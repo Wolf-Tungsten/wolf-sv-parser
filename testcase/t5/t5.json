@@ -1,0 +1,255 @@
+Top level design units:
+    t5
+
+=== AST JSON ===
+{
+  "name": "$root",
+  "kind": "Root",
+  "addr": 2199025506816,
+  "members": [
+    {
+      "name": "",
+      "kind": "CompilationUnit",
+      "addr": 2199024897120
+    },
+    {
+      "name": "t5",
+      "kind": "Instance",
+      "addr": 2199024898496,
+      "body": {
+        "name": "t5",
+        "kind": "InstanceBody",
+        "addr": 2199024897512,
+        "members": [
+          {
+            "name": "W",
+            "kind": "Parameter",
+            "addr": 2199024897712,
+            "type": "logic signed[31:0]",
+            "initializer": {
+              "kind": "Conversion",
+              "type": "logic signed[31:0]",
+              "operand": {
+                "kind": "IntegerLiteral",
+                "type": "int",
+                "value": "6",
+                "constant": "6"
+              },
+              "constant": "6"
+            },
+            "value": "6",
+            "isLocal": false,
+            "isPort": true,
+            "isBody": false
+          },
+          {
+            "name": "i_port",
+            "kind": "Port",
+            "addr": 2199024898648,
+            "type": "logic[5:0]",
+            "direction": "In",
+            "internalSymbol": "2199024898824 i_port"
+          },
+          {
+            "name": "i_port",
+            "kind": "Net",
+            "addr": 2199024898824,
+            "type": "logic[5:0]",
+            "netType": {
+              "name": "wire",
+              "kind": "NetType",
+              "addr": 2199025504128,
+              "type": "logic"
+            }
+          },
+          {
+            "name": "o_port",
+            "kind": "Port",
+            "addr": 2199024899024,
+            "type": "reg[5:0]",
+            "direction": "Out",
+            "internalSymbol": "2199024899200 o_port"
+          },
+          {
+            "name": "o_port",
+            "kind": "Variable",
+            "addr": 2199024899200,
+            "type": "reg[5:0]",
+            "lifetime": "Static"
+          },
+          {
+            "name": "",
+            "kind": "StatementBlock",
+            "addr": 2199024898136,
+            "members": [
+              {
+                "name": "i",
+                "kind": "Variable",
+                "addr": 2199024898304,
+                "type": "integer",
+                "initializer": {
+                  "kind": "Conversion",
+                  "type": "integer",
+                  "operand": {
+                    "kind": "IntegerLiteral",
+                    "type": "int",
+                    "value": "0",
+                    "constant": "0"
+                  },
+                  "constant": "0"
+                },
+                "lifetime": "Automatic"
+              }
+            ]
+          },
+          {
+            "name": "",
+            "kind": "ProceduralBlock",
+            "addr": 2199024898008,
+            "procedureKind": "Always",
+            "body": {
+              "kind": "Timed",
+              "timing": {
+                "kind": "ImplicitEvent"
+              },
+              "stmt": {
+                "kind": "Block",
+                "blockKind": "Sequential",
+                "body": {
+                  "kind": "Block",
+                  "blockKind": "Sequential",
+                  "block": "2199024898136 ",
+                  "body": {
+                    "kind": "List",
+                    "list": [
+                      {
+                        "kind": "VariableDeclaration",
+                        "symbol": "2199024898304 i"
+                      },
+                      {
+                        "kind": "ForLoop",
+                        "initializers": [
+                        ],
+                        "stopExpr": {
+                          "kind": "BinaryOp",
+                          "type": "logic",
+                          "op": "LessThan",
+                          "left": {
+                            "kind": "NamedValue",
+                            "type": "integer",
+                            "symbol": "2199024898304 i"
+                          },
+                          "right": {
+                            "kind": "NamedValue",
+                            "type": "logic signed[31:0]",
+                            "symbol": "2199024897712 W",
+                            "constant": "6"
+                          }
+                        },
+                        "steps": [
+                          {
+                            "kind": "Assignment",
+                            "type": "integer",
+                            "left": {
+                              "kind": "NamedValue",
+                              "type": "integer",
+                              "symbol": "2199024898304 i"
+                            },
+                            "right": {
+                              "kind": "BinaryOp",
+                              "type": "integer",
+                              "op": "Add",
+                              "left": {
+                                "kind": "NamedValue",
+                                "type": "integer",
+                                "symbol": "2199024898304 i"
+                              },
+                              "right": {
+                                "kind": "Conversion",
+                                "type": "integer",
+                                "operand": {
+                                  "kind": "IntegerLiteral",
+                                  "type": "int",
+                                  "value": "1",
+                                  "constant": "1"
+                                },
+                                "constant": "1"
+                              }
+                            },
+                            "isNonBlocking": false
+                          }
+                        ],
+                        "body": {
+                          "kind": "Block",
+                          "blockKind": "Sequential",
+                          "body": {
+                            "kind": "ExpressionStatement",
+                            "expr": {
+                              "kind": "Assignment",
+                              "type": "reg[0:0]",
+                              "left": {
+                                "kind": "RangeSelect",
+                                "type": "reg[0:0]",
+                                "selectionKind": "IndexedUp",
+                                "value": {
+                                  "kind": "NamedValue",
+                                  "type": "reg[5:0]",
+                                  "symbol": "2199024899200 o_port"
+                                },
+                                "left": {
+                                  "kind": "NamedValue",
+                                  "type": "integer",
+                                  "symbol": "2199024898304 i"
+                                },
+                                "right": {
+                                  "kind": "IntegerLiteral",
+                                  "type": "int",
+                                  "value": "1",
+                                  "constant": "1"
+                                }
+                              },
+                              "right": {
+                                "kind": "UnaryOp",
+                                "type": "logic[0:0]",
+                                "op": "BitwiseNot",
+                                "operand": {
+                                  "kind": "RangeSelect",
+                                  "type": "logic[0:0]",
+                                  "selectionKind": "IndexedUp",
+                                  "value": {
+                                    "kind": "NamedValue",
+                                    "type": "logic[5:0]",
+                                    "symbol": "2199024898824 i_port"
+                                  },
+                                  "left": {
+                                    "kind": "NamedValue",
+                                    "type": "integer",
+                                    "symbol": "2199024898304 i"
+                                  },
+                                  "right": {
+                                    "kind": "IntegerLiteral",
+                                    "type": "int",
+                                    "value": "1",
+                                    "constant": "1"
+                                  }
+                                }
+                              },
+                              "isNonBlocking": false
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "definition": "2199024304512 t5"
+      },
+      "connections": [
+      ]
+    }
+  ]
+}Build succeeded: 0 errors, 0 warnings

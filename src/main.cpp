@@ -51,8 +51,8 @@ namespace
 int main(int argc, char **argv)
 {
     Driver driver;
-    driver.options.compilationFlags[slang::ast::CompilationFlags::AllowTopLevelIfacePorts] = true;
     driver.addStandardArgs();
+    driver.options.compilationFlags.at(slang::ast::CompilationFlags::AllowTopLevelIfacePorts) = true;
 
     std::optional<bool> dumpAst;
     driver.cmdLine.add("--dump-ast", dumpAst, "Dump a summary of the elaborated AST");
