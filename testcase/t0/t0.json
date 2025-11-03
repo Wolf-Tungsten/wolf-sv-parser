@@ -1,0 +1,141 @@
+Top level design units:
+    t0
+
+=== AST JSON ===
+{
+  "name": "$root",
+  "kind": "Root",
+  "addr": 4354627224960,
+  "members": [
+    {
+      "name": "",
+      "kind": "CompilationUnit",
+      "addr": 4354630424120
+    },
+    {
+      "name": "t0",
+      "kind": "Instance",
+      "addr": 4354630424928,
+      "body": {
+        "name": "t0",
+        "kind": "InstanceBody",
+        "addr": 4354630424416,
+        "members": [
+          {
+            "name": "P",
+            "kind": "Parameter",
+            "addr": 4354630424600,
+            "type": "logic[3:0]",
+            "initializer": {
+              "kind": "Conversion",
+              "type": "logic[3:0]",
+              "operand": {
+                "kind": "Conversion",
+                "type": "logic signed[31:0]",
+                "operand": {
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "16",
+                  "constant": "16"
+                },
+                "constant": "16"
+              },
+              "constant": "4'b0"
+            },
+            "value": "4'b0",
+            "isLocal": false,
+            "isPort": true,
+            "isBody": false
+          },
+          {
+            "name": "i_port",
+            "kind": "Port",
+            "addr": 4354630425064,
+            "type": "logic[7:0]",
+            "direction": "In",
+            "internalSymbol": "4354630425192 i_port"
+          },
+          {
+            "name": "i_port",
+            "kind": "Net",
+            "addr": 4354630425192,
+            "type": "logic[7:0]",
+            "netType": {
+              "name": "wire",
+              "kind": "NetType",
+              "addr": 4354627225600,
+              "type": "logic"
+            }
+          },
+          {
+            "name": "o_port",
+            "kind": "Port",
+            "addr": 4354630425360,
+            "type": "logic[7:0]",
+            "direction": "Out",
+            "internalSymbol": "4354630425488 o_port"
+          },
+          {
+            "name": "o_port",
+            "kind": "Net",
+            "addr": 4354630425488,
+            "type": "logic[7:0]",
+            "netType": {
+              "name": "wire",
+              "kind": "NetType",
+              "addr": 4354627225600,
+              "type": "logic"
+            }
+          },
+          {
+            "name": "",
+            "kind": "ContinuousAssign",
+            "addr": 4354630425672,
+            "assignment": {
+              "kind": "Assignment",
+              "type": "logic[7:0]",
+              "left": {
+                "kind": "NamedValue",
+                "type": "logic[7:0]",
+                "symbol": "4354630425488 o_port"
+              },
+              "right": {
+                "kind": "BinaryOp",
+                "type": "logic[7:0]",
+                "op": "Add",
+                "left": {
+                  "kind": "UnaryOp",
+                  "type": "logic[7:0]",
+                  "op": "BitwiseNot",
+                  "operand": {
+                    "kind": "NamedValue",
+                    "type": "logic[7:0]",
+                    "symbol": "4354630425192 i_port"
+                  }
+                },
+                "right": {
+                  "kind": "Conversion",
+                  "type": "logic[7:0]",
+                  "operand": {
+                    "kind": "NamedValue",
+                    "type": "logic[3:0]",
+                    "symbol": "4354630424600 P",
+                    "constant": "4'b0"
+                  },
+                  "constant": "8'd0"
+                }
+              },
+              "isNonBlocking": false
+            }
+          }
+        ],
+        "definition": "4354630705920 t0"
+      },
+      "connections": [
+      ]
+    }
+  ]
+}Top module: t0
+  port i_port: logic[7:0]
+  port o_port: logic[7:0]
+Build succeeded: 0 errors, 0 warnings

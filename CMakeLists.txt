@@ -10,6 +10,7 @@ add_subdirectory(external/slang)
 
 # Source files
 set(SOURCES
+    src/graph.cpp
     src/elaborate.cpp
     src/main.cpp
 )

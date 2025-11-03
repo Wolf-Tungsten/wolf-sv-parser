@@ -3,8 +3,11 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <sstream>
+#include <iomanip>
 
 #include "graph.hpp"
 #include "slang/ast/Symbol.h"
@@ -23,66 +26,93 @@ std::shared_ptr<Netlist> Elaborate::convert(const slang::ast::RootSymbol& root) 
 
   auto netlist = std::make_shared<Netlist>();
   latestNetlist_ = netlist;
+  instanceBodyGraphs_.clear();
+  instanceStack_.clear();
+  graphStack_.clear();
 
   for (const auto* instance : root.topInstances) {
-    if (!instance) {
+    if (!instance || !instance->isModule()) {
       continue;
     }
+    
     processTopModule(*instance);
+    
   }
 
   return netlist;
 }
 
+Netlist& Elaborate::getNetlist() {
+  if(auto locked = latestNetlist_.lock()){
+    return *locked;
+  } else {
+    throw std::runtime_error("latest netlist has expired; call convert() before accessing it");
+  }
+}
+
 void Elaborate::processTopModule(const slang::ast::InstanceSymbol& instance) {
-  if (!instance.isModule()) {
+  processInstance(instance);
+}
+
+void Elaborate::processInstance(const slang::ast::InstanceSymbol& instance) {
+  instanceStack_.push_back(&instance);
+  // step1: 处理 instanceBody，处理结果压入graphStack
+  processInstanceBody();
+  // step2：graph 已经创建好并放在栈顶，processInstanceConnection 在栈顶创建连接关系
+  processInstanceConnection();
+  graphStack_.pop_back();
+  instanceStack_.pop_back();
+}
+
+void Elaborate::processInstanceBody() {
+  // 解析 instanceBody，将解析后的 graph 压入栈顶
+  const slang::ast::InstanceSymbol& instance = *(instanceStack_.back());
+  Netlist& netlist = getNetlist();
+  const auto* canonical = instance.getCanonicalBody();
+  const auto* key = canonical ? canonical : &instance.body;
+
+  if (!key) {
+    throw std::logic_error("instance body pointer must not be null");
+  }
+
+  const auto it = instanceBodyGraphs_.find(key);
+  if (it != instanceBodyGraphs_.end()) {
+    // 这个 instanceBody 已经解析过，压栈返回即可
+    graphStack_.push_back(it->second);
     return;
   }
 
-  std::cout << "Top module: " << instance.name << '\n';
-
-  const auto& portList = instance.body.getPortList();
-  for (const auto* portSymbol : portList) {
-    if (!portSymbol) {
-      continue;
-    }
-
-    switch (portSymbol->kind) {
-      case slang::ast::SymbolKind::Port: {
-        const auto* port = static_cast<const slang::ast::PortSymbol*>(portSymbol);
-        std::cout << "  port " << port->name << ": " << port->getType().toString() << '\n';
-        break;
-      }
-      case slang::ast::SymbolKind::MultiPort: {
-        const auto* multiPort = static_cast<const slang::ast::MultiPortSymbol*>(portSymbol);
-        throw std::runtime_error("multi-port ports are unsupported: " +
-                                 std::string(multiPort->name));
-      }
-      case slang::ast::SymbolKind::InterfacePort: {
-        const auto* ifacePort = static_cast<const slang::ast::InterfacePortSymbol*>(portSymbol);
-        std::string typeDesc;
-        if (ifacePort->interfaceDef) {
-          typeDesc.append(ifacePort->interfaceDef->name);
-          if (!ifacePort->modport.empty()) {
-            typeDesc.push_back('.');
-            typeDesc.append(ifacePort->modport);
-          }
-        }
-        else if (ifacePort->isGeneric) {
-          typeDesc = "generic";
-        }
-        else {
-          typeDesc = "<invalid>";
-        }
-
-        std::cout << "  port " << ifacePort->name << ": interface " << typeDesc << '\n';
-        break;
-      }
-      default:
-        std::cout << "  port " << portSymbol->name << ": <unsupported port kind>\n";
-        break;
-    }
+  // 执行到此处，当前 InstanceBody 尚未解析过，创建一个新的图，压栈
+  std::ostringstream nameBuilder;
+  auto definitionName = instance.getDefinition().name;
+  if (!definitionName.empty()) {
+    nameBuilder << definitionName;
   }
+  else if (!instance.name.empty()) {
+    nameBuilder << instance.name;
+  }
+  else {
+    nameBuilder << "anonymous";
+  }
+  nameBuilder << "@body_"
+              << std::hex << reinterpret_cast<std::uintptr_t>(key);
+  Graph& graph = netlist.createGraph(nameBuilder.str());
+  instanceBodyGraphs_.emplace(key, &graph);
+  graphStack_.push_back(&graph);
+
+  // TODO：遍历 instance.body，对每种 symbol 进行分类处理
+
+}
+
+void Elaborate::processInstanceConnection() {
+  if(instanceStack_.size() != graphStack_.size()){
+    throw std::runtime_error("instanceStack size does not match graphStack");
+  }
+  if(graphStack_.size() < 2) {
+    return;
+  }
+
+  // TODO: 处理连接关系
 }
 
 }  // namespace wolf_sv

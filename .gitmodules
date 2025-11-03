@@ -1,3 +1,6 @@
 [submodule "external/slang"]
 	path = external/slang
 	url = https://github.com/MikePopoloski/slang
+[submodule "docs/reference/slang-netlist"]
+	path = docs/reference/slang-netlist
+	url = https://github.com/jameshanlon/slang-netlist

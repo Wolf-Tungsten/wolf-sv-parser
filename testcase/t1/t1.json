@@ -1,0 +1,168 @@
+Top level design units:
+    t1
+
+=== AST JSON ===
+{
+  "name": "$root",
+  "kind": "Root",
+  "addr": 3265114817920,
+  "members": [
+    {
+      "name": "",
+      "kind": "CompilationUnit",
+      "addr": 3265118021176
+    },
+    {
+      "name": "t1",
+      "kind": "Instance",
+      "addr": 3265118021800,
+      "body": {
+        "name": "t1",
+        "kind": "InstanceBody",
+        "addr": 3265118021472,
+        "members": [
+          {
+            "name": "i_port",
+            "kind": "Port",
+            "addr": 3265118021936,
+            "type": "logic[7:0]",
+            "direction": "In",
+            "internalSymbol": "3265118022064 i_port"
+          },
+          {
+            "name": "i_port",
+            "kind": "Net",
+            "addr": 3265118022064,
+            "type": "logic[7:0]",
+            "netType": {
+              "name": "wire",
+              "kind": "NetType",
+              "addr": 3265114818560,
+              "type": "logic"
+            }
+          },
+          {
+            "name": "o_port",
+            "kind": "Port",
+            "addr": 3265118022232,
+            "type": "logic[7:0]",
+            "direction": "Out",
+            "internalSymbol": "3265118022360 o_port"
+          },
+          {
+            "name": "o_port",
+            "kind": "Net",
+            "addr": 3265118022360,
+            "type": "logic[7:0]",
+            "netType": {
+              "name": "wire",
+              "kind": "NetType",
+              "addr": 3265114818560,
+              "type": "logic"
+            }
+          },
+          {
+            "name": "",
+            "kind": "ContinuousAssign",
+            "addr": 3265118022544,
+            "assignment": {
+              "kind": "Assignment",
+              "type": "logic[7:0]",
+              "left": {
+                "kind": "Concatenation",
+                "type": "logic[7:0]",
+                "operands": [
+                  {
+                    "kind": "RangeSelect",
+                    "type": "logic[3:0]",
+                    "selectionKind": "Simple",
+                    "value": {
+                      "kind": "NamedValue",
+                      "type": "logic[7:0]",
+                      "symbol": "3265118022360 o_port"
+                    },
+                    "left": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "3",
+                      "constant": "3"
+                    },
+                    "right": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "0",
+                      "constant": "0"
+                    }
+                  },
+                  {
+                    "kind": "RangeSelect",
+                    "type": "logic[7:4]",
+                    "selectionKind": "Simple",
+                    "value": {
+                      "kind": "NamedValue",
+                      "type": "logic[7:0]",
+                      "symbol": "3265118022360 o_port"
+                    },
+                    "left": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "7",
+                      "constant": "7"
+                    },
+                    "right": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "4",
+                      "constant": "4"
+                    }
+                  }
+                ]
+              },
+              "right": {
+                "kind": "Concatenation",
+                "type": "logic[7:0]",
+                "operands": [
+                  {
+                    "kind": "IntegerLiteral",
+                    "type": "bit[0:0]",
+                    "value": "1'b1",
+                    "constant": "1'b1"
+                  },
+                  {
+                    "kind": "RangeSelect",
+                    "type": "logic[6:0]",
+                    "selectionKind": "Simple",
+                    "value": {
+                      "kind": "NamedValue",
+                      "type": "logic[7:0]",
+                      "symbol": "3265118022064 i_port"
+                    },
+                    "left": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "6",
+                      "constant": "6"
+                    },
+                    "right": {
+                      "kind": "IntegerLiteral",
+                      "type": "int",
+                      "value": "0",
+                      "constant": "0"
+                    }
+                  }
+                ]
+              },
+              "isNonBlocking": false
+            }
+          }
+        ],
+        "definition": "3265118299392 t1"
+      },
+      "connections": [
+      ]
+    }
+  ]
+}Top module: t1
+  port i_port: logic[7:0]
+  port o_port: logic[7:0]
+Build succeeded: 0 errors, 0 warnings

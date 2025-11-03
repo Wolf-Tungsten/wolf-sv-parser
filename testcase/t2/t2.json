@@ -1,0 +1,150 @@
+Top level design units:
+    t2
+
+=== AST JSON ===
+{
+  "name": "$root",
+  "kind": "Root",
+  "addr": 5318075630560,
+  "members": [
+    {
+      "name": "",
+      "kind": "CompilationUnit",
+      "addr": 5318078834232,
+      "members": [
+        {
+          "name": "some_struct_t",
+          "kind": "TypeAlias",
+          "addr": 5318078834528,
+          "target": "struct packed{logic[7:0] data0;logic[7:0] data1;}s$1"
+        }
+      ]
+    },
+    {
+      "name": "t2",
+      "kind": "Instance",
+      "addr": 5318078835080,
+      "body": {
+        "name": "t2",
+        "kind": "InstanceBody",
+        "addr": 5318078834680,
+        "members": [
+          {
+            "name": "i_port",
+            "kind": "Port",
+            "addr": 5318078836056,
+            "type": "5318078834528 some_struct_t",
+            "direction": "In",
+            "internalSymbol": "5318078836184 i_port"
+          },
+          {
+            "name": "i_port",
+            "kind": "Variable",
+            "addr": 5318078836184,
+            "type": "5318078834528 some_struct_t",
+            "lifetime": "Static"
+          },
+          {
+            "name": "o_port",
+            "kind": "Port",
+            "addr": 5318078836328,
+            "type": "logic[7:0]",
+            "direction": "Out",
+            "internalSymbol": "5318078836456 o_port"
+          },
+          {
+            "name": "o_port",
+            "kind": "Variable",
+            "addr": 5318078836456,
+            "type": "logic[7:0]",
+            "lifetime": "Static"
+          },
+          {
+            "name": "another_o_port",
+            "kind": "Port",
+            "addr": 5318078836600,
+            "type": "logic[7:0]",
+            "direction": "Out",
+            "internalSymbol": "5318078836752 another_o_port"
+          },
+          {
+            "name": "another_o_port",
+            "kind": "Variable",
+            "addr": 5318078836752,
+            "type": "logic[7:0]",
+            "lifetime": "Static"
+          },
+          {
+            "name": "",
+            "kind": "ContinuousAssign",
+            "addr": 5318078836920,
+            "assignment": {
+              "kind": "Assignment",
+              "type": "logic[7:0]",
+              "left": {
+                "kind": "NamedValue",
+                "type": "logic[7:0]",
+                "symbol": "5318078836456 o_port"
+              },
+              "right": {
+                "kind": "RangeSelect",
+                "type": "logic[11:4]",
+                "selectionKind": "Simple",
+                "value": {
+                  "kind": "NamedValue",
+                  "type": "5318078834528 some_struct_t",
+                  "symbol": "5318078836184 i_port"
+                },
+                "left": {
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "11",
+                  "constant": "11"
+                },
+                "right": {
+                  "kind": "IntegerLiteral",
+                  "type": "int",
+                  "value": "4",
+                  "constant": "4"
+                }
+              },
+              "isNonBlocking": false
+            }
+          },
+          {
+            "name": "",
+            "kind": "ContinuousAssign",
+            "addr": 5318078837008,
+            "assignment": {
+              "kind": "Assignment",
+              "type": "logic[7:0]",
+              "left": {
+                "kind": "NamedValue",
+                "type": "logic[7:0]",
+                "symbol": "5318078836752 another_o_port"
+              },
+              "right": {
+                "kind": "MemberAccess",
+                "type": "logic[7:0]",
+                "member": "5318078835896 data1",
+                "value": {
+                  "kind": "NamedValue",
+                  "type": "5318078834528 some_struct_t",
+                  "symbol": "5318078836184 i_port"
+                }
+              },
+              "isNonBlocking": false
+            }
+          }
+        ],
+        "definition": "5318079112704 t2"
+      },
+      "connections": [
+      ]
+    }
+  ]
+}Top module: t2
+  port i_port: some_struct_t
+  port o_port: logic[7:0]
+  port another_o_port: logic[7:0]
+Build succeeded: 0 errors, 0 warnings
