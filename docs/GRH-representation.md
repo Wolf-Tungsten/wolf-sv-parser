@@ -55,6 +55,19 @@
     - 缩减操作使用 `kReduce*` 对应的 OperationKind，并只允许一个 operand
     - 拼接操作的 operand 数不固定，结果为 operand 从低索引到高索引、从右至左拼接而成
     - 复制操作使用 `kReplicate`，被复制的变量以 operand 方式传入，副本数量用 uint64_t `rep` attribute 保存
+    - 位宽/符号语义遵循 SystemVerilog 表达式规则，前端在构建图时即根据 SV 的上下文确定每个 Value 的 `width` 和 `isSigned`。除非另有说明，算术/关系/按位操作均先将所有 operand 对齐到同一宽度：取参与 operand 的最大位宽 `W`，再按 `isSigned` 进行符号扩展（signed）或零扩展（unsigned）到 `W` 位。常见操作的特化约定如下：
+        - `kAdd`/`kSub`：结果宽度为 `W`，溢出会被截断；只有所有 operand 均为 signed 时结果才视为 signed。
+        - `kMul`：结果宽度为 `width(lhs) + width(rhs)`，并保持“全部 signed 才 signed”规则。若上层需要较窄位宽，需显式加入 `kSlice`。
+        - `kDiv`/`kMod`：被除数（Dividend）保持自身宽度，`kDiv` 结果宽度等于被除数，`kMod` 结果宽度等于除数；两者的 `isSigned` 仅在所有参与 operand signed 时为 true。
+        - `kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`：结果宽度固定为 1，`isSigned=false`，比较前按上述规则扩展 operand。
+        - `kLogicAnd`、`kLogicOr`、`kLogicNot`：输入先按“非零即真”收敛为 1 bit，再进行逻辑运算，结果宽度为 1、`isSigned=false`。
+        - `kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`：结果宽度为 `W`，`kNot` 继承其唯一 operand 的 `isSigned`，其余操作仅当所有 operand signed 时结果才为 signed。
+        - `kReduce*`：结果宽度为 1，`isSigned=false`。
+        - `kShl`、`kLShr`、`kAShr`：被移位 operand 的宽度保持不变。`kShl` 和 `kLShr` 总是零填充；`kAShr` 会在 `isSigned=true` 时复制符号位，否则零填充；移位量 operand 的具体位宽不影响语义。
+        - `kMux`：第一个 operand 为条件，按逻辑运算规则收敛为 1 bit；两个数据 operand 按 `W = max(width0, width1)` 扩展，结果 `width=W`，`isSigned` 仅当两个数据 operand 均为 signed 时为 true。
+        - `kConcat`：结果宽度为所有 operand 宽度之和，拼接顺序为“operand 索引从低到高、每个 operand 内从高位到低位”，结果恒为 unsigned（`isSigned=false`）。
+        - `kReplicate`：结果宽度为 `rep * width(operand)`，结果 `isSigned=false`。
+        - `kSlice`：结果宽度由对应 attribute 明确给出；是否视为 signed 由前端根据 SV 上下文设置 `isSigned`，默认推荐设为 false 以匹配 SV 对切片的 unsigned 语义。
 
 - 位截取操作
     - 所有位截取均复用 `kSlice` Operation，通过字符串属性 `sliceKind` 区分模式，取值 `static`（静态）、`dynamic`（动态）、`array`（数组）。
@@ -65,38 +78,53 @@
 
 - 时序逻辑部件操作
     - 寄存器: OperationKind::kRegister
-        - 当 `resetCategory` 属性取 `sync` 时，建模同步复位寄存器
-            - 操作数 1 为时钟信号
-            - 操作数 2 为 d 信号
-            - 结果为 q 信号
-            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
-        - 当 `resetCategory` 属性取 `async` 时，建模异步复位寄存器
-            - 操作数 1 为时钟信号
-            - 操作数 2 为复位信号
-            - 操作数 3 为 d 信号
-            - 结果为 q 信号
-            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
-            - 字符串类型的 rstType 属性可取值 posedge、negedge、edge
-        - 如果未设置 `resetCategory`，默认视为同步复位
+        - 操作数排列
+            - operand 0：时钟信号，所有寄存器都必须提供
+            - operand 1：复位信号，仅当 `resetCategory` 出现时提供；`resetCategory=sync` 和 `resetCategory=async` 均复用同一位置
+            - operand 2：复位值（`resetValue`），仅当存在复位时提供，必须由 `OperationKind::kConstant` 生成，并与寄存器输出位宽/符号属性一致
+            - 最后一个 operand：数据输入 d（若存在复位信号，则为 operand 3，否则为 operand 1）
+            - Operation 的唯一 result 表示寄存器输出 q，其位宽和 `isSigned` 与 d 一致
+        - 当存在复位时，operand 2 提供的 `kConstant` Operation 即定义了 `resetValue`，不再通过属性重复描述常量内容。
+        - 属性
+            - `resetCategory`：字符串，可选取值 `sync` / `async`，缺省表示“无复位”，此时寄存器只在时钟沿上采样 d
+            - `clkType`：字符串，取值 `posedge`、`negedge`、`edge`，描述触发沿
+            - `rstType`：仅当 `resetCategory=async` 时使用，取值同 `clkType`，对应 `always @(posedge clk or negedge rst)` 中的复位触发沿
+            - `rstPolarity`：仅当 `resetCategory=sync` 时使用，取值 `activeHigh`/`activeLow`，指明复位信号的有效电平
+            - `initValue`：可选常量字典，字段格式与 `OperationKind::kConstant` 的属性一致，表示无复位寄存器的上电初值；若未指定，默认初值未知。
+        - 语义
+            - 无复位：每逢 `clkType` 指定的时钟沿，q ← d。
+            - 同步复位：每逢时钟沿，先检查复位信号是否处于 `rstPolarity` 指定的有效电平；若有效则 q ← operand2（`kConstant`）提供的 `resetValue`，否则 q ← d。
+            - 异步复位：当复位信号出现 `rstType` 指定的沿时立即更新 q ← operand2（`kConstant`）提供的 `resetValue`。在时钟沿上若复位信号处于无效电平，则 q ← d；若复位仍有效，则维持该 `resetValue`。
+        - 不额外建模时钟使能，若需要使能语义，应在构图前将 `d` 端构造成多路选择或逻辑门以表达使能行为
     - 片上 mem: OperationKind::kMemory、OperationKind::kMemoryReadPort、OperationKind::kMemoryWritePort
         - kMemory 操作建模存储阵列
-            - 没有操作数，也没有结果
-            - uint64_t width 属性记录每行bit数位宽
-            - uint64_t row 属性记录总行数
-            - 设置一个全局唯一的 symbol 用于 kMemoryReadPort 和 kMemoryWritePort 索引，该 symbol 应尽可能人类可读，便于后续调试
-        - kMemoryReadPort
-            - 操作数 1 为读地址信号
-            - 结果为读数据信号
-            - 字符串类型的 memSymbol 属性指向对应的 kMemory 组件
-            - kMemoryReadPort 建模的读取为异步读取。如果需要同步读取，通过与设置了 `resetCategory=sync` 的 kRegister 联合实现
-        - kMemoryWritePort
-            - 操作数 1 为写时钟信号
-            - 操作数 2 为写地址信号
-            - 操作数 3 为写数据信号
-            - 字符串类型的 memSymbol 属性指向对应的 kMemory 组件
-            - kMemoryWritePort 建模为同步写入
-            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
-        - 一个 kMemory 可以关联多个读写口，以支持跨时钟域读写等场景
+            - Operands / Results：均为空；该 Operation 仅作为“存储体”占位，并通过 `symbol` 字段被读写端口引用
+            - Attributes
+                - `width`（uint64_t）：每一行（word）的 bit 宽度
+                - `row`（uint64_t）：总行数，决定寻址空间
+                - `maskGranularity`（uint64_t，可选）：当指定时，表示写入 mask 的粒度（单位：bit），必须整除 `width`。缺省或取值 0 表示该存储体不支持部分写，使能 mask operand 应被省略
+            - 约束：`symbol` 必须在整个 Graph 内唯一，且是 kMemoryReadPort / kMemoryWritePort 的唯一关联依据
+        - kMemoryReadPort（异步读）
+            - Operands
+                - operand 0：读地址信号，位宽需覆盖 `row` 的寻址空间；若不足，读者需在前端对地址进行截断/扩展
+            - Results
+                - result 0：读数据信号，位宽固定为所关联 kMemory 的 `width`，`isSigned=false`
+            - Attributes
+                - `memSymbol`（string）：指向目标 kMemory 的 `symbol`
+            - 语义：地址变化后，输出立即反映相应存储行的内容；若需要同步读，请将输出接入设置了 `resetCategory=sync` 的 kRegister
+        - kMemoryWritePort（同步写）
+            - Operands
+                - operand 0：写时钟信号，必需
+                - operand 1：写地址信号，位宽同读端口要求
+                - operand 2：写使能信号，宽度固定为 1。低电平时，当前时钟沿不对存储体产生影响
+                - operand 3：写数据信号，位宽必须与目标 kMemory 的 `width` 一致，`isSigned=false`
+                - operand 4（可选）：写 mask 信号，仅当目标 kMemory 的 `maskGranularity` 为正值时出现，位宽为 `width / maskGranularity`。第 i 位为高表示写入 operand3 中对应粒度的比特区间
+            - Results：无
+            - Attributes
+                - `memSymbol`（string）：指向目标 kMemory 的 `symbol`
+                - `clkType`（string）：取值 `posedge` / `negedge` / `edge`，描述写入触发沿
+            - 语义：在选定的时钟沿上，若写使能为高，则写端口将 operand3 写入地址 operand1 对应的存储行；当提供写 mask 时，仅更新 mask 对应的粒度区间，其余 bit 保持原值
+        - 一个 kMemory 可以关联多个读写口，以支持多端口或跨时钟域访问；前端需负责冲突检测与顺序语义建模
 
 - 层次结构操作：kInstance
     - 字符串类型的 moduleName 属性，用于识别被实例化的模块（也就是 Graph）
