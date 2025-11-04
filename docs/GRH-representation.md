@@ -38,7 +38,7 @@
 - 常量定义操作
     - 没有 operand Value，只有一个输出 result Value
     - 常量 symbol 应尽可能可读，尽可能沿用用户输入代码的命名
-    - 常量位宽以 uint64_t 类型名为 width 的 attribute 标识
+    - 常量位宽、符号和值均以 Operation attributes 记载，是下游恢复字面量的权威来源；对应的 result Value 只需复制 `width`/`isSigned` 等类型信息
     - 常量值的记录方法
         - 使用 bool signed attribute 标识是否为有符号常量
         - 使用 bool wide attribute 标识是否为位宽大于 64 bit 的值
@@ -129,9 +129,9 @@
 - 层次结构操作：kInstance
     - 字符串类型的 moduleName 属性，用于识别被实例化的模块（也就是 Graph）
     - 可变数量的操作数，表示被实例化模块的输入
-    - 一个 vector<string> inputPortName，顺序和数量与操作数一致，表示每个操作数和模块输入的关系映射
+    - 一个 vector<string> inputPortName，顺序和数量与 operands 一致，表示每个操作数和模块输入的关系映射
     - 可变数量的结果result，表示被实例化模块的输出
-    - 一个 vector<string> outputPortName，顺序和数量与操作数一致，表示每个结果和模块输出的关系映射
+    - 一个 vector<string> outputPortName，顺序和数量与 results 一致，表示每个结果和模块输出的关系映射
     - 一个 string instanceName 属性，记录实例名称，便于用户调试
 
 - 调试结构操作：kDisplay, kAssert
@@ -167,19 +167,20 @@
 # 边 - Value
 
 - 满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取
+- Value 只记录 operation 之间传递的值的类型信息（`width`、`isSigned`、端口属性等），具体常量字面值仅保存在其定义 Operation 的 attributes 中
 - 具有一个字符串类型的 symbol 字段，用于识别信号
-- 具有一个 64 bit 无符号整型的 width 字段（`uint64_t` 实现），表示 Value 的位宽；位宽可大于 64 bit，只要能够落在 `uint64_t` 表示范围内即可
-- 常量 Value 在 width 大于 64 bit 时必须配合 `wideValue` 属性存储具体数值；其他 Operation 依赖 width 元数据传播位宽
+- 具有一个 `uint64_t` 类型的 width 字段，表示 Value 的位宽
 - 具有一个标记有无符号的布尔字段 isSigned
 - 具有一个标记是否为模块输入的布尔字段 isInput
 - 具有一个标记是否为模块输出的布尔字段 isOutput
 - 可选记录一个 sourceLoc 字段，类型为 `std::map<std::string, std::any>`，字段含义同 Operation 的 `sourceLoc` 属性
-- GRH 的数据类型不支持数组和结构体，数据和结构体均被前端扁平化，涉及访问操作通过 kSlice 和 kConcat 实现，但不能破坏SSA特性
+- GRH 的数据类型不支持数组和结构体，数组和结构体均被前端扁平化，涉及访问操作通过 kSlice 和 kConcat 实现，但不能破坏SSA特性
 - 基于单驱动 SSA 模型，所有输入端口和内部连接都不允许表达三态（Z）或 inout 语义；若源代码包含三态逻辑，前端需在转换前拆解为等效的多路选择或显式上拉/下拉结构
 - 具有一个 defineOp 指针，指向写入 Op，若 Value 是模块的输入参数，则为空指针
 - 具有一个 userOps 数组，元素为 `<Operation*, size_t operandIndex>` 二元组，记录该 Value 在各 Operation 中作为第几个操作数被引用；同一 Operation 多次使用同一个 Value 时会存储多个条目
 - Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 Value。`defineOp` 和 `userOps` 都只能引用同一个 Graph 的 Operation。
 - `isInput`/`isOutput` 会由 `Graph::addInputPort` / `Graph::addOutputPort` 自动设置，禁止手动篡改以免与端口映射失联。
+- result Value 的 `width`、`isSigned` 等元信息必须与其定义 Operation（包括 `kConstant`）保持一致
 
 # 图 - Graph
 
@@ -224,6 +225,6 @@
 - 不保留数组/结构体/联合等聚合类型，必须在前端扁平化后使用 `kSlice`/`kConcat` 来表示元素访问，无法在 GRH 中表达原生聚合语义。
 - 模块端口只支持 `input`/`output`，因此不保留 `ref`、`interface`/`modport`、`virtual interface` 等高级端口特性，需要在前端展开为普通信号才能映射到 GRH。
 - Value 仅记录位宽（`uint64_t width`）和有符号属性，不保留 `real`/`shortreal`/`time`/`chandle`/`string` 等非位向量数据类型，需要在构图前转换或报错。
-- 不支持双向 DPI（例如 `export "DPI-C"`）、PLI、VPI、SDF 注入、`force/release` 等需要仿真调度器配合的语义。
+- 不支持 PLI、VPI、SDF 注入、`force/release` 等需要仿真调度器配合的语义。
 - 不支持 `export "DPI-C"` 和 `export "DPI-C" task/function`
 - 不支持 `cover property`/`covergroup` 等覆盖率结构
