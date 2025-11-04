@@ -28,7 +28,7 @@
 - `type` 字段对应 `enum class OperationKind`，当前枚举值依次为：
   - 常量：`kConstant`
   - 组合算术/逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`、`kSlice`、`kConcat`、`kReplicate`
-  - 时序/层次/调试：`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`、`kInstance`、`kDisplay`、`kAssert`、`kDpic`
+  - 时序/层次/调试：`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`、`kInstance`、`kDisplay`、`kAssert`、`kDpicImport`、`kDpicCall`
   若需要扩展新的 Operation，需要同步扩展该枚举并更新本文件。
 - `addOperand(Value*)` 会把当前 Operation 注册到 Value 的 `userOps` 中，`addResult(Value*)` 则会把 Value 的 `defineOp` 设为当前 Operation。前端/解析器应优先使用 Graph 提供的构造接口，以自动维护 def-use 关系。
 - `symbol` 在 Graph 作用域内建议唯一，方便调试和序列化（系统不会强制检查，约定由前端保证）。
@@ -114,18 +114,26 @@
     - kAssert
         - 一个操作数，表示断言条件
 
-- DPI 操作：kDpic
-    - 仅支持 `import "DPI-C"` 的函数 / 任务调用
-    - Operation 的 operands 与 SystemVerilog 形参一一对应，按照声明顺序排布；`input` / `inout` 端口都作为 operand 传入
-    - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）
-    - 字符串属性
-        - `dpiSymbol`：记录 `import "DPI-C"` 中暴露给 C 端的符号名
-        - `svName`：记录 SystemVerilog 侧的可见名，便于回溯
-    - 布尔属性
-        - `isTask`：区分 `function` / `task`
-        - `isContext`：对应 `context` 关键字
-        - `isPure`：对应 `pure` 关键字
-    - 额外 attribute `cSignature`（string）缓存 `extern "C"` 的原型描述，方便后端直接生成绑定代码
+- DPI 操作：`kDpicImport` / `kDpicCall`
+    - `kDpicImport`
+        - 描述 `import "DPI-C"` 声明本身，不产生 operands/results
+        - 通过 Operation 的 `symbol` 字段暴露唯一标识，供 `kDpicCall` 引用
+        - 字符串属性
+            - `dpiSymbol`：记录 `import "DPI-C"` 中暴露给 C 端的符号名
+            - `svName`：记录 SystemVerilog 侧的可见名，便于回溯
+        - 布尔属性
+            - `isTask`：区分 `function` / `task`
+            - `isContext`：对应 `context` 关键字
+            - `isPure`：对应 `pure` 关键字
+        - 额外 attribute `cSignature`（string）缓存 `extern "C"` 的原型描述，方便后端直接生成绑定代码
+    - `kDpicCall`
+        - 第一个 operand 固定为调用的使能信号，仅当为高电平时才触发后续语义
+        - 之后的 operands 与 SystemVerilog 形参（一一对应的 `input` / `inout`）按照声明顺序排布
+        - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）
+        - 通过字符串属性 `targetImportSymbol` 记录被调用 `kDpicImport` Operation 的 `symbol`，据此解析调用目标；前端需保证引用合法
+        - 额外记录两个 vector 属性，帮助还原形参/返回值在 DPI 声明中的确切位置
+            - `operandArgPositions`：与 operands 一一对应，索引 0 固定为使能信号并使用值 `-1`；其余条目为 `int64_t`，记录该 operand 映射到的形参下标（基于 `kDpicImport` 声明，0 表示第一个 SystemVerilog 形参）
+            - `resultArgPositions`：与 results 一一对应，`int64_t` 类型；若结果表示函数返回值则标记为 `-1`，否则填写其对应的 `output`/`inout` 形参下标
 
 
 # 边 - Value
@@ -145,7 +153,7 @@
 - Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 Value。`defineOp` 和 `userOps` 都只能引用同一个 Graph 的 Operation。
 - `isInput`/`isOutput` 会由 `Graph::addInputPort` / `Graph::addOutputPort` 自动设置，禁止手动篡改以免与端口映射失联。
 
-## 图 Graph
+# 图 - Graph
 
 - 具有一个 moduleName 字段标识模块名称
 - 具有一个 inputPorts 字段，类型为 <std::string，Value*> 的字典，记录所有输入端口
@@ -160,10 +168,34 @@
 - 所有 Operation 的 operands 和 results 都必须引用当前 Graph 管理的 Value，禁止跨 Graph 取值，以确保 Netlist 遍历时可以通过 Graph 边界判定层次结构。
 - 模块端口只支持input/output，其他特性不予支持
 
-# 网表
+# 网表 - Netlist
 
 - 具有一个可以按照 moduleName 索引全部 Graph 的容器，要求 moduleName 在网表中唯一
 - 通过 Graph 的 isTopModule 字段标记顶层模块，至少存在一个顶层 Graph，且顶层 Graph 不允许被其他 Graph 的 instance 引用
 - instance Operation 的 attributes 中记录被例化模块的 moduleName，运行时通过该索引解析被例化 Graph；禁止跨网表引用
 - 允许存在未被引用的 Graph（如库模块），但综合或导出流程默认仅从顶层 Graph 开始遍历可达子图
 - 层次结构由 Graph 内的 instance Operation 建模，网表自身不额外存储层次边
+
+# 表达能力
+
+## 支持的 SystemVerilog 特性
+
+- 支持 Verilog 和 SystemVerilog 的可综合子集，所有输入都会先经 `slang` elaboration，再在 GRH 中以 SSA 形式建模。
+- 支持所有常见组合算术/逻辑/移位/比较/缩减/条件/拼接/复制操作，对应 `kAdd`~`kReplicate` 等 OperationKind，能够覆盖 `assign`、`always_comb` 等组合语句。
+- 支持静态/动态/数组分片、结构体/数组的扁平访问，分别使用 `sliceKind=static/dynamic/array` 的 `kSlice` 与 `kConcat`，可表达 packed/unpacked 数据的逐位运算。
+- 支持同步/异步复位寄存器以及 `posedge`/`negedge`/`edge` 三种触发方式，涵盖 `always_ff`/`always @(posedge …)` 中的单时钟寄存器语义。
+- 支持片上存储器（`kMemory` + 读写端口），读端口异步、写端口同步，可建模多端口 RAM、ROM 以及跨时钟域访问（结合寄存器建模）。
+- 支持层次实例化，通过 `kInstance` 记录端口映射，可表达层次模块、参数化展开后的各类子模块。
+- 支持常见验证/调试原语：`kDisplay` 对应 `$display` 类系统任务，`kAssert` 对应断言语句，方便在图级别保留验证语义。
+- 支持 `import "DPI-C"` 函数/任务声明与调用（`kDpicImport`/`kDpicCall`），保留 `dpiSymbol`、`svName`、纯度、上下文等属性，并通过 `kDpicCall` 引用 `kDpicImport`，便于继续生成 DPI 绑定逻辑。
+
+## 不支持/不保留的 SystemVerilog 特性
+
+- 不支持 `#` 延迟、`wait #t` 等基于仿真时间的语句，GRH 仅建模零延迟组合和时序逻辑。
+- 不支持三态驱动、`inout` 端口或多驱动 `wire`，SSA Value 只允许单驱动，所有三态需在前端转换为多路选择/上拉下拉结构。
+- 不保留数组/结构体/联合等聚合类型，必须在前端扁平化后使用 `kSlice`/`kConcat` 来表示元素访问，无法在 GRH 中表达原生聚合语义。
+- 模块端口只支持 `input`/`output`，因此不保留 `ref`、`interface`/`modport`、`virtual interface` 等高级端口特性，需要在前端展开为普通信号才能映射到 GRH。
+- Value 仅记录位宽（`uint64_t width`）和有符号属性，不保留 `real`/`shortreal`/`time`/`chandle`/`string` 等非位向量数据类型，需要在构图前转换或报错。
+- 不支持双向 DPI（例如 `export "DPI-C"`）、PLI、VPI、SDF 注入、`force/release` 等需要仿真调度器配合的语义。
+- 不支持 `export "DPI-C"` 和 `export "DPI-C" task/function`
+- 不支持 `cover property`/`covergroup` 等覆盖率结构
