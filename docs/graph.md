@@ -32,7 +32,7 @@
         - 使用 bool signed attribute 标识是否为有符号常量
         - 使用 bool wide attribute 标识是否为位宽大于 64 bit 的值
         - 当常量值位宽小于等于64位时，使用 int64_t 或 uint64_t 的 value 属性直接保存
-        - 当常量值位宽大于64位时，使用 vector<int64_t> 或 vector<uint64_t> 的 wide_value 属性存储常量值，小端序形式，索引 i 保存 [i*64 +: 64] 位
+        - 当常量值位宽大于64位时，使用 vector<int64_t> 或 vector<uint64_t> 的 wideValue 属性存储常量值，小端序形式，索引 i 保存 [i*64 +: 64] 位
 
 - 组合逻辑操作
     - 支持 SystemVerilog 的算术操作符、相等操作符、逻辑操作符、按位操作符、缩减操作符、移位操作符、关系操作符、条件操作符、拼接和复制操作符
@@ -55,14 +55,14 @@
             - 操作数 1 为时钟信号
             - 操作数 2 为 d 信号
             - 结果为 q 信号
-            - 字符串类型的 clk_type 属性可取值 posedge、negedge、edge
-        - REG_A 操作建模异步复位寄存器
+            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
+        - REGA 操作建模异步复位寄存器
             - 操作数 1 为时钟信号
             - 操作数 2 为复位信号
             - 操作数 3 为 d 信号
             - 结果为 q 信号
-            - 字符串类型的 clk_type 属性可取值 posedge、negedge、edge
-            - 字符串类型的 rst_type 属性可取值 posedge、negedge、edge
+            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
+            - 字符串类型的 rstType 属性可取值 posedge、negedge、edge
     - 片上mem: MEM, MEM_R_PORT, MEM_W_PORT
         - MEM 操作建模存储阵列
             - 没有操作数，也没有结果
@@ -72,19 +72,19 @@
         - MEM_R_PORT
             - 操作数 1 为读地址信号
             - 结果为读数据信号
-            - 字符串类型的 mem_symbol 属性指向 MEM_R_PORT 读取的 MEM 组件
-            - MEM_R_PORT 建模的读取为异步读取。如果需要同步读取，通过与 REG 或 REG_A 联合实现
+            - 字符串类型的 memSymbol 属性指向 MEM_R_PORT 读取的 MEM 组件
+            - MEM_R_PORT 建模的读取为异步读取。如果需要同步读取，通过与 REG 或 REGA 联合实现
         - MEM_W_PORT
             - 操作数 1 为写时钟信号
             - 操作数 2 为写地址信号
             - 操作数 3 为写数据信号
-            - 字符串类型的 mem_symbol 属性指向 MEM_W_PORT 读取的 MEM 组件
+            - 字符串类型的 memSymbol 属性指向 MEM_W_PORT 读取的 MEM 组件
             - MEM_W_PORT 建模为同步写入
-            - 字符串类型的 clk_type 属性可取值 posedge、negedge、edge
+            - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
         - 一个 MEM 可以关联多个读写口，以支持跨时钟域读写等场景
 
 - 层次结构操作：INSTANCE
-    - 字符串类型的 module_name 属性，用于识别被实例化的模块（也就是 Graph）
+    - 字符串类型的 moduleName 属性，用于识别被实例化的模块（也就是 Graph）
     - 可变数量的操作数，表示被实例化模块的输入
     - 一个 vector<string> inputPortName，顺序和数量与操作数一致，表示每个操作数和模块输入的关系映射
     - 可变数量的结果result，表示被实例化模块的输出
@@ -99,8 +99,18 @@
     - ASSERT
         - 一个操作数，表示断言条件
 
-- DPI 操作
-    - （帮我想一下怎么办？只支持 import "DPI" 即可，用操作数和结果和对应参数和返回值）
+- DPI 操作：DPI_CALL
+    - 仅支持 `import "DPI-C"` 的函数 / 任务调用
+    - Operation 的 operands 与 SystemVerilog 形参一一对应，按照声明顺序排布；`input` / `inout` 端口都作为 operand 传入
+    - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）
+    - 字符串属性
+        - `dpiSymbol`：记录 `import "DPI-C"` 中暴露给 C 端的符号名
+        - `svName`：记录 SystemVerilog 侧的可见名，便于回溯
+    - 布尔属性
+        - `isTask`：区分 `function` / `task`
+        - `isContext`：对应 `context` 关键字
+        - `isPure`：对应 `pure` 关键字
+    - 额外 attribute `cSignature`（string）缓存 `extern "C"` 的原型描述，方便后端直接生成绑定代码
 
 
 # 边 - Value
@@ -116,7 +126,7 @@
 
 ## 图 Graph
 
-- 具有一个 module_name 字段标识模块名称
+- 具有一个 moduleName 字段标识模块名称
 - 具有一个 inputPorts 字段，类型为 <std::string，Value*> 的字典，记录所有输入端口
 - 具有一个 outputPorts 字段，类型为 <std::string，Value*> 的字典，记录所有输出端口
 - 具有一个 isTopModule bool 字段，标识是否为顶层模块
@@ -131,11 +141,3 @@
 - instance Operation 的 attributes 中记录被例化模块的 moduleName，运行时通过该索引解析被例化 Graph；禁止跨网表引用
 - 允许存在未被引用的 Graph（如库模块），但综合或导出流程默认仅从顶层 Graph 开始遍历可达子图
 - 层次结构由 Graph 内的 instance Operation 建模，网表自身不额外存储层次边
-
-## Operation 的粗粒度分类
-
-- 常量定义
-- 组合逻辑操作：算数、布尔、移位、多路复用器、信号切片读取、信号拼接
-- 时序逻辑部件：reg、mem、mem_read_port、mem_write_port
-- 层次结构部件：instance
-- 调试结构部件：display，assert，dpic 等
