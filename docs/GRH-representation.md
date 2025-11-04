@@ -21,6 +21,17 @@
 - 具有一个 operands 数组，包含对 Value 的指针，记录 Operation 的操作数
 - 具有一个 results 数组，包含对 Value 的指针，记录 Operation 的结果
 - 具有一个 attributes 字典，key 为字符串类型，value 为 std::any，记录 Operation 的元数据。attributes 的 value 仅允许存储 `bool`、`int64_t`、`uint64_t`、`double`、`std::string`、`std::vector<std::any>`、`std::map<std::string, std::any>` 等 JSON 兼容类型，序列化时按照 JSON 语义写出，遇到不受支持的类型时抛错
+- 所有 Operation/Value/Graph 都可以携带一个可选的 `sourceLoc` 属性，用 `std::map<std::string, std::any>` 结构表示；推荐字段包括 `file`（字符串，源文件路径）、`line`（uint64_t，行号）、`column`（uint64_t，列号）、`hierPath`（字符串，层次路径）。缺失字段表示对应信息未知
+
+## Operation 类型与使用约束
+
+- `type` 字段对应 `enum class OperationKind`，当前枚举值依次为：
+  - 常量：`kConstant`
+  - 组合算术/逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`、`kSlice`、`kConcat`、`kReplicate`
+  - 时序/层次/调试：`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`、`kInstance`、`kDisplay`、`kAssert`、`kDpic`
+  若需要扩展新的 Operation，需要同步扩展该枚举并更新本文件。
+- `addOperand(Value*)` 会把当前 Operation 注册到 Value 的 `userOps` 中，`addResult(Value*)` 则会把 Value 的 `defineOp` 设为当前 Operation。前端/解析器应优先使用 Graph 提供的构造接口，以自动维护 def-use 关系。
+- `symbol` 在 Graph 作用域内建议唯一，方便调试和序列化（系统不会强制检查，约定由前端保证）。
 
 ## Operation 的粗粒度分类描述
 
@@ -37,53 +48,57 @@
 - 组合逻辑操作
     - 支持 SystemVerilog 的算术操作符、相等操作符、逻辑操作符、按位操作符、缩减操作符、移位操作符、关系操作符、条件操作符、拼接和复制操作符
     - 所有操作符的操作数都用 operand 传入
-    - 条件操作使用 2选1 MUX operation 建模，具有三个operand，第一个为判断条件，第二个为条件真时结果，第三个为条件假时结果
-    - 拼接操作的 operand 数不固定，拼接结果为 operand 从低索引到高索引、从右至左拼接而成
-    - 复制操作中，被复制的变量以 operand 方式传入，副本数量用 uint64_t rep attribute 保存
+    - 条件操作使用 2选1 MUX operation（`kMux`）建模，具有三个 operand，第一个为判断条件，第二个为条件真时结果，第三个为条件假时结果
+    - 相等/关系操作分别映射到 `kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`
+    - 逻辑操作（`&&`/`||`/`!`）使用 `kLogicAnd`、`kLogicOr`、`kLogicNot`
+    - 按位操作包含 `kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`
+    - 缩减操作使用 `kReduce*` 对应的 OperationKind，并只允许一个 operand
+    - 拼接操作的 operand 数不固定，结果为 operand 从低索引到高索引、从右至左拼接而成
+    - 复制操作使用 `kReplicate`，被复制的变量以 operand 方式传入，副本数量用 uint64_t `rep` attribute 保存
 
 - 位截取操作
-    - 在 SystemVerilog 操作符基础上添加三个位截取操作 SLICE 、SLICE_D 、SLICE_A
-    - SLICE 为静态截取，具有一个操作数 o，一个输出结果 r，一个 uint64_t start 属性表示截取截取起点，一个 uint64_t end 属性表示截取终点，end 包含在截取范围内， r = o[end : start];
-    - SLICE_D 为动态截取，具有两个操作数，其中第一个操作数 a 为被截取输入，第二个操作数 b 指示截取起点，具有一个输出结果 r，一个 uint64_t width 属性表示截取位宽 r = a[b +: width];
-    - SLICE_A 为按数组截取，具有两个操作数，其中第一个操作数 a 为被截取输入，第二个操作数 i 为数组索引，一个输出结果 r，一个 uint64_t width 属性表示数组中元素位宽 r = a[i * width +： width]；
-    - 为了便于分析，GRH 中的 Value 不保留数组结构信息，对于数组乃至多维数组的动态访问使用级联的 SLICE_A 实现，静态访问使用 SLICE 实现；
-    - GRH 中的 Value 也不保留结构体信息，对结构体的访问使用 SLICE 实现。
+    - 所有位截取均复用 `kSlice` Operation，通过字符串属性 `sliceKind` 区分模式，取值 `static`（静态）、`dynamic`（动态）、`array`（数组）。
+    - `static`：一个 operand `o`，一个输出 `r`，属性 `start`/`end`（`uint64_t`）均包含端点，语义 `r = o[end : start]`。
+    - `dynamic`：两个 operanda（`a` 为被截取输入，`b` 为截取起点），一个输出 `r`，属性 `width`（`uint64_t`），语义 `r = a[b +: width]`。
+    - `array`：两个 operanda（`a` 为被截取输入，`i` 为数组索引），一个输出 `r`，属性 `width`（`uint64_t`），语义 `r = a[i * width +: width]`。
+    - 为了便于分析，GRH 的 Value 不保留数组或结构体拓扑信息；数组（含多维）访存通过级联 `sliceKind=array` 完成，结构体访问使用 `sliceKind=static`。
 
 - 时序逻辑部件操作
-    - 寄存器: REG 和 REGA
-        - REG 操作建模同步复位寄存器
+    - 寄存器: OperationKind::kRegister
+        - 当 `resetCategory` 属性取 `sync` 时，建模同步复位寄存器
             - 操作数 1 为时钟信号
             - 操作数 2 为 d 信号
             - 结果为 q 信号
             - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
-        - REGA 操作建模异步复位寄存器
+        - 当 `resetCategory` 属性取 `async` 时，建模异步复位寄存器
             - 操作数 1 为时钟信号
             - 操作数 2 为复位信号
             - 操作数 3 为 d 信号
             - 结果为 q 信号
             - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
             - 字符串类型的 rstType 属性可取值 posedge、negedge、edge
-    - 片上mem: MEM, MEM_R_PORT, MEM_W_PORT
-        - MEM 操作建模存储阵列
+        - 如果未设置 `resetCategory`，默认视为同步复位
+    - 片上 mem: OperationKind::kMemory、OperationKind::kMemoryReadPort、OperationKind::kMemoryWritePort
+        - kMemory 操作建模存储阵列
             - 没有操作数，也没有结果
             - uint64_t width 属性记录每行bit数位宽
             - uint64_t row 属性记录总行数
-            - 设置一个全局唯一的 symbol 用于 MEM_R_PORT 和 MEM_W_PORT 索引，该 symbol 应尽可能人类可读，便于后续调试
-        - MEM_R_PORT
+            - 设置一个全局唯一的 symbol 用于 kMemoryReadPort 和 kMemoryWritePort 索引，该 symbol 应尽可能人类可读，便于后续调试
+        - kMemoryReadPort
             - 操作数 1 为读地址信号
             - 结果为读数据信号
-            - 字符串类型的 memSymbol 属性指向 MEM_R_PORT 读取的 MEM 组件
-            - MEM_R_PORT 建模的读取为异步读取。如果需要同步读取，通过与 REG 或 REGA 联合实现
-        - MEM_W_PORT
+            - 字符串类型的 memSymbol 属性指向对应的 kMemory 组件
+            - kMemoryReadPort 建模的读取为异步读取。如果需要同步读取，通过与设置了 `resetCategory=sync` 的 kRegister 联合实现
+        - kMemoryWritePort
             - 操作数 1 为写时钟信号
             - 操作数 2 为写地址信号
             - 操作数 3 为写数据信号
-            - 字符串类型的 memSymbol 属性指向 MEM_W_PORT 读取的 MEM 组件
-            - MEM_W_PORT 建模为同步写入
+            - 字符串类型的 memSymbol 属性指向对应的 kMemory 组件
+            - kMemoryWritePort 建模为同步写入
             - 字符串类型的 clkType 属性可取值 posedge、negedge、edge
-        - 一个 MEM 可以关联多个读写口，以支持跨时钟域读写等场景
+        - 一个 kMemory 可以关联多个读写口，以支持跨时钟域读写等场景
 
-- 层次结构操作：INSTANCE
+- 层次结构操作：kInstance
     - 字符串类型的 moduleName 属性，用于识别被实例化的模块（也就是 Graph）
     - 可变数量的操作数，表示被实例化模块的输入
     - 一个 vector<string> inputPortName，顺序和数量与操作数一致，表示每个操作数和模块输入的关系映射
@@ -91,15 +106,15 @@
     - 一个 vector<string> outputPortName，顺序和数量与操作数一致，表示每个结果和模块输出的关系映射
     - 一个 string instanceName 属性，记录实例名称，便于用户调试
 
-- 调试结构操作：DISPLAY, ASSERT
-    - 打印调试信息 DISPLAY
-        - 第一个操作数为使能信号，只有该信号为高时，DISPLAY 输出
+- 调试结构操作：kDisplay, kAssert
+    - 打印调试信息 kDisplay
+        - 第一个操作数为使能信号，只有该信号为高时，kDisplay 输出
         - 之后跟随的可变数量的操作数，表示参与输出的变量
         - 一个 string formatString 属性，表示输出格式化字符串
-    - ASSERT
+    - kAssert
         - 一个操作数，表示断言条件
 
-- DPI 操作：DPI_CALL
+- DPI 操作：kDpic
     - 仅支持 `import "DPI-C"` 的函数 / 任务调用
     - Operation 的 operands 与 SystemVerilog 形参一一对应，按照声明顺序排布；`input` / `inout` 端口都作为 operand 传入
     - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）
@@ -115,14 +130,20 @@
 
 # 边 - Value
 
-- 满足静态单赋值特性，只能由一个 Operation 写入，可以被多个 Operation 读取
+- 满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取
 - 具有一个字符串类型的 symbol 字段，用于识别信号
-- 具有一个位宽字段 width
+- 具有一个 64 bit 无符号整型的 width 字段（`uint64_t` 实现），表示 Value 的位宽；位宽可大于 64 bit，只要能够落在 `uint64_t` 表示范围内即可
+- 常量 Value 在 width 大于 64 bit 时必须配合 `wideValue` 属性存储具体数值；其他 Operation 依赖 width 元数据传播位宽
 - 具有一个标记有无符号的布尔字段 isSigned
 - 具有一个标记是否为模块输入的布尔字段 isInput
 - 具有一个标记是否为模块输出的布尔字段 isOutput
+- 可选记录一个 sourceLoc 字段，类型为 `std::map<std::string, std::any>`，字段含义同 Operation 的 `sourceLoc` 属性
+- GRH 的数据类型不支持数组和结构体，数据和结构体均被前端扁平化，涉及访问操作通过 kSlice 和 kConcat 实现，但不能破坏SSA特性
+- 基于单驱动 SSA 模型，所有输入端口和内部连接都不允许表达三态（Z）或 inout 语义；若源代码包含三态逻辑，前端需在转换前拆解为等效的多路选择或显式上拉/下拉结构
 - 具有一个 defineOp 指针，指向写入 Op，若 Value 是模块的输入参数，则为空指针
 - 具有一个 userOps 数组，元素为 `<Operation*, size_t operandIndex>` 二元组，记录该 Value 在各 Operation 中作为第几个操作数被引用；同一 Operation 多次使用同一个 Value 时会存储多个条目
+- Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 Value。`defineOp` 和 `userOps` 都只能引用同一个 Graph 的 Operation。
+- `isInput`/`isOutput` 会由 `Graph::addInputPort` / `Graph::addOutputPort` 自动设置，禁止手动篡改以免与端口映射失联。
 
 ## 图 Graph
 
@@ -131,8 +152,13 @@
 - 具有一个 outputPorts 字段，类型为 <std::string，Value*> 的字典，记录所有输出端口
 - 具有一个 isTopModule bool 字段，标识是否为顶层模块
 - 具有一个 isBlackBox bool 字段，标识是否为黑盒模块
+- 可选记录一个 sourceLoc 字段，类型同前文所述
 - 具有一个 values 数组，保存所有 value 的指针。Graph 对 values 拥有所有权，在 Graph 析构时销毁全部 values，并维持插入顺序用于遍历
 - 具有一个 ops 数组，保存所有 operation 的指针。Graph 对 ops 拥有所有权，在 Graph 析构时销毁全部 operation，并尽量保持与 values 一致的拓扑顺序
+- `inputPorts` / `outputPorts` 使用 `std::unordered_map` 存储，端口名唯一、查找为 O(1)。重新插入同名端口会覆盖旧记录，因此前端需要显式地维护端口定义顺序（例如额外保存一个端口名数组）。调用 `addInputPort` / `addOutputPort` 会同步设置对应 Value 的 `isInput` / `isOutput`。
+- `createValue` / `createOperation` 返回的原始指针在 Graph 生命周期内始终有效，由 Graph 内部的 `std::unique_ptr` 数组管理内存；禁止在 Graph 外释放。
+- 所有 Operation 的 operands 和 results 都必须引用当前 Graph 管理的 Value，禁止跨 Graph 取值，以确保 Netlist 遍历时可以通过 Graph 边界判定层次结构。
+- 模块端口只支持input/output，其他特性不予支持
 
 # 网表
 
