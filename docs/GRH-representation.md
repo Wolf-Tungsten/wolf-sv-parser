@@ -20,8 +20,8 @@
 - 具有一个字符串类型的 symbol 字段，为 Operation 添加可索引的标签
 - 具有一个 operands 数组，包含对 Value 的指针，记录 Operation 的操作数
 - 具有一个 results 数组，包含对 Value 的指针，记录 Operation 的结果
-- 具有一个 attributes 字典，key 为字符串类型，value 为 std::any，记录 Operation 的元数据。attributes 的 value 仅允许存储 `bool`、`int64_t`、`uint64_t`、`double`、`std::string`、`std::vector<std::any>`、`std::map<std::string, std::any>` 等 JSON 兼容类型，序列化时按照 JSON 语义写出，遇到不受支持的类型时抛错
-- 所有 Operation/Value/Graph 都可以携带一个可选的 `sourceLoc` 属性，用 `std::map<std::string, std::any>` 结构表示；推荐字段包括 `file`（字符串，源文件路径）、`line`（uint64_t，行号）、`column`（uint64_t，列号）、`hierPath`（字符串，层次路径）。缺失字段表示对应信息未知
+- 具有一个 attributes 字典，key 为字符串类型，value 为 std::any，记录 Operation 的元数据。attributes 的 value 仅允许存储 `bool`、`int64_t`、`uint64_t`、`double`、`std::string`、`std::vector<std::any>`、`std::map<std::string, std::any>` 等 JSON 兼容类型，序列化时按照 JSON 语义写出，遇到不受支持的类型时抛错。`std::vector<std::any>` 与 `std::map<std::string, std::any>` 的元素同样必须受上述 JSON 限制，不得再嵌套其他自定义类型，以便反序列化逻辑只需处理基本数值/字符串/容器组合。推荐在文档中约定每个 attribute 的键名与类型，避免使用运行时才判定的“任意字典”形式。
+- 所有 Operation/Value/Graph 都可以携带一个可选的 `sourceLoc` 属性，用 `std::map<std::string, std::any>` 结构表示；推荐字段包括 `file`（字符串，源文件路径）、`line`（uint64_t，行号）、`column`（uint64_t，列号）、`hierPath`（字符串，层次路径）。`line`/`column` 采用 1 基计数，`hierPath` 建议使用 `.` 分隔层次（例如 `top.u_sub.u_leaf`）。缺失字段表示对应信息未知
 
 ## Operation 类型与使用约束
 
@@ -39,11 +39,11 @@
     - 没有 operand Value，只有一个输出 result Value
     - 常量 symbol 应尽可能可读，尽可能沿用用户输入代码的命名
     - 常量位宽、符号和值均以 Operation attributes 记载，是下游恢复字面量的权威来源；对应的 result Value 只需复制 `width`/`isSigned` 等类型信息
-    - 常量值的记录方法
-        - 使用 bool signed attribute 标识是否为有符号常量
-        - 使用 bool wide attribute 标识是否为位宽大于 64 bit 的值
-        - 当常量值位宽小于等于64位时，使用 int64_t 或 uint64_t 的 value 属性直接保存
-        - 当常量值位宽大于64位时，使用 vector<int64_t> 或 vector<uint64_t> 的 wideValue 属性存储常量值，小端序形式，索引 i 保存 [i*64 +: 64] 位
+- 常量值的记录方法（遵循“仅保留恢复语义所需的最少属性”原则）
+    - 使用 bool signed attribute 标识是否为有符号常量；为避免歧义，显式写出 true/false，而非依赖缺省值
+    - 仅当常量位宽大于 64 bit 时写入 bool wide attribute 并设置为 true；位宽不超过 64 bit 时省略该属性
+    - 当常量值位宽小于等于 64 bit 时，只允许写入一个 `value` 属性（类型为 int64_t 或 uint64_t，根据 `signed` 选择），并且必须省略 `wideValue`
+    - 当常量值位宽大于 64 bit 时，只允许写入一个 `wideValue` 属性（类型为 vector<int64_t> 或 vector<uint64_t>，与 `signed` 一致），并且必须省略 `value`。`wideValue` 采用小端序，索引 i 对应 [i*64 +: 64] 位；最高块仅保留真实有效位并遵循符号扩展/零扩展规则，禁止额外填充
 
 - 组合逻辑操作
     - 支持 SystemVerilog 的算术操作符、相等操作符、逻辑操作符、按位操作符、缩减操作符、移位操作符、关系操作符、条件操作符、拼接和复制操作符
@@ -70,11 +70,11 @@
         - `kSlice`：结果宽度由对应 attribute 明确给出；是否视为 signed 由前端根据 SV 上下文设置 `isSigned`，默认推荐设为 false 以匹配 SV 对切片的 unsigned 语义。
 
 - 位截取操作
-    - 所有位截取均复用 `kSlice` Operation，通过字符串属性 `sliceKind` 区分模式，取值 `static`（静态）、`dynamic`（动态）、`array`（数组）。
-    - `static`：一个 operand `o`，一个输出 `r`，属性 `start`/`end`（`uint64_t`）均包含端点，语义 `r = o[end : start]`。
-    - `dynamic`：两个 operanda（`a` 为被截取输入，`b` 为截取起点），一个输出 `r`，属性 `width`（`uint64_t`），语义 `r = a[b +: width]`。
-    - `array`：两个 operanda（`a` 为被截取输入，`i` 为数组索引），一个输出 `r`，属性 `width`（`uint64_t`），语义 `r = a[i * width +: width]`。
-    - 为了便于分析，GRH 的 Value 不保留数组或结构体拓扑信息；数组（含多维）访存通过级联 `sliceKind=array` 完成，结构体访问使用 `sliceKind=static`。
+    - 所有位截取均复用 `kSlice` Operation，通过字符串属性 `sliceKind` 区分模式，取值 `static`（静态）、`dynamic`（动态）、`array`（数组）。默认约定 Bit 0 为 LSB、Bit `width-1` 为 MSB，所有 `start`/`end`/`width`/索引参数均在该编号体系下解释。
+    - `static`：一个 operand `o`，一个输出 `r`。必须提供 `sliceStart`/`sliceEnd`（`uint64_t`）两个 attribute，均包含端点，语义 `r = o[sliceEnd : sliceStart]`，并要求 `sliceStart <= sliceEnd`。`sliceStart=0` 表示最低位，结果宽度可由 `sliceEnd - sliceStart + 1` 推导，禁止额外重复填写 `width` 以避免两个字段冲突。
+    - `dynamic`：两个 operanda（`a` 为被截取输入，`b` 为截取起点），一个输出 `r`。必须提供 `sliceWidth`（`uint64_t`） attribute，语义 `r = a[b +: sliceWidth]`。若截取区间超出 `a` 的有效位范围，构图流程必须报错并拒绝生成该 Operation，不允许静默截断或填充。
+    - `array`：两个 operanda（`a` 为被截取输入，`i` 为数组索引），一个输出 `r`。同样使用 `sliceWidth`（`uint64_t`） attribute，语义 `r = a[i * sliceWidth +: sliceWidth]`。若 `a` 由多维数组或结构体扁平化而来，约定按 SystemVerilog 的“右侧维度靠近 LSB，向左逐级拼接”顺序展开，`i=0` 总对应最低有效的元素切片；若索引导致访问越界，同样必须报错。
+    - 为了便于分析，GRH 的 Value 不保留数组或结构体拓扑信息；数组（含多维）访存通过级联 `sliceKind=array` 完成，结构体访问使用 `sliceKind=static`。若需要不同的位序，可在前端通过适当的 `kConcat`/`kSlice` 组合进行转换。
 
 - 时序逻辑部件操作
     - 寄存器: OperationKind::kRegister
@@ -87,14 +87,14 @@
         - 当存在复位时，operand 2 提供的 `kConstant` Operation 即定义了 `resetValue`，不再通过属性重复描述常量内容。
         - 属性
             - `resetCategory`：字符串，可选取值 `sync` / `async`，缺省表示“无复位”，此时寄存器只在时钟沿上采样 d
-            - `clkType`：字符串，取值 `posedge`、`negedge`、`edge`，描述触发沿
-            - `rstType`：仅当 `resetCategory=async` 时使用，取值同 `clkType`，对应 `always @(posedge clk or negedge rst)` 中的复位触发沿
-            - `rstPolarity`：仅当 `resetCategory=sync` 时使用，取值 `activeHigh`/`activeLow`，指明复位信号的有效电平
-            - `initValue`：可选常量字典，字段格式与 `OperationKind::kConstant` 的属性一致，表示无复位寄存器的上电初值；若未指定，默认初值未知。
+            - `clkType`：字符串，取值 `posedge`、`negedge`、`edge`，描述触发沿；其中 `edge` 表示对同一时钟信号的正、负沿都触发（等价于 `always @(posedge clk or negedge clk)`）
+            - `rstType`：仅当 `resetCategory=async` 时使用，取值同 `clkType`，对应 `always @(posedge clk or negedge rst)` 中的复位触发沿；若取值为 `edge`，表示任意沿都会触发异步复位
+            - `rstPolarity`：当存在复位（同步或异步）时必须设置，取值 `activeHigh`/`activeLow`，指明复位信号的有效电平
+            - `initMethod`（string）：必填，取值 `zero` / `one` / `random`，明确寄存器在上电且尚未执行复位时的初值语义
         - 语义
-            - 无复位：每逢 `clkType` 指定的时钟沿，q ← d。
-            - 同步复位：每逢时钟沿，先检查复位信号是否处于 `rstPolarity` 指定的有效电平；若有效则 q ← operand2（`kConstant`）提供的 `resetValue`，否则 q ← d。
-            - 异步复位：当复位信号出现 `rstType` 指定的沿时立即更新 q ← operand2（`kConstant`）提供的 `resetValue`。在时钟沿上若复位信号处于无效电平，则 q ← d；若复位仍有效，则维持该 `resetValue`。
+            - 无复位：寄存器上电瞬间按照 `initMethod` 指定的方式初始化；此后每逢 `clkType` 指定的时钟沿，q ← d。
+            - 同步复位：寄存器上电瞬间按照 `initMethod` 指定的方式初始化；每逢时钟沿，先检查复位信号是否处于 `rstPolarity` 指定的有效电平，若有效则 q ← operand2（`kConstant`）提供的 `resetValue`，否则 q ← d。
+            - 异步复位：寄存器上电瞬间按照 `initMethod` 指定的方式初始化；当复位信号出现 `rstType` 指定的沿时立即更新 q ← operand2（`kConstant`）提供的 `resetValue`，并在复位信号维持 `rstPolarity` 指定的有效电平期间保持该值；在时钟沿上若复位信号处于无效电平，则 q ← d。
         - 不额外建模时钟使能，若需要使能语义，应在构图前将 `d` 端构造成多路选择或逻辑门以表达使能行为
     - 片上 mem: OperationKind::kMemory、OperationKind::kMemoryReadPort、OperationKind::kMemoryWritePort
         - kMemory 操作建模存储阵列
@@ -103,10 +103,11 @@
                 - `width`（uint64_t）：每一行（word）的 bit 宽度
                 - `row`（uint64_t）：总行数，决定寻址空间
                 - `maskGranularity`（uint64_t，可选）：当指定时，表示写入 mask 的粒度（单位：bit），必须整除 `width`。缺省或取值 0 表示该存储体不支持部分写，使能 mask operand 应被省略
+                - `initMethod`（string）：必填，取值 `zero` / `one` / `random`，描述上电时全部存储行的逻辑初始内容
             - 约束：`symbol` 必须在整个 Graph 内唯一，且是 kMemoryReadPort / kMemoryWritePort 的唯一关联依据
         - kMemoryReadPort（异步读）
             - Operands
-                - operand 0：读地址信号，位宽需覆盖 `row` 的寻址空间；若不足，读者需在前端对地址进行截断/扩展
+                - operand 0：读地址信号，位宽需覆盖 `row` 的寻址空间；若不足，读者需在前端对地址进行截断/扩展，禁止依赖下游自动截断
             - Results
                 - result 0：读数据信号，位宽固定为所关联 kMemory 的 `width`，`isSigned=false`
             - Attributes
@@ -118,29 +119,36 @@
                 - operand 1：写地址信号，位宽同读端口要求
                 - operand 2：写使能信号，宽度固定为 1。低电平时，当前时钟沿不对存储体产生影响
                 - operand 3：写数据信号，位宽必须与目标 kMemory 的 `width` 一致，`isSigned=false`
-                - operand 4（可选）：写 mask 信号，仅当目标 kMemory 的 `maskGranularity` 为正值时出现，位宽为 `width / maskGranularity`。第 i 位为高表示写入 operand3 中对应粒度的比特区间
+                - operand 4（可选）：写 mask 信号，仅当目标 kMemory 的 `maskGranularity` 为正值时出现，位宽为 `width / maskGranularity`。第 i 位为高表示写入 operand3 中 `[i*maskGranularity +: maskGranularity]` 区间，其中 `i=0` 对应最低有效位分块；各 mask 位独立决定是否覆盖各自的区间
             - Results：无
             - Attributes
                 - `memSymbol`（string）：指向目标 kMemory 的 `symbol`
-                - `clkType`（string）：取值 `posedge` / `negedge` / `edge`，描述写入触发沿
-            - 语义：在选定的时钟沿上，若写使能为高，则写端口将 operand3 写入地址 operand1 对应的存储行；当提供写 mask 时，仅更新 mask 对应的粒度区间，其余 bit 保持原值
+                - `clkType`（string）：取值 `posedge` / `negedge` / `edge`，描述写入触发沿；其中 `edge` 表示对同一时钟的正、负沿都执行写入
+            - 语义：在选定的时钟沿上（若 `clkType=edge` 则正、负沿都生效），若写使能为高，则写端口将 operand3 写入地址 operand1 对应的存储行；当提供写 mask 时，仅更新 mask 对应的粒度区间，其余 bit 保持原值；若 mask 全为 0，则本次写入不对存储体产生任何修改
         - 一个 kMemory 可以关联多个读写口，以支持多端口或跨时钟域访问；前端需负责冲突检测与顺序语义建模
+        - 地址/容量约束：`row` 不要求为 2 的幂，但地址 operand 的位宽必须不少于 `ceil(log2(row))`，多出的高位可视作未使用；地址一旦超出 `row`-1 的范围或未按照 `maskGranularity` 对齐，其读写结果未定义，需在前端消除。
+        - 竞争/冲突约束：若多个写端口在同一时钟沿写入同一地址，或写入与同周期读建立冲突，GRH 不定义结果；前端应在建图前禁止该类情况，下游实现可直接报错以暴露设计问题。
+        - 初始化：所有地址在仿真/综合入口时均按照 `initMethod` 指定的策略生成初值；`random` 表示实现相关的伪随机填充，但同一个实现必须保持可重复性
 
 - 层次结构操作：kInstance
     - 字符串类型的 moduleName 属性，用于识别被实例化的模块（也就是 Graph）
     - 可变数量的操作数，表示被实例化模块的输入
-    - 一个 vector<string> inputPortName，顺序和数量与 operands 一致，表示每个操作数和模块输入的关系映射
+    - 一个 vector<string> inputPortName，顺序和数量与 operands 一致，表示每个操作数和模块输入的关系映射；`inputPortName[i]` 必须与被实例化 Graph 中真实存在的端口名完全匹配，同一端口不得重复出现。若某个端口需要拉高/拉低，显式构造相应的常量/Value；若省略某个输入端口，则等效于连接一个与端口位宽一致的常量 0，前端在构图或序列化时必须显式补齐该常量
     - 可变数量的结果result，表示被实例化模块的输出
-    - 一个 vector<string> outputPortName，顺序和数量与 results 一致，表示每个结果和模块输出的关系映射
+    - 一个 vector<string> outputPortName，顺序和数量与 results 一致，表示每个结果和模块输出的关系映射；每个输出端口最多出现一次。若省略某个输出端口，则默认视为该输出被上层忽略，若上层需要占位值，应显式连接到常量 0，不应依赖隐式悬空
     - 一个 string instanceName 属性，记录实例名称，便于用户调试
+    - GRH 不保留参数化信息。所有 `parameter` / `localparam` / `defparam` 都应在前端（slang AST）阶段完全求值，不同参数实参组合必须展开为不同的 Graph，并在 Netlist 中以独立的 `moduleName` 注册；`kInstance` 仅通过 `moduleName` 绑定目标 Graph，不再携带额外的参数属性。
 
 - 调试结构操作：kDisplay, kAssert
     - 打印调试信息 kDisplay
         - 第一个操作数为使能信号，只有该信号为高时，kDisplay 输出
         - 之后跟随的可变数量的操作数，表示参与输出的变量
-        - 一个 string formatString 属性，表示输出格式化字符串
+        - 一个 string formatString 属性，表示输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
+        - 操作数会依次替换格式串中的占位符；占位符数量不足会触发构图错误，若多余操作数则被忽略
+        - 语义：在触发该 Operation 的调度点，将格式化文本追加到仿真/日志输出；Operation 不产生结果，仅有副作用
     - kAssert
         - 一个操作数，表示断言条件
+        - 语义：条件为 0（逻辑假）时立即报告断言失败，默认等同于 SystemVerilog `assert` 的致命行为（终止当前仿真或 pass）；若需要非致命处理，应由前端插入额外逻辑或使用 `kDisplay` 协助打印
 
 - DPI 操作：`kDpicImport` / `kDpicCall`
     - `kDpicImport`
@@ -156,19 +164,21 @@
         - 额外 attribute `cSignature`（string）缓存 `extern "C"` 的原型描述，方便后端直接生成绑定代码
     - `kDpicCall`
         - 第一个 operand 固定为调用的使能信号，仅当为高电平时才触发后续语义
+        - 该使能由前端解析 slang AST 时生成，通常挂接常量 1；在建模 handshake/valid 时才接入真实逻辑，信号为 0 时完全跳过本次 DPI 调用。
         - 之后的 operands 与 SystemVerilog 形参（一一对应的 `input` / `inout`）按照声明顺序排布
-        - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）
+        - Operation 的 results 建模 `output` / `inout` 形参以及函数返回值，保持与源码相同的出现顺序（函数返回值排在首位）。`inout` 形参会同时在 operands（输入方向）与 results（输出方向）中各出现一次，两个 Value 不共享引用，以满足 SSA 的单驱动原则；前端需显式连线，将 result Value 作为后续操作的来源
         - 通过字符串属性 `targetImportSymbol` 记录被调用 `kDpicImport` Operation 的 `symbol`，据此解析调用目标；前端需保证引用合法
-        - 额外记录两个 vector 属性，帮助还原形参/返回值在 DPI 声明中的确切位置
-            - `operandArgPositions`：与 operands 一一对应，索引 0 固定为使能信号并使用值 `-1`；其余条目为 `int64_t`，记录该 operand 映射到的形参下标（基于 `kDpicImport` 声明，0 表示第一个 SystemVerilog 形参）
-            - `resultArgPositions`：与 results 一一对应，`int64_t` 类型；若结果表示函数返回值则标记为 `-1`，否则填写其对应的 `output`/`inout` 形参下标
+        - 额外记录两个 `std::vector<int64_t>` 属性，帮助还原形参/返回值在 DPI 声明中的确切位置，均采用 -1 作为“无对应形参/返回值”的占位
+            - `operandArgPositions`：与 operands 一一对应，索引 0 固定为使能信号并写入 -1；其余条目记录该 operand 映射到的形参下标（基于 `kDpicImport` 声明，0 表示第一个 SystemVerilog 形参）。`inout` 的输入方向同样使用其在声明中的下标
+            - `resultArgPositions`：与 results 一一对应；若结果表示函数返回值则填 -1，否则填写其对应的 `output`/`inout` 形参下标。`inout` 的返回方向使用与 operands 相同的形参下标，方便前端在 SSA 层面建立“读 → 写”顺序
+        - 当某个形参声明为 `inout` 时，工具需校验 `operandArgPositions` 与 `resultArgPositions` 中的条目保持一致，以确保 SSA 图中读写配对
 
 
 # 边 - Value
 
 - 满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取
 - Value 只记录 operation 之间传递的值的类型信息（`width`、`isSigned`、端口属性等），具体常量字面值仅保存在其定义 Operation 的 attributes 中
-- 具有一个字符串类型的 symbol 字段，用于识别信号
+- 具有一个字符串类型的 symbol 字段，用于识别信号；要求在 Graph 作用域内唯一且非空
 - 具有一个 `uint64_t` 类型的 width 字段，表示 Value 的位宽
 - 具有一个标记有无符号的布尔字段 isSigned
 - 具有一个标记是否为模块输入的布尔字段 isInput
@@ -192,7 +202,7 @@
 - 可选记录一个 sourceLoc 字段，类型同前文所述
 - 具有一个 values 数组，保存所有 value 的指针。Graph 对 values 拥有所有权，在 Graph 析构时销毁全部 values，并维持插入顺序用于遍历
 - 具有一个 ops 数组，保存所有 operation 的指针。Graph 对 ops 拥有所有权，在 Graph 析构时销毁全部 operation，并尽量保持与 values 一致的拓扑顺序
-- `inputPorts` / `outputPorts` 使用 `std::unordered_map` 存储，端口名唯一、查找为 O(1)。重新插入同名端口会覆盖旧记录，因此前端需要显式地维护端口定义顺序（例如额外保存一个端口名数组）。调用 `addInputPort` / `addOutputPort` 会同步设置对应 Value 的 `isInput` / `isOutput`。
+- `inputPorts` / `outputPorts` 使用 `std::unordered_map` 存储，端口名唯一、查找为 O(1)。重新插入同名端口会覆盖旧记录，本规范不要求维护额外的顺序容器。调用 `addInputPort` / `addOutputPort` 会同步设置对应 Value 的 `isInput` / `isOutput`。
 - `createValue` / `createOperation` 返回的原始指针在 Graph 生命周期内始终有效，由 Graph 内部的 `std::unique_ptr` 数组管理内存；禁止在 Graph 外释放。
 - 所有 Operation 的 operands 和 results 都必须引用当前 Graph 管理的 Value，禁止跨 Graph 取值，以确保 Netlist 遍历时可以通过 Graph 边界判定层次结构。
 - 模块端口只支持input/output，其他特性不予支持
@@ -228,3 +238,4 @@
 - 不支持 PLI、VPI、SDF 注入、`force/release` 等需要仿真调度器配合的语义。
 - 不支持 `export "DPI-C"` 和 `export "DPI-C" task/function`
 - 不支持 `cover property`/`covergroup` 等覆盖率结构
+- 不支持隐式锁存器或 `always_latch`，出现该类语句时前端直接报错，不会在 GRH 中生成等效 Operation。
