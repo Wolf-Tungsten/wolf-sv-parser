@@ -4,3 +4,6 @@
 [submodule "docs/reference/slang-netlist"]
 	path = docs/reference/slang-netlist
 	url = https://github.com/jameshanlon/slang-netlist
+[submodule "docs/reference/yosys"]
+	path = docs/reference/yosys
+	url = https://github.com/YosysHQ/yosys.git
