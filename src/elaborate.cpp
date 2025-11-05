@@ -100,7 +100,7 @@ void Elaborate::processInstanceBody() {
   instanceBodyGraphs_.emplace(key, &graph);
   graphStack_.push_back(&graph);
 
-  // TODO：遍历 instance.body，对每种 symbol 进行分类处理
+  // <<<CODEXTODO>>>
 
 }
 
