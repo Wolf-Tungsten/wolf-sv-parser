@@ -12,6 +12,10 @@ GRH 表示在编译流程中的功能定位如下：
 
 变换过程中，GRH表示尽可能避免对RTL语义的分析，语义应当由处理低层次 SystemVerilog 的仿真器、逻辑综合工具解释。
 
+典型的案例是 GRH 不关心各种操作数、地址位宽之间的匹配规则，如果出现截断或者越界，应当由处理低层次SystemVerilog的工具处理。
+
+
+
 # GRH 表示的层次结构（自底向上）
 
 - 顶点（Operation）和超边（Value）
@@ -54,7 +58,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 具有一个字符串类型的 symbol 字段，用于识别信号，要求在 Graph 作用域内唯一且非空，符合verilog 标识符规范，symbol 应尽可能沿用输入RTL的命名，提高可读性
 - 具有一个 `int64_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
 - 具有一个 bool 类型 signed 标记是否为有符号
-- Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性
+- Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
 生成语义
 
@@ -67,6 +71,7 @@ wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
 - 具有一个标记是否为模块输入的布尔字段 isInput
 - 具有一个标记是否为模块输出的布尔字段 isOutput
 - 以上二者不能同时为真
+- 当 `isInput == true` 时，该 Value 必须存在于所属 Graph 的 `inputPorts` 字典中，键名与端口名一致；同理，`isOutput == true` 的 Value 必须存在于 `outputPorts` 字典中。未出现在端口字典中的 Value 必须同时满足 `isInput == false` 且 `isOutput == false`。
 
 辅助字段
 
@@ -102,10 +107,12 @@ module ${moduleName} (
 endmodule
 ```
 
+其中 `CommaSeparatedList` 先按照端口名的字典序枚举全部输入端口，再按照端口名字典序枚举全部输出端口；端口顺序不会保留原始 SystemVerilog 声明顺序。
+
 Graph 管理 Operation 和 Value 的生命周期：
 
 - 具有一个 values 数组，保存所有 value 的指针。Graph 对 values 拥有所有权，在 Graph 析构时销毁全部 values，并维持插入顺序用于遍历
-- 具有一个 ops 数组，保存所有 operation 的指针。Graph 对 ops 拥有所有权，在 Graph 析构时销毁全部 operation，并尽量保持与 values 一致的拓扑顺序
+- 具有一个 ops 数组，保存所有 operation 的指针。Graph 对 ops 拥有所有权，在 Graph 析构时销毁全部 operation，ops 按插入顺序保存，不保证拓扑顺序
 
 # 网表 - Netlist
 
@@ -242,7 +249,6 @@ assign ${res.symbol} = ${input.symbol}[${offset.symbol} +: ${sliceWidth}];
 ```
 
 ### 数组位截取操作 kSliceArray
-
 - operands：
     - input：扁平化后的数组输入信号
     - index：访问的数组下标，按无符号数解释
@@ -256,6 +262,8 @@ assign ${res.symbol} = ${input.symbol}[${offset.symbol} +: ${sliceWidth}];
 assign ${res.symbol} = ${input.symbol}[${index.symbol} * ${sliceWidth} +: ${sliceWidth}];
 ```
 
+GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
+
 ## 时序逻辑操作
 ### 无复位寄存器 kRegister
 
@@ -267,11 +275,11 @@ kRegister 的 symbol 是必须定义的，且必须符合 verilog 标识符规�
 - result：
     - q：寄存器输出
 - attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
 
 生成语义：
 ```
-reg ${d.isSigned ? "signed" : ""} [${d.width}-1:0] ${symbol};
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
 always @(${clkPolarity} ${clk.symbol}) begin
     ${symbol} <= ${d.symbol};
 end
@@ -290,12 +298,12 @@ kRegisterRst 的 symbol 是必须定义的，且必须符合 verilog 标识符�
 - result：
     - q：寄存器输出
 - attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
     - rstLevel：string 类型，取值 `1'b0` / `1'b1`，指明复位信号的有效电平
 
 生成语义：
 ```
-reg ${d.isSigned ? "signed" : ""} [${d.width}-1:0] ${symbol};
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
 always @(${clkPolarity} ${clk.symbol}) begin
     if (${rst.symbol} == ${rstLevel}) begin
         ${symbol} <= ${resetValue.symbol};
@@ -318,13 +326,13 @@ kRegisterARst 的 symbol 是必须定义的，且必须符合 verilog 标识符�
 - result：
     - q：寄存器输出
 - attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
     - rstLevel：string 类型，取值 `1'b0` / `1'b1`，指明复位信号的有效电平
 
 生成语义：
 ```
-reg ${d.isSigned ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstLevel == "1'b1" ? "posedge" : "negedge"} ${rst.symbol}) begin
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always @(${clkPolarity} ${clk.symbol} or ${rstEdge} ${rst.symbol}) begin
     if (${rst.symbol} == ${rstLevel}) begin
         ${symbol} <= ${resetValue.symbol};
     end else begin
@@ -334,7 +342,7 @@ end
 assign ${q.symbol} = ${symbol};
 ```
 
-当 `rstLevel` 为 `1'b1` 时，敏感列表中的复位信号使用 `posedge ${rst.symbol}`；当 `rstLevel` 为 `1'b0` 时使用 `negedge ${rst.symbol}`。
+其中 `rstEdge = (rstLevel == "1'b1") ? "posedge" : "negedge"`。
 
 ### 片上存储器 kMemory
 
@@ -377,7 +385,7 @@ kMemorySyncReadPort 的 symbol 是必须定义的，且必须符合 verilog 标�
 - results：
     - data：读数据输出信号
 - attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
     - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，生成语义中访问的 `memSymbol.isSigned`、`memSymbol.width` 等字段均来源于该 Operation。
 
 生成语义：
@@ -401,7 +409,7 @@ assign ${data.symbol} = ${symbol};
 - results：无
 - attributes：
     - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation。
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
 
 生成语义：
 ```
@@ -419,11 +427,11 @@ end
     - addr：写地址信号
     - en：写使能信号
     - data：写数据输入信号
-    - mask: 写掩码信号，位宽必须与 `memSymbol.width` 一致
+    - mask: 逐位写掩码信号，位宽必须与 `memSymbol.width` 一致
 - results：无
 - attributes：
     - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，掩码逻辑按照该 Operation 的位宽展开。
-    - clkPolarity：string 类型，取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
 
 生成语义：
 ```
@@ -523,7 +531,7 @@ GRH 只建模包裹在有时钟驱动的过程块中的 display，其他情况�
     - enable：使能信号
     - var0，var1，... 可变数量的参与输出的变量, n 个
 - attributes:
-    - clkPolarity（string）：取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
     - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
 
 生成语义：
@@ -543,7 +551,7 @@ GRH 只建模包裹在有时钟驱动的过程块中的 assert，其他情况在
     - clk: 时钟信号
     - condition：断言条件
 - attributes:
-    - clkPolarity（string）：取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
 
 生成语义：
 ```
@@ -588,10 +596,12 @@ import "DPI-C" function void ${symbol} (
 - results:
     - outArg0，outArg1，... 可变数量的输出参数, p 个
 - attributes：
-    - clkPolarity（string）：取值 posedge / negedge / edge，指明时钟信号的触发沿
+    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
     - targetImportSymbol（string）：记录被调用 kDpicImport Operation 的 symbol。前端必须在当前 Netlist 中基于该 symbol 查找到唯一的 kDpicImport，将其 `argsName`、`argsDirection` 等元数据注入生成语义中引用的 `targetImportSymbol.*` 字段。
     - inArgName (vector<string>，m 个)：记录每个输入参数的名称
     - outArgName (vector<string>，p 个)：记录每个输出参数的名称
+
+构图或变换流程在处理 `kDpicCall` 时，需使用 `targetImportSymbol` 字符串到 Netlist 中解析出对应的 `kDpicImport` Operation，并从该 Operation 的 attributes 中读取形参方向、位宽与名称等信息；若解析失败或发现多个候选项，必须立即报错。下文伪代码中的 `importOp` 表示解析得到的 kDpicImport Operation，`importOp.argsName` 等字段均来自该 Operation 的 attributes。
 
 生成语义：
 ```
@@ -603,10 +613,10 @@ always @(${clkPolarity} ${clk.symbol}) begin
     if (${enable.symbol}) begin
         ${targetImportSymbol} (
             ${CommaSeparatedList(
-                for (size_t i = 0; i < targetImportSymbol.argsName.size(); ++i)
-                    -> (targetImportSymbol.argsDirection[i] == "input"
-                        ? inArgs[IndexOf(inArgName, targetImportSymbol.argsName[i])].symbol
-                        : outArgs[IndexOf(outArgName, targetImportSymbol.argsName[i])].symbol + "_intm")
+                for (size_t i = 0; i < importOp.argsName.size(); ++i)
+                    -> (importOp.argsDirection[i] == "input"
+                        ? inArgs[IndexOf(inArgName, importOp.argsName[i])].symbol
+                        : outArgs[IndexOf(outArgName, importOp.argsName[i])].symbol + "_intm")
             )}
         );
     end
