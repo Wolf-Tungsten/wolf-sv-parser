@@ -83,5 +83,22 @@ target_compile_definitions(elaborate-smoke
 
 add_test(NAME elaborate-smoke COMMAND elaborate-smoke)
 
+add_executable(elaborate-hierarchy
+    tests/elaborate/test_elaborate_hierarchy.cpp
+)
+
+target_link_libraries(elaborate-hierarchy
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-hierarchy
+    PRIVATE
+        WOLF_SV_ELAB_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/elaborate/data"
+        WOLF_SV_ELAB_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/artifacts/elaborate_stage3"
+)
+
+add_test(NAME elaborate-hierarchy COMMAND elaborate-hierarchy)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

@@ -14,11 +14,17 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "slang/text/SourceLocation.h"
 
 namespace slang::ast {
 class InstanceSymbol;
+class InstanceArraySymbol;
+class InstanceBodySymbol;
+class ValueSymbol;
+class Expression;
 class RootSymbol;
 class Symbol;
 } // namespace slang::ast
@@ -75,10 +81,26 @@ private:
                                  grh::Netlist& netlist, bool& wasCreated);
     void populatePorts(const slang::ast::InstanceSymbol& instance, grh::Graph& graph);
     void emitModulePlaceholder(const slang::ast::InstanceSymbol& instance, grh::Graph& graph);
+    void convertInstanceBody(const slang::ast::InstanceSymbol& instance, grh::Graph& graph,
+                             grh::Netlist& netlist);
+    void processInstanceArray(const slang::ast::InstanceArraySymbol& array, grh::Graph& graph,
+                              grh::Netlist& netlist);
+    void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,
+                                 grh::Graph& parentGraph, grh::Graph& targetGraph);
+    grh::Value* ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);
+    grh::Value* resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
+                                       const slang::ast::Symbol* origin);
+    std::string makeUniqueOperationName(grh::Graph& graph, std::string baseName);
+    void registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value);
 
     ElaborateDiagnostics* diagnostics_;
     ElaborateOptions options_;
     std::size_t placeholderCounter_ = 0;
+    std::size_t instanceCounter_ = 0;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, grh::Graph*> graphByBody_;
+    std::unordered_set<const slang::ast::InstanceBodySymbol*> processedBodies_;
+    std::unordered_map<const slang::ast::Symbol*, grh::Value*> valueCache_;
+    std::unordered_map<std::string, std::size_t> graphNameUsage_;
 };
 
 } // namespace wolf_sv
