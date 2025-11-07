@@ -45,7 +45,7 @@ GRH 表示在编译流程中的功能定位如下：
 
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
-- 连线：`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
+- 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
 - 时序：`kRegister`、`kRegisterRst`、`kRegisterARst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemoryWritePort`、`kMemoryMaskWritePort`
 - 层次：`kInstance`、`kBlackbox`
 - 调试：`kDisplay`、`kAssert`

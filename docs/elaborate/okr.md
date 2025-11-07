@@ -6,7 +6,7 @@
 - **Objective** 严格遵循 `docs/GRH-representation.md` 定义构建 GRH 核心数据结构，并完成稳定的序列化基础。
   - KR1 完成 GRH 节点、边类型与属性的设计评审，形成对照 `docs/reference/yosys`、`docs/reference/slang-netlist` 的比对表，并确认不触及 `docs/GRH-representation.md`。
   - KR2 在 `include/grh` 内落地核心结构与内存布局，单元测试覆盖常见节点（连线、网、寄存器、存储器、断言），校验字段与语义与规范一致。
-  - KR3 实现 JSON 序列化/反序列化供人工核查，并在单元测试中通过 GRH API 验证结构一致性，若需调整规范需先提交变更审批。
+  - KR3 实现 JSON 序列化/反序列化供人工核查，并在单元测试中通过 GRH API 验证结构一致性，若需调整规范需先提交变更审批；`grh-tests` 运行时需将 round-trip 结果以 pretty JSON 写入 `${CMAKE_BINARY_DIR}/artifacts/grh_stage1_demo.json` 供阶段评审手动检视。
 
 ## 阶段2：Elaborate 框架雏形
 - **Objective** 建立从 slang AST 读取到 GRH 草图输出的最小可行流程。
