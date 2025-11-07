@@ -23,15 +23,28 @@ target_link_libraries(grh
         slang::slang
 )
 
+add_library(elaborate STATIC
+    src/elaborate.cpp
+)
+
+target_include_directories(elaborate
+    PUBLIC
+        include
+)
+
+target_link_libraries(elaborate
+    PUBLIC
+        grh
+)
+
 # Application executable
 add_executable(wolf-sv-compiler
-    src/elaborate.cpp
     src/main.cpp
 )
 
 target_link_libraries(wolf-sv-compiler
     PRIVATE
-        grh
+        elaborate
 )
 
 enable_testing()
@@ -51,6 +64,24 @@ target_compile_definitions(grh-tests
 )
 
 add_test(NAME grh-tests COMMAND grh-tests)
+
+add_executable(elaborate-smoke
+    tests/elaborate/test_elaborate_smoke.cpp
+)
+
+target_link_libraries(elaborate-smoke
+    PRIVATE
+        elaborate
+)
+
+set(ELABORATE_SMOKE_INPUT "${CMAKE_SOURCE_DIR}/tests/elaborate/data/t0.sv")
+
+target_compile_definitions(elaborate-smoke
+    PRIVATE
+        WOLF_SV_ELAB_SMOKE_INPUT_PATH="${ELABORATE_SMOKE_INPUT}"
+)
+
+add_test(NAME elaborate-smoke COMMAND elaborate-smoke)
 
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

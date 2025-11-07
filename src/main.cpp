@@ -56,6 +56,8 @@ int main(int argc, char **argv)
 
     std::optional<bool> dumpAst;
     driver.cmdLine.add("--dump-ast", dumpAst, "Dump a summary of the elaborated AST");
+    std::optional<bool> dumpGrh;
+    driver.cmdLine.add("--dump-grh", dumpGrh, "Dump GRH JSON after elaboration");
 
     if (!driver.parseCommandLine(argc, argv)) {
         return 1;
@@ -89,9 +91,43 @@ int main(int argc, char **argv)
         std::cout << writer.view();
     }
 
-    wolf_sv::Elaborate elaborator;
+    wolf_sv::ElaborateDiagnostics elaborateDiagnostics;
+    wolf_sv::Elaborate elaborator(&elaborateDiagnostics);
     auto netlist = elaborator.convert(root);
-    (void)netlist;
+
+    if (!elaborateDiagnostics.empty())
+    {
+        const auto *sourceManager = compilation->getSourceManager();
+        for (const auto &message : elaborateDiagnostics.messages())
+        {
+            const char *tag = message.kind == wolf_sv::ElaborateDiagnosticKind::Todo ? "TODO" : "NYI";
+            std::cerr << "[elaborate] [" << tag << "] ";
+
+            bool printedLocation = false;
+            if (sourceManager && message.location && message.location->valid())
+            {
+                const auto loc = sourceManager->getFullyOriginalLoc(*message.location);
+                if (loc.valid() && sourceManager->isFileLoc(loc))
+                {
+                    auto fileName = sourceManager->getFileName(loc);
+                    auto line = sourceManager->getLineNumber(loc);
+                    std::cerr << fileName << ":" << line << " ";
+                    printedLocation = true;
+                }
+            }
+            if (!printedLocation && !message.originSymbol.empty())
+            {
+                std::cerr << message.originSymbol << " ";
+            }
+            std::cerr << "- " << message.message << '\n';
+        }
+    }
+
+    if (dumpGrh == true)
+    {
+        std::cout << "=== GRH JSON ===\n";
+        std::cout << netlist.toJsonString(true) << '\n';
+    }
 
     bool ok = driver.reportDiagnostics(/* quiet */ false);
     return ok ? 0 : 4;
