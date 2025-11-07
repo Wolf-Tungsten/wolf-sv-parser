@@ -19,7 +19,7 @@
 - 占位 `kBlackbox` 操作仍然存在，但已在模块末尾统一下发，并对每个模块体记录 TODO 诊断以提示后续实现。
 
 ## KR4 回归样例与诊断
-- 新增 `tests/elaborate/data`：
+- 新增 `tests/data/elaborate`：
   - `hierarchy_nested.sv`：三层嵌套实例；
   - `param_instance.sv`：参数化实例场景；
   - `struct_array.sv`：端口为 packed struct 与多维数组，验证 TypeHelper。

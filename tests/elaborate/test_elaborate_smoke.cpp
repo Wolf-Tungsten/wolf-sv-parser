@@ -65,7 +65,7 @@ int main() {
     }
 
     const std::string& topName = netlist.topGraphs().front();
-    if (topName != "t0") {
+    if (topName.rfind("t0", 0) != 0) {
         return fail("Unexpected top graph name: " + topName);
     }
 

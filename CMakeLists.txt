@@ -74,7 +74,13 @@ target_link_libraries(elaborate-smoke
         elaborate
 )
 
-set(ELABORATE_SMOKE_INPUT "${CMAKE_SOURCE_DIR}/tests/elaborate/data/t0.sv")
+set(WOLF_SV_TEST_INPUT_DIR "${CMAKE_SOURCE_DIR}/tests/data")
+set(WOLF_SV_TEST_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/artifacts")
+
+set(ELABORATE_INPUT_DIR "${WOLF_SV_TEST_INPUT_DIR}/elaborate")
+set(ELABORATE_ARTIFACT_DIR "${WOLF_SV_TEST_ARTIFACT_DIR}/elaborate")
+
+set(ELABORATE_SMOKE_INPUT "${ELABORATE_INPUT_DIR}/t0.sv")
 
 target_compile_definitions(elaborate-smoke
     PRIVATE
@@ -94,8 +100,8 @@ target_link_libraries(elaborate-hierarchy
 
 target_compile_definitions(elaborate-hierarchy
     PRIVATE
-        WOLF_SV_ELAB_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/elaborate/data"
-        WOLF_SV_ELAB_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/artifacts/elaborate_stage3"
+        WOLF_SV_ELAB_DATA_DIR="${ELABORATE_INPUT_DIR}"
+        WOLF_SV_ELAB_ARTIFACT_DIR="${ELABORATE_ARTIFACT_DIR}"
 )
 
 add_test(NAME elaborate-hierarchy COMMAND elaborate-hierarchy)

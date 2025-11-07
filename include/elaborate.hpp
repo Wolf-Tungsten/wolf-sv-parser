@@ -24,6 +24,8 @@ class InstanceSymbol;
 class InstanceArraySymbol;
 class InstanceBodySymbol;
 class ValueSymbol;
+class GenerateBlockSymbol;
+class GenerateBlockArraySymbol;
 class Expression;
 class RootSymbol;
 class Symbol;
@@ -79,12 +81,19 @@ public:
 private:
     grh::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
                                  grh::Netlist& netlist, bool& wasCreated);
-    void populatePorts(const slang::ast::InstanceSymbol& instance, grh::Graph& graph);
+    void populatePorts(const slang::ast::InstanceSymbol& instance,
+                       const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void emitModulePlaceholder(const slang::ast::InstanceSymbol& instance, grh::Graph& graph);
     void convertInstanceBody(const slang::ast::InstanceSymbol& instance, grh::Graph& graph,
                              grh::Netlist& netlist);
     void processInstanceArray(const slang::ast::InstanceArraySymbol& array, grh::Graph& graph,
                               grh::Netlist& netlist);
+    void processGenerateBlock(const slang::ast::GenerateBlockSymbol& block, grh::Graph& graph,
+                              grh::Netlist& netlist);
+    void processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                   grh::Graph& graph, grh::Netlist& netlist);
+    void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::Graph& parentGraph,
+                         grh::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,
                                  grh::Graph& parentGraph, grh::Graph& targetGraph);
     grh::Value* ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);

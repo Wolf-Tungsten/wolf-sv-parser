@@ -1,5 +1,6 @@
 #include "elaborate.hpp"
 
+#include <cctype>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -11,9 +12,11 @@
 #include "slang/ast/Symbol.h"
 #include "slang/ast/SemanticFacts.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
+#include "slang/ast/symbols/ParameterSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
@@ -24,6 +27,101 @@
 namespace wolf_sv {
 
 namespace {
+
+std::string sanitizeForGraphName(std::string_view text, bool allowLeadingDigit = false) {
+    std::string result;
+    result.reserve(text.size());
+    bool lastUnderscore = false;
+
+    for (unsigned char raw : text) {
+        char ch = static_cast<char>(raw);
+        if (std::isalnum(raw) || ch == '_' || ch == '$') {
+            result.push_back(ch);
+            lastUnderscore = false;
+            continue;
+        }
+
+        if (lastUnderscore) {
+            continue;
+        }
+
+        result.push_back('_');
+        lastUnderscore = true;
+    }
+
+    if (!result.empty() && result.back() == '_') {
+        result.pop_back();
+    }
+
+    if (!allowLeadingDigit && !result.empty() &&
+        std::isdigit(static_cast<unsigned char>(result.front()))) {
+        result.insert(result.begin(), '_');
+    }
+
+    return result;
+}
+
+std::string parameterValueToString(const slang::ConstantValue& value) {
+    if (value.bad()) {
+        return "bad";
+    }
+
+    std::string sanitized = sanitizeForGraphName(value.toString(), /* allowLeadingDigit */ true);
+    if (sanitized.empty()) {
+        sanitized = "value";
+    }
+    return sanitized;
+}
+
+std::string typeParameterToString(const slang::ast::TypeParameterSymbol& param) {
+    return sanitizeForGraphName(param.getTypeAlias().toString());
+}
+
+std::string deriveParameterSuffix(const slang::ast::InstanceBodySymbol& body) {
+    std::vector<std::string> parts;
+    for (const slang::ast::ParameterSymbolBase* paramBase : body.getParameters()) {
+        if (!paramBase) {
+            continue;
+        }
+
+        std::string paramName = sanitizeForGraphName(paramBase->symbol.name);
+        if (paramName.empty()) {
+            continue;
+        }
+
+        std::string paramValue;
+        if (const auto* valueParam = paramBase->symbol.as_if<slang::ast::ParameterSymbol>()) {
+            paramValue = parameterValueToString(valueParam->getValue());
+        }
+        else if (const auto* typeParam =
+                     paramBase->symbol.as_if<slang::ast::TypeParameterSymbol>()) {
+            paramValue = typeParameterToString(*typeParam);
+        }
+
+        if (paramValue.empty()) {
+            continue;
+        }
+
+        parts.emplace_back(std::move(paramName) + "_" + std::move(paramValue));
+    }
+
+    if (parts.empty()) {
+        return {};
+    }
+
+    std::string suffix;
+    suffix.reserve(16 * parts.size());
+    suffix.push_back('$');
+    bool first = true;
+    for (std::string& part : parts) {
+        if (!first) {
+            suffix.push_back('$');
+        }
+        first = false;
+        suffix.append(part);
+    }
+    return suffix;
+}
 
 std::string deriveSymbolPath(const slang::ast::Symbol& symbol) {
     std::string path = symbol.getHierarchicalPath();
@@ -270,14 +368,18 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
 
 grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instance,
                                         grh::Netlist& netlist, bool& wasCreated) {
-    const auto& body = instance.body;
-    if (auto it = graphByBody_.find(&body); it != graphByBody_.end()) {
+    const slang::ast::InstanceBodySymbol* canonicalBody = instance.getCanonicalBody();
+    const slang::ast::InstanceBodySymbol* keyBody =
+        canonicalBody ? canonicalBody : &instance.body;
+
+    if (auto it = graphByBody_.find(keyBody); it != graphByBody_.end()) {
         wasCreated = false;
+        graphByBody_[&instance.body] = it->second;
         return it->second;
     }
 
     std::string baseName;
-    const auto& definition = body.getDefinition();
+    const auto& definition = instance.body.getDefinition();
     if (!definition.name.empty()) {
         baseName.assign(definition.name);
     }
@@ -291,6 +393,10 @@ grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instan
         }
     }
 
+    if (const std::string paramSuffix = deriveParameterSuffix(*keyBody); !paramSuffix.empty()) {
+        baseName.append(paramSuffix);
+    }
+
     auto [usageIt, inserted] = graphNameUsage_.try_emplace(baseName, 0);
     std::string graphName = baseName;
     if (usageIt->second > 0) {
@@ -300,13 +406,14 @@ grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instan
     ++usageIt->second;
 
     grh::Graph& graph = netlist.createGraph(graphName);
-    graphByBody_[&body] = &graph;
+    graphByBody_[keyBody] = &graph;
+    graphByBody_[&instance.body] = &graph;
     wasCreated = true;
     return &graph;
 }
 
-void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance, grh::Graph& graph) {
-    const auto& body = instance.body;
+void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
+                              const slang::ast::InstanceBodySymbol& body, grh::Graph& graph) {
 
     for (const slang::ast::Symbol* portSymbol : body.getPortList()) {
         if (!portSymbol) {
@@ -411,34 +518,34 @@ void Elaborate::emitModulePlaceholder(const slang::ast::InstanceSymbol& instance
 
 void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
                                     grh::Graph& graph, grh::Netlist& netlist) {
-    const auto& body = instance.body;
+    const slang::ast::InstanceBodySymbol* canonicalBody = instance.getCanonicalBody();
+    const slang::ast::InstanceBodySymbol& body =
+        canonicalBody ? *canonicalBody : instance.body;
+
     if (!processedBodies_.insert(&body).second) {
         return;
     }
 
-    populatePorts(instance, graph);
+    populatePorts(instance, body, graph);
 
     for (const slang::ast::Symbol& member : body.members()) {
         if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
-            if (!childInstance->isModule()) {
-                if (diagnostics_) {
-                    diagnostics_->nyi(*childInstance, "Only module instances are supported");
-                }
-                continue;
-            }
-
-            bool childCreated = false;
-            grh::Graph* childGraph = materializeGraph(*childInstance, netlist, childCreated);
-            if (!childGraph) {
-                continue;
-            }
-            convertInstanceBody(*childInstance, *childGraph, netlist);
-            createInstanceOperation(*childInstance, graph, *childGraph);
+            processInstance(*childInstance, graph, netlist);
             continue;
         }
 
         if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
             processInstanceArray(*instanceArray, graph, netlist);
+            continue;
+        }
+
+        if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>()) {
+            processGenerateBlock(*generateBlock, graph, netlist);
+            continue;
+        }
+
+        if (const auto* generateArray = member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
+            processGenerateBlockArray(*generateArray, graph, netlist);
             continue;
         }
 
@@ -460,20 +567,89 @@ void Elaborate::processInstanceArray(const slang::ast::InstanceArraySymbol& arra
         }
 
         if (const auto* childInstance = element->as_if<slang::ast::InstanceSymbol>()) {
-            bool childCreated = false;
-            grh::Graph* childGraph = materializeGraph(*childInstance, netlist, childCreated);
-            if (!childGraph) {
-                continue;
-            }
-            convertInstanceBody(*childInstance, *childGraph, netlist);
-            createInstanceOperation(*childInstance, graph, *childGraph);
+            processInstance(*childInstance, graph, netlist);
             continue;
         }
 
         if (const auto* nestedArray = element->as_if<slang::ast::InstanceArraySymbol>()) {
             processInstanceArray(*nestedArray, graph, netlist);
+            continue;
+        }
+
+        if (const auto* generateBlock = element->as_if<slang::ast::GenerateBlockSymbol>()) {
+            processGenerateBlock(*generateBlock, graph, netlist);
+            continue;
+        }
+
+        if (const auto* generateArray = element->as_if<slang::ast::GenerateBlockArraySymbol>()) {
+            processGenerateBlockArray(*generateArray, graph, netlist);
         }
     }
+}
+
+void Elaborate::processGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
+                                     grh::Graph& graph, grh::Netlist& netlist) {
+    if (block.isUninstantiated) {
+        return;
+    }
+
+    for (const slang::ast::Symbol& member : block.members()) {
+        if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
+            processInstance(*childInstance, graph, netlist);
+            continue;
+        }
+
+        if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
+            processInstanceArray(*instanceArray, graph, netlist);
+            continue;
+        }
+
+        if (const auto* nestedBlock = member.as_if<slang::ast::GenerateBlockSymbol>()) {
+            processGenerateBlock(*nestedBlock, graph, netlist);
+            continue;
+        }
+
+        if (const auto* nestedArray = member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
+            processGenerateBlockArray(*nestedArray, graph, netlist);
+            continue;
+        }
+    }
+}
+
+void Elaborate::processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                          grh::Graph& graph, grh::Netlist& netlist) {
+    if (!array.valid) {
+        if (diagnostics_) {
+            diagnostics_->nyi(array, "Generate block array is not elaborated");
+        }
+        return;
+    }
+
+    for (const slang::ast::GenerateBlockSymbol* entry : array.entries) {
+        if (!entry) {
+            continue;
+        }
+        processGenerateBlock(*entry, graph, netlist);
+    }
+}
+
+void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,
+                                grh::Graph& parentGraph, grh::Netlist& netlist) {
+    if (!childInstance.isModule()) {
+        if (diagnostics_) {
+            diagnostics_->nyi(childInstance, "Only module instances are supported");
+        }
+        return;
+    }
+
+    bool childCreated = false;
+    grh::Graph* childGraph = materializeGraph(childInstance, netlist, childCreated);
+    if (!childGraph) {
+        return;
+    }
+
+    convertInstanceBody(childInstance, *childGraph, netlist);
+    createInstanceOperation(childInstance, parentGraph, *childGraph);
 }
 
 void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,

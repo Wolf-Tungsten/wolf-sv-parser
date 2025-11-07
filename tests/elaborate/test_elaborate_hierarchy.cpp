@@ -175,12 +175,17 @@ int validateNested(const grh::Netlist& netlist) {
 }
 
 int validateParameterized(const grh::Netlist& netlist) {
-    if (netlist.topGraphs().size() != 1 || netlist.topGraphs().front() != "p_top") {
+    if (netlist.topGraphs().size() != 1) {
+        return fail("param", "Unexpected number of top graphs");
+    }
+
+    const std::string& topName = netlist.topGraphs().front();
+    if (topName.rfind("p_top", 0) != 0) {
         return fail("param", "Unexpected top graph layout");
     }
 
-    const grh::Graph* topGraph = netlist.findGraph("p_top");
-    const grh::Graph* leafGraph = netlist.findGraph("p_leaf");
+    const grh::Graph* topGraph = netlist.findGraph(topName);
+    const grh::Graph* leafGraph = netlist.findGraph("p_leaf$WIDTH_4");
     if (!topGraph || !leafGraph) {
         return fail("param", "Missing expected graphs for parameterized hierarchy");
     }
@@ -327,6 +332,78 @@ int validateStructArray(const grh::Netlist& netlist) {
     return 0;
 }
 
+int validateParamGenerate(const grh::Netlist& netlist) {
+    if (netlist.topGraphs().size() != 1 || netlist.topGraphs().front() != "pg_top") {
+        return fail("param_generate", "Unexpected top graph layout");
+    }
+
+    if (netlist.graphs().size() != 3) {
+        return fail("param_generate", "Expected exactly three graphs (top + two leaf specializations)");
+    }
+
+    const grh::Graph* topGraph = netlist.findGraph("pg_top");
+    const grh::Graph* leaf4Graph = netlist.findGraph("pg_leaf$WIDTH_4");
+    const grh::Graph* leaf8Graph = netlist.findGraph("pg_leaf$WIDTH_8");
+    if (!topGraph || !leaf4Graph || !leaf8Graph) {
+        return fail("param_generate", "Missing expected graphs for parameterized generate test");
+    }
+
+    auto checkPortWidth = [](const grh::Graph* graph, int64_t expected) {
+        auto inputIt = graph->inputPorts().find("in");
+        auto outputIt = graph->outputPorts().find("out");
+        if (inputIt == graph->inputPorts().end() || outputIt == graph->outputPorts().end()) {
+            return false;
+        }
+        const grh::Value* inputValue = inputIt->second;
+        const grh::Value* outputValue = outputIt->second;
+        return inputValue && outputValue && inputValue->width() == expected &&
+               outputValue->width() == expected;
+    };
+
+    if (!checkPortWidth(leaf4Graph, 4)) {
+        return fail("param_generate", "pg_leaf ports do not match WIDTH=4 expectation");
+    }
+    if (!checkPortWidth(leaf8Graph, 8)) {
+        return fail("param_generate", "pg_leaf_1 ports do not match WIDTH=8 expectation");
+    }
+
+    std::size_t totalInstances = 0;
+    std::size_t width4Instances = 0;
+    std::size_t width8Instances = 0;
+    for (const std::unique_ptr<grh::Operation>& opPtr : topGraph->operations()) {
+        const grh::Operation& op = *opPtr;
+        if (op.kind() != grh::OperationKind::kInstance) {
+            continue;
+        }
+
+        totalInstances++;
+        auto moduleNameIt = op.attributes().find("moduleName");
+        if (moduleNameIt == op.attributes().end()) {
+            return fail("param_generate", "Instance missing moduleName attribute");
+        }
+
+        const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
+        if (moduleName == leaf4Graph->name()) {
+            width4Instances++;
+        }
+        else if (moduleName == leaf8Graph->name()) {
+            width8Instances++;
+        }
+        else {
+            return fail("param_generate", "Instance references unexpected module graph: " + moduleName);
+        }
+    }
+
+    if (totalInstances != 6) {
+        return fail("param_generate", "Unexpected number of instances in top graph");
+    }
+    if (width4Instances != 5 || width8Instances != 1) {
+        return fail("param_generate", "Instance distribution across parameterizations is incorrect");
+    }
+
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -370,6 +447,20 @@ int main() {
             return 1;
         }
         if (int result = validateStructArray(netlist); result != 0) {
+            return result;
+        }
+    }
+
+    {
+        grh::Netlist netlist;
+        ElaborateDiagnostics diagnostics;
+        if (!buildNetlist("param_generate", dataDir / "param_generate.sv", netlist, diagnostics)) {
+            return 1;
+        }
+        if (!writeArtifact("param_generate", netlist)) {
+            return 1;
+        }
+        if (int result = validateParamGenerate(netlist); result != 0) {
             return result;
         }
     }
