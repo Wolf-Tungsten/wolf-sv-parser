@@ -53,7 +53,9 @@ GRH 表示在编译流程中的功能定位如下：
 
 # 边 - Value
 
-满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取
+满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取。
+
+每个 Value 最终都会显式生成为 SystemVerilog 中的 wire 声明，以支持 SSA 特性。
 
 - 具有一个字符串类型的 symbol 字段，用于识别信号，要求在 Graph 作用域内唯一且非空，符合verilog 标识符规范，symbol 应尽可能沿用输入RTL的命名，提高可读性
 - 具有一个 `int64_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
@@ -186,6 +188,18 @@ assign ${res.symbol} = ${op0.symbol} ? ${op1.symbol} : ${op2.symbol};
 ```
 
 ## 连线操作
+
+### 连续赋值操作 kAssign
+
+- operands：
+    - input：待赋值的输入信号
+- results：
+    - res：赋值后的输出结果
+
+生成语义：
+```
+assign ${res.symbol} = ${input.symbol};
+```
 
 ### 拼接操作符 kConcat
 
