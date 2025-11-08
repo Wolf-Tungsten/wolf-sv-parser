@@ -487,6 +487,126 @@ bool containsEdgeSensitiveEvent(const slang::ast::TimingControl& timing) {
     }
 }
 
+struct MemoryLayoutInfo {
+    int64_t rowWidth = 0;
+    int64_t rowCount = 0;
+    bool isSigned = false;
+};
+
+std::optional<MemoryLayoutInfo>
+deriveMemoryLayout(const slang::ast::Type& type, const slang::ast::ValueSymbol& symbol,
+                   ElaborateDiagnostics* diagnostics) {
+    const slang::ast::Type* current = &type;
+    bool hasUnpacked = false;
+    int64_t rows = 1;
+
+    while (true) {
+        const slang::ast::Type& canonical = current->getCanonicalType();
+        if (canonical.kind == slang::ast::SymbolKind::FixedSizeUnpackedArrayType) {
+            hasUnpacked = true;
+            const auto& unpacked = canonical.as<slang::ast::FixedSizeUnpackedArrayType>();
+            const uint64_t extent = unpacked.range.fullWidth();
+            if (extent == 0) {
+                if (diagnostics) {
+                    diagnostics->nyi(symbol,
+                                     "Unpacked array dimension must have positive extent");
+                }
+                return std::nullopt;
+            }
+            const uint64_t maxValue = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+            uint64_t total = static_cast<uint64_t>(rows);
+            total *= extent;
+            if (total > maxValue) {
+                if (diagnostics) {
+                    diagnostics->nyi(symbol,
+                                     "Memory row count exceeds GRH limit; clamping to int64_t::max");
+                }
+                rows = std::numeric_limits<int64_t>::max();
+            }
+            else {
+                rows = static_cast<int64_t>(total);
+            }
+            current = &unpacked.elementType;
+            continue;
+        }
+        break;
+    }
+
+    if (!hasUnpacked) {
+        return std::nullopt;
+    }
+
+    TypeHelper::Info info = TypeHelper::analyze(*current, symbol, diagnostics);
+    MemoryLayoutInfo layout;
+    layout.rowWidth = info.width > 0 ? info.width : 1;
+    layout.rowCount = rows > 0 ? rows : 1;
+    layout.isSigned = info.isSigned;
+    return layout;
+}
+
+const slang::ast::SignalEventControl*
+findEdgeEventControl(const slang::ast::TimingControl& timing) {
+    using slang::ast::TimingControlKind;
+    switch (timing.kind) {
+    case TimingControlKind::SignalEvent:
+        return &timing.as<slang::ast::SignalEventControl>();
+    case TimingControlKind::EventList: {
+        const auto& list = timing.as<slang::ast::EventListControl>();
+        for (const slang::ast::TimingControl* entry : list.events) {
+            if (!entry) {
+                continue;
+            }
+            if (const auto* edge = findEdgeEventControl(*entry)) {
+                return edge;
+            }
+        }
+        return nullptr;
+    }
+    case TimingControlKind::RepeatedEvent:
+        return findEdgeEventControl(timing.as<slang::ast::RepeatedEventControl>().event);
+    default:
+        return nullptr;
+    }
+}
+
+std::optional<std::string>
+deriveClockPolarity(const slang::ast::ProceduralBlockSymbol& block,
+                    const slang::ast::ValueSymbol& symbol, ElaborateDiagnostics* diagnostics) {
+    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+    if (!timing) {
+        if (diagnostics) {
+            diagnostics->nyi(symbol,
+                             "Sequential driver lacks timing control; unable to determine clock edge");
+        }
+        return std::nullopt;
+    }
+
+    const slang::ast::SignalEventControl* event = findEdgeEventControl(*timing);
+    if (!event) {
+        if (diagnostics) {
+            diagnostics->nyi(symbol,
+                             "Sequential driver timing control is not an edge-sensitive event");
+        }
+        return std::nullopt;
+    }
+
+    using slang::ast::EdgeKind;
+    switch (event->edge) {
+    case EdgeKind::PosEdge:
+        return std::string("posedge");
+    case EdgeKind::NegEdge:
+        return std::string("negedge");
+    case EdgeKind::BothEdges:
+    case EdgeKind::None:
+    default:
+        if (diagnostics) {
+            diagnostics->nyi(symbol,
+                             "Sequential driver uses unsupported edge kind (dual-edge / level)");
+        }
+        return std::nullopt;
+    }
+}
+
 MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
     using slang::ast::ProceduralBlockKind;
     switch (block.procedureKind) {
@@ -726,6 +846,10 @@ void Elaborate::emitModulePlaceholder(const slang::ast::InstanceSymbol& instance
 
     op.setAttribute("module_name", moduleName);
     op.setAttribute("status", std::string("TODO: module body elaboration pending"));
+
+    if (diagnostics_) {
+        diagnostics_->todo(instance, "Module body elaboration pending");
+    }
 }
 
 void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
@@ -740,6 +864,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
 
     populatePorts(instance, body, graph);
     collectSignalMemos(body);
+    materializeSignalMemos(body, graph);
 
     for (const slang::ast::Symbol& member : body.members()) {
         if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
@@ -1026,6 +1151,95 @@ void Elaborate::registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Va
     valueCache_[&symbol] = &value;
 }
 
+void Elaborate::materializeSignalMemos(const slang::ast::InstanceBodySymbol& body,
+                                       grh::Graph& graph) {
+    ensureNetValues(body, graph);
+    ensureRegState(body, graph);
+}
+
+void Elaborate::ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph) {
+    auto it = netMemo_.find(&body);
+    if (it == netMemo_.end()) {
+        return;
+    }
+
+    for (SignalMemoEntry& entry : it->second) {
+        if (!entry.symbol) {
+            continue;
+        }
+        grh::Value* value = ensureValueForSymbol(*entry.symbol, graph);
+        entry.value = value;
+    }
+}
+
+void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph) {
+    auto it = regMemo_.find(&body);
+    if (it == regMemo_.end()) {
+        return;
+    }
+
+    for (SignalMemoEntry& entry : it->second) {
+        if (!entry.symbol || !entry.type) {
+            continue;
+        }
+        if (entry.stateOp) {
+            continue;
+        }
+
+        if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
+            std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
+            grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
+            op.setAttribute("width", layout->rowWidth);
+            op.setAttribute("row", layout->rowCount);
+            op.setAttribute("isSigned", layout->isSigned);
+            entry.stateOp = &op;
+            continue;
+        }
+
+        grh::Value* value = ensureValueForSymbol(*entry.symbol, graph);
+        entry.value = value;
+        if (!value) {
+            continue;
+        }
+
+        if (!entry.drivingBlock) {
+            if (diagnostics_) {
+                diagnostics_->nyi(*entry.symbol,
+                                  "Sequential signal lacks associated procedural block metadata");
+            }
+            continue;
+        }
+
+        std::optional<std::string> clkPolarity =
+            deriveClockPolarity(*entry.drivingBlock, *entry.symbol, diagnostics_);
+        if (!clkPolarity) {
+            continue;
+        }
+
+        std::string opName = makeOperationNameForSymbol(*entry.symbol, "register", graph);
+        grh::Operation& op = graph.createOperation(grh::OperationKind::kRegister, opName);
+        op.addResult(*value);
+        op.setAttribute("clkPolarity", *clkPolarity);
+        entry.stateOp = &op;
+    }
+}
+
+std::string Elaborate::makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
+                                                  std::string_view fallback, grh::Graph& graph) {
+    if (!symbol.name.empty()) {
+        std::string symbolName(symbol.name);
+        if (!graph.findOperation(symbolName)) {
+            return symbolName;
+        }
+    }
+
+    std::string base = symbol.name.empty() ? std::string(fallback) : std::string(symbol.name);
+    if (base.empty()) {
+        base = fallback.empty() ? std::string("_state") : std::string(fallback);
+    }
+    return makeUniqueOperationName(graph, std::move(base));
+}
+
 void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     std::unordered_map<const slang::ast::ValueSymbol*, SignalMemoEntry> candidates;
 
@@ -1075,8 +1289,13 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
     std::unordered_map<const slang::ast::ValueSymbol*, MemoDriverKind> driverKinds;
     driverKinds.reserve(candidates.size());
+    std::unordered_map<const slang::ast::ValueSymbol*, const slang::ast::ProceduralBlockSymbol*>
+        regDriverBlocks;
+    regDriverBlocks.reserve(candidates.size());
+    std::unordered_set<const slang::ast::ValueSymbol*> regDriverConflicts;
 
-    auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver) {
+    auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver,
+                          const slang::ast::ProceduralBlockSymbol* block = nullptr) {
         if (driver == MemoDriverKind::None) {
             return;
         }
@@ -1092,6 +1311,14 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
 
         state |= driver;
+        if (driver == MemoDriverKind::Reg && block) {
+            auto [ownerIt, inserted] = regDriverBlocks.emplace(&symbol, block);
+            if (!inserted && ownerIt->second != block) {
+                if (regDriverConflicts.insert(&symbol).second && diagnostics_) {
+                    diagnostics_->nyi(symbol, "Signal is driven by multiple sequential blocks; unsupported");
+                }
+            }
+        }
         if (hasDriver(state, MemoDriverKind::Net) && hasDriver(state, MemoDriverKind::Reg)) {
             if (diagnostics_) {
                 diagnostics_->nyi(symbol,
@@ -1120,7 +1347,9 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
             auto handleAssignment = [&](const slang::ast::Expression& lhs) {
                 collectAssignedSymbols(
-                    lhs, [&](const slang::ast::ValueSymbol& symbol) { markDriver(symbol, driver); });
+                    lhs, [&](const slang::ast::ValueSymbol& symbol) {
+                        markDriver(symbol, driver, block);
+                    });
             };
             AssignmentCollector collector(handleAssignment);
             block->getBody().visit(collector);
@@ -1133,7 +1362,7 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     nets.reserve(candidates.size());
     regs.reserve(candidates.size());
 
-    for (const auto& [symbol, entry] : candidates) {
+    for (auto& [symbol, entry] : candidates) {
         MemoDriverKind driver = MemoDriverKind::None;
         if (auto it = driverKinds.find(symbol); it != driverKinds.end()) {
             driver = it->second;
@@ -1148,6 +1377,12 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
             nets.push_back(entry);
         }
         else if (regOnly) {
+            if (regDriverConflicts.count(symbol) > 0) {
+                continue;
+            }
+            if (auto blockIt = regDriverBlocks.find(symbol); blockIt != regDriverBlocks.end()) {
+                entry.drivingBlock = blockIt->second;
+            }
             regs.push_back(entry);
         }
     }

@@ -44,3 +44,9 @@
   - KR1 统一术语命名，将原来的 wire 和 reg 改为 net 和 reg 表述，包括修改代码和文档
   - KR2 增强 TypeHelper，使得 net 和 reg 的解析可以处理 packed/unpacked 结构体和数组，请注意，GRH对于结构体和数组的处理方法是按照 Systemverilog 规范进行 flatten，形成一个大的 Value，之后通过 kSlice* 读取，通过 kConcat 写回
   - KR3 阶段5的实现中，会产生 Module body elaboration incomplete，这是不必要的，net 和 reg 只解析线网和变量即可，GRH不支持跨Graph的信号访问
+
+## 阶段7：由 net 和 reg memo 创建 Value 和 Operation 
+- **Objective** 在阶段 6 的基础上，根据 net 和 reg memo 创建 Value
+  - KR1 net memo 中的信号直接创建 Value，扩展 net memo 记录信号和 Value 的关系
+  - KR2 reg memo 中的信号需解析类型和赋值的 always 块特点，生成 kRegister* 和 kMemory，并扩展 reg memo 记录 memo entry 和 kRegister*、kMemory 的关系，kRegister* 和 kMemory 的 operand 可以先留空，留待后续步骤解析
+  - KR3 创建测试样例，提供人类可读的检查输出

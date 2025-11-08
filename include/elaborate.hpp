@@ -31,6 +31,7 @@ class GenerateBlockArraySymbol;
 class Expression;
 class RootSymbol;
 class Symbol;
+class ProceduralBlockSymbol;
 } // namespace slang::ast
 
 namespace wolf_sv {
@@ -86,6 +87,9 @@ struct SignalMemoEntry {
     int64_t width = 0;
     bool isSigned = false;
     std::vector<SignalMemoField> fields;
+    grh::Value* value = nullptr;
+    grh::Operation* stateOp = nullptr;
+    const slang::ast::ProceduralBlockSymbol* drivingBlock = nullptr;
 };
 
 /// Elaborates slang AST into GRH representation.
@@ -127,8 +131,13 @@ private:
     grh::Value* resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
                                        const slang::ast::Symbol* origin);
     std::string makeUniqueOperationName(grh::Graph& graph, std::string baseName);
+    std::string makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
+                                           std::string_view fallback, grh::Graph& graph);
     void registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value);
     void collectSignalMemos(const slang::ast::InstanceBodySymbol& body);
+    void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
 
     ElaborateDiagnostics* diagnostics_;
     ElaborateOptions options_;

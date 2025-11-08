@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <variant>
 
 #include "slang/ast/Compilation.h"
 #include "slang/analysis/AnalysisManager.h"
@@ -104,7 +105,7 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    (void)elaborator.convert(compilation->getRoot());
+    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     const slang::ast::InstanceSymbol* memoTop = nullptr;
     for (const slang::ast::InstanceSymbol* top : compilation->getRoot().topInstances) {
@@ -213,6 +214,109 @@ int main() {
     if (!findField(*packedReg, "reg_packed_matrix[0][0]")) {
         return fail("reg_packed_matrix missing packed field path");
     }
+
+    auto expectNetValue = [&](std::string_view name) -> bool {
+        const SignalMemoEntry* entry = findEntry(netMemo, name);
+        if (!entry) {
+            return fail(std::string("net memo missing entry for ") + std::string(name));
+        }
+        if (!entry->value) {
+            return fail(std::string("net memo entry ") + std::string(name) + " is missing GRH value");
+        }
+        std::cout << "[memo] net " << name << " entryWidth=" << entry->width
+                  << " valueWidth=" << entry->value->width() << '\n';
+        if (entry->value->width() != entry->width) {
+            return fail(std::string("value width mismatch for net ") + std::string(name));
+        }
+        std::cout << "        value symbol=" << entry->value->symbol() << '\n';
+        return true;
+    };
+    if (!expectNetValue("w_assign")) {
+        return 1;
+    }
+    if (!expectNetValue("comb_bus")) {
+        return 1;
+    }
+
+    auto expectRegister = [&](std::string_view name, std::string_view clkPolarity) -> bool {
+        const SignalMemoEntry* entry = findEntry(regMemo, name);
+        if (!entry) {
+            return fail(std::string("reg memo missing entry for ") + std::string(name));
+        }
+        if (!entry->stateOp) {
+            return fail(std::string("reg memo entry ") + std::string(name) +
+                        " is missing state operation");
+        }
+        if (entry->stateOp->kind() != grh::OperationKind::kRegister) {
+            return fail(std::string("reg memo entry ") + std::string(name) +
+                        " is not bound to kRegister");
+        }
+        if (!entry->value) {
+            return fail(std::string("reg memo entry ") + std::string(name) +
+                        " is missing GRH value");
+        }
+        if (entry->stateOp->results().empty() ||
+            entry->stateOp->results().front() != entry->value) {
+            return fail(std::string("register operation result mismatch for ") +
+                        std::string(name));
+        }
+        const auto attrIt = entry->stateOp->attributes().find("clkPolarity");
+        if (attrIt == entry->stateOp->attributes().end()) {
+            return fail(std::string("register operation missing clkPolarity attribute for ") +
+                        std::string(name));
+        }
+        if (!std::holds_alternative<std::string>(attrIt->second)) {
+            return fail(std::string("register clkPolarity attribute type mismatch for ") +
+                        std::string(name));
+        }
+        const std::string& attrValue = std::get<std::string>(attrIt->second);
+        if (attrValue != clkPolarity) {
+            return fail(std::string("register clkPolarity mismatch for ") + std::string(name));
+        }
+        std::cout << "[memo] register " << name << " clk=" << attrValue
+                  << " op=" << entry->stateOp->symbol() << '\n';
+        std::cout << "        value=" << entry->value->symbol() << '\n';
+        return true;
+    };
+
+    if (!expectRegister("seq_logic", "posedge") || !expectRegister("reg_ff", "posedge") ||
+        !expectRegister("reg_struct_bus", "posedge") ||
+        !expectRegister("reg_packed_matrix", "posedge")) {
+        return 1;
+    }
+    if (!expectRegister("latch_target", "negedge")) {
+        return 1;
+    }
+
+    const SignalMemoEntry* memoryEntry = findEntry(regMemo, "reg_unpacked_bus");
+    if (!memoryEntry) {
+        return fail("reg memo missing reg_unpacked_bus");
+    }
+    if (memoryEntry->value) {
+        return fail("reg_unpacked_bus should not materialize a flat value");
+    }
+    if (!memoryEntry->stateOp ||
+        memoryEntry->stateOp->kind() != grh::OperationKind::kMemory) {
+        return fail("reg_unpacked_bus expected kMemory placeholder");
+    }
+    const auto& memAttrs = memoryEntry->stateOp->attributes();
+    auto widthIt = memAttrs.find("width");
+    auto rowIt = memAttrs.find("row");
+    auto signedIt = memAttrs.find("isSigned");
+    if (widthIt == memAttrs.end() || rowIt == memAttrs.end() || signedIt == memAttrs.end()) {
+        return fail("reg_unpacked_bus memory attributes incomplete");
+    }
+    if (!std::holds_alternative<int64_t>(widthIt->second) ||
+        !std::holds_alternative<int64_t>(rowIt->second) ||
+        !std::holds_alternative<bool>(signedIt->second)) {
+        return fail("reg_unpacked_bus memory attributes have unexpected types");
+    }
+    if (std::get<int64_t>(widthIt->second) != 3 || std::get<int64_t>(rowIt->second) != 2 ||
+        std::get<bool>(signedIt->second)) {
+        return fail("reg_unpacked_bus memory attributes mismatch");
+    }
+    std::cout << "[memo] memory reg_unpacked_bus width=" << std::get<int64_t>(widthIt->second)
+              << " rows=" << std::get<int64_t>(rowIt->second) << '\n';
 
     std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
     for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
