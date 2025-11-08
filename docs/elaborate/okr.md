@@ -31,11 +31,16 @@
   - KR2 支持 generate 语句和模块实例化数组的处理
   - KR3 构建覆盖上述特性的测试样例
 
-## 阶段5：wire 和 reg 解析
-- **Objective** 对于每个模块，解析用户定义的 wire/reg/logic 信号，形成两个独立的 Slang AST Symbol memo 表
-  - KR1 在 elaborate 类中增加两个备忘录结构，分别存储解析为 wire 和 reg 声明的符号与类型信息
-  - KR2 实现对 slang AST 中 logic/wire/reg 声明的遍历
-  - KR3 判定每个 logic/wire/reg 最终属于 wire 还是属于 reg，判断依据：被 assign/always_comb/always@(*) 驱动的为 wire，被 always@(posedge/negedge)、always_ff 驱动的为 reg，双重驱动则报错
+## 阶段5：net 和 reg 解析
+- **Objective** 对于每个模块，解析用户定义的 net/reg/logic 信号，形成两个独立的 Slang AST Symbol memo 表
+  - KR1 在 elaborate 类中增加两个备忘录结构，分别存储解析为 net 和 reg 声明的符号与类型信息
+  - KR2 实现对 slang AST 中 logic/net/reg 声明的遍历
+  - KR3 判定每个 logic/net/reg 最终属于 net 还是属于 reg，判断依据：被 assign/always_comb/always@(*) 驱动的为 net，被 always@(posedge/negedge)、always_ff 驱动的为 reg，双重驱动则报错
   - KR4 将判定后的符号与类型信息存入对应备忘录
   - KR5 构建覆盖上述特性的测试样例，对备忘录内容进行 peek 测试
 
+## 阶段6：复杂类型的 net 和 reg 解析
+- **Objective** 在阶段5的基础上，增强 net 和 reg 的解析
+  - KR1 统一术语命名，将原来的 wire 和 reg 改为 net 和 reg 表述，包括修改代码和文档
+  - KR2 增强 TypeHelper，使得 net 和 reg 的解析可以处理 packed/unpacked 结构体和数组，请注意，GRH对于结构体和数组的处理方法是按照 Systemverilog 规范进行 flatten，形成一个大的 Value，之后通过 kSlice* 读取，通过 kConcat 写回
+  - KR3 阶段5的实现中，会产生 Module body elaboration incomplete，这是不必要的，net 和 reg 只解析线网和变量即可，GRH不支持跨Graph的信号访问

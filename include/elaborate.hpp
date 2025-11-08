@@ -71,12 +71,21 @@ struct ElaborateOptions {
     bool emitPlaceholders = true;
 };
 
+/// Captures a flattened field inside a memoized signal.
+struct SignalMemoField {
+    std::string path;
+    int64_t msb = 0;
+    int64_t lsb = 0;
+    bool isSigned = false;
+};
+
 /// Captures a memoized signal entry discovered during elaboration.
 struct SignalMemoEntry {
     const slang::ast::ValueSymbol* symbol = nullptr;
     const slang::ast::Type* type = nullptr;
     int64_t width = 0;
     bool isSigned = false;
+    std::vector<SignalMemoField> fields;
 };
 
 /// Elaborates slang AST into GRH representation.
@@ -88,9 +97,9 @@ public:
     /// Convert the provided slang AST root symbol into a GRH netlist.
     grh::Netlist convert(const slang::ast::RootSymbol& root);
 
-    /// Returns memoized wire declarations for the provided module body.
+    /// Returns memoized net declarations for the provided module body.
     std::span<const SignalMemoEntry>
-    peekWireMemo(const slang::ast::InstanceBodySymbol& body) const;
+    peekNetMemo(const slang::ast::InstanceBodySymbol& body) const;
 
     /// Returns memoized register declarations for the provided module body.
     std::span<const SignalMemoEntry>
@@ -130,7 +139,7 @@ private:
     std::unordered_map<const slang::ast::Symbol*, grh::Value*> valueCache_;
     std::unordered_map<std::string, std::size_t> graphNameUsage_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
-        wireMemo_;
+        netMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
         regMemo_;
 };

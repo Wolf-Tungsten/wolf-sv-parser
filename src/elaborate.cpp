@@ -326,7 +326,7 @@ private:
 
 enum class MemoDriverKind : uint8_t {
     None = 0,
-    Wire = 1 << 0,
+    Net = 1 << 0,
     Reg = 1 << 1
 };
 
@@ -491,7 +491,7 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
     using slang::ast::ProceduralBlockKind;
     switch (block.procedureKind) {
     case ProceduralBlockKind::AlwaysComb:
-        return MemoDriverKind::Wire;
+        return MemoDriverKind::Net;
     case ProceduralBlockKind::AlwaysLatch:
     case ProceduralBlockKind::AlwaysFF:
     case ProceduralBlockKind::Initial:
@@ -500,12 +500,12 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
     case ProceduralBlockKind::Always: {
         const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
         if (!timing) {
-            return MemoDriverKind::Wire;
+            return MemoDriverKind::Net;
         }
         if (timing->kind == slang::ast::TimingControlKind::ImplicitEvent) {
-            return MemoDriverKind::Wire;
+            return MemoDriverKind::Net;
         }
-        return containsEdgeSensitiveEvent(*timing) ? MemoDriverKind::Reg : MemoDriverKind::Wire;
+        return containsEdgeSensitiveEvent(*timing) ? MemoDriverKind::Reg : MemoDriverKind::Net;
     }
     default:
         return MemoDriverKind::None;
@@ -563,8 +563,8 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
 }
 
 std::span<const SignalMemoEntry>
-Elaborate::peekWireMemo(const slang::ast::InstanceBodySymbol& body) const {
-    if (auto it = wireMemo_.find(&body); it != wireMemo_.end()) {
+Elaborate::peekNetMemo(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = netMemo_.find(&body); it != netMemo_.end()) {
         return it->second;
     }
     return {};
@@ -766,10 +766,6 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
     }
 
     emitModulePlaceholder(instance, graph);
-    if (diagnostics_) {
-        diagnostics_->todo(body,
-                           "Module body elaboration incomplete; emitted placeholder operation");
-    }
 }
 
 void Elaborate::processInstanceArray(const slang::ast::InstanceArraySymbol& array,
@@ -1035,19 +1031,28 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
     auto registerCandidate = [&](const slang::ast::ValueSymbol& symbol) {
         const slang::ast::Type& type = symbol.getType();
-        if (!type.isIntegral()) {
+        if (!type.isFixedSize() || !type.isBitstreamType()) {
+            if (diagnostics_) {
+                diagnostics_->nyi(symbol,
+                                  "Skipping memoization for non bitstream, fixed-size signal type");
+            }
             return;
         }
+
+        TypeHelper::Info info = TypeHelper::analyze(type, symbol, diagnostics_);
 
         SignalMemoEntry entry;
         entry.symbol = &symbol;
         entry.type = &type;
-        entry.width = clampBitWidth(type.getBitstreamWidth(), diagnostics_, symbol);
-        if (entry.width <= 0) {
-            entry.width = 1;
+        entry.width = info.width > 0 ? info.width : 1;
+        entry.isSigned = info.isSigned;
+        entry.fields.reserve(info.fields.size());
+        for (const auto& field : info.fields) {
+            entry.fields.push_back(
+                SignalMemoField{field.path, field.msb, field.lsb, field.isSigned});
         }
-        entry.isSigned = type.isSigned();
-        candidates.emplace(&symbol, entry);
+
+        candidates.emplace(&symbol, std::move(entry));
     };
 
     for (const slang::ast::Symbol& member : body.members()) {
@@ -1063,7 +1068,7 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     }
 
     if (candidates.empty()) {
-        wireMemo_[&body].clear();
+        netMemo_[&body].clear();
         regMemo_[&body].clear();
         return;
     }
@@ -1087,10 +1092,10 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
 
         state |= driver;
-        if (hasDriver(state, MemoDriverKind::Wire) && hasDriver(state, MemoDriverKind::Reg)) {
+        if (hasDriver(state, MemoDriverKind::Net) && hasDriver(state, MemoDriverKind::Reg)) {
             if (diagnostics_) {
                 diagnostics_->nyi(symbol,
-                                   "Signal has conflicting wire/reg drivers (combinational vs sequential)");
+                                   "Signal has conflicting net/reg drivers (combinational vs sequential)");
             }
         }
     };
@@ -1101,7 +1106,7 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
             if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
                 collectAssignedSymbols(
                     assignment->left(), [&](const slang::ast::ValueSymbol& symbol) {
-                        markDriver(symbol, MemoDriverKind::Wire);
+                        markDriver(symbol, MemoDriverKind::Net);
                     });
             }
             continue;
@@ -1123,9 +1128,9 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
     }
 
-    std::vector<SignalMemoEntry> wires;
+    std::vector<SignalMemoEntry> nets;
     std::vector<SignalMemoEntry> regs;
-    wires.reserve(candidates.size());
+    nets.reserve(candidates.size());
     regs.reserve(candidates.size());
 
     for (const auto& [symbol, entry] : candidates) {
@@ -1134,13 +1139,13 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
             driver = it->second;
         }
 
-        const bool wireOnly = hasDriver(driver, MemoDriverKind::Wire) &&
-                              !hasDriver(driver, MemoDriverKind::Reg);
+        const bool netOnly = hasDriver(driver, MemoDriverKind::Net) &&
+                             !hasDriver(driver, MemoDriverKind::Reg);
         const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
-                             !hasDriver(driver, MemoDriverKind::Wire);
+                             !hasDriver(driver, MemoDriverKind::Net);
 
-        if (wireOnly) {
-            wires.push_back(entry);
+        if (netOnly) {
+            nets.push_back(entry);
         }
         else if (regOnly) {
             regs.push_back(entry);
@@ -1150,9 +1155,9 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     auto byName = [](const SignalMemoEntry& lhs, const SignalMemoEntry& rhs) {
         return lhs.symbol->name < rhs.symbol->name;
     };
-    std::sort(wires.begin(), wires.end(), byName);
+    std::sort(nets.begin(), nets.end(), byName);
     std::sort(regs.begin(), regs.end(), byName);
-    wireMemo_[&body] = std::move(wires);
+    netMemo_[&body] = std::move(nets);
     regMemo_[&body] = std::move(regs);
 }
 

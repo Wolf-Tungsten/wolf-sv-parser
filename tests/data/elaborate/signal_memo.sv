@@ -1,3 +1,8 @@
+typedef struct packed {
+    logic [3:0] parts_hi;
+    logic signed [1:0] parts_lo;
+} memo_struct_t;
+
 module memo_child(
     input  logic clk,
     input  logic rst_n
@@ -9,6 +14,12 @@ module memo_child(
     reg   reg_ff;
     logic latch_target;
     logic conflict_signal;
+    memo_struct_t net_struct_bus;
+    memo_struct_t reg_struct_bus;
+    logic [1:0][3:0] net_packed_matrix;
+    logic [1:0][3:0] reg_packed_matrix;
+    logic signed [2:0] net_unpacked_bus [0:1];
+    logic [2:0] reg_unpacked_bus [0:1];
 
     assign w_assign = rst_n;
 
@@ -32,9 +43,24 @@ module memo_child(
         latch_target <= reg_ff;
     end
 
+    assign net_struct_bus = '{parts_hi: comb_bus[3:0], parts_lo: comb_bus[5:4]};
+    always_comb begin
+        net_packed_matrix[0] = comb_bus[3:0];
+        net_packed_matrix[1] = comb_bus[7:4];
+    end
+    assign net_unpacked_bus[0] = comb_bus[2:0];
+    assign net_unpacked_bus[1] = {star_assign, comb_bus[5:4]};
+
     assign conflict_signal = star_assign;
     always_ff @(posedge clk) begin
         conflict_signal <= rst_n;
+    end
+
+    always_ff @(posedge clk) begin
+        reg_struct_bus <= net_struct_bus;
+        reg_packed_matrix <= net_packed_matrix;
+        reg_unpacked_bus[0] <= net_unpacked_bus[0];
+        reg_unpacked_bus[1] <= net_unpacked_bus[1];
     end
 endmodule
 

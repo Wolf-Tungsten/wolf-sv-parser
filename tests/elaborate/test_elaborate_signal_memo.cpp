@@ -1,8 +1,10 @@
 #include "elaborate.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "slang/ast/Compilation.h"
@@ -33,13 +35,29 @@ const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> entries,
     return nullptr;
 }
 
+const SignalMemoField* findField(const SignalMemoEntry& entry, std::string_view path) {
+    for (const SignalMemoField& field : entry.fields) {
+        if (field.path == path) {
+            return &field;
+        }
+    }
+    return nullptr;
+}
+
 void logMemo(std::string_view label, std::span<const SignalMemoEntry> entries) {
     std::cout << "[memo] " << label << " count=" << entries.size() << '\n';
     for (const SignalMemoEntry& entry : entries) {
         const std::string symbolName = entry.symbol ? std::string(entry.symbol->name) : "<null>";
         const std::string typeName = entry.type ? entry.type->toString() : "<null-type>";
         std::cout << "  - " << symbolName << " width=" << entry.width
-                  << (entry.isSigned ? " signed" : " unsigned") << " type=" << typeName << '\n';
+                  << (entry.isSigned ? " signed" : " unsigned") << " type=" << typeName
+                  << " fields=" << entry.fields.size() << '\n';
+        std::size_t preview = std::min<std::size_t>(entry.fields.size(), 3);
+        for (std::size_t idx = 0; idx < preview; ++idx) {
+            const SignalMemoField& field = entry.fields[idx];
+            std::cout << "      field=" << field.path << " [" << field.msb << ":" << field.lsb
+                      << "]" << (field.isSigned ? " signed" : "") << '\n';
+        }
     }
 }
 
@@ -117,24 +135,47 @@ int main() {
         childBody = &childInstance->body;
     }
 
-    std::span<const SignalMemoEntry> wireMemo = elaborator.peekWireMemo(*childBody);
+    std::span<const SignalMemoEntry> netMemo = elaborator.peekNetMemo(*childBody);
     std::span<const SignalMemoEntry> regMemo = elaborator.peekRegMemo(*childBody);
 
-    logMemo("wire", wireMemo);
+    logMemo("net", netMemo);
     logMemo("reg", regMemo);
 
-    if (!findEntry(wireMemo, "w_assign")) {
-        return fail("wire memo missing w_assign");
+    if (!findEntry(netMemo, "w_assign")) {
+        return fail("net memo missing w_assign");
     }
-    const SignalMemoEntry* combBus = findEntry(wireMemo, "comb_bus");
+    const SignalMemoEntry* combBus = findEntry(netMemo, "comb_bus");
     if (!combBus) {
-        return fail("wire memo missing comb_bus");
+        return fail("net memo missing comb_bus");
     }
     if (combBus->width != 8 || !combBus->isSigned) {
         return fail("comb_bus memo entry has unexpected width/sign");
     }
-    if (!findEntry(wireMemo, "star_assign")) {
-        return fail("wire memo missing star_assign");
+    if (!findEntry(netMemo, "star_assign")) {
+        return fail("net memo missing star_assign");
+    }
+
+    const SignalMemoEntry* structNet = findEntry(netMemo, "net_struct_bus");
+    if (!structNet) {
+        return fail("net memo missing net_struct_bus");
+    }
+    if (structNet->width != 6 || structNet->fields.size() != 6) {
+        return fail("net_struct_bus expected 6-bit flattened fields");
+    }
+    if (!findField(*structNet, "net_struct_bus.parts_hi[3]") ||
+        !findField(*structNet, "net_struct_bus.parts_lo[0]")) {
+        return fail("net_struct_bus fields missing expected slices");
+    }
+
+    const SignalMemoEntry* unpackedNet = findEntry(netMemo, "net_unpacked_bus");
+    if (!unpackedNet) {
+        return fail("net memo missing net_unpacked_bus");
+    }
+    if (unpackedNet->width != 6 || unpackedNet->fields.size() != 6) {
+        return fail("net_unpacked_bus expected 6 flattened bits");
+    }
+    if (!findField(*unpackedNet, "net_unpacked_bus[1][0]")) {
+        return fail("net_unpacked_bus missing [1][0] slice");
     }
 
     if (!findEntry(regMemo, "seq_logic")) {
@@ -146,8 +187,31 @@ int main() {
     if (!findEntry(regMemo, "latch_target")) {
         return fail("reg memo missing latch_target");
     }
-    if (findEntry(wireMemo, "conflict_signal") || findEntry(regMemo, "conflict_signal")) {
+    if (findEntry(netMemo, "conflict_signal") || findEntry(regMemo, "conflict_signal")) {
         return fail("conflict_signal should have been excluded due to conflicting drivers");
+    }
+
+    const SignalMemoEntry* structReg = findEntry(regMemo, "reg_struct_bus");
+    if (!structReg) {
+        return fail("reg memo missing reg_struct_bus");
+    }
+    if (structReg->width != 6 || structReg->fields.size() != 6) {
+        return fail("reg_struct_bus expected 6-bit flattened fields");
+    }
+    if (!findField(*structReg, "reg_struct_bus.parts_hi[2]") ||
+        !findField(*structReg, "reg_struct_bus.parts_lo[1]")) {
+        return fail("reg_struct_bus fields missing expected slices");
+    }
+
+    const SignalMemoEntry* packedReg = findEntry(regMemo, "reg_packed_matrix");
+    if (!packedReg) {
+        return fail("reg memo missing reg_packed_matrix");
+    }
+    if (packedReg->width != 8) {
+        return fail("reg_packed_matrix width mismatch");
+    }
+    if (!findField(*packedReg, "reg_packed_matrix[0][0]")) {
+        return fail("reg_packed_matrix missing packed field path");
     }
 
     std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
@@ -158,7 +222,7 @@ int main() {
 
     bool foundConflictDiag = false;
     for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
-        if (diag.message.find("conflicting wire/reg") != std::string::npos ||
+        if (diag.message.find("conflicting net/reg") != std::string::npos ||
             diag.originSymbol.find("conflict_signal") != std::string::npos) {
             foundConflictDiag = true;
             break;
