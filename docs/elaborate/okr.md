@@ -31,56 +31,11 @@
   - KR2 支持 generate 语句和模块实例化数组的处理
   - KR3 构建覆盖上述特性的测试样例
 
-## 阶段5：连续赋值 `assign`
-- **Objective** 将连续赋值语句映射为 GRH 中的组合驱动关系。
-  - KR1 复用 `slang-netlist` 的表达式遍历策略，完成运算符节点映射表。
-  - KR2 为 bit-slice、拼接、条件运算实现驱动边生成并通过位宽一致性检查。
-  - KR3 在 `ctest` 中新增包含多重 `assign` 的组合逻辑基线用例，通过 GRH 访问器校验驱动关系。
+## 阶段5：wire 和 reg 解析
+- **Objective** 对于每个模块，解析用户定义的 wire/reg/logic 信号，形成两个独立的 Slang AST Symbol memo 表
+  - KR1 在 elaborate 类中增加两个备忘录结构，分别存储解析为 wire 和 reg 声明的符号与类型信息
+  - KR2 实现对 slang AST 中 logic/wire/reg 声明的遍历
+  - KR3 判定每个 logic/wire/reg 最终属于 wire 还是属于 reg，判断依据：被 assign/always_comb/always@(*) 驱动的为 wire，被 always@(posedge/negedge)、always_ff 驱动的为 reg，双重驱动则报错
+  - KR4 将判定后的符号与类型信息存入对应备忘录
+  - KR5 构建覆盖上述特性的测试样例，对备忘录内容进行 peek 测试
 
-## 阶段6：组合行为 `always_comb` / `always @(*)`
-- **Objective** 支持组合过程块的 elaboration，确保对驱动集合的精确追踪。
-  - KR1 借鉴 `docs/reference/slang-netlist-data-flow-rationale.md` 的数据流分析，为过程块建立状态收集器。
-  - KR2 覆盖阻塞赋值、初始条件与敏感列表自动推导，生成对应 GRH 节点。
-  - KR3 用 3 个行为描述样例验证驱动覆盖度与无重复驱动，基于 GRH 内部结构断言。
-
-## 阶段7：组合流程控制展开
-- **Objective** 对组合逻辑中的 if/case/loop 进行静态展开，消除控制依赖。
-  - KR1 实现控制依赖图与条件边，并参考 `verilator` 控制流展开策略校验。
-  - KR2 对 case/unique case、for/while 循环进行展开或展开失败诊断。
-  - KR3 引入覆盖 if/case/loop 的回归集，通过结构对比验证 GRH 结果匹配预期。
-
-## 阶段8：时序过程 `always_ff` / `always`
-- **Objective** 支持同步过程块，捕获时序边界与敏感列表。
-  - KR1 解析时钟与复位条件，借鉴 `yosys` 时序单元建模记录触发边。
-  - KR2 支持非阻塞赋值驱动，确保过程内控制结构沿用阶段6的展开能力。
-  - KR3 针对双时钟与同步复位场景构建测试样例，检查 GRH 边界节点与触发条件。
-
-## 阶段9：寄存器识别
-- **Objective** 从时序过程抽取寄存器并在 GRH 中生成 `kRegister*` 节点。
-  - KR1 定义寄存器节点属性（位宽、复位值、驱动源）并与 `yosys` 寄存器抽象对照。
-  - KR2 在 elaborate 收尾阶段聚合寄存器信息，避免重复实例化。
-  - KR3 增加包含多寄存器与位切片的回归用例，通过 GRH 数据接口校验寄存器属性。
-
-## 阶段10：存储器识别
-- **Objective** 捕获 `mem` 语义，生成 `kMemory` 节点及读写端口。
-  - KR1 设计内存节点 schema（深度、宽度、端口数量），参考 `yosys`、`verilator` 内存建模。
-  - KR2 支持多读多写端口解析，识别同步/异步读写模式。
-  - KR3 使用真实项目片段验证内存 elaboration，通过 GRH 结构检视端口连线拓扑。
-
-## 阶段11：仿真输出 `$display`
-- **Objective** 将 `$display/$write` 等仿真输出映射为 GRH 中的 `kDisplay` 节点。
-  - KR1 建立消息节点格式与参数捕获机制，支持静态与动态参数列表。
-  - KR2 在 elaboration 过程中标记其触发上下文，确保与时序/组合节点正确关联。
-  - KR3 添加含条件输出的测试，通过 GRH 节点属性验证触发条件与输出内容。
-
-## 阶段12：仿真终止 `$finish/$error`
-- **Objective** 识别仿真终止类语句，生成 `kAssert` 节点并捕获触发条件。
-  - KR1 复用阶段6的条件展开，记录断言表达式及 fail/pass 边。
-  - KR2 实现严重级别分类（finish/error/fatal）并体现在节点属性中。
-  - KR3 构建覆盖不同终止语句的测试用例，通过 GRH 链路验证触发源可追溯。
-
-## 阶段13：DPI 交互
-- **Objective** 完成 DPI 函数的识别与 GRH 建模，生成 `kDpicImport` / `kDpicCall`。
-  - KR1 建立 DPI 导入表，与 `verilator` DPI 绑定流程对照确认参数/返回值处理。
-  - KR2 在 elaboration 中区分 import、export、task/function 调用并建立调用边。
-  - KR3 编写含 DPI 调用的端到端 demo，基于 GRH 结构比对调用链符合预期。

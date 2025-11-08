@@ -1,0 +1,172 @@
+#include "elaborate.hpp"
+
+#include <filesystem>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "slang/ast/Compilation.h"
+#include "slang/analysis/AnalysisManager.h"
+#include "slang/driver/Driver.h"
+#include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
+#include "slang/ast/symbols/ValueSymbol.h"
+#include "slang/ast/types/Type.h"
+
+using namespace wolf_sv;
+
+namespace {
+
+int fail(const std::string& message) {
+    std::cerr << "[elaborate_signal_memo] " << message << '\n';
+    return 1;
+}
+
+const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> entries,
+                                 std::string_view name) {
+    for (const SignalMemoEntry& entry : entries) {
+        if (entry.symbol && entry.symbol->name == name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+void logMemo(std::string_view label, std::span<const SignalMemoEntry> entries) {
+    std::cout << "[memo] " << label << " count=" << entries.size() << '\n';
+    for (const SignalMemoEntry& entry : entries) {
+        const std::string symbolName = entry.symbol ? std::string(entry.symbol->name) : "<null>";
+        const std::string typeName = entry.type ? entry.type->toString() : "<null-type>";
+        std::cout << "  - " << symbolName << " width=" << entry.width
+                  << (entry.isSigned ? " signed" : " unsigned") << " type=" << typeName << '\n';
+    }
+}
+
+} // namespace
+
+int main() {
+    const std::filesystem::path sourcePath =
+        std::filesystem::path(WOLF_SV_ELAB_SIGNAL_MEMO_PATH);
+    if (!std::filesystem::exists(sourcePath)) {
+        return fail("Missing testcase file: " + sourcePath.string());
+    }
+
+    slang::driver::Driver driver;
+    driver.addStandardArgs();
+    driver.options.compilationFlags.at(
+        slang::ast::CompilationFlags::AllowTopLevelIfacePorts) = true;
+
+    std::vector<std::string> argStorage;
+    argStorage.emplace_back("elaborate-signal-memo");
+    argStorage.emplace_back(sourcePath.string());
+
+    std::vector<const char*> argv;
+    argv.reserve(argStorage.size());
+    for (const std::string& arg : argStorage) {
+        argv.push_back(arg.c_str());
+    }
+
+    if (!driver.parseCommandLine(static_cast<int>(argv.size()), argv.data())) {
+        return fail("Failed to parse command line");
+    }
+    if (!driver.processOptions()) {
+        return fail("Failed to process driver options");
+    }
+    if (!driver.parseAllSources()) {
+        return fail("Failed to parse sources");
+    }
+
+    auto compilation = driver.createCompilation();
+    if (!compilation) {
+        return fail("Failed to create compilation");
+    }
+    driver.reportCompilation(*compilation, /* quiet */ true);
+    driver.runAnalysis(*compilation);
+
+    ElaborateDiagnostics diagnostics;
+    Elaborate elaborator(&diagnostics);
+    (void)elaborator.convert(compilation->getRoot());
+
+    const slang::ast::InstanceSymbol* memoTop = nullptr;
+    for (const slang::ast::InstanceSymbol* top : compilation->getRoot().topInstances) {
+        if (top && top->name == "memo_top") {
+            memoTop = top;
+            break;
+        }
+    }
+    if (!memoTop) {
+        return fail("Unable to locate memo_top instance");
+    }
+
+    const slang::ast::InstanceSymbol* childInstance = nullptr;
+    for (const slang::ast::Symbol& member : memoTop->body.members()) {
+        if (const auto* instance = member.as_if<slang::ast::InstanceSymbol>()) {
+            if (instance->name == "u_child") {
+                childInstance = instance;
+                break;
+            }
+        }
+    }
+    if (!childInstance) {
+        return fail("Child instance u_child not found");
+    }
+
+    const slang::ast::InstanceBodySymbol* childBody = childInstance->getCanonicalBody();
+    if (!childBody) {
+        childBody = &childInstance->body;
+    }
+
+    std::span<const SignalMemoEntry> wireMemo = elaborator.peekWireMemo(*childBody);
+    std::span<const SignalMemoEntry> regMemo = elaborator.peekRegMemo(*childBody);
+
+    logMemo("wire", wireMemo);
+    logMemo("reg", regMemo);
+
+    if (!findEntry(wireMemo, "w_assign")) {
+        return fail("wire memo missing w_assign");
+    }
+    const SignalMemoEntry* combBus = findEntry(wireMemo, "comb_bus");
+    if (!combBus) {
+        return fail("wire memo missing comb_bus");
+    }
+    if (combBus->width != 8 || !combBus->isSigned) {
+        return fail("comb_bus memo entry has unexpected width/sign");
+    }
+    if (!findEntry(wireMemo, "star_assign")) {
+        return fail("wire memo missing star_assign");
+    }
+
+    if (!findEntry(regMemo, "seq_logic")) {
+        return fail("reg memo missing seq_logic");
+    }
+    if (!findEntry(regMemo, "reg_ff")) {
+        return fail("reg memo missing reg_ff");
+    }
+    if (!findEntry(regMemo, "latch_target")) {
+        return fail("reg memo missing latch_target");
+    }
+    if (findEntry(wireMemo, "conflict_signal") || findEntry(regMemo, "conflict_signal")) {
+        return fail("conflict_signal should have been excluded due to conflicting drivers");
+    }
+
+    std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
+    for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
+        std::cout << "  - kind=" << (diag.kind == ElaborateDiagnosticKind::Todo ? "TODO" : "NYI")
+                  << " origin=" << diag.originSymbol << " message=" << diag.message << '\n';
+    }
+
+    bool foundConflictDiag = false;
+    for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
+        if (diag.message.find("conflicting wire/reg") != std::string::npos ||
+            diag.originSymbol.find("conflict_signal") != std::string::npos) {
+            foundConflictDiag = true;
+            break;
+        }
+    }
+    if (!foundConflictDiag) {
+        return fail("Expected conflicting driver diagnostic for conflict_signal");
+    }
+
+    return 0;
+}

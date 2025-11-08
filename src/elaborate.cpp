@@ -1,5 +1,6 @@
 #include "elaborate.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <limits>
 #include <sstream>
@@ -8,18 +9,25 @@
 #include <utility>
 #include <vector>
 
+#include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/Symbol.h"
 #include "slang/ast/SemanticFacts.h"
-#include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/Statement.h"
+#include "slang/ast/TimingControl.h"
+#include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/ConversionExpression.h"
+#include "slang/ast/expressions/MiscExpressions.h"
+#include "slang/ast/expressions/OperatorExpressions.h"
+#include "slang/ast/expressions/SelectExpressions.h"
 #include "slang/ast/symbols/BlockSymbols.h"
+#include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
+#include "slang/ast/symbols/ParameterSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
-#include "slang/ast/symbols/ParameterSymbols.h"
-#include "slang/ast/symbols/MemberSymbols.h"
-#include "slang/ast/expressions/AssignmentExpressions.h"
-#include "slang/ast/expressions/MiscExpressions.h"
+#include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/ast/types/Type.h"
 #include "slang/numeric/ConstantValue.h"
@@ -315,6 +323,194 @@ private:
         }
     }
 };
+
+enum class MemoDriverKind : uint8_t {
+    None = 0,
+    Wire = 1 << 0,
+    Reg = 1 << 1
+};
+
+constexpr MemoDriverKind operator|(MemoDriverKind lhs, MemoDriverKind rhs) {
+    return static_cast<MemoDriverKind>(static_cast<uint8_t>(lhs) |
+                                       static_cast<uint8_t>(rhs));
+}
+
+constexpr MemoDriverKind operator&(MemoDriverKind lhs, MemoDriverKind rhs) {
+    return static_cast<MemoDriverKind>(static_cast<uint8_t>(lhs) &
+                                       static_cast<uint8_t>(rhs));
+}
+
+inline MemoDriverKind& operator|=(MemoDriverKind& lhs, MemoDriverKind rhs) {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+inline bool hasDriver(MemoDriverKind value, MemoDriverKind flag) {
+    return (value & flag) == flag && flag != MemoDriverKind::None;
+}
+
+const slang::ast::ValueSymbol*
+resolveAssignedSymbol(const slang::ast::Expression& expr) {
+    const slang::ast::Expression* current = &expr;
+    while (current) {
+        if (const auto* named = current->as_if<slang::ast::NamedValueExpression>()) {
+            return &named->symbol;
+        }
+        if (const auto* hier = current->as_if<slang::ast::HierarchicalValueExpression>()) {
+            return &hier->symbol;
+        }
+        if (const auto* select = current->as_if<slang::ast::ElementSelectExpression>()) {
+            current = &select->value();
+            continue;
+        }
+        if (const auto* range = current->as_if<slang::ast::RangeSelectExpression>()) {
+            current = &range->value();
+            continue;
+        }
+        if (const auto* member = current->as_if<slang::ast::MemberAccessExpression>()) {
+            current = &member->value();
+            continue;
+        }
+        if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>()) {
+            if (!conversion->isImplicit()) {
+                break;
+            }
+            current = &conversion->operand();
+            continue;
+        }
+        break;
+    }
+    return nullptr;
+}
+
+void collectAssignedSymbols(const slang::ast::Expression& expr,
+                            slang::function_ref<void(const slang::ast::ValueSymbol&)> callback) {
+    if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
+        for (const slang::ast::Expression* operand : concat->operands()) {
+            if (operand) {
+                collectAssignedSymbols(*operand, callback);
+            }
+        }
+        return;
+    }
+
+    if (const auto* replication = expr.as_if<slang::ast::ReplicationExpression>()) {
+        collectAssignedSymbols(replication->concat(), callback);
+        return;
+    }
+
+    if (const auto* streaming = expr.as_if<slang::ast::StreamingConcatenationExpression>()) {
+        for (const auto& stream : streaming->streams()) {
+            collectAssignedSymbols(*stream.operand, callback);
+        }
+        return;
+    }
+
+    if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
+        callback(*symbol);
+    }
+}
+
+class AssignmentCollector : public slang::ast::ASTVisitor<AssignmentCollector, true, false> {
+public:
+    explicit AssignmentCollector(
+        slang::function_ref<void(const slang::ast::Expression&)> onAssignment) :
+        onAssignment_(onAssignment) {}
+
+    void handle(const slang::ast::ExpressionStatement& stmt) {
+        handleExpression(stmt.expr);
+        visitDefault(stmt);
+    }
+
+    void handle(const slang::ast::ProceduralAssignStatement& stmt) {
+        handleExpression(stmt.assignment);
+        visitDefault(stmt);
+    }
+
+private:
+    void handleExpression(const slang::ast::Expression& expr) {
+        if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
+            if (!assignment->isLValueArg()) {
+                onAssignment_(assignment->left());
+            }
+        }
+    }
+
+    slang::function_ref<void(const slang::ast::Expression&)> onAssignment_;
+};
+
+const slang::ast::TimingControl* findTimingControl(const slang::ast::Statement& stmt) {
+    if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>()) {
+        return &timed->timing;
+    }
+
+    if (const auto* block = stmt.as_if<slang::ast::BlockStatement>()) {
+        return findTimingControl(block->body);
+    }
+
+    if (const auto* list = stmt.as_if<slang::ast::StatementList>()) {
+        for (const slang::ast::Statement* child : list->list) {
+            if (!child) {
+                continue;
+            }
+            if (const auto* timing = findTimingControl(*child)) {
+                return timing;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool containsEdgeSensitiveEvent(const slang::ast::TimingControl& timing) {
+    using slang::ast::TimingControlKind;
+    switch (timing.kind) {
+    case TimingControlKind::SignalEvent: {
+        const auto& signal = timing.as<slang::ast::SignalEventControl>();
+        return signal.edge == slang::ast::EdgeKind::PosEdge ||
+               signal.edge == slang::ast::EdgeKind::NegEdge ||
+               signal.edge == slang::ast::EdgeKind::BothEdges;
+    }
+    case TimingControlKind::EventList: {
+        const auto& list = timing.as<slang::ast::EventListControl>();
+        for (const slang::ast::TimingControl* ctrl : list.events) {
+            if (ctrl && containsEdgeSensitiveEvent(*ctrl)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    case TimingControlKind::RepeatedEvent:
+        return containsEdgeSensitiveEvent(
+            timing.as<slang::ast::RepeatedEventControl>().event);
+    default:
+        return false;
+    }
+}
+
+MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
+    using slang::ast::ProceduralBlockKind;
+    switch (block.procedureKind) {
+    case ProceduralBlockKind::AlwaysComb:
+        return MemoDriverKind::Wire;
+    case ProceduralBlockKind::AlwaysLatch:
+    case ProceduralBlockKind::AlwaysFF:
+    case ProceduralBlockKind::Initial:
+    case ProceduralBlockKind::Final:
+        return MemoDriverKind::Reg;
+    case ProceduralBlockKind::Always: {
+        const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+        if (!timing) {
+            return MemoDriverKind::Wire;
+        }
+        if (timing->kind == slang::ast::TimingControlKind::ImplicitEvent) {
+            return MemoDriverKind::Wire;
+        }
+        return containsEdgeSensitiveEvent(*timing) ? MemoDriverKind::Reg : MemoDriverKind::Wire;
+    }
+    default:
+        return MemoDriverKind::None;
+    }
+}
 } // namespace
 
 void ElaborateDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message) {
@@ -364,6 +560,22 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
     }
 
     return netlist;
+}
+
+std::span<const SignalMemoEntry>
+Elaborate::peekWireMemo(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = wireMemo_.find(&body); it != wireMemo_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::span<const SignalMemoEntry>
+Elaborate::peekRegMemo(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = regMemo_.find(&body); it != regMemo_.end()) {
+        return it->second;
+    }
+    return {};
 }
 
 grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instance,
@@ -527,6 +739,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
     }
 
     populatePorts(instance, body, graph);
+    collectSignalMemos(body);
 
     for (const slang::ast::Symbol& member : body.members()) {
         if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
@@ -815,6 +1028,132 @@ std::string Elaborate::makeUniqueOperationName(grh::Graph& graph, std::string ba
 
 void Elaborate::registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value) {
     valueCache_[&symbol] = &value;
+}
+
+void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
+    std::unordered_map<const slang::ast::ValueSymbol*, SignalMemoEntry> candidates;
+
+    auto registerCandidate = [&](const slang::ast::ValueSymbol& symbol) {
+        const slang::ast::Type& type = symbol.getType();
+        if (!type.isIntegral()) {
+            return;
+        }
+
+        SignalMemoEntry entry;
+        entry.symbol = &symbol;
+        entry.type = &type;
+        entry.width = clampBitWidth(type.getBitstreamWidth(), diagnostics_, symbol);
+        if (entry.width <= 0) {
+            entry.width = 1;
+        }
+        entry.isSigned = type.isSigned();
+        candidates.emplace(&symbol, entry);
+    };
+
+    for (const slang::ast::Symbol& member : body.members()) {
+        if (const auto* net = member.as_if<slang::ast::NetSymbol>()) {
+            registerCandidate(*net);
+            continue;
+        }
+
+        if (const auto* variable = member.as_if<slang::ast::VariableSymbol>()) {
+            registerCandidate(*variable);
+            continue;
+        }
+    }
+
+    if (candidates.empty()) {
+        wireMemo_[&body].clear();
+        regMemo_[&body].clear();
+        return;
+    }
+
+    std::unordered_map<const slang::ast::ValueSymbol*, MemoDriverKind> driverKinds;
+    driverKinds.reserve(candidates.size());
+
+    auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver) {
+        if (driver == MemoDriverKind::None) {
+            return;
+        }
+        auto candidateIt = candidates.find(&symbol);
+        if (candidateIt == candidates.end()) {
+            return;
+        }
+
+        auto [driverIt, _] = driverKinds.emplace(&symbol, MemoDriverKind::None);
+        MemoDriverKind& state = driverIt->second;
+        if (hasDriver(state, driver)) {
+            return;
+        }
+
+        state |= driver;
+        if (hasDriver(state, MemoDriverKind::Wire) && hasDriver(state, MemoDriverKind::Reg)) {
+            if (diagnostics_) {
+                diagnostics_->nyi(symbol,
+                                   "Signal has conflicting wire/reg drivers (combinational vs sequential)");
+            }
+        }
+    };
+
+    for (const slang::ast::Symbol& member : body.members()) {
+        if (const auto* assign = member.as_if<slang::ast::ContinuousAssignSymbol>()) {
+            const slang::ast::Expression& expr = assign->getAssignment();
+            if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
+                collectAssignedSymbols(
+                    assignment->left(), [&](const slang::ast::ValueSymbol& symbol) {
+                        markDriver(symbol, MemoDriverKind::Wire);
+                    });
+            }
+            continue;
+        }
+
+        if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
+            MemoDriverKind driver = classifyProceduralBlock(*block);
+            if (driver == MemoDriverKind::None) {
+                continue;
+            }
+
+            auto handleAssignment = [&](const slang::ast::Expression& lhs) {
+                collectAssignedSymbols(
+                    lhs, [&](const slang::ast::ValueSymbol& symbol) { markDriver(symbol, driver); });
+            };
+            AssignmentCollector collector(handleAssignment);
+            block->getBody().visit(collector);
+            continue;
+        }
+    }
+
+    std::vector<SignalMemoEntry> wires;
+    std::vector<SignalMemoEntry> regs;
+    wires.reserve(candidates.size());
+    regs.reserve(candidates.size());
+
+    for (const auto& [symbol, entry] : candidates) {
+        MemoDriverKind driver = MemoDriverKind::None;
+        if (auto it = driverKinds.find(symbol); it != driverKinds.end()) {
+            driver = it->second;
+        }
+
+        const bool wireOnly = hasDriver(driver, MemoDriverKind::Wire) &&
+                              !hasDriver(driver, MemoDriverKind::Reg);
+        const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
+                             !hasDriver(driver, MemoDriverKind::Wire);
+
+        if (wireOnly) {
+            wires.push_back(entry);
+        }
+        else if (regOnly) {
+            regs.push_back(entry);
+        }
+    }
+
+    auto byName = [](const SignalMemoEntry& lhs, const SignalMemoEntry& rhs) {
+        return lhs.symbol->name < rhs.symbol->name;
+    };
+    std::sort(wires.begin(), wires.end(), byName);
+    std::sort(regs.begin(), regs.end(), byName);
+    wireMemo_[&body] = std::move(wires);
+    regMemo_[&body] = std::move(regs);
 }
 
 } // namespace wolf_sv

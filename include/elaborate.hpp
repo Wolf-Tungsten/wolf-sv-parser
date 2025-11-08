@@ -11,11 +11,12 @@
  */
 
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "slang/text/SourceLocation.h"
 
@@ -24,6 +25,7 @@ class InstanceSymbol;
 class InstanceArraySymbol;
 class InstanceBodySymbol;
 class ValueSymbol;
+class Type;
 class GenerateBlockSymbol;
 class GenerateBlockArraySymbol;
 class Expression;
@@ -69,6 +71,14 @@ struct ElaborateOptions {
     bool emitPlaceholders = true;
 };
 
+/// Captures a memoized signal entry discovered during elaboration.
+struct SignalMemoEntry {
+    const slang::ast::ValueSymbol* symbol = nullptr;
+    const slang::ast::Type* type = nullptr;
+    int64_t width = 0;
+    bool isSigned = false;
+};
+
 /// Elaborates slang AST into GRH representation.
 class Elaborate {
 public:
@@ -77,6 +87,14 @@ public:
 
     /// Convert the provided slang AST root symbol into a GRH netlist.
     grh::Netlist convert(const slang::ast::RootSymbol& root);
+
+    /// Returns memoized wire declarations for the provided module body.
+    std::span<const SignalMemoEntry>
+    peekWireMemo(const slang::ast::InstanceBodySymbol& body) const;
+
+    /// Returns memoized register declarations for the provided module body.
+    std::span<const SignalMemoEntry>
+    peekRegMemo(const slang::ast::InstanceBodySymbol& body) const;
 
 private:
     grh::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
@@ -101,6 +119,7 @@ private:
                                        const slang::ast::Symbol* origin);
     std::string makeUniqueOperationName(grh::Graph& graph, std::string baseName);
     void registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value);
+    void collectSignalMemos(const slang::ast::InstanceBodySymbol& body);
 
     ElaborateDiagnostics* diagnostics_;
     ElaborateOptions options_;
@@ -110,6 +129,10 @@ private:
     std::unordered_set<const slang::ast::InstanceBodySymbol*> processedBodies_;
     std::unordered_map<const slang::ast::Symbol*, grh::Value*> valueCache_;
     std::unordered_map<std::string, std::size_t> graphNameUsage_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
+        wireMemo_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
+        regMemo_;
 };
 
 } // namespace wolf_sv

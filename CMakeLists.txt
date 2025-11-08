@@ -106,5 +106,21 @@ target_compile_definitions(elaborate-hierarchy
 
 add_test(NAME elaborate-hierarchy COMMAND elaborate-hierarchy)
 
+add_executable(elaborate-signal-memo
+    tests/elaborate/test_elaborate_signal_memo.cpp
+)
+
+target_link_libraries(elaborate-signal-memo
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-signal-memo
+    PRIVATE
+        WOLF_SV_ELAB_SIGNAL_MEMO_PATH="${ELABORATE_INPUT_DIR}/signal_memo.sv"
+)
+
+add_test(NAME elaborate-signal-memo COMMAND elaborate-signal-memo)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)
