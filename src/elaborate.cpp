@@ -690,6 +690,12 @@ grh::Value* RHSConverter::convertExpression(const slang::ast::Expression& expr) 
     case ExpressionKind::IntegerLiteral:
     case ExpressionKind::UnbasedUnsizedIntegerLiteral:
         return convertLiteral(expr);
+    case ExpressionKind::ElementSelect:
+        return convertElementSelect(expr.as<slang::ast::ElementSelectExpression>());
+    case ExpressionKind::RangeSelect:
+        return convertRangeSelect(expr.as<slang::ast::RangeSelectExpression>());
+    case ExpressionKind::MemberAccess:
+        return convertMemberAccess(expr.as<slang::ast::MemberAccessExpression>());
     case ExpressionKind::UnaryOp:
         return convertUnary(expr.as<slang::ast::UnaryExpression>());
     case ExpressionKind::BinaryOp:
@@ -713,6 +719,9 @@ grh::Value* RHSConverter::convertNamedValue(const slang::ast::Expression& expr) 
         const auto& named = expr.as<slang::ast::NamedValueExpression>();
 
         if (const SignalMemoEntry* entry = findMemoEntry(named.symbol)) {
+            if (grh::Value* memoHandler = handleMemoEntry(named, *entry)) {
+                return memoHandler;
+            }
             if (grh::Value* value = resolveMemoValue(*entry)) {
                 return value;
             }
@@ -950,6 +959,26 @@ grh::Value* RHSConverter::convertConversion(const slang::ast::ConversionExpressi
     return buildAssign(*operand, expr, "convert");
 }
 
+grh::Value* RHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
+    reportUnsupported("array select", expr);
+    return nullptr;
+}
+
+grh::Value* RHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& expr) {
+    reportUnsupported("range select", expr);
+    return nullptr;
+}
+
+grh::Value* RHSConverter::convertMemberAccess(const slang::ast::MemberAccessExpression& expr) {
+    reportUnsupported("member access", expr);
+    return nullptr;
+}
+
+grh::Value* RHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression&,
+                                          const SignalMemoEntry&) {
+    return nullptr;
+}
+
 grh::Value& RHSConverter::createTemporaryValue(const slang::ast::Type& type,
                                                 std::string_view hint) {
     const TypeInfo info = deriveTypeInfo(type);
@@ -1144,6 +1173,240 @@ std::optional<int64_t> RHSConverter::evaluateConstantInt(const slang::ast::Expre
         return std::nullopt;
     }
     return *asInt;
+}
+
+//===---------------------------------------------------------------------===//
+// CombRHSConverter implementation
+//===---------------------------------------------------------------------===//
+
+CombRHSConverter::CombRHSConverter(Context context) : RHSConverter(context) {}
+
+const SignalMemoEntry*
+CombRHSConverter::findMemoEntryFromExpression(const slang::ast::Expression& expr) const {
+    if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
+        return findMemoEntry(*symbol);
+    }
+    return nullptr;
+}
+
+std::optional<CombRHSConverter::SliceRange>
+CombRHSConverter::deriveStructFieldSlice(const slang::ast::MemberAccessExpression& expr) const {
+    using slang::ast::FieldSymbol;
+    const auto* field = expr.member.as_if<FieldSymbol>();
+    if (!field) {
+        return std::nullopt;
+    }
+
+    const slang::ast::Type& containerType = *expr.value().type;
+    const uint64_t totalWidth = containerType.getBitstreamWidth();
+    if (totalWidth == 0) {
+        return std::nullopt;
+    }
+
+    const slang::ast::Type& canonical = containerType.getCanonicalType();
+    const auto* scope = canonical.as_if<slang::ast::Scope>();
+    if (!scope) {
+        return std::nullopt;
+    }
+
+    int64_t currentMsb = static_cast<int64_t>(totalWidth) - 1;
+    for (const slang::ast::FieldSymbol& candidate :
+         scope->membersOfType<slang::ast::FieldSymbol>()) {
+        const int64_t fieldWidth =
+            static_cast<int64_t>(candidate.getType().getBitstreamWidth());
+        if (fieldWidth <= 0) {
+            continue;
+        }
+        const int64_t fieldLsb = currentMsb - fieldWidth + 1;
+        if (&candidate == field) {
+            return SliceRange{currentMsb, fieldLsb};
+        }
+        currentMsb = fieldLsb - 1;
+    }
+    return std::nullopt;
+}
+
+grh::Value* CombRHSConverter::buildStaticSlice(grh::Value& input, int64_t sliceStart,
+                                               int64_t sliceEnd,
+                                               const slang::ast::Expression& originExpr,
+                                               std::string_view hint) {
+    if (sliceStart < 0 || sliceEnd < sliceStart) {
+        reportUnsupported("static slice range", originExpr);
+        return nullptr;
+    }
+
+    grh::Operation& op = createOperation(grh::OperationKind::kSliceStatic, hint);
+    op.addOperand(input);
+    op.setAttribute("sliceStart", sliceStart);
+    op.setAttribute("sliceEnd", sliceEnd);
+    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombRHSConverter::buildDynamicSlice(grh::Value& input, grh::Value& offset,
+                                                int64_t sliceWidth,
+                                                const slang::ast::Expression& originExpr,
+                                                std::string_view hint) {
+    if (sliceWidth <= 0) {
+        reportUnsupported("dynamic slice width", originExpr);
+        return nullptr;
+    }
+    grh::Operation& op = createOperation(grh::OperationKind::kSliceDynamic, hint);
+    op.addOperand(input);
+    op.addOperand(offset);
+    op.setAttribute("sliceWidth", sliceWidth);
+    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombRHSConverter::buildArraySlice(grh::Value& input, grh::Value& index,
+                                              int64_t sliceWidth,
+                                              const slang::ast::Expression& originExpr) {
+    if (sliceWidth <= 0) {
+        reportUnsupported("array slice width", originExpr);
+        return nullptr;
+    }
+    grh::Operation& op = createOperation(grh::OperationKind::kSliceArray, "array_slice");
+    op.addOperand(input);
+    op.addOperand(index);
+    op.setAttribute("sliceWidth", sliceWidth);
+    grh::Value& result = createTemporaryValue(*originExpr.type, "array_slice");
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombRHSConverter::buildMemoryRead(const SignalMemoEntry& entry,
+                                              const slang::ast::ElementSelectExpression& expr) {
+    if (!entry.stateOp || entry.stateOp->kind() != grh::OperationKind::kMemory) {
+        reportUnsupported("memory read target", expr);
+        return nullptr;
+    }
+
+    grh::Value* addr = convert(expr.selector());
+    if (!addr) {
+        return nullptr;
+    }
+
+    grh::Operation& op = createOperation(grh::OperationKind::kMemoryAsyncReadPort, "mem_read");
+    op.addOperand(*addr);
+    op.setAttribute("memSymbol", entry.stateOp->symbol());
+    grh::Value& result = createTemporaryValue(*expr.type, "mem_read");
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombRHSConverter::createIntConstant(int64_t value, const slang::ast::Type& type,
+                                                std::string_view hint) {
+    uint64_t bitWidth = 32;
+    if (type.isBitstreamType() && type.isFixedSize()) {
+        bitWidth = type.getBitstreamWidth();
+    }
+    if (bitWidth == 0) {
+        bitWidth = 1;
+    }
+    slang::SVInt literal(static_cast<slang::bitwidth_t>(bitWidth), value, type.isSigned());
+    return createConstantValue(literal, type, hint);
+}
+
+grh::Value*
+CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
+    if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
+        if (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory) {
+            return buildMemoryRead(*entry, expr);
+        }
+    }
+
+    grh::Value* input = convert(expr.value());
+    grh::Value* index = convert(expr.selector());
+    if (!input || !index) {
+        return nullptr;
+    }
+
+    const TypeInfo info = deriveTypeInfo(*expr.type);
+    return buildArraySlice(*input, *index, info.width, expr);
+}
+
+grh::Value*
+CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& expr) {
+    grh::Value* input = convert(expr.value());
+    if (!input) {
+        return nullptr;
+    }
+
+    using slang::ast::RangeSelectionKind;
+    switch (expr.getSelectionKind()) {
+    case RangeSelectionKind::Simple: {
+        std::optional<int64_t> left = evaluateConstantInt(expr.left());
+        std::optional<int64_t> right = evaluateConstantInt(expr.right());
+        if (!left || !right) {
+            reportUnsupported("static range bounds", expr);
+            return nullptr;
+        }
+        const int64_t sliceStart = std::min(*left, *right);
+        const int64_t sliceEnd = std::max(*left, *right);
+        return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_slice");
+    }
+    case RangeSelectionKind::IndexedUp: {
+        grh::Value* offset = convert(expr.left());
+        if (!offset) {
+            return nullptr;
+        }
+        std::optional<int64_t> width = evaluateConstantInt(expr.right());
+        if (!width || *width <= 0) {
+            reportUnsupported("indexed range width", expr);
+            return nullptr;
+        }
+        return buildDynamicSlice(*input, *offset, *width, expr, "range_up");
+    }
+    case RangeSelectionKind::IndexedDown: {
+        grh::Value* base = convert(expr.left());
+        if (!base) {
+            return nullptr;
+        }
+        std::optional<int64_t> width = evaluateConstantInt(expr.right());
+        if (!width || *width <= 0) {
+            reportUnsupported("indexed range width", expr);
+            return nullptr;
+        }
+        grh::Value* offset = base;
+        if (*width > 1) {
+            grh::Value* widthValue =
+                createIntConstant(*width - 1, *expr.left().type, "range_down_width");
+            if (!widthValue) {
+                return nullptr;
+            }
+            offset = buildBinaryOp(grh::OperationKind::kSub, *base, *widthValue, expr.left(),
+                                   "range_down_off");
+            if (!offset) {
+                return nullptr;
+            }
+        }
+        return buildDynamicSlice(*input, *offset, *width, expr, "range_down");
+    }
+    default:
+        reportUnsupported("range select kind", expr);
+        return nullptr;
+    }
+}
+
+grh::Value*
+CombRHSConverter::convertMemberAccess(const slang::ast::MemberAccessExpression& expr) {
+    std::optional<SliceRange> slice = deriveStructFieldSlice(expr);
+    if (!slice) {
+        reportUnsupported("struct member access", expr);
+        return nullptr;
+    }
+
+    grh::Value* input = convert(expr.value());
+    if (!input) {
+        return nullptr;
+    }
+
+    const int64_t sliceStart = std::min(slice->lsb, slice->msb);
+    const int64_t sliceEnd = std::max(slice->lsb, slice->msb);
+    return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "member_slice");
 }
 
 void ElaborateDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message) {

@@ -41,6 +41,10 @@ class ConditionalExpression;
 class ConcatenationExpression;
 class ReplicationExpression;
 class ConversionExpression;
+class NamedValueExpression;
+class RangeSelectExpression;
+class ElementSelectExpression;
+class MemberAccessExpression;
 class RootSymbol;
 class Symbol;
 class ProceduralBlockSymbol;
@@ -122,28 +126,22 @@ public:
     grh::Value* convert(const slang::ast::Expression& expr);
 
 protected:
+    struct TypeInfo {
+        int64_t width = 0;
+        bool isSigned = false;
+    };
+
     grh::Graph& graph() const noexcept { return *graph_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
 
     virtual std::string makeValueName(std::string_view hint, std::size_t index) const;
     virtual std::string makeOperationName(std::string_view hint, std::size_t index) const;
-
-private:
-    struct TypeInfo {
-        int64_t width = 0;
-        bool isSigned = false;
-    };
-
-    grh::Value* convertExpression(const slang::ast::Expression& expr);
-    grh::Value* convertNamedValue(const slang::ast::Expression& expr);
-    grh::Value* convertLiteral(const slang::ast::Expression& expr);
-    grh::Value* convertUnary(const slang::ast::UnaryExpression& expr);
-    grh::Value* convertBinary(const slang::ast::BinaryExpression& expr);
-    grh::Value* convertConditional(const slang::ast::ConditionalExpression& expr);
-    grh::Value* convertConcatenation(const slang::ast::ConcatenationExpression& expr);
-    grh::Value* convertReplication(const slang::ast::ReplicationExpression& expr);
-    grh::Value* convertConversion(const slang::ast::ConversionExpression& expr);
+    virtual grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr);
+    virtual grh::Value* convertRangeSelect(const slang::ast::RangeSelectExpression& expr);
+    virtual grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr);
+    virtual grh::Value*
+    handleMemoEntry(const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry);
 
     grh::Value& createTemporaryValue(const slang::ast::Type& type, std::string_view hint);
     grh::Operation& createOperation(grh::OperationKind kind, std::string_view hint);
@@ -151,11 +149,9 @@ private:
                                     std::string_view literalHint);
     grh::Value* createZeroValue(const slang::ast::Type& type, std::string_view hint);
     grh::Value* buildUnaryOp(grh::OperationKind kind, grh::Value& operand,
-                             const slang::ast::Expression& originExpr,
-                             std::string_view hint);
+                             const slang::ast::Expression& originExpr, std::string_view hint);
     grh::Value* buildBinaryOp(grh::OperationKind kind, grh::Value& lhs, grh::Value& rhs,
-                              const slang::ast::Expression& originExpr,
-                              std::string_view hint);
+                              const slang::ast::Expression& originExpr, std::string_view hint);
     grh::Value* buildMux(grh::Value& cond, grh::Value& onTrue, grh::Value& onFalse,
                          const slang::ast::Expression& originExpr);
     grh::Value* buildAssign(grh::Value& input, const slang::ast::Expression& originExpr,
@@ -165,11 +161,22 @@ private:
     grh::Value* resolveMemoValue(const SignalMemoEntry& entry);
     grh::Value* resolveGraphValue(const slang::ast::ValueSymbol& symbol);
     TypeInfo deriveTypeInfo(const slang::ast::Type& type) const;
-    std::string formatConstantLiteral(const slang::SVInt& value,
-                                      const slang::ast::Type& type) const;
     void reportUnsupported(std::string_view what, const slang::ast::Expression& expr);
     slang::ast::EvalContext& ensureEvalContext();
     std::optional<int64_t> evaluateConstantInt(const slang::ast::Expression& expr);
+
+private:
+    grh::Value* convertExpression(const slang::ast::Expression& expr);
+    grh::Value* convertNamedValue(const slang::ast::Expression& expr);
+    grh::Value* convertLiteral(const slang::ast::Expression& expr);
+    grh::Value* convertUnary(const slang::ast::UnaryExpression& expr);
+    grh::Value* convertBinary(const slang::ast::BinaryExpression& expr);
+    grh::Value* convertConditional(const slang::ast::ConditionalExpression& expr);
+    grh::Value* convertConcatenation(const slang::ast::ConcatenationExpression& expr);
+    grh::Value* convertReplication(const slang::ast::ReplicationExpression& expr);
+    grh::Value* convertConversion(const slang::ast::ConversionExpression& expr);
+    std::string formatConstantLiteral(const slang::SVInt& value,
+                                      const slang::ast::Type& type) const;
 
     grh::Graph* graph_ = nullptr;
     const slang::ast::Symbol* origin_ = nullptr;
@@ -180,6 +187,39 @@ private:
     std::size_t valueCounter_ = 0;
     std::size_t operationCounter_ = 0;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
+};
+
+/// Converts RHS expressions specifically for combinational contexts.
+class CombRHSConverter : public RHSConverter {
+public:
+    explicit CombRHSConverter(Context context);
+
+protected:
+    grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
+    grh::Value* convertRangeSelect(const slang::ast::RangeSelectExpression& expr) override;
+    grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr) override;
+
+private:
+    struct SliceRange {
+        int64_t msb = 0;
+        int64_t lsb = 0;
+    };
+
+    const SignalMemoEntry* findMemoEntryFromExpression(const slang::ast::Expression& expr) const;
+    std::optional<SliceRange>
+    deriveStructFieldSlice(const slang::ast::MemberAccessExpression& expr) const;
+    grh::Value* buildStaticSlice(grh::Value& input, int64_t sliceStart, int64_t sliceEnd,
+                                 const slang::ast::Expression& originExpr,
+                                 std::string_view hint);
+    grh::Value* buildDynamicSlice(grh::Value& input, grh::Value& offset, int64_t sliceWidth,
+                                  const slang::ast::Expression& originExpr,
+                                  std::string_view hint);
+    grh::Value* buildArraySlice(grh::Value& input, grh::Value& index, int64_t sliceWidth,
+                                const slang::ast::Expression& originExpr);
+    grh::Value* buildMemoryRead(const SignalMemoEntry& entry,
+                                const slang::ast::ElementSelectExpression& expr);
+    grh::Value* createIntConstant(int64_t value, const slang::ast::Type& type,
+                                  std::string_view hint);
 };
 
 /// Elaborates slang AST into GRH representation.

@@ -169,7 +169,7 @@ int main() {
         .regMemo = elaborator.peekRegMemo(body),
         .origin = origin,
         .diagnostics = &diagnostics};
-    RHSConverter converter(context);
+    CombRHSConverter converter(context);
 
     auto convertByName = [&](std::string_view name) -> grh::Value* {
         auto it = rhsMap.find(std::string(name));
@@ -348,6 +348,121 @@ int main() {
                            (regAddOp->operands()[1] == seqRegValue);
     if (!regOperandMatch) {
         return fail("reg_use kAdd missing register operand");
+    }
+
+    grh::Value* structSlice = convertByName("struct_hi_slice");
+    if (!structSlice) {
+        return fail("Failed to convert struct_hi_slice RHS");
+    }
+    const SignalMemoEntry* structEntry = findMemoEntry(netMemo, "struct_bus");
+    if (!structEntry || !structEntry->value) {
+        return fail("struct_bus memo missing");
+    }
+    const grh::Operation* structSliceOp = structSlice->definingOp();
+    if (!structSliceOp || structSliceOp->kind() != grh::OperationKind::kSliceStatic ||
+        structSliceOp->operands().size() != 1 ||
+        structSliceOp->operands()[0] != structEntry->value) {
+        return fail("struct_hi_slice not modeled via kSliceStatic");
+    }
+    auto structStart = structSliceOp->attributes().find("sliceStart");
+    auto structEnd = structSliceOp->attributes().find("sliceEnd");
+    if (structStart == structSliceOp->attributes().end() ||
+        structEnd == structSliceOp->attributes().end() ||
+        !std::holds_alternative<int64_t>(structStart->second) ||
+        !std::holds_alternative<int64_t>(structEnd->second) ||
+        std::get<int64_t>(structStart->second) != 4 ||
+        std::get<int64_t>(structEnd->second) != 7) {
+        return fail("struct_hi_slice slice range mismatch");
+    }
+
+    grh::Value* staticSlice = convertByName("static_slice_res");
+    if (!staticSlice) {
+        return fail("Failed to convert static_slice_res RHS");
+    }
+    grh::Value* rangeBus = graph->findValue("range_bus");
+    if (!rangeBus) {
+        return fail("range_bus value missing");
+    }
+    const grh::Operation* staticOp = staticSlice->definingOp();
+    if (!staticOp || staticOp->kind() != grh::OperationKind::kSliceStatic ||
+        staticOp->operands().size() != 1 || staticOp->operands()[0] != rangeBus) {
+        return fail("static_slice_res missing kSliceStatic");
+    }
+    auto staticWidthStart = staticOp->attributes().find("sliceStart");
+    auto staticWidthEnd = staticOp->attributes().find("sliceEnd");
+    if (staticWidthStart == staticOp->attributes().end() ||
+        staticWidthEnd == staticOp->attributes().end() ||
+        !std::holds_alternative<int64_t>(staticWidthStart->second) ||
+        !std::holds_alternative<int64_t>(staticWidthEnd->second) ||
+        std::get<int64_t>(staticWidthStart->second) != 4 ||
+        std::get<int64_t>(staticWidthEnd->second) != 11) {
+        return fail("static_slice_res slice bounds mismatch");
+    }
+
+    grh::Value* dynSlice = convertByName("dynamic_slice_res");
+    if (!dynSlice) {
+        return fail("Failed to convert dynamic_slice_res RHS");
+    }
+    const grh::Operation* dynOp = dynSlice->definingOp();
+    if (!dynOp || dynOp->kind() != grh::OperationKind::kSliceDynamic ||
+        dynOp->operands().size() != 2 || dynOp->operands()[0] != rangeBus) {
+        return fail("dynamic_slice_res missing kSliceDynamic");
+    }
+    auto dynAttr = dynOp->attributes().find("sliceWidth");
+    if (dynAttr == dynOp->attributes().end() ||
+        !std::holds_alternative<int64_t>(dynAttr->second) ||
+        std::get<int64_t>(dynAttr->second) != 8) {
+        return fail("dynamic_slice_res sliceWidth mismatch");
+    }
+
+    grh::Value* arraySlice = convertByName("array_slice_res");
+    if (!arraySlice) {
+        return fail("Failed to convert array_slice_res RHS");
+    }
+    const SignalMemoEntry* arrayEntry = findMemoEntry(netMemo, "net_array");
+    if (!arrayEntry || !arrayEntry->value) {
+        return fail("net_array memo missing");
+    }
+    grh::Value* arrayIndexValue = graph->findValue("array_index");
+    if (!arrayIndexValue) {
+        return fail("array_index value missing");
+    }
+    const grh::Operation* arrayOp = arraySlice->definingOp();
+    if (!arrayOp || arrayOp->kind() != grh::OperationKind::kSliceArray ||
+        arrayOp->operands().size() != 2 || arrayOp->operands()[0] != arrayEntry->value ||
+        arrayOp->operands()[1] != arrayIndexValue) {
+        return fail("array_slice_res missing kSliceArray");
+    }
+    auto arrayAttr = arrayOp->attributes().find("sliceWidth");
+    if (arrayAttr == arrayOp->attributes().end() ||
+        !std::holds_alternative<int64_t>(arrayAttr->second) ||
+        std::get<int64_t>(arrayAttr->second) != 8) {
+        return fail("array_slice_res sliceWidth mismatch");
+    }
+
+    grh::Value* memRead = convertByName("mem_read_res");
+    if (!memRead) {
+        return fail("Failed to convert mem_read_res RHS");
+    }
+    const SignalMemoEntry* memEntry = findMemoEntry(regMemo, "reg_mem");
+    if (!memEntry || !memEntry->stateOp ||
+        memEntry->stateOp->kind() != grh::OperationKind::kMemory) {
+        return fail("reg_mem memo missing kMemory placeholder");
+    }
+    grh::Value* memAddrValue = graph->findValue("mem_addr");
+    if (!memAddrValue) {
+        return fail("mem_addr value missing");
+    }
+    const grh::Operation* memOp = memRead->definingOp();
+    if (!memOp || memOp->kind() != grh::OperationKind::kMemoryAsyncReadPort ||
+        memOp->operands().size() != 1 || memOp->operands()[0] != memAddrValue) {
+        return fail("mem_read_res missing kMemoryAsyncReadPort");
+    }
+    auto memAttr = memOp->attributes().find("memSymbol");
+    if (memAttr == memOp->attributes().end() ||
+        !std::holds_alternative<std::string>(memAttr->second) ||
+        std::get<std::string>(memAttr->second) != memEntry->stateOp->symbol()) {
+        return fail("mem_read_res memSymbol attribute mismatch");
     }
 
     writeArtifact(netlist);

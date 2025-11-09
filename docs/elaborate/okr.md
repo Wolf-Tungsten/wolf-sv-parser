@@ -59,3 +59,10 @@
   - KR4 RHSConverter 返回的是一个 GRH Value，表示表达式的计算结果。
   - KR5 当 RHSConverter 需要对 net 或者 reg 进行读取时，通过 memo 查找对应的 GRH Value。
   - KR6 构建覆盖上述特性的测试样例，验证 RHSConverter 的正确性和完整性。
+
+## 阶段9：创建 CombRHSConverter 派生类
+- **Objective** 实现继承自 RHSConverter，专门处理组合逻辑右值表达式的 CombRHSConverter
+  - KR1 支持对结构体、数组乃至更复杂嵌套的 net 和 reg 读取时生成 kSlice*
+  - KR2 支持对 mem 读取时生成 kMemoryAsyncReadPort
+  - KR3 支持对简单 net 和 reg 的 concat 和 slice 读取
+  - KR4 构建自动测试样例，同时生成人工可读的json
