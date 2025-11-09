@@ -72,3 +72,9 @@
   - KR1 阅读理解目前 net / reg memo 的数据结构，设计新的 writeBack memo，并将三种 memo 的数据结构写成 memo.md 文档供后人参考
   - KR2 设计的数据结构既要考虑解析连续赋值和过程块的效率，也要考虑最终 finalize 成实际 Value 赋值的效率
   - KR3 将设计的数据结构进行代码实现。
+
+## 阶段11：支持解析纯组合逻辑的 assign 连续赋值
+- **Objective** 添加对纯组合逻辑的 assign，基于现有的 CombRHSConverter 和 memo 实现
+  - KR1 调用 CombRHSConverter 实现 assign 中 RHS 的解析，生成 Value
+  - KR2 对 LHS 进行解析，添加必要的 kSlice* 操作，写入 writeBack memo
+  - KR3 构建测试样例，覆盖复杂数据类型，形成人类可读的 json 输出供检查

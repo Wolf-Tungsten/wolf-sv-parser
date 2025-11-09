@@ -48,6 +48,7 @@ class MemberAccessExpression;
 class RootSymbol;
 class Symbol;
 class ProceduralBlockSymbol;
+class ContinuousAssignSymbol;
 } // namespace slang::ast
 
 namespace wolf_sv {
@@ -232,6 +233,7 @@ private:
     std::unordered_map<const slang::ast::Expression*, grh::Value*> cache_;
     std::size_t valueCounter_ = 0;
     std::size_t operationCounter_ = 0;
+    std::size_t instanceId_ = 0;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
 };
 
@@ -299,6 +301,8 @@ private:
                               grh::Netlist& netlist);
     void processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
                                    grh::Graph& graph, grh::Netlist& netlist);
+    void processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
+                                 const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::Graph& parentGraph,
                          grh::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,

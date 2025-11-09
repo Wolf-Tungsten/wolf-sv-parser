@@ -150,5 +150,22 @@ target_link_libraries(elaborate-write-back-memo
 
 add_test(NAME elaborate-write-back-memo COMMAND elaborate-write-back-memo)
 
+add_executable(elaborate-assign
+    tests/elaborate/test_elaborate_assign.cpp
+)
+
+target_link_libraries(elaborate-assign
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-assign
+    PRIVATE
+        WOLF_SV_ELAB_ASSIGN_DATA_PATH="${ELABORATE_INPUT_DIR}/continuous_assign.sv"
+        WOLF_SV_ELAB_ASSIGN_ARTIFACT_PATH="${ELABORATE_ARTIFACT_DIR}/assign_stage11.json"
+)
+
+add_test(NAME elaborate-assign COMMAND elaborate-assign)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

@@ -1,7 +1,9 @@
 #include "elaborate.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -38,6 +40,11 @@
 namespace wolf_sv {
 
 namespace {
+
+std::size_t nextConverterInstanceId() {
+    static std::atomic<std::size_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 std::string sanitizeForGraphName(std::string_view text, bool allowLeadingDigit = false) {
     std::string result;
@@ -442,6 +449,538 @@ private:
     slang::function_ref<void(const slang::ast::Expression&)> onAssignment_;
 };
 
+class ContinuousAssignLowerer {
+public:
+    ContinuousAssignLowerer(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                            WriteBackMemo& memo,
+                            const slang::ast::ContinuousAssignSymbol& origin,
+                            ElaborateDiagnostics* diagnostics);
+
+    bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+
+private:
+    struct BitRange {
+        int64_t msb = 0;
+        int64_t lsb = 0;
+    };
+
+    bool processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue);
+    bool handleConcatenation(const slang::ast::ConcatenationExpression& concat,
+                             grh::Value& rhsValue);
+    bool handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue);
+    const SignalMemoEntry* resolveMemoEntry(const slang::ast::Expression& expr) const;
+    const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
+    std::optional<BitRange> resolveBitRange(const SignalMemoEntry& entry,
+                                            const slang::ast::Expression& expr,
+                                            std::string& pathOut);
+    std::optional<BitRange> resolveRangeSelect(const SignalMemoEntry& entry,
+                                               const slang::ast::RangeSelectExpression& expr,
+                                               const std::string& basePath,
+                                               std::string& pathOut);
+    std::optional<std::string> buildFieldPath(const slang::ast::Expression& expr);
+    std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
+    std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
+                                              std::string_view path) const;
+    grh::Value* createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+                                 const slang::ast::Expression& originExpr);
+    void report(std::string message);
+    slang::ast::EvalContext& ensureEvalContext();
+    void flushPending();
+    static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
+
+    grh::Graph& graph_;
+    std::span<const SignalMemoEntry> netMemo_;
+    WriteBackMemo& memo_;
+    const slang::ast::ContinuousAssignSymbol& originSymbol_;
+    ElaborateDiagnostics* diagnostics_;
+    std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
+    std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    std::size_t sliceCounter_ = 0;
+};
+
+ContinuousAssignLowerer::ContinuousAssignLowerer(grh::Graph& graph,
+                                                 std::span<const SignalMemoEntry> netMemo,
+                                                 WriteBackMemo& memo,
+                                                 const slang::ast::ContinuousAssignSymbol& origin,
+                                                 ElaborateDiagnostics* diagnostics) :
+    graph_(graph),
+    netMemo_(netMemo),
+    memo_(memo),
+    originSymbol_(origin),
+    diagnostics_(diagnostics) {}
+
+bool ContinuousAssignLowerer::lower(const slang::ast::AssignmentExpression& assignment,
+                                    grh::Value& rhsValue) {
+    pending_.clear();
+
+    const slang::ast::Type* lhsType = assignment.left().type;
+    if (!lhsType || !lhsType->isBitstreamType() || !lhsType->isFixedSize()) {
+        report("Assign LHS must be a fixed-size bitstream type");
+        return false;
+    }
+
+    const int64_t lhsWidth = static_cast<int64_t>(lhsType->getBitstreamWidth());
+    if (lhsWidth <= 0) {
+        report("Assign LHS has zero width");
+        return false;
+    }
+    if (rhsValue.width() != lhsWidth) {
+        std::ostringstream oss;
+        oss << "Assign width mismatch; lhs=" << lhsWidth << " rhs=" << rhsValue.width();
+        report(oss.str());
+        return false;
+    }
+
+    if (!processLhs(assignment.left(), rhsValue)) {
+        pending_.clear();
+        return false;
+    }
+
+    flushPending();
+    pending_.clear();
+    return true;
+}
+
+bool ContinuousAssignLowerer::processLhs(const slang::ast::Expression& expr,
+                                         grh::Value& rhsValue) {
+    if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
+        return handleConcatenation(*concat, rhsValue);
+    }
+
+    if (expr.as_if<slang::ast::ReplicationExpression>()) {
+        report("Replication is not supported on assign LHS");
+        return false;
+    }
+
+    if (expr.as_if<slang::ast::StreamingConcatenationExpression>()) {
+        report("Streaming concatenation is not supported on assign LHS");
+        return false;
+    }
+
+    return handleLeaf(expr, rhsValue);
+}
+
+bool ContinuousAssignLowerer::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
+                                                  grh::Value& rhsValue) {
+    const auto operands = concat.operands();
+    if (operands.empty()) {
+        report("Empty concatenation on assign LHS");
+        return false;
+    }
+
+    int64_t remainingWidth = rhsValue.width();
+    int64_t currentMsb = remainingWidth - 1;
+
+    for (const slang::ast::Expression* operand : operands) {
+        if (!operand || !operand->type) {
+            report("Concatenation operand lacks type information");
+            return false;
+        }
+        if (!operand->type->isBitstreamType() || !operand->type->isFixedSize()) {
+            report("Concatenation operand must be a fixed-size bitstream");
+            return false;
+        }
+
+        const int64_t operandWidth =
+            static_cast<int64_t>(operand->type->getBitstreamWidth());
+        if (operandWidth <= 0) {
+            report("Concatenation operand has zero width");
+            return false;
+        }
+        if (operandWidth > remainingWidth) {
+            report("Concatenation operand width exceeds available RHS bits");
+            return false;
+        }
+
+        const int64_t sliceLsb = currentMsb - operandWidth + 1;
+        grh::Value* sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
+        if (!sliceValue) {
+            return false;
+        }
+        if (!processLhs(*operand, *sliceValue)) {
+            return false;
+        }
+        currentMsb = sliceLsb - 1;
+        remainingWidth -= operandWidth;
+    }
+
+    if (remainingWidth != 0) {
+        report("Concatenation coverage does not match RHS width");
+        return false;
+    }
+    return true;
+}
+
+bool ContinuousAssignLowerer::handleLeaf(const slang::ast::Expression& expr,
+                                         grh::Value& rhsValue) {
+    const SignalMemoEntry* entry = resolveMemoEntry(expr);
+    if (!entry) {
+        report("Assign LHS is not a memoized combinational net");
+        return false;
+    }
+
+    std::string path;
+    std::optional<BitRange> range = resolveBitRange(*entry, expr, path);
+    if (!range) {
+        return false;
+    }
+
+    const int64_t expectedWidth = range->msb - range->lsb + 1;
+    if (rhsValue.width() != expectedWidth) {
+        std::ostringstream oss;
+        oss << "Assign slice width mismatch; target=" << expectedWidth
+            << " rhs=" << rhsValue.width();
+        report(oss.str());
+        return false;
+    }
+
+    WriteBackMemo::Slice slice;
+    slice.path = path.empty() && entry->symbol && !entry->symbol->name.empty() ?
+                     std::string(entry->symbol->name) :
+                     path;
+    slice.msb = range->msb;
+    slice.lsb = range->lsb;
+    slice.value = &rhsValue;
+    slice.originExpr = &expr;
+    pending_[entry].push_back(std::move(slice));
+    return true;
+}
+
+const SignalMemoEntry*
+ContinuousAssignLowerer::resolveMemoEntry(const slang::ast::Expression& expr) const {
+    if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
+        return findMemoEntry(*symbol);
+    }
+    return nullptr;
+}
+
+const SignalMemoEntry*
+ContinuousAssignLowerer::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+    for (const SignalMemoEntry& entry : netMemo_) {
+        if (entry.symbol == &symbol) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<ContinuousAssignLowerer::BitRange>
+ContinuousAssignLowerer::resolveBitRange(const SignalMemoEntry& entry,
+                                         const slang::ast::Expression& expr,
+                                         std::string& pathOut) {
+    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
+        if (conversion->isImplicit()) {
+            return resolveBitRange(entry, conversion->operand(), pathOut);
+        }
+    }
+
+    if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>()) {
+        std::string basePath;
+        std::optional<BitRange> base = resolveBitRange(entry, range->value(), basePath);
+        if (!base) {
+            return std::nullopt;
+        }
+        return resolveRangeSelect(entry, *range, basePath, pathOut);
+    }
+
+    if (expr.as_if<slang::ast::ConcatenationExpression>() ||
+        expr.as_if<slang::ast::StreamingConcatenationExpression>() ||
+        expr.as_if<slang::ast::ReplicationExpression>()) {
+        report("Unexpected concatenation form inside assign leaf");
+        return std::nullopt;
+    }
+
+    std::optional<std::string> path = buildFieldPath(expr);
+    if (!path) {
+        report("Unable to derive flatten path for assign LHS");
+        return std::nullopt;
+    }
+
+    pathOut = *path;
+    if (pathOut.empty() && entry.symbol && !entry.symbol->name.empty()) {
+        pathOut = entry.symbol->name;
+    }
+
+    if (auto direct = lookupRangeByPath(entry, pathOut)) {
+        return direct;
+    }
+
+    if (entry.symbol && entry.symbol->name == pathOut) {
+        BitRange range{entry.width > 0 ? entry.width - 1 : 0, 0};
+        return range;
+    }
+
+    std::ostringstream oss;
+    oss << "Flatten metadata missing for path " << pathOut;
+    report(oss.str());
+    return std::nullopt;
+}
+
+std::optional<ContinuousAssignLowerer::BitRange>
+ContinuousAssignLowerer::resolveRangeSelect(const SignalMemoEntry& entry,
+                                            const slang::ast::RangeSelectExpression& expr,
+                                            const std::string& basePath, std::string& pathOut) {
+    using slang::ast::RangeSelectionKind;
+
+    auto makeIndexedPath = [&](int64_t index) {
+        std::string path = basePath;
+        path.push_back('[');
+        path.append(std::to_string(index));
+        path.push_back(']');
+        return path;
+    };
+
+    auto fetchRange = [&](int64_t index) -> std::optional<BitRange> {
+        const std::string path = makeIndexedPath(index);
+        if (auto range = lookupRangeByPath(entry, path)) {
+            return range;
+        }
+        std::ostringstream oss;
+        oss << "Assign LHS index " << index << " is out of bounds for " << basePath;
+        report(oss.str());
+        return std::nullopt;
+    };
+
+    switch (expr.getSelectionKind()) {
+    case RangeSelectionKind::Simple: {
+        std::optional<int64_t> left = evaluateConstant(expr.left());
+        std::optional<int64_t> right = evaluateConstant(expr.right());
+        if (!left || !right) {
+            report("Simple range select requires constant bounds");
+            return std::nullopt;
+        }
+        auto leftRange = fetchRange(*left);
+        auto rightRange = fetchRange(*right);
+        if (!leftRange || !rightRange) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(leftRange->msb, rightRange->msb),
+                       std::min(leftRange->lsb, rightRange->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*left));
+        pathOut.push_back(':');
+        pathOut.append(std::to_string(*right));
+        pathOut.push_back(']');
+        return range;
+    }
+    case RangeSelectionKind::IndexedUp: {
+        std::optional<int64_t> base = evaluateConstant(expr.left());
+        std::optional<int64_t> width = evaluateConstant(expr.right());
+        if (!base || !width || *width <= 0) {
+            report("Indexed-up range select requires constant base/width");
+            return std::nullopt;
+        }
+        auto first = fetchRange(*base);
+        auto last = fetchRange(*base + *width - 1);
+        if (!first || !last) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*base));
+        pathOut.append("+:");
+        pathOut.append(std::to_string(*width));
+        pathOut.push_back(']');
+        return range;
+    }
+    case RangeSelectionKind::IndexedDown: {
+        std::optional<int64_t> base = evaluateConstant(expr.left());
+        std::optional<int64_t> width = evaluateConstant(expr.right());
+        if (!base || !width || *width <= 0) {
+            report("Indexed-down range select requires constant base/width");
+            return std::nullopt;
+        }
+        auto first = fetchRange(*base);
+        auto last = fetchRange(*base - (*width - 1));
+        if (!first || !last) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*base));
+        pathOut.append("-:");
+        pathOut.append(std::to_string(*width));
+        pathOut.push_back(']');
+        return range;
+    }
+    default:
+        report("Unsupported range select kind on assign LHS");
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string>
+ContinuousAssignLowerer::buildFieldPath(const slang::ast::Expression& expr) {
+    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
+        if (conversion->isImplicit()) {
+            return buildFieldPath(conversion->operand());
+        }
+    }
+
+    if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>()) {
+        return named->symbol.name.empty() ? std::optional<std::string>{}
+                                          : std::optional<std::string>(std::string(named->symbol.name));
+    }
+
+    if (const auto* member = expr.as_if<slang::ast::MemberAccessExpression>()) {
+        std::optional<std::string> base = buildFieldPath(member->value());
+        if (!base) {
+            return std::nullopt;
+        }
+        std::string memberName(member->member.name);
+        if (memberName.empty()) {
+            report("Anonymous member access in assign LHS");
+            return std::nullopt;
+        }
+        if (!base->empty()) {
+            base->push_back('.');
+        }
+        base->append(memberName);
+        return base;
+    }
+
+    if (const auto* element = expr.as_if<slang::ast::ElementSelectExpression>()) {
+        std::optional<std::string> base = buildFieldPath(element->value());
+        if (!base) {
+            return std::nullopt;
+        }
+        std::optional<int64_t> index = evaluateConstant(element->selector());
+        if (!index) {
+            report("Element select index must be constant on assign LHS");
+            return std::nullopt;
+        }
+        base->push_back('[');
+        base->append(std::to_string(*index));
+        base->push_back(']');
+        return base;
+    }
+
+    if (expr.kind == slang::ast::ExpressionKind::HierarchicalValue) {
+        report("Hierarchical assign targets are not supported");
+    }
+
+    return std::nullopt;
+}
+
+std::optional<int64_t>
+ContinuousAssignLowerer::evaluateConstant(const slang::ast::Expression& expr) {
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || !value.isInteger() || value.hasUnknown()) {
+        return std::nullopt;
+    }
+    return value.integer().as<int64_t>();
+}
+
+std::optional<ContinuousAssignLowerer::BitRange>
+ContinuousAssignLowerer::lookupRangeByPath(const SignalMemoEntry& entry,
+                                           std::string_view path) const {
+    if (path.empty()) {
+        if (entry.width <= 0) {
+            return std::nullopt;
+        }
+        return BitRange{entry.width - 1, 0};
+    }
+
+    for (const SignalMemoField& field : entry.fields) {
+        if (field.path == path) {
+            return BitRange{field.msb, field.lsb};
+        }
+    }
+
+    bool found = false;
+    int64_t maxMsb = std::numeric_limits<int64_t>::min();
+    int64_t minLsb = std::numeric_limits<int64_t>::max();
+    for (const SignalMemoField& field : entry.fields) {
+        if (!pathMatchesDescendant(path, field.path)) {
+            continue;
+        }
+        found = true;
+        maxMsb = std::max(maxMsb, field.msb);
+        minLsb = std::min(minLsb, field.lsb);
+    }
+
+    if (found) {
+        return BitRange{maxMsb, minLsb};
+    }
+
+    if (entry.symbol && entry.symbol->name == path) {
+        return BitRange{entry.width > 0 ? entry.width - 1 : 0, 0};
+    }
+    return std::nullopt;
+}
+
+grh::Value* ContinuousAssignLowerer::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+                                                      const slang::ast::Expression& originExpr) {
+    if (lsb == 0 && msb == source.width() - 1) {
+        return &source;
+    }
+    if (lsb < 0 || msb < lsb || msb >= source.width()) {
+        report("Assign RHS slice range is out of bounds");
+        return nullptr;
+    }
+
+    const auto tag = static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(this));
+    std::string opName =
+        "_assign_slice_op_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
+    std::string valueName =
+        "_assign_slice_val_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
+    ++sliceCounter_;
+
+    grh::Operation& op = graph_.createOperation(grh::OperationKind::kSliceStatic, opName);
+    op.addOperand(source);
+    op.setAttribute("sliceStart", lsb);
+    op.setAttribute("sliceEnd", msb);
+
+    const int64_t width = msb - lsb + 1;
+    grh::Value& value =
+        graph_.createValue(valueName, width, originExpr.type ? originExpr.type->isSigned() : false);
+    op.addResult(value);
+    return &value;
+}
+
+void ContinuousAssignLowerer::report(std::string message) {
+    if (diagnostics_) {
+        diagnostics_->nyi(originSymbol_, std::move(message));
+    }
+}
+
+slang::ast::EvalContext& ContinuousAssignLowerer::ensureEvalContext() {
+    if (!evalContext_) {
+        evalContext_ = std::make_unique<slang::ast::EvalContext>(originSymbol_);
+    }
+    return *evalContext_;
+}
+
+void ContinuousAssignLowerer::flushPending() {
+    for (auto& [entry, slices] : pending_) {
+        if (!entry || slices.empty()) {
+            continue;
+        }
+        memo_.recordWrite(*entry, WriteBackMemo::AssignmentKind::Continuous, &originSymbol_,
+                          std::move(slices));
+    }
+}
+
+bool ContinuousAssignLowerer::pathMatchesDescendant(std::string_view parent,
+                                                    std::string_view candidate) {
+    if (parent.empty()) {
+        return false;
+    }
+    if (candidate.size() <= parent.size()) {
+        return false;
+    }
+    if (candidate.compare(0, parent.size(), parent) != 0) {
+        return false;
+    }
+    char next = candidate[parent.size()];
+    return next == '.' || next == '[';
+}
+
 const slang::ast::TimingControl* findTimingControl(const slang::ast::Statement& stmt) {
     if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>()) {
         return &timed->timing;
@@ -639,6 +1178,18 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
 void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
                                 const slang::ast::Symbol* originSymbol,
                                 std::vector<Slice> slices) {
+    for (Entry& entry : entries_) {
+        if (entry.target == &target && entry.kind == kind) {
+            if (!entry.originSymbol && originSymbol) {
+                entry.originSymbol = originSymbol;
+            }
+            for (Slice& slice : slices) {
+                entry.slices.push_back(std::move(slice));
+            }
+            return;
+        }
+    }
+
     Entry entry;
     entry.target = &target;
     entry.kind = kind;
@@ -896,7 +1447,9 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
 
 RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(context.origin),
                                               diagnostics_(context.diagnostics),
-                                              netMemo_(context.netMemo), regMemo_(context.regMemo) {}
+                                              netMemo_(context.netMemo), regMemo_(context.regMemo) {
+    instanceId_ = nextConverterInstanceId();
+}
 
 grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
     if (!graph_) {
@@ -921,6 +1474,8 @@ std::string RHSConverter::makeValueName(std::string_view hint, std::size_t index
         base = "_rhs_value";
     }
     base.push_back('_');
+    base.append(std::to_string(instanceId_));
+    base.push_back('_');
     base.append(std::to_string(index));
     return base;
 }
@@ -931,6 +1486,8 @@ std::string RHSConverter::makeOperationName(std::string_view hint, std::size_t i
     if (base.empty()) {
         base = "_rhs_op";
     }
+    base.push_back('_');
+    base.append(std::to_string(instanceId_));
     base.push_back('_');
     base.append(std::to_string(index));
     return base;
@@ -1903,6 +2460,11 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
             continue;
         }
 
+        if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>()) {
+            processContinuousAssign(*continuous, body, graph);
+            continue;
+        }
+
         if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
             processInstanceArray(*instanceArray, graph, netlist);
             continue;
@@ -1997,6 +2559,38 @@ void Elaborate::processGenerateBlockArray(const slang::ast::GenerateBlockArraySy
         }
         processGenerateBlock(*entry, graph, netlist);
     }
+}
+
+void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
+                                        const slang::ast::InstanceBodySymbol& body,
+                                        grh::Graph& graph) {
+    const slang::ast::Expression& expr = assign.getAssignment();
+    const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>();
+    if (!assignment) {
+        if (diagnostics_) {
+            diagnostics_->nyi(assign, "Continuous assign payload is not an assignment expression");
+        }
+        return;
+    }
+
+    std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
+    std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
+
+    RHSConverter::Context context{
+        .graph = &graph,
+        .netMemo = netMemo,
+        .regMemo = regMemo,
+        .origin = &assign,
+        .diagnostics = diagnostics_};
+    CombRHSConverter converter(context);
+    grh::Value* rhsValue = converter.convert(assignment->right());
+    if (!rhsValue) {
+        return;
+    }
+
+    WriteBackMemo& memo = ensureWriteBackMemo(body);
+    ContinuousAssignLowerer lowerer(graph, netMemo, memo, assign, diagnostics_);
+    lowerer.lower(*assignment, *rhsValue);
 }
 
 void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,
