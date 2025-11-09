@@ -46,7 +46,16 @@
   - KR3 阶段5的实现中，会产生 Module body elaboration incomplete，这是不必要的，net 和 reg 只解析线网和变量即可，GRH不支持跨Graph的信号访问
 
 ## 阶段7：由 net 和 reg memo 创建 Value 和 Operation 
-- **Objective** 在阶段 6 的基础上，根据 net 和 reg memo 创建 Value
-  - KR1 net memo 中的信号直接创建 Value，扩展 net memo 记录信号和 Value 的关系
-  - KR2 reg memo 中的信号需解析类型和赋值的 always 块特点，生成 kRegister* 和 kMemory，并扩展 reg memo 记录 memo entry 和 kRegister*、kMemory 的关系，kRegister* 和 kMemory 的 operand 可以先留空，留待后续步骤解析
-  - KR3 创建测试样例，提供人类可读的检查输出
+- **Objective** 把阶段5-6生成的 memo 投影到可落地的 GRH Value/Operation，为后续连线与驱动填充留好锚点。
+  - KR1 针对每个 net memo 条目，调用 TypeHelper 的 flatten 结果生成一组 GRH `Value`，并在 memo 中回填 `Value` 句柄（含 bit 位宽、层级来源），保证后续通过符号即可定位到唯一的 `Value`。
+  - KR2 对 reg memo 条目，结合前序驱动分类信息，为时序寄存器与存储器分别创建 `kRegister*`、`kMemory` Operation，占位的数据/时钟/复位 operand 可以先用 stub，memo 中需记录 `entry -> Operation` 的映射及关键属性（宽度、初值来源等）。
+  - KR3 补充覆盖标量/结构体/数组、net 与 reg 混合、不同 always 类型的回归样例；测试需输出人类可读的 Value/Operation 映射（JSON 或文本），以便人工校验。
+
+## 阶段8：创建 RHSConverter 基类 
+- **Objective** 实现 RHSConverter 类，用于将 slang AST 中的右值表达式转换为 GRH Operation 和 Value 链并插入到当前模块的 GRH 图中。
+  - KR1 设计 RHSConverter 类的接口和基本结构，确保其能够接受 slang AST 表达式节点、当前 GRH 图和上下文信息（memo）作为输入。
+  - KR2 RHSConverter 应当是一个可扩展的基类，后续会派生成 CombRHSConverter 和 SeqRHSConverter 两个子类，分别处理组合逻辑和时序逻辑的右值表达式转换。
+  - KR3 RHSConverter 类应全面覆盖 slang AST 中的右值表达式类型，生成对应的 GRH Operation 和 Value 链。
+  - KR4 RHSConverter 返回的是一个 GRH Value，表示表达式的计算结果。
+  - KR5 当 RHSConverter 需要对 net 或者 reg 进行读取时，通过 memo 查找对应的 GRH Value。
+  - KR6 构建覆盖上述特性的测试样例，验证 RHSConverter 的正确性和完整性。

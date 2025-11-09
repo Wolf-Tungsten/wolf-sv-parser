@@ -122,5 +122,22 @@ target_compile_definitions(elaborate-signal-memo
 
 add_test(NAME elaborate-signal-memo COMMAND elaborate-signal-memo)
 
+add_executable(elaborate-rhs-converter
+    tests/elaborate/test_elaborate_rhs_converter.cpp
+)
+
+target_link_libraries(elaborate-rhs-converter
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-rhs-converter
+    PRIVATE
+        WOLF_SV_ELAB_RHS_DATA_PATH="${ELABORATE_INPUT_DIR}/rhs_converter.sv"
+        WOLF_SV_ELAB_RHS_ARTIFACT_PATH="${ELABORATE_ARTIFACT_DIR}/rhs_converter.json"
+)
+
+add_test(NAME elaborate-rhs-converter COMMAND elaborate-rhs-converter)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

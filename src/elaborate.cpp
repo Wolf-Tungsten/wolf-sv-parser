@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "slang/ast/ASTVisitor.h"
+#include "slang/ast/EvalContext.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/Symbol.h"
 #include "slang/ast/SemanticFacts.h"
@@ -17,6 +18,7 @@
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
 #include "slang/ast/expressions/ConversionExpression.h"
+#include "slang/ast/expressions/LiteralExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/expressions/SelectExpressions.h"
@@ -31,6 +33,7 @@
 #include "slang/ast/types/AllTypes.h"
 #include "slang/ast/types/Type.h"
 #include "slang/numeric/ConstantValue.h"
+#include "slang/numeric/SVInt.h"
 
 namespace wolf_sv {
 
@@ -632,6 +635,516 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
     }
 }
 } // namespace
+
+//===---------------------------------------------------------------------===//
+// RHSConverter implementation
+//===---------------------------------------------------------------------===//
+
+RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(context.origin),
+                                              diagnostics_(context.diagnostics),
+                                              netMemo_(context.netMemo), regMemo_(context.regMemo) {}
+
+grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
+    if (!graph_) {
+        return nullptr;
+    }
+
+    if (auto it = cache_.find(&expr); it != cache_.end()) {
+        return it->second;
+    }
+
+    grh::Value* value = convertExpression(expr);
+    if (value) {
+        cache_[&expr] = value;
+    }
+    return value;
+}
+
+std::string RHSConverter::makeValueName(std::string_view hint, std::size_t index) const {
+    std::string base = hint.empty() ? std::string("_rhs_value")
+                                    : sanitizeForGraphName(hint, /* allowLeadingDigit */ false);
+    if (base.empty()) {
+        base = "_rhs_value";
+    }
+    base.push_back('_');
+    base.append(std::to_string(index));
+    return base;
+}
+
+std::string RHSConverter::makeOperationName(std::string_view hint, std::size_t index) const {
+    std::string base = hint.empty() ? std::string("_rhs_op")
+                                    : sanitizeForGraphName(hint, /* allowLeadingDigit */ false);
+    if (base.empty()) {
+        base = "_rhs_op";
+    }
+    base.push_back('_');
+    base.append(std::to_string(index));
+    return base;
+}
+
+grh::Value* RHSConverter::convertExpression(const slang::ast::Expression& expr) {
+    using slang::ast::ExpressionKind;
+    switch (expr.kind) {
+    case ExpressionKind::NamedValue:
+        return convertNamedValue(expr);
+    case ExpressionKind::IntegerLiteral:
+    case ExpressionKind::UnbasedUnsizedIntegerLiteral:
+        return convertLiteral(expr);
+    case ExpressionKind::UnaryOp:
+        return convertUnary(expr.as<slang::ast::UnaryExpression>());
+    case ExpressionKind::BinaryOp:
+        return convertBinary(expr.as<slang::ast::BinaryExpression>());
+    case ExpressionKind::ConditionalOp:
+        return convertConditional(expr.as<slang::ast::ConditionalExpression>());
+    case ExpressionKind::Concatenation:
+        return convertConcatenation(expr.as<slang::ast::ConcatenationExpression>());
+    case ExpressionKind::Replication:
+        return convertReplication(expr.as<slang::ast::ReplicationExpression>());
+    case ExpressionKind::Conversion:
+        return convertConversion(expr.as<slang::ast::ConversionExpression>());
+    default:
+        reportUnsupported("expression kind", expr);
+        return nullptr;
+    }
+}
+
+grh::Value* RHSConverter::convertNamedValue(const slang::ast::Expression& expr) {
+    if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
+        const auto& named = expr.as<slang::ast::NamedValueExpression>();
+
+        if (const SignalMemoEntry* entry = findMemoEntry(named.symbol)) {
+            if (grh::Value* value = resolveMemoValue(*entry)) {
+                return value;
+            }
+        }
+
+        if (grh::Value* fallback = resolveGraphValue(named.symbol)) {
+            return fallback;
+        }
+    }
+
+    reportUnsupported("named value", expr);
+    return nullptr;
+}
+
+grh::Value* RHSConverter::convertLiteral(const slang::ast::Expression& expr) {
+    switch (expr.kind) {
+    case slang::ast::ExpressionKind::IntegerLiteral: {
+        const auto& literal = expr.as<slang::ast::IntegerLiteral>();
+        return createConstantValue(literal.getValue(), *expr.type, "const");
+    }
+    case slang::ast::ExpressionKind::UnbasedUnsizedIntegerLiteral: {
+        const auto& literal = expr.as<slang::ast::UnbasedUnsizedIntegerLiteral>();
+        return createConstantValue(literal.getValue(), *expr.type, "const");
+    }
+    default:
+        reportUnsupported("literal", expr);
+        return nullptr;
+    }
+}
+
+grh::Value* RHSConverter::convertUnary(const slang::ast::UnaryExpression& expr) {
+    grh::Value* operand = convert(expr.operand());
+    if (!operand) {
+        return nullptr;
+    }
+
+    using slang::ast::UnaryOperator;
+    switch (expr.op) {
+    case UnaryOperator::Plus:
+        return operand;
+    case UnaryOperator::Minus: {
+        grh::Value* zero = createZeroValue(*expr.type, "neg_zero");
+        if (!zero) {
+            return nullptr;
+        }
+        return buildBinaryOp(grh::OperationKind::kSub, *zero, *operand, expr, "neg");
+    }
+    case UnaryOperator::BitwiseNot:
+        return buildUnaryOp(grh::OperationKind::kNot, *operand, expr, "not");
+    case UnaryOperator::LogicalNot:
+        return buildUnaryOp(grh::OperationKind::kLogicNot, *operand, expr, "lnot");
+    case UnaryOperator::BitwiseAnd:
+        return buildUnaryOp(grh::OperationKind::kReduceAnd, *operand, expr, "red_and");
+    case UnaryOperator::BitwiseOr:
+        return buildUnaryOp(grh::OperationKind::kReduceOr, *operand, expr, "red_or");
+    case UnaryOperator::BitwiseXor:
+        return buildUnaryOp(grh::OperationKind::kReduceXor, *operand, expr, "red_xor");
+    case UnaryOperator::BitwiseNand:
+        return buildUnaryOp(grh::OperationKind::kReduceNand, *operand, expr, "red_nand");
+    case UnaryOperator::BitwiseNor:
+        return buildUnaryOp(grh::OperationKind::kReduceNor, *operand, expr, "red_nor");
+    case UnaryOperator::BitwiseXnor:
+        return buildUnaryOp(grh::OperationKind::kReduceXnor, *operand, expr, "red_xnor");
+    default:
+        reportUnsupported("unary operator", expr);
+        return nullptr;
+    }
+}
+
+grh::Value* RHSConverter::convertBinary(const slang::ast::BinaryExpression& expr) {
+    grh::Value* lhs = convert(expr.left());
+    grh::Value* rhs = convert(expr.right());
+    if (!lhs || !rhs) {
+        return nullptr;
+    }
+
+    using slang::ast::BinaryOperator;
+    auto opKind = grh::OperationKind::kAssign;
+    bool supported = true;
+    switch (expr.op) {
+    case BinaryOperator::Add:
+        opKind = grh::OperationKind::kAdd;
+        break;
+    case BinaryOperator::Subtract:
+        opKind = grh::OperationKind::kSub;
+        break;
+    case BinaryOperator::Multiply:
+        opKind = grh::OperationKind::kMul;
+        break;
+    case BinaryOperator::Divide:
+        opKind = grh::OperationKind::kDiv;
+        break;
+    case BinaryOperator::Mod:
+        opKind = grh::OperationKind::kMod;
+        break;
+    case BinaryOperator::BinaryAnd:
+        opKind = grh::OperationKind::kAnd;
+        break;
+    case BinaryOperator::BinaryOr:
+        opKind = grh::OperationKind::kOr;
+        break;
+    case BinaryOperator::BinaryXor:
+        opKind = grh::OperationKind::kXor;
+        break;
+    case BinaryOperator::BinaryXnor:
+        opKind = grh::OperationKind::kXnor;
+        break;
+    case BinaryOperator::Equality:
+    case BinaryOperator::CaseEquality:
+        opKind = grh::OperationKind::kEq;
+        break;
+    case BinaryOperator::Inequality:
+    case BinaryOperator::CaseInequality:
+        opKind = grh::OperationKind::kNe;
+        break;
+    case BinaryOperator::GreaterThan:
+        opKind = grh::OperationKind::kGt;
+        break;
+    case BinaryOperator::GreaterThanEqual:
+        opKind = grh::OperationKind::kGe;
+        break;
+    case BinaryOperator::LessThan:
+        opKind = grh::OperationKind::kLt;
+        break;
+    case BinaryOperator::LessThanEqual:
+        opKind = grh::OperationKind::kLe;
+        break;
+    case BinaryOperator::LogicalAnd:
+        opKind = grh::OperationKind::kLogicAnd;
+        break;
+    case BinaryOperator::LogicalOr:
+        opKind = grh::OperationKind::kLogicOr;
+        break;
+    case BinaryOperator::LogicalShiftLeft:
+    case BinaryOperator::ArithmeticShiftLeft:
+        opKind = grh::OperationKind::kShl;
+        break;
+    case BinaryOperator::LogicalShiftRight:
+        opKind = grh::OperationKind::kLShr;
+        break;
+    case BinaryOperator::ArithmeticShiftRight:
+        opKind = grh::OperationKind::kAShr;
+        break;
+    case BinaryOperator::WildcardEquality:
+    case BinaryOperator::WildcardInequality:
+    case BinaryOperator::LogicalImplication:
+    case BinaryOperator::LogicalEquivalence:
+    case BinaryOperator::Power:
+        supported = false;
+        break;
+    default:
+        supported = false;
+        break;
+    }
+
+    if (!supported) {
+        reportUnsupported("binary operator", expr);
+        return nullptr;
+    }
+
+    return buildBinaryOp(opKind, *lhs, *rhs, expr, "bin");
+}
+
+grh::Value* RHSConverter::convertConditional(const slang::ast::ConditionalExpression& expr) {
+    if (expr.conditions.empty()) {
+        reportUnsupported("conditional (missing condition)", expr);
+        return nullptr;
+    }
+
+    const auto& condition = expr.conditions.front();
+    if (condition.pattern) {
+        reportUnsupported("patterned conditional", expr);
+        return nullptr;
+    }
+
+    grh::Value* condValue = convert(*condition.expr);
+    grh::Value* trueValue = convert(expr.left());
+    grh::Value* falseValue = convert(expr.right());
+    if (!condValue || !trueValue || !falseValue) {
+        return nullptr;
+    }
+
+    return buildMux(*condValue, *trueValue, *falseValue, expr);
+}
+
+grh::Value* RHSConverter::convertConcatenation(
+    const slang::ast::ConcatenationExpression& expr) {
+    grh::Operation& op = createOperation(grh::OperationKind::kConcat, "concat");
+    for (const slang::ast::Expression* operandExpr : expr.operands()) {
+        if (!operandExpr) {
+            continue;
+        }
+        grh::Value* operandValue = convert(*operandExpr);
+        if (!operandValue) {
+            return nullptr;
+        }
+        op.addOperand(*operandValue);
+    }
+
+    grh::Value& result = createTemporaryValue(*expr.type, "concat");
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::convertReplication(const slang::ast::ReplicationExpression& expr) {
+    std::optional<int64_t> replicateCount = evaluateConstantInt(expr.count());
+    if (!replicateCount || *replicateCount <= 0) {
+        reportUnsupported("replication count", expr);
+        return nullptr;
+    }
+
+    grh::Value* operand = convert(expr.concat());
+    if (!operand) {
+        return nullptr;
+    }
+
+    grh::Operation& op = createOperation(grh::OperationKind::kReplicate, "replicate");
+    op.addOperand(*operand);
+    op.setAttribute("rep", static_cast<int64_t>(*replicateCount));
+    grh::Value& result = createTemporaryValue(*expr.type, "replicate");
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::convertConversion(const slang::ast::ConversionExpression& expr) {
+    grh::Value* operand = convert(expr.operand());
+    if (!operand) {
+        return nullptr;
+    }
+
+    const TypeInfo info = deriveTypeInfo(*expr.type);
+    if (operand->width() == info.width && operand->isSigned() == info.isSigned) {
+        return operand;
+    }
+    return buildAssign(*operand, expr, "convert");
+}
+
+grh::Value& RHSConverter::createTemporaryValue(const slang::ast::Type& type,
+                                                std::string_view hint) {
+    const TypeInfo info = deriveTypeInfo(type);
+    std::string name = makeValueName(hint, valueCounter_++);
+    return graph_->createValue(name, info.width > 0 ? info.width : 1, info.isSigned);
+}
+
+grh::Operation& RHSConverter::createOperation(grh::OperationKind kind, std::string_view hint) {
+    std::string name = makeOperationName(hint, operationCounter_++);
+    return graph_->createOperation(kind, name);
+}
+
+grh::Value* RHSConverter::createConstantValue(const slang::SVInt& value,
+                                              const slang::ast::Type& type,
+                                              std::string_view hint) {
+    grh::Operation& op = createOperation(grh::OperationKind::kConstant, hint);
+    grh::Value& result = createTemporaryValue(type, hint);
+    op.addResult(result);
+    op.setAttribute("constValue", formatConstantLiteral(value, type));
+    return &result;
+}
+
+grh::Value* RHSConverter::createZeroValue(const slang::ast::Type& type,
+                                          std::string_view hint) {
+    const TypeInfo info = deriveTypeInfo(type);
+    slang::SVInt literal(static_cast<slang::bitwidth_t>(info.width), uint64_t(0), info.isSigned);
+    return createConstantValue(literal, type, hint);
+}
+
+grh::Value* RHSConverter::buildUnaryOp(grh::OperationKind kind, grh::Value& operand,
+                                       const slang::ast::Expression& originExpr,
+                                       std::string_view hint) {
+    grh::Operation& op = createOperation(kind, hint);
+    op.addOperand(operand);
+    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::buildBinaryOp(grh::OperationKind kind, grh::Value& lhs, grh::Value& rhs,
+                                        const slang::ast::Expression& originExpr,
+                                        std::string_view hint) {
+    grh::Operation& op = createOperation(kind, hint);
+    op.addOperand(lhs);
+    op.addOperand(rhs);
+    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::buildMux(grh::Value& cond, grh::Value& onTrue, grh::Value& onFalse,
+                                   const slang::ast::Expression& originExpr) {
+    grh::Operation& op = createOperation(grh::OperationKind::kMux, "mux");
+    op.addOperand(cond);
+    op.addOperand(onTrue);
+    op.addOperand(onFalse);
+    grh::Value& result = createTemporaryValue(*originExpr.type, "mux");
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::buildAssign(grh::Value& input, const slang::ast::Expression& originExpr,
+                                      std::string_view hint) {
+    grh::Operation& op = createOperation(grh::OperationKind::kAssign, hint);
+    op.addOperand(input);
+    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
+    op.addResult(result);
+    return &result;
+}
+
+const SignalMemoEntry* RHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+    auto finder = [&](std::span<const SignalMemoEntry> memo) -> const SignalMemoEntry* {
+        for (const SignalMemoEntry& entry : memo) {
+            if (entry.symbol == &symbol) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    };
+
+    if (const SignalMemoEntry* entry = finder(netMemo_)) {
+        return entry;
+    }
+    return finder(regMemo_);
+}
+
+grh::Value* RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
+    if (entry.value) {
+        return entry.value;
+    }
+
+    if (entry.stateOp) {
+        const grh::OperationKind kind = entry.stateOp->kind();
+        if (kind == grh::OperationKind::kRegister || kind == grh::OperationKind::kRegisterRst ||
+            kind == grh::OperationKind::kRegisterARst) {
+            const std::vector<grh::Value*>& results = entry.stateOp->results();
+            if (!results.empty() && results.front()) {
+                return results.front();
+            }
+        }
+    }
+
+    if (diagnostics_ && origin_) {
+        std::string symbolName = entry.symbol ? std::string(entry.symbol->name) : std::string();
+        diagnostics_->nyi(*origin_,
+                          "Memo entry missing GRH value for symbol " + symbolName);
+    }
+    return nullptr;
+}
+
+grh::Value* RHSConverter::resolveGraphValue(const slang::ast::ValueSymbol& symbol) {
+    if (!graph_) {
+        return nullptr;
+    }
+
+    const std::string_view symbolName = symbol.name;
+    if (symbolName.empty()) {
+        return nullptr;
+    }
+
+    return graph_->findValue(symbolName);
+}
+
+RHSConverter::TypeInfo RHSConverter::deriveTypeInfo(const slang::ast::Type& type) const {
+    TypeInfo info;
+    if (!type.isBitstreamType() || !type.isFixedSize()) {
+        if (diagnostics_ && origin_) {
+            diagnostics_->nyi(*origin_,
+                              "RHS conversion requires fixed-size bitstream type: " +
+                                  type.toString());
+        }
+        info.width = 1;
+        info.isSigned = false;
+        return info;
+    }
+
+    uint64_t bitWidth = type.getBitstreamWidth();
+    if (bitWidth == 0) {
+        bitWidth = 1;
+    }
+    const uint64_t maxWidth = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    if (bitWidth > maxWidth) {
+        bitWidth = maxWidth;
+    }
+
+    info.width = static_cast<int64_t>(bitWidth);
+    info.isSigned = type.isSigned();
+    return info;
+}
+
+std::string RHSConverter::formatConstantLiteral(const slang::SVInt& value,
+                                                const slang::ast::Type& type) const {
+    (void)type;
+    return value.toString(slang::LiteralBase::Hex, /* includeBase */ true,
+                          slang::SVInt::MAX_BITS);
+}
+
+void RHSConverter::reportUnsupported(std::string_view what,
+                                     const slang::ast::Expression& expr) {
+    if (!diagnostics_ || !origin_) {
+        return;
+    }
+
+    std::string message = "Unsupported RHS " + std::string(what);
+    message.append(" (kind=");
+    message.append(std::to_string(static_cast<int>(expr.kind)));
+    message.push_back(')');
+    diagnostics_->nyi(*origin_, std::move(message));
+}
+
+slang::ast::EvalContext& RHSConverter::ensureEvalContext() {
+    if (!evalContext_) {
+        evalContext_ = std::make_unique<slang::ast::EvalContext>(*origin_);
+    }
+    return *evalContext_;
+}
+
+std::optional<int64_t> RHSConverter::evaluateConstantInt(const slang::ast::Expression& expr) {
+    if (!origin_) {
+        return std::nullopt;
+    }
+
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || !value.isInteger() || value.hasUnknown()) {
+        return std::nullopt;
+    }
+
+    std::optional<int64_t> asInt = value.integer().as<int64_t>();
+    if (!asInt) {
+        return std::nullopt;
+    }
+    return *asInt;
+}
 
 void ElaborateDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message) {
     add(ElaborateDiagnosticKind::Todo, symbol, std::move(message));
