@@ -108,6 +108,52 @@ struct SignalMemoEntry {
     const slang::ast::ProceduralBlockSymbol* drivingBlock = nullptr;
 };
 
+/// Records pending writes against memoized signals before SSA write-back.
+class WriteBackMemo {
+public:
+    enum class AssignmentKind {
+        Continuous,
+        Procedural
+    };
+
+    struct Slice {
+        std::string path;
+        int64_t msb = 0;
+        int64_t lsb = 0;
+        grh::Value* value = nullptr;
+        const slang::ast::Expression* originExpr = nullptr;
+    };
+
+    struct Entry {
+        const SignalMemoEntry* target = nullptr;
+        AssignmentKind kind = AssignmentKind::Continuous;
+        const slang::ast::Symbol* originSymbol = nullptr;
+        std::vector<Slice> slices;
+    };
+
+    void recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
+                     const slang::ast::Symbol* originSymbol, std::vector<Slice> slices);
+    std::span<const Entry> entries() const noexcept { return entries_; }
+    bool empty() const noexcept { return entries_.empty(); }
+    void clear();
+    void finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics);
+
+private:
+    std::string makeOperationName(const Entry& entry, std::string_view suffix);
+    std::string makeValueName(const Entry& entry, std::string_view suffix);
+    const slang::ast::Symbol* originFor(const Entry& entry) const;
+    void reportIssue(const Entry& entry, std::string message,
+                     ElaborateDiagnostics* diagnostics) const;
+    grh::Value* composeSlices(Entry& entry, grh::Graph& graph,
+                              ElaborateDiagnostics* diagnostics);
+    void attachToTarget(const Entry& entry, grh::Value& composedValue, grh::Graph& graph,
+                        ElaborateDiagnostics* diagnostics);
+    grh::Value* createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph);
+
+    std::vector<Entry> entries_;
+    std::size_t nameCounter_ = 0;
+};
+
 /// Converts RHS expressions into GRH operations / values.
 class RHSConverter {
 public:
@@ -268,6 +314,8 @@ private:
     void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    WriteBackMemo& ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body);
+    void finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
 
     ElaborateDiagnostics* diagnostics_;
     ElaborateOptions options_;
@@ -281,6 +329,7 @@ private:
         netMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
         regMemo_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, WriteBackMemo> writeBackMemo_;
 };
 
 } // namespace wolf_sv

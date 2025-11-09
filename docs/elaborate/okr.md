@@ -66,3 +66,9 @@
   - KR2 支持对 mem 读取时生成 kMemoryAsyncReadPort
   - KR3 支持对简单 net 和 reg 的 concat 和 slice 读取
   - KR4 构建自动测试样例，同时生成人工可读的json
+
+## 阶段10：设计实现 Value 写回 memo 数据结构
+- **Objective** 为解析连续赋值、过程块准备数据结构。由于 sv 语法在 LHS 支持表达式，若直接写回 net 和 reg memo 中的 Value 会破坏 GRH 要求的 SSA 特性，因此elaborate中准备一个写回 memo 数据结构，记录这些赋值，在所有连续赋值和过程块解析完成后，由写回 memo 最终生成对 memo 中 Value 的 concat 或直接赋值
+  - KR1 阅读理解目前 net / reg memo 的数据结构，设计新的 writeBack memo，并将三种 memo 的数据结构写成 memo.md 文档供后人参考
+  - KR2 设计的数据结构既要考虑解析连续赋值和过程块的效率，也要考虑最终 finalize 成实际 Value 赋值的效率
+  - KR3 将设计的数据结构进行代码实现。

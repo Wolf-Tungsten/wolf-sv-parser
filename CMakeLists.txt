@@ -139,5 +139,16 @@ target_compile_definitions(elaborate-rhs-converter
 
 add_test(NAME elaborate-rhs-converter COMMAND elaborate-rhs-converter)
 
+add_executable(elaborate-write-back-memo
+    tests/elaborate/test_write_back_memo.cpp
+)
+
+target_link_libraries(elaborate-write-back-memo
+    PRIVATE
+        elaborate
+)
+
+add_test(NAME elaborate-write-back-memo COMMAND elaborate-write-back-memo)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

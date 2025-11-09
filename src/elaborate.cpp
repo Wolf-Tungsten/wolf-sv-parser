@@ -636,6 +636,260 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
 }
 } // namespace
 
+void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
+                                const slang::ast::Symbol* originSymbol,
+                                std::vector<Slice> slices) {
+    Entry entry;
+    entry.target = &target;
+    entry.kind = kind;
+    entry.originSymbol = originSymbol;
+    entry.slices = std::move(slices);
+    entries_.push_back(std::move(entry));
+}
+
+void WriteBackMemo::clear() {
+    entries_.clear();
+}
+
+std::string WriteBackMemo::makeOperationName(const Entry& entry, std::string_view suffix) {
+    std::string base;
+    if (entry.target && entry.target->symbol && !entry.target->symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.target->symbol->name);
+    }
+    if (base.empty()) {
+        base = "_write_back";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(nameCounter_++));
+    return base;
+}
+
+std::string WriteBackMemo::makeValueName(const Entry& entry, std::string_view suffix) {
+    std::string base;
+    if (entry.target && entry.target->symbol && !entry.target->symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.target->symbol->name);
+    }
+    if (base.empty()) {
+        base = "_write_back_val";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(nameCounter_++));
+    return base;
+}
+
+const slang::ast::Symbol* WriteBackMemo::originFor(const Entry& entry) const {
+    if (entry.originSymbol) {
+        return entry.originSymbol;
+    }
+    if (entry.target && entry.target->symbol) {
+        return entry.target->symbol;
+    }
+    return nullptr;
+}
+
+void WriteBackMemo::reportIssue(const Entry& entry, std::string message,
+                                ElaborateDiagnostics* diagnostics) const {
+    if (!diagnostics) {
+        return;
+    }
+    if (const slang::ast::Symbol* symbol = originFor(entry)) {
+        diagnostics->nyi(*symbol, std::move(message));
+    }
+}
+
+grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
+                                         ElaborateDiagnostics* diagnostics) {
+    if (!entry.target) {
+        reportIssue(entry, "Write-back target is missing memo metadata", diagnostics);
+        return nullptr;
+    }
+    if (entry.slices.empty()) {
+        reportIssue(entry, "Write-back entry has no slices to compose", diagnostics);
+        return nullptr;
+    }
+
+    std::sort(entry.slices.begin(), entry.slices.end(),
+              [](const Slice& lhs, const Slice& rhs) {
+                  if (lhs.msb != rhs.msb) {
+                      return lhs.msb > rhs.msb;
+                  }
+                  return lhs.lsb > rhs.lsb;
+              });
+
+    const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
+    int64_t expectedMsb = targetWidth - 1;
+    std::vector<grh::Value*> components;
+    components.reserve(entry.slices.size() + 2);
+
+    for (const Slice& slice : entry.slices) {
+        if (!slice.value) {
+            reportIssue(entry, "Write-back slice is missing RHS value", diagnostics);
+            return nullptr;
+        }
+        if (slice.msb < slice.lsb) {
+            reportIssue(entry, "Write-back slice has invalid bit range", diagnostics);
+            return nullptr;
+        }
+
+        if (slice.msb > expectedMsb) {
+            std::ostringstream oss;
+            oss << "Write-back slice exceeds target width; slice msb=" << slice.msb
+                << " expected at most " << expectedMsb;
+            reportIssue(entry, oss.str(), diagnostics);
+            return nullptr;
+        }
+
+        const int64_t gapWidth = expectedMsb - slice.msb;
+        if (gapWidth > 0) {
+            grh::Value* zero = createZeroValue(entry, gapWidth, graph);
+            if (!zero) {
+                reportIssue(entry, "Failed to create zero-fill value for write-back gap",
+                            diagnostics);
+                return nullptr;
+            }
+            components.push_back(zero);
+            expectedMsb -= gapWidth;
+        }
+
+        if (slice.msb != expectedMsb) {
+            std::ostringstream oss;
+            oss << "Write-back bookkeeping error; slice msb=" << slice.msb
+                << " but expected " << expectedMsb;
+            reportIssue(entry, oss.str(), diagnostics);
+            return nullptr;
+        }
+
+        const int64_t sliceWidth = slice.msb - slice.lsb + 1;
+        if (slice.value->width() != sliceWidth) {
+            std::ostringstream oss;
+            oss << "Write-back slice width mismatch; slice covers " << sliceWidth
+                << " bits but RHS value width is " << slice.value->width();
+            reportIssue(entry, oss.str(), diagnostics);
+            return nullptr;
+        }
+
+        components.push_back(slice.value);
+        expectedMsb = slice.lsb - 1;
+    }
+
+    if (expectedMsb >= 0) {
+        grh::Value* zero = createZeroValue(entry, expectedMsb + 1, graph);
+        if (!zero) {
+            reportIssue(entry, "Failed to create zero-fill value for trailing gap", diagnostics);
+            return nullptr;
+        }
+        components.push_back(zero);
+        expectedMsb = -1;
+    }
+
+    if (components.empty()) {
+        reportIssue(entry, "Write-back entry produced no value components", diagnostics);
+        return nullptr;
+    }
+
+    if (components.size() == 1) {
+        return components.front();
+    }
+
+    grh::Operation& concat =
+        graph.createOperation(grh::OperationKind::kConcat, makeOperationName(entry, "concat"));
+    for (grh::Value* component : components) {
+        concat.addOperand(*component);
+    }
+
+    grh::Value& composed =
+        graph.createValue(makeValueName(entry, "concat"), targetWidth, entry.target->isSigned);
+    concat.addResult(composed);
+    return &composed;
+}
+
+void WriteBackMemo::attachToTarget(const Entry& entry, grh::Value& composedValue,
+                                   grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
+    if (!entry.target) {
+        reportIssue(entry, "Missing target when attaching write-back value", diagnostics);
+        return;
+    }
+
+    if (!entry.target->stateOp) {
+        grh::Value* targetValue = entry.target->value;
+        if (!targetValue) {
+            reportIssue(entry, "Net write-back lacks GRH value handle", diagnostics);
+            return;
+        }
+        if (targetValue->width() != composedValue.width()) {
+            std::ostringstream oss;
+            oss << "Net write-back width mismatch; target width=" << targetValue->width()
+                << " source width=" << composedValue.width();
+            reportIssue(entry, oss.str(), diagnostics);
+            return;
+        }
+        grh::Operation& assign =
+            graph.createOperation(grh::OperationKind::kAssign, makeOperationName(entry, "assign"));
+        assign.addOperand(composedValue);
+        assign.addResult(*targetValue);
+        return;
+    }
+
+    grh::Operation* stateOp = entry.target->stateOp;
+    if (!stateOp) {
+        reportIssue(entry, "Sequential write-back missing state operation", diagnostics);
+        return;
+    }
+
+    if (stateOp->kind() == grh::OperationKind::kMemory) {
+        reportIssue(entry, "Memory write-back is not implemented yet", diagnostics);
+        return;
+    }
+
+    if (!stateOp->operands().empty()) {
+        reportIssue(entry, "State operation already has a data operand", diagnostics);
+        return;
+    }
+
+    if (!stateOp->results().empty()) {
+        grh::Value* stateValue = stateOp->results().front();
+        if (stateValue && stateValue->width() != composedValue.width()) {
+            std::ostringstream oss;
+            oss << "Register write-back width mismatch; state width=" << stateValue->width()
+                << " source width=" << composedValue.width();
+            reportIssue(entry, oss.str(), diagnostics);
+            return;
+        }
+    }
+
+    stateOp->addOperand(composedValue);
+}
+
+grh::Value* WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph) {
+    if (width <= 0) {
+        return nullptr;
+    }
+
+    grh::Operation& op =
+        graph.createOperation(grh::OperationKind::kConstant, makeOperationName(entry, "zero"));
+    grh::Value& value = graph.createValue(makeValueName(entry, "zero"), width, /*isSigned=*/false);
+    op.addResult(value);
+    std::ostringstream oss;
+    oss << width << "'h0";
+    op.setAttribute("constValue", oss.str());
+    return &value;
+}
+
+void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
+    for (Entry& entry : entries_) {
+        grh::Value* composed = composeSlices(entry, graph, diagnostics);
+        if (!composed) {
+            continue;
+        }
+        attachToTarget(entry, *composed, graph, diagnostics);
+    }
+    entries_.clear();
+}
+
 //===---------------------------------------------------------------------===//
 // RHSConverter implementation
 //===---------------------------------------------------------------------===//
@@ -1641,6 +1895,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
     populatePorts(instance, body, graph);
     collectSignalMemos(body);
     materializeSignalMemos(body, graph);
+    ensureWriteBackMemo(body);
 
     for (const slang::ast::Symbol& member : body.members()) {
         if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
@@ -1666,6 +1921,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
         // Other symbol kinds will be handled in later stages.
     }
 
+    finalizeWriteBackMemo(body, graph);
     emitModulePlaceholder(instance, graph);
 }
 
@@ -1998,6 +2254,19 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         op.setAttribute("clkPolarity", *clkPolarity);
         entry.stateOp = &op;
     }
+}
+
+WriteBackMemo& Elaborate::ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body) {
+    return writeBackMemo_[&body];
+}
+
+void Elaborate::finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body,
+                                      grh::Graph& graph) {
+    auto it = writeBackMemo_.find(&body);
+    if (it == writeBackMemo_.end()) {
+        return;
+    }
+    it->second.finalize(graph, diagnostics_);
 }
 
 std::string Elaborate::makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
