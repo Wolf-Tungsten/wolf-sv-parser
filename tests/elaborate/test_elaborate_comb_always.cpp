@@ -259,6 +259,24 @@ int main() {
         }
         return true;
     };
+    auto verifyDirectWithoutMux = [&](const SignalMemoEntry& entry, const grh::Value* expected,
+                                      std::string_view label) -> bool {
+        if (!verifyAssignOperand(entry, expected)) {
+            return false;
+        }
+        const grh::Value* driver = getAssignSource(entry);
+        if (!driver) {
+            std::cerr << "[elaborate_comb_always] " << label << " missing assign driver\n";
+            return false;
+        }
+        const grh::Operation* op = driver->definingOp();
+        if (op && op->kind() == grh::OperationKind::kMux) {
+        std::cerr << "[elaborate_comb_always] " << label
+                  << " unexpectedly driven by kMux under static condition\n";
+        return false;
+    }
+    return true;
+};
     if (!verifyDrivenByMux(*outIf, "out_if")) {
         return 1;
     }
@@ -386,6 +404,121 @@ int main() {
     }
     if (!validateMuxOutput("comb_always_stage13_casez", "out_casez")) {
         return 1;
+    }
+
+    // Stage14 static if tests
+    const slang::ast::InstanceSymbol* instStaticIf =
+        findInstanceByName("comb_always_stage14_static_if");
+    if (!instStaticIf) {
+        return fail("comb_always_stage14_static_if top instance not found");
+    }
+    grh::Graph* graphStaticIf = fetchGraphByName("comb_always_stage14_static_if");
+    if (!graphStaticIf) {
+        return fail("GRH graph comb_always_stage14_static_if not found");
+    }
+    std::span<const SignalMemoEntry> netMemoStaticIf = fetchNetMemoForInstance(*instStaticIf);
+    if (netMemoStaticIf.empty()) {
+        return fail("Net memo is empty for comb_always_stage14_static_if");
+    }
+    const SignalMemoEntry* outStaticTrue = findEntry(netMemoStaticIf, "out_static_true");
+    const SignalMemoEntry* outStaticFalse = findEntry(netMemoStaticIf, "out_static_false");
+    const SignalMemoEntry* outMixed = findEntry(netMemoStaticIf, "out_mixed");
+    if (!outStaticTrue || !outStaticFalse || !outMixed) {
+        return fail("Failed to locate stage14 static-if memo entries");
+    }
+    const grh::Value* portInTrue = findPort(*graphStaticIf, "in_true", /*isInput=*/true);
+    const grh::Value* portInFalse = findPort(*graphStaticIf, "in_false", /*isInput=*/true);
+    const grh::Value* portDynA = findPort(*graphStaticIf, "dyn_a", /*isInput=*/true);
+    const grh::Value* portDynB = findPort(*graphStaticIf, "dyn_b", /*isInput=*/true);
+    const grh::Value* portSelect = findPort(*graphStaticIf, "select", /*isInput=*/true);
+    if (!portInTrue || !portInFalse || !portDynA || !portDynB || !portSelect) {
+        return fail("comb_always_stage14_static_if inputs missing in graph");
+    }
+    if (!verifyDirectWithoutMux(*outStaticTrue, portInTrue, "out_static_true")) {
+        return 1;
+    }
+    if (!verifyDirectWithoutMux(*outStaticFalse, portInFalse, "out_static_false")) {
+        return 1;
+    }
+    if (!verifyDrivenByMux(*outMixed, "out_mixed")) {
+        return 1;
+    }
+    const grh::Value* mixedDriver = getAssignSource(*outMixed);
+    if (!mixedDriver) {
+        return fail("out_mixed missing assign driver");
+    }
+    const grh::Operation* mixedMux = mixedDriver->definingOp();
+    if (!mixedMux || mixedMux->operands().size() != 3) {
+        return fail("out_mixed mux expected to have 3 operands");
+    }
+    if (mixedMux->operands()[0] != portSelect) {
+        return fail("out_mixed mux condition does not reference select input");
+    }
+    const grh::Value* mixedTrue = mixedMux->operands()[1];
+    const grh::Value* mixedFalse = mixedMux->operands()[2];
+    if (!((mixedTrue == portDynA && mixedFalse == portDynB) ||
+          (mixedTrue == portDynB && mixedFalse == portDynA))) {
+        return fail("out_mixed mux operands do not reference dyn_a/dyn_b inputs");
+    }
+
+    // Stage14 static case tests
+    const slang::ast::InstanceSymbol* instStaticCase =
+        findInstanceByName("comb_always_stage14_static_case");
+    if (!instStaticCase) {
+        return fail("comb_always_stage14_static_case top instance not found");
+    }
+    grh::Graph* graphStaticCase = fetchGraphByName("comb_always_stage14_static_case");
+    if (!graphStaticCase) {
+        return fail("GRH graph comb_always_stage14_static_case not found");
+    }
+    std::span<const SignalMemoEntry> netMemoStaticCase = fetchNetMemoForInstance(*instStaticCase);
+    if (netMemoStaticCase.empty()) {
+        return fail("Net memo is empty for comb_always_stage14_static_case");
+    }
+    const SignalMemoEntry* outCaseConst = findEntry(netMemoStaticCase, "out_case_const");
+    const SignalMemoEntry* outCaseDefault = findEntry(netMemoStaticCase, "out_case_default");
+    const SignalMemoEntry* outCaseNested = findEntry(netMemoStaticCase, "out_case_nested");
+    if (!outCaseConst || !outCaseDefault || !outCaseNested) {
+        return fail("Failed to locate stage14 static-case memo entries");
+    }
+    const grh::Value* portIn0 = findPort(*graphStaticCase, "in0", /*isInput=*/true);
+    const grh::Value* portIn1 = findPort(*graphStaticCase, "in1", /*isInput=*/true);
+    const grh::Value* portIn2 = findPort(*graphStaticCase, "in2", /*isInput=*/true);
+    const grh::Value* portIn3 = findPort(*graphStaticCase, "in3", /*isInput=*/true);
+    const grh::Value* portDynCaseA = findPort(*graphStaticCase, "dyn_a", /*isInput=*/true);
+    const grh::Value* portDynCaseB = findPort(*graphStaticCase, "dyn_b", /*isInput=*/true);
+    const grh::Value* portCaseSelect = findPort(*graphStaticCase, "select", /*isInput=*/true);
+    if (!portIn0 || !portIn1 || !portIn2 || !portIn3 || !portDynCaseA || !portDynCaseB ||
+        !portCaseSelect) {
+        return fail("comb_always_stage14_static_case inputs missing in graph");
+    }
+    (void)portIn0;
+    (void)portIn1;
+    if (!verifyDirectWithoutMux(*outCaseConst, portIn2, "out_case_const")) {
+        return 1;
+    }
+    if (!verifyDirectWithoutMux(*outCaseDefault, portIn3, "out_case_default")) {
+        return 1;
+    }
+    if (!verifyDrivenByMux(*outCaseNested, "out_case_nested")) {
+        return 1;
+    }
+    const grh::Value* nestedDriver = getAssignSource(*outCaseNested);
+    if (!nestedDriver) {
+        return fail("out_case_nested missing assign driver");
+    }
+    const grh::Operation* nestedMux = nestedDriver->definingOp();
+    if (!nestedMux || nestedMux->operands().size() != 3) {
+        return fail("out_case_nested mux expected to have 3 operands");
+    }
+    if (nestedMux->operands()[0] != portCaseSelect) {
+        return fail("out_case_nested mux condition does not reference select input");
+    }
+    const grh::Value* nestedTrue = nestedMux->operands()[1];
+    const grh::Value* nestedFalse = nestedMux->operands()[2];
+    if (!((nestedTrue == portDynCaseA && nestedFalse == portDynCaseB) ||
+          (nestedTrue == portDynCaseB && nestedFalse == portDynCaseA))) {
+        return fail("out_case_nested mux operands do not reference dyn_a/dyn_b inputs");
     }
 
     bool sawExpectedLatchDiag = false;

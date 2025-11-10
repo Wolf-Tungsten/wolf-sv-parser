@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -202,6 +203,7 @@ public:
     Graph& createGraph(std::string name);
     Graph* findGraph(std::string_view name) noexcept;
     const Graph* findGraph(std::string_view name) const noexcept;
+    void registerGraphAlias(std::string alias, Graph& graph);
 
     void markAsTop(std::string_view graphName);
     const std::vector<std::string>& topGraphs() const noexcept { return topGraphs_; }
@@ -216,6 +218,7 @@ private:
 
     std::vector<std::unique_ptr<Graph>> graphs_;
     std::map<std::string, Graph*> graphByName_;
+    std::unordered_map<std::string, Graph*> graphAliasByName_;
     std::vector<std::string> topGraphs_;
 };
 

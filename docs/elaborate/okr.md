@@ -93,3 +93,9 @@
   - KR2 在 CombAlwaysConverter 中实现上述算法，创建 kMux 结构，如果需要可以增强 CombAlwaysLHSConverter
   - KR3 只支持可综合的 if/case 结构，对于产生 latch 的情况报错处理
   - KR4 创建足够复杂的测试案例
+
+## 阶段14：CombAlwaysConverter 添加静态分支分析能力
+- **Objective** CombAlwaysConverter 对于其中可静态分析的分支结构提供支持
+  - KR1 对于可静态分析的分支，不产生 kMux
+  - KR2 能够处理静态与动态分支嵌套的情况
+  - KR3 创建测试样例

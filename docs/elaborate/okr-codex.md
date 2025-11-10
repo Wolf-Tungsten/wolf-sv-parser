@@ -48,3 +48,9 @@
 - **KR2（kMux 生成）** CombAlwaysConverter/CombAlwaysRHSConverter/CombAlwaysLHSConverter 要能根据 if/case 的控制流在 GRH 中创建 kMux/kMuxChain 结构：对 if/else 形成二路 mux，对 case 形成链式mux（不允许出现 1：n mux），并在必要时增强 CombAlwaysLHSConverter，使其能对每个分支单独准备写入 Value，最终在控制流合流点用 mux 把 Value 合成后再写入 shadow/writeBack。
 - **KR3（防止 latch）** 仅支持完全覆盖的可综合结构：被赋值的变量要完整分支覆盖；缺失覆盖将导致潜在 latch，需要在解析阶段检测并报错。对于显式声明的优先级 case/unique case，要按照 SystemVerilog 语义（短路/优先 vs 并行）生成 mux，并确保诊断信息能够提醒用户不支持的 latch 模式。
 - **KR4（测试与复杂样例）** 设计涵盖嵌套 if/case、结构体字段赋值、带 shadow 读写的例子，以及 case 内部调用 RHSConverter 的复杂表达式；测试需输出 Graph/写回 memo JSON，证明 mux 链路、shadow 更新、错误分支都按预期运行，并覆盖 latch 检测的负例。
+
+## 阶段14：CombAlwaysConverter 添加静态分支分析能力
+- **目标定位** 在阶段13的控制流框架上补齐可静态决策分支（条件/ case item 在 elaboration 期间即可求值）的优化路径：被判定为「恒真/恒假」的控制块在 GRH 中不再注入多余的 kMux，而是直接落到存活分支的 Value/写集合。
+- **KR1（静态条件检测与折叠）** 结合 slang 的常量折叠能力，在处理 if/case 节点时先尝试对条件表达式求 `ConstantValue`，若能判定为 0/1 或匹配到唯一的 case item，则只解析对应分支并标记其它分支为 unreachable；同时阻止 CombAlwaysRHSConverter/CombAlwaysLHSConverter 生成冗余 Value，确保 Graph 中看不到因静态条件被动创建的 kMux/kMuxChain。
+- **KR2（静态/动态混合嵌套）** 当静态分支内部仍包含动态控制（或反之），需要保证 shadow/writeBack memo 的可见性规则依旧成立：静态剪枝负责缩小语句集合，但对残存的动态分支继续沿用阶段13的 mux 合成逻辑，并能正确溯源「静态祖先」信息，用于诊断和调试。
+- **KR3（测试覆盖）** 构建覆盖纯静态条件、静态 case、静态与动态交错（静态外层包裹动态子 if/case、动态 case item 中存在静态 guard）的单元测试，验证生成的 GRH/写回 JSON 中确实没有多余 mux，并补充断言证明 unreachable 分支不会错误触发写回。

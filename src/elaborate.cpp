@@ -1260,6 +1260,7 @@ private:
                                       slang::ast::CaseStatementCondition condition);
     grh::Value* createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                    std::string_view hint);
+    std::optional<bool> evaluateStaticCondition(const slang::ast::Expression& expr);
 
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
@@ -1434,7 +1435,24 @@ void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatemen
         reportControlFlowTodo("patterned if");
         return;
     }
-    grh::Value* conditionValue = rhsConverter_.convert(*stmt.conditions.front().expr);
+    const slang::ast::Expression& conditionExpr = *stmt.conditions.front().expr;
+    if (std::optional<bool> staticValue = evaluateStaticCondition(conditionExpr)) {
+        ShadowFrame baseSnapshot = currentFrame();
+        if (*staticValue) {
+            ShadowFrame trueFrame = runWithShadowFrame(baseSnapshot, stmt.ifTrue);
+            currentFrame() = std::move(trueFrame);
+        }
+        else if (stmt.ifFalse) {
+            ShadowFrame falseFrame = runWithShadowFrame(baseSnapshot, *stmt.ifFalse);
+            currentFrame() = std::move(falseFrame);
+        }
+        else {
+            currentFrame() = std::move(baseSnapshot);
+        }
+        return;
+    }
+
+    grh::Value* conditionValue = rhsConverter_.convert(conditionExpr);
     if (!conditionValue) {
         return;
     }
@@ -1459,12 +1477,27 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         return;
     }
 
+    checkCaseUniquePriority(stmt);
+
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    auto [knownBranch, isKnown] = stmt.getKnownBranch(ctx);
+    if (isKnown) {
+        ShadowFrame baseSnapshot = currentFrame();
+        if (knownBranch) {
+            ShadowFrame branchFrame = runWithShadowFrame(baseSnapshot, *knownBranch);
+            currentFrame() = std::move(branchFrame);
+        }
+        else {
+            currentFrame() = std::move(baseSnapshot);
+        }
+        return;
+    }
+
     grh::Value* controlValue = rhsConverter_.convert(stmt.expr);
     if (!controlValue) {
         return;
     }
-
-    checkCaseUniquePriority(stmt);
 
     ShadowFrame baseSnapshot = currentFrame();
     std::vector<CaseBranch> branches;
@@ -2055,6 +2088,26 @@ CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, boo
     return value.integer();
 }
 
+std::optional<bool> CombAlwaysConverter::evaluateStaticCondition(
+    const slang::ast::Expression& expr) {
+    if (!expr.type) {
+        return std::nullopt;
+    }
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || value.hasUnknown()) {
+        return std::nullopt;
+    }
+    if (value.isTrue()) {
+        return true;
+    }
+    if (value.isFalse()) {
+        return false;
+    }
+    return std::nullopt;
+}
+
 slang::ast::EvalContext& CombAlwaysConverter::ensureEvalContext() {
     if (!evalContext_) {
         evalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
@@ -2428,10 +2481,50 @@ grh::Value* RHSConverter::convertNamedValue(const slang::ast::Expression& expr) 
         if (grh::Value* fallback = resolveGraphValue(named.symbol)) {
             return fallback;
         }
+
+        if (grh::Value* paramValue = materializeParameterValue(named)) {
+            return paramValue;
+        }
     }
 
     reportUnsupported("named value", expr);
     return nullptr;
+}
+
+grh::Value* RHSConverter::materializeParameterValue(const slang::ast::NamedValueExpression& expr) {
+    const auto* param = expr.symbol.as_if<slang::ast::ParameterSymbol>();
+    if (!param) {
+        return nullptr;
+    }
+
+    const slang::ConstantValue& constValue = param->getValue(expr.sourceRange);
+    if (!constValue || !constValue.isInteger()) {
+        if (diagnostics_ && origin_) {
+            std::string message = "Parameter ";
+            message.append(std::string(param->name));
+            message.append(" has unsupported value type for RHS conversion");
+            diagnostics_->nyi(*origin_, std::move(message));
+        }
+        return nullptr;
+    }
+
+    const slang::ast::Type* type = expr.type;
+    if (!type) {
+        type = &param->getType();
+    }
+    if (!type) {
+        if (diagnostics_ && origin_) {
+            std::string message = "Parameter ";
+            message.append(std::string(param->name));
+            message.append(" lacks resolved type information");
+            diagnostics_->nyi(*origin_, std::move(message));
+        }
+        return nullptr;
+    }
+
+    const slang::SVInt& literal = constValue.integer();
+    std::string_view hint = param->name.empty() ? "param" : param->name;
+    return createConstantValue(literal, *type, hint);
 }
 
 grh::Value* RHSConverter::convertLiteral(const slang::ast::Expression& expr) {
@@ -3151,6 +3244,9 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
 
         convertInstanceBody(*topInstance, *graph, netlist);
         netlist.markAsTop(graph->name());
+        if (!topInstance->name.empty()) {
+            netlist.registerGraphAlias(std::string(topInstance->name), *graph);
+        }
     }
 
     return netlist;

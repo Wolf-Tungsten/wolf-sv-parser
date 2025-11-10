@@ -1080,22 +1080,43 @@ namespace wolf_sv::grh
 
     Graph *Netlist::findGraph(std::string_view name) noexcept
     {
-        auto it = graphByName_.find(std::string(name));
-        if (it == graphByName_.end())
+        std::string key(name);
+        auto it = graphByName_.find(key);
+        if (it != graphByName_.end())
         {
-            return nullptr;
+            return it->second;
         }
-        return it->second;
+        auto aliasIt = graphAliasByName_.find(key);
+        if (aliasIt != graphAliasByName_.end())
+        {
+            return aliasIt->second;
+        }
+        return nullptr;
     }
 
     const Graph *Netlist::findGraph(std::string_view name) const noexcept
     {
-        auto it = graphByName_.find(std::string(name));
-        if (it == graphByName_.end())
+        std::string key(name);
+        auto it = graphByName_.find(key);
+        if (it != graphByName_.end())
         {
-            return nullptr;
+            return it->second;
         }
-        return it->second;
+        auto aliasIt = graphAliasByName_.find(key);
+        if (aliasIt != graphAliasByName_.end())
+        {
+            return aliasIt->second;
+        }
+        return nullptr;
+    }
+
+    void Netlist::registerGraphAlias(std::string alias, Graph &graph)
+    {
+        if (alias.empty())
+        {
+            return;
+        }
+        graphAliasByName_[std::move(alias)] = &graph;
     }
 
     void Netlist::markAsTop(std::string_view graphName)

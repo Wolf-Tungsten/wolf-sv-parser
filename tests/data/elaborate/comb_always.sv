@@ -167,3 +167,98 @@ module comb_always_stage13_incomplete(
         // else branch intentionally omitted to trigger latch diagnostic
     end
 endmodule
+
+module comb_always_stage14_static_if(
+    input  logic [3:0] in_true,
+    input  logic [3:0] in_false,
+    input  logic [3:0] dyn_a,
+    input  logic [3:0] dyn_b,
+    input  logic       select,
+    output logic [3:0] out_static_true,
+    output logic [3:0] out_static_false,
+    output logic [3:0] out_mixed
+);
+    localparam bit ALWAYS_TRUE = 1'b1;
+    localparam bit ALWAYS_FALSE = 1'b0;
+
+    always_comb begin
+        if (ALWAYS_TRUE) begin
+            out_static_true = in_true;
+        end
+        else begin
+            out_static_true = in_false;
+        end
+    end
+
+    always_comb begin
+        if (ALWAYS_FALSE) begin
+            out_static_false = in_true;
+        end
+        else begin
+            out_static_false = in_false;
+        end
+    end
+
+    always_comb begin
+        if (ALWAYS_TRUE) begin
+            if (select) begin
+                out_mixed = dyn_a;
+            end
+            else begin
+                out_mixed = dyn_b;
+            end
+        end
+        else begin
+            out_mixed = '0;
+        end
+    end
+endmodule
+
+module comb_always_stage14_static_case(
+    input  logic [3:0] in0,
+    input  logic [3:0] in1,
+    input  logic [3:0] in2,
+    input  logic [3:0] in3,
+    input  logic [3:0] dyn_a,
+    input  logic [3:0] dyn_b,
+    input  logic       select,
+    output logic [3:0] out_case_const,
+    output logic [3:0] out_case_default,
+    output logic [3:0] out_case_nested
+);
+    localparam int MODE_CONST = 2;
+    localparam int MODE_DEFAULT = 9;
+    localparam int MODE_NESTED = 1;
+
+    always_comb begin
+        case (MODE_CONST)
+            0: out_case_const = in0;
+            1: out_case_const = in1;
+            2: out_case_const = in2;
+            default: out_case_const = in3;
+        endcase
+    end
+
+    always_comb begin
+        case (MODE_DEFAULT)
+            0: out_case_default = in0;
+            1: out_case_default = in1;
+            default: out_case_default = in3;
+        endcase
+    end
+
+    always_comb begin
+        case (MODE_NESTED)
+            0: out_case_nested = in0;
+            1: begin
+                if (select) begin
+                    out_case_nested = dyn_a;
+                end
+                else begin
+                    out_case_nested = dyn_b;
+                end
+            end
+            default: out_case_nested = in3;
+        endcase
+    end
+endmodule

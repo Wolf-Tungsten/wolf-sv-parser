@@ -223,6 +223,7 @@ private:
     grh::Value* convertConcatenation(const slang::ast::ConcatenationExpression& expr);
     grh::Value* convertReplication(const slang::ast::ReplicationExpression& expr);
     grh::Value* convertConversion(const slang::ast::ConversionExpression& expr);
+    grh::Value* materializeParameterValue(const slang::ast::NamedValueExpression& expr);
     std::string formatConstantLiteral(const slang::SVInt& value,
                                       const slang::ast::Type& type) const;
 
