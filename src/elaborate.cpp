@@ -449,9 +449,9 @@ private:
     slang::function_ref<void(const slang::ast::Expression&)> onAssignment_;
 };
 
-class ContinuousAssignLowerer {
+class ContinuousAssignConverter {
 public:
-    ContinuousAssignLowerer(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+    ContinuousAssignConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                             WriteBackMemo& memo,
                             const slang::ast::ContinuousAssignSymbol& origin,
                             ElaborateDiagnostics* diagnostics);
@@ -498,7 +498,7 @@ private:
     std::size_t sliceCounter_ = 0;
 };
 
-ContinuousAssignLowerer::ContinuousAssignLowerer(grh::Graph& graph,
+ContinuousAssignConverter::ContinuousAssignConverter(grh::Graph& graph,
                                                  std::span<const SignalMemoEntry> netMemo,
                                                  WriteBackMemo& memo,
                                                  const slang::ast::ContinuousAssignSymbol& origin,
@@ -509,7 +509,7 @@ ContinuousAssignLowerer::ContinuousAssignLowerer(grh::Graph& graph,
     originSymbol_(origin),
     diagnostics_(diagnostics) {}
 
-bool ContinuousAssignLowerer::lower(const slang::ast::AssignmentExpression& assignment,
+bool ContinuousAssignConverter::lower(const slang::ast::AssignmentExpression& assignment,
                                     grh::Value& rhsValue) {
     pending_.clear();
 
@@ -541,7 +541,7 @@ bool ContinuousAssignLowerer::lower(const slang::ast::AssignmentExpression& assi
     return true;
 }
 
-bool ContinuousAssignLowerer::processLhs(const slang::ast::Expression& expr,
+bool ContinuousAssignConverter::processLhs(const slang::ast::Expression& expr,
                                          grh::Value& rhsValue) {
     if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
         return handleConcatenation(*concat, rhsValue);
@@ -560,7 +560,7 @@ bool ContinuousAssignLowerer::processLhs(const slang::ast::Expression& expr,
     return handleLeaf(expr, rhsValue);
 }
 
-bool ContinuousAssignLowerer::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
+bool ContinuousAssignConverter::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
                                                   grh::Value& rhsValue) {
     const auto operands = concat.operands();
     if (operands.empty()) {
@@ -611,7 +611,7 @@ bool ContinuousAssignLowerer::handleConcatenation(const slang::ast::Concatenatio
     return true;
 }
 
-bool ContinuousAssignLowerer::handleLeaf(const slang::ast::Expression& expr,
+bool ContinuousAssignConverter::handleLeaf(const slang::ast::Expression& expr,
                                          grh::Value& rhsValue) {
     const SignalMemoEntry* entry = resolveMemoEntry(expr);
     if (!entry) {
@@ -647,7 +647,7 @@ bool ContinuousAssignLowerer::handleLeaf(const slang::ast::Expression& expr,
 }
 
 const SignalMemoEntry*
-ContinuousAssignLowerer::resolveMemoEntry(const slang::ast::Expression& expr) const {
+ContinuousAssignConverter::resolveMemoEntry(const slang::ast::Expression& expr) const {
     if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
         return findMemoEntry(*symbol);
     }
@@ -655,7 +655,7 @@ ContinuousAssignLowerer::resolveMemoEntry(const slang::ast::Expression& expr) co
 }
 
 const SignalMemoEntry*
-ContinuousAssignLowerer::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+ContinuousAssignConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
     for (const SignalMemoEntry& entry : netMemo_) {
         if (entry.symbol == &symbol) {
             return &entry;
@@ -664,8 +664,8 @@ ContinuousAssignLowerer::findMemoEntry(const slang::ast::ValueSymbol& symbol) co
     return nullptr;
 }
 
-std::optional<ContinuousAssignLowerer::BitRange>
-ContinuousAssignLowerer::resolveBitRange(const SignalMemoEntry& entry,
+std::optional<ContinuousAssignConverter::BitRange>
+ContinuousAssignConverter::resolveBitRange(const SignalMemoEntry& entry,
                                          const slang::ast::Expression& expr,
                                          std::string& pathOut) {
     if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
@@ -716,8 +716,8 @@ ContinuousAssignLowerer::resolveBitRange(const SignalMemoEntry& entry,
     return std::nullopt;
 }
 
-std::optional<ContinuousAssignLowerer::BitRange>
-ContinuousAssignLowerer::resolveRangeSelect(const SignalMemoEntry& entry,
+std::optional<ContinuousAssignConverter::BitRange>
+ContinuousAssignConverter::resolveRangeSelect(const SignalMemoEntry& entry,
                                             const slang::ast::RangeSelectExpression& expr,
                                             const std::string& basePath, std::string& pathOut) {
     using slang::ast::RangeSelectionKind;
@@ -813,7 +813,7 @@ ContinuousAssignLowerer::resolveRangeSelect(const SignalMemoEntry& entry,
 }
 
 std::optional<std::string>
-ContinuousAssignLowerer::buildFieldPath(const slang::ast::Expression& expr) {
+ContinuousAssignConverter::buildFieldPath(const slang::ast::Expression& expr) {
     if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
         if (conversion->isImplicit()) {
             return buildFieldPath(conversion->operand());
@@ -866,7 +866,7 @@ ContinuousAssignLowerer::buildFieldPath(const slang::ast::Expression& expr) {
 }
 
 std::optional<int64_t>
-ContinuousAssignLowerer::evaluateConstant(const slang::ast::Expression& expr) {
+ContinuousAssignConverter::evaluateConstant(const slang::ast::Expression& expr) {
     slang::ast::EvalContext& ctx = ensureEvalContext();
     ctx.reset();
     slang::ConstantValue value = expr.eval(ctx);
@@ -876,8 +876,8 @@ ContinuousAssignLowerer::evaluateConstant(const slang::ast::Expression& expr) {
     return value.integer().as<int64_t>();
 }
 
-std::optional<ContinuousAssignLowerer::BitRange>
-ContinuousAssignLowerer::lookupRangeByPath(const SignalMemoEntry& entry,
+std::optional<ContinuousAssignConverter::BitRange>
+ContinuousAssignConverter::lookupRangeByPath(const SignalMemoEntry& entry,
                                            std::string_view path) const {
     if (path.empty()) {
         if (entry.width <= 0) {
@@ -914,7 +914,7 @@ ContinuousAssignLowerer::lookupRangeByPath(const SignalMemoEntry& entry,
     return std::nullopt;
 }
 
-grh::Value* ContinuousAssignLowerer::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+grh::Value* ContinuousAssignConverter::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
                                                       const slang::ast::Expression& originExpr) {
     if (lsb == 0 && msb == source.width() - 1) {
         return &source;
@@ -943,20 +943,20 @@ grh::Value* ContinuousAssignLowerer::createSliceValue(grh::Value& source, int64_
     return &value;
 }
 
-void ContinuousAssignLowerer::report(std::string message) {
+void ContinuousAssignConverter::report(std::string message) {
     if (diagnostics_) {
         diagnostics_->nyi(originSymbol_, std::move(message));
     }
 }
 
-slang::ast::EvalContext& ContinuousAssignLowerer::ensureEvalContext() {
+slang::ast::EvalContext& ContinuousAssignConverter::ensureEvalContext() {
     if (!evalContext_) {
         evalContext_ = std::make_unique<slang::ast::EvalContext>(originSymbol_);
     }
     return *evalContext_;
 }
 
-void ContinuousAssignLowerer::flushPending() {
+void ContinuousAssignConverter::flushPending() {
     for (auto& [entry, slices] : pending_) {
         if (!entry || slices.empty()) {
             continue;
@@ -966,7 +966,7 @@ void ContinuousAssignLowerer::flushPending() {
     }
 }
 
-bool ContinuousAssignLowerer::pathMatchesDescendant(std::string_view parent,
+bool ContinuousAssignConverter::pathMatchesDescendant(std::string_view parent,
                                                     std::string_view candidate) {
     if (parent.empty()) {
         return false;
@@ -2450,6 +2450,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
     }
 
     populatePorts(instance, body, graph);
+    emitModulePlaceholder(instance, graph);
     collectSignalMemos(body);
     materializeSignalMemos(body, graph);
     ensureWriteBackMemo(body);
@@ -2484,7 +2485,6 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
     }
 
     finalizeWriteBackMemo(body, graph);
-    emitModulePlaceholder(instance, graph);
 }
 
 void Elaborate::processInstanceArray(const slang::ast::InstanceArraySymbol& array,
@@ -2589,7 +2589,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
     }
 
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    ContinuousAssignLowerer lowerer(graph, netMemo, memo, assign, diagnostics_);
+    ContinuousAssignConverter lowerer(graph, netMemo, memo, assign, diagnostics_);
     lowerer.lower(*assignment, *rhsValue);
 }
 
