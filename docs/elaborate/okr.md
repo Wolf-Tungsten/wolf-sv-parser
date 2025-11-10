@@ -78,3 +78,11 @@
   - KR1 调用 CombRHSConverter 实现 assign 中 RHS 的解析，生成 Value
   - KR2 对 LHS 进行解析，添加必要的 kSlice* 操作，写入 writeBack memo
   - KR3 构建测试样例，覆盖复杂数据类型，形成人类可读的 json 输出供检查
+
+## 阶段12：创建 CombAlwaysConverter 类
+- **Objective** 为解析组合逻辑过程块创建 CombAlwaysConverter 类
+  - KR1 CombAlwaysConverter 用于 always_comb 和 always@(*) 类型过程块的解析，在 elaborate 过程中由 processCombAlways 调用
+  - KR2 CombAlwaysConverter 维护解析组合逻辑阻塞赋值语义、块作用域内的 memo，例如 a = 1；b = a；时，b 应该得到 1
+  - KR3 结合 KR2 的 memo，CombAlwaysConverter 需要派生自己的 CombAlwaysRHSConverter 和 自定义的 LHS 处理逻辑
+  - KR4 CombAlwaysConverter 在转换结束后，将创建的 Operation,Value 写回 graph，最终的赋值结果写回 writeback memo
+  - KR5 CombAlwaysConverter 预留之后支持组合逻辑 if/case/loop 的 TODO 入口

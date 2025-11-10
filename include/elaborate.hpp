@@ -41,6 +41,7 @@ class ConditionalExpression;
 class ConcatenationExpression;
 class ReplicationExpression;
 class ConversionExpression;
+class AssignmentExpression;
 class NamedValueExpression;
 class RangeSelectExpression;
 class ElementSelectExpression;
@@ -270,6 +271,81 @@ private:
                                   std::string_view hint);
 };
 
+/// Converts LHS expressions into write-back slices.
+class LHSConverter {
+public:
+    struct Context {
+        grh::Graph* graph = nullptr;
+        std::span<const SignalMemoEntry> netMemo;
+        const slang::ast::Symbol* origin = nullptr;
+        ElaborateDiagnostics* diagnostics = nullptr;
+    };
+
+    struct WriteResult {
+        const SignalMemoEntry* target = nullptr;
+        std::vector<WriteBackMemo::Slice> slices;
+    };
+
+    explicit LHSConverter(Context context);
+    virtual ~LHSConverter() = default;
+
+protected:
+    bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
+               std::vector<WriteResult>& outResults);
+    virtual bool allowReplication() const { return false; }
+    grh::Graph& graph() const noexcept { return *graph_; }
+    ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
+    const slang::ast::Symbol* origin() const noexcept { return origin_; }
+
+private:
+    struct BitRange {
+        int64_t msb = 0;
+        int64_t lsb = 0;
+    };
+
+    bool processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue);
+    bool handleConcatenation(const slang::ast::ConcatenationExpression& concat,
+                             grh::Value& rhsValue);
+    bool handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue);
+    const SignalMemoEntry* resolveMemoEntry(const slang::ast::Expression& expr) const;
+    const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
+    std::optional<BitRange> resolveBitRange(const SignalMemoEntry& entry,
+                                            const slang::ast::Expression& expr,
+                                            std::string& pathOut);
+    std::optional<BitRange> resolveRangeSelect(const SignalMemoEntry& entry,
+                                               const slang::ast::RangeSelectExpression& expr,
+                                               const std::string& basePath, std::string& pathOut);
+    std::optional<std::string> buildFieldPath(const slang::ast::Expression& expr);
+    std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
+    std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
+                                              std::string_view path) const;
+    grh::Value* createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+                                 const slang::ast::Expression& originExpr);
+    void report(std::string message);
+    slang::ast::EvalContext& ensureEvalContext();
+    static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
+    void flushPending(std::vector<WriteResult>& outResults);
+
+    grh::Graph* graph_ = nullptr;
+    std::span<const SignalMemoEntry> netMemo_;
+    const slang::ast::Symbol* origin_ = nullptr;
+    ElaborateDiagnostics* diagnostics_ = nullptr;
+    std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
+    std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    std::size_t sliceCounter_ = 0;
+};
+
+/// LHS converter specialization for continuous assigns.
+class ContinuousAssignLHSConverter : public LHSConverter {
+public:
+    ContinuousAssignLHSConverter(Context context, WriteBackMemo& memo);
+
+    bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+
+private:
+    WriteBackMemo& memo_;
+};
+
 /// Elaborates slang AST into GRH representation.
 class Elaborate {
 public:
@@ -303,6 +379,8 @@ private:
                                    grh::Graph& graph, grh::Netlist& netlist);
     void processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
                                  const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void processCombAlways(const slang::ast::ProceduralBlockSymbol& block,
+                           const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::Graph& parentGraph,
                          grh::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,

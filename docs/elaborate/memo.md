@@ -40,6 +40,6 @@
      - 对 net：创建 `kAssign` 把组合出的 SSA Value 写回 `entry.value`；
      - 对 reg：将组合结果连接到 `entry.stateOp` 的数据端（`kRegister` operand），保持寄存器 SSA 输出不被破坏；
      - 对 `kMemory` 目前会报 `NYI`，留待后续阶段实现。
-  3. finalize 结束后 memo 会被清空，保证每次 elaboration 只消费一次 pending writes。
+ 3. finalize 结束后 memo 会被清空，保证每次 elaboration 只消费一次 pending writes。
 
 通过上述分层 memo，elaborate 可以把「解析 slang AST」、「构造 GRH 节点」以及「最终写回/驱动 stateful 对象」解耦，既便于诊断，也方便阶段化落地。

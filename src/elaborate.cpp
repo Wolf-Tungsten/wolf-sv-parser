@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cctype>
 #include <cstdint>
 #include <limits>
@@ -449,538 +450,6 @@ private:
     slang::function_ref<void(const slang::ast::Expression&)> onAssignment_;
 };
 
-class ContinuousAssignConverter {
-public:
-    ContinuousAssignConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                            WriteBackMemo& memo,
-                            const slang::ast::ContinuousAssignSymbol& origin,
-                            ElaborateDiagnostics* diagnostics);
-
-    bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
-
-private:
-    struct BitRange {
-        int64_t msb = 0;
-        int64_t lsb = 0;
-    };
-
-    bool processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue);
-    bool handleConcatenation(const slang::ast::ConcatenationExpression& concat,
-                             grh::Value& rhsValue);
-    bool handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue);
-    const SignalMemoEntry* resolveMemoEntry(const slang::ast::Expression& expr) const;
-    const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
-    std::optional<BitRange> resolveBitRange(const SignalMemoEntry& entry,
-                                            const slang::ast::Expression& expr,
-                                            std::string& pathOut);
-    std::optional<BitRange> resolveRangeSelect(const SignalMemoEntry& entry,
-                                               const slang::ast::RangeSelectExpression& expr,
-                                               const std::string& basePath,
-                                               std::string& pathOut);
-    std::optional<std::string> buildFieldPath(const slang::ast::Expression& expr);
-    std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
-    std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
-                                              std::string_view path) const;
-    grh::Value* createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
-                                 const slang::ast::Expression& originExpr);
-    void report(std::string message);
-    slang::ast::EvalContext& ensureEvalContext();
-    void flushPending();
-    static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
-
-    grh::Graph& graph_;
-    std::span<const SignalMemoEntry> netMemo_;
-    WriteBackMemo& memo_;
-    const slang::ast::ContinuousAssignSymbol& originSymbol_;
-    ElaborateDiagnostics* diagnostics_;
-    std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
-    std::unique_ptr<slang::ast::EvalContext> evalContext_;
-    std::size_t sliceCounter_ = 0;
-};
-
-ContinuousAssignConverter::ContinuousAssignConverter(grh::Graph& graph,
-                                                 std::span<const SignalMemoEntry> netMemo,
-                                                 WriteBackMemo& memo,
-                                                 const slang::ast::ContinuousAssignSymbol& origin,
-                                                 ElaborateDiagnostics* diagnostics) :
-    graph_(graph),
-    netMemo_(netMemo),
-    memo_(memo),
-    originSymbol_(origin),
-    diagnostics_(diagnostics) {}
-
-bool ContinuousAssignConverter::lower(const slang::ast::AssignmentExpression& assignment,
-                                    grh::Value& rhsValue) {
-    pending_.clear();
-
-    const slang::ast::Type* lhsType = assignment.left().type;
-    if (!lhsType || !lhsType->isBitstreamType() || !lhsType->isFixedSize()) {
-        report("Assign LHS must be a fixed-size bitstream type");
-        return false;
-    }
-
-    const int64_t lhsWidth = static_cast<int64_t>(lhsType->getBitstreamWidth());
-    if (lhsWidth <= 0) {
-        report("Assign LHS has zero width");
-        return false;
-    }
-    if (rhsValue.width() != lhsWidth) {
-        std::ostringstream oss;
-        oss << "Assign width mismatch; lhs=" << lhsWidth << " rhs=" << rhsValue.width();
-        report(oss.str());
-        return false;
-    }
-
-    if (!processLhs(assignment.left(), rhsValue)) {
-        pending_.clear();
-        return false;
-    }
-
-    flushPending();
-    pending_.clear();
-    return true;
-}
-
-bool ContinuousAssignConverter::processLhs(const slang::ast::Expression& expr,
-                                         grh::Value& rhsValue) {
-    if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
-        return handleConcatenation(*concat, rhsValue);
-    }
-
-    if (expr.as_if<slang::ast::ReplicationExpression>()) {
-        report("Replication is not supported on assign LHS");
-        return false;
-    }
-
-    if (expr.as_if<slang::ast::StreamingConcatenationExpression>()) {
-        report("Streaming concatenation is not supported on assign LHS");
-        return false;
-    }
-
-    return handleLeaf(expr, rhsValue);
-}
-
-bool ContinuousAssignConverter::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
-                                                  grh::Value& rhsValue) {
-    const auto operands = concat.operands();
-    if (operands.empty()) {
-        report("Empty concatenation on assign LHS");
-        return false;
-    }
-
-    int64_t remainingWidth = rhsValue.width();
-    int64_t currentMsb = remainingWidth - 1;
-
-    for (const slang::ast::Expression* operand : operands) {
-        if (!operand || !operand->type) {
-            report("Concatenation operand lacks type information");
-            return false;
-        }
-        if (!operand->type->isBitstreamType() || !operand->type->isFixedSize()) {
-            report("Concatenation operand must be a fixed-size bitstream");
-            return false;
-        }
-
-        const int64_t operandWidth =
-            static_cast<int64_t>(operand->type->getBitstreamWidth());
-        if (operandWidth <= 0) {
-            report("Concatenation operand has zero width");
-            return false;
-        }
-        if (operandWidth > remainingWidth) {
-            report("Concatenation operand width exceeds available RHS bits");
-            return false;
-        }
-
-        const int64_t sliceLsb = currentMsb - operandWidth + 1;
-        grh::Value* sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
-        if (!sliceValue) {
-            return false;
-        }
-        if (!processLhs(*operand, *sliceValue)) {
-            return false;
-        }
-        currentMsb = sliceLsb - 1;
-        remainingWidth -= operandWidth;
-    }
-
-    if (remainingWidth != 0) {
-        report("Concatenation coverage does not match RHS width");
-        return false;
-    }
-    return true;
-}
-
-bool ContinuousAssignConverter::handleLeaf(const slang::ast::Expression& expr,
-                                         grh::Value& rhsValue) {
-    const SignalMemoEntry* entry = resolveMemoEntry(expr);
-    if (!entry) {
-        report("Assign LHS is not a memoized combinational net");
-        return false;
-    }
-
-    std::string path;
-    std::optional<BitRange> range = resolveBitRange(*entry, expr, path);
-    if (!range) {
-        return false;
-    }
-
-    const int64_t expectedWidth = range->msb - range->lsb + 1;
-    if (rhsValue.width() != expectedWidth) {
-        std::ostringstream oss;
-        oss << "Assign slice width mismatch; target=" << expectedWidth
-            << " rhs=" << rhsValue.width();
-        report(oss.str());
-        return false;
-    }
-
-    WriteBackMemo::Slice slice;
-    slice.path = path.empty() && entry->symbol && !entry->symbol->name.empty() ?
-                     std::string(entry->symbol->name) :
-                     path;
-    slice.msb = range->msb;
-    slice.lsb = range->lsb;
-    slice.value = &rhsValue;
-    slice.originExpr = &expr;
-    pending_[entry].push_back(std::move(slice));
-    return true;
-}
-
-const SignalMemoEntry*
-ContinuousAssignConverter::resolveMemoEntry(const slang::ast::Expression& expr) const {
-    if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
-        return findMemoEntry(*symbol);
-    }
-    return nullptr;
-}
-
-const SignalMemoEntry*
-ContinuousAssignConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
-    for (const SignalMemoEntry& entry : netMemo_) {
-        if (entry.symbol == &symbol) {
-            return &entry;
-        }
-    }
-    return nullptr;
-}
-
-std::optional<ContinuousAssignConverter::BitRange>
-ContinuousAssignConverter::resolveBitRange(const SignalMemoEntry& entry,
-                                         const slang::ast::Expression& expr,
-                                         std::string& pathOut) {
-    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
-        if (conversion->isImplicit()) {
-            return resolveBitRange(entry, conversion->operand(), pathOut);
-        }
-    }
-
-    if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>()) {
-        std::string basePath;
-        std::optional<BitRange> base = resolveBitRange(entry, range->value(), basePath);
-        if (!base) {
-            return std::nullopt;
-        }
-        return resolveRangeSelect(entry, *range, basePath, pathOut);
-    }
-
-    if (expr.as_if<slang::ast::ConcatenationExpression>() ||
-        expr.as_if<slang::ast::StreamingConcatenationExpression>() ||
-        expr.as_if<slang::ast::ReplicationExpression>()) {
-        report("Unexpected concatenation form inside assign leaf");
-        return std::nullopt;
-    }
-
-    std::optional<std::string> path = buildFieldPath(expr);
-    if (!path) {
-        report("Unable to derive flatten path for assign LHS");
-        return std::nullopt;
-    }
-
-    pathOut = *path;
-    if (pathOut.empty() && entry.symbol && !entry.symbol->name.empty()) {
-        pathOut = entry.symbol->name;
-    }
-
-    if (auto direct = lookupRangeByPath(entry, pathOut)) {
-        return direct;
-    }
-
-    if (entry.symbol && entry.symbol->name == pathOut) {
-        BitRange range{entry.width > 0 ? entry.width - 1 : 0, 0};
-        return range;
-    }
-
-    std::ostringstream oss;
-    oss << "Flatten metadata missing for path " << pathOut;
-    report(oss.str());
-    return std::nullopt;
-}
-
-std::optional<ContinuousAssignConverter::BitRange>
-ContinuousAssignConverter::resolveRangeSelect(const SignalMemoEntry& entry,
-                                            const slang::ast::RangeSelectExpression& expr,
-                                            const std::string& basePath, std::string& pathOut) {
-    using slang::ast::RangeSelectionKind;
-
-    auto makeIndexedPath = [&](int64_t index) {
-        std::string path = basePath;
-        path.push_back('[');
-        path.append(std::to_string(index));
-        path.push_back(']');
-        return path;
-    };
-
-    auto fetchRange = [&](int64_t index) -> std::optional<BitRange> {
-        const std::string path = makeIndexedPath(index);
-        if (auto range = lookupRangeByPath(entry, path)) {
-            return range;
-        }
-        std::ostringstream oss;
-        oss << "Assign LHS index " << index << " is out of bounds for " << basePath;
-        report(oss.str());
-        return std::nullopt;
-    };
-
-    switch (expr.getSelectionKind()) {
-    case RangeSelectionKind::Simple: {
-        std::optional<int64_t> left = evaluateConstant(expr.left());
-        std::optional<int64_t> right = evaluateConstant(expr.right());
-        if (!left || !right) {
-            report("Simple range select requires constant bounds");
-            return std::nullopt;
-        }
-        auto leftRange = fetchRange(*left);
-        auto rightRange = fetchRange(*right);
-        if (!leftRange || !rightRange) {
-            return std::nullopt;
-        }
-        BitRange range{std::max(leftRange->msb, rightRange->msb),
-                       std::min(leftRange->lsb, rightRange->lsb)};
-        pathOut = basePath;
-        pathOut.push_back('[');
-        pathOut.append(std::to_string(*left));
-        pathOut.push_back(':');
-        pathOut.append(std::to_string(*right));
-        pathOut.push_back(']');
-        return range;
-    }
-    case RangeSelectionKind::IndexedUp: {
-        std::optional<int64_t> base = evaluateConstant(expr.left());
-        std::optional<int64_t> width = evaluateConstant(expr.right());
-        if (!base || !width || *width <= 0) {
-            report("Indexed-up range select requires constant base/width");
-            return std::nullopt;
-        }
-        auto first = fetchRange(*base);
-        auto last = fetchRange(*base + *width - 1);
-        if (!first || !last) {
-            return std::nullopt;
-        }
-        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
-        pathOut = basePath;
-        pathOut.push_back('[');
-        pathOut.append(std::to_string(*base));
-        pathOut.append("+:");
-        pathOut.append(std::to_string(*width));
-        pathOut.push_back(']');
-        return range;
-    }
-    case RangeSelectionKind::IndexedDown: {
-        std::optional<int64_t> base = evaluateConstant(expr.left());
-        std::optional<int64_t> width = evaluateConstant(expr.right());
-        if (!base || !width || *width <= 0) {
-            report("Indexed-down range select requires constant base/width");
-            return std::nullopt;
-        }
-        auto first = fetchRange(*base);
-        auto last = fetchRange(*base - (*width - 1));
-        if (!first || !last) {
-            return std::nullopt;
-        }
-        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
-        pathOut = basePath;
-        pathOut.push_back('[');
-        pathOut.append(std::to_string(*base));
-        pathOut.append("-:");
-        pathOut.append(std::to_string(*width));
-        pathOut.push_back(']');
-        return range;
-    }
-    default:
-        report("Unsupported range select kind on assign LHS");
-        return std::nullopt;
-    }
-}
-
-std::optional<std::string>
-ContinuousAssignConverter::buildFieldPath(const slang::ast::Expression& expr) {
-    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
-        if (conversion->isImplicit()) {
-            return buildFieldPath(conversion->operand());
-        }
-    }
-
-    if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>()) {
-        return named->symbol.name.empty() ? std::optional<std::string>{}
-                                          : std::optional<std::string>(std::string(named->symbol.name));
-    }
-
-    if (const auto* member = expr.as_if<slang::ast::MemberAccessExpression>()) {
-        std::optional<std::string> base = buildFieldPath(member->value());
-        if (!base) {
-            return std::nullopt;
-        }
-        std::string memberName(member->member.name);
-        if (memberName.empty()) {
-            report("Anonymous member access in assign LHS");
-            return std::nullopt;
-        }
-        if (!base->empty()) {
-            base->push_back('.');
-        }
-        base->append(memberName);
-        return base;
-    }
-
-    if (const auto* element = expr.as_if<slang::ast::ElementSelectExpression>()) {
-        std::optional<std::string> base = buildFieldPath(element->value());
-        if (!base) {
-            return std::nullopt;
-        }
-        std::optional<int64_t> index = evaluateConstant(element->selector());
-        if (!index) {
-            report("Element select index must be constant on assign LHS");
-            return std::nullopt;
-        }
-        base->push_back('[');
-        base->append(std::to_string(*index));
-        base->push_back(']');
-        return base;
-    }
-
-    if (expr.kind == slang::ast::ExpressionKind::HierarchicalValue) {
-        report("Hierarchical assign targets are not supported");
-    }
-
-    return std::nullopt;
-}
-
-std::optional<int64_t>
-ContinuousAssignConverter::evaluateConstant(const slang::ast::Expression& expr) {
-    slang::ast::EvalContext& ctx = ensureEvalContext();
-    ctx.reset();
-    slang::ConstantValue value = expr.eval(ctx);
-    if (!value || !value.isInteger() || value.hasUnknown()) {
-        return std::nullopt;
-    }
-    return value.integer().as<int64_t>();
-}
-
-std::optional<ContinuousAssignConverter::BitRange>
-ContinuousAssignConverter::lookupRangeByPath(const SignalMemoEntry& entry,
-                                           std::string_view path) const {
-    if (path.empty()) {
-        if (entry.width <= 0) {
-            return std::nullopt;
-        }
-        return BitRange{entry.width - 1, 0};
-    }
-
-    for (const SignalMemoField& field : entry.fields) {
-        if (field.path == path) {
-            return BitRange{field.msb, field.lsb};
-        }
-    }
-
-    bool found = false;
-    int64_t maxMsb = std::numeric_limits<int64_t>::min();
-    int64_t minLsb = std::numeric_limits<int64_t>::max();
-    for (const SignalMemoField& field : entry.fields) {
-        if (!pathMatchesDescendant(path, field.path)) {
-            continue;
-        }
-        found = true;
-        maxMsb = std::max(maxMsb, field.msb);
-        minLsb = std::min(minLsb, field.lsb);
-    }
-
-    if (found) {
-        return BitRange{maxMsb, minLsb};
-    }
-
-    if (entry.symbol && entry.symbol->name == path) {
-        return BitRange{entry.width > 0 ? entry.width - 1 : 0, 0};
-    }
-    return std::nullopt;
-}
-
-grh::Value* ContinuousAssignConverter::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
-                                                      const slang::ast::Expression& originExpr) {
-    if (lsb == 0 && msb == source.width() - 1) {
-        return &source;
-    }
-    if (lsb < 0 || msb < lsb || msb >= source.width()) {
-        report("Assign RHS slice range is out of bounds");
-        return nullptr;
-    }
-
-    const auto tag = static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(this));
-    std::string opName =
-        "_assign_slice_op_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
-    std::string valueName =
-        "_assign_slice_val_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
-    ++sliceCounter_;
-
-    grh::Operation& op = graph_.createOperation(grh::OperationKind::kSliceStatic, opName);
-    op.addOperand(source);
-    op.setAttribute("sliceStart", lsb);
-    op.setAttribute("sliceEnd", msb);
-
-    const int64_t width = msb - lsb + 1;
-    grh::Value& value =
-        graph_.createValue(valueName, width, originExpr.type ? originExpr.type->isSigned() : false);
-    op.addResult(value);
-    return &value;
-}
-
-void ContinuousAssignConverter::report(std::string message) {
-    if (diagnostics_) {
-        diagnostics_->nyi(originSymbol_, std::move(message));
-    }
-}
-
-slang::ast::EvalContext& ContinuousAssignConverter::ensureEvalContext() {
-    if (!evalContext_) {
-        evalContext_ = std::make_unique<slang::ast::EvalContext>(originSymbol_);
-    }
-    return *evalContext_;
-}
-
-void ContinuousAssignConverter::flushPending() {
-    for (auto& [entry, slices] : pending_) {
-        if (!entry || slices.empty()) {
-            continue;
-        }
-        memo_.recordWrite(*entry, WriteBackMemo::AssignmentKind::Continuous, &originSymbol_,
-                          std::move(slices));
-    }
-}
-
-bool ContinuousAssignConverter::pathMatchesDescendant(std::string_view parent,
-                                                    std::string_view candidate) {
-    if (parent.empty()) {
-        return false;
-    }
-    if (candidate.size() <= parent.size()) {
-        return false;
-    }
-    if (candidate.compare(0, parent.size(), parent) != 0) {
-        return false;
-    }
-    char next = candidate[parent.size()];
-    return next == '.' || next == '[';
-}
-
 const slang::ast::TimingControl* findTimingControl(const slang::ast::Statement& stmt) {
     if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>()) {
         return &timed->timing;
@@ -1173,7 +642,945 @@ MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& 
         return MemoDriverKind::None;
     }
 }
+
+bool isCombProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
+    using slang::ast::ProceduralBlockKind;
+    if (block.procedureKind == ProceduralBlockKind::AlwaysComb) {
+        return true;
+    }
+    if (block.procedureKind != ProceduralBlockKind::Always) {
+        return false;
+    }
+    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+    if (!timing) {
+        return true;
+    }
+    return timing->kind == slang::ast::TimingControlKind::ImplicitEvent;
+}
 } // namespace
+
+LHSConverter::LHSConverter(LHSConverter::Context context) :
+    graph_(context.graph),
+    netMemo_(context.netMemo),
+    origin_(context.origin),
+    diagnostics_(context.diagnostics) {}
+
+bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
+                         std::vector<LHSConverter::WriteResult>& outResults) {
+    pending_.clear();
+    outResults.clear();
+
+    const slang::ast::Type* lhsType = assignment.left().type;
+    if (!lhsType || !lhsType->isBitstreamType() || !lhsType->isFixedSize()) {
+        report("Assign LHS must be a fixed-size bitstream type");
+        return false;
+    }
+
+    const int64_t lhsWidth = static_cast<int64_t>(lhsType->getBitstreamWidth());
+    if (lhsWidth <= 0) {
+        report("Assign LHS has zero width");
+        return false;
+    }
+    if (rhsValue.width() != lhsWidth) {
+        std::ostringstream oss;
+        oss << "Assign width mismatch; lhs=" << lhsWidth << " rhs=" << rhsValue.width();
+        report(oss.str());
+        return false;
+    }
+
+    if (!processLhs(assignment.left(), rhsValue)) {
+        pending_.clear();
+        return false;
+    }
+
+    flushPending(outResults);
+    pending_.clear();
+    return true;
+}
+
+bool LHSConverter::processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue) {
+    if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
+        return handleConcatenation(*concat, rhsValue);
+    }
+
+    if (!allowReplication()) {
+        if (expr.as_if<slang::ast::ReplicationExpression>()) {
+            report("Replication is not supported on assign LHS");
+            return false;
+        }
+
+        if (expr.as_if<slang::ast::StreamingConcatenationExpression>()) {
+            report("Streaming concatenation is not supported on assign LHS");
+            return false;
+        }
+    }
+
+    return handleLeaf(expr, rhsValue);
+}
+
+bool LHSConverter::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
+                                       grh::Value& rhsValue) {
+    const auto operands = concat.operands();
+    if (operands.empty()) {
+        report("Empty concatenation on assign LHS");
+        return false;
+    }
+
+    int64_t remainingWidth = rhsValue.width();
+    int64_t currentMsb = remainingWidth - 1;
+
+    for (const slang::ast::Expression* operand : operands) {
+        if (!operand || !operand->type) {
+            report("Concatenation operand lacks type information");
+            return false;
+        }
+        if (!operand->type->isBitstreamType() || !operand->type->isFixedSize()) {
+            report("Concatenation operand must be a fixed-size bitstream");
+            return false;
+        }
+
+        const int64_t operandWidth =
+            static_cast<int64_t>(operand->type->getBitstreamWidth());
+        if (operandWidth <= 0) {
+            report("Concatenation operand has zero width");
+            return false;
+        }
+        if (operandWidth > remainingWidth) {
+            report("Concatenation operand width exceeds available RHS bits");
+            return false;
+        }
+
+        const int64_t sliceLsb = currentMsb - operandWidth + 1;
+        grh::Value* sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
+        if (!sliceValue) {
+            return false;
+        }
+        if (!processLhs(*operand, *sliceValue)) {
+            return false;
+        }
+        currentMsb = sliceLsb - 1;
+        remainingWidth -= operandWidth;
+    }
+
+    if (remainingWidth != 0) {
+        report("Concatenation coverage does not match RHS width");
+        return false;
+    }
+    return true;
+}
+
+bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue) {
+    const SignalMemoEntry* entry = resolveMemoEntry(expr);
+    if (!entry) {
+        report("Assign LHS is not a memoized combinational net");
+        return false;
+    }
+
+    std::string path;
+    std::optional<BitRange> range = resolveBitRange(*entry, expr, path);
+    if (!range) {
+        return false;
+    }
+
+    const int64_t expectedWidth = range->msb - range->lsb + 1;
+    if (rhsValue.width() != expectedWidth) {
+        std::ostringstream oss;
+        oss << "Assign slice width mismatch; target=" << expectedWidth
+            << " rhs=" << rhsValue.width();
+        report(oss.str());
+        return false;
+    }
+
+    WriteBackMemo::Slice slice;
+    slice.path = path.empty() && entry->symbol && !entry->symbol->name.empty() ?
+                     std::string(entry->symbol->name) :
+                     path;
+    slice.msb = range->msb;
+    slice.lsb = range->lsb;
+    slice.value = &rhsValue;
+    slice.originExpr = &expr;
+    pending_[entry].push_back(std::move(slice));
+    return true;
+}
+
+const SignalMemoEntry* LHSConverter::resolveMemoEntry(const slang::ast::Expression& expr) const {
+    if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(expr)) {
+        return findMemoEntry(*symbol);
+    }
+    return nullptr;
+}
+
+const SignalMemoEntry* LHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+    for (const SignalMemoEntry& entry : netMemo_) {
+        if (entry.symbol == &symbol) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+std::optional<LHSConverter::BitRange>
+LHSConverter::resolveBitRange(const SignalMemoEntry& entry, const slang::ast::Expression& expr,
+                              std::string& pathOut) {
+    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
+        if (conversion->isImplicit()) {
+            return resolveBitRange(entry, conversion->operand(), pathOut);
+        }
+    }
+
+    if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>()) {
+        std::string basePath;
+        std::optional<BitRange> base = resolveBitRange(entry, range->value(), basePath);
+        if (!base) {
+            return std::nullopt;
+        }
+        return resolveRangeSelect(entry, *range, basePath, pathOut);
+    }
+
+    if (expr.as_if<slang::ast::ConcatenationExpression>() ||
+        expr.as_if<slang::ast::StreamingConcatenationExpression>() ||
+        expr.as_if<slang::ast::ReplicationExpression>()) {
+        report("Unexpected concatenation form inside assign leaf");
+        return std::nullopt;
+    }
+
+    std::optional<std::string> path = buildFieldPath(expr);
+    if (!path) {
+        report("Unable to derive flatten path for assign LHS");
+        return std::nullopt;
+    }
+
+    pathOut = *path;
+    if (pathOut.empty() && entry.symbol && !entry.symbol->name.empty()) {
+        pathOut = entry.symbol->name;
+    }
+
+    if (auto direct = lookupRangeByPath(entry, pathOut)) {
+        return direct;
+    }
+
+    if (entry.symbol && entry.symbol->name == pathOut) {
+        BitRange range{entry.width > 0 ? entry.width - 1 : 0, 0};
+        return range;
+    }
+
+    std::ostringstream oss;
+    oss << "Flatten metadata missing for path " << pathOut;
+    report(oss.str());
+    return std::nullopt;
+}
+
+std::optional<LHSConverter::BitRange>
+LHSConverter::resolveRangeSelect(const SignalMemoEntry& entry,
+                                 const slang::ast::RangeSelectExpression& expr,
+                                 const std::string& basePath, std::string& pathOut) {
+    using slang::ast::RangeSelectionKind;
+
+    auto makeIndexedPath = [&](int64_t index) {
+        std::string path = basePath;
+        path.push_back('[');
+        path.append(std::to_string(index));
+        path.push_back(']');
+        return path;
+    };
+
+    auto fetchRange = [&](int64_t index) -> std::optional<BitRange> {
+        const std::string path = makeIndexedPath(index);
+        if (auto range = lookupRangeByPath(entry, path)) {
+            return range;
+        }
+        std::ostringstream oss;
+        oss << "Assign LHS index " << index << " is out of bounds for " << basePath;
+        report(oss.str());
+        return std::nullopt;
+    };
+
+    switch (expr.getSelectionKind()) {
+    case RangeSelectionKind::Simple: {
+        std::optional<int64_t> left = evaluateConstant(expr.left());
+        std::optional<int64_t> right = evaluateConstant(expr.right());
+        if (!left || !right) {
+            report("Simple range select bounds must be constant");
+            return std::nullopt;
+        }
+        const int64_t lower = std::min(*left, *right);
+        const int64_t upper = std::max(*left, *right);
+        std::optional<BitRange> first = fetchRange(upper);
+        std::optional<BitRange> last = fetchRange(lower);
+        if (!first || !last) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*left));
+        pathOut.push_back(':');
+        pathOut.append(std::to_string(*right));
+        pathOut.push_back(']');
+        return range;
+    }
+    case RangeSelectionKind::IndexedUp: {
+        std::optional<int64_t> base = evaluateConstant(expr.left());
+        std::optional<int64_t> width = evaluateConstant(expr.right());
+        if (!base || !width || *width <= 0) {
+            report("Indexed up select requires constant base/width");
+            return std::nullopt;
+        }
+        std::optional<BitRange> first = fetchRange(*base + *width - 1);
+        std::optional<BitRange> last = fetchRange(*base);
+        if (!first || !last) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*base));
+        pathOut.push_back('+');
+        pathOut.append(std::to_string(*width));
+        pathOut.push_back(']');
+        return range;
+    }
+    case RangeSelectionKind::IndexedDown: {
+        std::optional<int64_t> base = evaluateConstant(expr.left());
+        std::optional<int64_t> width = evaluateConstant(expr.right());
+        if (!base || !width || *width <= 0) {
+            report("Indexed down select requires constant base/width");
+            return std::nullopt;
+        }
+        std::optional<BitRange> first = fetchRange(*base);
+        std::optional<BitRange> last = fetchRange(*base - *width + 1);
+        if (!first || !last) {
+            return std::nullopt;
+        }
+        BitRange range{std::max(first->msb, last->msb), std::min(first->lsb, last->lsb)};
+        pathOut = basePath;
+        pathOut.push_back('[');
+        pathOut.append(std::to_string(*base));
+        pathOut.append("-:");
+        pathOut.append(std::to_string(*width));
+        pathOut.push_back(']');
+        return range;
+    }
+    default:
+        report("Unsupported range select kind on assign LHS");
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> LHSConverter::buildFieldPath(const slang::ast::Expression& expr) {
+    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
+        if (conversion->isImplicit()) {
+            return buildFieldPath(conversion->operand());
+        }
+    }
+
+    if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>()) {
+        return named->symbol.name.empty() ? std::optional<std::string>{}
+                                          : std::optional<std::string>(std::string(named->symbol.name));
+    }
+
+    if (const auto* member = expr.as_if<slang::ast::MemberAccessExpression>()) {
+        std::optional<std::string> base = buildFieldPath(member->value());
+        if (!base) {
+            return std::nullopt;
+        }
+        std::string memberName(member->member.name);
+        if (memberName.empty()) {
+            report("Anonymous member access in assign LHS");
+            return std::nullopt;
+        }
+        if (!base->empty()) {
+            base->push_back('.');
+        }
+        base->append(memberName);
+        return base;
+    }
+
+    if (const auto* element = expr.as_if<slang::ast::ElementSelectExpression>()) {
+        std::optional<std::string> base = buildFieldPath(element->value());
+        if (!base) {
+            return std::nullopt;
+        }
+        std::optional<int64_t> index = evaluateConstant(element->selector());
+        if (!index) {
+            report("Element select index must be constant on assign LHS");
+            return std::nullopt;
+        }
+        base->push_back('[');
+        base->append(std::to_string(*index));
+        base->push_back(']');
+        return base;
+    }
+
+    if (expr.kind == slang::ast::ExpressionKind::HierarchicalValue) {
+        report("Hierarchical assign targets are not supported");
+    }
+
+    return std::nullopt;
+}
+
+std::optional<int64_t> LHSConverter::evaluateConstant(const slang::ast::Expression& expr) {
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || !value.isInteger() || value.hasUnknown()) {
+        return std::nullopt;
+    }
+    return value.integer().as<int64_t>();
+}
+
+std::optional<LHSConverter::BitRange>
+LHSConverter::lookupRangeByPath(const SignalMemoEntry& entry, std::string_view path) const {
+    if (path.empty()) {
+        if (entry.width <= 0) {
+            return std::nullopt;
+        }
+        return BitRange{entry.width - 1, 0};
+    }
+
+    for (const SignalMemoField& field : entry.fields) {
+        if (field.path == path) {
+            return BitRange{field.msb, field.lsb};
+        }
+    }
+
+    bool found = false;
+    int64_t maxMsb = std::numeric_limits<int64_t>::min();
+    int64_t minLsb = std::numeric_limits<int64_t>::max();
+    for (const SignalMemoField& field : entry.fields) {
+        if (!pathMatchesDescendant(path, field.path)) {
+            continue;
+        }
+        found = true;
+        maxMsb = std::max(maxMsb, field.msb);
+        minLsb = std::min(minLsb, field.lsb);
+    }
+
+    if (found) {
+        return BitRange{maxMsb, minLsb};
+    }
+
+    if (entry.symbol && entry.symbol->name == path) {
+        return BitRange{entry.width > 0 ? entry.width - 1 : 0, 0};
+    }
+    return std::nullopt;
+}
+
+grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+                                           const slang::ast::Expression& originExpr) {
+    if (lsb == 0 && msb == source.width() - 1) {
+        return &source;
+    }
+    if (lsb < 0 || msb < lsb || msb >= source.width()) {
+        report("Assign RHS slice range is out of bounds");
+        return nullptr;
+    }
+
+    const auto tag = static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(this));
+    std::string opName =
+        "_assign_slice_op_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
+    std::string valueName =
+        "_assign_slice_val_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
+    ++sliceCounter_;
+
+    grh::Operation& op = graph().createOperation(grh::OperationKind::kSliceStatic, opName);
+    op.addOperand(source);
+    op.setAttribute("sliceStart", lsb);
+    op.setAttribute("sliceEnd", msb);
+
+    const int64_t width = msb - lsb + 1;
+    grh::Value& value = graph().createValue(
+        valueName, width, originExpr.type ? originExpr.type->isSigned() : false);
+    op.addResult(value);
+    return &value;
+}
+
+void LHSConverter::report(std::string message) {
+    if (diagnostics_ && origin_) {
+        diagnostics_->nyi(*origin_, std::move(message));
+    }
+}
+
+slang::ast::EvalContext& LHSConverter::ensureEvalContext() {
+    if (!evalContext_) {
+        assert(origin_ && "LHSConverter requires an origin symbol for evaluation");
+        evalContext_ = std::make_unique<slang::ast::EvalContext>(*origin_);
+    }
+    return *evalContext_;
+}
+void LHSConverter::flushPending(std::vector<WriteResult>& outResults) {
+    for (auto& [entry, slices] : pending_) {
+        if (!entry || slices.empty()) {
+            continue;
+        }
+        WriteResult result;
+        result.target = entry;
+        result.slices = std::move(slices);
+        outResults.push_back(std::move(result));
+    }
+}
+
+bool LHSConverter::pathMatchesDescendant(std::string_view parent, std::string_view candidate) {
+    if (parent.empty()) {
+        return false;
+    }
+    if (candidate.size() <= parent.size()) {
+        return false;
+    }
+    if (candidate.compare(0, parent.size(), parent) != 0) {
+        return false;
+    }
+    char next = candidate[parent.size()];
+    return next == '.' || next == '[';
+}
+
+ContinuousAssignLHSConverter::ContinuousAssignLHSConverter(Context context, WriteBackMemo& memo) :
+    LHSConverter(context), memo_(memo) {}
+
+bool ContinuousAssignLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
+                                           grh::Value& rhsValue) {
+    using WriteResult = LHSConverter::WriteResult;
+    std::vector<WriteResult> results;
+    if (!lower(assignment, rhsValue, results)) {
+        return false;
+    }
+    for (WriteResult& result : results) {
+        if (!result.target) {
+            continue;
+        }
+        memo_.recordWrite(*result.target, WriteBackMemo::AssignmentKind::Continuous, origin(),
+                          std::move(result.slices));
+    }
+    return true;
+}
+
+
+class CombAlwaysConverter;
+
+class CombAlwaysLHSConverter : public LHSConverter {
+public:
+    CombAlwaysLHSConverter(Context context, CombAlwaysConverter& owner);
+
+    bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+
+private:
+    CombAlwaysConverter& owner_;
+};
+
+class CombAlwaysRHSConverter : public CombRHSConverter {
+public:
+    CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner);
+
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+
+private:
+    CombAlwaysConverter& owner_;
+};
+
+class CombAlwaysConverter {
+public:
+    CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                        std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                        const slang::ast::ProceduralBlockSymbol& block,
+                        ElaborateDiagnostics* diagnostics);
+
+    void run();
+
+private:
+    friend class CombAlwaysRHSConverter;
+    friend class CombAlwaysLHSConverter;
+
+    struct ShadowState {
+        std::vector<WriteBackMemo::Slice> slices;
+        grh::Value* composed = nullptr;
+        bool dirty = false;
+    };
+
+    void visitStatement(const slang::ast::Statement& stmt);
+    void visitStatementList(const slang::ast::StatementList& list);
+    void visitBlock(const slang::ast::BlockStatement& block);
+    void visitExpressionStatement(const slang::ast::ExpressionStatement& stmt);
+    void visitProceduralAssign(const slang::ast::ProceduralAssignStatement& stmt);
+    void handleAssignment(const slang::ast::AssignmentExpression& expr,
+                          const slang::ast::Expression& originExpr);
+    void finalizeWrites();
+    void reportControlFlowTodo(std::string_view label);
+    void reportUnsupportedStmt(const slang::ast::Statement& stmt);
+    void handleEntryWrite(const SignalMemoEntry& entry,
+                          std::vector<WriteBackMemo::Slice> slices);
+    void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice);
+    grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
+    grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
+    grh::Value* createZeroValue(int64_t width);
+    std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
+    std::string makeShadowValueName(const SignalMemoEntry& entry, std::string_view suffix);
+
+    grh::Graph& graph_;
+    std::span<const SignalMemoEntry> netMemo_;
+    std::span<const SignalMemoEntry> regMemo_;
+    WriteBackMemo& memo_;
+    const slang::ast::ProceduralBlockSymbol& block_;
+    ElaborateDiagnostics* diagnostics_;
+    CombAlwaysRHSConverter rhsConverter_;
+    CombAlwaysLHSConverter lhsConverter_;
+    std::unordered_map<const SignalMemoEntry*, ShadowState> shadowState_;
+    std::unordered_map<int64_t, grh::Value*> zeroCache_;
+    std::size_t shadowNameCounter_ = 0;
+    bool reportedControlFlowTodo_ = false;
+};
+
+CombAlwaysRHSConverter::CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner) :
+    CombRHSConverter(context), owner_(owner) {}
+
+CombAlwaysLHSConverter::CombAlwaysLHSConverter(Context context, CombAlwaysConverter& owner) :
+    LHSConverter(context), owner_(owner) {}
+
+grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                                    const SignalMemoEntry& entry) {
+    if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
+        return shadow;
+    }
+    return CombRHSConverter::handleMemoEntry(expr, entry);
+}
+
+bool CombAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
+                                     grh::Value& rhsValue) {
+    using WriteResult = LHSConverter::WriteResult;
+    std::vector<WriteResult> results;
+    if (!lower(assignment, rhsValue, results)) {
+        return false;
+    }
+    for (WriteResult& result : results) {
+        if (!result.target) {
+            continue;
+        }
+        owner_.handleEntryWrite(*result.target, std::move(result.slices));
+    }
+    return true;
+}
+
+CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
+                                         std::span<const SignalMemoEntry> netMemo,
+                                         std::span<const SignalMemoEntry> regMemo,
+                                         WriteBackMemo& memo,
+                                         const slang::ast::ProceduralBlockSymbol& block,
+                                         ElaborateDiagnostics* diagnostics) :
+    graph_(graph),
+    netMemo_(netMemo),
+    regMemo_(regMemo),
+    memo_(memo),
+    block_(block),
+    diagnostics_(diagnostics),
+    rhsConverter_(
+        RHSConverter::Context{.graph = &graph,
+                              .netMemo = netMemo,
+                              .regMemo = regMemo,
+                              .origin = &block,
+                              .diagnostics = diagnostics},
+        *this),
+    lhsConverter_(LHSConverter::Context{.graph = &graph,
+                                        .netMemo = netMemo,
+                                        .origin = &block,
+                                        .diagnostics = diagnostics},
+                  *this) {}
+
+void CombAlwaysConverter::run() {
+    visitStatement(block_.getBody());
+    finalizeWrites();
+}
+
+void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
+    if (const auto* list = stmt.as_if<slang::ast::StatementList>()) {
+        visitStatementList(*list);
+        return;
+    }
+    if (const auto* block = stmt.as_if<slang::ast::BlockStatement>()) {
+        visitBlock(*block);
+        return;
+    }
+    if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>()) {
+        visitStatement(timed->stmt);
+        return;
+    }
+    if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>()) {
+        visitExpressionStatement(*exprStmt);
+        return;
+    }
+    if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>()) {
+        visitProceduralAssign(*procAssign);
+        return;
+    }
+
+    using slang::ast::StatementKind;
+    switch (stmt.kind) {
+    case StatementKind::Empty:
+        return;
+    case StatementKind::Conditional:
+        reportControlFlowTodo("if / else");
+        return;
+    case StatementKind::Case:
+    case StatementKind::PatternCase:
+        reportControlFlowTodo("case");
+        return;
+    case StatementKind::ForLoop:
+    case StatementKind::ForeachLoop:
+    case StatementKind::RepeatLoop:
+    case StatementKind::WhileLoop:
+    case StatementKind::DoWhileLoop:
+    case StatementKind::ForeverLoop:
+        reportControlFlowTodo("loop");
+        return;
+    default:
+        reportUnsupportedStmt(stmt);
+        return;
+    }
+}
+
+void CombAlwaysConverter::visitStatementList(const slang::ast::StatementList& list) {
+    for (const slang::ast::Statement* child : list.list) {
+        if (!child) {
+            continue;
+        }
+        visitStatement(*child);
+    }
+}
+
+void CombAlwaysConverter::visitBlock(const slang::ast::BlockStatement& block) {
+    visitStatement(block.body);
+}
+
+void CombAlwaysConverter::visitExpressionStatement(
+    const slang::ast::ExpressionStatement& stmt) {
+    const slang::ast::Expression& expr = stmt.expr;
+
+    if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
+        handleAssignment(*assignment, expr);
+        return;
+    }
+
+    reportUnsupportedStmt(stmt);
+}
+
+void CombAlwaysConverter::visitProceduralAssign(
+    const slang::ast::ProceduralAssignStatement& stmt) {
+    if (const auto* assignment = stmt.assignment.as_if<slang::ast::AssignmentExpression>()) {
+        handleAssignment(*assignment, stmt.assignment);
+        return;
+    }
+    reportUnsupportedStmt(stmt);
+}
+
+void CombAlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& expr,
+                                           const slang::ast::Expression& originExpr) {
+    if (expr.isNonBlocking()) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_,
+                              "Comb always currently supports only blocking procedural assignments");
+        }
+        return;
+    }
+
+    grh::Value* rhsValue = rhsConverter_.convert(expr.right());
+    if (!rhsValue) {
+        return;
+    }
+
+    lhsConverter_.convert(expr, *rhsValue);
+}
+
+void CombAlwaysConverter::finalizeWrites() {
+    for (auto& [entry, state] : shadowState_) {
+        if (!entry || state.slices.empty()) {
+            continue;
+        }
+        memo_.recordWrite(*entry, WriteBackMemo::AssignmentKind::Procedural, &block_,
+                          std::move(state.slices));
+    }
+}
+
+void CombAlwaysConverter::reportControlFlowTodo(std::string_view label) {
+    if (reportedControlFlowTodo_ || !diagnostics_) {
+        return;
+    }
+    std::string message = "Comb always control flow (";
+    message.append(label);
+    message.append(") is not implemented yet");
+    diagnostics_->todo(block_, std::move(message));
+    reportedControlFlowTodo_ = true;
+}
+
+void CombAlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
+    if (!diagnostics_) {
+        return;
+    }
+    std::string message = "Unsupported statement kind in comb always (kind = ";
+    message.append(std::to_string(static_cast<int>(stmt.kind)));
+    message.push_back(')');
+    diagnostics_->nyi(block_, std::move(message));
+}
+
+void CombAlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
+                                           std::vector<WriteBackMemo::Slice> slices) {
+    if (slices.empty()) {
+        return;
+    }
+    ShadowState& state = shadowState_[&entry];
+    for (WriteBackMemo::Slice& slice : slices) {
+        insertShadowSlice(state, slice);
+    }
+    state.dirty = true;
+    state.composed = nullptr;
+}
+
+void CombAlwaysConverter::insertShadowSlice(ShadowState& state,
+                                            const WriteBackMemo::Slice& slice) {
+    WriteBackMemo::Slice copy = slice;
+    auto& entries = state.slices;
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [&](const WriteBackMemo::Slice& existing) {
+                                     return !(copy.msb < existing.lsb || copy.lsb > existing.msb);
+                                 }),
+                  entries.end());
+
+    auto insertPos =
+        std::find_if(entries.begin(), entries.end(), [&](const WriteBackMemo::Slice& existing) {
+            if (copy.msb != existing.msb) {
+                return copy.msb > existing.msb;
+            }
+            return copy.lsb > existing.lsb;
+        });
+    entries.insert(insertPos, std::move(copy));
+}
+
+grh::Value* CombAlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
+    auto it = shadowState_.find(&entry);
+    if (it == shadowState_.end()) {
+        return nullptr;
+    }
+    ShadowState& state = it->second;
+    if (!state.dirty && state.composed) {
+        return state.composed;
+    }
+    return rebuildShadowValue(entry, state);
+}
+
+grh::Value* CombAlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
+                                                    ShadowState& state) {
+    if (state.slices.empty()) {
+        state.composed = nullptr;
+        state.dirty = false;
+        return nullptr;
+    }
+
+    const int64_t targetWidth = entry.width > 0 ? entry.width : 1;
+    int64_t expectedMsb = targetWidth - 1;
+    std::vector<grh::Value*> components;
+    components.reserve(state.slices.size() + 2);
+
+    for (const WriteBackMemo::Slice& slice : state.slices) {
+        const int64_t gapWidth = expectedMsb - slice.msb;
+        if (gapWidth > 0) {
+            grh::Value* zero = createZeroValue(gapWidth);
+            if (!zero) {
+                state.composed = nullptr;
+                state.dirty = false;
+                return nullptr;
+            }
+            components.push_back(zero);
+            expectedMsb -= gapWidth;
+        }
+        components.push_back(slice.value);
+        expectedMsb = slice.lsb - 1;
+    }
+
+    if (expectedMsb >= 0) {
+        grh::Value* zero = createZeroValue(expectedMsb + 1);
+        if (!zero) {
+            state.composed = nullptr;
+            state.dirty = false;
+            return nullptr;
+        }
+        components.push_back(zero);
+    }
+
+    grh::Value* composed = nullptr;
+    if (components.size() == 1) {
+        composed = components.front();
+    }
+    else {
+        grh::Operation& concat =
+            graph_.createOperation(grh::OperationKind::kConcat,
+                                   makeShadowOpName(entry, "shadow_concat"));
+        for (grh::Value* operand : components) {
+            concat.addOperand(*operand);
+        }
+        grh::Value& value =
+            graph_.createValue(makeShadowValueName(entry, "shadow"), targetWidth, entry.isSigned);
+        concat.addResult(value);
+        composed = &value;
+    }
+
+    state.composed = composed;
+    state.dirty = false;
+    return composed;
+}
+
+grh::Value* CombAlwaysConverter::createZeroValue(int64_t width) {
+    if (width <= 0) {
+        return nullptr;
+    }
+    if (auto it = zeroCache_.find(width); it != zeroCache_.end()) {
+        return it->second;
+    }
+
+    std::string opName = "_comb_zero_";
+    opName.append(std::to_string(shadowNameCounter_++));
+    std::string valueName = "_comb_zero_val_";
+    valueName.append(std::to_string(shadowNameCounter_++));
+
+    grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
+    grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
+    op.addResult(value);
+    std::ostringstream oss;
+    oss << width << "'h0";
+    op.setAttribute("constValue", oss.str());
+    zeroCache_[width] = &value;
+    return &value;
+}
+
+std::string CombAlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
+                                                  std::string_view suffix) {
+    std::string base;
+    if (entry.symbol && !entry.symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.symbol->name);
+    }
+    if (base.empty()) {
+        base = "_comb_always";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(shadowNameCounter_++));
+    return base;
+}
+
+std::string CombAlwaysConverter::makeShadowValueName(const SignalMemoEntry& entry,
+                                                     std::string_view suffix) {
+    std::string base;
+    if (entry.symbol && !entry.symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.symbol->name);
+    }
+    if (base.empty()) {
+        base = "_comb_value";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(shadowNameCounter_++));
+    return base;
+}
 
 void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
                                 const slang::ast::Symbol* originSymbol,
@@ -2466,6 +2873,16 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
             continue;
         }
 
+        if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
+            if (isCombProceduralBlock(*block)) {
+                processCombAlways(*block, body, graph);
+            }
+            else if (diagnostics_) {
+                diagnostics_->nyi(*block, "Procedural block kind is not supported yet");
+            }
+            continue;
+        }
+
         if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
             processInstanceArray(*instanceArray, graph, netlist);
             continue;
@@ -2589,8 +3006,20 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
     }
 
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    ContinuousAssignConverter lowerer(graph, netMemo, memo, assign, diagnostics_);
-    lowerer.lower(*assignment, *rhsValue);
+    LHSConverter::Context lhsContext{
+        .graph = &graph, .netMemo = netMemo, .origin = &assign, .diagnostics = diagnostics_};
+    ContinuousAssignLHSConverter lhsConverter(lhsContext, memo);
+    lhsConverter.convert(*assignment, *rhsValue);
+}
+
+void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block,
+                                  const slang::ast::InstanceBodySymbol& body,
+                                  grh::Graph& graph) {
+    std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
+    std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
+    WriteBackMemo& memo = ensureWriteBackMemo(body);
+    CombAlwaysConverter converter(graph, netMemo, regMemo, memo, block, diagnostics_);
+    converter.run();
 }
 
 void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,

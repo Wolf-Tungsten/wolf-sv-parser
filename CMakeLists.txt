@@ -167,5 +167,22 @@ target_compile_definitions(elaborate-assign
 
 add_test(NAME elaborate-assign COMMAND elaborate-assign)
 
+add_executable(elaborate-comb-always
+    tests/elaborate/test_elaborate_comb_always.cpp
+)
+
+target_link_libraries(elaborate-comb-always
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-comb-always
+    PRIVATE
+        WOLF_SV_ELAB_COMB_ALWAYS_DATA_PATH="${ELABORATE_INPUT_DIR}/comb_always.sv"
+        WOLF_SV_ELAB_COMB_ALWAYS_ARTIFACT_PATH="${ELABORATE_ARTIFACT_DIR}/comb_always.json"
+)
+
+add_test(NAME elaborate-comb-always COMMAND elaborate-comb-always)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

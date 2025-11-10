@@ -32,3 +32,12 @@
 - **KR1（RHS 解析接入）** 解析 `assign lhs = rhs;` 时直接复用 CombRHSConverter：把 RHS 的 slang AST、当前模块 Graph、net/reg memo 上下文交给转换器，拿到一个经过 flatten/拼接后的 `Value`。需要确保 RHS 中涉及的 net/reg 或 memory 读都遵循阶段9的规则，且 assign 遇到还未支持的 RHS 类型时要给出清晰诊断。
 - **KR2（LHS 切片与 writeBack）** LHS 可能是标量、结构体字段、数组元素甚至 concat，需要基于 TypeHelper 的位段信息构建必要的 kSlice*/kConcat 操作来对齐 RHS 位宽，再把「写意图」写入阶段10的 writeBack memo。流程包含：解析 LHS -> 映射到 net memo 中的目标 Value 与 bit 区间 -> 记录赋值类型为“组合连续”，为 finalize 阶段生成实际的 Value 覆写/拼接提供完整上下文。
 - **KR3（回归与可视化）** 新增覆盖标量/结构体/数组/concat 等 LHS 场景的回归样例，重点验证：1）RHS 转换结果位宽与目标匹配；2）writeBack memo 最终能生成正确的 kConcat/kSlice 链路；3）连续赋值对已有 SSA 结构无副作用。测试过程中沿用前几阶段的做法，输出可读 JSON（或等效文本）来展示 assign 解析后写入 writeBack memo 以及最终 Graph 的状态，方便人工审查。
+
+## 阶段12：创建 CombAlwaysConverter 类
+- **目标定位** CombAlwaysConverter 补全 `always_comb` / `always @(*)` 过程块的解析链路，是 `processCombAlways` 的核心执行器，负责把整个过程块转成 GRH Operation/Value 并与 writeBack memo 协同。
+- **KR1（入口与生命周期）** CombAlwaysConverter 需要接受当前过程块的 AST、模块 Graph、net/reg/writeBack memo 以及诊断接口，在被 `processCombAlways` 调用时完成初始化、遍历语句、收敛结果的全流程；要求与 assign 流程共用 finalize 机制，且能为每个过程块生成独立的写集合，便于调试。
+- **KR2（阻塞赋值语义）** 过程块内部要维护「就地生效」的阻塞赋值语义：同一块里的后续语句读取到的是最新写入值。实现上需提供块级 memo shadow（临时 Value map），记录 `symbol -> Value` 的即时覆盖，并在语句解析时优先查询 shadow；块结束时再把最终值写入全局 writeBack memo。
+- **KR3（专属 RHS/LHS 支持）** 基于阶段8-11的成果扩展出 CombAlwaysRHSConverter（复用 CombRHSConverter 能力但接入块级 shadow）以及匹配的 LHS 处理逻辑，保证 `a = b[c + 1]` 这类组合场景能正确读取 shadow、生成必要的 kSlice*/kConcat，并把结果登记到 writeBack memo，记录其过程块来源和执行顺序。
+- **KR4（Graph 写入与诊断）** 解析完成后，要把过程中生成的 Operation/Value 插入当前 Graph，并将最终赋值通过 writeBack memo 统一落地；同时输出诊断/trace 信息（或 JSON dump）以便验证：生成节点、shadow 命中、写集合等细节都与 SystemVerilog 语义一致。
+- **KR5（控制流扩展留钩子）** 预留 `TODO`/扩展点以支持未来的 if/case/loop：结构化地列出需要覆盖的 slang AST 节点、shadow 与 writeBack memo 如何配合、多分支合流时的策略等，让后续阶段可以在既定接口上继续实现，不需要重写 CombAlwaysConverter。
+- **KR6（LHSConverter 抽象计划）** 参考 RHSConverter 体系，把当前 `ContinuousAssignConverter` 内的 LHS 解析/切片逻辑提炼成 `LHSConverter` 基类，负责公共的字段路径推导、kSlice/kConcat 生成。随后派生 `ContinuousAssignLHSConverter` 和 `CombAlwaysLHSConverter`，分别处理连续赋值与组合过程块的写回策略（前者直接写入 writeBack memo，后者写入 block shadow 并在块结束统一落地），以降低两条管线耦合并为未来 SeqAlways 等场景复用铺平道路。
