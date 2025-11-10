@@ -124,25 +124,51 @@ int main() {
         return fail("Failed to write comb always artifact");
     }
 
-    const slang::ast::InstanceSymbol* topInstance = nullptr;
-    for (const slang::ast::InstanceSymbol* inst : compilation->getRoot().topInstances) {
-        if (inst && inst->name == "comb_always_stage12_case") {
-            topInstance = inst;
-            break;
+    auto findInstanceByName = [&](std::string_view name) -> const slang::ast::InstanceSymbol* {
+        for (const slang::ast::InstanceSymbol* inst : compilation->getRoot().topInstances) {
+            if (inst && inst->name == name) {
+                return inst;
+            }
         }
-    }
-    if (!topInstance) {
+        return nullptr;
+    };
+
+    auto fetchBody = [](const slang::ast::InstanceSymbol& inst) -> const slang::ast::InstanceBodySymbol& {
+        const slang::ast::InstanceBodySymbol* canonical = inst.getCanonicalBody();
+        return canonical ? *canonical : inst.body;
+    };
+
+    auto fetchNetMemoForInstance = [&](const slang::ast::InstanceSymbol& inst) {
+        return elaborator.peekNetMemo(fetchBody(inst));
+    };
+
+    auto fetchGraphByName = [&](std::string_view name) -> grh::Graph* {
+        return netlist.findGraph(name);
+    };
+
+    auto getAssignSource = [&](const SignalMemoEntry& entry) -> const grh::Value* {
+        if (!entry.value) {
+            return nullptr;
+        }
+        const grh::Operation* assign = entry.value->definingOp();
+        if (!assign || assign->kind() != grh::OperationKind::kAssign ||
+            assign->operands().size() != 1) {
+            return nullptr;
+        }
+        return assign->operands().front();
+    };
+
+    const slang::ast::InstanceSymbol* instStage12 = findInstanceByName("comb_always_stage12_case");
+    if (!instStage12) {
         return fail("comb_always_stage12_case top instance not found");
     }
 
-    grh::Graph* graph = netlist.findGraph("comb_always_stage12_case");
+    grh::Graph* graph = fetchGraphByName("comb_always_stage12_case");
     if (!graph) {
         return fail("GRH graph comb_always_stage12_case not found");
     }
 
-    const slang::ast::InstanceBodySymbol* canonicalBody = topInstance->getCanonicalBody();
-    const slang::ast::InstanceBodySymbol& body = canonicalBody ? *canonicalBody : topInstance->body;
-    std::span<const SignalMemoEntry> netMemo = elaborator.peekNetMemo(body);
+    std::span<const SignalMemoEntry> netMemo = fetchNetMemoForInstance(*instStage12);
     if (netMemo.empty()) {
         return fail("Net memo is empty for comb_always_stage12_case");
     }
@@ -202,15 +228,184 @@ int main() {
         return fail("or_value kOr operands do not reference in_a/in_b");
     }
 
-    auto hasRealDiag = std::any_of(diagnostics.messages().begin(), diagnostics.messages().end(),
-                                   [](const ElaborateDiagnostic& diag) {
-                                       return diag.message != "Module body elaboration pending";
-                                   });
-    if (hasRealDiag) {
-        for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
-            std::cerr << "[elaborate_comb_always] unexpected diagnostic: " << diag.message << '\n';
+    // Stage13 if tests
+    const slang::ast::InstanceSymbol* instIf = findInstanceByName("comb_always_stage13_if");
+    if (!instIf) {
+        return fail("comb_always_stage13_if top instance not found");
+    }
+    if (!fetchGraphByName("comb_always_stage13_if")) {
+        return fail("GRH graph comb_always_stage13_if not found");
+    }
+    std::span<const SignalMemoEntry> netMemoIf = fetchNetMemoForInstance(*instIf);
+    if (netMemoIf.empty()) {
+        return fail("Net memo is empty for comb_always_stage13_if");
+    }
+
+    const SignalMemoEntry* outIf = findEntry(netMemoIf, "out_if");
+    const SignalMemoEntry* outNested = findEntry(netMemoIf, "out_nested");
+    if (!outIf || !outNested) {
+        return fail("Failed to locate out_if/out_nested memo entries");
+    }
+    auto verifyDrivenByMux = [&](const SignalMemoEntry& entry, std::string_view label) -> bool {
+        const grh::Value* driver = getAssignSource(entry);
+        if (!driver) {
+            std::cerr << "[elaborate_comb_always] " << label << " missing assign driver\n";
+            return false;
         }
-        return fail("Diagnostics emitted during comb always elaboration");
+        const grh::Operation* mux = driver->definingOp();
+        if (!mux || mux->kind() != grh::OperationKind::kMux) {
+            std::cerr << "[elaborate_comb_always] " << label << " is not driven by kMux\n";
+            return false;
+        }
+        return true;
+    };
+    if (!verifyDrivenByMux(*outIf, "out_if")) {
+        return 1;
+    }
+    if (!verifyDrivenByMux(*outNested, "out_nested")) {
+        return 1;
+    }
+
+    // Stage13 case tests
+    const slang::ast::InstanceSymbol* instCase = findInstanceByName("comb_always_stage13_case");
+    if (!instCase) {
+        return fail("comb_always_stage13_case top instance not found");
+    }
+    if (!fetchGraphByName("comb_always_stage13_case")) {
+        return fail("GRH graph comb_always_stage13_case not found");
+    }
+    std::span<const SignalMemoEntry> netMemoCase = fetchNetMemoForInstance(*instCase);
+    if (netMemoCase.empty()) {
+        return fail("Net memo is empty for comb_always_stage13_case");
+    }
+    const SignalMemoEntry* outCase = findEntry(netMemoCase, "out_case");
+    if (!outCase) {
+        return fail("Failed to locate out_case memo entry");
+    }
+    const grh::Value* caseDriver = getAssignSource(*outCase);
+    if (!caseDriver) {
+        return fail("out_case missing assign driver");
+    }
+    const grh::Operation* caseMux = caseDriver->definingOp();
+    if (!caseMux || caseMux->kind() != grh::OperationKind::kMux) {
+        return fail("out_case is not driven by outer kMux");
+    }
+    bool hasNestedMux = false;
+    if (caseMux->operands().size() >= 3) {
+        for (std::size_t idx = 1; idx < caseMux->operands().size(); ++idx) {
+            const grh::Value* branch = caseMux->operands()[idx];
+            if (branch && branch->definingOp() &&
+                branch->definingOp()->kind() == grh::OperationKind::kMux) {
+                hasNestedMux = true;
+                break;
+            }
+        }
+    }
+    if (!hasNestedMux) {
+        return fail("case mux chain is expected to contain nested mux nodes");
+    }
+
+    // Stage13 default-if tests (default assignment before if acts as implicit else)
+    const slang::ast::InstanceSymbol* instDefault =
+        findInstanceByName("comb_always_stage13_default_if");
+    if (!instDefault) {
+        return fail("comb_always_stage13_default_if top instance not found");
+    }
+    grh::Graph* graphDefault = fetchGraphByName("comb_always_stage13_default_if");
+    if (!graphDefault) {
+        return fail("GRH graph comb_always_stage13_default_if not found");
+    }
+    std::span<const SignalMemoEntry> netMemoDefault = fetchNetMemoForInstance(*instDefault);
+    if (netMemoDefault.empty()) {
+        return fail("Net memo is empty for comb_always_stage13_default_if");
+    }
+    const SignalMemoEntry* outDefault = findEntry(netMemoDefault, "out_default");
+    if (!outDefault) {
+        return fail("Failed to locate out_default memo entry");
+    }
+    const grh::Value* defaultDriver = getAssignSource(*outDefault);
+    if (!defaultDriver) {
+        return fail("out_default missing assign driver");
+    }
+    const grh::Operation* defaultMux = defaultDriver->definingOp();
+    if (!defaultMux || defaultMux->kind() != grh::OperationKind::kMux ||
+        defaultMux->operands().size() != 3) {
+        return fail("out_default is expected to be driven by a 2-way kMux");
+    }
+    const grh::Value* condPort = findPort(*graphDefault, "cond", /*isInput=*/true);
+    const grh::Value* defPort = findPort(*graphDefault, "in_default", /*isInput=*/true);
+    const grh::Value* overridePort = findPort(*graphDefault, "in_override", /*isInput=*/true);
+    if (!condPort || !defPort || !overridePort) {
+        return fail("comb_always_stage13_default_if missing input ports");
+    }
+    if (defaultMux->operands()[0] != condPort) {
+        return fail("out_default mux condition does not reference cond input");
+    }
+    const grh::Value* muxTrue = defaultMux->operands()[1];
+    const grh::Value* muxFalse = defaultMux->operands()[2];
+    auto matchesPorts = [&](const grh::Value* value, const grh::Value* expected) {
+        return value == expected;
+    };
+    if (!(matchesPorts(muxTrue, overridePort) && matchesPorts(muxFalse, defPort)) &&
+        !(matchesPorts(muxTrue, defPort) && matchesPorts(muxFalse, overridePort))) {
+        return fail("out_default mux operands do not tie to in_default/in_override");
+    }
+
+    const slang::ast::InstanceSymbol* instCaseImplicit =
+        findInstanceByName("comb_always_stage13_case_defaultless");
+    if (!instCaseImplicit) {
+        return fail("comb_always_stage13_case_defaultless top instance not found");
+    }
+    grh::Graph* graphCaseImplicit = fetchGraphByName("comb_always_stage13_case_defaultless");
+    if (!graphCaseImplicit) {
+        return fail("GRH graph comb_always_stage13_case_defaultless not found");
+    }
+    std::span<const SignalMemoEntry> netMemoCaseImplicit =
+        fetchNetMemoForInstance(*instCaseImplicit);
+    if (netMemoCaseImplicit.empty()) {
+        return fail("Net memo is empty for comb_always_stage13_case_defaultless");
+    }
+    const SignalMemoEntry* outCaseImplicit = findEntry(netMemoCaseImplicit, "out_case_implicit");
+    if (!outCaseImplicit) {
+        return fail("Failed to locate out_case_implicit memo entry");
+    }
+    const grh::Value* caseImplicitDriver = getAssignSource(*outCaseImplicit);
+    if (!caseImplicitDriver) {
+        return fail("out_case_implicit missing assign driver");
+    }
+    const grh::Operation* caseImplicitMux = caseImplicitDriver->definingOp();
+    if (!caseImplicitMux || caseImplicitMux->kind() != grh::OperationKind::kMux) {
+        return fail("out_case_implicit is not driven by kMux");
+    }
+
+    bool sawExpectedLatchDiag = false;
+    bool sawUniqueCaseDiag = false;
+    std::vector<std::string> unexpectedDiags;
+    for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
+        if (diag.message == "Module body elaboration pending") {
+            continue;
+        }
+        if (diag.message.find("comb always branch coverage incomplete") != std::string::npos) {
+            sawExpectedLatchDiag = true;
+            continue;
+        }
+        if (diag.message.find("unique case items overlap") != std::string::npos) {
+            sawUniqueCaseDiag = true;
+            continue;
+        }
+        unexpectedDiags.push_back(diag.message);
+    }
+    if (!sawExpectedLatchDiag) {
+        return fail("Expected latch diagnostic for comb_always_stage13_incomplete was not emitted");
+    }
+    if (!sawUniqueCaseDiag) {
+        return fail("Expected unique case overlap diagnostic was not emitted");
+    }
+    if (!unexpectedDiags.empty()) {
+        for (const std::string& msg : unexpectedDiags) {
+            std::cerr << "[elaborate_comb_always] unexpected diagnostic: " << msg << '\n';
+        }
+        return fail("Unexpected diagnostics emitted during comb always elaboration");
     }
 
     return 0;

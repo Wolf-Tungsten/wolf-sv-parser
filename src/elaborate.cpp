@@ -6,9 +6,12 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,6 +28,7 @@
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/expressions/SelectExpressions.h"
+#include "slang/ast/statements/ConditionalStatements.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
@@ -1198,7 +1202,19 @@ private:
         bool dirty = false;
     };
 
+    struct ShadowFrame {
+        std::unordered_map<const SignalMemoEntry*, ShadowState> map;
+        std::unordered_set<const SignalMemoEntry*> touched;
+    };
+
+    struct CaseBranch {
+        grh::Value* match = nullptr;
+        ShadowFrame frame;
+    };
+
     void visitStatement(const slang::ast::Statement& stmt);
+    void visitConditional(const slang::ast::ConditionalStatement& stmt);
+    void visitCase(const slang::ast::CaseStatement& stmt);
     void visitStatementList(const slang::ast::StatementList& list);
     void visitBlock(const slang::ast::BlockStatement& block);
     void visitExpressionStatement(const slang::ast::ExpressionStatement& stmt);
@@ -1216,6 +1232,27 @@ private:
     grh::Value* createZeroValue(int64_t width);
     std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
     std::string makeShadowValueName(const SignalMemoEntry& entry, std::string_view suffix);
+    ShadowFrame& currentFrame();
+    const ShadowFrame& currentFrame() const;
+    ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt);
+    std::optional<ShadowFrame> mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+                                                 ShadowFrame&& falseFrame,
+                                                 const slang::ast::Statement& originStmt,
+                                                 std::string_view label);
+    WriteBackMemo::Slice buildFullSlice(const SignalMemoEntry& entry, grh::Value& value);
+    grh::Value* createMuxForEntry(const SignalMemoEntry& entry, grh::Value& condition,
+                                  grh::Value& onTrue, grh::Value& onFalse,
+                                  std::string_view label);
+    grh::Value* buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+                               grh::Value& controlValue);
+    grh::Value* buildEquality(grh::Value& lhs, grh::Value& rhs, std::string_view hint);
+    grh::Value* buildLogicOr(grh::Value& lhs, grh::Value& rhs);
+    std::string makeControlOpName(std::string_view suffix);
+    std::string makeControlValueName(std::string_view suffix);
+    void reportLatchIssue(std::string_view context, const SignalMemoEntry* entry = nullptr);
+    void checkCaseUniquePriority(const slang::ast::CaseStatement& stmt);
+    std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr);
+    slang::ast::EvalContext& ensureEvalContext();
 
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
@@ -1225,10 +1262,12 @@ private:
     ElaborateDiagnostics* diagnostics_;
     CombAlwaysRHSConverter rhsConverter_;
     CombAlwaysLHSConverter lhsConverter_;
-    std::unordered_map<const SignalMemoEntry*, ShadowState> shadowState_;
+    std::vector<ShadowFrame> shadowStack_;
     std::unordered_map<int64_t, grh::Value*> zeroCache_;
     std::size_t shadowNameCounter_ = 0;
+    std::size_t controlNameCounter_ = 0;
     bool reportedControlFlowTodo_ = false;
+    std::unique_ptr<slang::ast::EvalContext> evalContext_;
 };
 
 CombAlwaysRHSConverter::CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner) :
@@ -1284,7 +1323,9 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                         .netMemo = netMemo,
                                         .origin = &block,
                                         .diagnostics = diagnostics},
-                  *this) {}
+                  *this) {
+    shadowStack_.emplace_back();
+}
 
 void CombAlwaysConverter::run() {
     visitStatement(block_.getBody());
@@ -1304,6 +1345,14 @@ void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
         visitStatement(timed->stmt);
         return;
     }
+    if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>()) {
+        visitConditional(*conditional);
+        return;
+    }
+    if (const auto* caseStmt = stmt.as_if<slang::ast::CaseStatement>()) {
+        visitCase(*caseStmt);
+        return;
+    }
     if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>()) {
         visitExpressionStatement(*exprStmt);
         return;
@@ -1316,9 +1365,6 @@ void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
     using slang::ast::StatementKind;
     switch (stmt.kind) {
     case StatementKind::Empty:
-        return;
-    case StatementKind::Conditional:
-        reportControlFlowTodo("if / else");
         return;
     case StatementKind::Case:
     case StatementKind::PatternCase:
@@ -1372,6 +1418,84 @@ void CombAlwaysConverter::visitProceduralAssign(
     reportUnsupportedStmt(stmt);
 }
 
+void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& stmt) {
+    if (stmt.conditions.empty()) {
+        reportUnsupportedStmt(stmt);
+        return;
+    }
+    if (stmt.conditions.size() != 1 || stmt.conditions.front().pattern) {
+        reportControlFlowTodo("patterned if");
+        return;
+    }
+    grh::Value* conditionValue = rhsConverter_.convert(*stmt.conditions.front().expr);
+    if (!conditionValue) {
+        return;
+    }
+
+    ShadowFrame baseSnapshot = currentFrame();
+    ShadowFrame trueFrame = runWithShadowFrame(baseSnapshot, stmt.ifTrue);
+    ShadowFrame falseFrame =
+        stmt.ifFalse ? runWithShadowFrame(baseSnapshot, *stmt.ifFalse) : baseSnapshot;
+
+    auto merged =
+        mergeShadowFrames(*conditionValue, std::move(trueFrame), std::move(falseFrame), stmt, "if");
+    if (!merged) {
+        return;
+    }
+    currentFrame() = std::move(*merged);
+}
+
+void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
+    using slang::ast::CaseStatementCondition;
+    if (stmt.condition != CaseStatementCondition::Normal) {
+        reportControlFlowTodo("case condition kind");
+        return;
+    }
+
+    grh::Value* controlValue = rhsConverter_.convert(stmt.expr);
+    if (!controlValue) {
+        return;
+    }
+
+    checkCaseUniquePriority(stmt);
+
+    ShadowFrame baseSnapshot = currentFrame();
+    std::vector<CaseBranch> branches;
+    branches.reserve(stmt.items.size());
+
+    for (const auto& item : stmt.items) {
+        grh::Value* match = buildCaseMatch(item, *controlValue);
+        if (!match) {
+            return;
+        }
+        ShadowFrame branchFrame = runWithShadowFrame(baseSnapshot, *item.stmt);
+        CaseBranch branch;
+        branch.match = match;
+        branch.frame = std::move(branchFrame);
+        branches.push_back(std::move(branch));
+    }
+
+    ShadowFrame accumulator = stmt.defaultCase ? runWithShadowFrame(baseSnapshot, *stmt.defaultCase)
+                                               : baseSnapshot;
+
+    if (branches.empty()) {
+        currentFrame() = std::move(accumulator);
+        return;
+    }
+
+    for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
+        auto merged =
+            mergeShadowFrames(*it->match, std::move(it->frame), std::move(accumulator), stmt,
+                              "case");
+        if (!merged) {
+            return;
+        }
+        accumulator = std::move(*merged);
+    }
+
+    currentFrame() = std::move(accumulator);
+}
+
 void CombAlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& expr,
                                            const slang::ast::Expression& originExpr) {
     if (expr.isNonBlocking()) {
@@ -1391,7 +1515,11 @@ void CombAlwaysConverter::handleAssignment(const slang::ast::AssignmentExpressio
 }
 
 void CombAlwaysConverter::finalizeWrites() {
-    for (auto& [entry, state] : shadowState_) {
+    if (shadowStack_.empty()) {
+        return;
+    }
+    ShadowFrame& root = shadowStack_.front();
+    for (auto& [entry, state] : root.map) {
         if (!entry || state.slices.empty()) {
             continue;
         }
@@ -1426,12 +1554,13 @@ void CombAlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     if (slices.empty()) {
         return;
     }
-    ShadowState& state = shadowState_[&entry];
+    ShadowState& state = currentFrame().map[&entry];
     for (WriteBackMemo::Slice& slice : slices) {
         insertShadowSlice(state, slice);
     }
     state.dirty = true;
     state.composed = nullptr;
+    currentFrame().touched.insert(&entry);
 }
 
 void CombAlwaysConverter::insertShadowSlice(ShadowState& state,
@@ -1455,8 +1584,9 @@ void CombAlwaysConverter::insertShadowSlice(ShadowState& state,
 }
 
 grh::Value* CombAlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
-    auto it = shadowState_.find(&entry);
-    if (it == shadowState_.end()) {
+    ShadowFrame& frame = currentFrame();
+    auto it = frame.map.find(&entry);
+    if (it == frame.map.end()) {
         return nullptr;
     }
     ShadowState& state = it->second;
@@ -1580,6 +1710,260 @@ std::string CombAlwaysConverter::makeShadowValueName(const SignalMemoEntry& entr
     base.push_back('_');
     base.append(std::to_string(shadowNameCounter_++));
     return base;
+}
+
+CombAlwaysConverter::ShadowFrame& CombAlwaysConverter::currentFrame() {
+    assert(!shadowStack_.empty());
+    return shadowStack_.back();
+}
+
+const CombAlwaysConverter::ShadowFrame& CombAlwaysConverter::currentFrame() const {
+    assert(!shadowStack_.empty());
+    return shadowStack_.back();
+}
+
+CombAlwaysConverter::ShadowFrame
+CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
+                                        const slang::ast::Statement& stmt) {
+    ShadowFrame frame;
+    frame.map = seed.map;
+    shadowStack_.push_back(std::move(frame));
+    visitStatement(stmt);
+    ShadowFrame result = std::move(shadowStack_.back());
+    shadowStack_.pop_back();
+    return result;
+}
+
+std::optional<CombAlwaysConverter::ShadowFrame>
+CombAlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+                                       ShadowFrame&& falseFrame,
+                                       const slang::ast::Statement& /*originStmt*/,
+                                       std::string_view label) {
+    std::unordered_set<const SignalMemoEntry*> coverage;
+    coverage.insert(trueFrame.touched.begin(), trueFrame.touched.end());
+    coverage.insert(falseFrame.touched.begin(), falseFrame.touched.end());
+
+    if (coverage.empty()) {
+        return std::move(falseFrame);
+    }
+
+    for (const SignalMemoEntry* entry : coverage) {
+        if (!entry) {
+            reportLatchIssue("comb always branch references unknown target");
+            return std::nullopt;
+        }
+        if (trueFrame.touched.count(entry) == 0 || falseFrame.touched.count(entry) == 0) {
+            reportLatchIssue("comb always branch coverage incomplete", entry);
+            return std::nullopt;
+        }
+
+        auto trueIt = trueFrame.map.find(entry);
+        auto falseIt = falseFrame.map.find(entry);
+        if (trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) {
+            reportLatchIssue("comb always branch shadow state missing target", entry);
+            return std::nullopt;
+        }
+
+        grh::Value* trueValue = rebuildShadowValue(*entry, trueIt->second);
+        grh::Value* falseValue = rebuildShadowValue(*entry, falseIt->second);
+        if (!trueValue || !falseValue) {
+            return std::nullopt;
+        }
+
+        grh::Value* muxValue =
+            createMuxForEntry(*entry, condition, *trueValue, *falseValue, label);
+        if (!muxValue) {
+            return std::nullopt;
+        }
+
+        ShadowState mergedState;
+        mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+        mergedState.composed = muxValue;
+        mergedState.dirty = false;
+        falseIt->second = std::move(mergedState);
+    }
+
+    falseFrame.touched.insert(coverage.begin(), coverage.end());
+    return std::move(falseFrame);
+}
+
+WriteBackMemo::Slice CombAlwaysConverter::buildFullSlice(const SignalMemoEntry& entry,
+                                                         grh::Value& value) {
+    WriteBackMemo::Slice slice;
+    if (entry.symbol && !entry.symbol->name.empty()) {
+        slice.path = std::string(entry.symbol->name);
+    }
+    const int64_t width = entry.width > 0 ? entry.width : 1;
+    slice.msb = width - 1;
+    slice.lsb = 0;
+    slice.value = &value;
+    slice.originExpr = nullptr;
+    return slice;
+}
+
+grh::Value* CombAlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
+                                                   grh::Value& condition, grh::Value& onTrue,
+                                                   grh::Value& onFalse, std::string_view label) {
+    const int64_t width = entry.width > 0 ? entry.width : 1;
+    if (onTrue.width() != width || onFalse.width() != width) {
+        reportLatchIssue("comb always mux width mismatch", &entry);
+        return nullptr;
+    }
+
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kMux, makeShadowOpName(entry, label));
+    op.addOperand(condition);
+    op.addOperand(onTrue);
+    op.addOperand(onFalse);
+    grh::Value& result =
+        graph_.createValue(makeShadowValueName(entry, label), width, entry.isSigned);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+                                                grh::Value& controlValue) {
+    std::vector<grh::Value*> terms;
+    terms.reserve(item.expressions.size());
+
+    for (const slang::ast::Expression* expr : item.expressions) {
+        if (!expr) {
+            continue;
+        }
+        grh::Value* rhsVal = rhsConverter_.convert(*expr);
+        if (!rhsVal) {
+            return nullptr;
+        }
+        grh::Value* eq = buildEquality(controlValue, *rhsVal, "case_eq");
+        if (!eq) {
+            return nullptr;
+        }
+        terms.push_back(eq);
+    }
+
+    if (terms.empty()) {
+        reportLatchIssue("comb always case item lacks expressions");
+        return nullptr;
+    }
+
+    grh::Value* match = terms.front();
+    for (std::size_t idx = 1; idx < terms.size(); ++idx) {
+        grh::Value* combined = buildLogicOr(*match, *terms[idx]);
+        if (!combined) {
+            return nullptr;
+        }
+        match = combined;
+    }
+    return match;
+}
+
+grh::Value* CombAlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
+                                               std::string_view hint) {
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kEq, makeControlOpName(hint));
+    op.addOperand(lhs);
+    op.addOperand(rhs);
+    grh::Value& result = graph_.createValue(makeControlValueName(hint), 1, /*isSigned=*/false);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* CombAlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kOr, makeControlOpName("case_or"));
+    op.addOperand(lhs);
+    op.addOperand(rhs);
+    grh::Value& result = graph_.createValue(makeControlValueName("case_or"), 1,
+                                            /*isSigned=*/false);
+    op.addResult(result);
+    return &result;
+}
+
+std::string CombAlwaysConverter::makeControlOpName(std::string_view suffix) {
+    std::string base = "_comb_ctrl_op_";
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(controlNameCounter_++));
+    return base;
+}
+
+std::string CombAlwaysConverter::makeControlValueName(std::string_view suffix) {
+    std::string base = "_comb_ctrl_val_";
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(controlNameCounter_++));
+    return base;
+}
+
+void CombAlwaysConverter::reportLatchIssue(std::string_view context,
+                                           const SignalMemoEntry* entry) {
+    if (!diagnostics_) {
+        return;
+    }
+    std::string message(context);
+    if (entry && entry->symbol && !entry->symbol->name.empty()) {
+        message.append(" (signal = ");
+        message.append(std::string(entry->symbol->name));
+        message.push_back(')');
+    }
+    diagnostics_->nyi(block_, std::move(message));
+}
+
+void CombAlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {
+    using slang::ast::UniquePriorityCheck;
+    UniquePriorityCheck check = stmt.check;
+    if (check != UniquePriorityCheck::Unique && check != UniquePriorityCheck::Unique0) {
+        return;
+    }
+
+    std::unordered_map<std::string, const slang::ast::Expression*> seen;
+    for (const auto& item : stmt.items) {
+        for (const slang::ast::Expression* expr : item.expressions) {
+            if (!expr) {
+                continue;
+            }
+            std::optional<slang::SVInt> constant = evaluateConstantInt(*expr);
+            if (!constant || constant->hasUnknown()) {
+                continue;
+            }
+            std::string key = std::to_string(constant->getBitWidth());
+            key.push_back(':');
+            key.append(constant->toString(slang::LiteralBase::Hex, true));
+            auto [it, inserted] = seen.emplace(key, expr);
+            if (!inserted) {
+                if (diagnostics_) {
+                    std::string message = "unique case items overlap on constant value ";
+                    message.append(constant->toString(slang::LiteralBase::Hex, true));
+                    diagnostics_->nyi(block_, std::move(message));
+                }
+                return;
+            }
+        }
+    }
+}
+
+std::optional<slang::SVInt>
+CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr) {
+    if (!expr.type || !expr.type->isIntegral()) {
+        return std::nullopt;
+    }
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || !value.isInteger()) {
+        return std::nullopt;
+    }
+    if (value.hasUnknown()) {
+        return std::nullopt;
+    }
+    return value.integer();
+}
+
+slang::ast::EvalContext& CombAlwaysConverter::ensureEvalContext() {
+    if (!evalContext_) {
+        evalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
+    }
+    return *evalContext_;
 }
 
 void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind kind,

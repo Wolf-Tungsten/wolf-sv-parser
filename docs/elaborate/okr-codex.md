@@ -41,3 +41,10 @@
 - **KR4（Graph 写入与诊断）** 解析完成后，要把过程中生成的 Operation/Value 插入当前 Graph，并将最终赋值通过 writeBack memo 统一落地；同时输出诊断/trace 信息（或 JSON dump）以便验证：生成节点、shadow 命中、写集合等细节都与 SystemVerilog 语义一致。
 - **KR5（控制流扩展留钩子）** 预留 `TODO`/扩展点以支持未来的 if/case/loop：结构化地列出需要覆盖的 slang AST 节点、shadow 与 writeBack memo 如何配合、多分支合流时的策略等，让后续阶段可以在既定接口上继续实现，不需要重写 CombAlwaysConverter。
 - **KR6（LHSConverter 抽象计划）** 参考 RHSConverter 体系，把当前 `ContinuousAssignConverter` 内的 LHS 解析/切片逻辑提炼成 `LHSConverter` 基类，负责公共的字段路径推导、kSlice/kConcat 生成。随后派生 `ContinuousAssignLHSConverter` 和 `CombAlwaysLHSConverter`，分别处理连续赋值与组合过程块的写回策略（前者直接写入 writeBack memo，后者写入 block shadow 并在块结束统一落地），以降低两条管线耦合并为未来 SeqAlways 等场景复用铺平道路。
+
+## 阶段13：CombAlwaysConverter 添加 if/case 支持
+- **总体目标** 在阶段12的基础上补齐组合过程块里的结构化控制流，实现可综合 `if`/`case` 在 GRH 上的正确映射，并仍旧复用 shadow + writeBack memo 的执行模型。
+- **KR1（算法对齐文档）** 需要深入研读 `docs/reference/yosys` 中对条件/多路分支的处理方法，形成一份内部可引用的笔记（新文档 process-always-comb.md），明确：条件表达式如何规约成位宽一致的布尔 Value，case 项如何排序/优先级化，default 分支如何兜底，以及 yosys 如何在 SSA 视角避免 latch。
+- **KR2（kMux 生成）** CombAlwaysConverter/CombAlwaysRHSConverter/CombAlwaysLHSConverter 要能根据 if/case 的控制流在 GRH 中创建 kMux/kMuxChain 结构：对 if/else 形成二路 mux，对 case 形成链式mux（不允许出现 1：n mux），并在必要时增强 CombAlwaysLHSConverter，使其能对每个分支单独准备写入 Value，最终在控制流合流点用 mux 把 Value 合成后再写入 shadow/writeBack。
+- **KR3（防止 latch）** 仅支持完全覆盖的可综合结构：被赋值的变量要完整分支覆盖；缺失覆盖将导致潜在 latch，需要在解析阶段检测并报错。对于显式声明的优先级 case/unique case，要按照 SystemVerilog 语义（短路/优先 vs 并行）生成 mux，并确保诊断信息能够提醒用户不支持的 latch 模式。
+- **KR4（测试与复杂样例）** 设计涵盖嵌套 if/case、结构体字段赋值、带 shadow 读写的例子，以及 case 内部调用 RHSConverter 的复杂表达式；测试需输出 Graph/写回 memo JSON，证明 mux 链路、shadow 更新、错误分支都按预期运行，并覆盖 latch 检测的负例。

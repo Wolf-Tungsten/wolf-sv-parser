@@ -86,3 +86,10 @@
   - KR3 结合 KR2 的 memo，CombAlwaysConverter 需要派生自己的 CombAlwaysRHSConverter 和 自定义的 LHS 处理逻辑
   - KR4 CombAlwaysConverter 在转换结束后，将创建的 Operation,Value 写回 graph，最终的赋值结果写回 writeback memo
   - KR5 CombAlwaysConverter 预留之后支持组合逻辑 if/case/loop 的 TODO 入口
+
+## 阶段13：CombAlwaysConverter 添加 if/case 支持
+- **Objective** 使得 CombAlwaysConverter 支持 if/case 等可综合的分支语句
+  - KR1 调研 docs/reference/yosys 中处理 if 和 case 语句的算法，形成可参考的文档
+  - KR2 在 CombAlwaysConverter 中实现上述算法，创建 kMux 结构，如果需要可以增强 CombAlwaysLHSConverter
+  - KR3 只支持可综合的 if/case 结构，对于产生 latch 的情况报错处理
+  - KR4 创建足够复杂的测试案例
