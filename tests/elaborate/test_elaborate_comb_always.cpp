@@ -351,31 +351,41 @@ int main() {
         return fail("out_default mux operands do not tie to in_default/in_override");
     }
 
-    const slang::ast::InstanceSymbol* instCaseImplicit =
-        findInstanceByName("comb_always_stage13_case_defaultless");
-    if (!instCaseImplicit) {
-        return fail("comb_always_stage13_case_defaultless top instance not found");
+    const auto validateMuxOutput = [&](std::string_view instanceName,
+                                       std::string_view signalName) -> bool {
+        const slang::ast::InstanceSymbol* inst = findInstanceByName(instanceName);
+        if (!inst) {
+            fail(std::string(instanceName) + " top instance not found");
+            return false;
+        }
+        if (!fetchGraphByName(instanceName)) {
+            fail(std::string("GRH graph ") + std::string(instanceName) + " not found");
+            return false;
+        }
+        std::span<const SignalMemoEntry> memo = fetchNetMemoForInstance(*inst);
+        if (memo.empty()) {
+            fail(std::string("Net memo is empty for ") + std::string(instanceName));
+            return false;
+        }
+        const SignalMemoEntry* entry = findEntry(memo, signalName);
+        if (!entry) {
+            fail(std::string("Failed to locate ") + std::string(signalName) + " memo entry");
+            return false;
+        }
+        if (!verifyDrivenByMux(*entry, signalName)) {
+            return false;
+        }
+        return true;
+    };
+
+    if (!validateMuxOutput("comb_always_stage13_case_defaultless", "out_case_implicit")) {
+        return 1;
     }
-    grh::Graph* graphCaseImplicit = fetchGraphByName("comb_always_stage13_case_defaultless");
-    if (!graphCaseImplicit) {
-        return fail("GRH graph comb_always_stage13_case_defaultless not found");
+    if (!validateMuxOutput("comb_always_stage13_casex", "out_casex")) {
+        return 1;
     }
-    std::span<const SignalMemoEntry> netMemoCaseImplicit =
-        fetchNetMemoForInstance(*instCaseImplicit);
-    if (netMemoCaseImplicit.empty()) {
-        return fail("Net memo is empty for comb_always_stage13_case_defaultless");
-    }
-    const SignalMemoEntry* outCaseImplicit = findEntry(netMemoCaseImplicit, "out_case_implicit");
-    if (!outCaseImplicit) {
-        return fail("Failed to locate out_case_implicit memo entry");
-    }
-    const grh::Value* caseImplicitDriver = getAssignSource(*outCaseImplicit);
-    if (!caseImplicitDriver) {
-        return fail("out_case_implicit missing assign driver");
-    }
-    const grh::Operation* caseImplicitMux = caseImplicitDriver->definingOp();
-    if (!caseImplicitMux || caseImplicitMux->kind() != grh::OperationKind::kMux) {
-        return fail("out_case_implicit is not driven by kMux");
+    if (!validateMuxOutput("comb_always_stage13_casez", "out_casez")) {
+        return 1;
     }
 
     bool sawExpectedLatchDiag = false;

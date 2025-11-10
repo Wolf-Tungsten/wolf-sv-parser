@@ -109,6 +109,34 @@ module comb_always_stage13_case_defaultless(
     end
 endmodule
 
+module comb_always_stage13_casex(
+    input  logic [3:0] sel,
+    input  logic [3:0] in_default,
+    input  logic [3:0] in_override,
+    output logic [3:0] out_casex
+);
+    always_comb begin
+        out_casex = in_default;
+        casex (sel)
+            4'b1xxx: out_casex = in_override;
+        endcase
+    end
+endmodule
+
+module comb_always_stage13_casez(
+    input  logic [3:0] sel,
+    input  logic [3:0] in_default,
+    input  logic [3:0] in_override,
+    output logic [3:0] out_casez
+);
+    always_comb begin
+        out_casez = in_default;
+        casez (sel)
+            4'b??11: out_casez = in_override;
+        endcase
+    end
+endmodule
+
 module comb_always_stage13_unique_overlap(
     input  logic [1:0] sel,
     input  logic [3:0] in0,

@@ -1244,15 +1244,22 @@ private:
                                   grh::Value& onTrue, grh::Value& onFalse,
                                   std::string_view label);
     grh::Value* buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
-                               grh::Value& controlValue);
+                               grh::Value& controlValue,
+                               slang::ast::CaseStatementCondition condition);
     grh::Value* buildEquality(grh::Value& lhs, grh::Value& rhs, std::string_view hint);
     grh::Value* buildLogicOr(grh::Value& lhs, grh::Value& rhs);
     std::string makeControlOpName(std::string_view suffix);
     std::string makeControlValueName(std::string_view suffix);
     void reportLatchIssue(std::string_view context, const SignalMemoEntry* entry = nullptr);
     void checkCaseUniquePriority(const slang::ast::CaseStatement& stmt);
-    std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr);
+    std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr,
+                                                    bool allowUnknown);
     slang::ast::EvalContext& ensureEvalContext();
+    grh::Value* buildWildcardEquality(grh::Value& controlValue, grh::Value& rhsValue,
+                                      const slang::ast::Expression& rhsExpr,
+                                      slang::ast::CaseStatementCondition condition);
+    grh::Value* createLiteralValue(const slang::SVInt& literal, bool isSigned,
+                                   std::string_view hint);
 
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
@@ -1447,8 +1454,8 @@ void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatemen
 
 void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     using slang::ast::CaseStatementCondition;
-    if (stmt.condition != CaseStatementCondition::Normal) {
-        reportControlFlowTodo("case condition kind");
+    if (stmt.condition == CaseStatementCondition::Inside) {
+        reportControlFlowTodo("case inside condition");
         return;
     }
 
@@ -1464,7 +1471,7 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     branches.reserve(stmt.items.size());
 
     for (const auto& item : stmt.items) {
-        grh::Value* match = buildCaseMatch(item, *controlValue);
+        grh::Value* match = buildCaseMatch(item, *controlValue, stmt.condition);
         if (!match) {
             return;
         }
@@ -1822,7 +1829,8 @@ grh::Value* CombAlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
 }
 
 grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
-                                                grh::Value& controlValue) {
+                                                grh::Value& controlValue,
+                                                slang::ast::CaseStatementCondition condition) {
     std::vector<grh::Value*> terms;
     terms.reserve(item.expressions.size());
 
@@ -1834,11 +1842,18 @@ grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement:
         if (!rhsVal) {
             return nullptr;
         }
-        grh::Value* eq = buildEquality(controlValue, *rhsVal, "case_eq");
-        if (!eq) {
+        grh::Value* term = nullptr;
+        if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ ||
+            condition == slang::ast::CaseStatementCondition::WildcardJustZ) {
+            term = buildWildcardEquality(controlValue, *rhsVal, *expr, condition);
+        }
+        if (!term) {
+            term = buildEquality(controlValue, *rhsVal, "case_eq");
+        }
+        if (!term) {
             return nullptr;
         }
-        terms.push_back(eq);
+        terms.push_back(term);
     }
 
     if (terms.empty()) {
@@ -1877,6 +1892,87 @@ grh::Value* CombAlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) 
                                             /*isSigned=*/false);
     op.addResult(result);
     return &result;
+}
+
+grh::Value* CombAlwaysConverter::buildWildcardEquality(
+    grh::Value& controlValue, grh::Value& rhsValue, const slang::ast::Expression& rhsExpr,
+    slang::ast::CaseStatementCondition condition) {
+    const int64_t width = controlValue.width();
+    if (width <= 0) {
+        return nullptr;
+    }
+
+    std::optional<slang::SVInt> literalOpt = evaluateConstantInt(rhsExpr, /*allowUnknown=*/true);
+    if (!literalOpt) {
+        return nullptr;
+    }
+    slang::SVInt literal = literalOpt->resize(static_cast<slang::bitwidth_t>(width));
+
+    std::string maskLiteral = std::to_string(width);
+    maskLiteral.append("'b");
+    bool hasWildcard = false;
+    for (int64_t bit = width - 1; bit >= 0; --bit) {
+        slang::logic_t value = literal[static_cast<int32_t>(bit)];
+        bool wildcard = false;
+    if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ) {
+            wildcard = value.isUnknown();
+        }
+    else if (condition == slang::ast::CaseStatementCondition::WildcardJustZ) {
+            wildcard = value.value == slang::logic_t::Z_VALUE;
+    }
+        if (wildcard) {
+            maskLiteral.push_back('0');
+            hasWildcard = true;
+        }
+        else {
+            maskLiteral.push_back('1');
+        }
+    }
+
+    if (!hasWildcard) {
+        return nullptr;
+    }
+
+    slang::SVInt maskValue = slang::SVInt::fromString(maskLiteral);
+    grh::Operation& xorOp =
+        graph_.createOperation(grh::OperationKind::kXor, makeControlOpName("case_wild_xor"));
+    xorOp.addOperand(controlValue);
+    xorOp.addOperand(rhsValue);
+    grh::Value& xorResult =
+        graph_.createValue(makeControlValueName("case_wild_xor"), width, /*isSigned=*/false);
+    xorOp.addResult(xorResult);
+
+    grh::Value* maskConst = createLiteralValue(maskValue, /*isSigned=*/false, "case_wild_mask");
+    if (!maskConst) {
+        return nullptr;
+    }
+
+    grh::Operation& andOp =
+        graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("case_wild_and"));
+    andOp.addOperand(xorResult);
+    andOp.addOperand(*maskConst);
+    grh::Value& masked =
+        graph_.createValue(makeControlValueName("case_wild_and"), width, /*isSigned=*/false);
+    andOp.addResult(masked);
+
+    grh::Value* zero = createZeroValue(width);
+    if (!zero) {
+        return nullptr;
+    }
+    return buildEquality(masked, *zero, "case_wild_eq0");
+}
+
+grh::Value* CombAlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
+                                                    std::string_view hint) {
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kConstant, makeControlOpName(hint));
+    grh::Value& value = graph_.createValue(makeControlValueName(hint),
+                                           static_cast<int64_t>(literal.getBitWidth()),
+                                           isSigned);
+    op.addResult(value);
+    op.setAttribute("constValue",
+                    literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
+    return &value;
 }
 
 std::string CombAlwaysConverter::makeControlOpName(std::string_view suffix) {
@@ -1922,8 +2018,8 @@ void CombAlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatemen
             if (!expr) {
                 continue;
             }
-            std::optional<slang::SVInt> constant = evaluateConstantInt(*expr);
-            if (!constant || constant->hasUnknown()) {
+            std::optional<slang::SVInt> constant = evaluateConstantInt(*expr, /*allowUnknown=*/false);
+            if (!constant) {
                 continue;
             }
             std::string key = std::to_string(constant->getBitWidth());
@@ -1943,7 +2039,7 @@ void CombAlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatemen
 }
 
 std::optional<slang::SVInt>
-CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr) {
+CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, bool allowUnknown) {
     if (!expr.type || !expr.type->isIntegral()) {
         return std::nullopt;
     }
@@ -1953,7 +2049,7 @@ CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr) {
     if (!value || !value.isInteger()) {
         return std::nullopt;
     }
-    if (value.hasUnknown()) {
+    if (value.hasUnknown() && !allowUnknown) {
         return std::nullopt;
     }
     return value.integer();

@@ -5,7 +5,8 @@
 - **if/case 降级算法**：`if` 允许没有显式 `else`——通过 snapshot 形成隐式 fallback；`case` 亦可缺省 default，当所有 case 都未命中时回退到 snapshot，等效于用户手写的「先赋默认值再 case 覆盖」模式。真正缺失驱动时依旧触发 `comb always branch coverage incomplete`。
 - **静态语义检查**：`unique/unique0` case 会在生成 mux 之前用 `EvalContext` 折出所有可计算的 case item，构建「位宽 + 十六进制文本」键值检测冲突，重复时立即报 `unique case items overlap on constant value ...`。`priority` 继续要求 coverage 完整，但可在后续阶段扩展成“至少命中一支”或运行期断言。
 - **文档沉淀**：`docs/elaborate/process-always-comb.md` 记录 ShadowFrame 栈、merge 对齐策略、隐式 fallback 的语义以及 unique/priority 静态检查流程，便于后续在此基础上实现 loop、pattern case 等。
-- **测试增强**：新增 `comb_always_stage13_default_if`、`case_defaultless`、`unique_overlap`、`incomplete` 等模块，并在 `elaborate-comb-always` 集成测试里验证生成的 `kMux(cond, override, default)`、链式 case mux、unique 诊断与 latch 诊断，确保 shadow 栈逻辑覆盖多重控制流。
+- **casex/casez**：对 `CaseStatementCondition::WildcardX/WildcardZ` 生成按位掩码比较，先 `kXor` 控制值与 item，再用由常量 `x/z` 位派生的 mask 通过 `kAnd` 清除忽略位，最后与零 `kEq` 得到匹配结果；若 item 不是常量则回退到普通 `case`。
+- **测试增强**：新增 `comb_always_stage13_default_if`、`case_defaultless`、`casex`、`casez`、`unique_overlap`、`incomplete` 等模块，并在 `elaborate-comb-always` 集成测试里验证生成的 `kMux(cond, override, default)`、链式 case mux（含 wildcard）、unique 诊断与 latch 诊断，确保 shadow 栈逻辑覆盖多重控制流。
 
 ## 算法与数据结构细节
 - **ShadowState**：每个 memo entry 挂一组 `WriteBackMemo::Slice`，进入分支时复制父帧的 `map` 以继承「默认值」。`rebuildShadowValue` 会按 MSB→LSB 拼接（必要时注入零），命名通过 `makeShadowOpName/ValueName` 保证可观测性。

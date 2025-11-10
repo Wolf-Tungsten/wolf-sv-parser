@@ -33,6 +33,7 @@ Yosys 的 `proc_case`/`proc_mux` 组合做法是：
    - `match` 由若干 `kEq` + `kOr` 构成的 1bit `grh::Value`；
    - `mergeBranches` 内部逻辑与 if/else 相同，逐目标生成 `kMux` 并写入新的切片。
 4. `unique`/`priority` 不会改变 mux 结构，但会被串进诊断信息，方便后续阶段根据需要扩展短路/并行行为。
+5. `casex/casez`：当 case item 是常量表达式时，会解析出 wildcard mask（`casex` 忽略常量中的 `x/z`，`casez` 忽略 `z/?`），并生成 `kXor -> kAnd(mask) -> kEq(0)` 结构来实现按位匹配；若表达式不是常量则退化为普通 `case` 语义。
 
 ## 防止 latch 的约束
 - **if**：必须带 `else`，且 true/false 两侧对所有受影响的目标都有写入；否则报错 `comb always if lacks full coverage for <signal>`。
