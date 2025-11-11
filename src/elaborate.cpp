@@ -694,6 +694,21 @@ bool isCombProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
     }
     return isLevelSensitiveEventList(*timing);
 }
+
+bool isSeqProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
+    using slang::ast::ProceduralBlockKind;
+    if (block.procedureKind == ProceduralBlockKind::AlwaysFF) {
+        return true;
+    }
+    if (block.procedureKind != ProceduralBlockKind::Always) {
+        return false;
+    }
+    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+    if (!timing) {
+        return false;
+    }
+    return containsEdgeSensitiveEvent(*timing);
+}
 } // namespace
 
 LHSConverter::LHSConverter(LHSConverter::Context context) :
@@ -1192,45 +1207,83 @@ bool ContinuousAssignLHSConverter::convert(const slang::ast::AssignmentExpressio
 }
 
 
-class CombAlwaysConverter;
+class AlwaysConverter;
 
-class CombAlwaysLHSConverter : public LHSConverter {
+class AlwaysBlockLHSConverter : public LHSConverter {
 public:
-    CombAlwaysLHSConverter(Context context, CombAlwaysConverter& owner);
+    AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner);
 
     bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
 
-private:
-    CombAlwaysConverter& owner_;
+protected:
+    AlwaysConverter& owner_;
 };
 
-class CombAlwaysRHSConverter : public CombRHSConverter {
+class CombAlwaysLHSConverter : public AlwaysBlockLHSConverter {
 public:
-    CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner);
+    using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
+};
+
+class SeqAlwaysLHSConverter : public AlwaysBlockLHSConverter {
+public:
+    using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
+};
+
+class AlwaysBlockRHSConverter : public CombRHSConverter {
+public:
+    AlwaysBlockRHSConverter(Context context, AlwaysConverter& owner);
 
 protected:
     grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
     grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr) override;
-
-private:
-    CombAlwaysConverter& owner_;
+    AlwaysConverter& owner_;
 };
 
-class CombAlwaysConverter {
+class CombAlwaysRHSConverter : public AlwaysBlockRHSConverter {
 public:
-    CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                        std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
-                        const slang::ast::ProceduralBlockSymbol& block,
-                        ElaborateDiagnostics* diagnostics);
+    using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
 
-    void run();
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+};
 
-private:
+class SeqAlwaysRHSConverter : public AlwaysBlockRHSConverter {
+public:
+    using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
+
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+};
+
+class AlwaysConverter {
+public:
+    AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                    std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                    const slang::ast::ProceduralBlockSymbol& block,
+                    ElaborateDiagnostics* diagnostics);
+    virtual ~AlwaysConverter() = default;
+
+    void traverse();
+
+protected:
+    friend class AlwaysBlockRHSConverter;
+    friend class AlwaysBlockLHSConverter;
     friend class CombAlwaysRHSConverter;
     friend class CombAlwaysLHSConverter;
+    friend class SeqAlwaysRHSConverter;
+    friend class SeqAlwaysLHSConverter;
     static constexpr std::size_t kMaxLoopIterations = 4096;
 
+    virtual std::string_view modeLabel() const = 0;
+    virtual bool allowBlockingAssignments() const = 0;
+    virtual bool allowNonBlockingAssignments() const = 0;
+    virtual bool requireNonBlockingAssignments() const = 0;
+
+    void setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
+                       std::unique_ptr<AlwaysBlockLHSConverter> lhs);
     enum class LoopControl {
         None,
         Break,
@@ -1266,24 +1319,24 @@ private:
 
     class LoopScopeGuard {
     public:
-        LoopScopeGuard(CombAlwaysConverter& owner,
+        LoopScopeGuard(AlwaysConverter& owner,
                        std::vector<const slang::ast::ValueSymbol*> symbols);
         ~LoopScopeGuard();
         void dismiss();
 
     private:
-        CombAlwaysConverter& owner_;
+        AlwaysConverter& owner_;
         bool active_ = false;
     };
 
     class LoopContextGuard {
     public:
-        explicit LoopContextGuard(CombAlwaysConverter& owner);
+        explicit LoopContextGuard(AlwaysConverter& owner);
         ~LoopContextGuard();
         void dismiss();
 
     private:
-        CombAlwaysConverter& owner_;
+        AlwaysConverter& owner_;
         bool active_ = true;
     };
 
@@ -1298,7 +1351,7 @@ private:
     void visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt);
     void handleAssignment(const slang::ast::AssignmentExpression& expr,
                           const slang::ast::Expression& originExpr);
-    void finalizeWrites();
+    void flushProceduralWrites();
     void reportControlFlowTodo(std::string_view label);
     void reportUnsupportedStmt(const slang::ast::Statement& stmt);
     void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
@@ -1360,15 +1413,20 @@ private:
     void pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols);
     void popLoopScope();
     grh::Value* lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
+    grh::Graph& graph() noexcept { return graph_; }
+    const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
+    ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
+    WriteBackMemo& memo() noexcept { return memo_; }
 
+private:
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     WriteBackMemo& memo_;
     const slang::ast::ProceduralBlockSymbol& block_;
     ElaborateDiagnostics* diagnostics_;
-    CombAlwaysRHSConverter rhsConverter_;
-    CombAlwaysLHSConverter lhsConverter_;
+    std::unique_ptr<AlwaysBlockRHSConverter> rhsConverter_;
+    std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
     std::vector<ShadowFrame> shadowStack_;
     std::unordered_map<int64_t, grh::Value*> zeroCache_;
     std::size_t shadowNameCounter_ = 0;
@@ -1388,21 +1446,53 @@ private:
     std::unique_ptr<slang::ast::EvalContext> loopEvalContext_;
 };
 
-CombAlwaysRHSConverter::CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner) :
+class CombAlwaysConverter : public AlwaysConverter {
+public:
+    CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                        std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                        const slang::ast::ProceduralBlockSymbol& block,
+                        ElaborateDiagnostics* diagnostics);
+
+    void run();
+
+protected:
+    std::string_view modeLabel() const override { return "comb always"; }
+    bool allowBlockingAssignments() const override { return true; }
+    bool allowNonBlockingAssignments() const override { return false; }
+    bool requireNonBlockingAssignments() const override { return false; }
+};
+
+class SeqAlwaysConverter : public AlwaysConverter {
+public:
+    SeqAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                       std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                       const slang::ast::ProceduralBlockSymbol& block,
+                       ElaborateDiagnostics* diagnostics);
+
+    void run();
+
+protected:
+    std::string_view modeLabel() const override { return "seq always"; }
+    bool allowBlockingAssignments() const override { return false; }
+    bool allowNonBlockingAssignments() const override { return true; }
+    bool requireNonBlockingAssignments() const override { return true; }
+
+private:
+    void planSequentialFinalize();
+};
+
+AlwaysBlockRHSConverter::AlwaysBlockRHSConverter(Context context, AlwaysConverter& owner) :
     CombRHSConverter(context), owner_(owner) {}
 
-CombAlwaysLHSConverter::CombAlwaysLHSConverter(Context context, CombAlwaysConverter& owner) :
+AlwaysBlockLHSConverter::AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner) :
     LHSConverter(context), owner_(owner) {}
 
-grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
-                                                    const SignalMemoEntry& entry) {
-    if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
-        return shadow;
-    }
+grh::Value* AlwaysBlockRHSConverter::handleMemoEntry(
+    const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry) {
     return CombRHSConverter::handleMemoEntry(expr, entry);
 }
 
-grh::Value* CombAlwaysRHSConverter::handleCustomNamedValue(
+grh::Value* AlwaysBlockRHSConverter::handleCustomNamedValue(
     const slang::ast::NamedValueExpression& expr) {
     if (const auto* symbol = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
         if (grh::Value* value = owner_.lookupLoopValue(*symbol)) {
@@ -1412,7 +1502,20 @@ grh::Value* CombAlwaysRHSConverter::handleCustomNamedValue(
     return CombRHSConverter::handleCustomNamedValue(expr);
 }
 
-bool CombAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
+grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                                    const SignalMemoEntry& entry) {
+    if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
+        return shadow;
+    }
+    return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
+}
+
+grh::Value* SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                                   const SignalMemoEntry& entry) {
+    return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
+}
+
+bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
                                      grh::Value& rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
     std::vector<WriteResult> results;
@@ -1428,35 +1531,59 @@ bool CombAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& ass
     return true;
 }
 
-CombAlwaysConverter::LoopScopeGuard::LoopScopeGuard(
-    CombAlwaysConverter& owner, std::vector<const slang::ast::ValueSymbol*> symbols) :
+AlwaysConverter::LoopScopeGuard::LoopScopeGuard(
+    AlwaysConverter& owner, std::vector<const slang::ast::ValueSymbol*> symbols) :
     owner_(owner), active_(true) {
     owner_.pushLoopScope(std::move(symbols));
 }
 
-CombAlwaysConverter::LoopScopeGuard::~LoopScopeGuard() {
+AlwaysConverter::LoopScopeGuard::~LoopScopeGuard() {
     if (active_) {
         owner_.popLoopScope();
     }
 }
 
-void CombAlwaysConverter::LoopScopeGuard::dismiss() {
+void AlwaysConverter::LoopScopeGuard::dismiss() {
     active_ = false;
 }
 
-CombAlwaysConverter::LoopContextGuard::LoopContextGuard(CombAlwaysConverter& owner) :
+AlwaysConverter::LoopContextGuard::LoopContextGuard(AlwaysConverter& owner) :
     owner_(owner) {
     owner_.loopContextStack_.push_back(1);
 }
 
-CombAlwaysConverter::LoopContextGuard::~LoopContextGuard() {
+AlwaysConverter::LoopContextGuard::~LoopContextGuard() {
     if (active_) {
         owner_.loopContextStack_.pop_back();
     }
 }
 
-void CombAlwaysConverter::LoopContextGuard::dismiss() {
+void AlwaysConverter::LoopContextGuard::dismiss() {
     active_ = false;
+}
+
+AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                                 std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                                 const slang::ast::ProceduralBlockSymbol& block,
+                                 ElaborateDiagnostics* diagnostics) :
+    graph_(graph),
+    netMemo_(netMemo),
+    regMemo_(regMemo),
+    memo_(memo),
+    block_(block),
+    diagnostics_(diagnostics) {
+    shadowStack_.emplace_back();
+    controlContextStack_.push_back(true);
+}
+
+void AlwaysConverter::setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
+                                    std::unique_ptr<AlwaysBlockLHSConverter> lhs) {
+    rhsConverter_ = std::move(rhs);
+    lhsConverter_ = std::move(lhs);
+}
+
+void AlwaysConverter::traverse() {
+    visitStatement(block_.getBody());
 }
 
 CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
@@ -1465,34 +1592,89 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                          WriteBackMemo& memo,
                                          const slang::ast::ProceduralBlockSymbol& block,
                                          ElaborateDiagnostics* diagnostics) :
-    graph_(graph),
-    netMemo_(netMemo),
-    regMemo_(regMemo),
-    memo_(memo),
-    block_(block),
-    diagnostics_(diagnostics),
-    rhsConverter_(
+    AlwaysConverter(graph, netMemo, regMemo, memo, block, diagnostics) {
+    auto rhs = std::make_unique<CombAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = regMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
-        *this),
-    lhsConverter_(LHSConverter::Context{.graph = &graph,
-                                        .netMemo = netMemo,
-                                        .origin = &block,
-                                        .diagnostics = diagnostics},
-                  *this) {
-    shadowStack_.emplace_back();
-    controlContextStack_.push_back(true);
+        *this);
+    auto lhs = std::make_unique<CombAlwaysLHSConverter>(
+        LHSConverter::Context{.graph = &graph,
+                              .netMemo = netMemo,
+                              .origin = &block,
+                              .diagnostics = diagnostics},
+        *this);
+    setConverters(std::move(rhs), std::move(lhs));
 }
 
 void CombAlwaysConverter::run() {
-    visitStatement(block_.getBody());
-    finalizeWrites();
+    traverse();
+    flushProceduralWrites();
 }
 
-void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
+SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
+                                       std::span<const SignalMemoEntry> netMemo,
+                                       std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                                       const slang::ast::ProceduralBlockSymbol& block,
+                                       ElaborateDiagnostics* diagnostics) :
+    AlwaysConverter(graph, netMemo, regMemo, memo, block, diagnostics) {
+    auto rhs = std::make_unique<SeqAlwaysRHSConverter>(
+        RHSConverter::Context{.graph = &graph,
+                              .netMemo = netMemo,
+                              .regMemo = regMemo,
+                              .origin = &block,
+                              .diagnostics = diagnostics},
+        *this);
+    auto lhs = std::make_unique<SeqAlwaysLHSConverter>(
+        LHSConverter::Context{.graph = &graph,
+                              .netMemo = netMemo,
+                              .origin = &block,
+                              .diagnostics = diagnostics},
+        *this);
+    setConverters(std::move(rhs), std::move(lhs));
+}
+
+void SeqAlwaysConverter::run() {
+    traverse();
+    flushProceduralWrites();
+    planSequentialFinalize();
+}
+
+void SeqAlwaysConverter::planSequentialFinalize() {
+    ElaborateDiagnostics* diags = diagnostics();
+    if (!diags) {
+        return;
+    }
+    bool emitted = false;
+    for (const WriteBackMemo::Entry& entry : memo().entries()) {
+        if (entry.originSymbol != &block()) {
+            continue;
+        }
+        std::string targetName = entry.target && entry.target->symbol &&
+                                         !entry.target->symbol->name.empty() ?
+                                     std::string(entry.target->symbol->name) :
+                                     std::string("anonymous_signal");
+        std::string message = "Seq always finalize TODO: bind ";
+        message.append(targetName);
+        if (entry.target && entry.target->stateOp &&
+            entry.target->stateOp->kind() == grh::OperationKind::kMemory) {
+            message.append(" memory read/write ports to RHS values");
+        }
+        else {
+            message.append(" register data input to RHS value");
+        }
+        diags->todo(block(), std::move(message));
+        emitted = true;
+    }
+    if (!emitted) {
+        diags->todo(block(),
+                    "Seq always finalize TODO: connect register/memory stubs for this block");
+    }
+}
+
+void AlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
     if (stmt.kind == slang::ast::StatementKind::Break) {
         handleLoopControlRequest(LoopControl::Break, stmt);
         return;
@@ -1561,7 +1743,7 @@ void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
     }
 }
 
-void CombAlwaysConverter::visitStatementList(const slang::ast::StatementList& list) {
+void AlwaysConverter::visitStatementList(const slang::ast::StatementList& list) {
     for (const slang::ast::Statement* child : list.list) {
         if (!child) {
             continue;
@@ -1573,11 +1755,11 @@ void CombAlwaysConverter::visitStatementList(const slang::ast::StatementList& li
     }
 }
 
-void CombAlwaysConverter::visitBlock(const slang::ast::BlockStatement& block) {
+void AlwaysConverter::visitBlock(const slang::ast::BlockStatement& block) {
     visitStatement(block.body);
 }
 
-void CombAlwaysConverter::visitExpressionStatement(
+void AlwaysConverter::visitExpressionStatement(
     const slang::ast::ExpressionStatement& stmt) {
     const slang::ast::Expression& expr = stmt.expr;
 
@@ -1589,7 +1771,7 @@ void CombAlwaysConverter::visitExpressionStatement(
     reportUnsupportedStmt(stmt);
 }
 
-void CombAlwaysConverter::visitProceduralAssign(
+void AlwaysConverter::visitProceduralAssign(
     const slang::ast::ProceduralAssignStatement& stmt) {
     if (const auto* assignment = stmt.assignment.as_if<slang::ast::AssignmentExpression>()) {
         handleAssignment(*assignment, stmt.assignment);
@@ -1598,19 +1780,21 @@ void CombAlwaysConverter::visitProceduralAssign(
     reportUnsupportedStmt(stmt);
 }
 
-void CombAlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
+void AlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
     if (stmt.loopVars.empty()) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_,
-                              "Comb always for-loop without inline variable declarations "
-                              "is not supported yet");
+            std::string message = std::string(modeLabel()) +
+                                  " for-loop without inline variable declarations is not supported yet";
+            diagnostics_->nyi(block_, std::move(message));
         }
         return;
     }
     if (!stmt.stopExpr) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_,
-                              "Comb always for-loop requires a statically evaluable stop expression");
+            std::string message =
+                std::string(modeLabel()) +
+                " for-loop requires a statically evaluable stop expression";
+            diagnostics_->nyi(block_, std::move(message));
         }
         return;
     }
@@ -1647,8 +1831,9 @@ void CombAlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt)
         }
         if (iterationCount++ >= kMaxLoopIterations) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_,
-                                  "Comb always for-loop exceeded maximum unrolled iterations");
+                std::string message =
+                    std::string(modeLabel()) + " for-loop exceeded maximum unrolled iterations";
+                diagnostics_->nyi(block_, std::move(message));
             }
             break;
         }
@@ -1679,7 +1864,7 @@ void CombAlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt)
     ctx.reset();
 }
 
-void CombAlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt) {
+void AlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt) {
     if (stmt.loopDims.empty()) {
         return;
     }
@@ -1691,22 +1876,26 @@ void CombAlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatemen
     for (const auto& dim : stmt.loopDims) {
         if (!dim.range) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_, "Comb always foreach requires static dimension ranges");
+                std::string message =
+                    std::string(modeLabel()) + " foreach requires static dimension ranges";
+                diagnostics_->nyi(block_, std::move(message));
             }
             return;
         }
         if (!dim.loopVar) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_,
-                                  "Comb always foreach skipping dimensions is not supported yet");
+                std::string message =
+                    std::string(modeLabel()) + " foreach skipping dimensions is not supported yet";
+                diagnostics_->nyi(block_, std::move(message));
             }
             return;
         }
         const slang::ast::Type& type = dim.loopVar->getType();
         if (!type.isIntegral()) {
             if (diagnostics_) {
-                diagnostics_->nyi(*dim.loopVar,
-                                  "Comb always foreach loop variable must be integral");
+                std::string message =
+                    std::string(modeLabel()) + " foreach loop variable must be integral";
+                diagnostics_->nyi(*dim.loopVar, std::move(message));
             }
             return;
         }
@@ -1732,7 +1921,7 @@ void CombAlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatemen
     }
 }
 
-void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& stmt) {
+void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& stmt) {
     if (stmt.conditions.empty()) {
         reportUnsupportedStmt(stmt);
         return;
@@ -1758,7 +1947,7 @@ void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatemen
         return;
     }
 
-    grh::Value* conditionValue = rhsConverter_.convert(conditionExpr);
+    grh::Value* conditionValue = rhsConverter_->convert(conditionExpr);
     if (!conditionValue) {
         return;
     }
@@ -1777,7 +1966,7 @@ void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatemen
     currentFrame() = std::move(*merged);
 }
 
-void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
+void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     using slang::ast::CaseStatementCondition;
     if (stmt.condition == CaseStatementCondition::Inside) {
         reportControlFlowTodo("case inside condition");
@@ -1802,7 +1991,7 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         return;
     }
 
-    grh::Value* controlValue = rhsConverter_.convert(stmt.expr);
+    grh::Value* controlValue = rhsConverter_->convert(stmt.expr);
     if (!controlValue) {
         return;
     }
@@ -1847,25 +2036,43 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     currentFrame() = std::move(accumulator);
 }
 
-void CombAlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& expr,
-                                           const slang::ast::Expression& originExpr) {
-    if (expr.isNonBlocking()) {
+void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& expr,
+                                       const slang::ast::Expression& /*originExpr*/) {
+    const bool isNonBlocking = expr.isNonBlocking();
+    if (isNonBlocking && !allowNonBlockingAssignments()) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_,
-                              "Comb always currently supports only blocking procedural assignments");
+            std::string message = std::string(modeLabel()) +
+                                  " does not allow non-blocking assignments yet";
+            diagnostics_->nyi(block_, std::move(message));
+        }
+        return;
+    }
+    if (!isNonBlocking && (!allowBlockingAssignments() || requireNonBlockingAssignments())) {
+        if (diagnostics_) {
+            std::string message = std::string(modeLabel()) +
+                                  " requires non-blocking procedural assignments";
+            diagnostics_->nyi(block_, std::move(message));
+        }
+        return;
+    }
+    if (!rhsConverter_ || !lhsConverter_) {
+        if (diagnostics_) {
+            std::string message = std::string(modeLabel()) +
+                                  " converters are not initialized (internal error)";
+            diagnostics_->nyi(block_, std::move(message));
         }
         return;
     }
 
-    grh::Value* rhsValue = rhsConverter_.convert(expr.right());
+    grh::Value* rhsValue = rhsConverter_->convert(expr.right());
     if (!rhsValue) {
         return;
     }
 
-    lhsConverter_.convert(expr, *rhsValue);
+    lhsConverter_->convert(expr, *rhsValue);
 }
 
-void CombAlwaysConverter::finalizeWrites() {
+void AlwaysConverter::flushProceduralWrites() {
     if (shadowStack_.empty()) {
         return;
     }
@@ -1875,32 +2082,35 @@ void CombAlwaysConverter::finalizeWrites() {
             continue;
         }
         memo_.recordWrite(*entry, WriteBackMemo::AssignmentKind::Procedural, &block_,
-                          std::move(state.slices));
+                         std::move(state.slices));
     }
 }
 
-void CombAlwaysConverter::reportControlFlowTodo(std::string_view label) {
+void AlwaysConverter::reportControlFlowTodo(std::string_view label) {
     if (reportedControlFlowTodo_ || !diagnostics_) {
         return;
     }
-    std::string message = "Comb always control flow (";
+    std::string message = std::string(modeLabel());
+    message.append(" control flow (");
     message.append(label);
     message.append(") is not implemented yet");
     diagnostics_->todo(block_, std::move(message));
     reportedControlFlowTodo_ = true;
 }
 
-void CombAlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
+void AlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
     if (!diagnostics_) {
         return;
     }
-    std::string message = "Unsupported statement kind in comb always (kind = ";
+    std::string message = "Unsupported statement kind in ";
+    message.append(modeLabel());
+    message.append(" (kind = ");
     message.append(std::to_string(static_cast<int>(stmt.kind)));
     message.push_back(')');
     diagnostics_->nyi(block_, std::move(message));
 }
 
-void CombAlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
+void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
                                            std::vector<WriteBackMemo::Slice> slices) {
     if (slices.empty()) {
         return;
@@ -1914,7 +2124,7 @@ void CombAlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     currentFrame().touched.insert(&entry);
 }
 
-void CombAlwaysConverter::insertShadowSlice(ShadowState& state,
+void AlwaysConverter::insertShadowSlice(ShadowState& state,
                                             const WriteBackMemo::Slice& slice) {
     WriteBackMemo::Slice copy = slice;
     auto& entries = state.slices;
@@ -1934,7 +2144,7 @@ void CombAlwaysConverter::insertShadowSlice(ShadowState& state,
     entries.insert(insertPos, std::move(copy));
 }
 
-grh::Value* CombAlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
+grh::Value* AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
     ShadowFrame& frame = currentFrame();
     auto it = frame.map.find(&entry);
     if (it == frame.map.end()) {
@@ -1947,11 +2157,11 @@ grh::Value* CombAlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry)
     return rebuildShadowValue(entry, state);
 }
 
-void CombAlwaysConverter::handleLoopControlRequest(LoopControl kind,
+void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
                                                    const slang::ast::Statement& /*origin*/) {
     if (!currentContextStatic()) {
         if (diagnostics_) {
-            std::string message = "Comb always ";
+            std::string message = std::string(modeLabel()) + " ";
             message.append(kind == LoopControl::Break ? "break" : "continue");
             message.append(" requires statically known control flow");
             diagnostics_->nyi(block_, std::move(message));
@@ -1960,7 +2170,7 @@ void CombAlwaysConverter::handleLoopControlRequest(LoopControl kind,
     }
     if (loopContextStack_.empty()) {
         if (diagnostics_) {
-            std::string message = "Comb always ";
+            std::string message = std::string(modeLabel()) + " ";
             message.append(kind == LoopControl::Break ? "break" : "continue");
             message.append(" used outside of a loop is not supported");
             diagnostics_->nyi(block_, std::move(message));
@@ -1971,7 +2181,7 @@ void CombAlwaysConverter::handleLoopControlRequest(LoopControl kind,
     pendingLoopDepth_ = loopContextStack_.size();
 }
 
-grh::Value* CombAlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
+grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
                                                     ShadowState& state) {
     if (state.slices.empty()) {
         state.composed = nullptr;
@@ -2032,7 +2242,7 @@ grh::Value* CombAlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry
     return composed;
 }
 
-grh::Value* CombAlwaysConverter::createZeroValue(int64_t width) {
+grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
     if (width <= 0) {
         return nullptr;
     }
@@ -2055,7 +2265,7 @@ grh::Value* CombAlwaysConverter::createZeroValue(int64_t width) {
     return &value;
 }
 
-std::string CombAlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
+std::string AlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
                                                   std::string_view suffix) {
     std::string base;
     if (entry.symbol && !entry.symbol->name.empty()) {
@@ -2071,7 +2281,7 @@ std::string CombAlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
     return base;
 }
 
-std::string CombAlwaysConverter::makeShadowValueName(const SignalMemoEntry& entry,
+std::string AlwaysConverter::makeShadowValueName(const SignalMemoEntry& entry,
                                                      std::string_view suffix) {
     std::string base;
     if (entry.symbol && !entry.symbol->name.empty()) {
@@ -2087,24 +2297,24 @@ std::string CombAlwaysConverter::makeShadowValueName(const SignalMemoEntry& entr
     return base;
 }
 
-CombAlwaysConverter::ShadowFrame& CombAlwaysConverter::currentFrame() {
+AlwaysConverter::ShadowFrame& AlwaysConverter::currentFrame() {
     assert(!shadowStack_.empty());
     return shadowStack_.back();
 }
 
-const CombAlwaysConverter::ShadowFrame& CombAlwaysConverter::currentFrame() const {
+const AlwaysConverter::ShadowFrame& AlwaysConverter::currentFrame() const {
     assert(!shadowStack_.empty());
     return shadowStack_.back();
 }
 
-CombAlwaysConverter::ShadowFrame
-CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
+AlwaysConverter::ShadowFrame
+AlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
                                         const slang::ast::Statement& stmt) {
     return runWithShadowFrame(seed, stmt, currentContextStatic());
 }
 
-CombAlwaysConverter::ShadowFrame
-CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
+AlwaysConverter::ShadowFrame
+AlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
                                         const slang::ast::Statement& stmt,
                                         bool isStaticContext) {
     ShadowFrame frame;
@@ -2119,8 +2329,8 @@ CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
     return result;
 }
 
-std::optional<CombAlwaysConverter::ShadowFrame>
-CombAlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+std::optional<AlwaysConverter::ShadowFrame>
+AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
                                        ShadowFrame&& falseFrame,
                                        const slang::ast::Statement& /*originStmt*/,
                                        std::string_view label) {
@@ -2172,7 +2382,7 @@ CombAlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& true
     return std::move(falseFrame);
 }
 
-WriteBackMemo::Slice CombAlwaysConverter::buildFullSlice(const SignalMemoEntry& entry,
+WriteBackMemo::Slice AlwaysConverter::buildFullSlice(const SignalMemoEntry& entry,
                                                          grh::Value& value) {
     WriteBackMemo::Slice slice;
     if (entry.symbol && !entry.symbol->name.empty()) {
@@ -2186,7 +2396,7 @@ WriteBackMemo::Slice CombAlwaysConverter::buildFullSlice(const SignalMemoEntry& 
     return slice;
 }
 
-grh::Value* CombAlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
+grh::Value* AlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
                                                    grh::Value& condition, grh::Value& onTrue,
                                                    grh::Value& onFalse, std::string_view label) {
     const int64_t width = entry.width > 0 ? entry.width : 1;
@@ -2206,7 +2416,7 @@ grh::Value* CombAlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
     return &result;
 }
 
-grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+grh::Value* AlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
                                                 grh::Value& controlValue,
                                                 slang::ast::CaseStatementCondition condition) {
     std::vector<grh::Value*> terms;
@@ -2216,7 +2426,7 @@ grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement:
         if (!expr) {
             continue;
         }
-        grh::Value* rhsVal = rhsConverter_.convert(*expr);
+        grh::Value* rhsVal = rhsConverter_->convert(*expr);
         if (!rhsVal) {
             return nullptr;
         }
@@ -2250,7 +2460,7 @@ grh::Value* CombAlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement:
     return match;
 }
 
-grh::Value* CombAlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
+grh::Value* AlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
                                                std::string_view hint) {
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kEq, makeControlOpName(hint));
@@ -2261,7 +2471,7 @@ grh::Value* CombAlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
     return &result;
 }
 
-grh::Value* CombAlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
+grh::Value* AlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kOr, makeControlOpName("case_or"));
     op.addOperand(lhs);
@@ -2272,7 +2482,7 @@ grh::Value* CombAlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) 
     return &result;
 }
 
-grh::Value* CombAlwaysConverter::buildWildcardEquality(
+grh::Value* AlwaysConverter::buildWildcardEquality(
     grh::Value& controlValue, grh::Value& rhsValue, const slang::ast::Expression& rhsExpr,
     slang::ast::CaseStatementCondition condition) {
     const int64_t width = controlValue.width();
@@ -2340,7 +2550,7 @@ grh::Value* CombAlwaysConverter::buildWildcardEquality(
     return buildEquality(masked, *zero, "case_wild_eq0");
 }
 
-grh::Value* CombAlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
+grh::Value* AlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                                     std::string_view hint) {
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kConstant, makeControlOpName(hint));
@@ -2353,7 +2563,7 @@ grh::Value* CombAlwaysConverter::createLiteralValue(const slang::SVInt& literal,
     return &value;
 }
 
-std::string CombAlwaysConverter::makeControlOpName(std::string_view suffix) {
+std::string AlwaysConverter::makeControlOpName(std::string_view suffix) {
     std::string base = "_comb_ctrl_op_";
     base.append(suffix);
     base.push_back('_');
@@ -2361,7 +2571,7 @@ std::string CombAlwaysConverter::makeControlOpName(std::string_view suffix) {
     return base;
 }
 
-std::string CombAlwaysConverter::makeControlValueName(std::string_view suffix) {
+std::string AlwaysConverter::makeControlValueName(std::string_view suffix) {
     std::string base = "_comb_ctrl_val_";
     base.append(suffix);
     base.push_back('_');
@@ -2369,7 +2579,7 @@ std::string CombAlwaysConverter::makeControlValueName(std::string_view suffix) {
     return base;
 }
 
-void CombAlwaysConverter::reportLatchIssue(std::string_view context,
+void AlwaysConverter::reportLatchIssue(std::string_view context,
                                            const SignalMemoEntry* entry) {
     if (!diagnostics_) {
         return;
@@ -2383,7 +2593,7 @@ void CombAlwaysConverter::reportLatchIssue(std::string_view context,
     diagnostics_->nyi(block_, std::move(message));
 }
 
-void CombAlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {
+void AlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {
     using slang::ast::UniquePriorityCheck;
     UniquePriorityCheck check = stmt.check;
     if (check != UniquePriorityCheck::Unique && check != UniquePriorityCheck::Unique0) {
@@ -2417,7 +2627,7 @@ void CombAlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatemen
 }
 
 std::optional<slang::SVInt>
-CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, bool allowUnknown) {
+AlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, bool allowUnknown) {
     if (!expr.type || !expr.type->isIntegral()) {
         return std::nullopt;
     }
@@ -2434,7 +2644,7 @@ CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, boo
     return value.integer();
 }
 
-std::optional<bool> CombAlwaysConverter::evaluateStaticCondition(
+std::optional<bool> AlwaysConverter::evaluateStaticCondition(
     const slang::ast::Expression& expr) {
     if (!expr.type) {
         return std::nullopt;
@@ -2455,21 +2665,21 @@ std::optional<bool> CombAlwaysConverter::evaluateStaticCondition(
     return std::nullopt;
 }
 
-slang::ast::EvalContext& CombAlwaysConverter::ensureEvalContext() {
+slang::ast::EvalContext& AlwaysConverter::ensureEvalContext() {
     if (!evalContext_) {
         evalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
     }
     return *evalContext_;
 }
 
-slang::ast::EvalContext& CombAlwaysConverter::ensureLoopEvalContext() {
+slang::ast::EvalContext& AlwaysConverter::ensureLoopEvalContext() {
     if (!loopEvalContext_) {
         loopEvalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
     }
     return *loopEvalContext_;
 }
 
-void CombAlwaysConverter::seedEvalContextWithLoopValues(slang::ast::EvalContext& ctx) {
+void AlwaysConverter::seedEvalContextWithLoopValues(slang::ast::EvalContext& ctx) {
     if (loopValueMap_.empty()) {
         return;
     }
@@ -2482,7 +2692,7 @@ void CombAlwaysConverter::seedEvalContextWithLoopValues(slang::ast::EvalContext&
     }
 }
 
-bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
+bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
                                               std::vector<ForLoopVarState>& states,
                                               slang::ast::EvalContext& ctx) {
     slang::ast::EvalContext initEvalCtx(block_);
@@ -2501,7 +2711,9 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
         const slang::ast::Type& type = symbol.getType();
         if (!type.isIntegral()) {
             if (diagnostics_) {
-                diagnostics_->nyi(symbol, "Comb always for-loop variable must be integral");
+                std::string message =
+                    std::string(modeLabel()) + " for-loop variable must be integral";
+                diagnostics_->nyi(symbol, std::move(message));
             }
             return false;
         }
@@ -2509,7 +2721,9 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
         std::optional<slang::SVInt> initValue = evaluateInitializer(initExpr);
         if (!initValue) {
             if (diagnostics_) {
-                diagnostics_->nyi(symbol, "Comb always for-loop initializer must be constant");
+                std::string message =
+                    std::string(modeLabel()) + " for-loop initializer must be constant";
+                diagnostics_->nyi(symbol, std::move(message));
             }
             return false;
         }
@@ -2538,8 +2752,9 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
             const slang::ast::Expression* initExpr = var->getInitializer();
             if (!initExpr) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*var,
-                                      "Comb always for-loop variable requires an initializer");
+                    std::string message =
+                        std::string(modeLabel()) + " for-loop variable requires an initializer";
+                    diagnostics_->nyi(*var, std::move(message));
                 }
                 return false;
             }
@@ -2551,7 +2766,9 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
     else {
         if (stmt.initializers.empty()) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_, "Comb always for-loop requires an initializer");
+                std::string message =
+                    std::string(modeLabel()) + " for-loop requires an initializer";
+                diagnostics_->nyi(block_, std::move(message));
             }
             return false;
         }
@@ -2560,16 +2777,20 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
                                           : nullptr;
             if (!assign) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(block_,
-                                      "Comb always for-loop initializer must be an assignment");
+                    std::string message =
+                        std::string(modeLabel()) +
+                        " for-loop initializer must be an assignment";
+                    diagnostics_->nyi(block_, std::move(message));
                 }
                 return false;
             }
             const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(assign->left());
             if (!symbol) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(block_,
-                                      "Comb always for-loop initializer must target a variable symbol");
+                    std::string message =
+                        std::string(modeLabel()) +
+                        " for-loop initializer must target a variable symbol";
+                    diagnostics_->nyi(block_, std::move(message));
                 }
                 return false;
             }
@@ -2581,7 +2802,9 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
 
     if (states.empty()) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_, "Comb always for-loop has no supported loop variables");
+            std::string message =
+                std::string(modeLabel()) + " for-loop has no supported loop variables";
+            diagnostics_->nyi(block_, std::move(message));
         }
         return false;
     }
@@ -2589,7 +2812,7 @@ bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement
     return true;
 }
 
-bool CombAlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStatement& stmt,
+bool AlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStatement& stmt,
                                                    slang::ast::EvalContext& ctx, bool& result) {
     if (!stmt.stopExpr) {
         result = false;
@@ -2599,7 +2822,9 @@ bool CombAlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStat
     slang::ConstantValue cond = stmt.stopExpr->eval(ctx);
     if (!cond || cond.hasUnknown()) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_, "Comb always for-loop stop expression must be constant");
+            std::string message =
+                std::string(modeLabel()) + " for-loop stop expression must be constant";
+            diagnostics_->nyi(block_, std::move(message));
         }
         return false;
     }
@@ -2622,12 +2847,14 @@ bool CombAlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStat
     }
 
     if (diagnostics_) {
-        diagnostics_->nyi(block_, "Comb always for-loop stop expression is not boolean");
+        std::string message =
+            std::string(modeLabel()) + " for-loop stop expression is not boolean";
+        diagnostics_->nyi(block_, std::move(message));
     }
     return false;
 }
 
-bool CombAlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
+bool AlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
                                               slang::ast::EvalContext& ctx) {
     for (const slang::ast::Expression* step : stmt.steps) {
         if (!step) {
@@ -2636,7 +2863,9 @@ bool CombAlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement
         slang::ConstantValue value = step->eval(ctx);
         if (!value) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_, "Comb always for-loop step expression failed evaluation");
+                std::string message =
+                    std::string(modeLabel()) + " for-loop step expression failed evaluation";
+                diagnostics_->nyi(block_, std::move(message));
             }
             return false;
         }
@@ -2644,7 +2873,7 @@ bool CombAlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement
     return true;
 }
 
-bool CombAlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> states,
+bool AlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> states,
                                              slang::ast::EvalContext& ctx) {
     for (const ForLoopVarState& state : states) {
         if (!state.symbol) {
@@ -2653,7 +2882,9 @@ bool CombAlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> st
         slang::ConstantValue* storage = ctx.findLocal(state.symbol);
         if (!storage || !storage->isInteger()) {
             if (diagnostics_) {
-                std::string message = "Comb always for-loop variable evaluated to non-integer value";
+                std::string message =
+                    std::string(modeLabel()) +
+                    " for-loop variable evaluated to non-integer value";
                 if (state.symbol && !state.symbol->name.empty()) {
                     message.append(" (");
                     message.append(std::string(state.symbol->name));
@@ -2672,7 +2903,7 @@ bool CombAlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> st
     return true;
 }
 
-bool CombAlwaysConverter::assignLoopValue(const slang::ast::ValueSymbol& symbol,
+bool AlwaysConverter::assignLoopValue(const slang::ast::ValueSymbol& symbol,
                                           const slang::SVInt& value) {
     const slang::ast::Type& type = symbol.getType();
     const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
@@ -2694,14 +2925,15 @@ bool CombAlwaysConverter::assignLoopValue(const slang::ast::ValueSymbol& symbol,
     return true;
 }
 
-bool CombAlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
+bool AlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
                                               std::span<const ForeachDimState> dims,
                                               std::size_t depth, std::size_t& iterationCount) {
     if (depth >= dims.size()) {
         if (iterationCount++ >= kMaxLoopIterations) {
             if (diagnostics_) {
-                diagnostics_->nyi(block_,
-                                  "Comb always foreach loop exceeded maximum unrolled iterations");
+                std::string message =
+                    std::string(modeLabel()) + " foreach loop exceeded maximum unrolled iterations";
+                diagnostics_->nyi(block_, std::move(message));
             }
             return false;
         }
@@ -2749,11 +2981,11 @@ bool CombAlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopState
     return true;
 }
 
-void CombAlwaysConverter::pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols) {
+void AlwaysConverter::pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols) {
     loopScopeStack_.push_back(std::move(symbols));
 }
 
-void CombAlwaysConverter::popLoopScope() {
+void AlwaysConverter::popLoopScope() {
     if (loopScopeStack_.empty()) {
         return;
     }
@@ -2763,7 +2995,7 @@ void CombAlwaysConverter::popLoopScope() {
     loopScopeStack_.pop_back();
 }
 
-grh::Value* CombAlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& symbol) const {
+grh::Value* AlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& symbol) const {
     auto it = loopValueMap_.find(&symbol);
     if (it == loopValueMap_.end()) {
         return nullptr;
@@ -2771,14 +3003,14 @@ grh::Value* CombAlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& 
     return it->second.value;
 }
 
-bool CombAlwaysConverter::currentContextStatic() const {
+bool AlwaysConverter::currentContextStatic() const {
     if (controlContextStack_.empty()) {
         return true;
     }
     return controlContextStack_.back();
 }
 
-bool CombAlwaysConverter::loopControlTargetsCurrentLoop() const {
+bool AlwaysConverter::loopControlTargetsCurrentLoop() const {
     if (pendingLoopControl_ == LoopControl::None) {
         return false;
     }
@@ -4133,6 +4365,9 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
             if (isCombProceduralBlock(*block)) {
                 processCombAlways(*block, body, graph);
             }
+            else if (isSeqProceduralBlock(*block)) {
+                processSeqAlways(*block, body, graph);
+            }
             else if (diagnostics_) {
                 diagnostics_->nyi(*block, "Procedural block kind is not supported yet");
             }
@@ -4275,6 +4510,16 @@ void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block
     std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
     CombAlwaysConverter converter(graph, netMemo, regMemo, memo, block, diagnostics_);
+    converter.run();
+}
+
+void Elaborate::processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
+                                 const slang::ast::InstanceBodySymbol& body,
+                                 grh::Graph& graph) {
+    std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
+    std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
+    WriteBackMemo& memo = ensureWriteBackMemo(body);
+    SeqAlwaysConverter converter(graph, netMemo, regMemo, memo, block, diagnostics_);
     converter.run();
 }
 

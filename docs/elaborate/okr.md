@@ -107,3 +107,10 @@
   - KR3 支持静态可预测的 break 和 continue 语法
   - KR4 创建测试样例
   - KR5 扩展 `isCombProceduralBlock`，对 `always @(a or b ...)` 等仅包含电平敏感信号列表的过程块视作组合逻辑，保证循环展开前的 block 分类一致
+
+## 阶段16：创建 SeqAlwaysConverter 类
+- **Objective** 为解析时序逻辑过程块创建 SeqAlwaysConverter 类、SeqAlwaysLHSConverter 类
+  - KR1 调研 docs/reference/yosys 中判定时序逻辑过程块的方法，并扩展当前 elaborate 流程添加 processSeqAlways 实现集成
+  - KR2 参考当前 CombAlwaysConverter 的实现，提取一个基类 AlwaysConverter，之后 CombAlwaysConverter 和 SeqAlwaysConverter 均由该基类派生，该基类包含 if/case/loop 处理的公共部分，最终块级的 finalize 阶段由子类按行为定义
+  - KR3 SeqAlwaysConverter 配合 SeqAlwaysLHSConverter 类解析非阻塞赋值语句，时序always块中不允许出现阻塞赋值，报错。
+  - KR3 SeqAlwaysConverter 的 finalize 阶段将绑定 kRegister 的输入 value，创建 kMemory 的读写口，请你规划这个流程，但具体是实现标记为 TODO

@@ -61,3 +61,10 @@
 - **KR2（编译期展开实现）** 在 CombAlwaysConverter 中实现基于常量上下限的循环 unroll：for 循环需要在 elaboration 期间计算初值/终值/步长，生成按迭代顺序串联的语句副本；foreach 循环依赖 TypeHelper 提供的字段/索引列表，逐个展开并绑定对应的迭代变量。展开过程中要为每个迭代实例创建独立的 shadow 层级（或在同一 shadow 中带迭代编号），确保读取到的写入与真实执行顺序一致，且在无法确定迭代次数时及时报错。
 - **KR3（静态 break/continue）** 对 `break`/`continue` 语句做静态判定：当触发条件可在 elaboration 阶段求值时，直接剪裁后续迭代或跳过当前迭代余下语句；无法静态确定的情形应报错，提示需要可决策的循环界限。需支持 for/foreach 中嵌套 break/continue，并记录诊断上下文（循环标签若存在也需校验）。
 - **KR4（测试与可视化）** 构建覆盖 for、foreach、嵌套循环以及带 break/continue 的组合样例，验证展开后生成的 Operation/Value 顺序、shadow 命中与 writeBack 结果。测试应输出 JSON/trace，展示每个迭代实例的写集合，确保循环展开不会遗留动态结构，也不会破坏 SSA 或写回顺序。
+
+## 阶段16：创建 SeqAlwaysConverter 类
+- **定位** 针对含 posedge/negedge 敏感表或 `always_ff` 的时序过程块提供 SeqAlwaysConverter/SeqAlwaysLHSConverter，确保 sequential 语义与 net/reg memo、writeBack memo 的职责边界清晰，并与阶段15结束时的 elaborate 框架顺畅衔接。
+- **流程接入（KR1）** 按 docs/reference/yosys 的判定规则梳理何时触发 `processSeqAlways`：检测敏感列表、判定时钟/复位信号、从 elaborate 主流程传入 graph+memo+诊断上下文，让 SeqAlwaysConverter 完成语句遍历；需要同步补全 `isSeqProceduralBlock` 之类的判断与错误提示。
+- **公共基类（KR2）** 抽象 AlwaysConverter 基类，收敛 if/case/loop 分支栈、块级 shadow memo、RHS/LHS Converter 工厂等公共逻辑；CombAlwaysConverter 与 SeqAlwaysConverter 只覆写专属的 RHS/LHS Converter 创建、赋值调度策略以及 finalize 钩子，重构后跑回归确保组合流程行为不变。
+- **非阻塞语义（KR3）** SeqAlwaysConverter/SeqAlwaysLHSConverter 仅支持非阻塞赋值：遇到阻塞赋值立即诊断；块内维护「当前时钟沿」的 writeBack 列表，记录每条非阻塞语句的目标符号、bit 范围、优先级，并在多次写同一目标时按源代码顺序合并。
+- **finalize 规划（KR4）** 规划 finalize 的三步走但暂以 TODO 落地：1）遍历 writeBack memo，把寄存器条目的 RHS Value 连接到对应 kRegister* stub 的 data 输入（同步/异步复位钩子预留 TODO）；2）为 reg memo 中的 kMemory 条目生成 kMemorySyncRead/Write 端口，明确地址/数据/使能 Value 的来源并记录 TODO 占位以便后续实现真正连线；3）生成人工可读的阶段日志或 JSON dump，输出 register/memory 绑定结果与待实现项，方便阶段评审。

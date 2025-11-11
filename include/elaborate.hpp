@@ -383,6 +383,8 @@ private:
                                  const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processCombAlways(const slang::ast::ProceduralBlockSymbol& block,
                            const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
+                          const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::Graph& parentGraph,
                          grh::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,
