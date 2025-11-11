@@ -106,3 +106,4 @@
   - KR2 对循环进行编译时展开，生成静态结构
   - KR3 支持静态可预测的 break 和 continue 语法
   - KR4 创建测试样例
+  - KR5 扩展 `isCombProceduralBlock`，对 `always @(a or b ...)` 等仅包含电平敏感信号列表的过程块视作组合逻辑，保证循环展开前的 block 分类一致

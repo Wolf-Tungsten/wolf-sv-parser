@@ -503,6 +503,35 @@ bool containsEdgeSensitiveEvent(const slang::ast::TimingControl& timing) {
     }
 }
 
+bool isLevelSensitiveEventList(const slang::ast::TimingControl& timing) {
+    using slang::ast::TimingControlKind;
+    switch (timing.kind) {
+    case TimingControlKind::SignalEvent: {
+        const auto& signal = timing.as<slang::ast::SignalEventControl>();
+        return signal.edge == slang::ast::EdgeKind::None;
+    }
+    case TimingControlKind::EventList: {
+        const auto& list = timing.as<slang::ast::EventListControl>();
+        bool hasSignal = false;
+        for (const slang::ast::TimingControl* ctrl : list.events) {
+            if (!ctrl) {
+                continue;
+            }
+            if (!isLevelSensitiveEventList(*ctrl)) {
+                return false;
+            }
+            hasSignal = true;
+        }
+        return hasSignal;
+    }
+    case TimingControlKind::RepeatedEvent:
+        return isLevelSensitiveEventList(
+            timing.as<slang::ast::RepeatedEventControl>().event);
+    default:
+        return false;
+    }
+}
+
 struct MemoryLayoutInfo {
     int64_t rowWidth = 0;
     int64_t rowCount = 0;
@@ -660,7 +689,10 @@ bool isCombProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
     if (!timing) {
         return true;
     }
-    return timing->kind == slang::ast::TimingControlKind::ImplicitEvent;
+    if (timing->kind == slang::ast::TimingControlKind::ImplicitEvent) {
+        return true;
+    }
+    return isLevelSensitiveEventList(*timing);
 }
 } // namespace
 

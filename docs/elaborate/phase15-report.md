@@ -5,6 +5,7 @@
 - **循环展开实现（KR2）**：`CombAlwaysConverter` 新增 loop scope、迭代变量 eval-context 注入与 `LoopContextGuard`。`visitForLoop` 编译期执行 init/cond/step，`visitForeachLoop` 基于已知维度递归展开，所有迭代直接在 shadow 帧中串联并写回写意图，最终只保留 SSA 结构。
 - **静态 break / continue（KR3）**：在 `visitStatement` 中捕获 `StatementKind::Break/Continue`，通过 `LoopControl` 标记静态上下文下的退出/跳过请求；循环执行器在每次迭代后检查 pending control，裁剪后续迭代并阻止非静态使用，保持 elaboration 期语义可判定。
 - **测试用例与断言（KR4）**：`tests/data/elaborate/comb_always.sv` 新增 `comb_always_stage15_for/foreach/break/continue`。`tests/elaborate/test_elaborate_comb_always.cpp` 解析 JSON artifact，验证 for 形成包含 `data_even/data_odd` 的 `kOr` 树、foreach 形成 `kXor` 树并引用 `src0/src1`，以及 break/continue 输出匹配预期切换。`ctest -R elaborate-comb-always` 作为阶段回归入口。
+- **组合 block 判定增强（KR5）**：`isCombProceduralBlock` 现在会将显式列出但仅包含电平敏感信号的 `always` 块视为组合逻辑，从而允许 `CombAlwaysConverter` 解析 `always @(a or b or c)` 等写法，避免循环展开阶段遗漏这类过程块。
 
 ## 算法与数据结构细节
 - **LoopDescriptor**：用 `ForLoopVarState` 与 `ForeachDimState` 捕获迭代变量、范围与步长，存入 loop-scope 栈，确保 shadow 与 RHSConverter 可以在同一帧内查询当前迭代值。
