@@ -190,6 +190,7 @@ protected:
     virtual grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr);
     virtual grh::Value*
     handleMemoEntry(const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry);
+    virtual grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr);
 
     grh::Value& createTemporaryValue(const slang::ast::Type& type, std::string_view hint);
     grh::Operation& createOperation(grh::OperationKind kind, std::string_view hint);

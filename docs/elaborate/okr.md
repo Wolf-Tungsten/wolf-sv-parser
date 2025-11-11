@@ -99,3 +99,10 @@
   - KR1 对于可静态分析的分支，不产生 kMux
   - KR2 能够处理静态与动态分支嵌套的情况
   - KR3 创建测试样例
+
+## 阶段15：CombAlwaysConverter 添加循环展开能力
+- **Objective** CombAlwaysConverter 支持 for/foreach 循环语句
+  - KR1 参考 docs/reference/yosys 的实现方法，形成循环语句处理算法规划文档
+  - KR2 对循环进行编译时展开，生成静态结构
+  - KR3 支持静态可预测的 break 和 continue 语法
+  - KR4 创建测试样例

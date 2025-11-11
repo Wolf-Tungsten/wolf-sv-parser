@@ -262,3 +262,76 @@ module comb_always_stage14_static_case(
         endcase
     end
 endmodule
+
+module comb_always_stage15_for(
+    input  logic [3:0] data_even,
+    input  logic [3:0] data_odd,
+    output logic [3:0] out_for
+);
+    always_comb begin
+        out_for = '0;
+        for (int idx = 0; idx < 2; idx++) begin
+            if (idx == 0) begin
+                out_for = out_for | data_even;
+            end
+            else begin
+                out_for = out_for | data_odd;
+            end
+        end
+    end
+endmodule
+
+module comb_always_stage15_foreach(
+    input  logic [3:0] src0,
+    input  logic [3:0] src1,
+    output logic [3:0] out_foreach
+);
+    logic dummy [0:1];
+
+    always_comb begin
+        out_foreach = '0;
+        foreach (dummy[idx]) begin
+            if (idx == 0) begin
+                out_foreach = out_foreach ^ src0;
+            end
+            else begin
+                out_foreach = out_foreach ^ src1;
+            end
+        end
+    end
+endmodule
+
+module comb_always_stage15_break(
+    input  logic [3:0] break_a,
+    input  logic [3:0] break_b,
+    output logic [3:0] out_break
+);
+    always_comb begin
+        out_break = '0;
+        for (int idx = 0; idx < 2; idx++) begin
+            if (idx == 0) begin
+                out_break = break_a;
+            end
+            else begin
+                out_break = break_b;
+                break;
+            end
+        end
+    end
+endmodule
+
+module comb_always_stage15_continue(
+    input  logic [3:0] cont_a,
+    input  logic [3:0] cont_b,
+    output logic [3:0] out_continue
+);
+    always_comb begin
+        out_continue = cont_a;
+        for (int idx = 0; idx < 2; idx++) begin
+            if (idx == 0) begin
+                continue;
+            end
+            out_continue = cont_b;
+        end
+    end
+endmodule

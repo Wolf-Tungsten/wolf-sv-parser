@@ -54,3 +54,10 @@
 - **KR1（静态条件检测与折叠）** 结合 slang 的常量折叠能力，在处理 if/case 节点时先尝试对条件表达式求 `ConstantValue`，若能判定为 0/1 或匹配到唯一的 case item，则只解析对应分支并标记其它分支为 unreachable；同时阻止 CombAlwaysRHSConverter/CombAlwaysLHSConverter 生成冗余 Value，确保 Graph 中看不到因静态条件被动创建的 kMux/kMuxChain。
 - **KR2（静态/动态混合嵌套）** 当静态分支内部仍包含动态控制（或反之），需要保证 shadow/writeBack memo 的可见性规则依旧成立：静态剪枝负责缩小语句集合，但对残存的动态分支继续沿用阶段13的 mux 合成逻辑，并能正确溯源「静态祖先」信息，用于诊断和调试。
 - **KR3（测试覆盖）** 构建覆盖纯静态条件、静态 case、静态与动态交错（静态外层包裹动态子 if/case、动态 case item 中存在静态 guard）的单元测试，验证生成的 GRH/写回 JSON 中确实没有多余 mux，并补充断言证明 unreachable 分支不会错误触发写回。
+
+## 阶段15：CombAlwaysConverter 添加循环展开能力
+- **目标定位** 让 CombAlwaysConverter 能够解析 `always_comb`/`always @(*)` 内部的 for/foreach 循环，并在 elaboration 阶段把它们完全展开成静态语句序列，使 shadow memo 与 writeBack memo 仍遵循逐语句推进的模型。
+- **KR1（算法规划文档）** 研读 `docs/reference/yosys` 中关于循环的处理方式，补写一份 `docs/elaborate/process-comb-loops.md`（或扩展既有 process 文档），明确：循环入口条件、迭代表达式、循环变量作用域、嵌套循环与 foreach（数组/结构体字段枚举）的展开顺序，以及与 shadow/writeBack 的交互约束；文档需列示允许/禁止的 SystemVerilog 语法，并给出错误诊断策略。
+- **KR2（编译期展开实现）** 在 CombAlwaysConverter 中实现基于常量上下限的循环 unroll：for 循环需要在 elaboration 期间计算初值/终值/步长，生成按迭代顺序串联的语句副本；foreach 循环依赖 TypeHelper 提供的字段/索引列表，逐个展开并绑定对应的迭代变量。展开过程中要为每个迭代实例创建独立的 shadow 层级（或在同一 shadow 中带迭代编号），确保读取到的写入与真实执行顺序一致，且在无法确定迭代次数时及时报错。
+- **KR3（静态 break/continue）** 对 `break`/`continue` 语句做静态判定：当触发条件可在 elaboration 阶段求值时，直接剪裁后续迭代或跳过当前迭代余下语句；无法静态确定的情形应报错，提示需要可决策的循环界限。需支持 for/foreach 中嵌套 break/continue，并记录诊断上下文（循环标签若存在也需校验）。
+- **KR4（测试与可视化）** 构建覆盖 for、foreach、嵌套循环以及带 break/continue 的组合样例，验证展开后生成的 Operation/Value 顺序、shadow 命中与 writeBack 结果。测试应输出 JSON/trace，展示每个迭代实例的写集合，确保循环展开不会遗留动态结构，也不会破坏 SSA 或写回顺序。

@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <unordered_set>
 
 #include "slang/analysis/AnalysisManager.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
@@ -396,6 +397,27 @@ int main() {
         return true;
     };
 
+    auto collectLeavesForOp = [&](const grh::Value* root, grh::OperationKind foldKind,
+                                  std::unordered_set<const grh::Value*>& leaves) {
+        if (!root) {
+            return;
+        }
+        std::vector<const grh::Value*> stack;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const grh::Value* node = stack.back();
+            stack.pop_back();
+            const grh::Operation* op = node->definingOp();
+            if (!op || op->kind() != foldKind) {
+                leaves.insert(node);
+                continue;
+            }
+            for (const grh::Value* operand : op->operands()) {
+                stack.push_back(operand);
+            }
+        }
+    };
+
     if (!validateMuxOutput("comb_always_stage13_case_defaultless", "out_case_implicit")) {
         return 1;
     }
@@ -519,6 +541,124 @@ int main() {
     if (!((nestedTrue == portDynCaseA && nestedFalse == portDynCaseB) ||
           (nestedTrue == portDynCaseB && nestedFalse == portDynCaseA))) {
         return fail("out_case_nested mux operands do not reference dyn_a/dyn_b inputs");
+    }
+
+    // Stage15 for-loop reductions
+    {
+        const slang::ast::InstanceSymbol* instStage15For =
+            findInstanceByName("comb_always_stage15_for");
+        if (!instStage15For) {
+            return fail("comb_always_stage15_for top instance not found");
+        }
+        grh::Graph* graphStage15For = fetchGraphByName("comb_always_stage15_for");
+        if (!graphStage15For) {
+            return fail("GRH graph comb_always_stage15_for not found");
+        }
+        std::span<const SignalMemoEntry> netMemoStage15For =
+            fetchNetMemoForInstance(*instStage15For);
+        const SignalMemoEntry* outStage15For = findEntry(netMemoStage15For, "out_for");
+        if (!outStage15For) {
+            return fail("Failed to locate out_for memo entry");
+        }
+        const grh::Value* portEven = findPort(*graphStage15For, "data_even", /*isInput=*/true);
+        const grh::Value* portOdd = findPort(*graphStage15For, "data_odd", /*isInput=*/true);
+        if (!portEven || !portOdd) {
+            return fail("comb_always_stage15_for missing data_even/data_odd ports");
+        }
+        const grh::Value* forDriver = getAssignSource(*outStage15For);
+        if (!forDriver) {
+            return fail("out_for missing assign driver");
+        }
+    std::unordered_set<const grh::Value*> orLeaves;
+    collectLeavesForOp(forDriver, grh::OperationKind::kOr, orLeaves);
+    if (!orLeaves.count(portEven) || !orLeaves.count(portOdd)) {
+        return fail("out_for kOr tree does not reference both data_even and data_odd inputs");
+    }
+    }
+
+    // Stage15 foreach XOR
+    {
+        const slang::ast::InstanceSymbol* instStage15Foreach =
+            findInstanceByName("comb_always_stage15_foreach");
+        if (!instStage15Foreach) {
+            return fail("comb_always_stage15_foreach top instance not found");
+        }
+        grh::Graph* graphStage15Foreach = fetchGraphByName("comb_always_stage15_foreach");
+        if (!graphStage15Foreach) {
+            return fail("GRH graph comb_always_stage15_foreach not found");
+        }
+        std::span<const SignalMemoEntry> netMemoStage15Foreach =
+            fetchNetMemoForInstance(*instStage15Foreach);
+        const SignalMemoEntry* outStage15Foreach =
+            findEntry(netMemoStage15Foreach, "out_foreach");
+        if (!outStage15Foreach) {
+            return fail("Failed to locate out_foreach memo entry");
+        }
+        const grh::Value* portSrc0 = findPort(*graphStage15Foreach, "src0", /*isInput=*/true);
+        const grh::Value* portSrc1 = findPort(*graphStage15Foreach, "src1", /*isInput=*/true);
+        if (!portSrc0 || !portSrc1) {
+            return fail("comb_always_stage15_foreach missing src ports");
+        }
+        const grh::Value* foreachDriver = getAssignSource(*outStage15Foreach);
+        if (!foreachDriver) {
+            return fail("out_foreach missing assign driver");
+        }
+    std::unordered_set<const grh::Value*> xorLeaves;
+    collectLeavesForOp(foreachDriver, grh::OperationKind::kXor, xorLeaves);
+    if (!xorLeaves.count(portSrc0) || !xorLeaves.count(portSrc1)) {
+        return fail("out_foreach kXor tree does not reference src0/src1 inputs");
+    }
+    }
+
+    // Stage15 break/continue semantics
+    {
+        const slang::ast::InstanceSymbol* instStage15Break =
+            findInstanceByName("comb_always_stage15_break");
+        if (!instStage15Break) {
+            return fail("comb_always_stage15_break top instance not found");
+        }
+        grh::Graph* graphStage15Break = fetchGraphByName("comb_always_stage15_break");
+        if (!graphStage15Break) {
+            return fail("GRH graph comb_always_stage15_break not found");
+        }
+        std::span<const SignalMemoEntry> netMemoStage15Break =
+            fetchNetMemoForInstance(*instStage15Break);
+        const SignalMemoEntry* outStage15Break =
+            findEntry(netMemoStage15Break, "out_break");
+        if (!outStage15Break) {
+            return fail("Failed to locate out_break memo entry");
+        }
+        const grh::Value* portBreakB = findPort(*graphStage15Break, "break_b", /*isInput=*/true);
+        if (!portBreakB) {
+            return fail("comb_always_stage15_break missing break_b port");
+        }
+        if (!verifyDirectWithoutMux(*outStage15Break, portBreakB, "out_break")) {
+            return 1;
+        }
+
+        const slang::ast::InstanceSymbol* instStage15Continue =
+            findInstanceByName("comb_always_stage15_continue");
+        if (!instStage15Continue) {
+            return fail("comb_always_stage15_continue top instance not found");
+        }
+        grh::Graph* graphStage15Continue = fetchGraphByName("comb_always_stage15_continue");
+        if (!graphStage15Continue) {
+            return fail("GRH graph comb_always_stage15_continue not found");
+        }
+        std::span<const SignalMemoEntry> netMemoStage15Continue =
+            fetchNetMemoForInstance(*instStage15Continue);
+        const SignalMemoEntry* outStage15Continue =
+            findEntry(netMemoStage15Continue, "out_continue");
+        if (!outStage15Continue) {
+            return fail("Failed to locate out_continue memo entry");
+        }
+        const grh::Value* portContB = findPort(*graphStage15Continue, "cont_b", /*isInput=*/true);
+        if (!portContB) {
+            return fail("comb_always_stage15_continue missing cont_b port");
+        }
+        if (!verifyDirectWithoutMux(*outStage15Continue, portContB, "out_continue")) {
+            return 1;
+        }
     }
 
     bool sawExpectedLatchDiag = false;

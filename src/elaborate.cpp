@@ -28,6 +28,7 @@
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/expressions/SelectExpressions.h"
+#include "slang/ast/statements/LoopStatements.h"
 #include "slang/ast/statements/ConditionalStatements.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
@@ -1178,6 +1179,7 @@ public:
 protected:
     grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
+    grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr) override;
 
 private:
     CombAlwaysConverter& owner_;
@@ -1195,6 +1197,13 @@ public:
 private:
     friend class CombAlwaysRHSConverter;
     friend class CombAlwaysLHSConverter;
+    static constexpr std::size_t kMaxLoopIterations = 4096;
+
+    enum class LoopControl {
+        None,
+        Break,
+        Continue
+    };
 
     struct ShadowState {
         std::vector<WriteBackMemo::Slice> slices;
@@ -1212,6 +1221,40 @@ private:
         ShadowFrame frame;
     };
 
+    struct ForLoopVarState {
+        const slang::ast::ValueSymbol* symbol = nullptr;
+    };
+
+    struct ForeachDimState {
+        const slang::ast::ValueSymbol* loopVar = nullptr;
+        int32_t start = 0;
+        int32_t stop = 0;
+        int32_t step = 1;
+    };
+
+    class LoopScopeGuard {
+    public:
+        LoopScopeGuard(CombAlwaysConverter& owner,
+                       std::vector<const slang::ast::ValueSymbol*> symbols);
+        ~LoopScopeGuard();
+        void dismiss();
+
+    private:
+        CombAlwaysConverter& owner_;
+        bool active_ = false;
+    };
+
+    class LoopContextGuard {
+    public:
+        explicit LoopContextGuard(CombAlwaysConverter& owner);
+        ~LoopContextGuard();
+        void dismiss();
+
+    private:
+        CombAlwaysConverter& owner_;
+        bool active_ = true;
+    };
+
     void visitStatement(const slang::ast::Statement& stmt);
     void visitConditional(const slang::ast::ConditionalStatement& stmt);
     void visitCase(const slang::ast::CaseStatement& stmt);
@@ -1219,11 +1262,14 @@ private:
     void visitBlock(const slang::ast::BlockStatement& block);
     void visitExpressionStatement(const slang::ast::ExpressionStatement& stmt);
     void visitProceduralAssign(const slang::ast::ProceduralAssignStatement& stmt);
+    void visitForLoop(const slang::ast::ForLoopStatement& stmt);
+    void visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt);
     void handleAssignment(const slang::ast::AssignmentExpression& expr,
                           const slang::ast::Expression& originExpr);
     void finalizeWrites();
     void reportControlFlowTodo(std::string_view label);
     void reportUnsupportedStmt(const slang::ast::Statement& stmt);
+    void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
     void handleEntryWrite(const SignalMemoEntry& entry,
                           std::vector<WriteBackMemo::Slice> slices);
     void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice);
@@ -1235,6 +1281,8 @@ private:
     ShadowFrame& currentFrame();
     const ShadowFrame& currentFrame() const;
     ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt);
+    ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt,
+                                   bool isStaticContext);
     std::optional<ShadowFrame> mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
                                                  ShadowFrame&& falseFrame,
                                                  const slang::ast::Statement& originStmt,
@@ -1255,12 +1303,31 @@ private:
     std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr,
                                                     bool allowUnknown);
     slang::ast::EvalContext& ensureEvalContext();
+    slang::ast::EvalContext& ensureLoopEvalContext();
     grh::Value* buildWildcardEquality(grh::Value& controlValue, grh::Value& rhsValue,
                                       const slang::ast::Expression& rhsExpr,
                                       slang::ast::CaseStatementCondition condition);
     grh::Value* createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                    std::string_view hint);
     std::optional<bool> evaluateStaticCondition(const slang::ast::Expression& expr);
+    bool currentContextStatic() const;
+    bool loopControlTargetsCurrentLoop() const;
+    void seedEvalContextWithLoopValues(slang::ast::EvalContext& ctx);
+    bool prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
+                             std::vector<ForLoopVarState>& states, slang::ast::EvalContext& ctx);
+    bool evaluateForLoopCondition(const slang::ast::ForLoopStatement& stmt,
+                                  slang::ast::EvalContext& ctx, bool& result);
+    bool executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
+                             slang::ast::EvalContext& ctx);
+    bool updateLoopBindings(std::span<const ForLoopVarState> states,
+                            slang::ast::EvalContext& ctx);
+    bool assignLoopValue(const slang::ast::ValueSymbol& symbol, const slang::SVInt& value);
+    bool runForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
+                             std::span<const ForeachDimState> dims, std::size_t depth,
+                             std::size_t& iterationCount);
+    void pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols);
+    void popLoopScope();
+    grh::Value* lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
 
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
@@ -1276,6 +1343,17 @@ private:
     std::size_t controlNameCounter_ = 0;
     bool reportedControlFlowTodo_ = false;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    std::vector<bool> controlContextStack_;
+    std::vector<int> loopContextStack_;
+    LoopControl pendingLoopControl_ = LoopControl::None;
+    std::size_t pendingLoopDepth_ = 0;
+    struct LoopValueInfo {
+        slang::SVInt literal;
+        grh::Value* value = nullptr;
+    };
+    std::unordered_map<const slang::ast::ValueSymbol*, LoopValueInfo> loopValueMap_;
+    std::vector<std::vector<const slang::ast::ValueSymbol*>> loopScopeStack_;
+    std::unique_ptr<slang::ast::EvalContext> loopEvalContext_;
 };
 
 CombAlwaysRHSConverter::CombAlwaysRHSConverter(Context context, CombAlwaysConverter& owner) :
@@ -1292,6 +1370,16 @@ grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValue
     return CombRHSConverter::handleMemoEntry(expr, entry);
 }
 
+grh::Value* CombAlwaysRHSConverter::handleCustomNamedValue(
+    const slang::ast::NamedValueExpression& expr) {
+    if (const auto* symbol = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
+        if (grh::Value* value = owner_.lookupLoopValue(*symbol)) {
+            return value;
+        }
+    }
+    return CombRHSConverter::handleCustomNamedValue(expr);
+}
+
 bool CombAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
                                      grh::Value& rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
@@ -1306,6 +1394,37 @@ bool CombAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& ass
         owner_.handleEntryWrite(*result.target, std::move(result.slices));
     }
     return true;
+}
+
+CombAlwaysConverter::LoopScopeGuard::LoopScopeGuard(
+    CombAlwaysConverter& owner, std::vector<const slang::ast::ValueSymbol*> symbols) :
+    owner_(owner), active_(true) {
+    owner_.pushLoopScope(std::move(symbols));
+}
+
+CombAlwaysConverter::LoopScopeGuard::~LoopScopeGuard() {
+    if (active_) {
+        owner_.popLoopScope();
+    }
+}
+
+void CombAlwaysConverter::LoopScopeGuard::dismiss() {
+    active_ = false;
+}
+
+CombAlwaysConverter::LoopContextGuard::LoopContextGuard(CombAlwaysConverter& owner) :
+    owner_(owner) {
+    owner_.loopContextStack_.push_back(1);
+}
+
+CombAlwaysConverter::LoopContextGuard::~LoopContextGuard() {
+    if (active_) {
+        owner_.loopContextStack_.pop_back();
+    }
+}
+
+void CombAlwaysConverter::LoopContextGuard::dismiss() {
+    active_ = false;
 }
 
 CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
@@ -1333,6 +1452,7 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                         .diagnostics = diagnostics},
                   *this) {
     shadowStack_.emplace_back();
+    controlContextStack_.push_back(true);
 }
 
 void CombAlwaysConverter::run() {
@@ -1341,6 +1461,17 @@ void CombAlwaysConverter::run() {
 }
 
 void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
+    if (stmt.kind == slang::ast::StatementKind::Break) {
+        handleLoopControlRequest(LoopControl::Break, stmt);
+        return;
+    }
+    if (stmt.kind == slang::ast::StatementKind::Continue) {
+        handleLoopControlRequest(LoopControl::Continue, stmt);
+        return;
+    }
+    if (stmt.kind == slang::ast::StatementKind::VariableDeclaration) {
+        return;
+    }
     if (const auto* list = stmt.as_if<slang::ast::StatementList>()) {
         visitStatementList(*list);
         return;
@@ -1369,6 +1500,14 @@ void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
         visitProceduralAssign(*procAssign);
         return;
     }
+    if (const auto* forLoop = stmt.as_if<slang::ast::ForLoopStatement>()) {
+        visitForLoop(*forLoop);
+        return;
+    }
+    if (const auto* foreachLoop = stmt.as_if<slang::ast::ForeachLoopStatement>()) {
+        visitForeachLoop(*foreachLoop);
+        return;
+    }
 
     using slang::ast::StatementKind;
     switch (stmt.kind) {
@@ -1378,8 +1517,6 @@ void CombAlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
     case StatementKind::PatternCase:
         reportControlFlowTodo("case");
         return;
-    case StatementKind::ForLoop:
-    case StatementKind::ForeachLoop:
     case StatementKind::RepeatLoop:
     case StatementKind::WhileLoop:
     case StatementKind::DoWhileLoop:
@@ -1398,6 +1535,9 @@ void CombAlwaysConverter::visitStatementList(const slang::ast::StatementList& li
             continue;
         }
         visitStatement(*child);
+        if (loopControlTargetsCurrentLoop()) {
+            break;
+        }
     }
 }
 
@@ -1424,6 +1564,140 @@ void CombAlwaysConverter::visitProceduralAssign(
         return;
     }
     reportUnsupportedStmt(stmt);
+}
+
+void CombAlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
+    if (stmt.loopVars.empty()) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_,
+                              "Comb always for-loop without inline variable declarations "
+                              "is not supported yet");
+        }
+        return;
+    }
+    if (!stmt.stopExpr) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_,
+                              "Comb always for-loop requires a statically evaluable stop expression");
+        }
+        return;
+    }
+
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+
+    std::vector<ForLoopVarState> states;
+    states.reserve(stmt.loopVars.size());
+    if (!prepareForLoopState(stmt, states, ctx)) {
+        ctx.reset();
+        return;
+    }
+
+    std::vector<const slang::ast::ValueSymbol*> scopeSymbols;
+    scopeSymbols.reserve(states.size());
+    for (const ForLoopVarState& state : states) {
+        if (state.symbol) {
+            scopeSymbols.push_back(state.symbol);
+        }
+    }
+    LoopScopeGuard scope(*this, std::move(scopeSymbols));
+    LoopContextGuard loopContext(*this);
+
+    std::size_t iterationCount = 0;
+    while (true) {
+        bool condition = true;
+        if (!evaluateForLoopCondition(stmt, ctx, condition)) {
+            ctx.reset();
+            return;
+        }
+        if (!condition) {
+            break;
+        }
+        if (iterationCount++ >= kMaxLoopIterations) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_,
+                                  "Comb always for-loop exceeded maximum unrolled iterations");
+            }
+            break;
+        }
+
+        if (!updateLoopBindings(states, ctx)) {
+            ctx.reset();
+            return;
+        }
+
+        visitStatement(stmt.body);
+
+        if (loopControlTargetsCurrentLoop()) {
+            if (pendingLoopControl_ == LoopControl::Break) {
+                pendingLoopControl_ = LoopControl::None;
+                break;
+            }
+            if (pendingLoopControl_ == LoopControl::Continue) {
+                pendingLoopControl_ = LoopControl::None;
+            }
+        }
+
+        if (!executeForLoopSteps(stmt, ctx)) {
+            ctx.reset();
+            return;
+        }
+    }
+
+    ctx.reset();
+}
+
+void CombAlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt) {
+    if (stmt.loopDims.empty()) {
+        return;
+    }
+
+    std::vector<ForeachDimState> dims;
+    dims.reserve(stmt.loopDims.size());
+    std::vector<const slang::ast::ValueSymbol*> scopeSymbols;
+
+    for (const auto& dim : stmt.loopDims) {
+        if (!dim.range) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_, "Comb always foreach requires static dimension ranges");
+            }
+            return;
+        }
+        if (!dim.loopVar) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_,
+                                  "Comb always foreach skipping dimensions is not supported yet");
+            }
+            return;
+        }
+        const slang::ast::Type& type = dim.loopVar->getType();
+        if (!type.isIntegral()) {
+            if (diagnostics_) {
+                diagnostics_->nyi(*dim.loopVar,
+                                  "Comb always foreach loop variable must be integral");
+            }
+            return;
+        }
+
+        ForeachDimState state;
+        state.loopVar = dim.loopVar;
+        state.start = dim.range->left;
+        state.stop = dim.range->right;
+        state.step = state.start <= state.stop ? 1 : -1;
+        dims.push_back(state);
+        scopeSymbols.push_back(dim.loopVar);
+    }
+
+    if (dims.empty()) {
+        return;
+    }
+
+    LoopScopeGuard scope(*this, std::move(scopeSymbols));
+    LoopContextGuard loopContext(*this);
+    std::size_t iterationCount = 0;
+    if (!runForeachRecursive(stmt, std::span<const ForeachDimState>(dims), 0, iterationCount)) {
+        return;
+    }
 }
 
 void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& stmt) {
@@ -1458,9 +1732,10 @@ void CombAlwaysConverter::visitConditional(const slang::ast::ConditionalStatemen
     }
 
     ShadowFrame baseSnapshot = currentFrame();
-    ShadowFrame trueFrame = runWithShadowFrame(baseSnapshot, stmt.ifTrue);
+    ShadowFrame trueFrame = runWithShadowFrame(baseSnapshot, stmt.ifTrue, /*isStaticContext=*/false);
     ShadowFrame falseFrame =
-        stmt.ifFalse ? runWithShadowFrame(baseSnapshot, *stmt.ifFalse) : baseSnapshot;
+        stmt.ifFalse ? runWithShadowFrame(baseSnapshot, *stmt.ifFalse, /*isStaticContext=*/false)
+                     : baseSnapshot;
 
     auto merged =
         mergeShadowFrames(*conditionValue, std::move(trueFrame), std::move(falseFrame), stmt, "if");
@@ -1481,6 +1756,7 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
 
     slang::ast::EvalContext& ctx = ensureEvalContext();
     ctx.reset();
+    seedEvalContextWithLoopValues(ctx);
     auto [knownBranch, isKnown] = stmt.getKnownBranch(ctx);
     if (isKnown) {
         ShadowFrame baseSnapshot = currentFrame();
@@ -1508,15 +1784,18 @@ void CombAlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         if (!match) {
             return;
         }
-        ShadowFrame branchFrame = runWithShadowFrame(baseSnapshot, *item.stmt);
+        ShadowFrame branchFrame =
+            runWithShadowFrame(baseSnapshot, *item.stmt, /*isStaticContext=*/false);
         CaseBranch branch;
         branch.match = match;
         branch.frame = std::move(branchFrame);
         branches.push_back(std::move(branch));
     }
 
-    ShadowFrame accumulator = stmt.defaultCase ? runWithShadowFrame(baseSnapshot, *stmt.defaultCase)
-                                               : baseSnapshot;
+    ShadowFrame accumulator =
+        stmt.defaultCase ? runWithShadowFrame(baseSnapshot, *stmt.defaultCase,
+                                              /*isStaticContext=*/false)
+                         : baseSnapshot;
 
     if (branches.empty()) {
         currentFrame() = std::move(accumulator);
@@ -1634,6 +1913,30 @@ grh::Value* CombAlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry)
         return state.composed;
     }
     return rebuildShadowValue(entry, state);
+}
+
+void CombAlwaysConverter::handleLoopControlRequest(LoopControl kind,
+                                                   const slang::ast::Statement& /*origin*/) {
+    if (!currentContextStatic()) {
+        if (diagnostics_) {
+            std::string message = "Comb always ";
+            message.append(kind == LoopControl::Break ? "break" : "continue");
+            message.append(" requires statically known control flow");
+            diagnostics_->nyi(block_, std::move(message));
+        }
+        return;
+    }
+    if (loopContextStack_.empty()) {
+        if (diagnostics_) {
+            std::string message = "Comb always ";
+            message.append(kind == LoopControl::Break ? "break" : "continue");
+            message.append(" used outside of a loop is not supported");
+            diagnostics_->nyi(block_, std::move(message));
+        }
+        return;
+    }
+    pendingLoopControl_ = kind;
+    pendingLoopDepth_ = loopContextStack_.size();
 }
 
 grh::Value* CombAlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
@@ -1765,12 +2068,22 @@ const CombAlwaysConverter::ShadowFrame& CombAlwaysConverter::currentFrame() cons
 CombAlwaysConverter::ShadowFrame
 CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
                                         const slang::ast::Statement& stmt) {
+    return runWithShadowFrame(seed, stmt, currentContextStatic());
+}
+
+CombAlwaysConverter::ShadowFrame
+CombAlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
+                                        const slang::ast::Statement& stmt,
+                                        bool isStaticContext) {
     ShadowFrame frame;
     frame.map = seed.map;
     shadowStack_.push_back(std::move(frame));
+    bool parentStatic = currentContextStatic();
+    controlContextStack_.push_back(parentStatic && isStaticContext);
     visitStatement(stmt);
     ShadowFrame result = std::move(shadowStack_.back());
     shadowStack_.pop_back();
+    controlContextStack_.pop_back();
     return result;
 }
 
@@ -2078,6 +2391,7 @@ CombAlwaysConverter::evaluateConstantInt(const slang::ast::Expression& expr, boo
     }
     slang::ast::EvalContext& ctx = ensureEvalContext();
     ctx.reset();
+    seedEvalContextWithLoopValues(ctx);
     slang::ConstantValue value = expr.eval(ctx);
     if (!value || !value.isInteger()) {
         return std::nullopt;
@@ -2095,6 +2409,7 @@ std::optional<bool> CombAlwaysConverter::evaluateStaticCondition(
     }
     slang::ast::EvalContext& ctx = ensureEvalContext();
     ctx.reset();
+    seedEvalContextWithLoopValues(ctx);
     slang::ConstantValue value = expr.eval(ctx);
     if (!value || value.hasUnknown()) {
         return std::nullopt;
@@ -2113,6 +2428,329 @@ slang::ast::EvalContext& CombAlwaysConverter::ensureEvalContext() {
         evalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
     }
     return *evalContext_;
+}
+
+slang::ast::EvalContext& CombAlwaysConverter::ensureLoopEvalContext() {
+    if (!loopEvalContext_) {
+        loopEvalContext_ = std::make_unique<slang::ast::EvalContext>(block_);
+    }
+    return *loopEvalContext_;
+}
+
+void CombAlwaysConverter::seedEvalContextWithLoopValues(slang::ast::EvalContext& ctx) {
+    if (loopValueMap_.empty()) {
+        return;
+    }
+    for (const auto& [symbol, info] : loopValueMap_) {
+        if (!symbol) {
+            continue;
+        }
+        slang::ConstantValue literal(info.literal);
+        ctx.createLocal(symbol, std::move(literal));
+    }
+}
+
+bool CombAlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
+                                              std::vector<ForLoopVarState>& states,
+                                              slang::ast::EvalContext& ctx) {
+    slang::ast::EvalContext initEvalCtx(block_);
+    auto evaluateInitializer = [&](const slang::ast::Expression& expr)
+        -> std::optional<slang::SVInt> {
+        initEvalCtx.reset();
+        slang::ConstantValue value = expr.eval(initEvalCtx);
+        if (!value || !value.isInteger() || value.hasUnknown()) {
+            return std::nullopt;
+        }
+        return value.integer();
+    };
+
+    auto addLoopVar = [&](const slang::ast::ValueSymbol& symbol,
+                          const slang::ast::Expression& initExpr) -> bool {
+        const slang::ast::Type& type = symbol.getType();
+        if (!type.isIntegral()) {
+            if (diagnostics_) {
+                diagnostics_->nyi(symbol, "Comb always for-loop variable must be integral");
+            }
+            return false;
+        }
+
+        std::optional<slang::SVInt> initValue = evaluateInitializer(initExpr);
+        if (!initValue) {
+            if (diagnostics_) {
+                diagnostics_->nyi(symbol, "Comb always for-loop initializer must be constant");
+            }
+            return false;
+        }
+
+        const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+        const slang::bitwidth_t width = static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+        slang::SVInt sized = initValue->resize(width);
+        sized.setSigned(type.isSigned());
+        slang::ConstantValue initConst(sized);
+        slang::ConstantValue* storage = ctx.createLocal(&symbol, std::move(initConst));
+        if (!storage) {
+            return false;
+        }
+
+        ForLoopVarState state;
+        state.symbol = &symbol;
+        states.push_back(state);
+        return true;
+    };
+
+    if (!stmt.loopVars.empty()) {
+        for (const slang::ast::VariableSymbol* var : stmt.loopVars) {
+            if (!var) {
+                continue;
+            }
+            const slang::ast::Expression* initExpr = var->getInitializer();
+            if (!initExpr) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(*var,
+                                      "Comb always for-loop variable requires an initializer");
+                }
+                return false;
+            }
+            if (!addLoopVar(*var, *initExpr)) {
+                return false;
+            }
+        }
+    }
+    else {
+        if (stmt.initializers.empty()) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_, "Comb always for-loop requires an initializer");
+            }
+            return false;
+        }
+        for (const slang::ast::Expression* initExpr : stmt.initializers) {
+            const auto* assign = initExpr ? initExpr->as_if<slang::ast::AssignmentExpression>()
+                                          : nullptr;
+            if (!assign) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(block_,
+                                      "Comb always for-loop initializer must be an assignment");
+                }
+                return false;
+            }
+            const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(assign->left());
+            if (!symbol) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(block_,
+                                      "Comb always for-loop initializer must target a variable symbol");
+                }
+                return false;
+            }
+            if (!addLoopVar(*symbol, assign->right())) {
+                return false;
+            }
+        }
+    }
+
+    if (states.empty()) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_, "Comb always for-loop has no supported loop variables");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool CombAlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStatement& stmt,
+                                                   slang::ast::EvalContext& ctx, bool& result) {
+    if (!stmt.stopExpr) {
+        result = false;
+        return true;
+    }
+
+    slang::ConstantValue cond = stmt.stopExpr->eval(ctx);
+    if (!cond || cond.hasUnknown()) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_, "Comb always for-loop stop expression must be constant");
+        }
+        return false;
+    }
+
+    if (cond.isTrue()) {
+        result = true;
+        return true;
+    }
+    if (cond.isFalse()) {
+        result = false;
+        return true;
+    }
+
+    if (cond.isInteger()) {
+        const slang::SVInt& intVal = cond.integer();
+        slang::SVInt zero(intVal.getBitWidth(), 0, intVal.isSigned());
+        slang::logic_t eqZero = intVal == zero;
+        result = !static_cast<bool>(eqZero);
+        return true;
+    }
+
+    if (diagnostics_) {
+        diagnostics_->nyi(block_, "Comb always for-loop stop expression is not boolean");
+    }
+    return false;
+}
+
+bool CombAlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
+                                              slang::ast::EvalContext& ctx) {
+    for (const slang::ast::Expression* step : stmt.steps) {
+        if (!step) {
+            continue;
+        }
+        slang::ConstantValue value = step->eval(ctx);
+        if (!value) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_, "Comb always for-loop step expression failed evaluation");
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CombAlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> states,
+                                             slang::ast::EvalContext& ctx) {
+    for (const ForLoopVarState& state : states) {
+        if (!state.symbol) {
+            continue;
+        }
+        slang::ConstantValue* storage = ctx.findLocal(state.symbol);
+        if (!storage || !storage->isInteger()) {
+            if (diagnostics_) {
+                std::string message = "Comb always for-loop variable evaluated to non-integer value";
+                if (state.symbol && !state.symbol->name.empty()) {
+                    message.append(" (");
+                    message.append(std::string(state.symbol->name));
+                    message.push_back(')');
+                }
+                diagnostics_->nyi(*state.symbol, std::move(message));
+            }
+            return false;
+        }
+
+        slang::SVInt value = storage->integer();
+        if (!assignLoopValue(*state.symbol, value)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CombAlwaysConverter::assignLoopValue(const slang::ast::ValueSymbol& symbol,
+                                          const slang::SVInt& value) {
+    const slang::ast::Type& type = symbol.getType();
+    const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+    const slang::bitwidth_t width = static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+    slang::SVInt resized = value.resize(width);
+    resized.setSigned(type.isSigned());
+
+    std::string hint =
+        symbol.name.empty() ? std::string("loop_idx") : sanitizeForGraphName(symbol.name);
+    grh::Value* literal = createLiteralValue(resized, type.isSigned(), hint);
+    if (!literal) {
+        return false;
+    }
+
+    LoopValueInfo info;
+    info.literal = resized;
+    info.value = literal;
+    loopValueMap_[&symbol] = std::move(info);
+    return true;
+}
+
+bool CombAlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
+                                              std::span<const ForeachDimState> dims,
+                                              std::size_t depth, std::size_t& iterationCount) {
+    if (depth >= dims.size()) {
+        if (iterationCount++ >= kMaxLoopIterations) {
+            if (diagnostics_) {
+                diagnostics_->nyi(block_,
+                                  "Comb always foreach loop exceeded maximum unrolled iterations");
+            }
+            return false;
+        }
+        visitStatement(stmt.body);
+        if (loopControlTargetsCurrentLoop()) {
+            if (pendingLoopControl_ == LoopControl::Break) {
+                pendingLoopControl_ = LoopControl::None;
+                return false;
+            }
+            if (pendingLoopControl_ == LoopControl::Continue) {
+                pendingLoopControl_ = LoopControl::None;
+            }
+        }
+        return true;
+    }
+
+    const ForeachDimState& dim = dims[depth];
+    for (int32_t index = dim.start;; index += dim.step) {
+        if (dim.loopVar) {
+            slang::SVInt literal(index);
+            if (!assignLoopValue(*dim.loopVar, literal)) {
+                return false;
+            }
+        }
+
+        if (!runForeachRecursive(stmt, dims, depth + 1, iterationCount)) {
+            return false;
+        }
+
+        if (loopControlTargetsCurrentLoop()) {
+            if (pendingLoopControl_ == LoopControl::Break) {
+                pendingLoopControl_ = LoopControl::None;
+                return false;
+            }
+            if (pendingLoopControl_ == LoopControl::Continue) {
+                pendingLoopControl_ = LoopControl::None;
+            }
+        }
+
+        if (index == dim.stop) {
+            break;
+        }
+    }
+
+    return true;
+}
+
+void CombAlwaysConverter::pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols) {
+    loopScopeStack_.push_back(std::move(symbols));
+}
+
+void CombAlwaysConverter::popLoopScope() {
+    if (loopScopeStack_.empty()) {
+        return;
+    }
+    for (const slang::ast::ValueSymbol* symbol : loopScopeStack_.back()) {
+        loopValueMap_.erase(symbol);
+    }
+    loopScopeStack_.pop_back();
+}
+
+grh::Value* CombAlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& symbol) const {
+    auto it = loopValueMap_.find(&symbol);
+    if (it == loopValueMap_.end()) {
+        return nullptr;
+    }
+    return it->second.value;
+}
+
+bool CombAlwaysConverter::currentContextStatic() const {
+    if (controlContextStack_.empty()) {
+        return true;
+    }
+    return controlContextStack_.back();
+}
+
+bool CombAlwaysConverter::loopControlTargetsCurrentLoop() const {
+    if (pendingLoopControl_ == LoopControl::None) {
+        return false;
+    }
+    return pendingLoopDepth_ == loopContextStack_.size();
 }
 
 void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
@@ -2478,6 +3116,10 @@ grh::Value* RHSConverter::convertNamedValue(const slang::ast::Expression& expr) 
             }
         }
 
+        if (grh::Value* custom = handleCustomNamedValue(named)) {
+            return custom;
+        }
+
         if (grh::Value* fallback = resolveGraphValue(named.symbol)) {
             return fallback;
         }
@@ -2770,8 +3412,12 @@ grh::Value* RHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression
     return nullptr;
 }
 
+grh::Value* RHSConverter::handleCustomNamedValue(const slang::ast::NamedValueExpression&) {
+    return nullptr;
+}
+
 grh::Value& RHSConverter::createTemporaryValue(const slang::ast::Type& type,
-                                                std::string_view hint) {
+                                               std::string_view hint) {
     const TypeInfo info = deriveTypeInfo(type);
     std::string name = makeValueName(hint, valueCounter_++);
     return graph_->createValue(name, info.width > 0 ? info.width : 1, info.isSigned);
@@ -2936,6 +3582,8 @@ void RHSConverter::reportUnsupported(std::string_view what,
     std::string message = "Unsupported RHS " + std::string(what);
     message.append(" (kind=");
     message.append(std::to_string(static_cast<int>(expr.kind)));
+    message.push_back(' ');
+    message.append(slang::ast::toString(expr.kind));
     message.push_back(')');
     diagnostics_->nyi(*origin_, std::move(message));
 }
