@@ -2,6 +2,9 @@
 
 #include "grh.hpp"
 #include "slang/ast/EvalContext.h"
+#include "slang/ast/statements/ConditionalStatements.h"
+#include "slang/ast/statements/LoopStatements.h"
+#include "slang/ast/statements/MiscStatements.h"
 
 /** \file elaborate.hpp
  *  \brief Entry points for converting slang AST into the GRH representation.
@@ -346,6 +349,284 @@ public:
 
 private:
     WriteBackMemo& memo_;
+};
+
+class AlwaysConverter;
+
+/// LHS converter used by procedural always blocks.
+class AlwaysBlockLHSConverter : public LHSConverter {
+public:
+    AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner);
+
+    bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+
+protected:
+    AlwaysConverter& owner_;
+};
+
+/// LHS converter for combinational always blocks.
+class CombAlwaysLHSConverter : public AlwaysBlockLHSConverter {
+public:
+    using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
+};
+
+/// LHS converter for sequential always blocks.
+class SeqAlwaysLHSConverter : public AlwaysBlockLHSConverter {
+public:
+    using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
+};
+
+/// RHS converter used by procedural always blocks.
+class AlwaysBlockRHSConverter : public CombRHSConverter {
+public:
+    AlwaysBlockRHSConverter(Context context, AlwaysConverter& owner);
+
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+    grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr) override;
+
+    AlwaysConverter& owner_;
+};
+
+/// RHS converter for combinational always blocks.
+class CombAlwaysRHSConverter : public AlwaysBlockRHSConverter {
+public:
+    using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
+
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+};
+
+/// RHS converter for sequential always blocks.
+class SeqAlwaysRHSConverter : public AlwaysBlockRHSConverter {
+public:
+    using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
+
+protected:
+    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+                                const SignalMemoEntry& entry) override;
+};
+
+/// Shared control logic for procedural always blocks.
+class AlwaysConverter {
+public:
+    AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                    std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                    const slang::ast::ProceduralBlockSymbol& block,
+                    ElaborateDiagnostics* diagnostics);
+    virtual ~AlwaysConverter() = default;
+
+    void traverse();
+
+protected:
+    friend class AlwaysBlockRHSConverter;
+    friend class AlwaysBlockLHSConverter;
+    friend class CombAlwaysRHSConverter;
+    friend class CombAlwaysLHSConverter;
+    friend class SeqAlwaysRHSConverter;
+    friend class SeqAlwaysLHSConverter;
+
+    static constexpr std::size_t kMaxLoopIterations = 4096;
+
+    virtual std::string_view modeLabel() const = 0;
+    virtual bool allowBlockingAssignments() const = 0;
+    virtual bool allowNonBlockingAssignments() const = 0;
+    virtual bool requireNonBlockingAssignments() const = 0;
+
+    void setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
+                       std::unique_ptr<AlwaysBlockLHSConverter> lhs);
+
+    enum class LoopControl { None, Break, Continue };
+
+    struct ShadowState {
+        std::vector<WriteBackMemo::Slice> slices;
+        grh::Value* composed = nullptr;
+        bool dirty = false;
+    };
+
+    struct ShadowFrame {
+        std::unordered_map<const SignalMemoEntry*, ShadowState> map;
+        std::unordered_set<const SignalMemoEntry*> touched;
+    };
+
+    struct CaseBranch {
+        grh::Value* match = nullptr;
+        ShadowFrame frame;
+    };
+
+    struct ForLoopVarState {
+        const slang::ast::ValueSymbol* symbol = nullptr;
+    };
+
+    struct ForeachDimState {
+        const slang::ast::ValueSymbol* loopVar = nullptr;
+        int32_t start = 0;
+        int32_t stop = 0;
+        int32_t step = 1;
+    };
+
+    class LoopScopeGuard {
+    public:
+        LoopScopeGuard(AlwaysConverter& owner, std::vector<const slang::ast::ValueSymbol*> symbols);
+        ~LoopScopeGuard();
+        void dismiss();
+
+    private:
+        AlwaysConverter& owner_;
+        bool active_ = false;
+    };
+
+    class LoopContextGuard {
+    public:
+        explicit LoopContextGuard(AlwaysConverter& owner);
+        ~LoopContextGuard();
+        void dismiss();
+
+    private:
+        AlwaysConverter& owner_;
+        bool active_ = true;
+    };
+
+    void visitStatement(const slang::ast::Statement& stmt);
+    void visitConditional(const slang::ast::ConditionalStatement& stmt);
+    void visitCase(const slang::ast::CaseStatement& stmt);
+    void visitStatementList(const slang::ast::StatementList& list);
+    void visitBlock(const slang::ast::BlockStatement& block);
+    void visitExpressionStatement(const slang::ast::ExpressionStatement& stmt);
+    void visitProceduralAssign(const slang::ast::ProceduralAssignStatement& stmt);
+    void visitForLoop(const slang::ast::ForLoopStatement& stmt);
+    void visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt);
+    void handleAssignment(const slang::ast::AssignmentExpression& expr,
+                          const slang::ast::Expression& originExpr);
+    void flushProceduralWrites();
+    void reportControlFlowTodo(std::string_view label);
+    void reportUnsupportedStmt(const slang::ast::Statement& stmt);
+    void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
+    void handleEntryWrite(const SignalMemoEntry& entry, std::vector<WriteBackMemo::Slice> slices);
+    void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice);
+    grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
+    grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
+    grh::Value* createZeroValue(int64_t width);
+    std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
+    std::string makeShadowValueName(const SignalMemoEntry& entry, std::string_view suffix);
+    ShadowFrame& currentFrame();
+    const ShadowFrame& currentFrame() const;
+    ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt);
+    ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt,
+                                   bool isStaticContext);
+    std::optional<ShadowFrame> mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+                                                 ShadowFrame&& falseFrame,
+                                                 const slang::ast::Statement& originStmt,
+                                                 std::string_view label);
+    WriteBackMemo::Slice buildFullSlice(const SignalMemoEntry& entry, grh::Value& value);
+    grh::Value* createMuxForEntry(const SignalMemoEntry& entry, grh::Value& condition,
+                                  grh::Value& onTrue, grh::Value& onFalse, std::string_view label);
+    grh::Value* buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+                               grh::Value& controlValue,
+                               slang::ast::CaseStatementCondition condition);
+    grh::Value* buildEquality(grh::Value& lhs, grh::Value& rhs, std::string_view hint);
+    grh::Value* buildLogicOr(grh::Value& lhs, grh::Value& rhs);
+    std::string makeControlOpName(std::string_view suffix);
+    std::string makeControlValueName(std::string_view suffix);
+    void reportLatchIssue(std::string_view context, const SignalMemoEntry* entry = nullptr);
+    void checkCaseUniquePriority(const slang::ast::CaseStatement& stmt);
+    std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr,
+                                                    bool allowUnknown);
+    slang::ast::EvalContext& ensureEvalContext();
+    slang::ast::EvalContext& ensureLoopEvalContext();
+    grh::Value* buildWildcardEquality(grh::Value& controlValue, grh::Value& rhsValue,
+                                      const slang::ast::Expression& rhsExpr,
+                                      slang::ast::CaseStatementCondition condition);
+    grh::Value* createLiteralValue(const slang::SVInt& literal, bool isSigned,
+                                   std::string_view hint);
+    std::optional<bool> evaluateStaticCondition(const slang::ast::Expression& expr);
+    bool currentContextStatic() const;
+    bool loopControlTargetsCurrentLoop() const;
+    void seedEvalContextWithLoopValues(slang::ast::EvalContext& ctx);
+    bool prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
+                             std::vector<ForLoopVarState>& states, slang::ast::EvalContext& ctx);
+    bool evaluateForLoopCondition(const slang::ast::ForLoopStatement& stmt,
+                                  slang::ast::EvalContext& ctx, bool& result);
+    bool executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
+                             slang::ast::EvalContext& ctx);
+    bool updateLoopBindings(std::span<const ForLoopVarState> states,
+                            slang::ast::EvalContext& ctx);
+    bool assignLoopValue(const slang::ast::ValueSymbol& symbol, const slang::SVInt& value);
+    bool runForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
+                             std::span<const ForeachDimState> dims, std::size_t depth,
+                             std::size_t& iterationCount);
+    void pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols);
+    void popLoopScope();
+    grh::Value* lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
+    grh::Graph& graph() noexcept { return graph_; }
+    const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
+    ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
+    WriteBackMemo& memo() noexcept { return memo_; }
+
+    grh::Graph& graph_;
+    std::span<const SignalMemoEntry> netMemo_;
+    std::span<const SignalMemoEntry> regMemo_;
+    WriteBackMemo& memo_;
+    const slang::ast::ProceduralBlockSymbol& block_;
+    ElaborateDiagnostics* diagnostics_;
+    std::unique_ptr<AlwaysBlockRHSConverter> rhsConverter_;
+    std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
+    std::vector<ShadowFrame> shadowStack_;
+    std::unordered_map<int64_t, grh::Value*> zeroCache_;
+    std::size_t shadowNameCounter_ = 0;
+    std::size_t controlNameCounter_ = 0;
+    bool reportedControlFlowTodo_ = false;
+    std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    std::vector<bool> controlContextStack_;
+    std::vector<int> loopContextStack_;
+    LoopControl pendingLoopControl_ = LoopControl::None;
+    std::size_t pendingLoopDepth_ = 0;
+    struct LoopValueInfo {
+        slang::SVInt literal;
+        grh::Value* value = nullptr;
+    };
+    std::unordered_map<const slang::ast::ValueSymbol*, LoopValueInfo> loopValueMap_;
+    std::vector<std::vector<const slang::ast::ValueSymbol*>> loopScopeStack_;
+    std::unique_ptr<slang::ast::EvalContext> loopEvalContext_;
+};
+
+/// Comb always converter entry point.
+class CombAlwaysConverter : public AlwaysConverter {
+public:
+    CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                        std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                        const slang::ast::ProceduralBlockSymbol& block,
+                        ElaborateDiagnostics* diagnostics);
+
+    void run();
+
+protected:
+    std::string_view modeLabel() const override;
+    bool allowBlockingAssignments() const override;
+    bool allowNonBlockingAssignments() const override;
+    bool requireNonBlockingAssignments() const override;
+};
+
+/// Sequential always converter entry point.
+class SeqAlwaysConverter : public AlwaysConverter {
+public:
+    SeqAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+                       std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                       const slang::ast::ProceduralBlockSymbol& block,
+                       ElaborateDiagnostics* diagnostics);
+
+    void run();
+
+protected:
+    std::string_view modeLabel() const override;
+    bool allowBlockingAssignments() const override;
+    bool allowNonBlockingAssignments() const override;
+    bool requireNonBlockingAssignments() const override;
+
+private:
+    void planSequentialFinalize();
 };
 
 /// Elaborates slang AST into GRH representation.
