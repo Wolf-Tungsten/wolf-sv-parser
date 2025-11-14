@@ -114,3 +114,11 @@
   - KR2 参考当前 CombAlwaysConverter 的实现，提取一个基类 AlwaysConverter，之后 CombAlwaysConverter 和 SeqAlwaysConverter 均由该基类派生，该基类包含 if/case/loop 处理的公共部分，最终块级的 finalize 阶段由子类按行为定义
   - KR3 SeqAlwaysConverter 配合 SeqAlwaysLHSConverter 类解析非阻塞赋值语句，时序always块中不允许出现阻塞赋值，报错。
   - KR3 SeqAlwaysConverter 的 finalize 阶段将绑定 kRegister 的输入 value，创建 kMemory 的读写口，请你规划这个流程，但具体是实现标记为 TODO
+
+## 阶段17：SeqAlwaysConverter 类处理寄存器非阻塞赋值
+- **Objective** SeqAlwaysConverter 在遇到寄存器非阻塞赋值时，能够正确设置 kRegister 的 clk、rst、d 操作数
+  - KR1 当时序 always 块中出现对 kRegister 的非阻塞赋值时，要正确设置被赋值 kRegister 的所有操作数
+  - KR2 核查 kRegister 的类型、attribute正确（有无复位？时钟复位极性？），操作数尚未被设置？不满足条件则报错
+  - KR3 支持同一个 always 块中对同一寄存器分段不重叠的非阻塞赋值，生成正确的 kConcat
+  - KR4 对于同一个 always 块中对同一寄存器重复或者分段重叠的非阻塞赋值，后来者覆盖前者
+  - KR5 对于同一个 always 块中切片赋值但又没有完全赋值的寄存器，未操作的片段应当保留原值，通过将 q 的 slice 和 d 的 slice 拼接实现

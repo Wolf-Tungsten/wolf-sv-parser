@@ -68,3 +68,12 @@
 - **公共基类（KR2）** 抽象 AlwaysConverter 基类，收敛 if/case/loop 分支栈、块级 shadow memo、RHS/LHS Converter 工厂等公共逻辑；CombAlwaysConverter 与 SeqAlwaysConverter 只覆写专属的 RHS/LHS Converter 创建、赋值调度策略以及 finalize 钩子，重构后跑回归确保组合流程行为不变。
 - **非阻塞语义（KR3）** SeqAlwaysConverter/SeqAlwaysLHSConverter 仅支持非阻塞赋值：遇到阻塞赋值立即诊断；块内维护「当前时钟沿」的 writeBack 列表，记录每条非阻塞语句的目标符号、bit 范围、优先级，并在多次写同一目标时按源代码顺序合并。
 - **finalize 规划（KR4）** 规划 finalize 的三步走但暂以 TODO 落地：1）遍历 writeBack memo，把寄存器条目的 RHS Value 连接到对应 kRegister* stub 的 data 输入（同步/异步复位钩子预留 TODO）；2）为 reg memo 中的 kMemory 条目生成 kMemorySyncRead/Write 端口，明确地址/数据/使能 Value 的来源并记录 TODO 占位以便后续实现真正连线；3）生成人工可读的阶段日志或 JSON dump，输出 register/memory 绑定结果与待实现项，方便阶段评审。
+
+## 阶段17：SeqAlwaysConverter 类处理寄存器非阻塞赋值
+- **目标定位** 接棒阶段16的 finalize TODO，把 SeqAlwaysConverter 在遇到寄存器非阻塞赋值（NBA）时的结果真正落到 kRegister 节点：同一 always_ff/时序块内要基于块级上下文一次性绑定 clk/rst/d，并补齐 `reg memo -> kRegister` 之间的实际连线。
+- **KR1（kRegister 操作数绑定）** 在解析 NBA 时即收集目标寄存器、写入 bit 区间与 RHS Value，finalize 阶段按寄存器聚合：对每个 reg memo 条目填充 kRegister 的 data/clk/rst operand。clk/rst 来源于 `processSeqAlways` 已解析的敏感列表信息，data 则来自本块 writeBack 列表的拼接结果，确保单一寄存器的所有操作数都在本阶段完成设置。
+- **KR2（属性与状态校验）** finalize 前对 reg memo 条目进行自检：确认类型为 kRegister（非 memory）、attribute 与当前块的时钟/复位匹配（极性、同步/异步）、各 operand 尚未被其他块写入。任一条件不满足需报错并指明冲突来源，以防止重复绑定或把组合逻辑误连到寄存器口。
+- **KR3（分段不重叠合成）** 同一 always 块里对同一寄存器的多段非重叠写入需要按照 bit 位顺序构造 kConcat，把每段 RHS Value 对应的 slice 拼出完整 data 输入。实现上依赖 TypeHelper/flatten 信息生成 `[hi:lo]` 描述，并在 finalize 时根据覆盖区间排序合并，确保拼接后的位宽与寄存器定义一致。
+- **KR4（重叠写入覆盖规则）** 若同一寄存器在一个块内被重复赋值或区间重叠，后出现的赋值覆盖先前结果。需要在 writeBack 结构中携带语句顺序，合并时按顺序覆写重叠区间（无需报错），并在调试日志中标注覆盖关系，便于追踪最终 data 值的来源。
+- **KR5（保留未写片段）** 当一个寄存器只被切片赋值且未覆盖全部位段时，未触碰的片段要保留上一拍的 q 值：通过从现有 kRegister 输出切片生成保留 Value，再与新的 data 片段拼接，保证整体 data 输入仍覆盖全位。如果 q 尚未可用（例如尚未插入 Graph），需要在 finalize 前确保可以获取该 Value 或给出明确的 TODO/诊断。
+- **验证与可视化** 增加覆盖单寄存器多段写入、重叠写入、部分写入保留旧值以及不同复位形态的时序样例，测试中 dump 出寄存器绑定的 clk/rst/data Value 及每段写入的位宽，确保 kRegister 的三个 operand 都按预期被设置；必要时扩展现有 JSON trace，帮助评审核对覆盖/保留策略。

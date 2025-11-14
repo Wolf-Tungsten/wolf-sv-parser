@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -652,6 +654,131 @@ deriveClockPolarity(const slang::ast::ProceduralBlockSymbol& block,
     }
 }
 
+void collectSignalEvents(const slang::ast::TimingControl& timing,
+                         std::vector<const slang::ast::SignalEventControl*>& out) {
+    using slang::ast::TimingControlKind;
+    switch (timing.kind) {
+    case TimingControlKind::SignalEvent:
+        out.push_back(&timing.as<slang::ast::SignalEventControl>());
+        break;
+    case TimingControlKind::EventList: {
+        const auto& list = timing.as<slang::ast::EventListControl>();
+        for (const slang::ast::TimingControl* ctrl : list.events) {
+            if (ctrl) {
+                collectSignalEvents(*ctrl, out);
+            }
+        }
+        break;
+    }
+    case TimingControlKind::RepeatedEvent:
+        collectSignalEvents(timing.as<slang::ast::RepeatedEventControl>().event, out);
+        break;
+    default:
+        break;
+    }
+}
+
+struct AsyncResetEvent {
+    const slang::ast::Expression* expr = nullptr;
+    slang::ast::EdgeKind edge = {};
+};
+
+std::optional<AsyncResetEvent>
+detectAsyncResetEvent(const slang::ast::ProceduralBlockSymbol& block,
+                      ElaborateDiagnostics* diagnostics) {
+    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+    if (!timing) {
+        return std::nullopt;
+    }
+    std::vector<const slang::ast::SignalEventControl*> events;
+    collectSignalEvents(*timing, events);
+    if (events.size() <= 1) {
+        return std::nullopt;
+    }
+    if (events.size() > 2) {
+        if (diagnostics) {
+            diagnostics->nyi(block, "Multiple asynchronous reset events are not supported yet");
+        }
+        return std::nullopt;
+    }
+    const auto* resetEvent = events[1];
+    if (!resetEvent) {
+        return std::nullopt;
+    }
+    return AsyncResetEvent{.expr = &resetEvent->expr, .edge = resetEvent->edge};
+}
+
+const slang::ast::ValueSymbol* extractResetSymbol(const slang::ast::Expression& expr,
+                                                  bool& activeHigh) {
+    if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>()) {
+        if (const auto* sym = named->symbol.as_if<slang::ast::ValueSymbol>()) {
+            return sym;
+        }
+        return nullptr;
+    }
+    if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>()) {
+        using slang::ast::UnaryOperator;
+        if (unary->op == UnaryOperator::LogicalNot || unary->op == UnaryOperator::BitwiseNot) {
+            activeHigh = !activeHigh;
+            return extractResetSymbol(unary->operand(), activeHigh);
+        }
+    }
+    return nullptr;
+}
+
+struct SyncResetInfo {
+    const slang::ast::ValueSymbol* symbol = nullptr;
+    bool activeHigh = true;
+};
+
+const slang::ast::ConditionalStatement* findConditional(const slang::ast::Statement& stmt) {
+    switch (stmt.kind) {
+    case slang::ast::StatementKind::Conditional:
+        return &stmt.as<slang::ast::ConditionalStatement>();
+    case slang::ast::StatementKind::Block:
+        return findConditional(stmt.as<slang::ast::BlockStatement>().body);
+    case slang::ast::StatementKind::List: {
+        const auto& list = stmt.as<slang::ast::StatementList>();
+        for (const slang::ast::Statement* child : list.list) {
+            if (child) {
+                if (const auto* result = findConditional(*child)) {
+                    return result;
+                }
+            }
+        }
+        break;
+    }
+    case slang::ast::StatementKind::Timed:
+        return findConditional(stmt.as<slang::ast::TimedStatement>().stmt);
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+std::optional<SyncResetInfo> detectSyncReset(const slang::ast::Statement& stmt) {
+    const auto* conditional = findConditional(stmt);
+    if (!conditional || conditional->conditions.size() != 1 || !conditional->ifFalse) {
+        return std::nullopt;
+    }
+
+    const slang::ast::Expression* condExpr = conditional->conditions.front().expr;
+    if (!condExpr) {
+        return std::nullopt;
+    }
+
+    bool activeHigh = true;
+    const slang::ast::ValueSymbol* symbol = extractResetSymbol(*condExpr, activeHigh);
+    if (!symbol) {
+        return std::nullopt;
+    }
+    return SyncResetInfo{symbol, activeHigh};
+}
+
+std::optional<SyncResetInfo> detectSyncReset(const slang::ast::ProceduralBlockSymbol& block) {
+    return detectSyncReset(block.getBody());
+}
+
 MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
     using slang::ast::ProceduralBlockKind;
     switch (block.procedureKind) {
@@ -714,6 +841,7 @@ bool isSeqProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
 LHSConverter::LHSConverter(LHSConverter::Context context) :
     graph_(context.graph),
     netMemo_(context.netMemo),
+    regMemo_(context.regMemo),
     origin_(context.origin),
     diagnostics_(context.diagnostics) {}
 
@@ -824,7 +952,7 @@ bool LHSConverter::handleConcatenation(const slang::ast::ConcatenationExpression
 bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue) {
     const SignalMemoEntry* entry = resolveMemoEntry(expr);
     if (!entry) {
-        report("Assign LHS is not a memoized combinational net");
+        report("Assign LHS is not a memoized signal");
         return false;
     }
 
@@ -864,6 +992,11 @@ const SignalMemoEntry* LHSConverter::resolveMemoEntry(const slang::ast::Expressi
 
 const SignalMemoEntry* LHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
     for (const SignalMemoEntry& entry : netMemo_) {
+        if (entry.symbol == &symbol) {
+            return &entry;
+        }
+    }
+    for (const SignalMemoEntry& entry : regMemo_) {
         if (entry.symbol == &symbol) {
             return &entry;
         }
@@ -1328,6 +1461,7 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
     auto lhs = std::make_unique<CombAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
+                              .regMemo = {},
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1371,6 +1505,7 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
     auto lhs = std::make_unique<SeqAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
+                              .regMemo = regMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1400,35 +1535,473 @@ bool SeqAlwaysConverter::requireNonBlockingAssignments() const {
 }
 
 void SeqAlwaysConverter::planSequentialFinalize() {
-    ElaborateDiagnostics* diags = diagnostics();
-    if (!diags) {
+    std::optional<grh::Value*> clockValueOpt = deriveClockValue();
+    if (!clockValueOpt) {
         return;
     }
-    bool emitted = false;
-    for (const WriteBackMemo::Entry& entry : memo().entries()) {
+
+    grh::Value* clockValue = *clockValueOpt;
+    bool consumedAny = false;
+
+    for (WriteBackMemo::Entry& entry : memo().entriesMutable()) {
+        if (entry.consumed) {
+            continue;
+        }
         if (entry.originSymbol != &block()) {
             continue;
         }
-        std::string targetName = entry.target && entry.target->symbol &&
-                                         !entry.target->symbol->name.empty() ?
-                                     std::string(entry.target->symbol->name) :
-                                     std::string("anonymous_signal");
-        std::string message = "Seq always finalize TODO: bind ";
-        message.append(targetName);
-        if (entry.target && entry.target->stateOp &&
-            entry.target->stateOp->kind() == grh::OperationKind::kMemory) {
-            message.append(" memory read/write ports to RHS values");
+        if (entry.kind != WriteBackMemo::AssignmentKind::Procedural) {
+            continue;
         }
-        else {
-            message.append(" register data input to RHS value");
+        if (!entry.target || !entry.target->stateOp) {
+            reportFinalizeIssue(entry, "Sequential write target lacks register metadata");
+            entry.consumed = true;
+            continue;
         }
-        diags->todo(block(), std::move(message));
-        emitted = true;
+
+        grh::Operation* stateOp = entry.target->stateOp;
+
+        grh::Value* dataValue = buildDataOperand(entry);
+        if (!dataValue) {
+            continue;
+        }
+
+        auto resetContext = buildResetContext(*entry.target);
+        std::optional<ResetExtraction> resetExtraction;
+        if (resetContext && resetContext->kind != ResetContext::Kind::None) {
+            if (!resetContext->signal) {
+                reportFinalizeIssue(entry, "Reset signal is unavailable for this register");
+                continue;
+            }
+            resetExtraction =
+                extractResetBranches(*dataValue, *resetContext->signal, resetContext->activeHigh,
+                                     entry);
+            if (!resetExtraction) {
+                continue;
+            }
+        }
+
+        if (!attachClockOperand(*stateOp, *clockValue, entry)) {
+            continue;
+        }
+        if (resetContext && resetContext->kind != ResetContext::Kind::None) {
+            if (!resetExtraction ||
+                !attachResetOperands(*stateOp, *resetContext->signal,
+                                     *resetExtraction->resetValue, entry)) {
+                continue;
+            }
+        }
+        if (!attachDataOperand(*stateOp, *dataValue, entry)) {
+            continue;
+        }
+
+        entry.consumed = true;
+        consumedAny = true;
     }
-    if (!emitted) {
-        diags->todo(block(),
-                    "Seq always finalize TODO: connect register/memory stubs for this block");
+
+    if (!consumedAny && diagnostics()) {
+        diagnostics()->todo(block(),
+                            "Seq always block produced no register write intents to finalize");
     }
+}
+
+std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {
+    const slang::ast::TimingControl* timing = findTimingControl(block().getBody());
+    if (!timing) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential block lacks timing control");
+        }
+        return std::nullopt;
+    }
+
+    std::vector<const slang::ast::SignalEventControl*> events;
+    collectSignalEvents(*timing, events);
+    if (events.empty()) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential block timing control has no edge events");
+        }
+        return std::nullopt;
+    }
+
+    const auto* clockEvent = events.front();
+    if (!clockEvent) {
+        return std::nullopt;
+    }
+
+    if (clockEvent->edge == slang::ast::EdgeKind::None) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential block clock must be edge-sensitive");
+        }
+        return std::nullopt;
+    }
+
+    grh::Value* clkValue = convertTimingExpr(clockEvent->expr);
+    if (!clkValue && diagnostics()) {
+        diagnostics()->nyi(block(), "Failed to lower sequential clock expression");
+    }
+    return clkValue;
+}
+
+grh::Value* SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& expr) {
+    if (auto it = timingValueCache_.find(&expr); it != timingValueCache_.end()) {
+        return it->second;
+    }
+
+    if (!rhsConverter_) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "RHS converter unavailable for timing expressions");
+        }
+        return nullptr;
+    }
+
+    grh::Value* value = rhsConverter_->convert(expr);
+    if (value) {
+        timingValueCache_[&expr] = value;
+    }
+    return value;
+}
+
+grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& entry) {
+    if (!entry.target || !entry.target->value) {
+        reportFinalizeIssue(entry, "Sequential write target lacks register value handle");
+        return nullptr;
+    }
+
+    const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
+    if (entry.target->value->width() != targetWidth) {
+        reportFinalizeIssue(entry, "Register value width mismatch in sequential write");
+        return nullptr;
+    }
+
+    if (entry.slices.empty()) {
+        reportFinalizeIssue(entry, "Sequential write has no RHS slices to compose");
+        return nullptr;
+    }
+
+    std::vector<WriteBackMemo::Slice> slices = entry.slices;
+    std::sort(slices.begin(), slices.end(), [](const WriteBackMemo::Slice& lhs,
+                                               const WriteBackMemo::Slice& rhs) {
+        if (lhs.msb != rhs.msb) {
+            return lhs.msb > rhs.msb;
+        }
+        return lhs.lsb > rhs.lsb;
+    });
+
+    std::vector<grh::Value*> components;
+    components.reserve(slices.size() + 2);
+
+    auto appendHoldRange = [&](int64_t msb, int64_t lsb) -> bool {
+        if (msb < lsb) {
+            return true;
+        }
+        grh::Value* hold = createHoldSlice(entry, msb, lsb);
+        if (!hold) {
+            return false;
+        }
+        components.push_back(hold);
+        return true;
+    };
+
+    int64_t expectedMsb = targetWidth - 1;
+    for (const WriteBackMemo::Slice& slice : slices) {
+        if (!slice.value) {
+            reportFinalizeIssue(entry, "Sequential write slice is missing RHS value");
+            return nullptr;
+        }
+        if (slice.msb < slice.lsb) {
+            reportFinalizeIssue(entry, "Sequential write slice has invalid bit range");
+            return nullptr;
+        }
+        if (slice.msb > expectedMsb) {
+            reportFinalizeIssue(entry, "Sequential write slice exceeds register width");
+            return nullptr;
+        }
+        if (slice.msb < expectedMsb) {
+            if (!appendHoldRange(expectedMsb, slice.msb + 1)) {
+                return nullptr;
+            }
+        }
+        components.push_back(slice.value);
+        expectedMsb = slice.lsb - 1;
+    }
+
+    if (expectedMsb >= 0) {
+        if (!appendHoldRange(expectedMsb, 0)) {
+            return nullptr;
+        }
+    }
+
+    if (components.empty()) {
+        return entry.target->value;
+    }
+
+    if (components.size() == 1) {
+        return components.front();
+    }
+
+    grh::Operation& concat =
+        graph().createOperation(grh::OperationKind::kConcat,
+                                makeFinalizeOpName(*entry.target, "seq_concat"));
+    for (grh::Value* component : components) {
+        concat.addOperand(*component);
+    }
+
+    grh::Value& composed =
+        graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"), targetWidth,
+                            entry.target->isSigned);
+    concat.addResult(composed);
+    return &composed;
+}
+
+grh::Value* SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entry, int64_t msb,
+                                                int64_t lsb) {
+    if (!entry.target || !entry.target->value) {
+        reportFinalizeIssue(entry, "Register hold slice missing target value");
+        return nullptr;
+    }
+
+    grh::Value* source = entry.target->value;
+    if (!source) {
+        reportFinalizeIssue(entry, "Register hold slice has null source value");
+        return nullptr;
+    }
+
+    if (lsb < 0 || msb < lsb || msb >= source->width()) {
+        reportFinalizeIssue(entry, "Register hold slice range is out of bounds");
+        return nullptr;
+    }
+
+    if (lsb == 0 && msb == source->width() - 1) {
+        return source;
+    }
+
+    grh::Operation& sliceOp = graph().createOperation(grh::OperationKind::kSliceStatic,
+                                                      makeFinalizeOpName(*entry.target, "hold"));
+    sliceOp.addOperand(*source);
+    sliceOp.setAttribute("sliceStart", lsb);
+    sliceOp.setAttribute("sliceEnd", msb);
+
+    grh::Value& result =
+        graph().createValue(makeFinalizeValueName(*entry.target, "hold"), msb - lsb + 1,
+                            source->isSigned());
+    sliceOp.addResult(result);
+    return &result;
+}
+
+bool SeqAlwaysConverter::attachClockOperand(grh::Operation& stateOp, grh::Value& clkValue,
+                                            const WriteBackMemo::Entry& entry) {
+    const auto& operands = stateOp.operands();
+    if (operands.empty()) {
+        stateOp.addOperand(clkValue);
+        return true;
+    }
+
+    if (operands.front() != &clkValue) {
+        reportFinalizeIssue(entry, "Register already bound to a different clock operand");
+        return false;
+    }
+    return true;
+}
+
+bool SeqAlwaysConverter::attachDataOperand(grh::Operation& stateOp, grh::Value& dataValue,
+                                           const WriteBackMemo::Entry& entry) {
+    const auto& operands = stateOp.operands();
+    std::size_t expected = 1;
+    if (stateOp.kind() == grh::OperationKind::kRegisterRst ||
+        stateOp.kind() == grh::OperationKind::kRegisterARst) {
+        expected = 3;
+    }
+    if (operands.size() != expected) {
+        reportFinalizeIssue(entry, "Register operands not ready for data attachment");
+        return false;
+    }
+
+    if (!stateOp.results().empty()) {
+        if (grh::Value* q = stateOp.results().front()) {
+            if (q->width() != dataValue.width()) {
+                reportFinalizeIssue(entry, "Register data width does not match Q output width");
+                return false;
+            }
+        }
+    }
+
+    stateOp.addOperand(dataValue);
+    return true;
+}
+
+void SeqAlwaysConverter::reportFinalizeIssue(const WriteBackMemo::Entry& entry,
+                                             std::string_view message) {
+    if (!diagnostics()) {
+        return;
+    }
+
+    const slang::ast::Symbol* origin = entry.originSymbol;
+    if (!origin && entry.target) {
+        origin = entry.target->symbol;
+    }
+    if (!origin) {
+        origin = &block();
+    }
+    diagnostics()->nyi(*origin, std::string(message));
+}
+
+std::string SeqAlwaysConverter::makeFinalizeOpName(const SignalMemoEntry& entry,
+                                                   std::string_view suffix) {
+    std::string base;
+    if (entry.symbol && !entry.symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.symbol->name);
+    }
+    if (base.empty()) {
+        base = "_seq";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(finalizeNameCounter_++));
+    return base;
+}
+
+std::string SeqAlwaysConverter::makeFinalizeValueName(const SignalMemoEntry& entry,
+                                                      std::string_view suffix) {
+    std::string base;
+    if (entry.symbol && !entry.symbol->name.empty()) {
+        base = sanitizeForGraphName(entry.symbol->name);
+    }
+    if (base.empty()) {
+        base = "_seq_val";
+    }
+    base.push_back('_');
+    base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(finalizeNameCounter_++));
+    return base;
+}
+
+std::optional<SeqAlwaysConverter::ResetContext>
+SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
+    if (!entry.stateOp) {
+        return std::nullopt;
+    }
+    ResetContext context;
+    switch (entry.stateOp->kind()) {
+    case grh::OperationKind::kRegisterARst:
+        if (!entry.asyncResetExpr) {
+            return std::nullopt;
+        }
+        if (entry.asyncResetEdge != slang::ast::EdgeKind::PosEdge &&
+            entry.asyncResetEdge != slang::ast::EdgeKind::NegEdge) {
+            return std::nullopt;
+        }
+        context.kind = ResetContext::Kind::Async;
+        context.signal = resolveAsyncResetSignal(*entry.asyncResetExpr);
+        context.activeHigh = entry.asyncResetEdge == slang::ast::EdgeKind::PosEdge;
+        return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
+    case grh::OperationKind::kRegisterRst:
+        if (!entry.syncResetSymbol) {
+            return std::nullopt;
+        }
+        context.kind = ResetContext::Kind::Sync;
+        context.signal = resolveSyncResetSignal(*entry.syncResetSymbol);
+        context.activeHigh = entry.syncResetActiveHigh;
+        return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
+    default:
+        break;
+    }
+    return std::nullopt;
+}
+
+std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& condition,
+                                                            grh::Value& resetSignal) {
+    if (&condition == &resetSignal) {
+        return /* inverted */ false;
+    }
+    if (grh::Operation* op = condition.definingOp()) {
+        if (op->kind() == grh::OperationKind::kLogicNot && op->operands().size() == 1 &&
+            op->operands().front() == &resetSignal) {
+            return true;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<SeqAlwaysConverter::ResetExtraction>
+SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal,
+                                         bool activeHigh, const WriteBackMemo::Entry& entry) {
+    grh::Operation* muxOp = dataValue.definingOp();
+    if (!muxOp || muxOp->kind() != grh::OperationKind::kMux || muxOp->operands().size() != 3) {
+        reportFinalizeIssue(entry, "Expected mux structure to derive reset value");
+        return std::nullopt;
+    }
+    grh::Value* condition = muxOp->operands().front();
+    auto match = matchResetCondition(*condition, resetSignal);
+    if (!match) {
+        reportFinalizeIssue(entry, "Reset mux condition does not reference reset signal");
+        return std::nullopt;
+    }
+
+    const bool conditionTrueWhenSignalHigh = !*match;
+    const bool resetWhenSignalHigh = activeHigh;
+    const bool resetBranchIsTrue = conditionTrueWhenSignalHigh == resetWhenSignalHigh;
+    grh::Value* resetValue = muxOp->operands()[resetBranchIsTrue ? 1 : 2];
+    if (!resetValue) {
+        reportFinalizeIssue(entry, "Reset branch value is missing");
+        return std::nullopt;
+    }
+    if (resetValue->width() != dataValue.width()) {
+        reportFinalizeIssue(entry, "Reset branch width mismatch");
+        return std::nullopt;
+    }
+    return ResetExtraction{resetValue};
+}
+
+bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
+                                             grh::Value& resetValue,
+                                             const WriteBackMemo::Entry& entry) {
+    auto& operands = stateOp.operands();
+    if (stateOp.kind() != grh::OperationKind::kRegisterRst &&
+        stateOp.kind() != grh::OperationKind::kRegisterARst) {
+        reportFinalizeIssue(entry, "Register does not expect reset operands");
+        return false;
+    }
+    if (operands.size() < 1) {
+        reportFinalizeIssue(entry, "Register clock must be attached before reset operand");
+        return false;
+    }
+    if (operands.size() > 1) {
+        if (operands.size() < 3) {
+            reportFinalizeIssue(entry, "Register reset operand already attached");
+        }
+        return false;
+    }
+    if (resetValue.width() != entry.target->width) {
+        reportFinalizeIssue(entry, "Reset value width mismatch");
+        return false;
+    }
+    stateOp.addOperand(rstSignal);
+    stateOp.addOperand(resetValue);
+    return true;
+}
+
+grh::Value* SeqAlwaysConverter::resolveAsyncResetSignal(const slang::ast::Expression& expr) {
+    if (auto it = timingValueCache_.find(&expr); it != timingValueCache_.end()) {
+        return it->second;
+    }
+    grh::Value* value = convertTimingExpr(expr);
+    if (value) {
+        timingValueCache_[&expr] = value;
+    }
+    return value;
+}
+
+grh::Value* SeqAlwaysConverter::resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol) {
+    if (auto it = syncResetCache_.find(&symbol); it != syncResetCache_.end()) {
+        return it->second;
+    }
+    grh::Value* value = graph().findValue(symbol.name);
+    if (value) {
+        syncResetCache_[&symbol] = value;
+    }
+    return value;
 }
 
 void AlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
@@ -3031,6 +3604,9 @@ grh::Value* WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, gr
 
 void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
     for (Entry& entry : entries_) {
+        if (entry.consumed) {
+            continue;
+        }
         grh::Value* composed = composeSlices(entry, graph, diagnostics);
         if (!composed) {
             continue;
@@ -4255,7 +4831,11 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
 
     WriteBackMemo& memo = ensureWriteBackMemo(body);
     LHSConverter::Context lhsContext{
-        .graph = &graph, .netMemo = netMemo, .origin = &assign, .diagnostics = diagnostics_};
+        .graph = &graph,
+        .netMemo = netMemo,
+        .regMemo = {},
+        .origin = &assign,
+        .diagnostics = diagnostics_};
     ContinuousAssignLHSConverter lhsConverter(lhsContext, memo);
     lhsConverter.convert(*assignment, *rhsValue);
 }
@@ -4491,6 +5071,11 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         return;
     }
 
+    std::unordered_map<const slang::ast::ProceduralBlockSymbol*, std::optional<AsyncResetEvent>>
+        asyncCache;
+    std::unordered_map<const slang::ast::ProceduralBlockSymbol*, std::optional<SyncResetInfo>>
+        syncCache;
+
     for (SignalMemoEntry& entry : it->second) {
         if (!entry.symbol || !entry.type) {
             continue;
@@ -4498,7 +5083,6 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         if (entry.stateOp) {
             continue;
         }
-
         if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
             std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
             grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
@@ -4523,16 +5107,66 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
             continue;
         }
 
+        std::optional<AsyncResetEvent> asyncInfo;
+        if (auto itAsync = asyncCache.find(entry.drivingBlock); itAsync != asyncCache.end()) {
+            asyncInfo = itAsync->second;
+        }
+        else {
+            asyncInfo = detectAsyncResetEvent(*entry.drivingBlock, diagnostics_);
+            asyncCache.emplace(entry.drivingBlock, asyncInfo);
+        }
+
+        std::optional<SyncResetInfo> syncInfo;
+        if (!asyncInfo) {
+            if (auto itSync = syncCache.find(entry.drivingBlock); itSync != syncCache.end()) {
+                syncInfo = itSync->second;
+            }
+            else {
+                syncInfo = detectSyncReset(*entry.drivingBlock);
+                syncCache.emplace(entry.drivingBlock, syncInfo);
+            }
+        }
+
         std::optional<std::string> clkPolarity =
             deriveClockPolarity(*entry.drivingBlock, *entry.symbol, diagnostics_);
         if (!clkPolarity) {
             continue;
         }
 
+        auto makeRstLevel = [](bool activeHigh) {
+            return activeHigh ? std::string("1'b1") : std::string("1'b0");
+        };
+
+        grh::OperationKind opKind = grh::OperationKind::kRegister;
+        std::optional<std::string> rstLevel;
+        if (asyncInfo) {
+            entry.asyncResetExpr = asyncInfo->expr;
+            entry.asyncResetEdge = asyncInfo->edge;
+            if (entry.asyncResetExpr && entry.asyncResetEdge != slang::ast::EdgeKind::None &&
+                entry.asyncResetEdge != slang::ast::EdgeKind::BothEdges) {
+                const bool activeHigh = entry.asyncResetEdge == slang::ast::EdgeKind::PosEdge;
+                rstLevel = makeRstLevel(activeHigh);
+                opKind = grh::OperationKind::kRegisterARst;
+            }
+            else if (diagnostics_) {
+                diagnostics_->nyi(*entry.symbol,
+                                  "Async reset edge kind is not supported for this register");
+            }
+        }
+        else if (syncInfo && syncInfo->symbol) {
+            entry.syncResetSymbol = syncInfo->symbol;
+            entry.syncResetActiveHigh = syncInfo->activeHigh;
+            rstLevel = makeRstLevel(syncInfo->activeHigh);
+            opKind = grh::OperationKind::kRegisterRst;
+        }
+
         std::string opName = makeOperationNameForSymbol(*entry.symbol, "register", graph);
-        grh::Operation& op = graph.createOperation(grh::OperationKind::kRegister, opName);
+        grh::Operation& op = graph.createOperation(opKind, opName);
         op.addResult(*value);
         op.setAttribute("clkPolarity", *clkPolarity);
+        if (rstLevel) {
+            op.setAttribute("rstLevel", *rstLevel);
+        }
         entry.stateOp = &op;
     }
 }

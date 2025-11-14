@@ -184,5 +184,22 @@ target_compile_definitions(elaborate-comb-always
 
 add_test(NAME elaborate-comb-always COMMAND elaborate-comb-always)
 
+add_executable(elaborate-seq-always
+    tests/elaborate/test_elaborate_seq_always.cpp
+)
+
+target_link_libraries(elaborate-seq-always
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-seq-always
+    PRIVATE
+        WOLF_SV_ELAB_SEQ_ALWAYS_DATA_PATH="${ELABORATE_INPUT_DIR}/seq_always.sv"
+        WOLF_SV_ELAB_SEQ_ALWAYS_ARTIFACT_PATH="${ELABORATE_ARTIFACT_DIR}/seq_always.json"
+)
+
+add_test(NAME elaborate-seq-always COMMAND elaborate-seq-always)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

@@ -34,6 +34,7 @@ class InstanceSymbol;
 class InstanceArraySymbol;
 class InstanceBodySymbol;
 class ValueSymbol;
+enum class EdgeKind;
 class Type;
 class GenerateBlockSymbol;
 class GenerateBlockArraySymbol;
@@ -111,6 +112,10 @@ struct SignalMemoEntry {
     grh::Value* value = nullptr;
     grh::Operation* stateOp = nullptr;
     const slang::ast::ProceduralBlockSymbol* drivingBlock = nullptr;
+    const slang::ast::Expression* asyncResetExpr = nullptr;
+    slang::ast::EdgeKind asyncResetEdge = {};
+    const slang::ast::ValueSymbol* syncResetSymbol = nullptr;
+    bool syncResetActiveHigh = true;
 };
 
 /// Records pending writes against memoized signals before SSA write-back.
@@ -134,11 +139,13 @@ public:
         AssignmentKind kind = AssignmentKind::Continuous;
         const slang::ast::Symbol* originSymbol = nullptr;
         std::vector<Slice> slices;
+        bool consumed = false;
     };
 
     void recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
                      const slang::ast::Symbol* originSymbol, std::vector<Slice> slices);
     std::span<const Entry> entries() const noexcept { return entries_; }
+    std::span<Entry> entriesMutable() noexcept { return entries_; }
     bool empty() const noexcept { return entries_.empty(); }
     void clear();
     void finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics);
@@ -282,6 +289,7 @@ public:
     struct Context {
         grh::Graph* graph = nullptr;
         std::span<const SignalMemoEntry> netMemo;
+        std::span<const SignalMemoEntry> regMemo;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
     };
@@ -333,6 +341,7 @@ private:
 
     grh::Graph* graph_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
+    std::span<const SignalMemoEntry> regMemo_;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
@@ -627,6 +636,38 @@ protected:
 
 private:
     void planSequentialFinalize();
+    std::optional<grh::Value*> deriveClockValue();
+    grh::Value* convertTimingExpr(const slang::ast::Expression& expr);
+    grh::Value* buildDataOperand(const WriteBackMemo::Entry& entry);
+    grh::Value* createHoldSlice(const WriteBackMemo::Entry& entry, int64_t msb, int64_t lsb);
+    bool attachClockOperand(grh::Operation& stateOp, grh::Value& clkValue,
+                            const WriteBackMemo::Entry& entry);
+    bool attachDataOperand(grh::Operation& stateOp, grh::Value& dataValue,
+                           const WriteBackMemo::Entry& entry);
+    void reportFinalizeIssue(const WriteBackMemo::Entry& entry, std::string_view message);
+    std::string makeFinalizeOpName(const SignalMemoEntry& entry, std::string_view suffix);
+    std::string makeFinalizeValueName(const SignalMemoEntry& entry, std::string_view suffix);
+    struct ResetContext {
+        enum class Kind { None, Sync, Async } kind = Kind::None;
+        grh::Value* signal = nullptr;
+        bool activeHigh = true;
+    };
+    struct ResetExtraction {
+        grh::Value* resetValue = nullptr;
+    };
+    std::optional<ResetContext> buildResetContext(const SignalMemoEntry& entry);
+    std::optional<ResetExtraction>
+    extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal, bool activeHigh,
+                         const WriteBackMemo::Entry& entry);
+    std::optional<bool> matchResetCondition(grh::Value& condition, grh::Value& resetSignal);
+    bool attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
+                             grh::Value& resetValue, const WriteBackMemo::Entry& entry);
+    grh::Value* resolveAsyncResetSignal(const slang::ast::Expression& expr);
+    grh::Value* resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol);
+
+    std::unordered_map<const slang::ast::Expression*, grh::Value*> timingValueCache_;
+    std::unordered_map<const slang::ast::ValueSymbol*, grh::Value*> syncResetCache_;
+    std::size_t finalizeNameCounter_ = 0;
 };
 
 /// Elaborates slang AST into GRH representation.
