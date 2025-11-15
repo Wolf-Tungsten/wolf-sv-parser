@@ -77,3 +77,10 @@
 - **KR4（重叠写入覆盖规则）** 若同一寄存器在一个块内被重复赋值或区间重叠，后出现的赋值覆盖先前结果。需要在 writeBack 结构中携带语句顺序，合并时按顺序覆写重叠区间（无需报错），并在调试日志中标注覆盖关系，便于追踪最终 data 值的来源。
 - **KR5（保留未写片段）** 当一个寄存器只被切片赋值且未覆盖全部位段时，未触碰的片段要保留上一拍的 q 值：通过从现有 kRegister 输出切片生成保留 Value，再与新的 data 片段拼接，保证整体 data 输入仍覆盖全位。如果 q 尚未可用（例如尚未插入 Graph），需要在 finalize 前确保可以获取该 Value 或给出明确的 TODO/诊断。
 - **验证与可视化** 增加覆盖单寄存器多段写入、重叠写入、部分写入保留旧值以及不同复位形态的时序样例，测试中 dump 出寄存器绑定的 clk/rst/data Value 及每段写入的位宽，确保 kRegister 的三个 operand 都按预期被设置；必要时扩展现有 JSON trace，帮助评审核对覆盖/保留策略。
+
+## 阶段18：SeqAlwaysConverter 类处理 memory 读写口
+- **目标定位** 延续阶段16-17 的 SeqAlwaysConverter 能力，把时序 always/always_ff 中涉及 `reg memo` 上标记为 kMemory 的条目落到 GRH 的同步读/写端口，参考 `docs/reference/yosys` 的做法确保 memory 行为在单个块内即可完全建模。
+- **KR1（同步读口建模）** 当 SeqAlwaysConverter/SeqAlwaysRHSConverter 解析到 memory 读取（含 `mem[addr]`、结构体/数组字段读取）的 RHS，用 TypeHelper 提供的 bit 布局生成地址/数据 Value，并创建 `kMemorySyncReadPort` Operation。端口需绑定 memory handle、块级时钟、地址和可选的 enable；若 AST 中未显式出现 enable，则自动接 `Constant(1)`，并在 trace 中记录推断来源。
+- **KR2（整字写口落地）** 对于 `mem[addr] <= data;` 这类完整字写入，SeqAlwaysLHSConverter 需要把 RHS flatten 成与 memory 数据位宽一致的 Value，finalize 阶段生成 `kMemoryWritePort`，填入 memory、clk、addr、en、data 五个 operand，en 缺省同样连常量 1。需要支持同一 always 块写多条 memory 语句：按源顺序记录写意图，最终为每条语句创建独立端口并保留引用，方便后续优化或冲突检查。
+- **KR3（按位写掩码合成）** 当出现 `mem[addr][i] <= data_bit;` 或对数据位段的部分写入时，先在块内把每次写入记录到一个「mask write」集合，记住 addr 表达式、bit/byte 范围与 RHS Value。finalize 时解析这些集合并按照 SystemVerilog 语义合成 `kMemoryMaskWritePort`：生成 mask Value（标记哪些 bit 被覆盖）与 data Value（被写入的新值），同样绑定 clk/en。需要对同一 addr/bit 的多次写入按语句顺序覆盖，并在日志中显示最终 mask/data。
+- **KR4（测试与可视化）** 构建覆盖仅读取、整字写入、按位/按字节写入混用、显式 enable 与隐式 enable 的时序样例；回归中验证生成的 kMemorySyncReadPort/kMemoryWritePort/kMemoryMaskWritePort 数量与连接是否正确，dump JSON/trace 展示每个端口的 clk/addr/en/data/mask 取值来源，确保 memory 行为在 GRH 中可审计。

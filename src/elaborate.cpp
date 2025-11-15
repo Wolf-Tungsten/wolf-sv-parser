@@ -54,6 +54,11 @@ std::size_t nextConverterInstanceId() {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
+std::size_t nextMemoryHelperId() {
+    static std::atomic<std::size_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
 std::string sanitizeForGraphName(std::string_view text, bool allowLeadingDigit = false) {
     std::string result;
     result.reserve(text.size());
@@ -1373,6 +1378,23 @@ grh::Value* SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueE
     return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
 }
 
+grh::Value* SeqAlwaysRHSConverter::convertElementSelect(
+    const slang::ast::ElementSelectExpression& expr) {
+    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+    if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
+        if (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory) {
+            grh::Value* addrValue = convert(expr.selector());
+            if (!addrValue) {
+                return nullptr;
+            }
+            if (seqOwner) {
+                return seqOwner->buildMemorySyncRead(*entry, *addrValue, expr);
+            }
+        }
+    }
+    return AlwaysBlockRHSConverter::convertElementSelect(expr);
+}
+
 bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
                                      grh::Value& rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
@@ -1387,6 +1409,117 @@ bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& as
         owner_.handleEntryWrite(*result.target, std::move(result.slices));
     }
     return true;
+}
+
+namespace {
+
+const slang::ast::Expression* skipImplicitConversions(const slang::ast::Expression& expr) {
+    const slang::ast::Expression* current = &expr;
+    while (const auto* conversion = current->as_if<slang::ast::ConversionExpression>()) {
+        if (!conversion->isImplicit()) {
+            break;
+        }
+        current = &conversion->operand();
+    }
+    return current;
+}
+
+} // namespace
+
+bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
+                                    grh::Value& rhsValue) {
+    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+
+    const slang::ast::Expression* root = skipImplicitConversions(assignment.left());
+    const slang::ast::Expression* cursor = root;
+    const SignalMemoEntry* memoryEntry = nullptr;
+    const slang::ast::ElementSelectExpression* baseElement = nullptr;
+
+    while (cursor) {
+        if (const auto* element = cursor->as_if<slang::ast::ElementSelectExpression>()) {
+            const slang::ast::Expression* inner = skipImplicitConversions(element->value());
+            if (const auto* named = inner->as_if<slang::ast::NamedValueExpression>()) {
+                if (const auto* symbol = named->symbol.as_if<slang::ast::ValueSymbol>()) {
+                    const SignalMemoEntry* candidate = findMemoEntry(*symbol);
+                    if (candidate && candidate->stateOp &&
+                        candidate->stateOp->kind() == grh::OperationKind::kMemory) {
+                        memoryEntry = candidate;
+                        baseElement = element;
+                        break;
+                    }
+                }
+            }
+            cursor = inner;
+            continue;
+        }
+        if (const auto* member = cursor->as_if<slang::ast::MemberAccessExpression>()) {
+            cursor = skipImplicitConversions(member->value());
+            continue;
+        }
+        if (const auto* range = cursor->as_if<slang::ast::RangeSelectExpression>()) {
+            cursor = skipImplicitConversions(range->value());
+            continue;
+        }
+        break;
+    }
+
+    auto emitUnsupported = [&](std::string_view message) {
+        if (diagnostics()) {
+            diagnostics()->nyi(owner_.block(), std::string(message));
+        }
+    };
+
+    if (memoryEntry && baseElement) {
+        if (!owner_.rhsConverter_ || !seqOwner) {
+            emitUnsupported("Seq always memory write lacks RHS converter context");
+            return true;
+        }
+
+        grh::Value* addrValue = owner_.rhsConverter_->convert(baseElement->selector());
+        if (!addrValue) {
+            return true;
+        }
+
+        const slang::ast::Expression* normalizedRoot = root;
+        const bool rootIsBase = normalizedRoot == baseElement;
+        const int64_t entryWidth = seqOwner->memoryRowWidth(*memoryEntry);
+
+        if (rootIsBase) {
+            if (rhsValue.width() != entryWidth) {
+                emitUnsupported("Memory word write width mismatch");
+                return true;
+            }
+            seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, *addrValue, rhsValue);
+            return true;
+        }
+
+        const auto* bitSelect = normalizedRoot->as_if<slang::ast::ElementSelectExpression>();
+        if (!bitSelect) {
+            emitUnsupported("Memory assignment must target full row or single bit");
+            return true;
+        }
+        const slang::ast::Expression* bitBase = skipImplicitConversions(bitSelect->value());
+        if (bitBase != baseElement) {
+            emitUnsupported("Nested memory indexing beyond single-bit is not supported yet");
+            return true;
+        }
+
+        if (rhsValue.width() != 1) {
+            emitUnsupported("Memory single-bit write expects 1-bit RHS");
+            return true;
+        }
+
+        grh::Value* bitIndexValue = owner_.rhsConverter_->convert(bitSelect->selector());
+        if (!bitIndexValue) {
+            return true;
+        }
+
+        seqOwner->recordMemoryBitWrite(*memoryEntry, assignment, *addrValue, *bitIndexValue,
+                                       rhsValue);
+        return true;
+    }
+
+    return AlwaysBlockLHSConverter::convert(assignment, rhsValue);
 }
 
 AlwaysConverter::LoopScopeGuard::LoopScopeGuard(
@@ -1535,12 +1668,21 @@ bool SeqAlwaysConverter::requireNonBlockingAssignments() const {
 }
 
 void SeqAlwaysConverter::planSequentialFinalize() {
-    std::optional<grh::Value*> clockValueOpt = deriveClockValue();
-    if (!clockValueOpt) {
+    grh::Value* clockValue = ensureClockValue();
+    if (!clockValue) {
         return;
     }
 
-    grh::Value* clockValue = *clockValueOpt;
+    const bool registerWrites = finalizeRegisterWrites(*clockValue);
+    const bool memoryWrites = finalizeMemoryWrites(*clockValue);
+
+    if (!registerWrites && !memoryWrites && diagnostics()) {
+        diagnostics()->todo(block(),
+                            "Seq always block produced no sequential write intents to finalize");
+    }
+}
+
+bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
     bool consumedAny = false;
 
     for (WriteBackMemo::Entry& entry : memo().entriesMutable()) {
@@ -1560,6 +1702,9 @@ void SeqAlwaysConverter::planSequentialFinalize() {
         }
 
         grh::Operation* stateOp = entry.target->stateOp;
+        if (stateOp->kind() == grh::OperationKind::kMemory) {
+            continue;
+        }
 
         grh::Value* dataValue = buildDataOperand(entry);
         if (!dataValue) {
@@ -1581,7 +1726,7 @@ void SeqAlwaysConverter::planSequentialFinalize() {
             }
         }
 
-        if (!attachClockOperand(*stateOp, *clockValue, entry)) {
+        if (!attachClockOperand(*stateOp, clockValue, entry)) {
             continue;
         }
         if (resetContext && resetContext->kind != ResetContext::Kind::None) {
@@ -1599,10 +1744,302 @@ void SeqAlwaysConverter::planSequentialFinalize() {
         consumedAny = true;
     }
 
-    if (!consumedAny && diagnostics()) {
-        diagnostics()->todo(block(),
-                            "Seq always block produced no register write intents to finalize");
+    return consumedAny;
+}
+
+bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
+    bool emitted = false;
+    auto reportMemoryIssue = [&](const SignalMemoEntry* entry, const slang::ast::Expression* /*origin*/,
+                                 std::string_view message) {
+        if (!diagnostics()) {
+            return;
+        }
+        std::ostringstream oss;
+        oss << "Seq always memory elaboration failure";
+        if (entry && entry->symbol && !entry->symbol->name.empty()) {
+            oss << " (signal=" << entry->symbol->name << ")";
+        }
+        oss << ": " << message;
+        diagnostics()->nyi(block(), oss.str());
+    };
+
+    grh::Value* enableValue = ensureMemoryEnableValue();
+    if (!enableValue && (!memoryWrites_.empty() || !memoryBitWrites_.empty())) {
+        reportMemoryIssue(nullptr, nullptr, "failed to create memory enable value");
+        memoryWrites_.clear();
+        memoryBitWrites_.clear();
+        return false;
     }
+
+    auto emitWritePort = [&](const MemoryWriteIntent& intent) {
+        if (!intent.entry || !intent.addr || !intent.data) {
+            return;
+        }
+        if (!intent.entry->stateOp || intent.entry->stateOp->kind() != grh::OperationKind::kMemory) {
+            reportMemoryIssue(intent.entry, intent.originExpr, "memory entry lacks kMemory state op");
+            return;
+        }
+        const int64_t rowWidth = memoryRowWidth(*intent.entry);
+        if (intent.data->width() != rowWidth) {
+            reportMemoryIssue(intent.entry, intent.originExpr, "memory data width mismatch");
+            return;
+        }
+
+        grh::Operation& port =
+            graph().createOperation(grh::OperationKind::kMemoryWritePort,
+                                    makeFinalizeOpName(*intent.entry, "mem_wr"));
+        port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
+        port.addOperand(clockValue);
+        port.addOperand(*intent.addr);
+        port.addOperand(*enableValue);
+        port.addOperand(*intent.data);
+        emitted = true;
+    };
+
+    for (const MemoryWriteIntent& intent : memoryWrites_) {
+        emitWritePort(intent);
+    }
+    memoryWrites_.clear();
+
+    auto emitMaskWrite = [&](const MemoryBitWriteIntent& intent) {
+        if (!intent.entry || !intent.addr || !intent.bitValue || !intent.bitIndex) {
+            return;
+        }
+        if (!intent.entry->stateOp || intent.entry->stateOp->kind() != grh::OperationKind::kMemory) {
+            reportMemoryIssue(intent.entry, intent.originExpr, "memory entry lacks kMemory state op");
+            return;
+        }
+        const int64_t rowWidth = memoryRowWidth(*intent.entry);
+        grh::Value* dataValue =
+            buildShiftedBitValue(*intent.bitValue, *intent.bitIndex, rowWidth, "mem_bit_data");
+        grh::Value* maskValue =
+            buildShiftedMask(*intent.bitIndex, rowWidth, "mem_bit_mask");
+        if (!dataValue || !maskValue) {
+            reportMemoryIssue(intent.entry, intent.originExpr,
+                              "failed to synthesize memory bit intent");
+            return;
+        }
+
+        grh::Operation& port =
+            graph().createOperation(grh::OperationKind::kMemoryMaskWritePort,
+                                    makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
+        port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
+        port.addOperand(clockValue);
+        port.addOperand(*intent.addr);
+        port.addOperand(*enableValue);
+        port.addOperand(*dataValue);
+        port.addOperand(*maskValue);
+        emitted = true;
+    };
+
+    for (const MemoryBitWriteIntent& intent : memoryBitWrites_) {
+        emitMaskWrite(intent);
+    }
+    memoryBitWrites_.clear();
+
+    return emitted;
+}
+
+grh::Value* SeqAlwaysConverter::ensureClockValue() {
+    if (cachedClockValue_) {
+        return cachedClockValue_;
+    }
+    if (clockDeriveAttempted_) {
+        return nullptr;
+    }
+    clockDeriveAttempted_ = true;
+    std::optional<grh::Value*> derived = deriveClockValue();
+    if (derived) {
+        cachedClockValue_ = *derived;
+    }
+    return cachedClockValue_;
+}
+
+grh::Value* SeqAlwaysConverter::ensureMemoryEnableValue() {
+    if (memoryEnableOne_) {
+        return memoryEnableOne_;
+    }
+    grh::Operation& op =
+        graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName("en"));
+    grh::Value& value =
+        graph().createValue(makeMemoryHelperValueName("en"), 1, /*isSigned=*/false);
+    op.addResult(value);
+    op.setAttribute("constValue", "1'h1");
+    memoryEnableOne_ = &value;
+    return memoryEnableOne_;
+}
+
+void SeqAlwaysConverter::recordMemoryWordWrite(const SignalMemoEntry& entry,
+                                               const slang::ast::Expression& origin,
+                                               grh::Value& addrValue, grh::Value& dataValue) {
+    MemoryWriteIntent intent;
+    intent.entry = &entry;
+    intent.originExpr = &origin;
+    intent.addr = &addrValue;
+    intent.data = &dataValue;
+    memoryWrites_.push_back(intent);
+}
+
+void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
+                                              const slang::ast::Expression& origin,
+                                              grh::Value& addrValue, grh::Value& bitIndex,
+                                              grh::Value& bitValue) {
+    MemoryBitWriteIntent intent;
+    intent.entry = &entry;
+    intent.originExpr = &origin;
+    intent.addr = &addrValue;
+    intent.bitIndex = &bitIndex;
+    intent.bitValue = &bitValue;
+    memoryBitWrites_.push_back(intent);
+}
+
+grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
+                                                    grh::Value& addrValue,
+                                                    const slang::ast::Expression& originExpr) {
+    if (!entry.stateOp || entry.stateOp->kind() != grh::OperationKind::kMemory) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(),
+                               "Seq always memory read target is not backed by kMemory operation");
+        }
+        return nullptr;
+    }
+
+    grh::Value* clkValue = ensureClockValue();
+    grh::Value* enValue = ensureMemoryEnableValue();
+    if (!clkValue || !enValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Seq always memory read lacks clock or enable");
+        }
+        return nullptr;
+    }
+
+    const slang::ast::Type* type = originExpr.type;
+    int64_t width = memoryRowWidth(entry);
+    bool isSigned = entry.isSigned;
+    if (type && type->isBitstreamType() && type->isFixedSize()) {
+        width = static_cast<int64_t>(type->getBitstreamWidth());
+        isSigned = type->isSigned();
+    }
+
+    grh::Operation& port =
+        graph().createOperation(grh::OperationKind::kMemorySyncReadPort,
+                                makeFinalizeOpName(entry, "mem_sync_rd"));
+    port.setAttribute("memSymbol", entry.stateOp->symbol());
+    port.addOperand(*clkValue);
+    port.addOperand(addrValue);
+    port.addOperand(*enValue);
+
+    grh::Value& result =
+        graph().createValue(makeFinalizeValueName(entry, "mem_sync_rd"), width, isSigned);
+    port.addResult(result);
+    return &result;
+}
+
+int64_t SeqAlwaysConverter::memoryRowWidth(const SignalMemoEntry& entry) const {
+    if (entry.stateOp) {
+        const auto& attrs = entry.stateOp->attributes();
+        auto it = attrs.find("width");
+        if (it != attrs.end() && std::holds_alternative<int64_t>(it->second)) {
+            int64_t width = std::get<int64_t>(it->second);
+            if (width > 0) {
+                return width;
+            }
+        }
+    }
+    return entry.width > 0 ? entry.width : 1;
+}
+
+grh::Value* SeqAlwaysConverter::createConcatWithZeroPadding(grh::Value& value, int64_t padWidth,
+                                                            std::string_view label) {
+    if (padWidth < 0) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Negative padding requested for memory bit value");
+        }
+        return nullptr;
+    }
+    if (padWidth == 0) {
+        return &value;
+    }
+    grh::Value* zeroPad = createZeroValue(padWidth);
+    if (!zeroPad) {
+        return nullptr;
+    }
+    grh::Operation& concat =
+        graph().createOperation(grh::OperationKind::kConcat, makeMemoryHelperOpName(label));
+    concat.addOperand(*zeroPad);
+    concat.addOperand(value);
+
+    grh::Value& wide =
+        graph().createValue(makeMemoryHelperValueName(label), padWidth + value.width(),
+                            value.isSigned());
+    concat.addResult(wide);
+    return &wide;
+}
+
+grh::Value* SeqAlwaysConverter::buildShiftedBitValue(grh::Value& sourceBit, grh::Value& bitIndex,
+                                                     int64_t targetWidth, std::string_view label) {
+    if (targetWidth <= 0) {
+        return nullptr;
+    }
+    const int64_t padWidth = targetWidth - sourceBit.width();
+    grh::Value* extended = createConcatWithZeroPadding(sourceBit, padWidth, label);
+    if (!extended) {
+        return nullptr;
+    }
+
+    grh::Operation& shl =
+        graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    shl.addOperand(*extended);
+    shl.addOperand(bitIndex);
+    grh::Value& shifted =
+        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    shl.addResult(shifted);
+    return &shifted;
+}
+
+grh::Value* SeqAlwaysConverter::buildShiftedMask(grh::Value& bitIndex, int64_t targetWidth,
+                                                 std::string_view label) {
+    if (targetWidth <= 0) {
+        return nullptr;
+    }
+    slang::SVInt literal(static_cast<slang::bitwidth_t>(targetWidth), 1, /*isSigned=*/false);
+    grh::Operation& constOp =
+        graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName(label));
+    grh::Value& baseValue =
+        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    constOp.addResult(baseValue);
+    constOp.setAttribute(
+        "constValue",
+        literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
+    grh::Value* base = &baseValue;
+    if (!base) {
+        return nullptr;
+    }
+
+    grh::Operation& shl =
+        graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    shl.addOperand(*base);
+    shl.addOperand(bitIndex);
+    grh::Value& shifted =
+        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    shl.addResult(shifted);
+    return &shifted;
+}
+
+std::string SeqAlwaysConverter::makeMemoryHelperOpName(std::string_view suffix) {
+    std::string name = "_seq_mem_op_";
+    name.append(suffix);
+    name.push_back('_');
+    name.append(std::to_string(nextMemoryHelperId()));
+    return name;
+}
+
+std::string SeqAlwaysConverter::makeMemoryHelperValueName(std::string_view suffix) {
+    std::string name = "_seq_mem_val_";
+    name.append(suffix);
+    name.push_back('_');
+    name.append(std::to_string(nextMemoryHelperId()));
+    return name;
 }
 
 std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {

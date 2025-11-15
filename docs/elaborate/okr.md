@@ -122,3 +122,10 @@
   - KR3 支持同一个 always 块中对同一寄存器分段不重叠的非阻塞赋值，生成正确的 kConcat
   - KR4 对于同一个 always 块中对同一寄存器重复或者分段重叠的非阻塞赋值，后来者覆盖前者
   - KR5 对于同一个 always 块中切片赋值但又没有完全赋值的寄存器，未操作的片段应当保留原值，通过将 q 的 slice 和 d 的 slice 拼接实现
+
+## 阶段18：SeqAlwaysConverter 类处理memory读写口
+- **Objective** 参考 docs/reference/yosys 实现方法，将对 memory 的非阻塞赋值和读取建模成读写口
+  - KR1 将时序 always 块中的 memory 读取建模为 kMemorySyncReadPort，绑定 memory、clk、addr、en，如果没有明确识别的 en 信号则将 en 连接到 1
+  - KR2 将时序 always 块中，单次完整的 memory 写入建模为 kMemoryWritePort，绑定 memory、clk、addr、en、data，如果没有明确识别的 en 信号则将 en 连接到 1
+  - KR3 将时序 always 块中，对 memory 单bit的写入，记录下来，在 always 结束时根据语义合成 kMemoryMaskWritePort
+  - KR4 创建测试样例

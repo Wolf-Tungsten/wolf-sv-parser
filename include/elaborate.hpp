@@ -259,6 +259,7 @@ protected:
     grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
     grh::Value* convertRangeSelect(const slang::ast::RangeSelectExpression& expr) override;
     grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr) override;
+    const SignalMemoEntry* findMemoEntryFromExpression(const slang::ast::Expression& expr) const;
 
 private:
     struct SliceRange {
@@ -266,7 +267,6 @@ private:
         int64_t lsb = 0;
     };
 
-    const SignalMemoEntry* findMemoEntryFromExpression(const slang::ast::Expression& expr) const;
     std::optional<SliceRange>
     deriveStructFieldSlice(const slang::ast::MemberAccessExpression& expr) const;
     grh::Value* buildStaticSlice(grh::Value& input, int64_t sliceStart, int64_t sliceEnd,
@@ -309,6 +309,7 @@ protected:
     grh::Graph& graph() const noexcept { return *graph_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
+    const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
 
 private:
     struct BitRange {
@@ -321,7 +322,6 @@ private:
                              grh::Value& rhsValue);
     bool handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue);
     const SignalMemoEntry* resolveMemoEntry(const slang::ast::Expression& expr) const;
-    const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
     std::optional<BitRange> resolveBitRange(const SignalMemoEntry& entry,
                                             const slang::ast::Expression& expr,
                                             std::string& pathOut);
@@ -367,7 +367,8 @@ class AlwaysBlockLHSConverter : public LHSConverter {
 public:
     AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner);
 
-    bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+    virtual bool convert(const slang::ast::AssignmentExpression& assignment,
+                         grh::Value& rhsValue);
 
 protected:
     AlwaysConverter& owner_;
@@ -383,6 +384,9 @@ public:
 class SeqAlwaysLHSConverter : public AlwaysBlockLHSConverter {
 public:
     using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
+
+    bool convert(const slang::ast::AssignmentExpression& assignment,
+                 grh::Value& rhsValue) override;
 };
 
 /// RHS converter used by procedural always blocks.
@@ -416,6 +420,7 @@ public:
 protected:
     grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
+    grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
 };
 
 /// Shared control logic for procedural always blocks.
@@ -635,7 +640,29 @@ protected:
     bool requireNonBlockingAssignments() const override;
 
 private:
+    friend class SeqAlwaysRHSConverter;
+    friend class SeqAlwaysLHSConverter;
+
     void planSequentialFinalize();
+    bool finalizeRegisterWrites(grh::Value& clockValue);
+    bool finalizeMemoryWrites(grh::Value& clockValue);
+    grh::Value* ensureClockValue();
+    grh::Value* ensureMemoryEnableValue();
+    grh::Value* buildMemorySyncRead(const SignalMemoEntry& entry, grh::Value& addrValue,
+                                    const slang::ast::Expression& originExpr);
+    int64_t memoryRowWidth(const SignalMemoEntry& entry) const;
+    void recordMemoryWordWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
+                               grh::Value& addrValue, grh::Value& dataValue);
+    void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
+                              grh::Value& addrValue, grh::Value& bitIndex, grh::Value& bitValue);
+    grh::Value* buildShiftedBitValue(grh::Value& sourceBit, grh::Value& bitIndex,
+                                     int64_t targetWidth, std::string_view label);
+    grh::Value* buildShiftedMask(grh::Value& bitIndex, int64_t targetWidth,
+                                 std::string_view label);
+    grh::Value* createConcatWithZeroPadding(grh::Value& value, int64_t padWidth,
+                                            std::string_view label);
+    std::string makeMemoryHelperOpName(std::string_view suffix);
+    std::string makeMemoryHelperValueName(std::string_view suffix);
     std::optional<grh::Value*> deriveClockValue();
     grh::Value* convertTimingExpr(const slang::ast::Expression& expr);
     grh::Value* buildDataOperand(const WriteBackMemo::Entry& entry);
@@ -665,9 +692,29 @@ private:
     grh::Value* resolveAsyncResetSignal(const slang::ast::Expression& expr);
     grh::Value* resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol);
 
+    struct MemoryWriteIntent {
+        const SignalMemoEntry* entry = nullptr;
+        const slang::ast::Expression* originExpr = nullptr;
+        grh::Value* addr = nullptr;
+        grh::Value* data = nullptr;
+    };
+
+    struct MemoryBitWriteIntent {
+        const SignalMemoEntry* entry = nullptr;
+        const slang::ast::Expression* originExpr = nullptr;
+        grh::Value* addr = nullptr;
+        grh::Value* bitIndex = nullptr;
+        grh::Value* bitValue = nullptr;
+    };
+
     std::unordered_map<const slang::ast::Expression*, grh::Value*> timingValueCache_;
     std::unordered_map<const slang::ast::ValueSymbol*, grh::Value*> syncResetCache_;
     std::size_t finalizeNameCounter_ = 0;
+    std::vector<MemoryWriteIntent> memoryWrites_;
+    std::vector<MemoryBitWriteIntent> memoryBitWrites_;
+    grh::Value* cachedClockValue_ = nullptr;
+    bool clockDeriveAttempted_ = false;
+    grh::Value* memoryEnableOne_ = nullptr;
 };
 
 /// Elaborates slang AST into GRH representation.

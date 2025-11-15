@@ -43,6 +43,26 @@ const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool 
     return nullptr;
 }
 
+const grh::Operation* findMemoryOp(const grh::Graph& graph, grh::OperationKind kind,
+                                   std::string_view memSymbol) {
+    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
+        if (!opPtr || opPtr->kind() != kind) {
+            continue;
+        }
+        auto it = opPtr->attributes().find("memSymbol");
+        if (it == opPtr->attributes().end()) {
+            continue;
+        }
+        if (!std::holds_alternative<std::string>(it->second)) {
+            continue;
+        }
+        if (std::get<std::string>(it->second) == memSymbol) {
+            return opPtr.get();
+        }
+    }
+    return nullptr;
+}
+
 bool writeArtifact(const grh::Netlist& netlist) {
     const std::filesystem::path artifactPath(WOLF_SV_ELAB_SEQ_ALWAYS_ARTIFACT_PATH);
     if (artifactPath.empty()) {
@@ -357,6 +377,115 @@ int main() {
     }
     if (!checkResetOperands(*regAsync, rstPort, "1'b0")) {
         return 1;
+    }
+
+    const auto* inst18 = findInstanceByName(compilation->getRoot().topInstances, "seq_stage18");
+    if (!inst18) {
+        return fail("Top instance seq_stage18 not found");
+    }
+    const grh::Graph* graph18 = netlist.findGraph("seq_stage18");
+    if (!graph18) {
+        return fail("GRH graph seq_stage18 not found");
+    }
+
+    const grh::Value* clk18 = findPort(*graph18, "clk", /*isInput=*/true);
+    const grh::Value* wrAddr = findPort(*graph18, "wr_addr", /*isInput=*/true);
+    const grh::Value* rdAddr = findPort(*graph18, "rd_addr", /*isInput=*/true);
+    const grh::Value* maskAddr = findPort(*graph18, "mask_addr", /*isInput=*/true);
+    const grh::Value* bitIndex = findPort(*graph18, "bit_index", /*isInput=*/true);
+    const grh::Value* bitValue = findPort(*graph18, "bit_value", /*isInput=*/true);
+    const grh::Value* rdDataOut = findPort(*graph18, "rd_data", /*isInput=*/false);
+    if (!clk18 || !wrAddr || !rdAddr || !maskAddr || !bitIndex || !bitValue || !rdDataOut) {
+        return fail("seq_stage18 ports are missing");
+    }
+
+    std::span<const SignalMemoEntry> regMemo18 = elaborator.peekRegMemo(fetchBody(*inst18));
+    const SignalMemoEntry* memEntry = findEntry(regMemo18, "mem");
+    const SignalMemoEntry* rdRegEntry = findEntry(regMemo18, "rd_reg");
+    if (!memEntry || !rdRegEntry) {
+        return fail("seq_stage18 memo entries missing mem or rd_reg");
+    }
+    if (!memEntry->stateOp || memEntry->stateOp->kind() != grh::OperationKind::kMemory) {
+        return fail("seq_stage18 mem entry lacks kMemory state op");
+    }
+
+    const std::string memSymbol = memEntry->stateOp->symbol();
+
+    const grh::Operation* syncRead =
+        findMemoryOp(*graph18, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+    if (!syncRead) {
+        return fail("kMemorySyncReadPort not found for seq_stage18");
+    }
+    if (syncRead->operands().size() != 3 || syncRead->operands()[0] != clk18 ||
+        syncRead->operands()[1] != rdAddr) {
+        return fail("Memory sync read operands are incorrect");
+    }
+    if (!syncRead->operands()[2] || !syncRead->operands()[2]->definingOp() ||
+        syncRead->operands()[2]->definingOp()->kind() != grh::OperationKind::kConstant) {
+        return fail("Memory sync read enable is not tied to constant one");
+    }
+    if (syncRead->results().size() != 1 || syncRead->results().front()->width() != 8) {
+        return fail("Memory sync read result width mismatch");
+    }
+    if (rdRegEntry->stateOp->operands().empty() ||
+        rdRegEntry->stateOp->operands().back() != syncRead->results().front()) {
+        return fail("rd_reg data input is not driven by the sync read port");
+    }
+    const grh::Operation* writePort =
+        findMemoryOp(*graph18, grh::OperationKind::kMemoryWritePort, memSymbol);
+    if (!writePort) {
+        return fail("kMemoryWritePort not found for seq_stage18");
+    }
+    if (writePort->operands().size() != 4 || writePort->operands()[0] != clk18 ||
+        writePort->operands()[1] != wrAddr) {
+        return fail("Memory write port operands mismatched");
+    }
+    if (!writePort->operands()[2] || !writePort->operands()[2]->definingOp() ||
+        writePort->operands()[2]->definingOp()->kind() != grh::OperationKind::kConstant) {
+        return fail("Memory write port enable should be constant one");
+    }
+    if (writePort->operands()[3]->width() != 8) {
+        return fail("Memory write port data width mismatch");
+    }
+
+    const grh::Operation* maskPort =
+        findMemoryOp(*graph18, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+    if (!maskPort) {
+        return fail("kMemoryMaskWritePort not found for seq_stage18");
+    }
+    if (maskPort->operands().size() != 5 || maskPort->operands()[0] != clk18 ||
+        maskPort->operands()[1] != maskAddr) {
+        return fail("Memory mask write operands mismatched");
+    }
+    if (!maskPort->operands()[2] || !maskPort->operands()[2]->definingOp() ||
+        maskPort->operands()[2]->definingOp()->kind() != grh::OperationKind::kConstant) {
+        return fail("Memory mask write enable should be constant one");
+    }
+    if (maskPort->operands()[3]->width() != 8 || maskPort->operands()[4]->width() != 8) {
+        return fail("Memory mask write data/mask widths mismatch");
+    }
+    const grh::Operation* dataShift =
+        maskPort->operands()[3] ? maskPort->operands()[3]->definingOp() : nullptr;
+    const grh::Operation* maskShift =
+        maskPort->operands()[4] ? maskPort->operands()[4]->definingOp() : nullptr;
+    if (!dataShift || dataShift->kind() != grh::OperationKind::kShl ||
+        dataShift->operands().size() != 2 || dataShift->operands()[1] != bitIndex) {
+        return fail("Memory mask write data path is not shifted by bit_index");
+    }
+    const grh::Operation* dataConcat =
+        dataShift->operands()[0] ? dataShift->operands()[0]->definingOp() : nullptr;
+    if (!dataConcat || dataConcat->kind() != grh::OperationKind::kConcat ||
+        dataConcat->operands().size() != 2 || dataConcat->operands()[1] != bitValue) {
+        return fail("Memory mask write data concat does not source bit_value");
+    }
+    if (!maskShift || maskShift->kind() != grh::OperationKind::kShl ||
+        maskShift->operands().size() != 2 || maskShift->operands()[1] != bitIndex) {
+        return fail("Memory mask write mask is not shifted by bit_index");
+    }
+    const grh::Operation* maskConst =
+        maskShift->operands()[0] ? maskShift->operands()[0]->definingOp() : nullptr;
+    if (!maskConst || maskConst->kind() != grh::OperationKind::kConstant) {
+        return fail("Memory mask base should be a constant one-hot literal");
     }
 
     bool unexpectedDiag = false;

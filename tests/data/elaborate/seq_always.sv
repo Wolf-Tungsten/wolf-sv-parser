@@ -47,3 +47,25 @@ module seq_stage17 (
     assign reg_async_out = reg_async_rst;
     assign reg_sync_out = reg_sync_rst;
 endmodule
+
+module seq_stage18 (
+    input  logic        clk,
+    input  logic [3:0]  wr_addr,
+    input  logic [3:0]  rd_addr,
+    input  logic [3:0]  mask_addr,
+    input  logic [2:0]  bit_index,
+    input  logic [7:0]  wr_data,
+    input  logic        bit_value,
+    output logic [7:0]  rd_data
+);
+    logic [7:0] mem [0:15];
+    logic [7:0] rd_reg;
+
+    always_ff @(posedge clk) begin
+        mem[wr_addr] <= wr_data;
+        mem[mask_addr][bit_index] <= bit_value;
+        rd_reg <= mem[rd_addr];
+    end
+
+    assign rd_data = rd_reg;
+endmodule
