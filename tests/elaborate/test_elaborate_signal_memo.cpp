@@ -138,6 +138,7 @@ int main() {
 
     std::span<const SignalMemoEntry> netMemo = elaborator.peekNetMemo(*childBody);
     std::span<const SignalMemoEntry> regMemo = elaborator.peekRegMemo(*childBody);
+    std::span<const SignalMemoEntry> memMemo = elaborator.peekMemMemo(*childBody);
 
     logMemo("net", netMemo);
     logMemo("reg", regMemo);
@@ -288,9 +289,9 @@ int main() {
         return 1;
     }
 
-    const SignalMemoEntry* memoryEntry = findEntry(regMemo, "reg_unpacked_bus");
+    const SignalMemoEntry* memoryEntry = findEntry(memMemo, "reg_unpacked_bus");
     if (!memoryEntry) {
-        return fail("reg memo missing reg_unpacked_bus");
+        return fail("mem memo missing reg_unpacked_bus");
     }
     if (memoryEntry->value) {
         return fail("reg_unpacked_bus should not materialize a flat value");

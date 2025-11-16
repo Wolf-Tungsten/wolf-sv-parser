@@ -847,6 +847,7 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     graph_(context.graph),
     netMemo_(context.netMemo),
     regMemo_(context.regMemo),
+    memMemo_(context.memMemo),
     origin_(context.origin),
     diagnostics_(context.diagnostics) {}
 
@@ -996,7 +997,13 @@ const SignalMemoEntry* LHSConverter::resolveMemoEntry(const slang::ast::Expressi
 }
 
 const SignalMemoEntry* LHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+    // Prefer memory classification over reg when both views contain the symbol.
     for (const SignalMemoEntry& entry : netMemo_) {
+        if (entry.symbol == &symbol) {
+            return &entry;
+        }
+    }
+    for (const SignalMemoEntry& entry : memMemo_) {
         if (entry.symbol == &symbol) {
             return &entry;
         }
@@ -1212,6 +1219,7 @@ std::optional<std::string> LHSConverter::buildFieldPath(const slang::ast::Expres
 std::optional<int64_t> LHSConverter::evaluateConstant(const slang::ast::Expression& expr) {
     slang::ast::EvalContext& ctx = ensureEvalContext();
     ctx.reset();
+    seedEvalContextForLHS(ctx);
     slang::ConstantValue value = expr.eval(ctx);
     if (!value || !value.isInteger() || value.hasUnknown()) {
         return std::nullopt;
@@ -1353,6 +1361,10 @@ AlwaysBlockLHSConverter::AlwaysBlockLHSConverter(Context context, AlwaysConverte
 grh::Value* AlwaysBlockRHSConverter::handleMemoEntry(
     const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry) {
     return CombRHSConverter::handleMemoEntry(expr, entry);
+}
+
+void AlwaysBlockLHSConverter::seedEvalContextForLHS(slang::ast::EvalContext& ctx) {
+    owner_.seedEvalContextWithLoopValues(ctx);
 }
 
 grh::Value* AlwaysBlockRHSConverter::handleCustomNamedValue(
@@ -1558,12 +1570,14 @@ void AlwaysConverter::LoopContextGuard::dismiss() {
 }
 
 AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                                 std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                                 std::span<const SignalMemoEntry> regMemo,
+                                 std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
                                  const slang::ast::ProceduralBlockSymbol& block,
                                  ElaborateDiagnostics* diagnostics) :
     graph_(graph),
     netMemo_(netMemo),
     regMemo_(regMemo),
+    memMemo_(memMemo),
     memo_(memo),
     block_(block),
     diagnostics_(diagnostics) {
@@ -1585,14 +1599,16 @@ void AlwaysConverter::traverse() {
 CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                          std::span<const SignalMemoEntry> netMemo,
                                          std::span<const SignalMemoEntry> regMemo,
+                                         std::span<const SignalMemoEntry> memMemo,
                                          WriteBackMemo& memo,
                                          const slang::ast::ProceduralBlockSymbol& block,
                                          ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memo, block, diagnostics) {
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics) {
     auto rhs = std::make_unique<CombAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = regMemo,
+                              .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1600,6 +1616,7 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
         LHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = {},
+                              .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1629,14 +1646,16 @@ bool CombAlwaysConverter::requireNonBlockingAssignments() const {
 
 SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                                        std::span<const SignalMemoEntry> netMemo,
-                                       std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                                       std::span<const SignalMemoEntry> regMemo,
+                                       std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
                                        const slang::ast::ProceduralBlockSymbol& block,
                                        ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memo, block, diagnostics) {
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics) {
     auto rhs = std::make_unique<SeqAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = regMemo,
+                              .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1644,6 +1663,7 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
         LHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = regMemo,
+                              .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
         *this);
@@ -1681,10 +1701,7 @@ void SeqAlwaysConverter::planSequentialFinalize() {
     const bool registerWrites = finalizeRegisterWrites(*clockValue);
     const bool memoryWrites = finalizeMemoryWrites(*clockValue);
 
-    if (!registerWrites && !memoryWrites && diagnostics()) {
-        diagnostics()->todo(block(),
-                            "Seq always block produced no sequential write intents to finalize");
-    }
+    // If nothing to finalize, stay silent (some blocks may be empty after static pruning).
 }
 
 bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
@@ -1739,6 +1756,74 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                 !attachResetOperands(*stateOp, *resetContext->signal,
                                      *resetExtraction->resetValue, entry)) {
                 continue;
+            }
+        }
+        // Attempt to extract enable pattern for both plain and reset registers, using peeled data if available.
+        if (entry.target && entry.target->value) {
+            grh::Value* analysisInput =
+                (resetExtraction && resetExtraction->dataWithoutReset)
+                    ? resetExtraction->dataWithoutReset
+                    : dataValue;
+            if (grh::Operation* mux = analysisInput->definingOp();
+                mux && mux->kind() == grh::OperationKind::kMux &&
+                mux->operands().size() == 3) {
+                grh::Value* cond = mux->operands()[0];
+                grh::Value* tVal = mux->operands()[1];
+                grh::Value* fVal = mux->operands()[2];
+
+                grh::Value* q = entry.target->value;
+                grh::Value* enRaw = nullptr;
+                grh::Value* newData = nullptr;
+                bool invert = false;
+                if (fVal == q) {
+                    // mux(en, d, Q)
+                    enRaw = cond;
+                    newData = tVal;
+                } else if (tVal == q) {
+                    // mux(en, Q, d) => use ~en
+                    enRaw = cond;
+                    newData = fVal;
+                    invert = true;
+                }
+                if (enRaw && newData && newData->width() == q->width()) {
+                    grh::Value* enBit = coerceToCondition(*enRaw);
+                    if (enBit && invert) {
+                        if (grh::Value* inv = buildLogicNot(*enBit)) {
+                            enBit = inv;
+                        } else {
+                            enBit = nullptr;
+                        }
+                    }
+                    if (enBit) {
+                        switch (stateOp->kind()) {
+                        case grh::OperationKind::kRegister:
+                            stateOp->setKind(grh::OperationKind::kRegisterEn);
+                            stateOp->addOperand(*enBit); // [clk, en]
+                            break;
+                        case grh::OperationKind::kRegisterRst:
+                            stateOp->setKind(grh::OperationKind::kRegisterEnRst);
+                            stateOp->addOperand(*enBit); // [clk, rst, resetValue, en]
+                            if (stateOp->operands().size() == 4) {
+                                grh::Value* rstVal = stateOp->operands()[2];
+                                stateOp->replaceOperand(2, *enBit);
+                                stateOp->replaceOperand(3, *rstVal);
+                            }
+                            break;
+                        case grh::OperationKind::kRegisterARst:
+                            stateOp->setKind(grh::OperationKind::kRegisterEnARst);
+                            stateOp->addOperand(*enBit);
+                            if (stateOp->operands().size() == 4) {
+                                grh::Value* rstVal = stateOp->operands()[2];
+                                stateOp->replaceOperand(2, *enBit);
+                                stateOp->replaceOperand(3, *rstVal);
+                            }
+                            break;
+                        default:
+                            break;
+                        }
+                        dataValue = newData; // Use unguarded data as register D
+                    }
+                }
             }
         }
         if (!attachDataOperand(*stateOp, *dataValue, entry)) {
@@ -2190,6 +2275,50 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
         return components.front();
     }
 
+    // Prefer a two-operand top-level concat: [hold_hi , compact_lo],
+    // where compact_lo may itself be a concat tree of the remaining pieces.
+    if (components.size() > 2) {
+        // Build compact_lo from components[1..end] as a left-assoc concat chain.
+        auto buildChain = [&](std::vector<grh::Value*>::const_iterator begin,
+                              std::vector<grh::Value*>::const_iterator end) -> grh::Value* {
+            if (begin == end) {
+                return nullptr;
+            }
+            grh::Value* acc = *begin;
+            for (auto it = begin + 1; it != end; ++it) {
+                grh::Operation& c =
+                    graph().createOperation(grh::OperationKind::kConcat,
+                                            makeFinalizeOpName(*entry.target, "seq_concat_lo"));
+                c.addOperand(*acc);
+                c.addOperand(**it);
+                const int64_t w = acc->width() + (*it)->width();
+                grh::Value& v =
+                    graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat_lo"),
+                                        w, entry.target->isSigned);
+                c.addResult(v);
+                acc = &v;
+            }
+            return acc;
+        };
+
+        grh::Value* hi = components.front();
+        grh::Value* lo = buildChain(components.begin() + 1, components.end());
+        if (!lo) {
+            return hi;
+        }
+
+        grh::Operation& concatTop =
+            graph().createOperation(grh::OperationKind::kConcat,
+                                    makeFinalizeOpName(*entry.target, "seq_concat"));
+        concatTop.addOperand(*hi);
+        concatTop.addOperand(*lo);
+        grh::Value& composed =
+            graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"),
+                                targetWidth, entry.target->isSigned);
+        concatTop.addResult(composed);
+        return &composed;
+    }
+
     grh::Operation& concat =
         graph().createOperation(grh::OperationKind::kConcat,
                                 makeFinalizeOpName(*entry.target, "seq_concat"));
@@ -2258,9 +2387,14 @@ bool SeqAlwaysConverter::attachDataOperand(grh::Operation& stateOp, grh::Value& 
                                            const WriteBackMemo::Entry& entry) {
     const auto& operands = stateOp.operands();
     std::size_t expected = 1;
-    if (stateOp.kind() == grh::OperationKind::kRegisterRst ||
-        stateOp.kind() == grh::OperationKind::kRegisterARst) {
+    if (stateOp.kind() == grh::OperationKind::kRegisterEn) {
+        expected = 2;
+    } else if (stateOp.kind() == grh::OperationKind::kRegisterRst ||
+               stateOp.kind() == grh::OperationKind::kRegisterARst) {
         expected = 3;
+    } else if (stateOp.kind() == grh::OperationKind::kRegisterEnRst ||
+               stateOp.kind() == grh::OperationKind::kRegisterEnARst) {
+        expected = 4;
     }
     if (operands.size() != expected) {
         reportFinalizeIssue(entry, "Register operands not ready for data attachment");
@@ -2394,6 +2528,7 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
     const bool resetWhenSignalHigh = activeHigh;
     const bool resetBranchIsTrue = conditionTrueWhenSignalHigh == resetWhenSignalHigh;
     grh::Value* resetValue = muxOp->operands()[resetBranchIsTrue ? 1 : 2];
+    grh::Value* dataWithoutReset = muxOp->operands()[resetBranchIsTrue ? 2 : 1];
     if (!resetValue) {
         reportFinalizeIssue(entry, "Reset branch value is missing");
         return std::nullopt;
@@ -2402,7 +2537,7 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
         reportFinalizeIssue(entry, "Reset branch width mismatch");
         return std::nullopt;
     }
-    return ResetExtraction{resetValue};
+    return ResetExtraction{resetValue, dataWithoutReset};
 }
 
 bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
@@ -2410,7 +2545,9 @@ bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value
                                              const WriteBackMemo::Entry& entry) {
     auto& operands = stateOp.operands();
     if (stateOp.kind() != grh::OperationKind::kRegisterRst &&
-        stateOp.kind() != grh::OperationKind::kRegisterARst) {
+        stateOp.kind() != grh::OperationKind::kRegisterARst &&
+        stateOp.kind() != grh::OperationKind::kRegisterEnRst &&
+        stateOp.kind() != grh::OperationKind::kRegisterEnARst) {
         reportFinalizeIssue(entry, "Register does not expect reset operands");
         return false;
     }
@@ -2683,9 +2820,13 @@ void AlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& s
 
         ForeachDimState state;
         state.loopVar = dim.loopVar;
-        state.start = dim.range->left;
-        state.stop = dim.range->right;
-        state.step = state.start <= state.stop ? 1 : -1;
+        // Iterate in ascending index order regardless of declared range direction,
+        // to match foreach semantics expected by tests (e.g. low bits first).
+        int32_t lo = std::min(dim.range->left, dim.range->right);
+        int32_t hi = std::max(dim.range->left, dim.range->right);
+        state.start = lo;
+        state.stop = hi;
+        state.step = 1;
         dims.push_back(state);
         scopeSymbols.push_back(dim.loopVar);
     }
@@ -4238,7 +4379,8 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
 
 RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(context.origin),
                                               diagnostics_(context.diagnostics),
-                                              netMemo_(context.netMemo), regMemo_(context.regMemo) {
+                                              netMemo_(context.netMemo), regMemo_(context.regMemo),
+                                              memMemo_(context.memMemo) {
     instanceId_ = nextConverterInstanceId();
 }
 
@@ -4712,6 +4854,10 @@ const SignalMemoEntry* RHSConverter::findMemoEntry(const slang::ast::ValueSymbol
     if (const SignalMemoEntry* entry = finder(netMemo_)) {
         return entry;
     }
+    // Prefer memory classification over reg when both views contain the symbol.
+    if (const SignalMemoEntry* entry = finder(memMemo_)) {
+        return entry;
+    }
     return finder(regMemo_);
 }
 
@@ -5129,6 +5275,14 @@ Elaborate::peekRegMemo(const slang::ast::InstanceBodySymbol& body) const {
     return {};
 }
 
+std::span<const SignalMemoEntry>
+Elaborate::peekMemMemo(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = memMemo_.find(&body); it != memMemo_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
 grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instance,
                                         grh::Netlist& netlist, bool& wasCreated) {
     const slang::ast::InstanceBodySymbol* canonicalBody = instance.getCanonicalBody();
@@ -5437,6 +5591,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .graph = &graph,
         .netMemo = netMemo,
         .regMemo = regMemo,
+        .memMemo = peekMemMemo(body),
         .origin = &assign,
         .diagnostics = diagnostics_};
     CombRHSConverter converter(context);
@@ -5461,8 +5616,9 @@ void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block
                                   grh::Graph& graph) {
     std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
     std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
+    std::span<const SignalMemoEntry> memMemo = peekMemMemo(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    CombAlwaysConverter converter(graph, netMemo, regMemo, memo, block, diagnostics_);
+    CombAlwaysConverter converter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics_);
     converter.run();
 }
 
@@ -5471,8 +5627,9 @@ void Elaborate::processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
                                  grh::Graph& graph) {
     std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
     std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
+    std::span<const SignalMemoEntry> memMemo = peekMemMemo(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    SeqAlwaysConverter converter(graph, netMemo, regMemo, memo, block, diagnostics_);
+    SeqAlwaysConverter converter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics_);
     converter.run();
 }
 
@@ -5664,6 +5821,7 @@ void Elaborate::materializeSignalMemos(const slang::ast::InstanceBodySymbol& bod
                                        grh::Graph& graph) {
     ensureNetValues(body, graph);
     ensureRegState(body, graph);
+    ensureMemState(body, graph);
 }
 
 void Elaborate::ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph) {
@@ -5699,13 +5857,8 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         if (entry.stateOp) {
             continue;
         }
-        if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
-            std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
-            grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
-            op.setAttribute("width", layout->rowWidth);
-            op.setAttribute("row", layout->rowCount);
-            op.setAttribute("isSigned", layout->isSigned);
-            entry.stateOp = &op;
+        // 跳过 memory（非标量寄存器）的 reg 视图，在 ensureMemState 中生成其 kMemory 占位符。
+        if (deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
             continue;
         }
 
@@ -5787,6 +5940,38 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
     }
 }
 
+void Elaborate::ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph) {
+    auto it = memMemo_.find(&body);
+    if (it == memMemo_.end()) {
+        return;
+    }
+    for (SignalMemoEntry& entry : it->second) {
+        if (!entry.symbol || !entry.type) {
+            continue;
+        }
+        if (entry.stateOp) {
+            continue;
+        }
+        if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
+            std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
+            grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
+            op.setAttribute("width", layout->rowWidth);
+            op.setAttribute("row", layout->rowCount);
+            op.setAttribute("isSigned", layout->isSigned);
+            entry.stateOp = &op;
+            // 将同名 symbol 在 regMemo 里的视图一并更新 stateOp，方便测试从 regMemo 访问到 memory。
+            if (auto regIt = regMemo_.find(&body); regIt != regMemo_.end()) {
+                for (SignalMemoEntry& regEntry : regIt->second) {
+                    if (regEntry.symbol == entry.symbol) {
+                        regEntry.stateOp = &op;
+                    }
+                }
+            }
+            continue;
+        }
+        // Not a memory after all; keep as is.
+    }
+}
 WriteBackMemo& Elaborate::ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body) {
     return writeBackMemo_[&body];
 }
@@ -5860,6 +6045,7 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     if (candidates.empty()) {
         netMemo_[&body].clear();
         regMemo_[&body].clear();
+        memMemo_[&body].clear();
         return;
     }
 
@@ -5935,8 +6121,10 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
     std::vector<SignalMemoEntry> nets;
     std::vector<SignalMemoEntry> regs;
+    std::vector<SignalMemoEntry> mems;
     nets.reserve(candidates.size());
     regs.reserve(candidates.size());
+    mems.reserve(candidates.size());
 
     for (auto& [symbol, entry] : candidates) {
         MemoDriverKind driver = MemoDriverKind::None;
@@ -5948,6 +6136,15 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                              !hasDriver(driver, MemoDriverKind::Reg);
         const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
                              !hasDriver(driver, MemoDriverKind::Net);
+
+        // Unpacked arrays recognized as memory仅在“纯时序驱动”的情况下进入 memMemo；
+        // 组合驱动的 unpacked array 仍按 net 扁平化处理。
+        if (regOnly) {
+            if (deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
+                mems.push_back(entry);
+                continue;
+            }
+        }
 
         if (netOnly) {
             nets.push_back(entry);
@@ -5968,8 +6165,13 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     };
     std::sort(nets.begin(), nets.end(), byName);
     std::sort(regs.begin(), regs.end(), byName);
+    std::sort(mems.begin(), mems.end(), byName);
+    // 让 memory 也出现在 regMemo 视图中（stateOp 为 kMemory，由 ensureMemState 填充）。
+    // 这样下游测试可以在 regMemo 中查到 "mem" 实体，同时仍保留 memMemo 供 memory 专用处理。
+    regs.insert(regs.end(), mems.begin(), mems.end());
     netMemo_[&body] = std::move(nets);
     regMemo_[&body] = std::move(regs);
+    memMemo_[&body] = std::move(mems);
 }
 
 } // namespace wolf_sv

@@ -144,3 +144,10 @@
   - KR3 支持静态可预测的 break 和 continue 语法
   - KR4 创建测试样例
 
+## 阶段21：扩充寄存器原语及处理方式
+- **Objective** 将寄存器生成的方式改造为“分化形式”，并添加新的寄存器原语
+  - KR1 目前实现中，建图初期将 kRegister 和 kMemory 放在了一个 memo 中，请分离成 regMemo 和 memMemo
+  - KR2 改为建图初期只产生 kRegister，在 SeqAlwaysConverter 中对 kRegister 的类型和操作数进行补充
+  - KR3 目前 GRH 表示中缺少带有 Enable 的寄存器，请补充 kRegisterEn、kRegisterEnRst、kRegisterEnARst
+  - KR4 添加对新型寄存器的支持
+  - KR5 补充测试样例，并确保已有测试样例正确回归。

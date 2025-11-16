@@ -67,7 +67,7 @@
 - **流程接入（KR1）** 按 docs/reference/yosys 的判定规则梳理何时触发 `processSeqAlways`：检测敏感列表、判定时钟/复位信号、从 elaborate 主流程传入 graph+memo+诊断上下文，让 SeqAlwaysConverter 完成语句遍历；需要同步补全 `isSeqProceduralBlock` 之类的判断与错误提示。
 - **公共基类（KR2）** 抽象 AlwaysConverter 基类，收敛 if/case/loop 分支栈、块级 shadow memo、RHS/LHS Converter 工厂等公共逻辑；CombAlwaysConverter 与 SeqAlwaysConverter 只覆写专属的 RHS/LHS Converter 创建、赋值调度策略以及 finalize 钩子，重构后跑回归确保组合流程行为不变。
 - **非阻塞语义（KR3）** SeqAlwaysConverter/SeqAlwaysLHSConverter 仅支持非阻塞赋值：遇到阻塞赋值立即诊断；块内维护「当前时钟沿」的 writeBack 列表，记录每条非阻塞语句的目标符号、bit 范围、优先级，并在多次写同一目标时按源代码顺序合并。
-- **finalize 规划（KR4）** 规划 finalize 的三步走但暂以 TODO 落地：1）遍历 writeBack memo，把寄存器条目的 RHS Value 连接到对应 kRegister* stub 的 data 输入（同步/异步复位钩子预留 TODO）；2）为 reg memo 中的 kMemory 条目生成 kMemorySyncRead/Write 端口，明确地址/数据/使能 Value 的来源并记录 TODO 占位以便后续实现真正连线；3）生成人工可读的阶段日志或 JSON dump，输出 register/memory 绑定结果与待实现项，方便阶段评审。
+- **finalize 规划（KR4）** 规划 finalize 的三步走但暂以 TODO 落地：1）遍历 writeBack memo，把寄存器条目的 RHS Value 连接到对应 kRegister* stub 的 data 输入（同步/异步复位钩子预留 TODO）；2）为 mem memo 中的 kMemory 条目生成 kMemorySyncRead/Write 端口，明确地址/数据/使能 Value 的来源并记录 TODO 占位以便后续实现真正连线；3）生成人工可读的阶段日志或 JSON dump，输出 register/memory 绑定结果与待实现项，方便阶段评审。
 
 ## 阶段17：SeqAlwaysConverter 类处理寄存器非阻塞赋值
 - **目标定位** 接棒阶段16的 finalize TODO，把 SeqAlwaysConverter 在遇到寄存器非阻塞赋值（NBA）时的结果真正落到 kRegister 节点：同一 always_ff/时序块内要基于块级上下文一次性绑定 clk/rst/d，并补齐 `reg memo -> kRegister` 之间的实际连线。
@@ -79,7 +79,7 @@
 - **验证与可视化** 增加覆盖单寄存器多段写入、重叠写入、部分写入保留旧值以及不同复位形态的时序样例，测试中 dump 出寄存器绑定的 clk/rst/data Value 及每段写入的位宽，确保 kRegister 的三个 operand 都按预期被设置；必要时扩展现有 JSON trace，帮助评审核对覆盖/保留策略。
 
 ## 阶段18：SeqAlwaysConverter 类处理 memory 读写口
-- **目标定位** 延续阶段16-17 的 SeqAlwaysConverter 能力，把时序 always/always_ff 中涉及 `reg memo` 上标记为 kMemory 的条目落到 GRH 的同步读/写端口，参考 `docs/reference/yosys` 的做法确保 memory 行为在单个块内即可完全建模。
+- **目标定位** 延续阶段16-17 的 SeqAlwaysConverter 能力，把时序 always/always_ff 中涉及 `mem memo` 上标记为 kMemory 的条目落到 GRH 的同步读/写端口，参考 `docs/reference/yosys` 的做法确保 memory 行为在单个块内即可完全建模。
 - **KR1（同步读口建模）** 当 SeqAlwaysConverter/SeqAlwaysRHSConverter 解析到 memory 读取（含 `mem[addr]`、结构体/数组字段读取）的 RHS，用 TypeHelper 提供的 bit 布局生成地址/数据 Value，并创建 `kMemorySyncReadPort` Operation。端口需绑定 memory handle、块级时钟、地址和可选的 enable；若 AST 中未显式出现 enable，则自动接 `Constant(1)`，并在 trace 中记录推断来源。
 - **KR2（整字写口落地）** 对于 `mem[addr] <= data;` 这类完整字写入，SeqAlwaysLHSConverter 需要把 RHS flatten 成与 memory 数据位宽一致的 Value，finalize 阶段生成 `kMemoryWritePort`，填入 memory、clk、addr、en、data 五个 operand，en 缺省同样连常量 1。需要支持同一 always 块写多条 memory 语句：按源顺序记录写意图，最终为每条语句创建独立端口并保留引用，方便后续优化或冲突检查。
 - **KR3（按位写掩码合成）** 当出现 `mem[addr][i] <= data_bit;` 或对数据位段的部分写入时，先在块内把每次写入记录到一个「mask write」集合，记住 addr 表达式、bit/byte 范围与 RHS Value。finalize 时解析这些集合并按照 SystemVerilog 语义合成 `kMemoryMaskWritePort`：生成 mask Value（标记哪些 bit 被覆盖）与 data Value（被写入的新值），同样绑定 clk/en。需要对同一 addr/bit 的多次写入按语句顺序覆盖，并在日志中显示最终 mask/data。
@@ -143,3 +143,69 @@
 > - 维护一个「迭代常量绑定」环境，用于把迭代变量替换为常量参与常量折叠；在进入/退出迭代时 push/pop 该绑定，配合 slang/自有常量折叠器判定 break/continue 的静态性。
 > - 展开期间一律使用 `runWithShadowFrame` 隔离每次迭代的临时读写视图，避免同一迭代内的读被后续迭代的写污染；最终 writeBack/memory intent 仍以全局线性顺序汇总。
 > - 与阶段19的 guard 机制协作：如需对某些循环条件构造 guard，可在进入迭代时把该条件与 `currentGuard` 做与，作为该迭代体内的起始 guard；一般 for/foreach 的迭代谓词若已静态决定，则无需额外 guard。
+
+## 阶段21：扩充寄存器原语及处理方式
+- 目标定位 将寄存器生成改为“分化形式”：建图初期仅放置无复位/无使能的 kRegister 占位，顺序路径在 SeqAlwaysConverter 中根据复位/使能语义对寄存器进行“特化”，并补充新的带使能原语。
+- 范围影响 涉及 memo 拆分、Reg 构建策略调整、SeqAlwaysConverter 的 finalize 过程、GRH 原语集扩展与测试用例更新；不改变前述 RHS/LHS/Memory 的总体设计。
+
+- KR1（拆分 memo：regMemo 与 memMemo） 将现有“Reg Memo 同时承载寄存器+存储器”的结构拆分：
+  - 数据结构
+    - regMemo：仅面向需要用寄存器表达的符号，保留 type/width/isSigned/fields/value（Q 口）、drivingBlock、stateOp（寄存器 op）。
+    - memMemo：仅面向内存对象，保存 width/row/isSigned、stateOp（kMemory）、以及为读写端口生成服务的附加元数据（例如命名前缀、端口计数器）。
+  - 迁移步骤
+    1) `collectSignalMemos` 在分类时把 unpacked reg/mem 放入 memMemo，其他 reg 放入 regMemo；
+    2) 调整 `ensureRegState/ensureMemState`：前者只处理寄存器，后者只处理存储器；
+    3) 更新引用点：RHS 读取寄存器继续从 regMemo.entry.value 取 Q；内存读取/写意图改为通过 memMemo.entry.stateOp；修正 `memo.md`（在本阶段提交中标注需要同步更新）。
+
+- KR2（新增原语：带使能寄存器族） 在 GRH 中补充 3 种带使能的寄存器：
+  - kRegisterEn
+    - operands：clk, en, d；result：q；attributes：clkPolarity（posedge/negedge）
+    - 语义（active-high en；若为低有效，前置 `kNot`）：`always @(clk) if (en) q <= d;`
+  - kRegisterEnRst（同步复位）
+    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstLevel
+    - 语义：`if (rst==rstLevel) q<=rstValue; else if (en) q<=d;`
+  - kRegisterEnARst（异步复位）
+    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstLevel（异步边由 rstLevel 推导）
+  - 归一化规则
+    - 仅支持高有效 en；遇到低有效/复杂条件时把条件归一到 1-bit 并接入前级 `kNot/kAnd` 等组合逻辑，保持原语简洁；
+    - resetValue 与 d 的位宽必须等于 q 宽度；rst/en 通过 `coerceToCondition` 规约为 1-bit。
+  - 规范引用
+    - 操作类型总览：`docs/GRH-representation.md:49`
+    - kRegisterEn：`docs/GRH-representation.md:361`
+    - kRegisterEnRst：`docs/GRH-representation.md:385`
+    - kRegisterEnARst：`docs/GRH-representation.md:414`
+
+- KR3（分化式寄存器生成） 基于 KR2 的原语定义，建图初期仅创建基础 `kRegister` 占位，SeqAlwaysConverter 决定最终形态并补全操作数：
+  - 初始占位
+    - `ensureRegState`：创建 `kRegister`，仅设置 symbol、q result 与 `clkPolarity` 属性（可从 drivingBlock 推断）；暂不连接 `clk/d`，不创建 `*Rst/*ARst/*En*` 变体。
+  - finalize 特化流程（面向每个被写的寄存器）
+    1) 汇总 writeBack 结果生成“候选 data”SSA；
+    2) 提取复位分支（沿用阶段19的 `extractResetBranches`）：若检测到复位，记录 rst 信号、rstLevel、resetValue 以及是同步/异步类型，并剥离数据路上的复位层；
+    3) 提取使能保持：尝试匹配 `mux(en, d, Q)` 或按位拼接后整体等价为“真支为新数据、假支为 Q”的结构；若条件为 `~en` 则归一化为 en + 取反；仅当“全宽保持为 Q”时视为可抽取的 enable；
+    4) 选择目标原语：基于是否存在复位（同步/异步）与是否存在使能，确定目标为 `kRegister` / `kRegisterRst` / `kRegisterARst` / `kRegisterEn` / `kRegisterEnRst` / `kRegisterEnARst`；
+    5) 迁移/变形：将基础 `kRegister` 替换为目标原语（或在同一 op 上修改 type），连接 `clk/(en)/(rst)/(rstVal)/d` 等 operand；若无法抽取 enable，则保留 `mux(..., Q)` 作为 data 输入的组合逻辑；
+    6) 校验与诊断：确认位宽匹配、Q 自引用合法、同一寄存器不会被多个 always 块写入；若发现部分位更新在不同 guard 下且无法归一化为单一 enable，则记录“保持由数据路表达”而非报错。
+  - 规范引用
+    - kRegister：`docs/GRH-representation.md:282`
+    - kRegisterRst：`docs/GRH-representation.md:303`
+    - kRegisterARst：`docs/GRH-representation.md:331`
+    - kRegisterEn：`docs/GRH-representation.md:361`
+    - kRegisterEnRst：`docs/GRH-representation.md:385`
+    - kRegisterEnARst：`docs/GRH-representation.md:414`
+
+- KR4（转换与兼容策略） 使能抽取失败或部分位更新的情形：
+  - 若数据路径不能整体归一为“else=Q”的保持，保留现有 `kRegister*/mux` 结构，不强制使用 `*En*` 原语；
+  - 当存在复位时，优先提取复位再尝试提取使能；允许得到 `kRegisterRst/ARst` + 数据路 mux 的等价表达；
+  - 读取路径（RHS）不受影响：一律从 regMemo.entry.value（Q）读取；writeBack 仍然负责拼接多片段写入，SeqAlwaysConverter 只在最终 data 上进行语义提取。
+
+- KR5（测试与验收） 新增与迁移测试：
+  - 基础：`seq_stage21_en_reg`（if(en) r<=d;）、`seq_stage21_rst_en_reg`（if(rst) r<=rv; else if(en) r<=d;）
+  - 低有效使能：`seq_stage21_nen_reg`（if(!en) r<=q; else r<=d;）验证前置 `kNot`；
+  - 部分位更新：`seq_stage21_partial_update`，验证无法整体抽取时保留 mux；复位 + 部分位混合；
+  - 兼容性：回归阶段17/18/19/20 的既有用例，确认寄存器/内存语义与端口连接不回退。
+
+> 实现提示
+> - 在 `SeqAlwaysConverter::finalizeRegisterWrites` 中插入两个提取器：`extractResetBranches`（已存在）之后新增 `extractEnableHold(data, Q)`；二者返回（剩余 data, enable?, resetCtx?）。
+> - 为“原地变形”封装 `mutateRegisterOp(op, targetKind)`，保持 symbol/Q 不变，仅调整 type 与 operands/attributes。
+> - 对按位保持的情况，可先尝试将 writeBack 片段合并成“真支为 concat(new_slices)，假支为 Q”的单层 mux，再决定能否抽取 enable。
+> - 规范条目：操作类型总览 `docs/GRH-representation.md:49`；寄存器族定义 `docs/GRH-representation.md:282`、`:303`、`:331`、`:361`、`:385`、`:414`。

@@ -254,3 +254,42 @@ module seq_stage19_rst_en_reg (
     end
     assign q = r;
 endmodule
+
+// Stage21: Enable registers as primitives
+
+// 1) 仅使能寄存器：if (en) r <= d; 期望生成 kRegisterEn
+module seq_stage21_en_reg (
+    input  logic       clk,
+    input  logic       en,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        if (en) begin
+            r <= d;
+        end
+    end
+    assign q = r;
+endmodule
+
+// 2) 异步低有效复位 + 使能：if (!rst_n) r<=rv; else if (en) r<=d; 期望生成 kRegisterEnARst
+module seq_stage21_rst_en_reg (
+    input  logic       clk,
+    input  logic       rst_n, // 低有效异步复位
+    input  logic       en,
+    input  logic [7:0] d,
+    input  logic [7:0] rv,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            r <= rv;
+        end
+        else if (en) begin
+            r <= d;
+        end
+    end
+    assign q = r;
+endmodule

@@ -325,27 +325,37 @@ int main() {
     };
 
     const grh::Value* syncData = regSync->stateOp->operands().back();
-    const grh::Operation* syncMux = syncData ? syncData->definingOp() : nullptr;
-    if (!syncMux || syncMux->kind() != grh::OperationKind::kMux) {
-        return fail("reg_sync_rst data is not driven by kMux");
-    }
-    if (syncMux->operands().size() != 3) {
-        return fail("reg_sync_rst mux operand count mismatch");
-    }
-    if (!mentionsPort(syncMux->operands().front(), rstSyncPort)) {
-        return fail("reg_sync_rst mux condition does not reference rst_sync");
-    }
-    if (!isZeroConstant(syncMux->operands()[1])) {
-        return fail("reg_sync_rst reset value is not zero");
-    }
-    const grh::Operation* syncConcat =
-        syncMux->operands()[2] ? syncMux->operands()[2]->definingOp() : nullptr;
-    if (!syncConcat || syncConcat->kind() != grh::OperationKind::kConcat) {
-        return fail("reg_sync_rst data path is not driven by concat");
-    }
-    if (syncConcat->operands().size() != 2 ||
-        syncConcat->operands()[0] != hiPort || syncConcat->operands()[1] != loPort) {
-        return fail("reg_sync_rst concat operands do not match hi/lo data");
+    const grh::Operation* dataOp = syncData ? syncData->definingOp() : nullptr;
+    if (dataOp && dataOp->kind() == grh::OperationKind::kMux) {
+        // 图中仍保留 mux 表达 reset：走原有校验路径
+        if (dataOp->operands().size() != 3) {
+            return fail("reg_sync_rst mux operand count mismatch");
+        }
+        if (!mentionsPort(dataOp->operands().front(), rstSyncPort)) {
+            return fail("reg_sync_rst mux condition does not reference rst_sync");
+        }
+        if (!isZeroConstant(dataOp->operands()[1])) {
+            return fail("reg_sync_rst reset value is not zero");
+        }
+        const grh::Operation* syncConcat =
+            dataOp->operands()[2] ? dataOp->operands()[2]->definingOp() : nullptr;
+        if (!syncConcat || syncConcat->kind() != grh::OperationKind::kConcat) {
+            return fail("reg_sync_rst data path is not driven by concat");
+        }
+        if (syncConcat->operands().size() != 2 ||
+            syncConcat->operands()[0] != hiPort || syncConcat->operands()[1] != loPort) {
+            return fail("reg_sync_rst concat operands do not match hi/lo data");
+        }
+    } else {
+        // 允许阶段21抽取 reset 后，data 直接为 concat(hi, lo)
+        const grh::Operation* syncConcat = dataOp;
+        if (!syncConcat || syncConcat->kind() != grh::OperationKind::kConcat) {
+            return fail("reg_sync_rst data is not driven by kMux");
+        }
+        if (syncConcat->operands().size() != 2 ||
+            syncConcat->operands()[0] != hiPort || syncConcat->operands()[1] != loPort) {
+            return fail("reg_sync_rst concat operands do not match hi/lo data");
+        }
     }
 
     auto checkResetOperands = [&](const SignalMemoEntry& entry, const grh::Value* expectedSignal,
@@ -530,26 +540,42 @@ int main() {
         const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_if_en_reg");
         std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
         const SignalMemoEntry* r = findEntry(memo, "r");
-        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegister) {
-            return fail("seq_stage19_if_en_reg r is not kRegister");
+        if (!r || !r->stateOp) {
+            return fail("seq_stage19_if_en_reg missing stateOp");
         }
-        if (r->stateOp->operands().size() != 2 || r->stateOp->operands().front() != clk) {
-            return fail("seq_stage19_if_en_reg clock binding error");
-        }
-        const grh::Value* data = r->stateOp->operands().back();
-        const grh::Operation* mux = data ? data->definingOp() : nullptr;
-        if (!mux || mux->kind() != grh::OperationKind::kMux || mux->operands().size() != 3) {
-            return fail("seq_stage19_if_en_reg data is not a kMux");
-        }
-        if (!mentionsPort(mux->operands().front(), en)) {
-            return fail("seq_stage19_if_en_reg mux condition does not reference en");
-        }
-        // True branch should be driven by d, false branch by Q (hold).
-        if (mux->operands()[1] != d) {
-            return fail("seq_stage19_if_en_reg mux true branch is not d");
-        }
-        if (mux->operands()[2] != r->value) {
-            return fail("seq_stage19_if_en_reg mux false branch is not hold(Q)");
+        if (r->stateOp->kind() == grh::OperationKind::kRegister) {
+            if (r->stateOp->operands().size() != 2 || r->stateOp->operands().front() != clk) {
+                return fail("seq_stage19_if_en_reg clock binding error");
+            }
+            const grh::Value* data = r->stateOp->operands().back();
+            const grh::Operation* mux = data ? data->definingOp() : nullptr;
+            if (!mux || mux->kind() != grh::OperationKind::kMux || mux->operands().size() != 3) {
+                return fail("seq_stage19_if_en_reg data is not a kMux");
+            }
+            if (!mentionsPort(mux->operands().front(), en)) {
+                return fail("seq_stage19_if_en_reg mux condition does not reference en");
+            }
+            // True branch should be driven by d, false branch by Q (hold).
+            if (mux->operands()[1] != d) {
+                return fail("seq_stage19_if_en_reg mux true branch is not d");
+            }
+            if (mux->operands()[2] != r->value) {
+                return fail("seq_stage19_if_en_reg mux false branch is not hold(Q)");
+            }
+        } else if (r->stateOp->kind() == grh::OperationKind::kRegisterEn) {
+            // Stage21+：允许被特化为带使能原语
+            if (r->stateOp->operands().size() != 3 || r->stateOp->operands().front() != clk) {
+                return fail("seq_stage19_if_en_reg kRegisterEn operand mismatch");
+            }
+            // 使能操作数应当能“提及”en 端口（可能存在归一化/取反等）
+            if (!mentionsPort(r->stateOp->operands()[1], en)) {
+                return fail("seq_stage19_if_en_reg kRegisterEn enable does not mention en");
+            }
+            if (r->stateOp->operands()[2] != d) {
+                return fail("seq_stage19_if_en_reg kRegisterEn data is not d");
+            }
+        } else {
+            return fail("seq_stage19_if_en_reg unexpected register kind");
         }
     }
 
@@ -719,26 +745,52 @@ int main() {
         }
         std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
         const SignalMemoEntry* r = findEntry(memo, "r");
-        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegisterRst) {
-            return fail("seq_stage19_rst_en_reg r is not kRegisterRst");
+        if (!r || !r->stateOp) {
+            return fail("seq_stage19_rst_en_reg missing stateOp");
         }
-        // rstLevel should be 1'b1 (active high)
-        auto it = r->stateOp->attributes().find("rstLevel");
-        if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
-            std::get<std::string>(it->second) != "1'b1") {
-            return fail("seq_stage19_rst_en_reg rstLevel attribute unexpected");
-        }
-        if (r->stateOp->operands().size() < 4 || r->stateOp->operands()[0] != clk ||
-            r->stateOp->operands()[1] != rst) {
-            return fail("seq_stage19_rst_en_reg clk/rst operands not bound");
-        }
-        if (!isZeroConstant(r->stateOp->operands()[2])) {
-            return fail("seq_stage19_rst_en_reg reset value is not zero constant");
-        }
-        // Data path should reference en (gated assignment)
-        const grh::Value* data = r->stateOp->operands().back();
-        if (!mentionsPort(data, en)) {
-            return fail("seq_stage19_rst_en_reg data path does not reference en");
+        if (r->stateOp->kind() == grh::OperationKind::kRegisterRst) {
+            // rstLevel should be 1'b1 (active high)
+            auto it = r->stateOp->attributes().find("rstLevel");
+            if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
+                std::get<std::string>(it->second) != "1'b1") {
+                return fail("seq_stage19_rst_en_reg rstLevel attribute unexpected");
+            }
+            if (r->stateOp->operands().size() < 4 || r->stateOp->operands()[0] != clk ||
+                r->stateOp->operands()[1] != rst) {
+                return fail("seq_stage19_rst_en_reg clk/rst operands not bound");
+            }
+            if (!isZeroConstant(r->stateOp->operands()[2])) {
+                return fail("seq_stage19_rst_en_reg reset value is not zero constant");
+            }
+            // Data path should reference en (gated assignment)
+            const grh::Value* data = r->stateOp->operands().back();
+            if (!mentionsPort(data, en)) {
+                return fail("seq_stage19_rst_en_reg data path does not reference en");
+            }
+        } else if (r->stateOp->kind() == grh::OperationKind::kRegisterEnRst) {
+            // Stage21+：特化为带使能 + 同步复位原语
+            auto it = r->stateOp->attributes().find("rstLevel");
+            if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
+                std::get<std::string>(it->second) != "1'b1") {
+                return fail("seq_stage19_rst_en_reg (EnRst) rstLevel attribute unexpected");
+            }
+            if (r->stateOp->operands().size() != 5 ||
+                r->stateOp->operands()[0] != clk ||
+                r->stateOp->operands()[1] != rst) {
+                return fail("seq_stage19_rst_en_reg (EnRst) clk/rst operands mismatch");
+            }
+            if (!mentionsPort(r->stateOp->operands()[2], en)) {
+                return fail("seq_stage19_rst_en_reg (EnRst) enable does not mention en");
+            }
+            // resetValue == zero; data mentions d
+            if (!isZeroConstant(r->stateOp->operands()[3])) {
+                return fail("seq_stage19_rst_en_reg (EnRst) reset value is not zero");
+            }
+            if (!mentionsPort(r->stateOp->operands()[4], d)) {
+                return fail("seq_stage19_rst_en_reg (EnRst) data does not mention d");
+            }
+        } else {
+            return fail("seq_stage19_rst_en_reg unexpected register kind");
         }
     }
 

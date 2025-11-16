@@ -54,8 +54,11 @@ enum class OperationKind {
     kSliceDynamic,
     kSliceArray,
     kRegister,
+    kRegisterEn,
     kRegisterRst,
+    kRegisterEnRst,
     kRegisterARst,
+    kRegisterEnARst,
     kMemory,
     kMemoryAsyncReadPort,
     kMemorySyncReadPort,
@@ -139,6 +142,7 @@ public:
     void replaceOperand(std::size_t index, Value& value);
     void replaceResult(std::size_t index, Value& value);
     void setAttribute(std::string key, AttributeValue value);
+    void setKind(OperationKind kind) noexcept { kind_ = kind; }
 
 private:
     friend class Graph;

@@ -173,6 +173,7 @@ public:
         grh::Graph* graph = nullptr;
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
+        std::span<const SignalMemoEntry> memMemo;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
     };
@@ -243,6 +244,7 @@ private:
     ElaborateDiagnostics* diagnostics_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
+    std::span<const SignalMemoEntry> memMemo_;
     std::unordered_map<const slang::ast::Expression*, grh::Value*> cache_;
     std::size_t valueCounter_ = 0;
     std::size_t operationCounter_ = 0;
@@ -290,6 +292,7 @@ public:
         grh::Graph* graph = nullptr;
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
+        std::span<const SignalMemoEntry> memMemo;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
     };
@@ -306,6 +309,8 @@ protected:
     bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
                std::vector<WriteResult>& outResults);
     virtual bool allowReplication() const { return false; }
+    // Hook to feed contextual constants (e.g., foreach loop indices) into LHS eval.
+    virtual void seedEvalContextForLHS(slang::ast::EvalContext&) {}
     grh::Graph& graph() const noexcept { return *graph_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
@@ -342,6 +347,7 @@ private:
     grh::Graph* graph_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
+    std::span<const SignalMemoEntry> memMemo_;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
@@ -371,6 +377,7 @@ public:
                          grh::Value& rhsValue);
 
 protected:
+    void seedEvalContextForLHS(slang::ast::EvalContext& ctx) override;
     AlwaysConverter& owner_;
 };
 
@@ -427,7 +434,8 @@ protected:
 class AlwaysConverter {
 public:
     AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                    std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                    std::span<const SignalMemoEntry> regMemo,
+                    std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
                     const slang::ast::ProceduralBlockSymbol& block,
                     ElaborateDiagnostics* diagnostics);
     virtual ~AlwaysConverter() = default;
@@ -587,6 +595,7 @@ protected:
     grh::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
+    std::span<const SignalMemoEntry> memMemo_;
     WriteBackMemo& memo_;
     const slang::ast::ProceduralBlockSymbol& block_;
     ElaborateDiagnostics* diagnostics_;
@@ -626,7 +635,8 @@ protected:
 class CombAlwaysConverter : public AlwaysConverter {
 public:
     CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                        std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                        std::span<const SignalMemoEntry> regMemo,
+                        std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
                         const slang::ast::ProceduralBlockSymbol& block,
                         ElaborateDiagnostics* diagnostics);
 
@@ -644,7 +654,8 @@ protected:
 class SeqAlwaysConverter : public AlwaysConverter {
 public:
     SeqAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
-                       std::span<const SignalMemoEntry> regMemo, WriteBackMemo& memo,
+                       std::span<const SignalMemoEntry> regMemo,
+                       std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
                        const slang::ast::ProceduralBlockSymbol& block,
                        ElaborateDiagnostics* diagnostics);
 
@@ -701,6 +712,7 @@ private:
     };
     struct ResetExtraction {
         grh::Value* resetValue = nullptr;
+        grh::Value* dataWithoutReset = nullptr;
     };
     std::optional<ResetContext> buildResetContext(const SignalMemoEntry& entry);
     std::optional<ResetExtraction>
@@ -755,6 +767,9 @@ public:
     /// Returns memoized register declarations for the provided module body.
     std::span<const SignalMemoEntry>
     peekRegMemo(const slang::ast::InstanceBodySymbol& body) const;
+    /// Returns memoized memory declarations for the provided module body.
+    std::span<const SignalMemoEntry>
+    peekMemMemo(const slang::ast::InstanceBodySymbol& body) const;
 
 private:
     grh::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
@@ -791,6 +806,7 @@ private:
     void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     WriteBackMemo& ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body);
     void finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
 
@@ -806,6 +822,8 @@ private:
         netMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
         regMemo_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
+        memMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, WriteBackMemo> writeBackMemo_;
 };
 

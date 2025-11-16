@@ -46,7 +46,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
-- 时序：`kRegister`、`kRegisterRst`、`kRegisterARst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemoryWritePort`、`kMemoryMaskWritePort`
+- 时序：`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterARst`、`kRegisterEnARst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemoryWritePort`、`kMemoryMaskWritePort`
 - 层次：`kInstance`、`kBlackbox`
 - 调试：`kDisplay`、`kAssert`
 - DPI：`kDpicImport`、`kDpicCall`
@@ -350,6 +350,90 @@ always @(${clkPolarity} ${clk.symbol} or ${rstEdge} ${rst.symbol}) begin
     if (${rst.symbol} == ${rstLevel}) begin
         ${symbol} <= ${resetValue.symbol};
     end else begin
+        ${symbol} <= ${d.symbol};
+    end
+end
+assign ${q.symbol} = ${symbol};
+```
+
+其中 `rstEdge = (rstLevel == "1'b1") ? "posedge" : "negedge"`。
+
+### 带使能寄存器 kRegisterEn
+
+kRegisterEn 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号按高有效解释（active-high）；若需要低有效使能，请在图中通过 `kNot` 等组合逻辑进行归一化处理。
+
+- operands：
+    - clk：时钟信号
+    - en：使能信号（高有效）
+    - d：数据输入
+- result：
+    - q：寄存器输出
+- attributes：
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
+
+生成语义：
+```
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always @(${clkPolarity} ${clk.symbol}) begin
+    if (${en.symbol}) begin
+        ${symbol} <= ${d.symbol};
+    end
+end
+assign ${q.symbol} = ${symbol};
+```
+
+### 带使能同步复位寄存器 kRegisterEnRst
+
+kRegisterEnRst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号按高有效解释（active-high）。
+
+- operands：
+    - clk：时钟信号
+    - rst：复位信号
+    - en：使能信号（高有效）
+    - resetValue：复位值
+    - d：数据输入
+- result：
+    - q：寄存器输出
+- attributes：
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
+    - rstLevel：string 类型，取值 `1'b0` / `1'b1`，指明复位信号的有效电平
+
+生成语义：
+```
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always @(${clkPolarity} ${clk.symbol}) begin
+    if (${rst.symbol} == ${rstLevel}) begin
+        ${symbol} <= ${resetValue.symbol};
+    end else if (${en.symbol}) begin
+        ${symbol} <= ${d.symbol};
+    end
+end
+assign ${q.symbol} = ${symbol};
+```
+
+### 带使能异步复位寄存器 kRegisterEnARst
+
+kRegisterEnARst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号按高有效解释（active-high）。
+
+- operands：
+    - clk：时钟信号
+    - rst：复位信号
+    - en：使能信号（高有效）
+    - resetValue：复位值
+    - d：数据输入
+- result：
+    - q：寄存器输出
+- attributes：
+    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
+    - rstLevel：string 类型，取值 `1'b0` / `1'b1`，指明复位信号的有效电平
+
+生成语义：
+```
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always @(${clkPolarity} ${clk.symbol} or ${rstEdge} ${rst.symbol}) begin
+    if (${rst.symbol} == ${rstLevel}) begin
+        ${symbol} <= ${resetValue.symbol};
+    end else if (${en.symbol}) begin
         ${symbol} <= ${d.symbol};
     end
 end
