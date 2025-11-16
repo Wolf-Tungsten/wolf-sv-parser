@@ -115,3 +115,31 @@
 > - 在 `AlwaysConverter` 中新增 guard 栈（例如 `std::vector<grh::Value*> guardStack_`），提供 `pushGuard(grh::Value*)/popGuard()` 与 `currentGuardOrOne()` 辅助；`runWithShadowFrame` 在进入分支前/后配对维护。
 > - 所有新建布尔算子均统一宽度为 1；在与父 guard 组合前，对条件表达式进行必要的位宽/符号规范化（如需要用 `kEq` 与常量 1 规约为 1-bit）。
 > - 回归现有阶段17/18 用例，确保新增 guard 不影响原有“默认 en=1”的行为；在未命中分支/静态折叠时不产生多余端口或错误连接。
+
+## 阶段20：SeqAlwaysConverter 类处理循环语句
+- 目标定位 在 SeqAlwaysConverter 中补齐 for/foreach 循环的处理能力，参考 docs/reference/yosys 的过程展开策略，在 elaboration 阶段对可静态决定的循环进行编译期展开，生成完全静态的语句序列；同时在时序语义下保持非阻塞赋值的“后写覆盖先写”规则，并与阶段19的分支 guard、阶段18的 memory 端口语义自然衔接。
+- KR1 (实现策略与范围) 研读 docs/reference/yosys 的循环处理，形成约束清单与实现方式，可新增或扩展一份文档如 docs/elaborate/process-seq-loops.md：
+  - 支持 for 与 foreach；禁止 while/do-while。
+  - 循环上下限与步长需在 elaboration 期可静态求值；foreach 借助 TypeHelper 给出可枚举的索引/字段列表。
+  - 循环体内允许 if/case (沿用阶段19)，允许对 reg/memory 的 NBA 写，允许同步读/写端口的构建。
+  - 诊断策略：无法静态确定迭代次数、出现动态 early-exit、或使用阻塞赋值，均报错并给出上下文。
+- KR2 (编译期展开与顺序语义) 将循环编译期展开为按源顺序排列的语句副本：
+  - for 循环：在进入循环前计算初值/终值/步长；对每个迭代 i，建立新的 shadow 帧并给出迭代变量 i 的常量绑定，展开循环体语句；结束后弹出 shadow。
+  - foreach 循环：使用 TypeHelper 列举被遍历的数组/结构体索引序列，逐项展开并绑定迭代变量。
+  - 顺序与覆盖：展开后的语句加入到当前 always 块的调度序列，保持“代码后出现的 NBA 覆盖之前同目标的 NBA”的规则；writeBack 与 memory intent 以展开后的线性顺序记录，finalize 按顺序聚合，保证语义等价于源循环逐次执行一遍。
+  - guard 继承：每个迭代实例在进入时继承当前 `currentGuard`，循环条件若可静态决定不再额外生成 guard；循环体内的 if/case 继续按阶段19维护 guard，从而为 memory 端口生成正确的 en。
+- KR3 (静态 break/continue) 支持静态可预测的 break/continue：
+  - 对每个迭代 i，若 break 条件在展开期可被常量折叠为真，则裁剪后续迭代不再生成；若条件依赖运行时值，则报错提示“需要静态可决策的 early-exit”。
+  - continue 条件在展开期可为真时，跳过当前迭代中该语句之后的同一迭代余下语句；无法静态决定同样报错。
+  - 嵌套循环中，break/continue 的作用域指向最近的可控循环；若使用标签，则需校验标签合法并按标签目标进行裁剪或跳过。
+- KR4 (测试与验收) 新增覆盖时序循环的用例组 seq_stage20_*：
+  - for 展开与覆盖规则：同一寄存器在多个迭代中被多次 NBA，验证最终 data 路径等价于“最后一次写生效”；包含切片写与整值写的混合。
+  - foreach 展开：对 packed/unpacked 数组/结构体字段遍历，验证 TypeHelper 索引顺序与生成的写回拼接顺序一致。
+  - break/continue：对可静态判定的 early-exit/跳过场景，验证展开出的迭代数及端口/寄存器写入数量；对不可静态判定场景，验证报错信息。
+  - memory 行为：循环内对 memory 的多次写/掩码写，验证生成的 `kMemoryWritePort/kMemoryMaskWritePort` 数量与 `en` 连接等于相应迭代时的 guard；读口在循环体内的生成也应带 `en`。
+
+> 实现提示
+> - 复用阶段15的循环展开骨架，在 AlwaysConverter 中抽象一个 `unrollLoop` 帮助函数，支持 comb/seq 两种模式：seq 模式仅改变 writeBack 与 intent 的记录器以及“最后写覆盖”的合并策略。
+> - 维护一个「迭代常量绑定」环境，用于把迭代变量替换为常量参与常量折叠；在进入/退出迭代时 push/pop 该绑定，配合 slang/自有常量折叠器判定 break/continue 的静态性。
+> - 展开期间一律使用 `runWithShadowFrame` 隔离每次迭代的临时读写视图，避免同一迭代内的读被后续迭代的写污染；最终 writeBack/memory intent 仍以全局线性顺序汇总。
+> - 与阶段19的 guard 机制协作：如需对某些循环条件构造 guard，可在进入迭代时把该条件与 `currentGuard` 做与，作为该迭代体内的起始 guard；一般 for/foreach 的迭代谓词若已静态决定，则无需额外 guard。

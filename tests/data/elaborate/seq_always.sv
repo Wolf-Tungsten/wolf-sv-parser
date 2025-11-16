@@ -88,6 +88,74 @@ module seq_stage19_if_en_reg (
     assign q = r;
 endmodule
 
+// Stage20: loops (for/foreach) with static break/continue and last-write-wins
+
+// 1) for 循环 + continue：最后一次写入应覆盖之前的写
+module seq_stage20_for_last_write (
+    input  logic       clk,
+    input  logic [7:0] d0,
+    input  logic [7:0] d2,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        for (int i = 0; i < 3; i++) begin
+            if (i == 1) begin
+                continue; // 静态 continue：跳过 i==1 迭代
+            end
+            if (i == 0) begin
+                r <= d0;
+            end
+            else begin
+                r <= d2; // 最后一次写
+            end
+        end
+    end
+    assign q = r;
+endmodule
+
+// 2) foreach + 静态 break：仅更新低 4 bit，高 4 bit 应保持（Q）
+module seq_stage20_foreach_partial (
+    input  logic       clk,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        foreach (r[i]) begin
+            if (i >= 4) begin
+                break; // 静态 break：裁剪后续迭代
+            end
+            r[i] <= d[i];
+        end
+    end
+    assign q = r;
+endmodule
+
+// 3) for 循环内的 memory 多次写与读：应生成两个写端口和一个同步读端口
+module seq_stage20_for_memory (
+    input  logic        clk,
+    input  logic [3:0]  base,
+    input  logic [7:0]  w0,
+    input  logic [7:0]  w1,
+    output logic [7:0]  probe
+);
+    logic [7:0] mem [0:15];
+    logic [7:0] rd;
+    always_ff @(posedge clk) begin
+        for (int i = 0; i < 2; i++) begin
+            if (i == 0) begin
+                mem[base + i] <= w0;
+            end
+            else begin
+                mem[base + i] <= w1;
+            end
+        end
+        rd <= mem[base + 1];
+    end
+    assign probe = rd;
+endmodule
+
 // 2) if (en) mem[...] <= wr_data; if (en2) mem[...][i] <= bit_value;
 //    期望写端口/掩码端口的 en 分别为 en/en2；读口在 en_rd 下更新
 module seq_stage19_if_en_mem (

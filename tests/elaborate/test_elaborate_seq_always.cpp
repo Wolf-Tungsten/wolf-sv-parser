@@ -742,5 +742,142 @@ int main() {
         }
     }
 
+    // -----------------------
+    // Stage20: loop tests
+    // -----------------------
+
+    // 20.1 for + continue: last-write-wins -> r <= d2
+    if (const grh::Graph* g20_1 = fetchGraph("seq_stage20_for_last_write")) {
+        const grh::Value* clk = findPort(*g20_1, "clk", /*isInput=*/true);
+        const grh::Value* d0  = findPort(*g20_1, "d0",  /*isInput=*/true);
+        const grh::Value* d2  = findPort(*g20_1, "d2",  /*isInput=*/true);
+        if (!clk || !d0 || !d2) {
+            return fail("seq_stage20_for_last_write missing ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
+                                              "seq_stage20_for_last_write");
+        if (!inst) {
+            return fail("seq_stage20_for_last_write instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* r = findEntry(memo, "r");
+        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegister) {
+            return fail("seq_stage20_for_last_write r is not kRegister");
+        }
+        if (r->stateOp->operands().size() < 2 || r->stateOp->operands().front() != clk) {
+            return fail("seq_stage20_for_last_write clock binding error");
+        }
+        const grh::Value* data = r->stateOp->operands().back();
+        // 最终数据应直接等于 d2（最后一次写）
+        if (data != d2) {
+            return fail("seq_stage20_for_last_write last-write is not d2");
+        }
+        // 确保没有意外依赖 d0
+        std::function<bool(const grh::Value*, const grh::Value*)> mentionsPort =
+            [&](const grh::Value* node, const grh::Value* port) -> bool {
+            if (!node) return false;
+            if (node == port) return true;
+            if (const grh::Operation* op = node->definingOp()) {
+                for (const grh::Value* operand : op->operands()) {
+                    if (mentionsPort(operand, port)) return true;
+                }
+            }
+            return false;
+        };
+        if (mentionsPort(data, d0)) {
+            return fail("seq_stage20_for_last_write data should not depend on d0");
+        }
+    }
+
+    // 20.2 foreach + static break: lower 4 bits from d, upper 4 bits hold from Q
+    if (const grh::Graph* g20_2 = fetchGraph("seq_stage20_foreach_partial")) {
+        const grh::Value* clk = findPort(*g20_2, "clk", /*isInput=*/true);
+        const grh::Value* d   = findPort(*g20_2, "d",   /*isInput=*/true);
+        if (!clk || !d) {
+            return fail("seq_stage20_foreach_partial missing ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
+                                              "seq_stage20_foreach_partial");
+        if (!inst) {
+            return fail("seq_stage20_foreach_partial instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* r = findEntry(memo, "r");
+        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegister) {
+            return fail("seq_stage20_foreach_partial r is not kRegister");
+        }
+        if (r->stateOp->operands().size() < 2 || r->stateOp->operands().front() != clk) {
+            return fail("seq_stage20_foreach_partial clock binding error");
+        }
+        const grh::Value* data = r->stateOp->operands().back();
+        const grh::Operation* concat = data ? data->definingOp() : nullptr;
+        if (!concat || concat->kind() != grh::OperationKind::kConcat || concat->operands().size() != 2) {
+            return fail("seq_stage20_foreach_partial data is not kConcat");
+        }
+        // hi operand should be hold slice of Q[7:4]
+        const grh::Value* hi = concat->operands()[0];
+        const grh::Operation* hiSlice = hi ? hi->definingOp() : nullptr;
+        if (!hiSlice || hiSlice->kind() != grh::OperationKind::kSliceStatic ||
+            hiSlice->operands().size() != 1 || hiSlice->operands().front() != r->value) {
+            return fail("seq_stage20_foreach_partial high hold slice incorrect");
+        }
+        if (!expectAttrs(*hiSlice, "sliceStart", 4) || !expectAttrs(*hiSlice, "sliceEnd", 7)) {
+            return fail("seq_stage20_foreach_partial high slice attributes incorrect");
+        }
+        // lo operand should mention d (source of bits [3:0])
+        const grh::Value* lo = concat->operands()[1];
+        std::function<bool(const grh::Value*, const grh::Value*)> mentionsPort2 =
+            [&](const grh::Value* node, const grh::Value* port) -> bool {
+            if (!node) return false;
+            if (node == port) return true;
+            if (const grh::Operation* op = node->definingOp()) {
+                for (const grh::Value* operand : op->operands()) {
+                    if (mentionsPort2(operand, port)) return true;
+                }
+            }
+            return false;
+        };
+        if (!mentionsPort2(lo, d)) {
+            return fail("seq_stage20_foreach_partial low concat input does not reference d");
+        }
+    }
+
+    // 20.3 for with memory writes: expect two kMemoryWritePort and one kMemorySyncReadPort
+    if (const grh::Graph* g20_3 = fetchGraph("seq_stage20_for_memory")) {
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
+                                              "seq_stage20_for_memory");
+        if (!inst) {
+            return fail("seq_stage20_for_memory instance not found");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage20_for_memory mem not found or mem not kMemory");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+        int wrCount = 0;
+        int rdCount = 0;
+        for (const std::unique_ptr<grh::Operation>& opPtr : g20_3->operations()) {
+            if (!opPtr) continue;
+            if (opPtr->kind() == grh::OperationKind::kMemoryWritePort) {
+                auto it = opPtr->attributes().find("memSymbol");
+                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+                    std::get<std::string>(it->second) == memSymbol) {
+                    wrCount++;
+                }
+            }
+            else if (opPtr->kind() == grh::OperationKind::kMemorySyncReadPort) {
+                auto it = opPtr->attributes().find("memSymbol");
+                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+                    std::get<std::string>(it->second) == memSymbol) {
+                    rdCount++;
+                }
+            }
+        }
+        if (wrCount != 2 || rdCount != 1) {
+            return fail("seq_stage20_for_memory expected 2 write ports and 1 sync read port");
+        }
+    }
+
     return 0;
 }
