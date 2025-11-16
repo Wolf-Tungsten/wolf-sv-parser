@@ -1388,7 +1388,9 @@ grh::Value* SeqAlwaysRHSConverter::convertElementSelect(
                 return nullptr;
             }
             if (seqOwner) {
-                return seqOwner->buildMemorySyncRead(*entry, *addrValue, expr);
+                // Use current guard as enable for sync read if available.
+                grh::Value* en = owner_.currentGuardValue();
+                return seqOwner->buildMemorySyncRead(*entry, *addrValue, expr, en);
             }
         }
     }
@@ -1482,6 +1484,7 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
 
         const slang::ast::Expression* normalizedRoot = root;
         const bool rootIsBase = normalizedRoot == baseElement;
+        grh::Value* currentEn = owner_.currentGuardValue();
         const int64_t entryWidth = seqOwner->memoryRowWidth(*memoryEntry);
 
         if (rootIsBase) {
@@ -1489,7 +1492,8 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
                 emitUnsupported("Memory word write width mismatch");
                 return true;
             }
-            seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, *addrValue, rhsValue);
+            seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, *addrValue, rhsValue,
+                                            currentEn);
             return true;
         }
 
@@ -1515,7 +1519,7 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
         }
 
         seqOwner->recordMemoryBitWrite(*memoryEntry, assignment, *addrValue, *bitIndexValue,
-                                       rhsValue);
+                                       rhsValue, currentEn);
         return true;
     }
 
@@ -1565,6 +1569,7 @@ AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEn
     diagnostics_(diagnostics) {
     shadowStack_.emplace_back();
     controlContextStack_.push_back(true);
+    controlInstanceId_ = nextConverterInstanceId();
 }
 
 void AlwaysConverter::setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
@@ -1763,14 +1768,6 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         diagnostics()->nyi(block(), oss.str());
     };
 
-    grh::Value* enableValue = ensureMemoryEnableValue();
-    if (!enableValue && (!memoryWrites_.empty() || !memoryBitWrites_.empty())) {
-        reportMemoryIssue(nullptr, nullptr, "failed to create memory enable value");
-        memoryWrites_.clear();
-        memoryBitWrites_.clear();
-        return false;
-    }
-
     auto emitWritePort = [&](const MemoryWriteIntent& intent) {
         if (!intent.entry || !intent.addr || !intent.data) {
             return;
@@ -1782,6 +1779,12 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         const int64_t rowWidth = memoryRowWidth(*intent.entry);
         if (intent.data->width() != rowWidth) {
             reportMemoryIssue(intent.entry, intent.originExpr, "memory data width mismatch");
+            return;
+        }
+        grh::Value* enableValue =
+            intent.enable ? coerceToCondition(*intent.enable) : ensureMemoryEnableValue();
+        if (!enableValue) {
+            reportMemoryIssue(intent.entry, intent.originExpr, "failed to resolve write enable");
             return;
         }
 
@@ -1817,6 +1820,12 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         if (!dataValue || !maskValue) {
             reportMemoryIssue(intent.entry, intent.originExpr,
                               "failed to synthesize memory bit intent");
+            return;
+        }
+        grh::Value* enableValue =
+            intent.enable ? coerceToCondition(*intent.enable) : ensureMemoryEnableValue();
+        if (!enableValue) {
+            reportMemoryIssue(intent.entry, intent.originExpr, "failed to resolve mask write enable");
             return;
         }
 
@@ -1871,31 +1880,35 @@ grh::Value* SeqAlwaysConverter::ensureMemoryEnableValue() {
 
 void SeqAlwaysConverter::recordMemoryWordWrite(const SignalMemoEntry& entry,
                                                const slang::ast::Expression& origin,
-                                               grh::Value& addrValue, grh::Value& dataValue) {
+                                               grh::Value& addrValue, grh::Value& dataValue,
+                                               grh::Value* enable) {
     MemoryWriteIntent intent;
     intent.entry = &entry;
     intent.originExpr = &origin;
     intent.addr = &addrValue;
     intent.data = &dataValue;
+    intent.enable = enable;
     memoryWrites_.push_back(intent);
 }
 
 void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
                                               const slang::ast::Expression& origin,
                                               grh::Value& addrValue, grh::Value& bitIndex,
-                                              grh::Value& bitValue) {
+                                              grh::Value& bitValue, grh::Value* enable) {
     MemoryBitWriteIntent intent;
     intent.entry = &entry;
     intent.originExpr = &origin;
     intent.addr = &addrValue;
     intent.bitIndex = &bitIndex;
     intent.bitValue = &bitValue;
+    intent.enable = enable;
     memoryBitWrites_.push_back(intent);
 }
 
 grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
                                                     grh::Value& addrValue,
-                                                    const slang::ast::Expression& originExpr) {
+                                                    const slang::ast::Expression& originExpr,
+                                                    grh::Value* enableOverride) {
     if (!entry.stateOp || entry.stateOp->kind() != grh::OperationKind::kMemory) {
         if (diagnostics()) {
             diagnostics()->nyi(block(),
@@ -1905,7 +1918,8 @@ grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry
     }
 
     grh::Value* clkValue = ensureClockValue();
-    grh::Value* enValue = ensureMemoryEnableValue();
+    grh::Value* enValue = enableOverride ? coerceToCondition(*enableOverride)
+                                         : ensureMemoryEnableValue();
     if (!clkValue || !enValue) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Seq always memory read lacks clock or enable");
@@ -2714,19 +2728,58 @@ void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& s
         return;
     }
 
-    grh::Value* conditionValue = rhsConverter_->convert(conditionExpr);
-    if (!conditionValue) {
+    grh::Value* rawCondition = rhsConverter_ ? rhsConverter_->convert(conditionExpr) : nullptr;
+    if (!rawCondition) {
+        return;
+    }
+
+    if (!isSequential()) {
+        ShadowFrame baseSnapshot = currentFrame();
+        ShadowFrame trueFrame =
+            runWithShadowFrame(baseSnapshot, stmt.ifTrue, /*isStaticContext=*/false);
+        ShadowFrame falseFrame = stmt.ifFalse
+                                     ? runWithShadowFrame(baseSnapshot, *stmt.ifFalse,
+                                                          /*isStaticContext=*/false)
+                                     : baseSnapshot;
+
+        auto merged = mergeShadowFrames(*rawCondition, std::move(trueFrame), std::move(falseFrame),
+                                        stmt, "if");
+        if (!merged) {
+            return;
+        }
+        currentFrame() = std::move(*merged);
+        return;
+    }
+
+    // Sequential: push guards for true/false branches, accumulate writes in child frames,
+    // and merge with hold semantics.
+    grh::Value* condBit = coerceToCondition(*rawCondition);
+    if (!condBit) {
+        return;
+    }
+    grh::Value* notCond = buildLogicNot(*condBit);
+    if (!notCond) {
         return;
     }
 
     ShadowFrame baseSnapshot = currentFrame();
+    pushGuard(condBit);
     ShadowFrame trueFrame = runWithShadowFrame(baseSnapshot, stmt.ifTrue, /*isStaticContext=*/false);
-    ShadowFrame falseFrame =
-        stmt.ifFalse ? runWithShadowFrame(baseSnapshot, *stmt.ifFalse, /*isStaticContext=*/false)
-                     : baseSnapshot;
+    popGuard();
+
+    ShadowFrame falseFrame;
+    if (stmt.ifFalse) {
+        pushGuard(notCond);
+        falseFrame =
+            runWithShadowFrame(baseSnapshot, *stmt.ifFalse, /*isStaticContext=*/false);
+        popGuard();
+    }
+    else {
+        falseFrame = baseSnapshot;
+    }
 
     auto merged =
-        mergeShadowFrames(*conditionValue, std::move(trueFrame), std::move(falseFrame), stmt, "if");
+        mergeShadowFrames(*condBit, std::move(trueFrame), std::move(falseFrame), stmt, "if");
     if (!merged) {
         return;
     }
@@ -2758,7 +2811,7 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         return;
     }
 
-    grh::Value* controlValue = rhsConverter_->convert(stmt.expr);
+    grh::Value* controlValue = rhsConverter_ ? rhsConverter_->convert(stmt.expr) : nullptr;
     if (!controlValue) {
         return;
     }
@@ -2767,23 +2820,49 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     std::vector<CaseBranch> branches;
     branches.reserve(stmt.items.size());
 
+    grh::Value* anyMatch = nullptr;
     for (const auto& item : stmt.items) {
         grh::Value* match = buildCaseMatch(item, *controlValue, stmt.condition);
         if (!match) {
             return;
         }
+        if (isSequential()) {
+            pushGuard(match);
+        }
         ShadowFrame branchFrame =
             runWithShadowFrame(baseSnapshot, *item.stmt, /*isStaticContext=*/false);
+        if (isSequential()) {
+            popGuard();
+        }
         CaseBranch branch;
         branch.match = match;
         branch.frame = std::move(branchFrame);
         branches.push_back(std::move(branch));
+        if (!anyMatch) {
+            anyMatch = match;
+        }
+        else if (isSequential()) {
+            anyMatch = buildLogicOr(*anyMatch, *match);
+        }
     }
 
-    ShadowFrame accumulator =
-        stmt.defaultCase ? runWithShadowFrame(baseSnapshot, *stmt.defaultCase,
-                                              /*isStaticContext=*/false)
-                         : baseSnapshot;
+    ShadowFrame accumulator;
+    if (stmt.defaultCase) {
+        if (isSequential() && anyMatch) {
+            grh::Value* notAny = buildLogicNot(*anyMatch);
+            pushGuard(notAny);
+            accumulator = runWithShadowFrame(baseSnapshot, *stmt.defaultCase,
+                                             /*isStaticContext=*/false);
+            popGuard();
+        }
+        else {
+            accumulator =
+                runWithShadowFrame(baseSnapshot, *stmt.defaultCase, /*isStaticContext=*/false);
+        }
+    }
+    else {
+        accumulator = baseSnapshot;
+    }
 
     if (branches.empty()) {
         currentFrame() = std::move(accumulator);
@@ -3032,6 +3111,32 @@ grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
     return &value;
 }
 
+grh::Value* AlwaysConverter::createOneValue(int64_t width) {
+    if (width <= 0) {
+        return nullptr;
+    }
+    if (auto it = oneCache_.find(width); it != oneCache_.end()) {
+        return it->second;
+    }
+    std::string opName = "_comb_one_";
+    opName.append(std::to_string(shadowNameCounter_++));
+    std::string valueName = "_comb_one_val_";
+    valueName.append(std::to_string(shadowNameCounter_++));
+    grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
+    grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
+    op.addResult(value);
+    std::ostringstream oss;
+    // Fill with ones: e.g. 8'hff
+    oss << width << "'h";
+    const int64_t hexDigits = (width + 3) / 4;
+    for (int64_t i = 0; i < hexDigits; ++i) {
+        oss << 'f';
+    }
+    op.setAttribute("constValue", oss.str());
+    oneCache_[width] = &value;
+    return &value;
+}
+
 std::string AlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
                                                   std::string_view suffix) {
     std::string base;
@@ -3109,31 +3214,60 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         return std::move(falseFrame);
     }
 
+    grh::Value* condBit = coerceToCondition(condition);
+    if (!condBit) {
+        return std::nullopt;
+    }
+
     for (const SignalMemoEntry* entry : coverage) {
         if (!entry) {
             reportLatchIssue("comb always branch references unknown target");
             return std::nullopt;
         }
-        if (trueFrame.touched.count(entry) == 0 || falseFrame.touched.count(entry) == 0) {
-            reportLatchIssue("comb always branch coverage incomplete", entry);
-            return std::nullopt;
-        }
 
         auto trueIt = trueFrame.map.find(entry);
         auto falseIt = falseFrame.map.find(entry);
-        if (trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) {
-            reportLatchIssue("comb always branch shadow state missing target", entry);
-            return std::nullopt;
+        if (!isSequential()) {
+            if (trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) {
+                reportLatchIssue("comb always branch coverage incomplete", entry);
+                return std::nullopt;
+            }
         }
 
-        grh::Value* trueValue = rebuildShadowValue(*entry, trueIt->second);
-        grh::Value* falseValue = rebuildShadowValue(*entry, falseIt->second);
+        grh::Value* trueValue = nullptr;
+        grh::Value* falseValue = nullptr;
+
+        if (trueIt != trueFrame.map.end()) {
+            trueValue = rebuildShadowValue(*entry, trueIt->second);
+        }
+        if (falseIt != falseFrame.map.end()) {
+            falseValue = rebuildShadowValue(*entry, falseIt->second);
+        }
+
+        // Sequential semantics: missing branch implies hold on that branch.
+        if (isSequential()) {
+            if (!trueValue) {
+                // Use current entry value (Q) as hold.
+                if (!entry->value) {
+                    reportLatchIssue("seq always missing hold value for true branch", entry);
+                    return std::nullopt;
+                }
+                trueValue = entry->value;
+            }
+            if (!falseValue) {
+                if (!entry->value) {
+                    reportLatchIssue("seq always missing hold value for false branch", entry);
+                    return std::nullopt;
+                }
+                falseValue = entry->value;
+            }
+        }
+
         if (!trueValue || !falseValue) {
             return std::nullopt;
         }
 
-        grh::Value* muxValue =
-            createMuxForEntry(*entry, condition, *trueValue, *falseValue, label);
+        grh::Value* muxValue = createMuxForEntry(*entry, *condBit, *trueValue, *falseValue, label);
         if (!muxValue) {
             return std::nullopt;
         }
@@ -3142,7 +3276,12 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
         mergedState.composed = muxValue;
         mergedState.dirty = false;
-        falseIt->second = std::move(mergedState);
+        if (falseIt == falseFrame.map.end()) {
+            falseFrame.map.emplace(entry, std::move(mergedState));
+        }
+        else {
+            falseIt->second = std::move(mergedState);
+        }
     }
 
     falseFrame.touched.insert(coverage.begin(), coverage.end());
@@ -3249,6 +3388,42 @@ grh::Value* AlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
     return &result;
 }
 
+grh::Value* AlwaysConverter::buildLogicAnd(grh::Value& lhs, grh::Value& rhs) {
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("and"));
+    op.addOperand(lhs);
+    op.addOperand(rhs);
+    grh::Value& result =
+        graph_.createValue(makeControlValueName("and"), 1, /*isSigned=*/false);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* AlwaysConverter::buildLogicNot(grh::Value& v) {
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kLogicNot, makeControlOpName("not"));
+    op.addOperand(v);
+    grh::Value& result =
+        graph_.createValue(makeControlValueName("not"), 1, /*isSigned=*/false);
+    op.addResult(result);
+    return &result;
+}
+
+grh::Value* AlwaysConverter::coerceToCondition(grh::Value& v) {
+    if (v.width() == 1) {
+        return &v;
+    }
+    grh::Value* zero = createZeroValue(v.width());
+    if (!zero) {
+        return nullptr;
+    }
+    grh::Value* eqZero = buildEquality(v, *zero, "eq0");
+    if (!eqZero) {
+        return nullptr;
+    }
+    return buildLogicNot(*eqZero);
+}
+
 grh::Value* AlwaysConverter::buildWildcardEquality(
     grh::Value& controlValue, grh::Value& rhsValue, const slang::ast::Expression& rhsExpr,
     slang::ast::CaseStatementCondition condition) {
@@ -3334,6 +3509,8 @@ std::string AlwaysConverter::makeControlOpName(std::string_view suffix) {
     std::string base = "_comb_ctrl_op_";
     base.append(suffix);
     base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
+    base.push_back('_');
     base.append(std::to_string(controlNameCounter_++));
     return base;
 }
@@ -3341,6 +3518,8 @@ std::string AlwaysConverter::makeControlOpName(std::string_view suffix) {
 std::string AlwaysConverter::makeControlValueName(std::string_view suffix) {
     std::string base = "_comb_ctrl_val_";
     base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
     base.push_back('_');
     base.append(std::to_string(controlNameCounter_++));
     return base;

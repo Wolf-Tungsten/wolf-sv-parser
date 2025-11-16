@@ -129,3 +129,18 @@
   - KR2 将时序 always 块中，单次完整的 memory 写入建模为 kMemoryWritePort，绑定 memory、clk、addr、en、data，如果没有明确识别的 en 信号则将 en 连接到 1
   - KR3 将时序 always 块中，对 memory 单bit的写入，记录下来，在 always 结束时根据语义合成 kMemoryMaskWritePort
   - KR4 创建测试样例
+
+## 阶段19：SeqAlwaysConverter 类处理if/case语句
+- **Objective** 在 SeqAlwaysConverter 中添加分支语句处理能力
+  - KR1 能够解析 if/case 语句
+  - KR2 解析结果形成 kRegister* 的复位、使能信号
+  - KR3 解析结果形成 memory 读写口的使能和 mask
+  - KR4 创建测试样例
+
+## 阶段20：SeqAlwaysConverter 类处理循环语句
+- **Objective** 在 SeqAlwaysConverter 中添加循环语句处理能力
+  - KR1 参考 docs/reference/yosys 的实现方法，形成循环语句
+  - KR2 对循环进行编译时展开，生成静态结构
+  - KR3 支持静态可预测的 break 和 continue 语法
+  - KR4 创建测试样例
+

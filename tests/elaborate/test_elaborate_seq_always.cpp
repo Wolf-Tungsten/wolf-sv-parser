@@ -500,5 +500,247 @@ int main() {
         return fail("Sequential finalize should not emit diagnostics for supported cases");
     }
 
+    // -----------------------
+    // Stage19: if/case tests
+    // -----------------------
+
+    // Helper to find graph by name.
+    auto fetchGraph = [&](std::string_view name) -> const grh::Graph* {
+        const slang::ast::InstanceSymbol* ins = findInstanceByName(compilation->getRoot().topInstances, name);
+        if (!ins) {
+            fail(std::string("Top instance not found: ") + std::string(name));
+            return nullptr;
+        }
+        const grh::Graph* g = netlist.findGraph(std::string(name));
+        if (!g) {
+            fail(std::string("GRH graph not found: ") + std::string(name));
+            return nullptr;
+        }
+        return g;
+    };
+
+    // 19.1 if (en) r <= d;
+    if (const grh::Graph* g19_1 = fetchGraph("seq_stage19_if_en_reg")) {
+        const grh::Value* clk = findPort(*g19_1, "clk", /*isInput=*/true);
+        const grh::Value* en  = findPort(*g19_1, "en", /*isInput=*/true);
+        const grh::Value* d   = findPort(*g19_1, "d", /*isInput=*/true);
+        if (!clk || !en || !d) {
+            return fail("seq_stage19_if_en_reg missing ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_if_en_reg");
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* r = findEntry(memo, "r");
+        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegister) {
+            return fail("seq_stage19_if_en_reg r is not kRegister");
+        }
+        if (r->stateOp->operands().size() != 2 || r->stateOp->operands().front() != clk) {
+            return fail("seq_stage19_if_en_reg clock binding error");
+        }
+        const grh::Value* data = r->stateOp->operands().back();
+        const grh::Operation* mux = data ? data->definingOp() : nullptr;
+        if (!mux || mux->kind() != grh::OperationKind::kMux || mux->operands().size() != 3) {
+            return fail("seq_stage19_if_en_reg data is not a kMux");
+        }
+        if (!mentionsPort(mux->operands().front(), en)) {
+            return fail("seq_stage19_if_en_reg mux condition does not reference en");
+        }
+        // True branch should be driven by d, false branch by Q (hold).
+        if (mux->operands()[1] != d) {
+            return fail("seq_stage19_if_en_reg mux true branch is not d");
+        }
+        if (mux->operands()[2] != r->value) {
+            return fail("seq_stage19_if_en_reg mux false branch is not hold(Q)");
+        }
+    }
+
+    // 19.2 if-en gated memory read/write/mask
+    if (const grh::Graph* g19_2 = fetchGraph("seq_stage19_if_en_mem")) {
+        const grh::Value* clk      = findPort(*g19_2, "clk", /*isInput=*/true);
+        const grh::Value* en_wr    = findPort(*g19_2, "en_wr", /*isInput=*/true);
+        const grh::Value* en_bit   = findPort(*g19_2, "en_bit", /*isInput=*/true);
+        const grh::Value* en_rd    = findPort(*g19_2, "en_rd", /*isInput=*/true);
+        const grh::Value* wr_addr  = findPort(*g19_2, "wr_addr", /*isInput=*/true);
+        const grh::Value* rd_addr  = findPort(*g19_2, "rd_addr", /*isInput=*/true);
+        const grh::Value* mask_addr= findPort(*g19_2, "mask_addr", /*isInput=*/true);
+        const grh::Value* bit_index= findPort(*g19_2, "bit_index", /*isInput=*/true);
+        if (!clk || !en_wr || !en_bit || !en_rd || !wr_addr || !rd_addr || !mask_addr || !bit_index) {
+            return fail("seq_stage19_if_en_mem missing ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_if_en_mem");
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        const SignalMemoEntry* rd_reg = findEntry(memo, "rd_reg");
+        if (!mem || !rd_reg || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage19_if_en_mem mem/rd_reg not found or mem not kMemory");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+        const grh::Operation* wr =
+            findMemoryOp(*g19_2, grh::OperationKind::kMemoryWritePort, memSymbol);
+        const grh::Operation* mwr =
+            findMemoryOp(*g19_2, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+        const grh::Operation* rd =
+            findMemoryOp(*g19_2, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+        if (!wr || !mwr || !rd) {
+            return fail("seq_stage19_if_en_mem expected memory ports not found");
+        }
+        if (wr->operands().size() != 4 || wr->operands()[0] != clk || wr->operands()[1] != wr_addr) {
+            return fail("seq_stage19_if_en_mem write port operand mismatch");
+        }
+        if (!mentionsPort(wr->operands()[2], en_wr)) {
+            return fail("seq_stage19_if_en_mem write enable does not mention en_wr");
+        }
+        if (mwr->operands().size() != 5 || mwr->operands()[0] != clk || mwr->operands()[1] != mask_addr) {
+            return fail("seq_stage19_if_en_mem mask write operand mismatch");
+        }
+        if (!mentionsPort(mwr->operands()[2], en_bit)) {
+            return fail("seq_stage19_if_en_mem mask write enable does not mention en_bit");
+        }
+        if (rd->operands().size() != 3 || rd->operands()[0] != clk || rd->operands()[1] != rd_addr) {
+            return fail("seq_stage19_if_en_mem sync read operand mismatch");
+        }
+        if (!mentionsPort(rd->operands()[2], en_rd)) {
+            return fail("seq_stage19_if_en_mem sync read enable does not mention en_rd");
+        }
+        if (rd_reg->stateOp->operands().empty()) {
+            return fail("seq_stage19_if_en_mem rd_reg missing data operand");
+        }
+        const grh::Value* rdData = rd_reg->stateOp->operands().back();
+        if (rdData != rd->results().front()) {
+            // Allow gated data path: mux(en_rd, rd_result, Q)
+            const grh::Operation* m = rdData->definingOp();
+            if (!m || m->kind() != grh::OperationKind::kMux || m->operands().size() != 3) {
+                return fail("seq_stage19_if_en_mem rd_reg not driven by sync read or mux");
+            }
+            if (!mentionsPort(m->operands().front(), en_rd)) {
+                return fail("seq_stage19_if_en_mem mux condition does not reference en_rd");
+            }
+            if (m->operands()[1] != rd->results().front() || m->operands()[2] != rd_reg->value) {
+                return fail("seq_stage19_if_en_mem mux branches are not (rd_result, hold(Q))");
+            }
+        }
+    }
+
+    // 19.3 case(sel) branches -> write/mask enables
+    if (const grh::Graph* g19_3 = fetchGraph("seq_stage19_case_mem")) {
+        const grh::Value* clk = findPort(*g19_3, "clk", /*isInput=*/true);
+        const grh::Value* sel = findPort(*g19_3, "sel", /*isInput=*/true);
+        const grh::Value* addr = findPort(*g19_3, "addr", /*isInput=*/true);
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_case_mem");
+        if (!clk || !sel || !addr || !inst) {
+            return fail("seq_stage19_case_mem ports missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage19_case_mem mem not found");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+        const grh::Operation* wr =
+            findMemoryOp(*g19_3, grh::OperationKind::kMemoryWritePort, memSymbol);
+        const grh::Operation* mwr =
+            findMemoryOp(*g19_3, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+        if (!wr || !mwr) {
+            return fail("seq_stage19_case_mem expected write/mask ports missing");
+        }
+        // write enable should reference sel and equal sel==0
+        const grh::Value* wrEn = wr->operands().size() > 2 ? wr->operands()[2] : nullptr;
+        const grh::Operation* wrEnOp = wrEn ? wrEn->definingOp() : nullptr;
+        if (!wrEn || !wrEnOp || wrEnOp->kind() != grh::OperationKind::kEq) {
+            return fail("seq_stage19_case_mem write enable is not eq(sel, const)");
+        }
+        if (!mentionsPort(wrEnOp->operands().front(), sel) &&
+            !mentionsPort(wrEnOp->operands().back(), sel)) {
+            return fail("seq_stage19_case_mem write enable does not reference sel");
+        }
+        // mask write enable should reference sel and equal sel==1
+        const grh::Value* mwrEn = mwr->operands().size() > 2 ? mwr->operands()[2] : nullptr;
+        const grh::Operation* mwrEnOp = mwrEn ? mwrEn->definingOp() : nullptr;
+        if (!mwrEn || !mwrEnOp || mwrEnOp->kind() != grh::OperationKind::kEq) {
+            return fail("seq_stage19_case_mem mask write enable is not eq(sel, const)");
+        }
+        if (!mentionsPort(mwrEnOp->operands().front(), sel) &&
+            !mentionsPort(mwrEnOp->operands().back(), sel)) {
+            return fail("seq_stage19_case_mem mask write enable does not reference sel");
+        }
+    }
+
+    // 19.4 casez wildcard: two writes, each enable references sel with wildcard logic
+    if (const grh::Graph* g19_4 = fetchGraph("seq_stage19_casez_mem")) {
+        const grh::Value* clk = findPort(*g19_4, "clk", /*isInput=*/true);
+        const grh::Value* sel = findPort(*g19_4, "sel", /*isInput=*/true);
+        const grh::Value* addr = findPort(*g19_4, "addr", /*isInput=*/true);
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_casez_mem");
+        if (!clk || !sel || !addr || !inst) {
+            return fail("seq_stage19_casez_mem ports missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage19_casez_mem mem not found");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+        // Collect all write ports for this mem
+        std::vector<const grh::Operation*> writes;
+        for (const std::unique_ptr<grh::Operation>& opPtr : g19_4->operations()) {
+            if (opPtr && opPtr->kind() == grh::OperationKind::kMemoryWritePort) {
+                auto it = opPtr->attributes().find("memSymbol");
+                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+                    std::get<std::string>(it->second) == memSymbol) {
+                    writes.push_back(opPtr.get());
+                }
+            }
+        }
+        if (writes.size() != 2) {
+            return fail("seq_stage19_casez_mem expects two write ports");
+        }
+        for (const grh::Operation* wr : writes) {
+            if (wr->operands().size() < 3) {
+                return fail("seq_stage19_casez_mem write port missing enable");
+            }
+            const grh::Value* en = wr->operands()[2];
+            if (!mentionsPort(en, sel)) {
+                return fail("seq_stage19_casez_mem write enable does not reference sel");
+            }
+        }
+    }
+
+    // 19.5 rst + en register
+    if (const grh::Graph* g19_5 = fetchGraph("seq_stage19_rst_en_reg")) {
+        const grh::Value* clk = findPort(*g19_5, "clk", /*isInput=*/true);
+        const grh::Value* rst = findPort(*g19_5, "rst", /*isInput=*/true);
+        const grh::Value* en  = findPort(*g19_5, "en",  /*isInput=*/true);
+        const grh::Value* d   = findPort(*g19_5, "d",   /*isInput=*/true);
+        if (!clk || !rst || !en || !d) {
+            return fail("seq_stage19_rst_en_reg missing ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances, "seq_stage19_rst_en_reg");
+        if (!inst) {
+            return fail("seq_stage19_rst_en_reg instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* r = findEntry(memo, "r");
+        if (!r || !r->stateOp || r->stateOp->kind() != grh::OperationKind::kRegisterRst) {
+            return fail("seq_stage19_rst_en_reg r is not kRegisterRst");
+        }
+        // rstLevel should be 1'b1 (active high)
+        auto it = r->stateOp->attributes().find("rstLevel");
+        if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
+            std::get<std::string>(it->second) != "1'b1") {
+            return fail("seq_stage19_rst_en_reg rstLevel attribute unexpected");
+        }
+        if (r->stateOp->operands().size() < 4 || r->stateOp->operands()[0] != clk ||
+            r->stateOp->operands()[1] != rst) {
+            return fail("seq_stage19_rst_en_reg clk/rst operands not bound");
+        }
+        if (!isZeroConstant(r->stateOp->operands()[2])) {
+            return fail("seq_stage19_rst_en_reg reset value is not zero constant");
+        }
+        // Data path should reference en (gated assignment)
+        const grh::Value* data = r->stateOp->operands().back();
+        if (!mentionsPort(data, en)) {
+            return fail("seq_stage19_rst_en_reg data path does not reference en");
+        }
+    }
+
     return 0;
 }

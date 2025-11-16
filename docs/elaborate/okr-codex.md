@@ -84,3 +84,34 @@
 - **KR2（整字写口落地）** 对于 `mem[addr] <= data;` 这类完整字写入，SeqAlwaysLHSConverter 需要把 RHS flatten 成与 memory 数据位宽一致的 Value，finalize 阶段生成 `kMemoryWritePort`，填入 memory、clk、addr、en、data 五个 operand，en 缺省同样连常量 1。需要支持同一 always 块写多条 memory 语句：按源顺序记录写意图，最终为每条语句创建独立端口并保留引用，方便后续优化或冲突检查。
 - **KR3（按位写掩码合成）** 当出现 `mem[addr][i] <= data_bit;` 或对数据位段的部分写入时，先在块内把每次写入记录到一个「mask write」集合，记住 addr 表达式、bit/byte 范围与 RHS Value。finalize 时解析这些集合并按照 SystemVerilog 语义合成 `kMemoryMaskWritePort`：生成 mask Value（标记哪些 bit 被覆盖）与 data Value（被写入的新值），同样绑定 clk/en。需要对同一 addr/bit 的多次写入按语句顺序覆盖，并在日志中显示最终 mask/data。
 - **KR4（测试与可视化）** 构建覆盖仅读取、整字写入、按位/按字节写入混用、显式 enable 与隐式 enable 的时序样例；回归中验证生成的 kMemorySyncReadPort/kMemoryWritePort/kMemoryMaskWritePort 数量与连接是否正确，dump JSON/trace 展示每个端口的 clk/addr/en/data/mask 取值来源，确保 memory 行为在 GRH 中可审计。
+
+## 阶段19：SeqAlwaysConverter 类处理 if/case 语句
+- **目标定位** 在现有 SeqAlwaysConverter/AlwaysConverter 能力之上，补齐分支语句语义，形成可落地到 GRH 的复位/使能与内存端口行为。
+- **KR1（分支覆盖）** if/case 解析
+  - 已有能力：`visitConditional`/`visitCase` 支持静态折叠与动态合流（生成 `kMux`、`kEq`、`kOr`、通配比较）；保留现状，补充回归样例覆盖 `if-else`、`case/unique case`、`casez/casex`。
+  - 新增：为分支执行建立「条件保护」上下文 guard。维护 `currentGuard`（1-bit Value），进入 `if` 的真/假分支分别令 `guard = parentGuard & cond`、`guard = parentGuard & ~cond`；进入 `case` 分支令 `guard = parentGuard & match_i`，default 分支令 `guard = parentGuard & ~(match_0 | ... | match_n)`。
+  - 支撑算子：在 `AlwaysConverter` 内新增 `buildLogicAnd(lhs,rhs)`、`buildLogicNot(x)`，与现有 `buildLogicOr`/`buildEquality` 风格一致，结果宽度固定为 1。
+- **KR2（寄存器复位/使能）**
+  - 复位：沿用阶段17的 `buildResetContext` + `extractResetBranches`，从 data 路径的 `kMux` 中提取 rst 条件与 `resetValue`，分别绑定到 `kRegisterRst/kRegisterARst` 的 `rst/resetValue` operand；测试覆盖同步/异步复位、高低有效与嵌套 if。
+  - 使能：GRH 的 `kRegister*` 无显式 enable operand，采用数据通路保持（hold）表达使能：当分支未写入时由 `createHoldSlice` 从 Q 端回读并与其他切片 `kConcat`，等价于“未使能时保持”。新增用例：`if (en) r <= d;` 期望 data 路径为 `mux(en, d, q)` 或等价拼接。
+- **KR3（内存端口的 enable/mask）**
+  - 写口：扩展 `MemoryWriteIntent`/`MemoryBitWriteIntent` 结构，增加 `enable` 字段（默认常量 1）。在 `SeqAlwaysLHSConverter::convert` 记录 `mem[...] <= ...` 或 `mem[...][i] <= b` 时把当前 `currentGuard` 作为 intent.enable；Finalize 时：
+    - 整字写生成 `kMemoryWritePort(clk, addr, enable, data)`；
+    - 单 bit 写生成 `kMemoryMaskWritePort(clk, addr, enable, shiftedData, shiftedMask)`（复用 `buildShiftedBitValue/buildShiftedMask`），保证 mask 宽度与 memory row 宽度一致。
+  - 读口：扩展 `SeqAlwaysConverter::buildMemorySyncRead` 支持可选 enable 输入，进入该表达式时使用 `currentGuard` 作为 `en`（缺省为 1）；从而在 `if (en) rd <= mem[addr];` 中生成 `kMemorySyncReadPort(clk, addr, en)`，避免端口寄存器在分支未触发时也被更新。
+  - 合并策略：允许同一 always 块内生成多个写/读端口（每条 intent 一口），先不做 OR 合并；在后续阶段引入端口聚合优化（可选）。
+- **KR4（测试与验收）**
+  - 新增 `tests/data/elaborate/seq_always.sv` 用例组 `seq_stage19_*`：
+    1) if 分支：`if (en) r <= d;`、`if (en) mem[a] <= w;`、`if (en) mem[a][i] <= b;`，断言寄存器 data 路径保留、写口/掩码口的 `en` 为 `en`；
+    2) case 分支：`case(sel) 0: mem[a]<=w0; 1: mem[a][i]<=b1; default: ; endcase`，断言各端口 `en` 分别等于相应 `match` 条件，default 不生成写口；
+    3) 通配比较：`casez(sel)`/`casex(sel)` 分支匹配构成 `en`，验证 `buildWildcardEquality` 产物被用作 enable；
+    4) 复位提取：`if (rst) r<=0; else if (en) r<=d;`，断言寄存器为 `kRegisterRst` 且 `rstLevel/resetValue` 正确。
+  - 在 `tests/elaborate/test_elaborate_seq_always.cpp` 中检查：
+    - `kMemorySyncReadPort/kMemoryWritePort/kMemoryMaskWritePort` 的 operand 顺序、`en` 连接与位宽；
+    - 寄存器 data 路 `kMux`/`kConcat` 结构与（异/同）步复位 operand；
+    - JSON/Graph 快照用于人工抽查（沿用阶段18 artifact 机制）。
+
+> 实现提示
+> - 在 `AlwaysConverter` 中新增 guard 栈（例如 `std::vector<grh::Value*> guardStack_`），提供 `pushGuard(grh::Value*)/popGuard()` 与 `currentGuardOrOne()` 辅助；`runWithShadowFrame` 在进入分支前/后配对维护。
+> - 所有新建布尔算子均统一宽度为 1；在与父 guard 组合前，对条件表达式进行必要的位宽/符号规范化（如需要用 `kEq` 与常量 1 规约为 1-bit）。
+> - 回归现有阶段17/18 用例，确保新增 guard 不影响原有“默认 en=1”的行为；在未命中分支/静态折叠时不产生多余端口或错误连接。

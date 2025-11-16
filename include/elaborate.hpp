@@ -448,6 +448,7 @@ protected:
     virtual bool allowBlockingAssignments() const = 0;
     virtual bool allowNonBlockingAssignments() const = 0;
     virtual bool requireNonBlockingAssignments() const = 0;
+    virtual bool isSequential() const = 0;
 
     void setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
                        std::unique_ptr<AlwaysBlockLHSConverter> lhs);
@@ -523,6 +524,7 @@ protected:
     grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
     grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
     grh::Value* createZeroValue(int64_t width);
+    grh::Value* createOneValue(int64_t width);
     std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
     std::string makeShadowValueName(const SignalMemoEntry& entry, std::string_view suffix);
     ShadowFrame& currentFrame();
@@ -542,6 +544,9 @@ protected:
                                slang::ast::CaseStatementCondition condition);
     grh::Value* buildEquality(grh::Value& lhs, grh::Value& rhs, std::string_view hint);
     grh::Value* buildLogicOr(grh::Value& lhs, grh::Value& rhs);
+    grh::Value* buildLogicAnd(grh::Value& lhs, grh::Value& rhs);
+    grh::Value* buildLogicNot(grh::Value& v);
+    grh::Value* coerceToCondition(grh::Value& v);
     std::string makeControlOpName(std::string_view suffix);
     std::string makeControlValueName(std::string_view suffix);
     void reportLatchIssue(std::string_view context, const SignalMemoEntry* entry = nullptr);
@@ -589,14 +594,25 @@ protected:
     std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
     std::vector<ShadowFrame> shadowStack_;
     std::unordered_map<int64_t, grh::Value*> zeroCache_;
+    std::unordered_map<int64_t, grh::Value*> oneCache_;
     std::size_t shadowNameCounter_ = 0;
     std::size_t controlNameCounter_ = 0;
+    std::size_t controlInstanceId_ = 0;
     bool reportedControlFlowTodo_ = false;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
     std::vector<bool> controlContextStack_;
     std::vector<int> loopContextStack_;
     LoopControl pendingLoopControl_ = LoopControl::None;
     std::size_t pendingLoopDepth_ = 0;
+    std::vector<grh::Value*> guardStack_;
+    grh::Value* currentGuardValue() const {
+        return guardStack_.empty() ? nullptr : guardStack_.back();
+    }
+    void pushGuard(grh::Value* guard) { guardStack_.push_back(guard); }
+    void popGuard() {
+        if (!guardStack_.empty())
+            guardStack_.pop_back();
+    }
     struct LoopValueInfo {
         slang::SVInt literal;
         grh::Value* value = nullptr;
@@ -621,6 +637,7 @@ protected:
     bool allowBlockingAssignments() const override;
     bool allowNonBlockingAssignments() const override;
     bool requireNonBlockingAssignments() const override;
+    bool isSequential() const override { return false; }
 };
 
 /// Sequential always converter entry point.
@@ -638,6 +655,7 @@ protected:
     bool allowBlockingAssignments() const override;
     bool allowNonBlockingAssignments() const override;
     bool requireNonBlockingAssignments() const override;
+    bool isSequential() const override { return true; }
 
 private:
     friend class SeqAlwaysRHSConverter;
@@ -649,12 +667,14 @@ private:
     grh::Value* ensureClockValue();
     grh::Value* ensureMemoryEnableValue();
     grh::Value* buildMemorySyncRead(const SignalMemoEntry& entry, grh::Value& addrValue,
-                                    const slang::ast::Expression& originExpr);
+                                    const slang::ast::Expression& originExpr,
+                                    grh::Value* enableOverride = nullptr);
     int64_t memoryRowWidth(const SignalMemoEntry& entry) const;
     void recordMemoryWordWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
-                               grh::Value& addrValue, grh::Value& dataValue);
+                               grh::Value& addrValue, grh::Value& dataValue, grh::Value* enable);
     void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
-                              grh::Value& addrValue, grh::Value& bitIndex, grh::Value& bitValue);
+                              grh::Value& addrValue, grh::Value& bitIndex, grh::Value& bitValue,
+                              grh::Value* enable);
     grh::Value* buildShiftedBitValue(grh::Value& sourceBit, grh::Value& bitIndex,
                                      int64_t targetWidth, std::string_view label);
     grh::Value* buildShiftedMask(grh::Value& bitIndex, int64_t targetWidth,
@@ -697,6 +717,7 @@ private:
         const slang::ast::Expression* originExpr = nullptr;
         grh::Value* addr = nullptr;
         grh::Value* data = nullptr;
+        grh::Value* enable = nullptr;
     };
 
     struct MemoryBitWriteIntent {
@@ -705,6 +726,7 @@ private:
         grh::Value* addr = nullptr;
         grh::Value* bitIndex = nullptr;
         grh::Value* bitValue = nullptr;
+        grh::Value* enable = nullptr;
     };
 
     std::unordered_map<const slang::ast::Expression*, grh::Value*> timingValueCache_;

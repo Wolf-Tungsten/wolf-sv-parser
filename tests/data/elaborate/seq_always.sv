@@ -69,3 +69,120 @@ module seq_stage18 (
 
     assign rd_data = rd_reg;
 endmodule
+
+// Stage19: if/case enable + mask scenarios
+
+// 1) if (en) r <= d; 期望寄存器保持语义（未使能保持上一拍）
+module seq_stage19_if_en_reg (
+    input  logic       clk,
+    input  logic       en,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        if (en) begin
+            r <= d;
+        end
+    end
+    assign q = r;
+endmodule
+
+// 2) if (en) mem[...] <= wr_data; if (en2) mem[...][i] <= bit_value;
+//    期望写端口/掩码端口的 en 分别为 en/en2；读口在 en_rd 下更新
+module seq_stage19_if_en_mem (
+    input  logic        clk,
+    input  logic        en_wr,
+    input  logic        en_bit,
+    input  logic        en_rd,
+    input  logic [3:0]  wr_addr,
+    input  logic [3:0]  rd_addr,
+    input  logic [3:0]  mask_addr,
+    input  logic [2:0]  bit_index,
+    input  logic [7:0]  wr_data,
+    input  logic        bit_value,
+    output logic [7:0]  rd_data
+);
+    logic [7:0] mem [0:15];
+    logic [7:0] rd_reg;
+
+    always_ff @(posedge clk) begin
+        if (en_wr) begin
+            mem[wr_addr] <= wr_data;
+        end
+        if (en_bit) begin
+            mem[mask_addr][bit_index] <= bit_value;
+        end
+        if (en_rd) begin
+            rd_reg <= mem[rd_addr];
+        end
+    end
+
+    assign rd_data = rd_reg;
+endmodule
+
+// 3) case 分支：不同分支写不同端口，default 不写
+module seq_stage19_case_mem (
+    input  logic        clk,
+    input  logic [1:0]  sel,
+    input  logic [3:0]  addr,
+    input  logic [2:0]  bit_index,
+    input  logic [7:0]  w0,
+    input  logic        b1,
+    output logic [7:0]  probe
+);
+    logic [7:0] mem [0:15];
+    logic [7:0] rd;
+    always_ff @(posedge clk) begin
+        case (sel)
+            2'd0: mem[addr] <= w0;              // 整字写：en 为 (sel==0)
+            2'd1: mem[addr][bit_index] <= b1;   // 按位写：en 为 (sel==1)
+            default: /* no write */;
+        endcase
+        rd <= mem[addr];
+    end
+    assign probe = rd;
+endmodule
+
+// 4) casez/casex 通配：使能来自通配匹配
+module seq_stage19_casez_mem (
+    input  logic        clk,
+    input  logic [3:0]  sel,     // 4 bit，Z/X 作为通配
+    input  logic [3:0]  addr,
+    input  logic [7:0]  wdata0,
+    input  logic [7:0]  wdataA,
+    output logic [7:0]  probe
+);
+    logic [7:0] mem [0:15];
+    logic [7:0] rd;
+    always_ff @(posedge clk) begin
+        // 对应匹配 4'b0???: 任一 0xxx 均写 wdata0；4'b101?: 写 wdataA
+        casez (sel)
+            4'b0???: mem[addr] <= wdata0;
+            4'b101?: mem[addr] <= wdataA;
+            default: /* no write */;
+        endcase
+        rd <= mem[addr];
+    end
+    assign probe = rd;
+endmodule
+
+// 5) 复位 + 使能：if (rst) r<=0; else if (en) r<=d;
+module seq_stage19_rst_en_reg (
+    input  logic       clk,
+    input  logic       rst,   // 同步高有效复位
+    input  logic       en,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            r <= '0;
+        end
+        else if (en) begin
+            r <= d;
+        end
+    end
+    assign q = r;
+endmodule
