@@ -25,6 +25,7 @@
 #include "slang/ast/Statement.h"
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/CallExpression.h"
 #include "slang/ast/expressions/ConversionExpression.h"
 #include "slang/ast/expressions/LiteralExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
@@ -106,6 +107,28 @@ std::string parameterValueToString(const slang::ConstantValue& value) {
 
 std::string typeParameterToString(const slang::ast::TypeParameterSymbol& param) {
     return sanitizeForGraphName(param.getTypeAlias().toString());
+}
+
+std::string toLowerCopy(std::string_view text) {
+    std::string lowered;
+    lowered.reserve(text.size());
+    for (unsigned char raw : text) {
+        lowered.push_back(static_cast<char>(std::tolower(raw)));
+    }
+    return lowered;
+}
+
+bool isDisplaySystemTaskName(std::string_view name) {
+    const std::string lowered = toLowerCopy(name);
+    return lowered == "$display" || lowered == "$write" || lowered == "$strobe";
+}
+
+std::string normalizeDisplayKind(std::string_view name) {
+    std::string lowered = toLowerCopy(name);
+    if (!lowered.empty() && lowered.front() == '$') {
+        lowered.erase(lowered.begin());
+    }
+    return lowered.empty() ? std::string("display") : lowered;
 }
 
 std::string deriveParameterSuffix(const slang::ast::InstanceBodySymbol& body) {
@@ -1644,6 +1667,17 @@ bool CombAlwaysConverter::requireNonBlockingAssignments() const {
     return false;
 }
 
+bool CombAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression& call,
+                                                  const slang::ast::ExpressionStatement&) {
+    if (diagnostics()) {
+        std::string msg = "$display-like task ";
+        msg.append(std::string(call.getSubroutineName()));
+        msg.append(" ignored in comb always; only sequential displays are modeled");
+        diagnostics()->nyi(block(), std::move(msg));
+    }
+    return true;
+}
+
 SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                                        std::span<const SignalMemoEntry> netMemo,
                                        std::span<const SignalMemoEntry> regMemo,
@@ -1689,6 +1723,110 @@ bool SeqAlwaysConverter::allowNonBlockingAssignments() const {
 }
 
 bool SeqAlwaysConverter::requireNonBlockingAssignments() const {
+    return true;
+}
+
+bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression& call,
+                                                 const slang::ast::ExpressionStatement&) {
+    grh::Value* clkValue = ensureClockValue();
+    if (!clkValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential display lacks resolved clock");
+        }
+        return true;
+    }
+
+    grh::Value* enableValue = nullptr;
+    if (grh::Value* guard = currentGuardValue()) {
+        enableValue = coerceToCondition(*guard);
+    }
+    else {
+        enableValue = createOneValue(1);
+    }
+    if (!enableValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Failed to derive enable for display operation");
+        }
+        return true;
+    }
+
+    const auto args = call.arguments();
+    std::vector<const slang::ast::Expression*> valueExprs;
+    valueExprs.reserve(args.size());
+    std::string formatString;
+
+    auto addValueArgument = [&](const slang::ast::Expression* expr) -> bool {
+        if (!expr || expr->kind == slang::ast::ExpressionKind::EmptyArgument) {
+            if (diagnostics()) {
+                std::string msg = std::string(call.getSubroutineName());
+                msg.append(" contains unsupported empty argument");
+                diagnostics()->nyi(block(), std::move(msg));
+            }
+            return false;
+        }
+        valueExprs.push_back(expr);
+        return true;
+    };
+
+    const bool hasLiteralFormat =
+        !args.empty() && args.front() &&
+        args.front()->kind == slang::ast::ExpressionKind::StringLiteral;
+
+    if (hasLiteralFormat) {
+        const auto& literal = args.front()->as<slang::ast::StringLiteral>();
+        formatString = std::string(literal.getValue());
+        for (std::size_t i = 1; i < args.size(); ++i) {
+            if (!addValueArgument(args[i])) {
+                return true;
+            }
+        }
+    }
+    else {
+        if (!args.empty()) {
+            const slang::ast::Expression* first = args.front();
+            if (first && first->type && first->type->canBeStringLike()) {
+                if (diagnostics()) {
+                    std::string msg = std::string(call.getSubroutineName());
+                    msg.append(" requires literal format strings for GRH display conversion");
+                    diagnostics()->nyi(block(), std::move(msg));
+                }
+                return true;
+            }
+        }
+
+        for (const slang::ast::Expression* expr : args) {
+            if (!addValueArgument(expr)) {
+                return true;
+            }
+            if (!formatString.empty()) {
+                formatString.push_back(' ');
+            }
+            formatString.append("%0d");
+        }
+    }
+
+    std::vector<grh::Value*> valueOperands;
+    valueOperands.reserve(valueExprs.size());
+    for (const slang::ast::Expression* expr : valueExprs) {
+        grh::Value* value = rhsConverter_ ? rhsConverter_->convert(*expr) : nullptr;
+        if (!value) {
+            return true;
+        }
+        valueOperands.push_back(value);
+    }
+
+    grh::Operation& op =
+        graph().createOperation(grh::OperationKind::kDisplay, makeControlOpName("display"));
+    op.addOperand(*clkValue);
+    op.addOperand(*enableValue);
+    for (grh::Value* operand : valueOperands) {
+        op.addOperand(*operand);
+    }
+    if (clockPolarityAttr_) {
+        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+    }
+    op.setAttribute("formatString", formatString);
+    op.setAttribute("displayKind", normalizeDisplayKind(call.getSubroutineName()));
     return true;
 }
 
@@ -2143,6 +2281,7 @@ std::string SeqAlwaysConverter::makeMemoryHelperValueName(std::string_view suffi
 
 std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {
     const slang::ast::TimingControl* timing = findTimingControl(block().getBody());
+    clockPolarityAttr_.reset();
     if (!timing) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Sequential block lacks timing control");
@@ -2169,6 +2308,17 @@ std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {
             diagnostics()->nyi(block(), "Sequential block clock must be edge-sensitive");
         }
         return std::nullopt;
+    }
+
+    switch (clockEvent->edge) {
+    case slang::ast::EdgeKind::PosEdge:
+        clockPolarityAttr_ = "posedge";
+        break;
+    case slang::ast::EdgeKind::NegEdge:
+        clockPolarityAttr_ = "negedge";
+        break;
+    default:
+        break;
     }
 
     grh::Value* clkValue = convertTimingExpr(clockEvent->expr);
@@ -2686,6 +2836,13 @@ void AlwaysConverter::visitExpressionStatement(
         return;
     }
 
+    if (expr.kind == slang::ast::ExpressionKind::Call) {
+        const auto& call = expr.as<slang::ast::CallExpression>();
+        if (handleSystemCall(call, stmt)) {
+            return;
+        }
+    }
+
     reportUnsupportedStmt(stmt);
 }
 
@@ -3057,6 +3214,24 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
     }
 
     lhsConverter_->convert(expr, *rhsValue);
+}
+
+bool AlwaysConverter::handleSystemCall(const slang::ast::CallExpression& call,
+                                       const slang::ast::ExpressionStatement& stmt) {
+    if (!call.isSystemCall()) {
+        return false;
+    }
+
+    std::string_view name = call.getSubroutineName();
+    if (isDisplaySystemTaskName(name)) {
+        return handleDisplaySystemTask(call, stmt);
+    }
+    return false;
+}
+
+bool AlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression&,
+                                              const slang::ast::ExpressionStatement&) {
+    return false;
 }
 
 void AlwaysConverter::flushProceduralWrites() {

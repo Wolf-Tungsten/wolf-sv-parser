@@ -48,6 +48,61 @@ module seq_stage17 (
     assign reg_sync_out = reg_sync_rst;
 endmodule
 
+// Stage22: display/write/strobe lowering
+
+// 1) 基本 display：在时序 always 中输出寄存器值
+module seq_stage22_display_basic (
+    input  logic       clk,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        r <= d;
+        $display("r=%0d", r);
+    end
+    assign q = r;
+endmodule
+
+// 2) 受 guard 控制的 write：enable 决定 display 触发
+module seq_stage22_guarded_write (
+    input  logic       clk,
+    input  logic       en,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        if (en) begin
+            r <= d + 8'h1;
+            $write("en=%0d d=%0d", en, d);
+        end
+    end
+    assign q = r;
+endmodule
+
+// 3) strobe 变体
+module seq_stage22_strobe (
+    input  logic       clk,
+    input  logic [7:0] d
+);
+    always_ff @(posedge clk) begin
+        $strobe("d=%0d", d);
+    end
+endmodule
+
+// 4) 组合过程中的 display：应被忽略并告警
+module comb_stage22_display_warning (
+    input  logic clk,
+    input  logic d,
+    output logic q
+);
+    always_comb begin
+        $display("comb d=%0d", d);
+        q = d;
+    end
+endmodule
+
 module seq_stage18 (
     input  logic        clk,
     input  logic [3:0]  wr_addr,

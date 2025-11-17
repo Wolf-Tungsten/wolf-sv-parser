@@ -50,6 +50,7 @@ class NamedValueExpression;
 class RangeSelectExpression;
 class ElementSelectExpression;
 class MemberAccessExpression;
+class CallExpression;
 class RootSymbol;
 class Symbol;
 class ProceduralBlockSymbol;
@@ -587,6 +588,10 @@ protected:
     void pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols);
     void popLoopScope();
     grh::Value* lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
+    bool handleSystemCall(const slang::ast::CallExpression& call,
+                          const slang::ast::ExpressionStatement& stmt);
+    virtual bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
+                                         const slang::ast::ExpressionStatement& stmt);
     grh::Graph& graph() noexcept { return graph_; }
     const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
@@ -648,6 +653,8 @@ protected:
     bool allowNonBlockingAssignments() const override;
     bool requireNonBlockingAssignments() const override;
     bool isSequential() const override { return false; }
+    bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
+                                 const slang::ast::ExpressionStatement& stmt) override;
 };
 
 /// Sequential always converter entry point.
@@ -667,6 +674,8 @@ protected:
     bool allowNonBlockingAssignments() const override;
     bool requireNonBlockingAssignments() const override;
     bool isSequential() const override { return true; }
+    bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
+                                 const slang::ast::ExpressionStatement& stmt) override;
 
 private:
     friend class SeqAlwaysRHSConverter;
@@ -749,6 +758,7 @@ private:
     grh::Value* cachedClockValue_ = nullptr;
     bool clockDeriveAttempted_ = false;
     grh::Value* memoryEnableOne_ = nullptr;
+    std::optional<std::string> clockPolarityAttr_;
 };
 
 /// Elaborates slang AST into GRH representation.

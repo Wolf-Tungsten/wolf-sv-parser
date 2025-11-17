@@ -117,6 +117,26 @@ bool expectAttrs(const grh::Operation& op, std::string_view key, int64_t value) 
     return std::get<int64_t>(it->second) == value;
 }
 
+const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
+        if (opPtr && opPtr->kind() == kind) {
+            return opPtr.get();
+        }
+    }
+    return nullptr;
+}
+
+bool expectStringAttr(const grh::Operation& op, std::string_view key, std::string_view expect) {
+    auto it = op.attributes().find(std::string(key));
+    if (it == op.attributes().end()) {
+        return false;
+    }
+    if (!std::holds_alternative<std::string>(it->second)) {
+        return false;
+    }
+    return std::get<std::string>(it->second) == expect;
+}
+
 } // namespace
 
 #ifndef WOLF_SV_ELAB_SEQ_ALWAYS_DATA_PATH
@@ -503,6 +523,9 @@ int main() {
         if (msg.message.find("Module body elaboration pending") != std::string::npos) {
             continue;
         }
+        if (msg.message.find("display-like task") != std::string::npos) {
+            continue;
+        }
         std::cerr << "[diag] " << msg.message << '\n';
         unexpectedDiag = true;
     }
@@ -838,6 +861,96 @@ int main() {
         };
         if (mentionsPort(data, d0)) {
             return fail("seq_stage20_for_last_write data should not depend on d0");
+        }
+    }
+
+    // -----------------------
+    // Stage22: display/write/strobe lowering
+    // -----------------------
+
+    // 22.1 basic display emits kDisplay with clk/en/var
+    if (const grh::Graph* g22_1 = fetchGraph("seq_stage22_display_basic")) {
+        const grh::Value* clk = findPort(*g22_1, "clk", /*isInput=*/true);
+        const grh::Value* d = findPort(*g22_1, "d", /*isInput=*/true);
+        const grh::Value* q = findPort(*g22_1, "q", /*isInput=*/false);
+        if (!clk || !d || !q) {
+            return fail("seq_stage22_display_basic missing ports");
+        }
+        const auto* inst =
+            findInstanceByName(compilation->getRoot().topInstances, "seq_stage22_display_basic");
+        if (!inst) {
+            return fail("seq_stage22_display_basic instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* rEntry = findEntry(memo, "r");
+        if (!rEntry || !rEntry->value) {
+            return fail("seq_stage22_display_basic missing reg memo for r");
+        }
+        const grh::Operation* display = findOpByKind(*g22_1, grh::OperationKind::kDisplay);
+        if (!display) {
+            return fail("seq_stage22_display_basic missing kDisplay");
+        }
+        if (display->operands().size() != 3) {
+            return fail("seq_stage22_display_basic display operand count mismatch");
+        }
+        if (display->operands()[0] != clk) {
+            return fail("seq_stage22_display_basic clk operand mismatch");
+        }
+        // enable should be constant 1; data should reference register value
+        if (display->operands()[2] != rEntry->value) {
+            return fail("seq_stage22_display_basic value operand mismatch");
+        }
+        if (!expectStringAttr(*display, "formatString", "r=%0d")) {
+            return fail("seq_stage22_display_basic formatString attribute mismatch");
+        }
+        if (!expectStringAttr(*display, "displayKind", "display")) {
+            return fail("seq_stage22_display_basic displayKind attribute missing");
+        }
+    }
+
+    // 22.2 guarded write: enable operand should reference guard (en)
+    if (const grh::Graph* g22_2 = fetchGraph("seq_stage22_guarded_write")) {
+        const grh::Value* clk = findPort(*g22_2, "clk", /*isInput=*/true);
+        const grh::Value* en = findPort(*g22_2, "en", /*isInput=*/true);
+        const grh::Value* d = findPort(*g22_2, "d", /*isInput=*/true);
+        if (!clk || !en || !d) {
+            return fail("seq_stage22_guarded_write missing ports");
+        }
+        const grh::Operation* display = findOpByKind(*g22_2, grh::OperationKind::kDisplay);
+        if (!display) {
+            return fail("seq_stage22_guarded_write missing kDisplay");
+        }
+        if (display->operands().size() != 4) {
+            return fail("seq_stage22_guarded_write operand count mismatch");
+        }
+        if (display->operands()[0] != clk || display->operands()[1] != en) {
+            return fail("seq_stage22_guarded_write clk/enable operands mismatch");
+        }
+        if (display->operands()[2] != en || display->operands()[3] != d) {
+            return fail("seq_stage22_guarded_write value operands mismatch");
+        }
+        if (!expectStringAttr(*display, "displayKind", "write")) {
+            return fail("seq_stage22_guarded_write displayKind unexpected");
+        }
+    }
+
+    // 22.3 strobe variant: ensure kind recorded
+    if (const grh::Graph* g22_3 = fetchGraph("seq_stage22_strobe")) {
+        const grh::Value* clk = findPort(*g22_3, "clk", /*isInput=*/true);
+        const grh::Value* d = findPort(*g22_3, "d", /*isInput=*/true);
+        if (!clk || !d) {
+            return fail("seq_stage22_strobe missing ports");
+        }
+        const grh::Operation* display = findOpByKind(*g22_3, grh::OperationKind::kDisplay);
+        if (!display) {
+            return fail("seq_stage22_strobe missing kDisplay");
+        }
+        if (display->operands().size() != 3 ||
+            display->operands()[0] != clk || display->operands()[2] != d) {
+            return fail("seq_stage22_strobe operands mismatch");
+        }
+        if (!expectStringAttr(*display, "displayKind", "strobe")) {
+            return fail("seq_stage22_strobe displayKind unexpected");
         }
     }
 

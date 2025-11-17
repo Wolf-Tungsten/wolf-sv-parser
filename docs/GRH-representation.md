@@ -631,6 +631,7 @@ GRH 只建模包裹在有时钟驱动的过程块中的 display，其他情况�
 - attributes:
     - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
     - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
+    - displayKind（string）：记录原始系统任务，取值 `display` / `write` / `strobe`；运行时可据此决定是否自动追加换行等语义差异
 
 生成语义：
 ```

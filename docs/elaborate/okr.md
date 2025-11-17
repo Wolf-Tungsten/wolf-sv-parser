@@ -151,3 +151,10 @@
   - KR3 目前 GRH 表示中缺少带有 Enable 的寄存器，请补充 kRegisterEn、kRegisterEnRst、kRegisterEnARst
   - KR4 添加对新型寄存器的支持
   - KR5 补充测试样例，并确保已有测试样例正确回归。
+
+## 阶段22：将调试打印语句转换为 kDisplay
+- **Objective** 将 slang AST 中的 $display/$write/$strobe 调试打印语句转换为 GRH 中的 kDisplay 操作
+  - KR1 在 SeqAlwaysConverter  中，识别 slang AST 中的 $display/$write/$strobe 调试打印语句
+  - KR2 只支持时序过程块中的调试打印语句，组合逻辑过程块中的调试打印语句忽略并 warning
+  - KR3 将这些调试打印语句转换为 GRH 中的 kDisplay 操作，正确设置属性，连接操作数，并插入到当前模块的 GRH 图中
+  - KR4 创建测试样例，验证调试打印语句的正确转换和插入。

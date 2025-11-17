@@ -208,4 +208,39 @@
 > - 在 `SeqAlwaysConverter::finalizeRegisterWrites` 中插入两个提取器：`extractResetBranches`（已存在）之后新增 `extractEnableHold(data, Q)`；二者返回（剩余 data, enable?, resetCtx?）。
 > - 为“原地变形”封装 `mutateRegisterOp(op, targetKind)`，保持 symbol/Q 不变，仅调整 type 与 operands/attributes。
 > - 对按位保持的情况，可先尝试将 writeBack 片段合并成“真支为 concat(new_slices)，假支为 Q”的单层 mux，再决定能否抽取 enable。
+
+## 阶段22：将调试打印语句转换为 kDisplay
+- 目标定位 把时序过程块中的 `$display/$write/$strobe` 系统任务映射到 GRH 的 `kDisplay` 原语，借助 SeqAlwaysConverter 复用现有 guard/clock 语境；组合过程块暂不支持，需提醒用户。
+- 规范基础 参考 `docs/GRH-representation.md:623` 的 `kDisplay` 约束：仅建模有时钟的流程，operands 为 `clk/en/var*`，attributes 包含 `clkPolarity/formatString`。若需要区分 display/write/strobe，可在本阶段评估是否需要新增 `displayKind` attribute 并同步规范。
+
+- KR1（检测入口：SeqAlwaysConverter 中识别系统任务）
+  - 在 `SeqAlwaysConverter::visitXYZ`（处理语句调度的入口）增设匹配逻辑：当 `Statement` 是 `ExpressionStatement` 且包裹 `SystemCallExpression`（或 `TimedStatement` 中的 `SystemTask`），且 `symbol.name` 属于 `$display/$write/$strobe` 时进入 display 处理路径。
+  - 调用 `slang::FmtHelpers::checkDisplayArgs` 或等价 API 对参数合法性进行一次前置校验；若 slang 已生成诊断则复用，否则在转换器中给出 “display args not supported” 的错误并终止当前 always。
+  - 将系统任务节点包装为内部 `DisplayIntent` 结构（记录调用 kind、原始 args、源位置信息），以便后续步骤可以统一处理格式串/变参表达式。
+  - 需要覆盖 `$strobe`、`$display`、`$write` 的别名（大小写、带/不带 `$`? slang 正常 AST 中包含 `$`），并确保 future-proof：无法识别的 system task 继续走默认 diag。
+
+- KR2（限定到时序过程块 & warning 策略）
+  - 在 `Elaborate` 的 always 块调度阶段，CombAlwaysConverter 遇到 display 系统任务时直接调用诊断接口发出 `warning`：提示“组合逻辑中的 $display 被忽略；GRH 仅保留时序 display”。warning 应附带源位置，便于用户定位。
+  - SeqAlwaysConverter 继续支持 display；但若当前 always 块没有有效的 clock（例如 `always @(*)` 被误分类），需要报错提示“kDisplay 仅允许在时序过程块中生成”，并跳过该系统任务。
+  - 在 SeqAlwaysConverter 内保持 `currentGuard` 语义：如果 display 出现在 if/case 内部，需把 guard 与 enable 合成（`enable = currentGuard`，若为空则使用常量 1），确保 display 触发条件与寄存器写入一致。
+  - 若 display 所在 block 被禁用（例如 `currentGuard` 恒为 0），可以在常量折叠阶段淘汰，但不必强制优化；可在后续 pass 由 DCE 处理。
+
+- KR3（构建 kDisplay Operation）
+  - 格式串处理：提取系统任务的第一个参数；若不是字符串字面量，借助 slang constant eval 拿到常量字符串。对于 `$display` 等无格式串但传入表达式列表的情况，按照 slang 的规则将其重写为含 `%0d` 的格式串；这部分可复用 `FmtHelpers::getFormatString`（若存在）或自行实现。
+  - 变参表达式求值：为每个格式占位符绑定一个 `SeqRHSConverter` 实例，生成 `Value`；需要确保在 display 中读取 net/reg/memory 时遵循 seq RHS 的访存规则，并保持参数顺序与格式串中的 `%` 顺序一致。
+  - operand 布线：`clk` 取自 SeqAlwaysConverter 的上下文（与寄存器写入共用）；`enable` 通过 `ensureGuardValue(currentGuard)` 生成，若 guard 为空则提供常量 1；其余 `var*` 来自上一 bullet 中的转换结果。`clkPolarity` attribute 从 always block 的 `eventControl` 推断（posedge/negedge）；`formatString` attribute 使用上一步生成的字符串；若需要保留 `$write/$strobe` 差异，则在 Operation attribute 中新增 `displayKind`（值为 display/write/strobe）并在 `docs/GRH-representation.md` 同步更新。
+  - Graph 插入：在当前模块 `graph` 上调用 `graph.createOperation(kDisplay, operands, attrs)`，并把新节点加入 SeqAlwaysConverter 的“当前语句序列”中，确保 display 相对顺序与源代码一致；必要时在 writeBack finalize 前 flush 一次 pending display 以保持执行顺序。
+  - 诊断：当格式串占位符数量与参数不符、存在暂不支持的数据类型（如 strings/unpacked arrays）、或 SeqRHSConverter 报错时，给出清晰的错误并停止生成该 display，避免插入不完整的操作。
+
+- KR4（测试与验收）
+  - 构建新的 elaboration 样例 `seq_stage22_display_basic`：含有 posedge always 和 `$display("r=%0d", r);`，验证生成的 `kDisplay` operands/attributes 与预期一致（clk/en/var 顺序正确，formatString 匹配）；测试通过 JSON/文本导出检查 display 节点。
+  - 再构建 `seq_stage22_guarded_write`：if 分支内 `$write`，guard 由 enable 控制，验证 `enable` operand 等于 guard 值（例如 combinational expression 生成的 Value）。
+  - 构建 `$strobe` 样例并检查 attribute/顺序。对组合 always 中的 display 建立 `comb_stage22_display_warning`，确保 elaboration 输出 warning 但不生成 `kDisplay`。
+  - 若新增 `displayKind` attribute，补充规范 & 单元测试断言 attribute 正确；同时回归前序阶段样例，确保未出现额外 `TODO/NYI`。
+
+> 实现提示
+> - slang 对 display 族系统任务的 AST 均派生自 `SystemCallStatement`，可通过 `call.kind == SystemTaskKind::Display/Write/Strobe` 分类；`FmtHelpers` 提供的 utilities 可以生成格式串并验证实参。
+> - 当前 SeqAlwaysConverter 已有 guard/clock 上下文，可复用 `currentClock`、`clockEdge`、`getCurrentGuardValue()` 等辅助函数，避免重复推导。
+> - 对 enable 生成常量 1 时优先复用 `graph.createConstant1(1)` 的缓存，减少重复 Value。
+> - 若需要延迟插入 display（例如 `always` 末尾统一 push），可在 converter 内维护一个 `pendingDisplays` 列表，在 `finish()` 时按顺序 emit，确保与写回/寄存器抽象互不干扰。
 > - 规范条目：操作类型总览 `docs/GRH-representation.md:49`；寄存器族定义 `docs/GRH-representation.md:282`、`:303`、`:331`、`:361`、`:385`、`:414`。
