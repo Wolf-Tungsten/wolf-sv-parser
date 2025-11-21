@@ -244,3 +244,34 @@
 > - 对 enable 生成常量 1 时优先复用 `graph.createConstant1(1)` 的缓存，减少重复 Value。
 > - 若需要延迟插入 display（例如 `always` 末尾统一 push），可在 converter 内维护一个 `pendingDisplays` 列表，在 `finish()` 时按顺序 emit，确保与写回/寄存器抽象互不干扰。
 > - 规范条目：操作类型总览 `docs/GRH-representation.md:49`；寄存器族定义 `docs/GRH-representation.md:282`、`:303`、`:331`、`:361`、`:385`、`:414`。
+
+## 阶段23：识别生成 kAssert 操作
+- 目标定位 将顺序 always 块中的断言语句（`assert` / `$fatal` / `$error` 等退化形态）转换为 GRH 的 `kAssert` 原语，保留时钟和条件上下文，组合流程仅告警忽略。
+- 规范基础 参考 `docs/GRH-representation.md:639` kAssert 约束：operands 为 `[clk, condition]`，attribute `clkPolarity` 必须匹配时序事件沿。若承载消息，可追加 `message` 字符串（可选）。
+
+- KR1（入口识别与分类）
+  - 在 `AlwaysConverter::visitExpressionStatement` 增设断言检测：捕获 `ImmediateAssertionStatement`（`assert`/`assume`/`cover` 仅保留 assert）、`ConcurrentAssertionStatement` 中的 `assert property` 前端若已降级为展开语句也应识别。
+  - 捕获 `$fatal/$error/$warning/$asserton` 等系统任务形式，将其归一为 `AssertionIntent`，记录 kind、表达式、可选消息、源位置、是否带 disable iff/clocking block。
+  - 对并行/延时（非 #0）断言暂不支持，发出清晰 NYI 诊断。
+
+- KR2（流程限定与 guard 处理）
+  - `CombAlwaysConverter` 遇到断言 intent 直接 warning：“组合过程中的 assert 被忽略，GRH 仅建模时序断言”，附源位置。
+  - `SeqAlwaysConverter` 仅在存在有效时钟时生成 kAssert：复用 `ensureClockValue()` 与 `clkPolarity` 推导；若缺少 edge-sensitive clock 或 `always @(*)`，报错并跳过。
+  - 断言条件需合成 guard：`finalCond = guard ? condition : 1'b1`（或 `guard -> condition`），使用 `coerceToCondition` 规约为 1-bit；disable iff 条件并入 guard。
+
+- KR3（kAssert 节点构建）
+  - operands：`clk` 取自当前时序上下文；`condition` 为 KR2 合成结果。
+  - attributes：`clkPolarity` 必须设置；若存在消息（如 `$fatal("msg")` 或字符串字面量 side arg），设置 `message`；可选保留 `severity`（fatal/error/warning）以备后端使用。
+  - 顺序维护：将 kAssert 插入当前语句序列，保持与寄存器写入/显示语句一致的执行顺序；必要时在 finalize 前 flush pending asserts。
+  - 诊断：条件求值失败、非整数条件、消息类型不支持时，报错并跳过生成，避免半成品节点。
+
+- KR4（测试与验收）
+  - 样例扩展 `tests/data/elaborate/seq_always.sv`：`seq_stage23_assert_basic`（posedge 上断言 q==d）、`seq_stage23_assert_guard`（if(en) 内断言）、`seq_stage23_assert_property`（assert property @(posedge clk) disable iff(!rst_n) d==$past(d)`）、`comb_stage23_assert_warning`（组合告警）。
+  - `tests/elaborate/test_elaborate_seq_always.cpp`：验证 kAssert 数量、operands 绑定（clk + condition 含 guard）、`clkPolarity`/`message` 属性；组合样例仅产生 warning 不生成 kAssert。
+  - 回归全量 `ctest --output-on-failure`，确保阶段22/21 等现有断言/显示逻辑无回退。
+
+> 实现提示
+> - slang AST：立即断言为 `ImmediateAssertionStatement`，条件表达式可直接访问；`assert property` 会携带 disable/clocking，可从 AST 收集并并入 guard。
+> - 若重用 display 流程的 guard/clock 入口，可提取公共 `handleSystemTask` 辅助；coerceToCondition/guardStack 已可直接复用。
+> - 对 `$fatal/$error` 输入：无显式条件时可视作 `assert(0)`；若首参为字符串字面量，填充 `message`。
+> - 对 cover/assume 目前报 NYI，预留未来扩展。

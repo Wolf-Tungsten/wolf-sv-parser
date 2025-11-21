@@ -651,6 +651,8 @@ GRH 只建模包裹在有时钟驱动的过程块中的 assert，其他情况在
     - condition：断言条件
 - attributes:
     - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
+    - message（string，可选）：断言失败的提示文本，通常来自 `$fatal/$error` 参数或静态字符串
+    - severity（string，可选）：记录断言级别，建议取值 fatal/error/warning
 
 生成语义：
 ```

@@ -158,3 +158,16 @@
   - KR2 只支持时序过程块中的调试打印语句，组合逻辑过程块中的调试打印语句忽略并 warning
   - KR3 将这些调试打印语句转换为 GRH 中的 kDisplay 操作，正确设置属性，连接操作数，并插入到当前模块的 GRH 图中
   - KR4 创建测试样例，验证调试打印语句的正确转换和插入。
+
+## 阶段23：识别生成 kAssert 操作
+- **Objective** 将顺序 always 块中的 `assert`（及 `$fatal/$error` 等退化形态）转换为 GRH `kAssert` 原语，使后续验证/仿真阶段可感知断言语义。
+  - KR1（入口识别）在 `AlwaysConverter` 中捕获 `ImmediateAssertionStatement`（`assert (...)`/`assert #0` 等）以及 `$assert/$fatal/$error` 系统任务，形成统一的 `AssertionIntent`；若为并行/延时断言暂不支持，需报清晰诊断。
+  - KR2（流程限定）仅在 `SeqAlwaysConverter` 中生成 `kAssert`，组合过程块遇到断言统一 warning 并忽略；对缺少时钟/edge 的时序块发出错误，保持与阶段22 相同的约束。
+  - KR3（kAssert 构建）根据 `docs/GRH-representation.md:639+` 要求，创建操作数 `[clk, condition]`，`condition` 需结合当前 guard（assert 触发区间）进行 `cond = guard -> expr` 的规约；attribute `clkPolarity` 复用时钟推导结果，必要时追加 `message`（若来自 `$error("msg")`）。对 `assert property` 解析到的 disable/clock 合并 guard。
+  - KR4（测试 & 回归）在 `tests/data/elaborate/seq_always.sv` 添加断言样例：基本 assert、带 enable guard、`assert property`、组合断言 warning；`tests/elaborate/test_elaborate_seq_always.cpp` 校验生成的 `kAssert` 数量、操作数、属性，确保阶段17/22 等既有测试稳定。
+
+## 阶段24：添加对 DPI-C 的支持
+- **Objective** 添加对sv通过DPI调用外部函数的支持
+  - KR1 在elaborate过程中，识别DPI导入的函数声明，将 import DPI 函数映射为GRH中的kDpicImport操作
+  - KR2 在elaborate过程中，识别DPI调用语句，将DPI调用映射为GRH中的kDpicCall操作，正确设置操作数和属性
+  - KR3 创建测试样例dpic.sv，验证DPI导入和调用的正确转换

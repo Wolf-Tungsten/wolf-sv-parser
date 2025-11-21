@@ -103,6 +103,49 @@ module comb_stage22_display_warning (
     end
 endmodule
 
+// -----------------------
+// Stage23: assert lowering
+// -----------------------
+
+// 1) 基本断言：在时钟沿检查 r==d
+module seq_stage23_assert_basic (
+    input  logic       clk,
+    input  logic [7:0] d,
+    output logic [7:0] q
+);
+    logic [7:0] r;
+    always_ff @(posedge clk) begin
+        r <= d;
+        assert (r == d);
+    end
+    assign q = r;
+endmodule
+
+// 2) guard 内的断言：if(en) 时才检查
+module seq_stage23_assert_guard (
+    input  logic       clk,
+    input  logic       en,
+    input  logic [7:0] d
+);
+    always_ff @(posedge clk) begin
+        if (en) begin
+            assert (d != 8'hff) else $error("bad d");
+        end
+    end
+endmodule
+
+// 3) 组合断言：应 warning 忽略
+module comb_stage23_assert_warning (
+    input  logic a,
+    input  logic b,
+    output logic y
+);
+    always_comb begin
+        assert (a == b);
+        y = a & b;
+    end
+endmodule
+
 module seq_stage18 (
     input  logic        clk,
     input  logic [3:0]  wr_addr,

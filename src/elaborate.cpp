@@ -131,6 +131,34 @@ std::string normalizeDisplayKind(std::string_view name) {
     return lowered.empty() ? std::string("display") : lowered;
 }
 
+bool classifyAssertSystemTask(std::string_view name, std::string& severity) {
+    std::string lowered = toLowerCopy(name);
+    if (!lowered.empty() && lowered.front() == '$') {
+        lowered.erase(lowered.begin());
+    }
+    if (lowered == "fatal") {
+        severity = "fatal";
+        return true;
+    }
+    if (lowered == "error") {
+        severity = "error";
+        return true;
+    }
+    if (lowered == "warning") {
+        severity = "warning";
+        return true;
+    }
+    return false;
+}
+
+std::optional<std::string> tryExtractMessageLiteral(const slang::ast::Expression& expr) {
+    if (expr.kind == slang::ast::ExpressionKind::StringLiteral) {
+        const auto& literal = expr.as<slang::ast::StringLiteral>();
+        return std::string(literal.getValue());
+    }
+    return std::nullopt;
+}
+
 std::string deriveParameterSuffix(const slang::ast::InstanceBodySymbol& body) {
     std::vector<std::string> parts;
     for (const slang::ast::ParameterSymbolBase* paramBase : body.getParameters()) {
@@ -1678,6 +1706,16 @@ bool CombAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressi
     return true;
 }
 
+bool CombAlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
+                                                const slang::ast::ExpressionStatement* origin,
+                                                std::string_view,
+                                                std::string_view) {
+    if (diagnostics() && origin) {
+        diagnostics()->nyi(block(), "组合 always 中的 assert 被忽略；GRH 仅建模时序断言");
+    }
+    return true;
+}
+
 SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                                        std::span<const SignalMemoEntry> netMemo,
                                        std::span<const SignalMemoEntry> regMemo,
@@ -1827,6 +1865,70 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
     }
     op.setAttribute("formatString", formatString);
     op.setAttribute("displayKind", normalizeDisplayKind(call.getSubroutineName()));
+    return true;
+}
+
+bool SeqAlwaysConverter::handleAssertionIntent(const slang::ast::Expression* condition,
+                                               const slang::ast::ExpressionStatement* origin,
+                                               std::string_view message,
+                                               std::string_view severity) {
+    grh::Value* clkValue = ensureClockValue();
+    if (!clkValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential assert lacks resolved clock");
+        }
+        return true;
+    }
+
+    grh::Value* guard = currentGuardValue();
+    grh::Value* condBit = nullptr;
+    if (condition && rhsConverter_) {
+        grh::Value* condValue = rhsConverter_->convert(*condition);
+        if (!condValue) {
+            if (diagnostics() && origin) {
+                diagnostics()->nyi(block(), "Failed to lower assert condition");
+            }
+            return true;
+        }
+        condBit = coerceToCondition(*condValue);
+    }
+    if (!condBit) {
+        return true;
+    }
+    if (!condBit) {
+        return true;
+    }
+
+    grh::Value* finalCond = condBit;
+    if (guard) {
+        grh::Value* guardBit = coerceToCondition(*guard);
+        if (!guardBit) {
+            return true;
+        }
+        // guard -> cond  === !guard || cond
+        grh::Value* notGuard = buildLogicNot(*guardBit);
+        if (!notGuard) {
+            return true;
+        }
+        finalCond = buildLogicOr(*notGuard, *condBit);
+        if (!finalCond) {
+            return true;
+        }
+    }
+
+    grh::Operation& op =
+        graph().createOperation(grh::OperationKind::kAssert, makeControlOpName("assert"));
+    op.addOperand(*clkValue);
+    op.addOperand(*finalCond);
+    if (clockPolarityAttr_) {
+        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+    }
+    if (!message.empty()) {
+        op.setAttribute("message", std::string(message));
+    }
+    if (!severity.empty()) {
+        op.setAttribute("severity", std::string(severity));
+    }
     return true;
 }
 
@@ -2778,6 +2880,10 @@ void AlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
         visitExpressionStatement(*exprStmt);
         return;
     }
+    if (const auto* immediate = stmt.as_if<slang::ast::ImmediateAssertionStatement>()) {
+        visitImmediateAssertion(*immediate);
+        return;
+    }
     if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>()) {
         visitProceduralAssign(*procAssign);
         return;
@@ -2844,6 +2950,46 @@ void AlwaysConverter::visitExpressionStatement(
     }
 
     reportUnsupportedStmt(stmt);
+}
+
+void AlwaysConverter::visitImmediateAssertion(
+    const slang::ast::ImmediateAssertionStatement& stmt) {
+    using slang::ast::AssertionKind;
+    if (stmt.assertionKind != AssertionKind::Assert) {
+        if (diagnostics_) {
+            std::string message = std::string(modeLabel()) + " unsupported assertion kind: ";
+            message.append(std::to_string(static_cast<int>(stmt.assertionKind)));
+            diagnostics_->nyi(block_, std::move(message));
+        }
+        return;
+    }
+    // Deferred / final immediate assertions are not supported.
+    if (stmt.isDeferred || stmt.isFinal) {
+        if (diagnostics_) {
+            diagnostics_->nyi(block_, std::string(modeLabel()) +
+                                       " deferred/final immediate assertion not supported");
+        }
+        return;
+    }
+    std::string severity = "error";
+    std::string message;
+    if (stmt.ifFalse) {
+        if (const auto* exprStmt = stmt.ifFalse->as_if<slang::ast::ExpressionStatement>()) {
+            if (const auto* call = exprStmt->expr.as_if<slang::ast::CallExpression>()) {
+                std::string taskSeverity;
+                if (call->isSystemCall() &&
+                    classifyAssertSystemTask(call->getSubroutineName(), taskSeverity)) {
+                    severity = taskSeverity;
+                    if (!call->arguments().empty()) {
+                        if (auto literal = tryExtractMessageLiteral(*call->arguments().front())) {
+                            message = *literal;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    handleAssertionIntent(&stmt.cond, nullptr, message, severity);
 }
 
 void AlwaysConverter::visitProceduralAssign(
@@ -3226,11 +3372,29 @@ bool AlwaysConverter::handleSystemCall(const slang::ast::CallExpression& call,
     if (isDisplaySystemTaskName(name)) {
         return handleDisplaySystemTask(call, stmt);
     }
+    std::string severity;
+    if (classifyAssertSystemTask(name, severity)) {
+        std::string message;
+        if (!call.arguments().empty()) {
+            if (auto literal = tryExtractMessageLiteral(*call.arguments().front())) {
+                message = *literal;
+            }
+        }
+        handleAssertionIntent(nullptr, &stmt, message, severity);
+        return true;
+    }
     return false;
 }
 
 bool AlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression&,
                                               const slang::ast::ExpressionStatement&) {
+    return false;
+}
+
+bool AlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
+                                            const slang::ast::ExpressionStatement*,
+                                            std::string_view,
+                                            std::string_view) {
     return false;
 }
 

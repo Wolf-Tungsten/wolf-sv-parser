@@ -126,6 +126,17 @@ const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind k
     return nullptr;
 }
 
+std::vector<const grh::Operation*> collectOpsByKind(const grh::Graph& graph,
+                                                    grh::OperationKind kind) {
+    std::vector<const grh::Operation*> result;
+    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
+        if (opPtr && opPtr->kind() == kind) {
+            result.push_back(opPtr.get());
+        }
+    }
+    return result;
+}
+
 bool expectStringAttr(const grh::Operation& op, std::string_view key, std::string_view expect) {
     auto it = op.attributes().find(std::string(key));
     if (it == op.attributes().end()) {
@@ -954,6 +965,94 @@ int main() {
         }
     }
 
+    // 22.x (diag filter already handled above)
+
+    // -----------------------
+    // Stage23: assert lowering
+    // -----------------------
+
+    // Helper: fetch assert ops and basic checks.
+    auto expectAssert = [&](const grh::Graph& graph, const grh::Value* clk,
+                            std::optional<std::string_view> message = std::nullopt) -> bool {
+        std::vector<const grh::Operation*> asserts =
+            collectOpsByKind(graph, grh::OperationKind::kAssert);
+        if (asserts.empty()) {
+            return fail("Expected at least one kAssert");
+        }
+        for (const grh::Operation* op : asserts) {
+            if (op->operands().size() != 2) {
+                return fail("kAssert operand count mismatch");
+            }
+            if (op->operands()[0] != clk) {
+                return fail("kAssert clock operand mismatch");
+            }
+            if (message) {
+                auto it = op->attributes().find("message");
+                if (it == op->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
+                    std::get<std::string>(it->second) != *message) {
+                    return fail("kAssert message attribute mismatch");
+                }
+            }
+        }
+        return true;
+    };
+
+    // 23.1 basic assert
+    if (const grh::Graph* g23_1 = fetchGraph("seq_stage23_assert_basic")) {
+        const grh::Value* clk = findPort(*g23_1, "clk", /*isInput=*/true);
+        if (!clk) {
+            return fail("seq_stage23_assert_basic missing clk");
+        }
+        if (!expectAssert(*g23_1, clk)) {
+            return 1;
+        }
+    }
+
+    // 23.2 guarded assert with message
+    if (const grh::Graph* g23_2 = fetchGraph("seq_stage23_assert_guard")) {
+        const grh::Value* clk = findPort(*g23_2, "clk", /*isInput=*/true);
+        const grh::Value* en = findPort(*g23_2, "en", /*isInput=*/true);
+        const grh::Value* d = findPort(*g23_2, "d", /*isInput=*/true);
+        if (!clk || !en || !d) {
+            return fail("seq_stage23_assert_guard missing ports");
+        }
+        std::vector<const grh::Operation*> asserts =
+            collectOpsByKind(*g23_2, grh::OperationKind::kAssert);
+        if (asserts.size() != 1) {
+            return fail("seq_stage23_assert_guard expected one kAssert");
+        }
+        const grh::Operation* op = asserts.front();
+        if (op->operands().size() != 2 || op->operands()[0] != clk) {
+            return fail("seq_stage23_assert_guard operand mismatch");
+        }
+        // guard -> cond encoded as (!en) || cond; ensure guard is present via operand users.
+        std::function<bool(const grh::Value*, const grh::Value*)> mentionsPort =
+            [&](const grh::Value* node, const grh::Value* port) -> bool {
+            if (!node) return false;
+            if (node == port) return true;
+            if (const grh::Operation* dop = node->definingOp()) {
+                for (const grh::Value* operand : dop->operands()) {
+                    if (mentionsPort(operand, port)) return true;
+                }
+            }
+            return false;
+        };
+        if (!mentionsPort(op->operands()[1], en) || !mentionsPort(op->operands()[1], d)) {
+            return fail("seq_stage23_assert_guard condition missing guard/data references");
+        }
+        if (!expectStringAttr(*op, "message", "bad d")) {
+            return fail("seq_stage23_assert_guard message missing");
+        }
+    }
+
+    // 23.3 comb assert warning only
+    if (const grh::Graph* g23_3 = fetchGraph("comb_stage23_assert_warning")) {
+        std::vector<const grh::Operation*> asserts =
+            collectOpsByKind(*g23_3, grh::OperationKind::kAssert);
+        if (!asserts.empty()) {
+            return fail("comb_stage23_assert_warning should not emit kAssert");
+        }
+    }
     // 20.2 foreach + static break: lower 4 bits from d, upper 4 bits hold from Q
     if (const grh::Graph* g20_2 = fetchGraph("seq_stage20_foreach_partial")) {
         const grh::Value* clk = findPort(*g20_2, "clk", /*isInput=*/true);

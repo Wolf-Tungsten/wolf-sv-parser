@@ -51,6 +51,7 @@ class RangeSelectExpression;
 class ElementSelectExpression;
 class MemberAccessExpression;
 class CallExpression;
+class ImmediateAssertionStatement;
 class RootSymbol;
 class Symbol;
 class ProceduralBlockSymbol;
@@ -519,6 +520,7 @@ protected:
     void visitStatementList(const slang::ast::StatementList& list);
     void visitBlock(const slang::ast::BlockStatement& block);
     void visitExpressionStatement(const slang::ast::ExpressionStatement& stmt);
+    void visitImmediateAssertion(const slang::ast::ImmediateAssertionStatement& stmt);
     void visitProceduralAssign(const slang::ast::ProceduralAssignStatement& stmt);
     void visitForLoop(const slang::ast::ForLoopStatement& stmt);
     void visitForeachLoop(const slang::ast::ForeachLoopStatement& stmt);
@@ -592,6 +594,10 @@ protected:
                           const slang::ast::ExpressionStatement& stmt);
     virtual bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                          const slang::ast::ExpressionStatement& stmt);
+    virtual bool handleAssertionIntent(const slang::ast::Expression* condition,
+                                       const slang::ast::ExpressionStatement* origin,
+                                       std::string_view message,
+                                       std::string_view severity);
     grh::Graph& graph() noexcept { return graph_; }
     const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
@@ -655,6 +661,10 @@ protected:
     bool isSequential() const override { return false; }
     bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                  const slang::ast::ExpressionStatement& stmt) override;
+    bool handleAssertionIntent(const slang::ast::Expression* condition,
+                               const slang::ast::ExpressionStatement* origin,
+                               std::string_view message,
+                               std::string_view severity) override;
 };
 
 /// Sequential always converter entry point.
@@ -676,6 +686,10 @@ protected:
     bool isSequential() const override { return true; }
     bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                  const slang::ast::ExpressionStatement& stmt) override;
+    bool handleAssertionIntent(const slang::ast::Expression* condition,
+                               const slang::ast::ExpressionStatement* origin,
+                               std::string_view message,
+                               std::string_view severity) override;
 
 private:
     friend class SeqAlwaysRHSConverter;
