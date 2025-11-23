@@ -146,6 +146,24 @@ target_compile_definitions(emit-json
 
 register_test_exe(emit-json)
 
+add_executable(emit-sv
+    tests/emit/test_emit_sv.cpp
+)
+
+target_link_libraries(emit-sv
+    PRIVATE
+        emit
+        elaborate
+)
+
+target_compile_definitions(emit-sv
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+        WOLF_SV_EMIT_SV_INPUT_PATH="${WOLF_SV_TEST_INPUT_DIR}/emit/emit_sv_input.sv"
+)
+
+register_test_exe(emit-sv)
+
 # elaborate: smoke
 add_executable(elaborate-smoke
     tests/elaborate/test_elaborate_smoke.cpp

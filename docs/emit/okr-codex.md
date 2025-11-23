@@ -58,3 +58,26 @@
   - EmitJSON 支持三种模式并通过选项可控，默认策略满足阶段要求（若切换默认则文档/调用同步）。
   - `prettyCompact` 输出满足：Netlist/Graph 缩进与 pretty 一致，`vals`/`ports`/`ops` 数组元素单行展示；无多余空行或缩进异常。
   - 所有依赖 JSON 的测试/样例更新为新模式并通过，CLI 输出与文档示例一致。
+
+## 阶段4：实现 EmitSystemVerilog 类基本功能
+- **目标定位** 提供首个可落地的 Verilog 兼容输出链路（除 DPI-C 外尽量避免 SystemVerilog 扩展），将 GRH Netlist 落盘为 `.sv`，并以 lint 级验证确保可被后续仿真/综合工具接受。
+- **KR1 对齐：Netlist 到文件的生成管线**
+  - 新增 `EmitSystemVerilog` 派生类，复用基类选项（输出目录、顶层覆盖、诊断收集），默认为每个 Netlist 生成单个 `<netlist>.sv`（内容保持 Verilog 2001 友好，仅 DPI-C 使用 SystemVerilog 语法），并按顶层优先、名称次序遍历 Graph 生成对应 module。
+  - 设计信号/模块命名规则（端口/中间 Value/实例名），避免重名和 SystemVerilog 关键字冲突；保持跨段引用一致的去重表。
+  - 在 CMake/CLI 入口处接线新输出模式（如 `--emit-sv`），确保与 JSON 流水线共存，默认输出目录/文件名可通过 EmitOptions 配置。
+- **KR2 对齐：模块段落与运算映射**
+  - 映射规则应尽量对齐 `docs/GRH-representation.md` 中定义的各类 Op 生成语义，缺口处用 TODO/诊断标注。
+  - **模块定义（Port）**：从 Graph ports 生成 module 端口表，方向/位宽/有符号性依据 Value/Type 推导，端口排序与 JSON 规范一致；必要时为 `clock/reset` 等保留名称提供配置钩子。
+  - **wire 定义区段（Value）**：为非端口的中间 Value 分配 `wire`/`reg`（依据驱动方式），区分单比特与向量，避免使用 `logic`/`typedef`/`struct` 等 SystemVerilog 扩展。
+  - **reg/mem 定义区段（reg/memOp）**：收集时序寄存器与存储器操作的目标，生成 `reg`/数组定义，记录复位值/宽度/深度信息，确保在时序块中使用前已声明。
+  - **实例化区段（kInstance/kBlackbox）**：将实例/黑盒操作转成 module 实例化语句，处理参数覆写、端口映射（命名关联优先），保留黑盒占位注释以便外部提供实现。
+  - **DPIC 导入区段（kDpiCImport）**：输出 `import "DPI-C"` 原型，覆盖函数/任务、返回类型和参数列表，保持名称与后续调用一致。
+  - **连续赋值区段**：将简单运算或直连映射为 `assign`，集中在声明之后便于阅读；若使用常量/切片需封装格式化助手。
+  - **组合逻辑区段**：理论上不生成 `always @*` 组合块，尽量用 `assign` 完成纯组合逻辑；如确需过程块需显式标注原因并保持单驱动。
+  - **时序逻辑区段**：将寄存器更新等时序操作收敛到 `always @(posedge clk ... )`（按需添加复位/使能），使用非阻塞赋值；相同时钟/复位特性的寄存器与 memport 写入尽量聚合进同一个 always 块，保持驱动与 reg 定义一一对应。
+  - 区段顺序/空行格式固定，形成可预测布局；为尚未覆盖的 op 种类留出 TODO/诊断提示，避免静默忽略。
+- **KR3 对齐：样例与 lint 验证**
+  - 在 `tests/data/emit` 添加覆盖多段的最小网表示例（含端口/wire/reg/mem/实例/DPIC/组合/时序），并提供期望 `.sv` 片段或快照。
+  - 在 `tests/emit` 编写单元测试：调用 `EmitSystemVerilog` 生成文件，与期望字符串/正则匹配；校验命名去重、段落顺序与必备语句存在。
+  - 集成 `verilator --lint-only` 跑已生成的 `.sv`（通过 CTest/脚本驱动），如环境缺失则检测并跳过但提示；确保 lint 通过作为阶段验收。
+  - 文档补充：在 `docs/emit` 或 README 记录使用方法、输出命名规则与 lint 流程，供后续阶段迭代参考。

@@ -20,3 +20,9 @@
 - KR1: 在保持prettyPrint的基础上，将Graph vals、ports、ops 数组改为每个元素一行
 - KR2: 保持 Graph 和 Netlists 的缩进和换行
 - KR3: 将现有所有测试用例包括 elaborate 的输出都改为 prettyCompact 形式
+
+## 阶段4: 实现 EmitSystemVerilog 类基本功能
+**Objective** 能够将 GRH 的表示输出成 .sv 文件
+- KR1: 每个 Netlist 创建一个 .sv, 每个 Graph 形成一个 module
+- KR2: 每个 Graph 产生的 Module 分为N段：模块定义（写出Port）- wire定义区段（写出Value）- reg/mem定义区段（写出 reg/memOp 所需的定义）- 实例化区段（写出kInstance/kBlackbox）- DPIC导入区段（写出kDpiCImport）- 连续赋值区段 - 组合逻辑区段 - 时序逻辑区段
+- KR3: 创建测试样例，使用 verilator 对输出结果进行 lint

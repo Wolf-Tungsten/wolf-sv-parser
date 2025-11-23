@@ -60,6 +60,8 @@ int main(int argc, char **argv)
     driver.cmdLine.add("--dump-ast", dumpAst, "Dump a summary of the elaborated AST");
     std::optional<bool> dumpGrh;
     driver.cmdLine.add("--dump-grh", dumpGrh, "Dump GRH JSON after elaboration");
+    std::optional<bool> dumpSv;
+    driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after elaboration");
 
     if (!driver.parseCommandLine(argc, argv)) {
         return 1;
@@ -167,6 +169,37 @@ int main(int argc, char **argv)
         else if (!emitResult.success)
         {
             std::cerr << "[emit-json] Failed to emit GRH JSON\n";
+        }
+    }
+
+    if (dumpSv == true)
+    {
+        wolf_sv::emit::EmitDiagnostics emitDiagnostics;
+        wolf_sv::emit::EmitSystemVerilog emitter(&emitDiagnostics);
+        wolf_sv::emit::EmitOptions emitOptions;
+
+        wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        if (!emitDiagnostics.empty())
+        {
+            for (const auto &message : emitDiagnostics.messages())
+            {
+                const char *tag = message.kind == wolf_sv::emit::EmitDiagnosticKind::Error ? "error" : "warn";
+                std::cerr << "[emit-sv] [" << tag << "] " << message.message;
+                if (!message.context.empty())
+                {
+                    std::cerr << " (" << message.context << ")";
+                }
+                std::cerr << '\n';
+            }
+        }
+        emitOk = emitOk && emitResult.success && !emitDiagnostics.hasError();
+        if (emitResult.success && !emitResult.artifacts.empty())
+        {
+            std::cout << "[emit-sv] Wrote SystemVerilog to " << emitResult.artifacts.front() << '\n';
+        }
+        else if (!emitResult.success)
+        {
+            std::cerr << "[emit-sv] Failed to emit SystemVerilog\n";
         }
     }
 
