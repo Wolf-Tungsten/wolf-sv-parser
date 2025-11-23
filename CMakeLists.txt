@@ -30,6 +30,21 @@ target_link_libraries(grh
         slang::slang
 )
 
+## emit
+add_library(emit STATIC
+    src/emit.cpp
+)
+
+target_include_directories(emit
+    PUBLIC
+        include
+)
+
+target_link_libraries(emit
+    PUBLIC
+        grh
+)
+
 ## elaborate
 add_library(elaborate STATIC
     src/elaborate.cpp
@@ -67,10 +82,12 @@ set(WOLF_SV_TEST_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/artifacts")
 set(ELABORATE_INPUT_DIR "${WOLF_SV_TEST_INPUT_DIR}/elaborate")
 set(ELABORATE_ARTIFACT_DIR "${WOLF_SV_TEST_ARTIFACT_DIR}/elaborate")
 set(ELABORATE_SMOKE_INPUT "${ELABORATE_INPUT_DIR}/t0.sv")
+set(EMIT_ARTIFACT_DIR "${WOLF_SV_TEST_ARTIFACT_DIR}/emit")
 
 # Ensure artifact directories exist
 file(MAKE_DIRECTORY "${WOLF_SV_TEST_ARTIFACT_DIR}")
 file(MAKE_DIRECTORY "${ELABORATE_ARTIFACT_DIR}")
+file(MAKE_DIRECTORY "${EMIT_ARTIFACT_DIR}")
 
 # Helper: register an executable as a ctest by its target file (no hardcoded paths)
 function(register_test_exe target_name)
@@ -93,6 +110,23 @@ target_compile_definitions(grh-tests
 )
 
 register_test_exe(grh-tests)
+
+# emit base
+add_executable(emit-base
+    tests/emit/test_emit_base.cpp
+)
+
+target_link_libraries(emit-base
+    PRIVATE
+        emit
+)
+
+target_compile_definitions(emit-base
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-base)
 
 # elaborate: smoke
 add_executable(elaborate-smoke
