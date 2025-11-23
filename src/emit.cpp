@@ -757,7 +757,8 @@ namespace wolf_sv::emit
             return result;
         }
 
-        const std::filesystem::path outputPath = resolveOutputDir(options) / "grh.json";
+        const std::string filename = options.outputFilename.value_or(std::string("grh.json"));
+        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
         auto stream = openOutputFile(outputPath);
         if (!stream)
         {
@@ -1998,7 +1999,8 @@ namespace wolf_sv::emit
             moduleBuffer << "endmodule\n";
         }
 
-        const std::filesystem::path outputPath = resolveOutputDir(options) / "grh.sv";
+        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
+        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
         auto stream = openOutputFile(outputPath);
         if (!stream)
         {

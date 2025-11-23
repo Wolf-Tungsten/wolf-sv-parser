@@ -10,3 +10,6 @@
 [submodule "docs/reference/verilator"]
 	path = docs/reference/verilator
 	url = https://github.com/verilator/verilator.git
+[submodule "tests/data/hdlbits"]
+	path = tests/data/hdlbits
+	url = git@github.com:Wolf-Tungsten/HDLBits-Verilog-Solutions.git

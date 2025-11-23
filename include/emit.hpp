@@ -53,6 +53,7 @@ namespace wolf_sv::emit
     struct EmitOptions
     {
         std::optional<std::string> outputDir;
+        std::optional<std::string> outputFilename;
         JsonPrintMode jsonMode = JsonPrintMode::PrettyCompact;
         std::vector<std::string> topOverrides;
         std::map<std::string, std::string, std::less<>> attributes;

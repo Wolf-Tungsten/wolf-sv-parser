@@ -1,3 +1,5 @@
+#include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -62,6 +64,10 @@ int main(int argc, char **argv)
     driver.cmdLine.add("--dump-grh", dumpGrh, "Dump GRH JSON after elaboration");
     std::optional<bool> dumpSv;
     driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after elaboration");
+    std::optional<std::string> emitOutputDir;
+    driver.cmdLine.add("--emit-out-dir,--emit-out", emitOutputDir, "Directory to write emitted GRH/SV files", "<path>");
+    std::optional<std::string> outputPathArg;
+    driver.cmdLine.add("-o", outputPathArg, "Output file path for emitted artifacts", "<path>", slang::CommandLineFlags::FilePath);
 
     if (!driver.parseCommandLine(argc, argv)) {
         return 1;
@@ -81,6 +87,73 @@ int main(int argc, char **argv)
     driver.runAnalysis(*compilation);
 
     auto &root = compilation->getRoot();
+
+    std::optional<std::string> outputDirOverride;
+    std::optional<std::string> jsonOutputName;
+    std::optional<std::string> svOutputName;
+
+    auto applyOutputPath = [&]()
+    {
+        if (!outputPathArg || outputPathArg->empty())
+        {
+            return;
+        }
+        const std::filesystem::path path(*outputPathArg);
+        const std::filesystem::path parent = path.parent_path();
+        if (!parent.empty())
+        {
+            outputDirOverride = parent.string();
+        }
+
+        const std::string filename = path.filename().string();
+        if (filename.empty() || filename == "." || filename == "..")
+        {
+            return;
+        }
+
+        std::string ext = path.extension().string();
+        for (char &c : ext)
+        {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+
+        const bool wantsSv = dumpSv == true;
+        const bool wantsJson = dumpGrh == true;
+
+        if (ext == ".sv" || ext == ".v")
+        {
+            svOutputName = filename;
+        }
+        else if (ext == ".json")
+        {
+            jsonOutputName = filename;
+        }
+        else if (wantsSv && !wantsJson)
+        {
+            svOutputName = filename;
+        }
+        else if (wantsJson && !wantsSv)
+        {
+            jsonOutputName = filename;
+        }
+        else if (wantsSv)
+        {
+            svOutputName = filename;
+        }
+    };
+    applyOutputPath();
+
+    auto applyCommonEmitOptions = [&](wolf_sv::emit::EmitOptions &emitOptions)
+    {
+        if (outputDirOverride)
+        {
+            emitOptions.outputDir = *outputDirOverride;
+        }
+        else if (emitOutputDir && !emitOutputDir->empty())
+        {
+            emitOptions.outputDir = *emitOutputDir;
+        }
+    };
 
     if (dumpAst == true) {
         std::cout << "=== AST JSON ===\n";
@@ -135,6 +208,11 @@ int main(int argc, char **argv)
 
         wolf_sv::emit::EmitOptions emitOptions;
         emitOptions.jsonMode = wolf_sv::emit::JsonPrintMode::PrettyCompact;
+        applyCommonEmitOptions(emitOptions);
+        if (jsonOutputName)
+        {
+            emitOptions.outputFilename = *jsonOutputName;
+        }
 
         wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         if (!emitDiagnostics.empty())
@@ -177,6 +255,11 @@ int main(int argc, char **argv)
         wolf_sv::emit::EmitDiagnostics emitDiagnostics;
         wolf_sv::emit::EmitSystemVerilog emitter(&emitDiagnostics);
         wolf_sv::emit::EmitOptions emitOptions;
+        applyCommonEmitOptions(emitOptions);
+        if (svOutputName)
+        {
+            emitOptions.outputFilename = *svOutputName;
+        }
 
         wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         if (!emitDiagnostics.empty())

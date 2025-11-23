@@ -7,4 +7,3 @@
   - 测试：`tests/emit/test_emit_sv.cpp` 构造多段网表（寄存器、mem 读写、掩码写、实例、DPI），检查无 `always @*`、端口 reg 宣告、DPI 语句存在；尝试 `verilator --lint-only`，若缺工具则跳过。
   - 构建：CMake 注册 emit-sv 测试目标。
 - **验证**：`cmake --build build && ctest` 全部通过，emit-sv 用例在本地环境 OK（lint 未强制）。生成样例见 `build/artifacts/emit/grh.sv`。
-- **遗留/风险**：未覆盖所有 Op（遇到未知种类仅警告）；未实现关键字冲突消歧/命名避让；复位/使能优先级与前端约定需在后续阶段补充校验。*** End Patch ***!
