@@ -5486,16 +5486,17 @@ grh::Value* RHSConverter::convertReplication(const slang::ast::ReplicationExpres
 }
 
 grh::Value* RHSConverter::convertConversion(const slang::ast::ConversionExpression& expr) {
+    const TypeInfo info = deriveTypeInfo(*expr.type);
+    if (std::optional<slang::SVInt> constant = evaluateConstantSvInt(expr)) {
+        return createConstantValue(*constant, *expr.type, "convert");
+    }
+
     grh::Value* operand = convert(expr.operand());
     if (!operand) {
         return nullptr;
     }
 
-    const TypeInfo info = deriveTypeInfo(*expr.type);
-    if (operand->width() == info.width && operand->isSigned() == info.isSigned) {
-        return operand;
-    }
-    return buildAssign(*operand, expr, "convert");
+    return resizeValue(*operand, *expr.type, info, expr, "convert");
 }
 
 grh::Value* RHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
@@ -5589,6 +5590,76 @@ grh::Value* RHSConverter::buildAssign(grh::Value& input, const slang::ast::Expre
     op.addOperand(input);
     grh::Value& result = createTemporaryValue(*originExpr.type, hint);
     op.addResult(result);
+    return &result;
+}
+
+grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type& targetType,
+                                      const TypeInfo& targetInfo,
+                                      const slang::ast::Expression& originExpr,
+                                      std::string_view hint) {
+    if (!graph_) {
+        return nullptr;
+    }
+
+    const int64_t targetWidth = targetInfo.width > 0 ? targetInfo.width : 1;
+    const int64_t inputWidth = input.width() > 0 ? input.width() : 1;
+
+    if (inputWidth == targetWidth && input.isSigned() == targetInfo.isSigned) {
+        return &input;
+    }
+
+    if (inputWidth == targetWidth) {
+        return buildAssign(input, originExpr, hint);
+    }
+
+    if (inputWidth > targetWidth) {
+        grh::Operation& slice = createOperation(grh::OperationKind::kSliceStatic, hint);
+        slice.addOperand(input);
+        slice.setAttribute("sliceStart", int64_t(0));
+        slice.setAttribute("sliceEnd", targetWidth - 1);
+        grh::Value& result = createTemporaryValue(targetType, hint);
+        slice.addResult(result);
+        return &result;
+    }
+
+    const int64_t extendWidth = targetWidth - inputWidth;
+    grh::Operation& concat = createOperation(grh::OperationKind::kConcat, hint);
+
+    grh::Value* extendValue = nullptr;
+    if (input.isSigned()) {
+        // Sign extend using the operand's MSB.
+        grh::Operation& signSlice = createOperation(grh::OperationKind::kSliceStatic, "sign");
+        signSlice.addOperand(input);
+        signSlice.setAttribute("sliceStart", inputWidth - 1);
+        signSlice.setAttribute("sliceEnd", inputWidth - 1);
+
+        std::string signName = makeValueName("sign", valueCounter_++);
+        grh::Value& signBit = graph_->createValue(signName, 1, input.isSigned());
+        signSlice.addResult(signBit);
+
+        grh::Operation& rep = createOperation(grh::OperationKind::kReplicate, "signext");
+        rep.addOperand(signBit);
+        rep.setAttribute("rep", extendWidth);
+        std::string repName = makeValueName("signext", valueCounter_++);
+        grh::Value& extBits = graph_->createValue(repName, extendWidth, targetInfo.isSigned);
+        rep.addResult(extBits);
+        extendValue = &extBits;
+    }
+    else {
+        grh::Operation& zeroOp = createOperation(grh::OperationKind::kConstant, "zext");
+        std::string valName = makeValueName("zext", valueCounter_++);
+        grh::Value& zeros = graph_->createValue(valName, extendWidth, /*isSigned=*/false);
+        zeroOp.addResult(zeros);
+        std::ostringstream oss;
+        oss << extendWidth << "'h0";
+        zeroOp.setAttribute("constValue", oss.str());
+        extendValue = &zeros;
+    }
+
+    concat.addOperand(*extendValue);
+    concat.addOperand(input);
+    grh::Value& result = createTemporaryValue(targetType, hint);
+    concat.addResult(result);
     return &result;
 }
 
@@ -5722,6 +5793,22 @@ std::optional<int64_t> RHSConverter::evaluateConstantInt(const slang::ast::Expre
         return std::nullopt;
     }
     return *asInt;
+}
+
+std::optional<slang::SVInt> RHSConverter::evaluateConstantSvInt(
+    const slang::ast::Expression& expr) {
+    if (!origin_) {
+        return std::nullopt;
+    }
+
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    ctx.reset();
+    slang::ConstantValue value = expr.eval(ctx);
+    if (!value || !value.isInteger() || value.hasUnknown()) {
+        return std::nullopt;
+    }
+
+    return value.integer();
 }
 
 //===---------------------------------------------------------------------===//

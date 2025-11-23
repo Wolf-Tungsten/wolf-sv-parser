@@ -6,6 +6,7 @@
 #include <iostream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <variant>
 #include <system_error>
 
@@ -263,11 +264,33 @@ int main() {
     if (!replicateValue) {
         return fail("Failed to convert replicate_res RHS");
     }
-    const grh::Operation* replicateOp = replicateValue->definingOp();
-    if (replicateOp && replicateOp->kind() == grh::OperationKind::kAssign &&
-        !replicateOp->operands().empty()) {
-        replicateOp = replicateOp->operands()[0]->definingOp();
-    }
+    auto findReplicateOp = [](const grh::Value* value) -> const grh::Operation* {
+        if (!value) {
+            return nullptr;
+        }
+        std::vector<const grh::Operation*> stack;
+        if (const grh::Operation* root = value->definingOp()) {
+            stack.push_back(root);
+        }
+        while (!stack.empty()) {
+            const grh::Operation* op = stack.back();
+            stack.pop_back();
+            if (!op) {
+                continue;
+            }
+            if (op->kind() == grh::OperationKind::kReplicate) {
+                return op;
+            }
+            for (const grh::Value* operand : op->operands()) {
+                if (operand && operand->definingOp()) {
+                    stack.push_back(operand->definingOp());
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    const grh::Operation* replicateOp = findReplicateOp(replicateValue);
     if (!replicateOp || replicateOp->kind() != grh::OperationKind::kReplicate ||
         replicateOp->operands().size() != 1) {
         return fail("replicate_res missing kReplicate");

@@ -264,6 +264,9 @@ protected:
                          const slang::ast::Expression& originExpr);
     grh::Value* buildAssign(grh::Value& input, const slang::ast::Expression& originExpr,
                             std::string_view hint);
+    grh::Value* resizeValue(grh::Value& input, const slang::ast::Type& targetType,
+                            const TypeInfo& targetInfo, const slang::ast::Expression& originExpr,
+                            std::string_view hint);
 
     const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
     grh::Value* resolveMemoValue(const SignalMemoEntry& entry);
@@ -272,6 +275,7 @@ protected:
     void reportUnsupported(std::string_view what, const slang::ast::Expression& expr);
     slang::ast::EvalContext& ensureEvalContext();
     std::optional<int64_t> evaluateConstantInt(const slang::ast::Expression& expr);
+    std::optional<slang::SVInt> evaluateConstantSvInt(const slang::ast::Expression& expr);
 
 private:
     grh::Value* convertExpression(const slang::ast::Expression& expr);
