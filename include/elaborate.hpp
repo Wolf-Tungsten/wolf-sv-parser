@@ -37,6 +37,7 @@ class InstanceBodySymbol;
 class ValueSymbol;
 enum class EdgeKind;
 class Type;
+class PortSymbol;
 class GenerateBlockSymbol;
 class GenerateBlockArraySymbol;
 class Expression;
@@ -136,6 +137,32 @@ struct DpiImportEntry {
     std::string cIdentifier;
     std::vector<DpiImportArg> args;
     grh::Operation* importOp = nullptr;
+};
+
+/// Captures a port entry for a blackbox module.
+struct BlackboxPort {
+    const slang::ast::PortSymbol* symbol = nullptr;
+    std::string name;
+    slang::ast::ArgumentDirection direction = slang::ast::ArgumentDirection::In;
+    int64_t width = 0;
+    bool isSigned = false;
+};
+
+/// Captures parameter metadata for a blackbox module.
+struct BlackboxParameter {
+    std::string name;
+    std::string value;
+};
+
+/// Records blackbox module metadata for later instantiation.
+struct BlackboxMemoEntry {
+    const slang::ast::InstanceBodySymbol* body = nullptr;
+    std::string moduleName;
+    bool isBlackbox = false;
+    bool hasExplicitAttribute = false;
+    bool hasImplementation = false;
+    std::vector<BlackboxPort> ports;
+    std::vector<BlackboxParameter> parameters;
 };
 
 /// Records pending writes against memoized signals before SSA write-back.
@@ -858,6 +885,8 @@ private:
                          grh::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,
                                  grh::Graph& parentGraph, grh::Graph& targetGraph);
+    void createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
+                                 grh::Graph& parentGraph, const BlackboxMemoEntry& memo);
     grh::Value* ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);
     grh::Value* resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
                                        const slang::ast::Symbol* origin);
@@ -874,6 +903,8 @@ private:
     void ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     WriteBackMemo& ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body);
     void finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    const BlackboxMemoEntry* ensureBlackboxMemo(const slang::ast::InstanceBodySymbol& body);
+    const BlackboxMemoEntry* peekBlackboxMemo(const slang::ast::InstanceBodySymbol& body) const;
 
     ElaborateDiagnostics* diagnostics_;
     ElaborateOptions options_;
@@ -892,6 +923,7 @@ private:
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<DpiImportEntry>>
         dpiImports_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, WriteBackMemo> writeBackMemo_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, BlackboxMemoEntry> blackboxMemo_;
 };
 
 } // namespace wolf_sv

@@ -302,3 +302,28 @@
 > - slang 中 `ImportExportDecl`/`SubroutineSymbol::getDPIContext()` 描述了 DPI 属性，可直接读取 direction (`FormalArgumentSymbol::direction`) 与 `SubroutineSymbol::getReturnType()`。
 > - guard->enable 折叠可复用阶段22/23 的 `ensureGuardValue`；输出写回沿用 writeBack memo，在 `flushSeqStatements` 或专门的 `finalizeDpiCalls` 中一次性提交。
 > - 若未来需要支持 `DPI-C task` 或 `context/pure`，在当前阶段留下 `TODO` 某 diag code，便于后续扩展；同理，对于 inout 参数先报 “NYI: DPI inout”。
+
+## 阶段25：添加对 blackbox 的支持
+- 目标定位 让 elaborate 能区分“仅声明接口、不含实现”的黑盒模块，并在实例化时生成 GRH `kBlackbox` 节点（含参数/端口元数据），保证上游 net/reg/TypeHelper 信息与后端 netlist 生成功能一致。
+- 规范基础 参照 `docs/GRH-representation.md:586+` 对 `kBlackbox` 的 operands/results/attributes 要求；与 `kInstance` 不同，黑盒没有内部 graph，所有端口/参数信息需体现在 attributes 上。
+
+- KR1（识别与 blackboxMemo） 
+  - 在模块收集阶段识别 blackbox 声明：优先读取显式标记（如 `(* blackbox *)`、pragma 等），其次可用“模块体为空/仅含端口/参数声明”作为兜底判定；一旦发现过程语句/连续赋值/内部实例化则视为普通模块，不应落入 blackbox 流程。
+  - 建立 `blackboxMemo`（moduleName -> InterfaceMeta）：记录端口方向/名称/flatten 后的位宽与顺序、参数名及默认值（常量折叠为字符串），以及原始声明位置用于诊断。
+  - blackbox 必须有定义；遇到实例化未知模块且无 blackbox 声明时保持现有错误路径，避免默认为黑盒。
+
+- KR2（实例化生成 kBlackbox） 
+  - 实例 elaboration 阶段查 `blackboxMemo`：若命中则跳过内部建图，直接根据 memo 生成 `kBlackbox` Operation。attributes 需填充 `moduleName/instanceName/inputPortName/outputPortName/parameterNames/parameterValues`，operands/results 顺序与 memo flatten 顺序一致。
+  - 端口连线：借助 TypeHelper 对实例实参（含结构体/数组/切片）进行 flatten/位宽校验；输入端接到 operands，输出端创建 results 并写回对应 net/reg memo，以便后续驱动能引用到正确的 Value。
+  - 参数覆盖：处理 `#(...)` 实例参数，常量折叠为字符串填入 `parameterValues`，未覆盖的使用默认值；不支持的表达式需报错。若端口/参数数量或方向不符，应立即诊断。
+  - 支持 generate 内的 blackbox 实例，与普通实例相同纳入层次遍历；确保不会尝试为黑盒生成子 graph，也不会与 `kInstance` 的模块缓存冲突。
+
+- KR3（测试与验收）
+  - 新增 `tests/data/elaborate/blackbox.sv`：含一个显式标记为 blackbox 的模块（带参数、向量端口），以及多个实例（直接实例、带参数覆盖、generate 内实例）。期望生成的 `kBlackbox` 节点 attributes/operands/results 与接口一致。
+  - 添加负例：同名模块若包含过程语句应被视作普通模块或报错而非黑盒；端口连接缺失/位宽不匹配/未知模块实例化应产生诊断。
+  - 在 `tests/elaborate/test_elaborate_blackbox.cpp` 验证 `kBlackbox` 数量、端口名/参数名数组、参数值、操作数绑定和 result 回填；将样例纳入 `ctest`，确保前序阶段用例回归稳定。
+
+> 实现提示
+> - blackbox 判定逻辑应集中在模块元信息收集处，避免在实例化阶段重复推导；对 pragma/attribute 的解析可复用 slang 的属性接口。
+> - 构造 `kBlackbox` 时复用已有 `kInstance` 的端口 flatten/连接助手，确保 input/output 顺序统一；inout 如未支持需显式报 NYI。
+> - parameterValues 建议统一保存为字符串（常量值转十进制或源码文本一致），保持与规范生成语义匹配；在 diag 中打印实例名与模块名便于定位。

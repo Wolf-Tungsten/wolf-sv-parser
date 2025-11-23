@@ -1,5 +1,5 @@
 typedef struct packed {
-    logic [7:0] lane[2];
+    logic [1:0][7:0] lane;
 } vec2_t;
 
 module dpic_stage24(

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "slang/ast/ASTVisitor.h"
+#include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/Symbol.h"
@@ -35,6 +36,7 @@
 #include "slang/ast/statements/ConditionalStatements.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
+#include "slang/ast/symbols/AttributeSymbol.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
@@ -130,6 +132,41 @@ std::string normalizeDisplayKind(std::string_view name) {
         lowered.erase(lowered.begin());
     }
     return lowered.empty() ? std::string("display") : lowered;
+}
+
+bool hasBlackboxAttribute(const slang::ast::InstanceBodySymbol& body) {
+    auto checkAttrs = [](std::span<const slang::ast::AttributeSymbol* const> attrs) {
+        for (const slang::ast::AttributeSymbol* attr : attrs) {
+            if (!attr) {
+                continue;
+            }
+            const std::string lowered = toLowerCopy(attr->name);
+            if (lowered == "blackbox" || lowered == "black_box" || lowered == "syn_black_box") {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    slang::ast::Compilation& compilation = body.getCompilation();
+    if (checkAttrs(compilation.getAttributes(body.getDefinition()))) {
+        return true;
+    }
+    return checkAttrs(compilation.getAttributes(body));
+}
+
+bool hasBlackboxImplementation(const slang::ast::InstanceBodySymbol& body) {
+    for (const slang::ast::Symbol& member : body.members()) {
+        if (member.as_if<slang::ast::ContinuousAssignSymbol>() ||
+            member.as_if<slang::ast::ProceduralBlockSymbol>() ||
+            member.as_if<slang::ast::InstanceSymbol>() ||
+            member.as_if<slang::ast::InstanceArraySymbol>() ||
+            member.as_if<slang::ast::GenerateBlockSymbol>() ||
+            member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool classifyAssertSystemTask(std::string_view name, std::string& severity) {
@@ -257,14 +294,85 @@ struct TypeHelper {
     struct Info {
         int64_t width = 0;
         bool isSigned = false;
+        bool widthKnown = false;
         std::vector<Field> fields;
     };
+
+    static uint64_t computeFixedWidth(const slang::ast::Type& type,
+                                      const slang::ast::Symbol& origin,
+                                      ElaborateDiagnostics* diagnostics) {
+        const uint64_t bitstreamWidth = type.getBitstreamWidth();
+        if (bitstreamWidth > 0) {
+            return bitstreamWidth;
+        }
+        if (type.hasFixedRange()) {
+            const uint64_t selectable = type.getSelectableWidth();
+            if (selectable > 0) {
+                return selectable;
+            }
+        }
+
+        const slang::ast::Type& canonical = type.getCanonicalType();
+        auto accumulateStruct = [&](const slang::ast::Scope& scope, bool isUnion) -> uint64_t {
+            uint64_t total = 0;
+            uint64_t maxWidth = 0;
+            for (const auto& field : scope.membersOfType<slang::ast::FieldSymbol>()) {
+                const uint64_t fieldWidth =
+                    computeFixedWidth(field.getType(), field, diagnostics);
+                if (fieldWidth == 0) {
+                    continue;
+                }
+                total += fieldWidth;
+                if (fieldWidth > maxWidth) {
+                    maxWidth = fieldWidth;
+                }
+            }
+            return isUnion ? maxWidth : total;
+        };
+
+        switch (canonical.kind) {
+        case slang::ast::SymbolKind::PackedArrayType: {
+            const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+            const uint64_t elementWidth = computeFixedWidth(packed.elementType, origin, diagnostics);
+            if (elementWidth == 0) {
+                return 0;
+            }
+            const uint64_t elements = static_cast<uint64_t>(packed.range.width());
+            return elementWidth * elements;
+        }
+        case slang::ast::SymbolKind::FixedSizeUnpackedArrayType: {
+            const auto& unpacked = canonical.as<slang::ast::FixedSizeUnpackedArrayType>();
+            const uint64_t elementWidth = computeFixedWidth(unpacked.elementType, origin, diagnostics);
+            if (elementWidth == 0) {
+                return 0;
+            }
+            const uint64_t elements = static_cast<uint64_t>(unpacked.range.width());
+            return elementWidth * elements;
+        }
+        case slang::ast::SymbolKind::PackedStructType:
+            return accumulateStruct(canonical.as<slang::ast::Scope>(), /* isUnion */ false);
+        case slang::ast::SymbolKind::UnpackedStructType:
+            return accumulateStruct(canonical.as<slang::ast::Scope>(), /* isUnion */ false);
+        case slang::ast::SymbolKind::PackedUnionType:
+            return accumulateStruct(canonical.as<slang::ast::Scope>(), /* isUnion */ true);
+        case slang::ast::SymbolKind::UnpackedUnionType:
+            return accumulateStruct(canonical.as<slang::ast::Scope>(), /* isUnion */ true);
+        case slang::ast::SymbolKind::TypeAlias: {
+            const auto& alias = canonical.as<slang::ast::TypeAliasType>();
+            return computeFixedWidth(alias.targetType.getType(), origin, diagnostics);
+        }
+        default:
+            break;
+        }
+        return bitstreamWidth;
+    }
 
     static Info analyze(const slang::ast::Type& type, const slang::ast::Symbol& origin,
                         ElaborateDiagnostics* diagnostics) {
         Info info{};
-        const uint64_t bitstreamWidth = type.getBitstreamWidth();
-        info.width = clampBitWidth(bitstreamWidth, diagnostics, origin);
+        const uint64_t fixedWidth = computeFixedWidth(type, origin, diagnostics);
+        info.widthKnown = fixedWidth > 0;
+        info.width = clampBitWidth(fixedWidth, diagnostics, origin);
         info.isSigned = type.isSigned();
         if (info.width <= 0) {
             info.width = 1;
@@ -5934,6 +6042,22 @@ Elaborate::peekDpiImports(const slang::ast::InstanceBodySymbol& body) const {
     return {};
 }
 
+const BlackboxMemoEntry*
+Elaborate::peekBlackboxMemo(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = blackboxMemo_.find(&body); it != blackboxMemo_.end()) {
+        return &it->second;
+    }
+
+    if (body.parentInstance) {
+        if (const auto* canonical = body.parentInstance->getCanonicalBody()) {
+            if (auto it = blackboxMemo_.find(canonical); it != blackboxMemo_.end()) {
+                return &it->second;
+            }
+        }
+    }
+    return nullptr;
+}
+
 grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instance,
                                         grh::Netlist& netlist, bool& wasCreated) {
     const slang::ast::InstanceBodySymbol* canonicalBody = instance.getCanonicalBody();
@@ -6000,15 +6124,6 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
             }
 
             const slang::ast::Type& type = port->getType();
-            if (!type.isFixedSize() || !type.isBitstreamType()) {
-                if (diagnostics_) {
-                    std::ostringstream oss;
-                    oss << "Port type is not a fixed-size bitstream (type: " << type.toString()
-                        << "); using placeholder width";
-                    diagnostics_->nyi(*port, oss.str());
-                }
-            }
-
             TypeHelper::Info typeInfo = TypeHelper::analyze(type, *port, diagnostics_);
             const int64_t width = typeInfo.width > 0 ? typeInfo.width : 1;
             const bool isSigned = typeInfo.isSigned;
@@ -6098,7 +6213,13 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
         return;
     }
 
+    const BlackboxMemoEntry* blackbox = ensureBlackboxMemo(body);
+    const bool isBlackbox = blackbox && blackbox->isBlackbox;
+
     populatePorts(instance, body, graph);
+    if (isBlackbox) {
+        return;
+    }
     emitModulePlaceholder(instance, graph);
     collectDpiImports(body);
     collectSignalMemos(body);
@@ -6299,6 +6420,11 @@ void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,
         return;
     }
 
+    const slang::ast::InstanceBodySymbol* canonicalBody = childInstance.getCanonicalBody();
+    const slang::ast::InstanceBodySymbol& memoBody =
+        canonicalBody ? *canonicalBody : childInstance.body;
+    const BlackboxMemoEntry* blackbox = ensureBlackboxMemo(memoBody);
+
     bool childCreated = false;
     grh::Graph* childGraph = materializeGraph(childInstance, netlist, childCreated);
     if (!childGraph) {
@@ -6306,6 +6432,11 @@ void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,
     }
 
     convertInstanceBody(childInstance, *childGraph, netlist);
+    if (blackbox && blackbox->isBlackbox) {
+        createBlackboxOperation(childInstance, parentGraph, *blackbox);
+        return;
+    }
+
     createInstanceOperation(childInstance, parentGraph, *childGraph);
 }
 
@@ -6395,6 +6526,98 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
     op.setAttribute("instanceName", instanceName);
     op.setAttribute("inputPortName", inputPortNames);
     op.setAttribute("outputPortName", outputPortNames);
+}
+
+void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
+                                        grh::Graph& parentGraph, const BlackboxMemoEntry& memo) {
+    std::string baseName =
+        childInstance.name.empty() ? std::string("inst") : std::string(childInstance.name);
+    std::string opName = makeUniqueOperationName(parentGraph, baseName);
+    grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kBlackbox, opName);
+
+    std::string instanceName = childInstance.name.empty()
+                                   ? deriveSymbolPath(childInstance)
+                                   : std::string(childInstance.name);
+    if (instanceName.empty()) {
+        instanceName = "_inst_" + std::to_string(instanceCounter_++);
+    }
+
+    std::vector<std::string> inputPortNames;
+    std::vector<std::string> outputPortNames;
+    inputPortNames.reserve(memo.ports.size());
+    outputPortNames.reserve(memo.ports.size());
+
+    for (const BlackboxPort& portMeta : memo.ports) {
+        const slang::ast::Symbol* symbol = childInstance.body.findPort(portMeta.name);
+        const auto* port = symbol ? symbol->as_if<slang::ast::PortSymbol>() : nullptr;
+        if (!port) {
+            if (diagnostics_) {
+                diagnostics_->nyi(childInstance, "Port lookup failed for blackbox connection");
+            }
+            continue;
+        }
+
+        const auto* connection = childInstance.getPortConnection(*port);
+        if (!connection) {
+            if (diagnostics_) {
+                diagnostics_->nyi(*port, "Missing port connection during blackbox elaboration");
+            }
+            continue;
+        }
+
+        const slang::ast::Expression* expr = connection->getExpression();
+        if (!expr) {
+            if (diagnostics_) {
+                diagnostics_->nyi(*port, "Port connection without explicit expression");
+            }
+            continue;
+        }
+
+        grh::Value* value = resolveConnectionValue(*expr, parentGraph, port);
+        if (!value) {
+            continue;
+        }
+
+        if (diagnostics_ && portMeta.width > 0 && value->width() != portMeta.width) {
+            std::ostringstream oss;
+            oss << "Port width mismatch for " << portMeta.name << " (expected " << portMeta.width
+                << ", got " << value->width() << ")";
+            diagnostics_->nyi(*port, oss.str());
+        }
+
+        switch (portMeta.direction) {
+        case slang::ast::ArgumentDirection::In:
+            op.addOperand(*value);
+            inputPortNames.emplace_back(portMeta.name);
+            break;
+        case slang::ast::ArgumentDirection::Out:
+            op.addResult(*value);
+            outputPortNames.emplace_back(portMeta.name);
+            break;
+        default:
+            if (diagnostics_) {
+                diagnostics_->nyi(*port,
+                                  "InOut/Ref port directions are not supported for blackbox");
+            }
+            break;
+        }
+    }
+
+    std::vector<std::string> parameterNames;
+    std::vector<std::string> parameterValues;
+    parameterNames.reserve(memo.parameters.size());
+    parameterValues.reserve(memo.parameters.size());
+    for (const BlackboxParameter& param : memo.parameters) {
+        parameterNames.push_back(param.name);
+        parameterValues.push_back(param.value);
+    }
+
+    op.setAttribute("moduleName", memo.moduleName);
+    op.setAttribute("instanceName", instanceName);
+    op.setAttribute("inputPortName", inputPortNames);
+    op.setAttribute("outputPortName", outputPortNames);
+    op.setAttribute("parameterNames", parameterNames);
+    op.setAttribute("parameterValues", parameterValues);
 }
 
 grh::Value* Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbol,
@@ -6642,6 +6865,134 @@ void Elaborate::finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body
     it->second.finalize(graph, diagnostics_);
 }
 
+const BlackboxMemoEntry*
+Elaborate::ensureBlackboxMemo(const slang::ast::InstanceBodySymbol& body) {
+    if (auto it = blackboxMemo_.find(&body); it != blackboxMemo_.end()) {
+        return &it->second;
+    }
+
+    const slang::ast::InstanceBodySymbol* keyBody = &body;
+    if (body.parentInstance) {
+        if (const auto* canonical = body.parentInstance->getCanonicalBody()) {
+            keyBody = canonical;
+            if (auto it = blackboxMemo_.find(keyBody); it != blackboxMemo_.end()) {
+                auto [aliasIt, _] = blackboxMemo_.emplace(&body, it->second);
+                return &aliasIt->second;
+            }
+        }
+    }
+
+    BlackboxMemoEntry entry;
+    entry.body = keyBody;
+    entry.moduleName = body.getDefinition().name.empty()
+                           ? deriveSymbolPath(body.getDefinition())
+                           : std::string(body.getDefinition().name);
+    if (entry.moduleName.empty()) {
+        entry.moduleName = "_anonymous_module";
+    }
+
+    entry.hasExplicitAttribute = hasBlackboxAttribute(body);
+    entry.hasImplementation = hasBlackboxImplementation(body);
+    if (entry.hasExplicitAttribute && entry.hasImplementation && diagnostics_) {
+        diagnostics_->nyi(body.getDefinition(),
+                          "Module marked as blackbox but contains implementation; treating as "
+                          "normal module body");
+    }
+    entry.isBlackbox = (entry.hasExplicitAttribute || !entry.hasImplementation) &&
+                       !entry.hasImplementation;
+
+    if (entry.isBlackbox) {
+        entry.ports.reserve(body.getPortList().size());
+        for (const slang::ast::Symbol* portSymbol : body.getPortList()) {
+            if (!portSymbol) {
+                continue;
+            }
+
+            if (const auto* port = portSymbol->as_if<slang::ast::PortSymbol>()) {
+                if (port->isNullPort || port->name.empty()) {
+                    handleUnsupportedPort(*port,
+                                          port->isNullPort ? "null ports are not supported"
+                                                           : "anonymous ports are not supported",
+                                          diagnostics_);
+                    continue;
+                }
+
+                const slang::ast::Type& type = port->getType();
+                TypeHelper::Info info = TypeHelper::analyze(type, *port, diagnostics_);
+                BlackboxPort memoPort;
+                memoPort.symbol = port;
+                memoPort.name = port->name;
+                memoPort.direction = port->direction;
+                memoPort.width = info.width > 0 ? info.width : 1;
+                memoPort.isSigned = info.isSigned;
+
+                switch (port->direction) {
+                case slang::ast::ArgumentDirection::In:
+                case slang::ast::ArgumentDirection::Out:
+                    entry.ports.push_back(std::move(memoPort));
+                    break;
+                case slang::ast::ArgumentDirection::InOut:
+                case slang::ast::ArgumentDirection::Ref:
+                    handleUnsupportedPort(
+                        *port,
+                        std::string("direction ") + std::string(slang::ast::toString(port->direction)),
+                        diagnostics_);
+                    break;
+                default:
+                    handleUnsupportedPort(*port, "unknown direction", diagnostics_);
+                    break;
+                }
+                continue;
+            }
+
+            if (const auto* multi = portSymbol->as_if<slang::ast::MultiPortSymbol>()) {
+                handleUnsupportedPort(*multi, "multi-port aggregations", diagnostics_);
+                continue;
+            }
+
+            if (const auto* iface = portSymbol->as_if<slang::ast::InterfacePortSymbol>()) {
+                handleUnsupportedPort(*iface, "interface ports", diagnostics_);
+                continue;
+            }
+
+            handleUnsupportedPort(*portSymbol, "unhandled symbol kind", diagnostics_);
+        }
+
+        for (const slang::ast::ParameterSymbolBase* paramBase : body.getParameters()) {
+            if (!paramBase) {
+                continue;
+            }
+
+            BlackboxParameter param;
+            param.name = paramBase->symbol.name.empty() ? std::string() : std::string(paramBase->symbol.name);
+            if (param.name.empty()) {
+                continue;
+            }
+
+            if (const auto* valueParam = paramBase->symbol.as_if<slang::ast::ParameterSymbol>()) {
+                param.value = parameterValueToString(valueParam->getValue());
+            }
+            else if (const auto* typeParam =
+                         paramBase->symbol.as_if<slang::ast::TypeParameterSymbol>()) {
+                param.value = typeParameterToString(*typeParam);
+            }
+            else {
+                param.value = "unsupported_param";
+            }
+
+            entry.parameters.push_back(std::move(param));
+        }
+    }
+
+    auto [it, inserted] = blackboxMemo_.emplace(keyBody, std::move(entry));
+    if (keyBody != &body) {
+        blackboxMemo_.emplace(&body, it->second);
+        auto aliasIt = blackboxMemo_.find(&body);
+        return aliasIt != blackboxMemo_.end() ? &aliasIt->second : nullptr;
+    }
+    return &it->second;
+}
+
 std::string Elaborate::makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
                                                   std::string_view fallback, grh::Graph& graph) {
     if (!symbol.name.empty()) {
@@ -6671,14 +7022,6 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
     auto registerCandidate = [&](const slang::ast::ValueSymbol& symbol) {
         const slang::ast::Type& type = symbol.getType();
-        if (!type.isFixedSize() || !type.isBitstreamType()) {
-            if (diagnostics_) {
-                diagnostics_->nyi(symbol,
-                                  "Skipping memoization for non bitstream, fixed-size signal type");
-            }
-            return;
-        }
-
         TypeHelper::Info info = TypeHelper::analyze(type, symbol, diagnostics_);
 
         SignalMemoEntry entry;
@@ -6921,13 +7264,13 @@ void Elaborate::collectDpiImports(const slang::ast::InstanceBodySymbol& body) {
                     valid = false;
                     break;
                 }
-        const slang::ast::Type& type = arg->getType();
-        if (!type.isFixedSize()) {
-            report(*arg, "DPI 参数必须是固定宽度类型");
-            valid = false;
-            break;
-        }
-        TypeHelper::Info info = TypeHelper::analyze(type, *arg, diagnostics_);
+                const slang::ast::Type& type = arg->getType();
+                TypeHelper::Info info = TypeHelper::analyze(type, *arg, diagnostics_);
+                if (!info.widthKnown) {
+                    report(*arg, "DPI 参数必须是固定宽度类型");
+                    valid = false;
+                    break;
+                }
                 DpiImportArg argInfo;
                 argInfo.name =
                     arg->name.empty() ? (std::string("arg") + std::to_string(index))

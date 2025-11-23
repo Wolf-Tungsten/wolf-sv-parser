@@ -247,6 +247,23 @@ target_compile_definitions(elaborate-stage21
 
 register_test_exe(elaborate-stage21)
 
+# elaborate: blackbox
+add_executable(elaborate-blackbox
+    tests/elaborate/test_elaborate_blackbox.cpp
+)
+
+target_link_libraries(elaborate-blackbox
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-blackbox
+    PRIVATE
+        WOLF_SV_ELAB_BLACKBOX_DATA_PATH="${ELABORATE_INPUT_DIR}/blackbox.sv"
+)
+
+register_test_exe(elaborate-blackbox)
+
 # elaborate: dpic
 add_executable(elaborate-dpic
     tests/elaborate/test_elaborate_dpic.cpp
