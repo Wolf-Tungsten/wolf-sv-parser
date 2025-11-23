@@ -8,6 +8,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <variant>
+#include <span>
 #include <vector>
 
 namespace slang {
@@ -203,6 +204,10 @@ private:
 class Netlist {
 public:
     Netlist() = default;
+    Netlist(Netlist&& other) noexcept;
+    Netlist& operator=(Netlist&& other) noexcept;
+    Netlist(const Netlist&) = delete;
+    Netlist& operator=(const Netlist&) = delete;
 
     Graph& createGraph(std::string name);
     Graph* findGraph(std::string_view name) noexcept;
@@ -215,10 +220,12 @@ public:
     const std::vector<std::unique_ptr<Graph>>& graphs() const noexcept { return graphs_; }
 
     std::string toJsonString(bool pretty = true) const;
+    std::string toJsonString(std::span<const Graph* const> topGraphs, bool pretty) const;
     static Netlist fromJsonString(std::string_view json);
 
 private:
     Graph& addGraphInternal(std::unique_ptr<Graph> graph);
+    void resetGraphOwners();
 
     std::vector<std::unique_ptr<Graph>> graphs_;
     std::map<std::string, Graph*> graphByName_;

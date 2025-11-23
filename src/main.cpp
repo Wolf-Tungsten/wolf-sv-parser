@@ -1,3 +1,4 @@
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -13,6 +14,7 @@
 #include "slang/text/Json.h"
 
 #include "elaborate.hpp"
+#include "emit.hpp"
 
 using namespace slang::driver;
 
@@ -123,12 +125,52 @@ int main(int argc, char **argv)
         }
     }
 
+    bool emitOk = true;
     if (dumpGrh == true)
     {
-        std::cout << "=== GRH JSON ===\n";
-        std::cout << netlist.toJsonString(true) << '\n';
+        wolf_sv::emit::EmitDiagnostics emitDiagnostics;
+        wolf_sv::emit::EmitJSON emitter(&emitDiagnostics);
+
+        wolf_sv::emit::EmitOptions emitOptions;
+        emitOptions.prettyPrint = true;
+
+        wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        if (!emitDiagnostics.empty())
+        {
+            for (const auto &message : emitDiagnostics.messages())
+            {
+                const char *tag = message.kind == wolf_sv::emit::EmitDiagnosticKind::Error ? "error" : "warn";
+                std::cerr << "[emit-json] [" << tag << "] " << message.message;
+                if (!message.context.empty())
+                {
+                    std::cerr << " (" << message.context << ")";
+                }
+                std::cerr << '\n';
+            }
+        }
+
+        emitOk = emitResult.success && !emitDiagnostics.hasError();
+        if (emitResult.success && !emitResult.artifacts.empty())
+        {
+            std::cout << "=== GRH JSON ===\n";
+            std::ifstream jsonFile(emitResult.artifacts.front());
+            if (!jsonFile.is_open())
+            {
+                std::cerr << "[emit-json] Failed to read emitted artifact: " << emitResult.artifacts.front() << '\n';
+                emitOk = false;
+            }
+            else
+            {
+                std::cout << jsonFile.rdbuf() << '\n';
+            }
+        }
+        else if (!emitResult.success)
+        {
+            std::cerr << "[emit-json] Failed to emit GRH JSON\n";
+        }
     }
 
     bool ok = driver.reportDiagnostics(/* quiet */ false);
+    ok = ok && emitOk;
     return ok ? 0 : 4;
 }

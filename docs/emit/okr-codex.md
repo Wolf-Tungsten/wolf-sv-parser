@@ -22,3 +22,22 @@
   - CMake/编译配置中能找到新文件，编译通过且不破坏现有管线。
   - 头文件声明的入口和选项结构稳定清晰，具备可扩展性和最小诊断能力。
   - 测试目录与占位样例就绪，至少包含针对基类框架的空跑/失败路径测试计划或骨架。
+
+## 阶段2：将 JSON 生成迁移到 EmitJSON 中
+- **目标定位** 把目前散落在 GRH/Elaborate 内的 JSON 序列化集中到 `EmitJSON` 派生类中，实现更轻量的输出格式与统一的入口，同时为 CLI/测试提供稳定的接口。
+- **KR1 对齐：JSON 格式规范与文档**
+  - 梳理现有 `Netlist::toJsonString`、`Graph::writeJson` 输出的字段，制定压缩命名规则（如 `ops`、`vals`、`attrs`、`in`/`out`、`kind` 简写），保持可读性的前提下减少冗余 key。
+  - 约定排序与布局：模块按名称排序，端口按名称排序，Operation/Value 均按插入顺序；Value、Operation、Port等小结构单行展示，Operation/Graph 支持 pretty/compact 两种模式。
+  - 在 `docs/GRH-JSON-spec.md` 编写规范：顶层结构、字段含义、类型约束、示例片段、与 `docs/GRH-representation.md` 的对应关系以及兼容性/未来扩展预留。
+- **KR2 对齐：EmitJSON 实现与集成**
+  - 新增 `EmitJSON`（头在emit.hpp/源文件在emit.cpp，命名空间 emit），继承基类并实现 `emitImpl`：接受 `Netlist` 和顶层列表，输出到指定目录（默认 `grh.json`），支持 `prettyPrint` 开关。
+  - 重构 `grh::Netlist::toJsonString` 等现有入口：视需求改为薄包装调用 `EmitJSON` 或保留作调试但复用相同格式，避免双份逻辑。
+  - 更新 CLI `--dump-grh` 和内部调用路径，改用 `EmitJSON`，确保诊断透传（如缺少 top 时提示）并保持现有行为兼容。
+- **KR3 对齐：测试与回归覆盖**
+  - 在 `tests/emit` 增加针对 `EmitJSON` 的单元测试：1）空/无顶层报错；2）单模块最小网表输出、校验关键字段与 key 简写；3）pretty/compact 差异。
+  - 回归现有依赖 JSON 的测试（例如 `tests/grh/test_grh.cpp` 写文件路径、elaborate 阶段 JSON dump），迁移到新接口或更新期望输出，确保 ctest 全通过。
+  - 在 `tests/data/emit` 添加示例网表与期望 JSON 片段（可简短），用于格式断言；确保 CMake 将 EmitJSON 测试纳入默认测试集。
+- **验收口径**
+  - `docs/GRH-JSON-spec.md` 完成并描述清晰的字段/示例与兼容策略。
+  - `EmitJSON` 可在 CLI/测试中成功输出 JSON，缺失 top 等异常能返回诊断，格式满足压缩与排序约定。
+  - 所有受影响测试更新并通过（ctest），不再依赖旧的 GRH 内建序列化路径或已与新实现一致。

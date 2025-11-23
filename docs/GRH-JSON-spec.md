@@ -1,0 +1,41 @@
+# GRH JSON 规范（EmitJSON）
+
+EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口。默认写入 `grh.json`（位于 `EmitOptions::outputDir`，缺省为当前工作目录），并支持 `prettyPrint` 控制缩进/换行。
+
+## 顶层结构
+- `graphs`: 按图名升序排列的数组，每个元素为单个 Graph 描述。
+- `tops`: 顶层图名数组，顺序遵循 `Emit` 解析后的顶层列表（包括 `topOverrides`）。
+
+## Graph 结构（按字段顺序输出）
+- `name`: 图名称。
+- `vals`: 值列表，保持创建顺序。每个值包含：
+  - `sym`: 符号名。
+  - `w`: 位宽。
+  - `sgn`: 是否有符号。
+  - `in` / `out`: 输入/输出标记（不可同时为真）。
+  - `def`: 可选，定义该值的 Operation 符号。
+  - `users`: 使用者数组 `{ op, idx }`，描述操作与操作数索引。
+- `ports`: 端口对象，键按名称排序。
+  - `in`: 输入端口数组，每项 `{ name, val }`。
+  - `out`: 输出端口数组，每项 `{ name, val }`。
+- `ops`: 操作列表，保持创建顺序。每个操作包含：
+  - `sym`: 符号名。
+  - `kind`: 操作类型字符串（来自 `grh::toString(OperationKind)`）。
+  - `in` / `out`: 操作数与结果符号数组，保持插入顺序。
+  - `attrs`: 可选属性对象，键为属性名，值为属性负载。
+
+## 属性编码
+- 属性负载统一为对象 `{ k: <kind>, v?: <scalar>, vs?: <array> }`。
+- 支持的 `k`：`bool`、`int`、`double`、`string`、`bool[]`、`int[]`、`double[]`、`string[]`。
+- 标量使用 `v`，数组使用 `vs`，数组条目保持给定顺序；非有限浮点将被拒绝。
+
+## 排序与布局约定
+- Graph 列表按名称排序，Ports 按名称排序；`vals`、`ops` 保留创建顺序；`attrs` 依赖 `std::map` 的有序键。
+- `prettyPrint=true` 时使用缩进与换行，`prettyPrint=false` 时为紧凑单行布局（用于文件体积最小化）。
+
+## 兼容性
+- 解析器仍接受阶段 1 的键（如 `values`/`operations`、`type`/`symbol`、`operands`/`results`、`attributes` + `kind`/`value`/`values` 以及 `topGraphs`），但 EmitJSON 写出的格式遵循上述压缩命名。
+- 期望使用新键名进行外部交互，新旧混排时会优先解析压缩键。
+
+## 示例
+- `tests/data/emit/demo_expected.json` 提供了压缩键风格的示例输出片段，可用于格式对齐或黄金回归。

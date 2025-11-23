@@ -68,6 +68,7 @@ add_executable(wolf-sv-compiler
 target_link_libraries(wolf-sv-compiler
     PRIVATE
         elaborate
+        emit
 )
 
 enable_testing()
@@ -127,6 +128,22 @@ target_compile_definitions(emit-base
 )
 
 register_test_exe(emit-base)
+
+add_executable(emit-json
+    tests/emit/test_emit_json.cpp
+)
+
+target_link_libraries(emit-json
+    PRIVATE
+        emit
+)
+
+target_compile_definitions(emit-json
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-json)
 
 # elaborate: smoke
 add_executable(elaborate-smoke

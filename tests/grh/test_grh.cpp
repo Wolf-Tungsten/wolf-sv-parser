@@ -252,19 +252,21 @@ int main()
   "graphs": [
     {
       "name": "illegal_nested_array",
-      "values": [],
-      "inputPorts": {},
-      "outputPorts": {},
-      "operations": [
+      "vals": [],
+      "ports": {
+        "in": [],
+        "out": []
+      },
+      "ops": [
         {
-          "type": "kAdd",
-          "symbol": "bad",
-          "operands": [],
-          "results": [],
-          "attributes": {
+          "sym": "bad",
+          "kind": "kAdd",
+          "in": [],
+          "out": [],
+          "attrs": {
             "illegal": {
-              "kind": "int_array",
-              "values": [
+              "k": "int[]",
+              "vs": [
                 1,
                 [2, 3]
               ]
@@ -274,7 +276,7 @@ int main()
       ]
     }
   ],
-  "topGraphs": []
+  "tops": []
 })";
         bool threwOnNestedArrayAttribute = expectThrows([&]
                                                         { Netlist::fromJsonString(nestedArrayJson); });
@@ -287,19 +289,21 @@ int main()
   "graphs": [
     {
       "name": "illegal_object_attr",
-      "values": [],
-      "inputPorts": {},
-      "outputPorts": {},
-      "operations": [
+      "vals": [],
+      "ports": {
+        "in": [],
+        "out": []
+      },
+      "ops": [
         {
-          "type": "kAdd",
-          "symbol": "bad_obj",
-          "operands": [],
-          "results": [],
-          "attributes": {
+          "sym": "bad_obj",
+          "kind": "kAdd",
+          "in": [],
+          "out": [],
+          "attrs": {
             "illegal": {
-              "kind": "string",
-              "value": {
+              "k": "string",
+              "v": {
                 "unexpected": "object"
               }
             }
@@ -308,7 +312,7 @@ int main()
       ]
     }
   ],
-  "topGraphs": []
+  "tops": []
 })";
         bool threwOnObjectAttribute = expectThrows([&]
                                                    { Netlist::fromJsonString(objectAttributeJson); });

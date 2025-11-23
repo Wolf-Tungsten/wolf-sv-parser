@@ -87,4 +87,15 @@ namespace wolf_sv::emit
         EmitDiagnostics *diagnostics_ = nullptr;
     };
 
+    class EmitJSON : public Emit
+    {
+    public:
+        using Emit::Emit;
+
+    private:
+        EmitResult emitImpl(const grh::Netlist &netlist,
+                            std::span<const grh::Graph *const> topGraphs,
+                            const EmitOptions &options) override;
+    };
+
 } // namespace wolf_sv::emit

@@ -1,5 +1,6 @@
 #include "emit.hpp"
 
+#include <exception>
 #include <system_error>
 #include <unordered_set>
 
@@ -157,6 +158,37 @@ namespace wolf_sv::emit
         {
             result.success = false;
         }
+        return result;
+    }
+
+    EmitResult EmitJSON::emitImpl(const grh::Netlist &netlist,
+                                  std::span<const grh::Graph *const> topGraphs,
+                                  const EmitOptions &options)
+    {
+        EmitResult result;
+
+        std::string jsonText;
+        try
+        {
+            jsonText = netlist.toJsonString(topGraphs, options.prettyPrint);
+        }
+        catch (const std::exception &ex)
+        {
+            reportError("Failed to serialize netlist to JSON: " + std::string(ex.what()));
+            result.success = false;
+            return result;
+        }
+
+        const std::filesystem::path outputPath = resolveOutputDir(options) / "grh.json";
+        auto stream = openOutputFile(outputPath);
+        if (!stream)
+        {
+            result.success = false;
+            return result;
+        }
+
+        *stream << jsonText;
+        result.artifacts.push_back(outputPath.string());
         return result;
     }
 
