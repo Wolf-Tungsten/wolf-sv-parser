@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "slang/text/SourceLocation.h"
+#include "slang/ast/symbols/SubroutineSymbols.h"
 
 namespace slang {
 class SVInt;
@@ -118,6 +119,23 @@ struct SignalMemoEntry {
     slang::ast::EdgeKind asyncResetEdge = {};
     const slang::ast::ValueSymbol* syncResetSymbol = nullptr;
     bool syncResetActiveHigh = true;
+};
+
+/// Describes a single DPI import argument lowered during elaboration.
+struct DpiImportArg {
+    std::string name;
+    slang::ast::ArgumentDirection direction = slang::ast::ArgumentDirection::In;
+    int64_t width = 0;
+    bool isSigned = false;
+    std::vector<SignalMemoField> fields;
+};
+
+/// Captures DPI import declarations discovered in a module body.
+struct DpiImportEntry {
+    const slang::ast::SubroutineSymbol* symbol = nullptr;
+    std::string cIdentifier;
+    std::vector<DpiImportArg> args;
+    grh::Operation* importOp = nullptr;
 };
 
 /// Records pending writes against memoized signals before SSA write-back.
@@ -310,6 +328,8 @@ public:
 protected:
     bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
                std::vector<WriteResult>& outResults);
+    bool lowerExpression(const slang::ast::Expression& expr, grh::Value& rhsValue,
+                         std::vector<WriteResult>& outResults);
     virtual bool allowReplication() const { return false; }
     // Hook to feed contextual constants (e.g., foreach loop indices) into LHS eval.
     virtual void seedEvalContextForLHS(slang::ast::EvalContext&) {}
@@ -377,6 +397,7 @@ public:
 
     virtual bool convert(const slang::ast::AssignmentExpression& assignment,
                          grh::Value& rhsValue);
+    virtual bool convertExpression(const slang::ast::Expression& expr, grh::Value& rhsValue);
 
 protected:
     void seedEvalContextForLHS(slang::ast::EvalContext& ctx) override;
@@ -396,6 +417,7 @@ public:
 
     bool convert(const slang::ast::AssignmentExpression& assignment,
                  grh::Value& rhsValue) override;
+    bool convertExpression(const slang::ast::Expression& expr, grh::Value& rhsValue) override;
 };
 
 /// RHS converter used by procedural always blocks.
@@ -437,7 +459,8 @@ class AlwaysConverter {
 public:
     AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                     std::span<const SignalMemoEntry> regMemo,
-                    std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
+                    std::span<const SignalMemoEntry> memMemo,
+                    std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                     const slang::ast::ProceduralBlockSymbol& block,
                     ElaborateDiagnostics* diagnostics);
     virtual ~AlwaysConverter() = default;
@@ -531,6 +554,7 @@ protected:
     void reportUnsupportedStmt(const slang::ast::Statement& stmt);
     void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
     void handleEntryWrite(const SignalMemoEntry& entry, std::vector<WriteBackMemo::Slice> slices);
+    const SignalMemoEntry* findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) const;
     void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice);
     grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
     grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
@@ -594,6 +618,9 @@ protected:
                           const slang::ast::ExpressionStatement& stmt);
     virtual bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                          const slang::ast::ExpressionStatement& stmt);
+    virtual bool handleDpiCall(const slang::ast::CallExpression& call,
+                               const DpiImportEntry& entry,
+                               const slang::ast::ExpressionStatement& stmt);
     virtual bool handleAssertionIntent(const slang::ast::Expression* condition,
                                        const slang::ast::ExpressionStatement* origin,
                                        std::string_view message,
@@ -607,6 +634,7 @@ protected:
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
+    std::span<const DpiImportEntry> dpiImports_;
     WriteBackMemo& memo_;
     const slang::ast::ProceduralBlockSymbol& block_;
     ElaborateDiagnostics* diagnostics_;
@@ -640,6 +668,8 @@ protected:
     std::unordered_map<const slang::ast::ValueSymbol*, LoopValueInfo> loopValueMap_;
     std::vector<std::vector<const slang::ast::ValueSymbol*>> loopScopeStack_;
     std::unique_ptr<slang::ast::EvalContext> loopEvalContext_;
+    std::unordered_map<const slang::ast::SubroutineSymbol*, const DpiImportEntry*> dpiImportMap_;
+    const DpiImportEntry* findDpiImport(const slang::ast::SubroutineSymbol& symbol) const;
 };
 
 /// Comb always converter entry point.
@@ -647,7 +677,8 @@ class CombAlwaysConverter : public AlwaysConverter {
 public:
     CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                         std::span<const SignalMemoEntry> regMemo,
-                        std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
+                        std::span<const SignalMemoEntry> memMemo,
+                        std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                         const slang::ast::ProceduralBlockSymbol& block,
                         ElaborateDiagnostics* diagnostics);
 
@@ -661,6 +692,8 @@ protected:
     bool isSequential() const override { return false; }
     bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                  const slang::ast::ExpressionStatement& stmt) override;
+    bool handleDpiCall(const slang::ast::CallExpression& call, const DpiImportEntry& entry,
+                       const slang::ast::ExpressionStatement& stmt) override;
     bool handleAssertionIntent(const slang::ast::Expression* condition,
                                const slang::ast::ExpressionStatement* origin,
                                std::string_view message,
@@ -672,7 +705,8 @@ class SeqAlwaysConverter : public AlwaysConverter {
 public:
     SeqAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                        std::span<const SignalMemoEntry> regMemo,
-                       std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
+                       std::span<const SignalMemoEntry> memMemo,
+                       std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                        const slang::ast::ProceduralBlockSymbol& block,
                        ElaborateDiagnostics* diagnostics);
 
@@ -686,6 +720,8 @@ protected:
     bool isSequential() const override { return true; }
     bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                  const slang::ast::ExpressionStatement& stmt) override;
+    bool handleDpiCall(const slang::ast::CallExpression& call, const DpiImportEntry& entry,
+                       const slang::ast::ExpressionStatement& stmt) override;
     bool handleAssertionIntent(const slang::ast::Expression* condition,
                                const slang::ast::ExpressionStatement* origin,
                                std::string_view message,
@@ -794,6 +830,9 @@ public:
     /// Returns memoized memory declarations for the provided module body.
     std::span<const SignalMemoEntry>
     peekMemMemo(const slang::ast::InstanceBodySymbol& body) const;
+    /// Returns memoized DPI import declarations for the provided module body.
+    std::span<const DpiImportEntry>
+    peekDpiImports(const slang::ast::InstanceBodySymbol& body) const;
 
 private:
     grh::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
@@ -827,7 +866,9 @@ private:
                                            std::string_view fallback, grh::Graph& graph);
     void registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value);
     void collectSignalMemos(const slang::ast::InstanceBodySymbol& body);
+    void collectDpiImports(const slang::ast::InstanceBodySymbol& body);
     void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void materializeDpiImports(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
@@ -848,6 +889,8 @@ private:
         regMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
         memMemo_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<DpiImportEntry>>
+        dpiImports_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, WriteBackMemo> writeBackMemo_;
 };
 

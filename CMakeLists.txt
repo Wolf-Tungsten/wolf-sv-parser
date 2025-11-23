@@ -247,5 +247,22 @@ target_compile_definitions(elaborate-stage21
 
 register_test_exe(elaborate-stage21)
 
+# elaborate: dpic
+add_executable(elaborate-dpic
+    tests/elaborate/test_elaborate_dpic.cpp
+)
+
+target_link_libraries(elaborate-dpic
+    PRIVATE
+        elaborate
+)
+
+target_compile_definitions(elaborate-dpic
+    PRIVATE
+        WOLF_SV_ELAB_DPIC_DATA_PATH="${ELABORATE_INPUT_DIR}/dpic.sv"
+)
+
+register_test_exe(elaborate-dpic)
+
 # Installation rules
 install(TARGETS wolf-sv-compiler DESTINATION bin)

@@ -171,3 +171,9 @@
   - KR1 在elaborate过程中，识别DPI导入的函数声明，将 import DPI 函数映射为GRH中的kDpicImport操作
   - KR2 在elaborate过程中，识别DPI调用语句，将DPI调用映射为GRH中的kDpicCall操作，正确设置操作数和属性
   - KR3 创建测试样例dpic.sv，验证DPI导入和调用的正确转换
+
+## 阶段25：添加对 blackbox 的支持
+- **Objective** 添加对 blackbox 模块的支持，使得 elaborate 能够正确处理 blackbox 模块的实例化和端口连接
+  - KR1 在 elaborate 过程中，识别 blackbox 模块声明，blackbox 模块必须被定义，但不能包含任何内部实现细节，否则就应当视为普通模块，可用 blackboxMemo 记录 blackbox 模块的信息
+  - KR2 当对 blackbox 模块进行实例化时，elaborate 应当正确处理 blackbox 模块的端口连接、参数配置，生成 kBlackbox 操作，kBlackbox 操作的生成也应该支持 generate，请核查当前对 kBlackbox 的支持
+  - KR3 创建测试样例 blackbox.sv，验证 blackbox 模块的正确处理。

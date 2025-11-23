@@ -38,6 +38,7 @@
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
+#include "slang/ast/symbols/SubroutineSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/ast/symbols/VariableSymbols.h"
@@ -427,6 +428,10 @@ const slang::ast::ValueSymbol*
 resolveAssignedSymbol(const slang::ast::Expression& expr) {
     const slang::ast::Expression* current = &expr;
     while (current) {
+        if (const auto* assign = current->as_if<slang::ast::AssignmentExpression>()) {
+            current = &assign->left();
+            continue;
+        }
         if (const auto* named = current->as_if<slang::ast::NamedValueExpression>()) {
             return &named->symbol;
         }
@@ -511,6 +516,25 @@ private:
     }
 
     slang::function_ref<void(const slang::ast::Expression&)> onAssignment_;
+};
+
+class DpiCallCollector : public slang::ast::ASTVisitor<DpiCallCollector, true, false> {
+public:
+    DpiCallCollector(
+        const std::unordered_map<const slang::ast::SubroutineSymbol*, const DpiImportEntry*>& map,
+        slang::function_ref<void(const slang::ast::CallExpression&)> onCall) :
+        dpiMap_(map), onCall_(onCall) {}
+
+    void handle(const slang::ast::ExpressionStatement& stmt) {
+        if (const auto* call = stmt.expr.as_if<slang::ast::CallExpression>()) {
+            onCall_(*call);
+        }
+        visitDefault(stmt);
+    }
+
+private:
+    const std::unordered_map<const slang::ast::SubroutineSymbol*, const DpiImportEntry*>& dpiMap_;
+    slang::function_ref<void(const slang::ast::CallExpression&)> onCall_;
 };
 
 const slang::ast::TimingControl* findTimingControl(const slang::ast::Statement& stmt) {
@@ -904,16 +928,21 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
 
 bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
                          std::vector<LHSConverter::WriteResult>& outResults) {
+    return lowerExpression(assignment.left(), rhsValue, outResults);
+}
+
+bool LHSConverter::lowerExpression(const slang::ast::Expression& expr, grh::Value& rhsValue,
+                                   std::vector<LHSConverter::WriteResult>& outResults) {
     pending_.clear();
     outResults.clear();
 
-    const slang::ast::Type* lhsType = assignment.left().type;
-    if (!lhsType || !lhsType->isBitstreamType() || !lhsType->isFixedSize()) {
+    const slang::ast::Type* exprType = expr.type;
+    if (!exprType || !exprType->isBitstreamType() || !exprType->isFixedSize()) {
         report("Assign LHS must be a fixed-size bitstream type");
         return false;
     }
 
-    const int64_t lhsWidth = static_cast<int64_t>(lhsType->getBitstreamWidth());
+    const int64_t lhsWidth = static_cast<int64_t>(exprType->getBitstreamWidth());
     if (lhsWidth <= 0) {
         report("Assign LHS has zero width");
         return false;
@@ -925,7 +954,7 @@ bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, grh
         return false;
     }
 
-    if (!processLhs(assignment.left(), rhsValue)) {
+    if (!processLhs(expr, rhsValue)) {
         pending_.clear();
         return false;
     }
@@ -1216,6 +1245,9 @@ LHSConverter::resolveRangeSelect(const SignalMemoEntry& entry,
 }
 
 std::optional<std::string> LHSConverter::buildFieldPath(const slang::ast::Expression& expr) {
+    if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
+        return buildFieldPath(assignment->left());
+    }
     if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>()) {
         if (conversion->isImplicit()) {
             return buildFieldPath(conversion->operand());
@@ -1476,6 +1508,22 @@ bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& as
     return true;
 }
 
+bool AlwaysBlockLHSConverter::convertExpression(const slang::ast::Expression& expr,
+                                                grh::Value& rhsValue) {
+    using WriteResult = LHSConverter::WriteResult;
+    std::vector<WriteResult> results;
+    if (!lowerExpression(expr, rhsValue, results)) {
+        return false;
+    }
+    for (WriteResult& result : results) {
+        if (!result.target) {
+            continue;
+        }
+        owner_.handleEntryWrite(*result.target, std::move(result.slices));
+    }
+    return true;
+}
+
 namespace {
 
 const slang::ast::Expression* skipImplicitConversions(const slang::ast::Expression& expr) {
@@ -1589,6 +1637,43 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
     return AlwaysBlockLHSConverter::convert(assignment, rhsValue);
 }
 
+bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr,
+                                              grh::Value& rhsValue) {
+    const slang::ast::Expression* root = skipImplicitConversions(expr);
+    const slang::ast::Expression* cursor = root;
+    while (cursor) {
+        if (const auto* element = cursor->as_if<slang::ast::ElementSelectExpression>()) {
+            const slang::ast::Expression* inner = skipImplicitConversions(element->value());
+            if (const auto* named = inner->as_if<slang::ast::NamedValueExpression>()) {
+                if (const auto* symbol = named->symbol.as_if<slang::ast::ValueSymbol>()) {
+                    const SignalMemoEntry* candidate = findMemoEntry(*symbol);
+                    if (candidate && candidate->stateOp &&
+                        candidate->stateOp->kind() == grh::OperationKind::kMemory) {
+                        if (diagnostics()) {
+                            diagnostics()->nyi(owner_.block(),
+                                               "DPI 输出参数写 memory 暂不支持");
+                        }
+                        return true;
+                    }
+                }
+            }
+            cursor = inner;
+            continue;
+        }
+        if (const auto* member = cursor->as_if<slang::ast::MemberAccessExpression>()) {
+            cursor = skipImplicitConversions(member->value());
+            continue;
+        }
+        if (const auto* range = cursor->as_if<slang::ast::RangeSelectExpression>()) {
+            cursor = skipImplicitConversions(range->value());
+            continue;
+        }
+        break;
+    }
+
+    return AlwaysBlockLHSConverter::convertExpression(expr, rhsValue);
+}
+
 AlwaysConverter::LoopScopeGuard::LoopScopeGuard(
     AlwaysConverter& owner, std::vector<const slang::ast::ValueSymbol*> symbols) :
     owner_(owner), active_(true) {
@@ -1622,19 +1707,26 @@ void AlwaysConverter::LoopContextGuard::dismiss() {
 
 AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                                  std::span<const SignalMemoEntry> regMemo,
-                                 std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
+                                 std::span<const SignalMemoEntry> memMemo,
+                                 std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                                  const slang::ast::ProceduralBlockSymbol& block,
                                  ElaborateDiagnostics* diagnostics) :
     graph_(graph),
     netMemo_(netMemo),
     regMemo_(regMemo),
     memMemo_(memMemo),
+    dpiImports_(dpiImports),
     memo_(memo),
     block_(block),
     diagnostics_(diagnostics) {
     shadowStack_.emplace_back();
     controlContextStack_.push_back(true);
     controlInstanceId_ = nextConverterInstanceId();
+    for (const DpiImportEntry& entry : dpiImports_) {
+        if (entry.symbol) {
+            dpiImportMap_.emplace(entry.symbol, &entry);
+        }
+    }
 }
 
 void AlwaysConverter::setConverters(std::unique_ptr<AlwaysBlockRHSConverter> rhs,
@@ -1651,10 +1743,11 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                          std::span<const SignalMemoEntry> netMemo,
                                          std::span<const SignalMemoEntry> regMemo,
                                          std::span<const SignalMemoEntry> memMemo,
+                                         std::span<const DpiImportEntry> dpiImports,
                                          WriteBackMemo& memo,
                                          const slang::ast::ProceduralBlockSymbol& block,
                                          ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics) {
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics) {
     auto rhs = std::make_unique<CombAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
@@ -1706,6 +1799,18 @@ bool CombAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressi
     return true;
 }
 
+bool CombAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
+                                        const DpiImportEntry&,
+                                        const slang::ast::ExpressionStatement&) {
+    if (diagnostics()) {
+        std::string msg = "组合 always 中的 DPI 调用 ";
+        msg.append(std::string(call.getSubroutineName()));
+        msg.append(" 被忽略；仅支持时序 always");
+        diagnostics()->nyi(block(), std::move(msg));
+    }
+    return true;
+}
+
 bool CombAlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
                                                 const slang::ast::ExpressionStatement* origin,
                                                 std::string_view,
@@ -1719,10 +1824,12 @@ bool CombAlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
 SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                                        std::span<const SignalMemoEntry> netMemo,
                                        std::span<const SignalMemoEntry> regMemo,
-                                       std::span<const SignalMemoEntry> memMemo, WriteBackMemo& memo,
+                                       std::span<const SignalMemoEntry> memMemo,
+                                       std::span<const DpiImportEntry> dpiImports,
+                                       WriteBackMemo& memo,
                                        const slang::ast::ProceduralBlockSymbol& block,
                                        ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics) {
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics) {
     auto rhs = std::make_unique<SeqAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
@@ -1865,6 +1972,145 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
     }
     op.setAttribute("formatString", formatString);
     op.setAttribute("displayKind", normalizeDisplayKind(call.getSubroutineName()));
+    return true;
+}
+
+bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
+                                       const DpiImportEntry& entry,
+                                       const slang::ast::ExpressionStatement&) {
+    grh::Value* clkValue = ensureClockValue();
+    if (!clkValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential DPI call lacks resolved clock");
+        }
+        return true;
+    }
+
+    grh::Value* enableValue = nullptr;
+    if (grh::Value* guard = currentGuardValue()) {
+        enableValue = coerceToCondition(*guard);
+    }
+    else {
+        enableValue = createOneValue(1);
+    }
+    if (!enableValue) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential DPI call failed to derive enable signal");
+        }
+        return true;
+    }
+
+    if (!rhsConverter_ || !lhsConverter_) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Sequential DPI call missing converter context");
+        }
+        return true;
+    }
+
+    const auto args = call.arguments();
+    if (args.size() != entry.args.size()) {
+        if (diagnostics()) {
+            std::ostringstream oss;
+            oss << "DPI 调用形参与声明不匹配: expected " << entry.args.size() << " got "
+                << args.size();
+            diagnostics()->nyi(block(), oss.str());
+        }
+        return true;
+    }
+
+    std::vector<grh::Value*> inputOperands;
+    std::vector<std::string> inputNames;
+    std::vector<grh::Value*> outputValues;
+    std::vector<std::string> outputNames;
+    inputOperands.reserve(entry.args.size());
+    inputNames.reserve(entry.args.size());
+    outputValues.reserve(entry.args.size());
+    outputNames.reserve(entry.args.size());
+
+    for (std::size_t idx = 0; idx < entry.args.size(); ++idx) {
+        const DpiImportArg& argInfo = entry.args[idx];
+        const slang::ast::Expression* actual = args[idx];
+        if (!actual) {
+            if (diagnostics()) {
+                diagnostics()->nyi(block(), "DPI 调用参数缺失表达式");
+            }
+            return true;
+        }
+        if (argInfo.direction == slang::ast::ArgumentDirection::In) {
+            grh::Value* value = rhsConverter_->convert(*actual);
+            if (!value) {
+                return true;
+            }
+            if (value->width() != argInfo.width) {
+                if (diagnostics()) {
+                    std::ostringstream oss;
+                    oss << "DPI input arg width mismatch: expected " << argInfo.width
+                        << " actual " << value->width();
+                    diagnostics()->nyi(block(), oss.str());
+                }
+                return true;
+            }
+            inputOperands.push_back(value);
+            inputNames.push_back(argInfo.name);
+        }
+        else {
+            std::string valueName = makeControlValueName("dpic_out");
+            grh::Value& resultValue =
+                graph().createValue(valueName, argInfo.width > 0 ? argInfo.width : 1,
+                                    argInfo.isSigned);
+            if (!lhsConverter_->convertExpression(*actual, resultValue)) {
+                const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*actual);
+                const SignalMemoEntry* entry =
+                    symbol ? findMemoEntryForSymbol(*symbol) : nullptr;
+                if (!entry) {
+                    if (diagnostics()) {
+                        std::string msg = "Failed to convert DPI output argument LHS for ";
+                        msg.append(argInfo.name);
+                        msg.append(" (expr kind=");
+                        msg.append(std::to_string(static_cast<int>(actual->kind)));
+                        msg.push_back(')');
+                        diagnostics()->nyi(block(), std::move(msg));
+                    }
+                    return true;
+                }
+                WriteBackMemo::Slice slice = buildFullSlice(*entry, resultValue);
+                slice.originExpr = actual;
+                std::vector<WriteBackMemo::Slice> slices;
+                slices.push_back(std::move(slice));
+                handleEntryWrite(*entry, std::move(slices));
+            }
+            outputValues.push_back(&resultValue);
+            outputNames.push_back(argInfo.name);
+        }
+    }
+
+    grh::Operation& op =
+        graph().createOperation(grh::OperationKind::kDpicCall, makeControlOpName("dpic_call"));
+    op.addOperand(*clkValue);
+    op.addOperand(*enableValue);
+    for (grh::Value* operand : inputOperands) {
+        op.addOperand(*operand);
+    }
+    for (grh::Value* result : outputValues) {
+        op.addResult(*result);
+    }
+    if (clockPolarityAttr_) {
+        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+    }
+    if (entry.importOp) {
+        op.setAttribute("targetImportSymbol", entry.importOp->symbol());
+    }
+    else if (entry.symbol) {
+        op.setAttribute("targetImportSymbol", std::string(entry.symbol->name));
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "DPI import operation 未在当前 graph 中创建");
+        }
+    }
+    else if (diagnostics()) {
+        diagnostics()->nyi(block(), "DPI import operation metadata缺失");
+    }
+    op.setAttribute("inArgName", inputNames);
+    op.setAttribute("outArgName", outputNames);
     return true;
 }
 
@@ -2947,6 +3193,25 @@ void AlwaysConverter::visitExpressionStatement(
         if (handleSystemCall(call, stmt)) {
             return;
         }
+        const DpiImportEntry* dpiEntry = nullptr;
+        if (const auto* subroutine =
+                std::get_if<const slang::ast::SubroutineSymbol*>(&call.subroutine)) {
+            dpiEntry = findDpiImport(**subroutine);
+        }
+        if (!dpiEntry) {
+            std::string_view name = call.getSubroutineName();
+            for (const DpiImportEntry& entry : dpiImports_) {
+                if (entry.symbol && entry.symbol->name == name) {
+                    dpiEntry = &entry;
+                    break;
+                }
+            }
+        }
+        if (dpiEntry) {
+            if (handleDpiCall(call, *dpiEntry, stmt)) {
+                return;
+            }
+        }
     }
 
     reportUnsupportedStmt(stmt);
@@ -3391,11 +3656,31 @@ bool AlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression&,
     return false;
 }
 
+bool AlwaysConverter::handleDpiCall(const slang::ast::CallExpression&,
+                                    const DpiImportEntry&,
+                                    const slang::ast::ExpressionStatement&) {
+    return false;
+}
+
 bool AlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
                                             const slang::ast::ExpressionStatement*,
                                             std::string_view,
                                             std::string_view) {
     return false;
+}
+
+const DpiImportEntry*
+AlwaysConverter::findDpiImport(const slang::ast::SubroutineSymbol& symbol) const {
+    auto it = dpiImportMap_.find(&symbol);
+    if (it != dpiImportMap_.end()) {
+        return it->second;
+    }
+    for (const DpiImportEntry& entry : dpiImports_) {
+        if (entry.symbol && entry.symbol->name == symbol.name) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 void AlwaysConverter::flushProceduralWrites() {
@@ -3437,7 +3722,7 @@ void AlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
 }
 
 void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
-                                           std::vector<WriteBackMemo::Slice> slices) {
+                                       std::vector<WriteBackMemo::Slice> slices) {
     if (slices.empty()) {
         return;
     }
@@ -3448,6 +3733,25 @@ void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     state.dirty = true;
     state.composed = nullptr;
     currentFrame().touched.insert(&entry);
+}
+
+const SignalMemoEntry*
+AlwaysConverter::findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) const {
+    auto findIn = [&](std::span<const SignalMemoEntry> memo) -> const SignalMemoEntry* {
+        for (const SignalMemoEntry& entry : memo) {
+            if (entry.symbol == &symbol) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    };
+    if (const SignalMemoEntry* entry = findIn(netMemo_)) {
+        return entry;
+    }
+    if (const SignalMemoEntry* entry = findIn(memMemo_)) {
+        return entry;
+    }
+    return findIn(regMemo_);
 }
 
 void AlwaysConverter::insertShadowSlice(ShadowState& state,
@@ -5622,6 +5926,14 @@ Elaborate::peekMemMemo(const slang::ast::InstanceBodySymbol& body) const {
     return {};
 }
 
+std::span<const DpiImportEntry>
+Elaborate::peekDpiImports(const slang::ast::InstanceBodySymbol& body) const {
+    if (auto it = dpiImports_.find(&body); it != dpiImports_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
 grh::Graph* Elaborate::materializeGraph(const slang::ast::InstanceSymbol& instance,
                                         grh::Netlist& netlist, bool& wasCreated) {
     const slang::ast::InstanceBodySymbol* canonicalBody = instance.getCanonicalBody();
@@ -5788,8 +6100,10 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
 
     populatePorts(instance, body, graph);
     emitModulePlaceholder(instance, graph);
+    collectDpiImports(body);
     collectSignalMemos(body);
     materializeSignalMemos(body, graph);
+    materializeDpiImports(body, graph);
     ensureWriteBackMemo(body);
 
     for (const slang::ast::Symbol& member : body.members()) {
@@ -5956,8 +6270,10 @@ void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block
     std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
     std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
     std::span<const SignalMemoEntry> memMemo = peekMemMemo(body);
+    std::span<const DpiImportEntry> dpiImports = peekDpiImports(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    CombAlwaysConverter converter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics_);
+    CombAlwaysConverter converter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block,
+                                  diagnostics_);
     converter.run();
 }
 
@@ -5967,8 +6283,10 @@ void Elaborate::processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
     std::span<const SignalMemoEntry> netMemo = peekNetMemo(body);
     std::span<const SignalMemoEntry> regMemo = peekRegMemo(body);
     std::span<const SignalMemoEntry> memMemo = peekMemMemo(body);
+    std::span<const DpiImportEntry> dpiImports = peekDpiImports(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
-    SeqAlwaysConverter converter(graph, netMemo, regMemo, memMemo, memo, block, diagnostics_);
+    SeqAlwaysConverter converter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block,
+                                 diagnostics_);
     converter.run();
 }
 
@@ -6342,6 +6660,14 @@ std::string Elaborate::makeOperationNameForSymbol(const slang::ast::ValueSymbol&
 
 void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     std::unordered_map<const slang::ast::ValueSymbol*, SignalMemoEntry> candidates;
+    std::unordered_map<const slang::ast::SubroutineSymbol*, const DpiImportEntry*> dpiLookup;
+    if (auto it = dpiImports_.find(&body); it != dpiImports_.end()) {
+        for (const DpiImportEntry& entry : it->second) {
+            if (entry.symbol) {
+                dpiLookup.emplace(entry.symbol, &entry);
+            }
+        }
+    }
 
     auto registerCandidate = [&](const slang::ast::ValueSymbol& symbol) {
         const slang::ast::Type& type = symbol.getType();
@@ -6446,16 +6772,47 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                 continue;
             }
 
-            auto handleAssignment = [&](const slang::ast::Expression& lhs) {
-                collectAssignedSymbols(
-                    lhs, [&](const slang::ast::ValueSymbol& symbol) {
-                        markDriver(symbol, driver, block);
-                    });
+        auto handleAssignment = [&](const slang::ast::Expression& lhs) {
+            collectAssignedSymbols(
+                lhs, [&](const slang::ast::ValueSymbol& symbol) {
+                    markDriver(symbol, driver, block);
+                });
+        };
+        AssignmentCollector collector(handleAssignment);
+        block->getBody().visit(collector);
+
+        if (!dpiLookup.empty()) {
+            auto onDpiCall = [&](const slang::ast::CallExpression& call) {
+                const auto* subroutine =
+                    std::get_if<const slang::ast::SubroutineSymbol*>(&call.subroutine);
+                if (!subroutine) {
+                    return;
+                }
+                auto mapIt = dpiLookup.find(*subroutine);
+                if (mapIt == dpiLookup.end()) {
+                    return;
+                }
+                const DpiImportEntry& entry = *mapIt->second;
+                auto args = call.arguments();
+                for (std::size_t idx = 0; idx < entry.args.size(); ++idx) {
+                    const DpiImportArg& argInfo = entry.args[idx];
+                    if (argInfo.direction != slang::ast::ArgumentDirection::Out) {
+                        continue;
+                    }
+                    if (idx >= args.size() || !args[idx]) {
+                        continue;
+                    }
+                    collectAssignedSymbols(
+                        *args[idx], [&](const slang::ast::ValueSymbol& symbol) {
+                            markDriver(symbol, MemoDriverKind::Reg, block);
+                        });
+                }
             };
-            AssignmentCollector collector(handleAssignment);
-            block->getBody().visit(collector);
-            continue;
+            DpiCallCollector dpiCollector(dpiLookup, onDpiCall);
+            block->getBody().visit(dpiCollector);
         }
+        continue;
+    }
     }
 
     std::vector<SignalMemoEntry> nets;
@@ -6511,6 +6868,147 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     netMemo_[&body] = std::move(nets);
     regMemo_[&body] = std::move(regs);
     memMemo_[&body] = std::move(mems);
+}
+
+void Elaborate::collectDpiImports(const slang::ast::InstanceBodySymbol& body) {
+    std::vector<DpiImportEntry> imports;
+    imports.reserve(4);
+
+    auto report = [&](const slang::ast::Symbol& symbol, std::string_view message) {
+        if (diagnostics_) {
+            diagnostics_->nyi(symbol, std::string(message));
+        }
+    };
+
+    for (const slang::ast::Symbol& member : body.members()) {
+        const auto* subroutine = member.as_if<slang::ast::SubroutineSymbol>();
+        if (!subroutine || !subroutine->flags.has(slang::ast::MethodFlags::DPIImport)) {
+            continue;
+        }
+
+        bool valid = true;
+        if (subroutine->subroutineKind != slang::ast::SubroutineKind::Function) {
+            report(*subroutine, "仅支持 import \"DPI-C\" function");
+            valid = false;
+        }
+
+        if (!subroutine->getReturnType().isVoid()) {
+            report(*subroutine, "DPI import 必须返回 void");
+            valid = false;
+        }
+
+        if (subroutine->flags.has(slang::ast::MethodFlags::DPIContext) ||
+            subroutine->flags.has(slang::ast::MethodFlags::Pure)) {
+            report(*subroutine, "DPI import context/pure 属性暂不支持");
+            valid = false;
+        }
+
+        DpiImportEntry entry;
+        entry.symbol = subroutine;
+
+        if (valid) {
+            auto args = subroutine->getArguments();
+            entry.args.reserve(args.size());
+            std::size_t index = 0;
+            for (const slang::ast::FormalArgumentSymbol* arg : args) {
+                if (!arg) {
+                    ++index;
+                    continue;
+                }
+                if (arg->direction != slang::ast::ArgumentDirection::In &&
+                    arg->direction != slang::ast::ArgumentDirection::Out) {
+                    report(*arg, "DPI import 仅支持 input/output 方向参数");
+                    valid = false;
+                    break;
+                }
+        const slang::ast::Type& type = arg->getType();
+        if (!type.isFixedSize()) {
+            report(*arg, "DPI 参数必须是固定宽度类型");
+            valid = false;
+            break;
+        }
+        TypeHelper::Info info = TypeHelper::analyze(type, *arg, diagnostics_);
+                DpiImportArg argInfo;
+                argInfo.name =
+                    arg->name.empty() ? (std::string("arg") + std::to_string(index))
+                                      : std::string(arg->name);
+                argInfo.direction = arg->direction;
+                argInfo.width = info.width > 0 ? info.width : 1;
+                argInfo.isSigned = info.isSigned;
+                if (info.fields.empty()) {
+                    argInfo.fields.push_back(SignalMemoField{
+                        argInfo.name, argInfo.width > 0 ? argInfo.width - 1 : 0, 0,
+                        argInfo.isSigned});
+                }
+                else {
+                    for (const auto& field : info.fields) {
+                        argInfo.fields.push_back(SignalMemoField{field.path, field.msb, field.lsb,
+                                                                 field.isSigned});
+                    }
+                }
+                entry.args.push_back(std::move(argInfo));
+                ++index;
+            }
+        }
+
+        if (valid) {
+            imports.push_back(std::move(entry));
+        }
+    }
+
+    auto byName = [](const DpiImportEntry& lhs, const DpiImportEntry& rhs) {
+        std::string_view l = lhs.symbol ? lhs.symbol->name : std::string_view{};
+        std::string_view r = rhs.symbol ? rhs.symbol->name : std::string_view{};
+        return l < r;
+    };
+
+    std::sort(imports.begin(), imports.end(), byName);
+    dpiImports_[&body] = std::move(imports);
+}
+
+void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body,
+                                      grh::Graph& graph) {
+    auto it = dpiImports_.find(&body);
+    if (it == dpiImports_.end()) {
+        return;
+    }
+
+    for (DpiImportEntry& entry : it->second) {
+        if (!entry.symbol || entry.importOp) {
+            continue;
+        }
+        std::string baseName;
+        if (entry.symbol && !entry.symbol->name.empty()) {
+            baseName = sanitizeForGraphName(entry.symbol->name);
+        }
+        if (baseName.empty()) {
+            baseName = "dpic_import";
+        }
+        std::string opName = makeUniqueOperationName(graph, baseName);
+        grh::Operation& op = graph.createOperation(grh::OperationKind::kDpicImport, opName);
+        entry.importOp = &op;
+
+        std::vector<std::string> directions;
+        std::vector<int64_t> widths;
+        std::vector<std::string> names;
+        directions.reserve(entry.args.size());
+        widths.reserve(entry.args.size());
+        names.reserve(entry.args.size());
+
+        for (const DpiImportArg& arg : entry.args) {
+            directions.emplace_back(arg.direction == slang::ast::ArgumentDirection::In ? "input"
+                                                                                       : "output");
+            widths.push_back(arg.width);
+            names.push_back(arg.name);
+        }
+
+        op.setAttribute("argsDirection", std::move(directions));
+        op.setAttribute("argsWidth", std::move(widths));
+        op.setAttribute("argsName", std::move(names));
+        if (!entry.cIdentifier.empty()) {
+            op.setAttribute("cIdentifier", entry.cIdentifier);
+        }
+    }
 }
 
 } // namespace wolf_sv

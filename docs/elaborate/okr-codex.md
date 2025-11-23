@@ -275,3 +275,30 @@
 > - 若重用 display 流程的 guard/clock 入口，可提取公共 `handleSystemTask` 辅助；coerceToCondition/guardStack 已可直接复用。
 > - 对 `$fatal/$error` 输入：无显式条件时可视作 `assert(0)`；若首参为字符串字面量，填充 `message`。
 > - 对 cover/assume 目前报 NYI，预留未来扩展。
+
+## 阶段24：添加对 DPI-C 的支持
+- 目标定位 把 `import "DPI-C" function void ...` 及其调用映射到 GRH 的 `kDpicImport`、`kDpicCall` 原语，为后续仿真/验证阶段保留对 C 函数交互的完整语义；沿用 SeqAlwaysConverter/guard/clock 体系，禁止无时序上下文的调用。
+- 规范基础 `docs/GRH-representation.md:668+`、`:691+` 限定 import 仅支持 void function、参数仅 input/output，call 需要 `[clk, enable, inputs...]` operands 与 `targetImportSymbol`，需严格遵循这些字段。
+
+- KR1（DPI import 声明 -> kDpicImport）
+  - 在 Elaborate 初始化模块 memo 时遍历 `slang::SubroutineSymbol`，筛选 `flags.foreignKind == DPIImport` 且 `prototype.isFunction()`，拒绝 task/context/pure/inout/非 void 返回并报清晰诊断。
+  - 借助 TypeHelper flatten DPI 形参类型，确保只接受 packed bit 向量；记录 direction/name/bitwidth，必要时对 typedef/enum 先还原基础类型。
+  - 在当前模块 graph 顶层创建 `kDpicImport` Operation，`symbol` 采用 SV side 名称 + 可选 scope 防止重名；attributes 写入 argsDirection/argsWidth/argsName。
+  - 将 SubroutineSymbol -> Operation 映射存入 `ModuleMemo::dpiImportMap`，用于 call 阶段 lookup；若多次 import 同名函数，检测签名一致否则拒绝。
+
+- KR2（DPI 调用 -> kDpicCall）
+  - `SeqAlwaysConverter::visitExpressionStatement`/`visitVoidCall` 识别调用目标为 DPI import（基于上一步 memo），组合/initial/无 clk 块遇到 DPI 调用先 warning/NYI，保持 `kDpicCall` 只能在时序 always 中生成。
+  - 按照 import metadata 拆分参数：direction=input 的实参通过 SeqRHSConverter 取 Value，并校验位宽；direction=output 的实参必须是可写 LHS（net/reg/memory slice），使用 writeBack memo 记录“call result -> 实参”回填关系。
+  - 生成 `enable = currentGuard 或常量 1`，`clk/clkPolarity` 来自 SeqAlwaysConverter 环境；操作数顺序遵循 `[clk, enable, inArg*]`，results 对应 output args，并在 finalize 阶段把 result Value 写回原 LHS。
+  - `targetImportSymbol` attribute 指向匹配的 `kDpicImport`，同时设置 inArgName/outArgName 以保持名称顺序；lookup 失败或模块未 import 直接报错。若函数还有 SystemVerilog side 名字和 C 名字差异，可在 attributes 中额外保留 `cIdentifier` 供后端使用。
+  - 诊断路径：实参与 import 方向/数量不符、output 实参非常量/不可寻址、参数类型 flatten 失败、call 出现阻塞等待（如任务 delay）等情况需直接报错，避免生成半成品节点。
+
+- KR3（测试与验收）
+  - 新增 `tests/data/elaborate/dpic.sv`：包含至少一个合法 import + posedge always 调用（带 input/output、enable guard）以及一个组合/initial 中的非法调用覆盖 warning/错误；覆盖多位参数与结构体拒绝路径。
+  - 在 `tests/elaborate/` 中添加新的 `TEST(ElaborateDpi, ...)`：解析 dpic.sv，断言生成的 `kDpicImport` attributes（direction/width/name）及 `kDpicCall` 的 operands/result/targetImportSymbol/enable；检查 output arguments 通过 writeBack 更新 net/reg。
+  - 将 dpic 样例纳入现有 `ctest` 驱动，确保阶段 22/23/SeqAlways pipeline 仍然全部通过；若生成了新的诊断文本，更新 `tests/elaborate/expected_diags.txt`（若存在）保持稳定回归。
+
+> 实现提示
+> - slang 中 `ImportExportDecl`/`SubroutineSymbol::getDPIContext()` 描述了 DPI 属性，可直接读取 direction (`FormalArgumentSymbol::direction`) 与 `SubroutineSymbol::getReturnType()`。
+> - guard->enable 折叠可复用阶段22/23 的 `ensureGuardValue`；输出写回沿用 writeBack memo，在 `flushSeqStatements` 或专门的 `finalizeDpiCalls` 中一次性提交。
+> - 若未来需要支持 `DPI-C task` 或 `context/pure`，在当前阶段留下 `TODO` 某 diag code，便于后续扩展；同理，对于 inout 参数先报 “NYI: DPI inout”。
