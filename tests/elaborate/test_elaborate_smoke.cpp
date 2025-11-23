@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "slang/analysis/AnalysisManager.h"
@@ -82,27 +83,32 @@ int main() {
     }
 
     if (graph->operations().empty()) {
-        return fail("Expected placeholder operation in graph");
-    }
-    const grh::Operation& op = *graph->operations().front();
-    if (op.kind() != grh::OperationKind::kBlackbox) {
-        return fail("Placeholder operation has unexpected kind");
+        return fail("Expected elaborated operations in graph");
     }
 
-    if (diagnostics.messages().empty()) {
-        return fail("Expected TODO diagnostic entry");
-    }
-
-    // Ensure at least one TODO message references the module body.
-    bool foundTodo = false;
-    for (const ElaborateDiagnostic& message : diagnostics.messages()) {
-        if (message.kind == ElaborateDiagnosticKind::Todo) {
-            foundTodo = true;
+    bool hasPlaceholder = false;
+    for (const std::unique_ptr<grh::Operation>& opPtr : graph->operations()) {
+        if (!opPtr) {
+            continue;
+        }
+        if (opPtr->kind() != grh::OperationKind::kBlackbox) {
+            continue;
+        }
+        auto it = opPtr->attributes().find("status");
+        if (it != opPtr->attributes().end() &&
+            std::holds_alternative<std::string>(it->second) &&
+            std::get<std::string>(it->second).find("Module body elaboration pending") !=
+                std::string::npos) {
+            hasPlaceholder = true;
             break;
         }
     }
-    if (!foundTodo) {
-        return fail("Missing TODO diagnostic");
+    if (hasPlaceholder) {
+        return fail("Unexpected module placeholder operation in graph");
+    }
+
+    if (!diagnostics.messages().empty()) {
+        return fail("Unexpected diagnostics emitted during smoke elaboration");
     }
 
     return 0;

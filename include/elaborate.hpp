@@ -95,7 +95,8 @@ private:
 /// Options controlling the elaboration pipeline behaviour.
 struct ElaborateOptions {
     /// When true, create placeholder operations describing the module body.
-    bool emitPlaceholders = true;
+    /// This is disabled by default now that module bodies are elaborated.
+    bool emitPlaceholders = false;
 };
 
 /// Captures a flattened field inside a memoized signal.
