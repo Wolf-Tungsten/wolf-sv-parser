@@ -1,6 +1,9 @@
 # GRH JSON 规范（EmitJSON）
 
-EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口。默认写入 `grh.json`（位于 `EmitOptions::outputDir`，缺省为当前工作目录），并支持 `prettyPrint` 控制缩进/换行。
+EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口。默认写入 `grh.json`（位于 `EmitOptions::outputDir`，缺省为当前工作目录），并通过 `EmitOptions::jsonMode` 控制排版：
+- `Compact`: 单行最紧凑格式。
+- `PrettyCompact`（默认）：保持顶层/Graph 缩进，但 `vals`/`ports`/`ops` 元素各占一行。
+- `Pretty`: 全量缩进换行（每个字段独立一行）。
 
 ## 顶层结构
 - `graphs`: 按图名升序排列的数组，每个元素为单个 Graph 描述。
@@ -31,7 +34,7 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
 
 ## 排序与布局约定
 - Graph 列表按名称排序，Ports 按名称排序；`vals`、`ops` 保留创建顺序；`attrs` 依赖 `std::map` 的有序键。
-- `prettyPrint=true` 时使用缩进与换行，`prettyPrint=false` 时为紧凑单行布局（用于文件体积最小化）。
+- `Compact` 模式无多余空格与换行；`PrettyCompact` 模式下 `vals`、`ports.in/out`、`ops` 数组的元素均单行展示；`Pretty` 模式每个字段独立换行。
 
 ## 兼容性
 - 解析器仍接受阶段 1 的键（如 `values`/`operations`、`type`/`symbol`、`operands`/`results`、`attributes` + `kind`/`value`/`values` 以及 `topGraphs`），但 EmitJSON 写出的格式遵循上述压缩命名。

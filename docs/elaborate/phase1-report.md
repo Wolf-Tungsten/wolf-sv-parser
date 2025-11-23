@@ -14,7 +14,7 @@
 - 内存布局采用 `std::vector<std::unique_ptr<...>>` 管理，符合阶段规划。
 
 ## KR3 JSON 序列化与校验
-- 序列化能力：`Netlist::toJsonString` 与 `Netlist::fromJsonString` 完成稳定 round-trip，支持 pretty/compact 输出。
+- 序列化能力：`EmitJSON` 支持 JSON 输出（compact/pretty/prettyCompact）并保持与 `Netlist::fromJsonString` 的 round-trip。
 - 属性约束：实现 `attributeValueIsJsonSerializable`，禁止嵌套数组、NaN/Inf 等非 JSON 合法类型（参见 `src/grh.cpp` 与对应单测）。
 - 测试产物：`grh-tests` 运行时生成 `${CMAKE_BINARY_DIR}/artifacts/grh_stage1_demo.json`，供评审人工检视，位置已在 `CMakeLists.txt` 中通过 `GRH_STAGE1_JSON_PATH` 定义。
 

@@ -3,48 +3,19 @@
     {
       "name": "sample",
       "vals": [
-        {
-          "sym": "in",
-          "w": 1,
-          "sgn": false,
-          "in": true,
-          "out": false,
-          "users": []
-        },
-        {
-          "sym": "out",
-          "w": 1,
-          "sgn": false,
-          "in": false,
-          "out": true,
-          "users": []
-        }
+        {"sym": "in", "w": 1, "sgn": false, "in": true, "out": false, "users": []},
+        {"sym": "out", "w": 1, "sgn": false, "in": false, "out": true, "users": []}
       ],
       "ports": {
         "in": [
-          {
-            "name": "in",
-            "val": "in"
-          }
+          {"name": "in", "val": "in"}
         ],
         "out": [
-          {
-            "name": "out",
-            "val": "out"
-          }
+          {"name": "out", "val": "out"}
         ]
       },
       "ops": [
-        {
-          "sym": "drv",
-          "kind": "kAssign",
-          "in": [
-            "in"
-          ],
-          "out": [
-            "out"
-          ]
-        }
+        {"sym": "drv", "kind": "kAssign", "in": ["in"], "out": ["out"]}
       ]
     }
   ],

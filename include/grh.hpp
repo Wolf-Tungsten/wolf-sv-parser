@@ -219,8 +219,6 @@ public:
 
     const std::vector<std::unique_ptr<Graph>>& graphs() const noexcept { return graphs_; }
 
-    std::string toJsonString(bool pretty = true) const;
-    std::string toJsonString(std::span<const Graph* const> topGraphs, bool pretty) const;
     static Netlist fromJsonString(std::string_view json);
 
 private:

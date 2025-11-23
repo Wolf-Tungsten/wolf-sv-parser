@@ -11,7 +11,7 @@
 ## KR2 elaborate 管线骨架
 - 在 `Elaborate::convert` 中针对顶层模块创建 GRH Graph，生成输入/输出端口对应的 SSA Value 并标记顶层图。
 - 为模块体添加 `kBlackbox` 占位 Operation，记录模块名称与“TODO”状态，JSON 导出时可见。
-- CLI 新增 `--dump-grh`，调用现有 `grh::Netlist::toJsonString` 生成 pretty JSON，手动评审时可与占位节点一并查看。
+- CLI 新增 `--dump-grh`，调用 `EmitJSON` 生成 JSON（默认 prettyCompact），手动评审时可与占位节点一并查看。
 
 ## KR3 诊断与 smoke 测试
 - 新增 `ElaborateDiagnostics`，支持 `TODO` / `NYI` 分类及源符号路径；CLI 会打印对应信息，并尝试解析文件位置。

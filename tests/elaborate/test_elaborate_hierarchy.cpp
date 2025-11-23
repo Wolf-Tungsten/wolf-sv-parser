@@ -1,4 +1,5 @@
 #include "elaborate.hpp"
+#include "emit.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -11,6 +12,7 @@
 #include "slang/driver/Driver.h"
 
 using namespace wolf_sv;
+using namespace wolf_sv::emit;
 
 namespace {
 
@@ -91,7 +93,15 @@ bool writeArtifact(const std::string& context, const grh::Netlist& netlist) {
                   << "] Failed to open artifact file for writing: " << outputPath << '\n';
         return false;
     }
-    os << netlist.toJsonString(/* pretty */ true);
+    EmitDiagnostics diagnostics;
+    EmitJSON emitter(&diagnostics);
+    EmitOptions options;
+    auto jsonOpt = emitter.emitToString(netlist, options);
+    if (!jsonOpt || diagnostics.hasError()) {
+        std::cerr << "[elaborate_hierarchy:" << context << "] Failed to emit JSON artifact\n";
+        return false;
+    }
+    os << *jsonOpt;
     return true;
 }
 

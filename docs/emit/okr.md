@@ -14,3 +14,9 @@
 - KR1: 规划适合GRH表示的 JSON 数据格式，注意要保持可读性的前提下，尽可能缩减文件体积和行数，缩短重复的 key 的名称，像 Value 这种小的数据结构应当一行输出，形成文档写入 docs/GRH-JSON-spec.md 供参考
 - KR2: 迁移 JSON 输出逻辑，统一到 EmitJSON 中
 - KR3: 更新现有的 test，均添加由 EmitJSON 支持的 JSON 输出
+
+## 阶段3: 在 EmitJSON 中添加新模式
+**Objective** 在当前 JSON 的 compact 和 prettyPrint 形式基础上，添加一种中等紧凑的格式 prettyCompact
+- KR1: 在保持prettyPrint的基础上，将Graph vals、ports、ops 数组改为每个元素一行
+- KR2: 保持 Graph 和 Netlists 的缩进和换行
+- KR3: 将现有所有测试用例包括 elaborate 的输出都改为 prettyCompact 形式

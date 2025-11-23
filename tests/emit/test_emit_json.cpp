@@ -78,53 +78,63 @@ int main()
 
     Netlist netlist = buildDemoNetlist();
 
-    // Case 2: pretty JSON emission with compact keys.
-    EmitDiagnostics diagPretty;
-    EmitJSON emitterPretty(&diagPretty);
-    EmitOptions prettyOptions;
-    prettyOptions.prettyPrint = true;
-    prettyOptions.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
+    // Case 2: prettyCompact JSON emission with compact keys.
+    EmitDiagnostics diagPrettyCompact;
+    EmitJSON emitterPrettyCompact(&diagPrettyCompact);
+    EmitOptions prettyCompactOptions;
+    prettyCompactOptions.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
 
-    EmitResult prettyResult = emitterPretty.emit(netlist, prettyOptions);
-    if (!prettyResult.success)
+    EmitResult prettyCompactResult = emitterPrettyCompact.emit(netlist, prettyCompactOptions);
+    if (!prettyCompactResult.success)
     {
-        return fail("EmitJSON pretty path failed");
+        return fail("EmitJSON prettyCompact path failed");
     }
-    if (diagPretty.hasError())
+    if (diagPrettyCompact.hasError())
     {
-        return fail("Unexpected diagnostics errors for pretty emit");
+        return fail("Unexpected diagnostics errors for prettyCompact emit");
     }
-    if (prettyResult.artifacts.empty())
+    if (prettyCompactResult.artifacts.empty())
     {
-        return fail("Pretty emit did not report an artifact");
+        return fail("PrettyCompact emit did not report an artifact");
     }
 
-    const std::filesystem::path prettyPath = prettyResult.artifacts.front();
-    const std::string prettyJson = readFile(prettyPath);
-    if (prettyJson.find("\"vals\"") == std::string::npos || prettyJson.find("\"ops\"") == std::string::npos)
+    const std::filesystem::path prettyCompactPath = prettyCompactResult.artifacts.front();
+    const std::string prettyCompactJson = readFile(prettyCompactPath);
+    if (prettyCompactJson.find("\"vals\"") == std::string::npos || prettyCompactJson.find("\"ops\"") == std::string::npos)
     {
-        return fail("Compressed keys vals/ops not found in pretty JSON");
+        return fail("Compressed keys vals/ops not found in prettyCompact JSON");
     }
-    if (prettyJson.find("\"tops\"") == std::string::npos)
+    if (prettyCompactJson.find("\"tops\"") == std::string::npos)
     {
-        return fail("Top graph list is missing in pretty JSON");
+        return fail("Top graph list is missing in prettyCompact JSON");
     }
-    if (prettyJson.find("\"attrs\"") == std::string::npos || prettyJson.find("\"int[]\"") == std::string::npos)
+    if (prettyCompactJson.find("\"attrs\"") == std::string::npos || prettyCompactJson.find("\"int[]\"") == std::string::npos)
     {
         return fail("Attribute payload missing expected compact layout");
     }
+    const std::size_t valsInlinePos = prettyCompactJson.find("{\"sym\": \"in\"");
+    if (valsInlinePos == std::string::npos)
+    {
+        return fail("Value entry not rendered inline in prettyCompact mode");
+    }
+    const std::size_t newlineAfterVal = prettyCompactJson.find('\n', valsInlinePos);
+    const std::size_t braceAfterVal = prettyCompactJson.find('}', valsInlinePos);
+    if (newlineAfterVal != std::string::npos && newlineAfterVal < braceAfterVal)
+    {
+        return fail("Value entry spans multiple lines in prettyCompact mode");
+    }
 
-    Netlist parsed = Netlist::fromJsonString(prettyJson);
+    Netlist parsed = Netlist::fromJsonString(prettyCompactJson);
     if (!parsed.findGraph("demo"))
     {
         return fail("Round-trip parsed netlist missing demo graph");
     }
 
-    // Case 3: compact mode should differ from pretty output and avoid newlines.
+    // Case 3: compact mode should differ from prettyCompact output and avoid newlines.
     EmitDiagnostics diagCompact;
     EmitJSON emitterCompact(&diagCompact);
-    EmitOptions compactOptions = prettyOptions;
-    compactOptions.prettyPrint = false;
+    EmitOptions compactOptions = prettyCompactOptions;
+    compactOptions.jsonMode = JsonPrintMode::Compact;
 
     EmitResult compactResult = emitterCompact.emit(netlist, compactOptions);
     if (!compactResult.success || diagCompact.hasError())
@@ -133,9 +143,9 @@ int main()
     }
 
     const std::string compactJson = readFile(compactResult.artifacts.front());
-    if (compactJson == prettyJson)
+    if (compactJson == prettyCompactJson)
     {
-        return fail("Compact emit should produce different layout from pretty emit");
+        return fail("Compact emit should produce different layout from prettyCompact emit");
     }
     if (compactJson.find('\n') != std::string::npos)
     {

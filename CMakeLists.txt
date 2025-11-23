@@ -103,6 +103,7 @@ add_executable(grh-tests
 target_link_libraries(grh-tests
     PRIVATE
         grh
+        emit
 )
 
 target_compile_definitions(grh-tests
@@ -153,6 +154,7 @@ add_executable(elaborate-smoke
 target_link_libraries(elaborate-smoke
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-smoke
@@ -170,6 +172,7 @@ add_executable(elaborate-hierarchy
 target_link_libraries(elaborate-hierarchy
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-hierarchy
@@ -188,6 +191,7 @@ add_executable(elaborate-signal-memo
 target_link_libraries(elaborate-signal-memo
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-signal-memo
@@ -205,6 +209,7 @@ add_executable(elaborate-rhs-converter
 target_link_libraries(elaborate-rhs-converter
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-rhs-converter
@@ -223,6 +228,7 @@ add_executable(elaborate-write-back-memo
 target_link_libraries(elaborate-write-back-memo
     PRIVATE
         elaborate
+        emit
 )
 
 register_test_exe(elaborate-write-back-memo)
@@ -235,6 +241,7 @@ add_executable(elaborate-assign
 target_link_libraries(elaborate-assign
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-assign
@@ -253,6 +260,7 @@ add_executable(elaborate-comb-always
 target_link_libraries(elaborate-comb-always
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-comb-always
@@ -271,6 +279,7 @@ add_executable(elaborate-seq-always
 target_link_libraries(elaborate-seq-always
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-seq-always
@@ -289,6 +298,7 @@ add_executable(elaborate-stage21
 target_link_libraries(elaborate-stage21
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-stage21
@@ -306,6 +316,7 @@ add_executable(elaborate-blackbox
 target_link_libraries(elaborate-blackbox
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-blackbox
@@ -323,6 +334,7 @@ add_executable(elaborate-dpic
 target_link_libraries(elaborate-dpic
     PRIVATE
         elaborate
+        emit
 )
 
 target_compile_definitions(elaborate-dpic

@@ -1,3 +1,4 @@
+#include "emit.hpp"
 #include "grh.hpp"
 
 #include <filesystem>
@@ -9,6 +10,7 @@
 #include <vector>
 
 using namespace wolf_sv::grh;
+using namespace wolf_sv::emit;
 
 namespace
 {
@@ -168,7 +170,16 @@ int main()
         }
 
         netlist.markAsTop("demo");
-        std::string json = netlist.toJsonString(true);
+
+        EmitDiagnostics emitDiagnostics;
+        EmitJSON emitter(&emitDiagnostics);
+        EmitOptions emitOptions;
+        auto jsonOpt = emitter.emitToString(netlist, emitOptions);
+        if (!jsonOpt || emitDiagnostics.hasError())
+        {
+            return fail("Failed to emit JSON for netlist");
+        }
+        std::string json = *jsonOpt;
 
 #ifdef GRH_STAGE1_JSON_PATH
         try
@@ -242,7 +253,13 @@ int main()
             return fail("Failed to parse kAssign operation kind");
         }
 
-        std::string jsonAgain = parsed.toJsonString(true);
+        emitDiagnostics.clear();
+        auto jsonAgainOpt = emitter.emitToString(parsed, emitOptions);
+        if (!jsonAgainOpt || emitDiagnostics.hasError())
+        {
+            return fail("Failed to re-emit JSON after parse");
+        }
+        std::string jsonAgain = *jsonAgainOpt;
         if (json != jsonAgain)
         {
             return fail("JSON serialization not stable");

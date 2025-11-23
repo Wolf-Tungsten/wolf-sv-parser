@@ -132,7 +132,7 @@ int main(int argc, char **argv)
         wolf_sv::emit::EmitJSON emitter(&emitDiagnostics);
 
         wolf_sv::emit::EmitOptions emitOptions;
-        emitOptions.prettyPrint = true;
+        emitOptions.jsonMode = wolf_sv::emit::JsonPrintMode::PrettyCompact;
 
         wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         if (!emitDiagnostics.empty())

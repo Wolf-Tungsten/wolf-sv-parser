@@ -28,6 +28,13 @@ namespace wolf_sv::emit
         std::string context;
     };
 
+    enum class JsonPrintMode
+    {
+        Compact,
+        PrettyCompact,
+        Pretty
+    };
+
     class EmitDiagnostics
     {
     public:
@@ -46,7 +53,7 @@ namespace wolf_sv::emit
     struct EmitOptions
     {
         std::optional<std::string> outputDir;
-        bool prettyPrint = true;
+        JsonPrintMode jsonMode = JsonPrintMode::PrettyCompact;
         std::vector<std::string> topOverrides;
         std::map<std::string, std::string, std::less<>> attributes;
     };
@@ -77,13 +84,14 @@ namespace wolf_sv::emit
         void reportError(std::string message, std::string context = {}) const;
         void reportWarning(std::string message, std::string context = {}) const;
 
-    private:
+    protected:
         virtual EmitResult emitImpl(const grh::Netlist &netlist,
                                     std::span<const grh::Graph *const> topGraphs,
                                     const EmitOptions &options) = 0;
 
         bool validateTopGraphs(const std::vector<const grh::Graph *> &topGraphs) const;
 
+    private:
         EmitDiagnostics *diagnostics_ = nullptr;
     };
 
@@ -91,6 +99,8 @@ namespace wolf_sv::emit
     {
     public:
         using Emit::Emit;
+
+        std::optional<std::string> emitToString(const grh::Netlist &netlist, const EmitOptions &options = EmitOptions());
 
     private:
         EmitResult emitImpl(const grh::Netlist &netlist,
