@@ -131,11 +131,17 @@ int main() {
             r->stateOp->operands()[2] != d) {
             return fail("seq_stage21_en_reg operand binding mismatch");
         }
+        auto enLevel = r->stateOp->attributes().find("enLevel");
+        if (enLevel == r->stateOp->attributes().end() ||
+            !std::holds_alternative<std::string>(enLevel->second) ||
+            std::get<std::string>(enLevel->second) != "high") {
+            return fail("seq_stage21_en_reg enLevel missing or not high");
+        }
     } else {
         return fail("Top instance seq_stage21_en_reg not found");
     }
 
-    // Case 2: seq_stage21_rst_en_reg => kRegisterEnARst with [clk, rst, en, resetValue, data]
+    // Case 2: seq_stage21_rst_en_reg => kRegisterEnArst with [clk, rst, en, resetValue, data]
     if (const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
                                               "seq_stage21_rst_en_reg")) {
         const grh::Graph* graph = netlist.findGraph("seq_stage21_rst_en_reg");
@@ -155,8 +161,8 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage21_rst_en_reg missing reg memo/stateOp");
         }
-        if (r->stateOp->kind() != grh::OperationKind::kRegisterEnARst) {
-            return fail("seq_stage21_rst_en_reg expected kRegisterEnARst");
+        if (r->stateOp->kind() != grh::OperationKind::kRegisterEnArst) {
+            return fail("seq_stage21_rst_en_reg expected kRegisterEnArst");
         }
         if (r->stateOp->operands().size() != 5) {
             return fail("seq_stage21_rst_en_reg operand count mismatch");
@@ -172,6 +178,18 @@ int main() {
         if (r->stateOp->operands()[3] != rv ||
             r->stateOp->operands()[4] != d) {
             return fail("seq_stage21_rst_en_reg reset/data binding mismatch");
+        }
+        auto rstPolarity = r->stateOp->attributes().find("rstPolarity");
+        if (rstPolarity == r->stateOp->attributes().end() ||
+            !std::holds_alternative<std::string>(rstPolarity->second) ||
+            std::get<std::string>(rstPolarity->second) != "low") {
+            return fail("seq_stage21_rst_en_reg rstPolarity missing/incorrect");
+        }
+        auto enLevel = r->stateOp->attributes().find("enLevel");
+        if (enLevel == r->stateOp->attributes().end() ||
+            !std::holds_alternative<std::string>(enLevel->second) ||
+            std::get<std::string>(enLevel->second) != "high") {
+            return fail("seq_stage21_rst_en_reg enLevel missing/incorrect");
         }
     } else {
         return fail("Top instance seq_stage21_rst_en_reg not found");

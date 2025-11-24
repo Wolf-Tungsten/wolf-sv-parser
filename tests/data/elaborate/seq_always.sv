@@ -371,7 +371,7 @@ module seq_stage21_en_reg (
     assign q = r;
 endmodule
 
-// 2) 异步低有效复位 + 使能：if (!rst_n) r<=rv; else if (en) r<=d; 期望生成 kRegisterEnARst
+// 2) 异步低有效复位 + 使能：if (!rst_n) r<=rv; else if (en) r<=d; 期望生成 kRegisterEnArst
 module seq_stage21_rst_en_reg (
     input  logic       clk,
     input  logic       rst_n, // 低有效异步复位

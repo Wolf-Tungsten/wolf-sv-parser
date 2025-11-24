@@ -1,6 +1,7 @@
 #include "emit.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <exception>
 #include <sstream>
@@ -802,15 +803,15 @@ namespace wolf_sv::emit
             const grh::Value *asyncRst = nullptr;
             std::string asyncEdge;
             const grh::Value *syncRst = nullptr;
-            std::string syncLevel;
+            std::string syncPolarity;
         };
 
         struct SeqKeyLess
         {
             bool operator()(const SeqKey &lhs, const SeqKey &rhs) const
             {
-                auto lhsTuple = std::make_tuple(lhs.clk, lhs.clkEdge, lhs.asyncRst, lhs.asyncEdge, lhs.syncRst, lhs.syncLevel);
-                auto rhsTuple = std::make_tuple(rhs.clk, rhs.clkEdge, rhs.asyncRst, rhs.asyncEdge, rhs.syncRst, rhs.syncLevel);
+                auto lhsTuple = std::make_tuple(lhs.clk, lhs.clkEdge, lhs.asyncRst, lhs.asyncEdge, lhs.syncRst, lhs.syncPolarity);
+                auto rhsTuple = std::make_tuple(rhs.clk, rhs.clkEdge, rhs.asyncRst, rhs.asyncEdge, rhs.syncRst, rhs.syncPolarity);
                 return lhsTuple < rhsTuple;
             }
         };
@@ -1311,8 +1312,8 @@ namespace wolf_sv::emit
                 case grh::OperationKind::kRegisterEn:
                 case grh::OperationKind::kRegisterRst:
                 case grh::OperationKind::kRegisterEnRst:
-                case grh::OperationKind::kRegisterARst:
-                case grh::OperationKind::kRegisterEnARst:
+                case grh::OperationKind::kRegisterArst:
+                case grh::OperationKind::kRegisterEnArst:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -1349,7 +1350,7 @@ namespace wolf_sv::emit
                             d = operands[2];
                         }
                     }
-                    else if (op.kind() == grh::OperationKind::kRegisterRst || op.kind() == grh::OperationKind::kRegisterARst)
+                    else if (op.kind() == grh::OperationKind::kRegisterRst || op.kind() == grh::OperationKind::kRegisterArst)
                     {
                         if (operands.size() >= 4)
                         {
@@ -1358,7 +1359,7 @@ namespace wolf_sv::emit
                             d = operands[3];
                         }
                     }
-                    else if (op.kind() == grh::OperationKind::kRegisterEnRst || op.kind() == grh::OperationKind::kRegisterEnARst)
+                    else if (op.kind() == grh::OperationKind::kRegisterEnRst || op.kind() == grh::OperationKind::kRegisterEnArst)
                     {
                         if (operands.size() >= 5)
                         {
@@ -1375,16 +1376,64 @@ namespace wolf_sv::emit
                         break;
                     }
 
-                    auto rstLevel = getAttribute<std::string>(op, "rstLevel");
+                    auto rstPolarityAttr = getAttribute<std::string>(op, "rstPolarity");
+                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string> {
+                        if (!attr) {
+                            return std::nullopt;
+                        }
+                        std::string v = *attr;
+                        std::transform(v.begin(), v.end(), v.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        return v;
+                    };
+                    auto parsePolarityBool = [&](const std::optional<std::string> &attr,
+                                                 std::string_view name) -> std::optional<bool> {
+                        auto norm = normalizeLower(attr);
+                        if (!norm) {
+                            reportError("Register " + std::string(name) + " missing", op.symbol());
+                            return std::nullopt;
+                        }
+                        if (*norm == "high" || *norm == "1'b1") {
+                            return true;
+                        }
+                        if (*norm == "low" || *norm == "1'b0") {
+                            return false;
+                        }
+                        reportError("Unknown " + std::string(name) + " value: " + *attr, op.symbol());
+                        return std::nullopt;
+                    };
+
+                    const std::string enLevel =
+                        normalizeLower(enLevelAttr).value_or(std::string("high"));
+                    auto formatEnableExpr = [&](const grh::Value* enVal) -> std::optional<std::string> {
+                        if (!enVal) {
+                            return std::nullopt;
+                        }
+                        if (enLevel == "high") {
+                            return enVal->symbol();
+                        }
+                        if (enLevel == "low") {
+                            return "!(" + enVal->symbol() + ")";
+                        }
+                        reportError("Unknown enLevel for register: " + enLevel, op.symbol());
+                        return std::nullopt;
+                    };
+                    const auto enExpr = formatEnableExpr(en);
+                    std::optional<bool> rstActiveHigh;
                     std::string asyncEdge;
-                    if (op.kind() == grh::OperationKind::kRegisterARst || op.kind() == grh::OperationKind::kRegisterEnARst)
-                    {
-                        if (!rstLevel)
-                        {
-                            reportError("Async register missing rstLevel", op.symbol());
+                    if (op.kind() == grh::OperationKind::kRegisterArst ||
+                        op.kind() == grh::OperationKind::kRegisterEnArst) {
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "rstPolarity");
+                        if (!rstActiveHigh) {
                             break;
                         }
-                        asyncEdge = *rstLevel == "1'b1" ? "posedge" : "negedge";
+                        asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
+                    } else if (rst) {
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "rstPolarity");
+                        if (!rstActiveHigh) {
+                            break;
+                        }
                     }
 
                     const bool directDrive = q->symbol() == regName;
@@ -1407,15 +1456,10 @@ namespace wolf_sv::emit
                         key.asyncRst = rst;
                         key.asyncEdge = asyncEdge;
                     }
-                    else if (rst)
+                    else if (rst && rstActiveHigh)
                     {
-                        if (!rstLevel)
-                        {
-                            reportError("Register with reset missing rstLevel", op.symbol());
-                            break;
-                        }
                         key.syncRst = rst;
-                        key.syncLevel = *rstLevel;
+                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
                     }
 
                     std::ostringstream stmt;
@@ -1433,38 +1477,54 @@ namespace wolf_sv::emit
                             emitted = false;
                             break;
                         }
-                        appendIndented(stmt, baseIndent, "if (" + en->symbol() + ") begin");
+                        if (!enExpr)
+                        {
+                            emitted = false;
+                            break;
+                        }
+                        appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
                     case grh::OperationKind::kRegisterRst:
-                    case grh::OperationKind::kRegisterARst:
-                        if (!rst || !rstLevel || !resetVal)
+                    case grh::OperationKind::kRegisterArst: {
+                        if (!rst || !rstActiveHigh || !resetVal)
                         {
-                            reportError("Register with reset missing operand or rstLevel", op.symbol());
+                            reportError("Register with reset missing operand or rstPolarity", op.symbol());
                             emitted = false;
                             break;
                         }
-                        appendIndented(stmt, baseIndent, "if (" + rst->symbol() + " == " + *rstLevel + ") begin");
+                        const std::string rstCond =
+                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + resetVal->symbol() + ";");
                         appendIndented(stmt, baseIndent, "end else begin");
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
+                    }
                     case grh::OperationKind::kRegisterEnRst:
-                    case grh::OperationKind::kRegisterEnARst:
-                        if (!rst || !rstLevel || !resetVal || !en)
+                    case grh::OperationKind::kRegisterEnArst: {
+                        if (!rst || !rstActiveHigh || !resetVal || !en)
                         {
                             reportError("kRegisterEnRst missing operands", op.symbol());
                             emitted = false;
                             break;
                         }
-                        appendIndented(stmt, baseIndent, "if (" + rst->symbol() + " == " + *rstLevel + ") begin");
+                        if (!enExpr)
+                        {
+                            emitted = false;
+                            break;
+                        }
+                        const std::string rstCond =
+                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + resetVal->symbol() + ";");
-                        appendIndented(stmt, baseIndent, "end else if (" + en->symbol() + ") begin");
+                        appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
+                    }
                     default:
                         emitted = false;
                         break;

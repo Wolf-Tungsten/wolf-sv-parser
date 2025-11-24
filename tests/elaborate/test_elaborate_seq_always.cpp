@@ -276,7 +276,7 @@ int main() {
         !expectRegisterKind(*regPartial, grh::OperationKind::kRegister, 2) ||
         !expectRegisterKind(*regMulti, grh::OperationKind::kRegister, 2) ||
         !expectRegisterKind(*regSync, grh::OperationKind::kRegisterRst, 4) ||
-        !expectRegisterKind(*regAsync, grh::OperationKind::kRegisterARst, 4)) {
+        !expectRegisterKind(*regAsync, grh::OperationKind::kRegisterArst, 4)) {
         return 1;
     }
 
@@ -403,10 +403,10 @@ int main() {
     auto checkResetOperands = [&](const SignalMemoEntry& entry, const grh::Value* expectedSignal,
                                   std::string_view expectLevel) -> bool {
         const auto& attrs = entry.stateOp->attributes();
-        auto it = attrs.find("rstLevel");
+        auto it = attrs.find("rstPolarity");
         if (it == attrs.end() || !std::holds_alternative<std::string>(it->second) ||
             std::get<std::string>(it->second) != expectLevel) {
-            fail("rstLevel attribute mismatch");
+            fail("rstPolarity attribute mismatch");
             return false;
         }
         if (entry.stateOp->operands().size() < 3) {
@@ -424,10 +424,10 @@ int main() {
         return true;
     };
 
-    if (!checkResetOperands(*regSync, rstSyncPort, "1'b0")) {
+    if (!checkResetOperands(*regSync, rstSyncPort, "low")) {
         return 1;
     }
-    if (!checkResetOperands(*regAsync, rstPort, "1'b0")) {
+    if (!checkResetOperands(*regAsync, rstPort, "low")) {
         return 1;
     }
 
@@ -794,11 +794,10 @@ int main() {
             return fail("seq_stage19_rst_en_reg missing stateOp");
         }
         if (r->stateOp->kind() == grh::OperationKind::kRegisterRst) {
-            // rstLevel should be 1'b1 (active high)
-            auto it = r->stateOp->attributes().find("rstLevel");
+            auto it = r->stateOp->attributes().find("rstPolarity");
             if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
-                std::get<std::string>(it->second) != "1'b1") {
-                return fail("seq_stage19_rst_en_reg rstLevel attribute unexpected");
+                std::get<std::string>(it->second) != "high") {
+                return fail("seq_stage19_rst_en_reg rstPolarity attribute unexpected");
             }
             if (r->stateOp->operands().size() < 4 || r->stateOp->operands()[0] != clk ||
                 r->stateOp->operands()[1] != rst) {
@@ -814,10 +813,16 @@ int main() {
             }
         } else if (r->stateOp->kind() == grh::OperationKind::kRegisterEnRst) {
             // Stage21+：特化为带使能 + 同步复位原语
-            auto it = r->stateOp->attributes().find("rstLevel");
+            auto it = r->stateOp->attributes().find("rstPolarity");
             if (it == r->stateOp->attributes().end() || !std::holds_alternative<std::string>(it->second) ||
-                std::get<std::string>(it->second) != "1'b1") {
-                return fail("seq_stage19_rst_en_reg (EnRst) rstLevel attribute unexpected");
+                std::get<std::string>(it->second) != "high") {
+                return fail("seq_stage19_rst_en_reg (EnRst) rstPolarity attribute unexpected");
+            }
+            auto enAttr = r->stateOp->attributes().find("enLevel");
+            if (enAttr == r->stateOp->attributes().end() ||
+                !std::holds_alternative<std::string>(enAttr->second) ||
+                std::get<std::string>(enAttr->second) != "high") {
+                return fail("seq_stage19_rst_en_reg (EnRst) enLevel attribute unexpected");
             }
             if (r->stateOp->operands().size() != 5 ||
                 r->stateOp->operands()[0] != clk ||

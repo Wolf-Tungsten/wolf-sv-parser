@@ -92,7 +92,7 @@
   - 新增：为分支执行建立「条件保护」上下文 guard。维护 `currentGuard`（1-bit Value），进入 `if` 的真/假分支分别令 `guard = parentGuard & cond`、`guard = parentGuard & ~cond`；进入 `case` 分支令 `guard = parentGuard & match_i`，default 分支令 `guard = parentGuard & ~(match_0 | ... | match_n)`。
   - 支撑算子：在 `AlwaysConverter` 内新增 `buildLogicAnd(lhs,rhs)`、`buildLogicNot(x)`，与现有 `buildLogicOr`/`buildEquality` 风格一致，结果宽度固定为 1。
 - **KR2（寄存器复位/使能）**
-  - 复位：沿用阶段17的 `buildResetContext` + `extractResetBranches`，从 data 路径的 `kMux` 中提取 rst 条件与 `resetValue`，分别绑定到 `kRegisterRst/kRegisterARst` 的 `rst/resetValue` operand；测试覆盖同步/异步复位、高低有效与嵌套 if。
+  - 复位：沿用阶段17的 `buildResetContext` + `extractResetBranches`，从 data 路径的 `kMux` 中提取 rst 条件与 `resetValue`，分别绑定到 `kRegisterRst/kRegisterArst` 的 `rst/resetValue` operand；测试覆盖同步/异步复位、高低有效与嵌套 if。
   - 使能：GRH 的 `kRegister*` 无显式 enable operand，采用数据通路保持（hold）表达使能：当分支未写入时由 `createHoldSlice` 从 Q 端回读并与其他切片 `kConcat`，等价于“未使能时保持”。新增用例：`if (en) r <= d;` 期望 data 路径为 `mux(en, d, q)` 或等价拼接。
 - **KR3（内存端口的 enable/mask）**
   - 写口：扩展 `MemoryWriteIntent`/`MemoryBitWriteIntent` 结构，增加 `enable` 字段（默认常量 1）。在 `SeqAlwaysLHSConverter::convert` 记录 `mem[...] <= ...` 或 `mem[...][i] <= b` 时把当前 `currentGuard` 作为 intent.enable；Finalize 时：
@@ -105,7 +105,7 @@
     1) if 分支：`if (en) r <= d;`、`if (en) mem[a] <= w;`、`if (en) mem[a][i] <= b;`，断言寄存器 data 路径保留、写口/掩码口的 `en` 为 `en`；
     2) case 分支：`case(sel) 0: mem[a]<=w0; 1: mem[a][i]<=b1; default: ; endcase`，断言各端口 `en` 分别等于相应 `match` 条件，default 不生成写口；
     3) 通配比较：`casez(sel)`/`casex(sel)` 分支匹配构成 `en`，验证 `buildWildcardEquality` 产物被用作 enable；
-    4) 复位提取：`if (rst) r<=0; else if (en) r<=d;`，断言寄存器为 `kRegisterRst` 且 `rstLevel/resetValue` 正确。
+    4) 复位提取：`if (rst) r<=0; else if (en) r<=d;`，断言寄存器为 `kRegisterRst` 且 `rstPolarity/resetValue` 正确。
   - 在 `tests/elaborate/test_elaborate_seq_always.cpp` 中检查：
     - `kMemorySyncReadPort/kMemoryWritePort/kMemoryMaskWritePort` 的 operand 顺序、`en` 连接与位宽；
     - 寄存器 data 路 `kMux`/`kConcat` 结构与（异/同）步复位 operand；
@@ -159,43 +159,43 @@
 
 - KR2（新增原语：带使能寄存器族） 在 GRH 中补充 3 种带使能的寄存器：
   - kRegisterEn
-    - operands：clk, en, d；result：q；attributes：clkPolarity（posedge/negedge）
-    - 语义（active-high en；若为低有效，前置 `kNot`）：`always @(clk) if (en) q <= d;`
+    - operands：clk, en, d；result：q；attributes：clkPolarity（posedge/negedge）、enLevel（high/low，默认 high）
+    - 语义（active-high 默认；enLevel=low 时等价于 `if (!en) hold`）：`always @(clk) if (en) q <= d;`
   - kRegisterEnRst（同步复位）
-    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstLevel
-    - 语义：`if (rst==rstLevel) q<=rstValue; else if (en) q<=d;`
-  - kRegisterEnARst（异步复位）
-    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstLevel（异步边由 rstLevel 推导）
+    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstPolarity, enLevel
+    - 语义：`if (rst==rstPolarity) q<=rstValue; else if (en[enLevel]) q<=d;`
+  - kRegisterEnArst（异步复位）
+    - operands：clk, rst, en, rstValue, d；result：q；attributes：clkPolarity, rstPolarity（异步边由 rstPolarity 推导）, enLevel
   - 归一化规则
-    - 仅支持高有效 en；遇到低有效/复杂条件时把条件归一到 1-bit 并接入前级 `kNot/kAnd` 等组合逻辑，保持原语简洁；
+    - enLevel 记录使能极性；复杂条件仍需规约到 1-bit 条件，可在数据路前用 `kNot/kAnd` 等组合逻辑归一化；
     - resetValue 与 d 的位宽必须等于 q 宽度；rst/en 通过 `coerceToCondition` 规约为 1-bit。
   - 规范引用
     - 操作类型总览：`docs/GRH-representation.md:49`
     - kRegisterEn：`docs/GRH-representation.md:361`
     - kRegisterEnRst：`docs/GRH-representation.md:385`
-    - kRegisterEnARst：`docs/GRH-representation.md:414`
+    - kRegisterEnArst：`docs/GRH-representation.md:414`
 
 - KR3（分化式寄存器生成） 基于 KR2 的原语定义，建图初期仅创建基础 `kRegister` 占位，SeqAlwaysConverter 决定最终形态并补全操作数：
   - 初始占位
     - `ensureRegState`：创建 `kRegister`，仅设置 symbol、q result 与 `clkPolarity` 属性（可从 drivingBlock 推断）；暂不连接 `clk/d`，不创建 `*Rst/*ARst/*En*` 变体。
   - finalize 特化流程（面向每个被写的寄存器）
     1) 汇总 writeBack 结果生成“候选 data”SSA；
-    2) 提取复位分支（沿用阶段19的 `extractResetBranches`）：若检测到复位，记录 rst 信号、rstLevel、resetValue 以及是同步/异步类型，并剥离数据路上的复位层；
+    2) 提取复位分支（沿用阶段19的 `extractResetBranches`）：若检测到复位，记录 rst 信号、rstPolarity、resetValue 以及是同步/异步类型，并剥离数据路上的复位层；
     3) 提取使能保持：尝试匹配 `mux(en, d, Q)` 或按位拼接后整体等价为“真支为新数据、假支为 Q”的结构；若条件为 `~en` 则归一化为 en + 取反；仅当“全宽保持为 Q”时视为可抽取的 enable；
-    4) 选择目标原语：基于是否存在复位（同步/异步）与是否存在使能，确定目标为 `kRegister` / `kRegisterRst` / `kRegisterARst` / `kRegisterEn` / `kRegisterEnRst` / `kRegisterEnARst`；
+    4) 选择目标原语：基于是否存在复位（同步/异步）与是否存在使能，确定目标为 `kRegister` / `kRegisterRst` / `kRegisterArst` / `kRegisterEn` / `kRegisterEnRst` / `kRegisterEnArst`；
     5) 迁移/变形：将基础 `kRegister` 替换为目标原语（或在同一 op 上修改 type），连接 `clk/(en)/(rst)/(rstVal)/d` 等 operand；若无法抽取 enable，则保留 `mux(..., Q)` 作为 data 输入的组合逻辑；
     6) 校验与诊断：确认位宽匹配、Q 自引用合法、同一寄存器不会被多个 always 块写入；若发现部分位更新在不同 guard 下且无法归一化为单一 enable，则记录“保持由数据路表达”而非报错。
   - 规范引用
     - kRegister：`docs/GRH-representation.md:282`
     - kRegisterRst：`docs/GRH-representation.md:303`
-    - kRegisterARst：`docs/GRH-representation.md:331`
+    - kRegisterArst：`docs/GRH-representation.md:331`
     - kRegisterEn：`docs/GRH-representation.md:361`
     - kRegisterEnRst：`docs/GRH-representation.md:385`
-    - kRegisterEnARst：`docs/GRH-representation.md:414`
+    - kRegisterEnArst：`docs/GRH-representation.md:414`
 
 - KR4（转换与兼容策略） 使能抽取失败或部分位更新的情形：
   - 若数据路径不能整体归一为“else=Q”的保持，保留现有 `kRegister*/mux` 结构，不强制使用 `*En*` 原语；
-  - 当存在复位时，优先提取复位再尝试提取使能；允许得到 `kRegisterRst/ARst` + 数据路 mux 的等价表达；
+  - 当存在复位时，优先提取复位再尝试提取使能；允许得到 `kRegisterRst/Arst` + 数据路 mux 的等价表达；
   - 读取路径（RHS）不受影响：一律从 regMemo.entry.value（Q）读取；writeBack 仍然负责拼接多片段写入，SeqAlwaysConverter 只在最终 data 上进行语义提取。
 
 - KR5（测试与验收） 新增与迁移测试：
@@ -333,3 +333,9 @@
 - **KR1（端口属性）** 在 SeqAlwaysConverter 创建 memory 读/写/掩码端口时，无论是否有 `clockPolarityAttr_`，都要显式写入 `clkPolarity`；缺失时直接诊断而非依赖 emit-sv 默认值；回归覆盖 memory 时序端口的属性完整性，确保 warning 清零。
 - **KR2（地址归一化）** 根据 kMemory 的行数推导 addrWidth（ceil(log2(rowCount))），在时序 memory 读/写/掩码写入口统一对地址做 zero-extend/截断到 addrWidth 并标记为 unsigned，避免 `signed [31:0]` 膨胀；在 mem attributes 里记录 row/width 便于推导；用 dut_162 或等效用例验收生成的 SV 地址宽度/符号。
 - **KR3（回归验证）** 复现 dut_162 流程，确认 emit-sv 无 warning，输出的 memory 端口地址宽度正确；必要时补充单元测试锁定 addrWidth 归一化与 clkPolarity 写入行为。
+
+## 阶段28：改进 kRegister 系列原语
+- **目标定位** 统一 GRH 中寄存器族的命名与极性描述，使 enable/复位的极性在规范、实现与测试中都可感知且与时钟描述风格一致。
+- **KR1（规范更新：enLevel）** 修改 `docs/GRH-representation.md` 中所有带 enable 的寄存器原语（kRegisterEn/kRegisterEnRst/kRegisterEnArst），增加 `enLevel` attribute，取值 high/low 表示使能极性；明确默认值（若缺省则为 high）与语义（当 enLevel=low 时等价于 `if (!en) hold else load`），并更新操作数/属性表、示例。
+- **KR2（命名与极性一致性）** 规范层将 `kRegister*ARst` 重命名为 `kRegister*Arst`，同时把所有寄存器原语中的 `rstLevel` 属性改为 `rstPolarity`（含同步/异步、带/不带 enable 的变体），与 `clkPolarity` 命名对齐；文档中的 type 名称、attribute 表、行内引用与编号需全部替换，保留变更记录供后续 review。
+- **KR3（实现与回归迁移）** 将上述规范变更映射到代码与测试：更新 OperationKind/enum/creator 中的类型名与 attribute 键，所有构建寄存器节点的路径（SeqAlwaysConverter 提取复位/使能、emit-sv、Graph 序列化）必须写入新的 `enLevel`/`rstPolarity`，删除或兼容旧字段；同时批量更新单元测试与 JSON dump 的字段名与预期值，保证现有回归（含阶段21 enable 抽取与阶段17/19 复位提取）在新命名下仍然通过。

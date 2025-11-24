@@ -1,17 +1,17 @@
-# 阶段21：使能寄存器原语（kRegisterEn/EnARst）落地
+# 阶段21：使能寄存器原语（kRegisterEn/EnArst）落地
 
 ## 完成内容
 - KR1（寄存器使能识别）：在顺序 always 路径中识别典型保持语义产生的使能结构，将
   - `mux(en, d, Q)` 折叠为 `kRegisterEn`（操作数顺序：[clk, en, d]）；
-  - `mux(rst?rv:d, ...)` 的复位已在阶段17提取，复位+保持下的 `mux(en, d, Q)` 进一步特化为 `kRegisterEnRst/kRegisterEnARst`（操作数顺序：[clk, rst, en, resetValue, d]）。
+  - `mux(rst?rv:d, ...)` 的复位已在阶段17提取，复位+保持下的 `mux(en, d, Q)` 进一步特化为 `kRegisterEnRst/kRegisterEnArst`（操作数顺序：[clk, rst, en, resetValue, d]）。
 - KR2（复位与使能协同）：保持阶段17的复位提取（从 data 路 `kMux` 中抽取 rst/rv），在此基础上“剥离”复位后的 data，再判断是否存在 `mux(en, d, Q)` 以提取使能。
 - KR3（操作数顺序与宽度一致性）：
   - `kRegisterEn` 在连接 data 之前具备 `[clk, en]` 两个操作数；
-  - `kRegisterEnRst/kRegisterEnARst` 在连接 data 之前具备 `[clk, rst, en, resetValue]` 四个操作数；
+  - `kRegisterEnRst/kRegisterEnArst` 在连接 data 之前具备 `[clk, rst, en, resetValue]` 四个操作数；
   - `attachDataOperand` 在不同原语下校验操作数数目与 data/Q 宽度一致后再接入 data。
 - KR4（测试用例）：`tests/elaborate/test_elaborate_stage21.cpp` 覆盖
   - `seq_stage21_en_reg` => 期望 `kRegisterEn([clk,en,d])`；
-  - `seq_stage21_rst_en_reg` => 期望 `kRegisterEnARst([clk,rst_n,en,rv,d])`。
+  - `seq_stage21_rst_en_reg` => 期望 `kRegisterEnArst([clk,rst_n,en,rv,d])`。
   结合阶段17/18/19/20 的既有断言，`ctest -R elaborate-stage21` 与全量回归均通过。
 
 ## 核心实现要点
@@ -23,14 +23,14 @@
      - 按当前原语类型重写：
        - `kRegister` => `kRegisterEn` 并插入 `en`；
        - `kRegisterRst` => `kRegisterEnRst`，重排操作数为 `[clk, rst, en, resetValue]`；
-       - `kRegisterARst` => `kRegisterEnARst`，重排操作数为 `[clk, rst, en, resetValue]`；
+       - `kRegisterArst` => `kRegisterEnArst`，重排操作数为 `[clk, rst, en, resetValue]`；
      - 使用“去除复位/保持”的 `newData` 作为最终 data。
   4) 最后由 `attachDataOperand` 接上 data，并做宽度一致性校验。
 - 复位/使能与保持的关系：
   - 对于保持（缺分支写入），顺序语义下 `mergeShadowFrames` 会自动补齐缺失分支为 `Q`，形成 `mux(en, new_data, Q)`；
   - 对已含复位的场景，先抽取复位再判断 `en`，确保最终原语与操作数序一致。
 - 宽度与顺序约束：
-  - `attachClockOperand/attachResetOperands/attachDataOperand` 分别确保 clock 先于 reset，再先于 enable（对 EnRst/EnARst 在 data 前应已有 `[clk,rst,en,rv]`）。
+  - `attachClockOperand/attachResetOperands/attachDataOperand` 分别确保 clock 先于 reset，再先于 enable（对 EnRst/EnArst 在 data 前应已有 `[clk,rst,en,rv]`）。
   - 数据宽度必须与 Q 相等，否则报 NYI 诊断并放弃 finalize（保证图一致性）。
 
 ## 与前序阶段的协作
@@ -55,4 +55,3 @@
 2. 属性增强：为使能/复位在原语上附加来源信息（例如源表达式位置、静态/动态来源），帮助调试与后端优化。
 3. 结构匹配扩展：识别“数据路径恒等传递”（assign/concat 的平凡组合）并收敛为更简洁的输入连接。
 4. 与组合/时序混合复位场景的边界处理：明确诊断并提供改写建议，保证最终 IR 易于综合与映射。
-

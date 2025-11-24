@@ -18,7 +18,7 @@
 
 ## Reg Memo
 - **定义位置**：与 Net Memo 共用 `SignalMemoEntry`，额外使用 `drivingBlock`、`stateOp` 字段，实例存放于 `Elaborate::regMemo_`。
-- **作用**：缓存需要用寄存器表达的信号（仅寄存器）。在建图初期会根据 memo 生成对应的寄存器原语（`kRegister` / `kRegisterRst` / `kRegisterARst`），并把 `value`（寄存器的 `q` 端口）与 `stateOp` 写回 entry 供 RHS 使用。
+- **作用**：缓存需要用寄存器表达的信号（仅寄存器）。在建图初期会根据 memo 生成对应的寄存器原语（`kRegister` / `kRegisterRst` / `kRegisterArst`），并把 `value`（寄存器的 `q` 端口）与 `stateOp` 写回 entry 供 RHS 使用。
 - **关键字段**
   - `drivingBlock`：记录唯一的时序过程块（例如 `always_ff`）指针，便于派生时钟极性等属性。
   - `stateOp`：指向生成的 GRH State Operation（寄存器族）。

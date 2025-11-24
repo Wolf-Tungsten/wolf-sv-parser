@@ -18,5 +18,5 @@
 
 ## 后续建议
 1. **控制流实现**：利用基类已有的 shadow/merge 基础，为 seq 块补充 if/case/loop，确保块内存在条件分支时写集合仍保持确定性。
-2. **复位/存储器支持**：阶段17仅覆盖 kRegister 数据绑定，还需规划 `kRegisterRst`/`kRegisterARst` 与 `kMemory` 读写口的接入策略，以便处理含复位、内存写口的 always_ff。
+2. **复位/存储器支持**：阶段17仅覆盖 kRegister 数据绑定，还需规划 `kRegisterRst`/`kRegisterArst` 与 `kMemory` 读写口的接入策略，以便处理含复位、内存写口的 always_ff。
 3. **诊断精细化**：当前 TODO 信息较为粗粒度，可扩展为输出源文件位置、寄存器名称与尚未连线的 operand 类型，降低后续调试成本。

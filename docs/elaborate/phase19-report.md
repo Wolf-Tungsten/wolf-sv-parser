@@ -6,7 +6,7 @@
   - 新增布尔辅助：`buildLogicAnd`/`buildLogicNot` 与 `coerceToCondition`（将多位表达式规约为 1-bit 条件），并复用已有 `buildEquality`/`buildLogicOr`/`buildWildcardEquality`。
   - 为顺序分支引入 guard 栈（currentGuard）：进入真/假分支分别将 guard 与条件与/取反后压栈，`case` 则使用每个分支的匹配条件；default 分支使用 `~(match_0 | ... | match_n)`。
 - KR2（寄存器复位/使能）：
-  - 复位沿用阶段17：`buildResetContext` + `extractResetBranches` 从数据路的 `kMux` 中提取 `rst` 与 `resetValue`，分别接入 `kRegisterRst/kRegisterARst`。
+  - 复位沿用阶段17：`buildResetContext` + `extractResetBranches` 从数据路的 `kMux` 中提取 `rst` 与 `resetValue`，分别接入 `kRegisterRst/kRegisterArst`。
   - 使能通过保持语义表达：分支缺省不写时，顺序合流自动以 `Q` 作为 hold，形成 `mux(en, new_data, Q)` 或等价 concat/hold 结构（`SeqAlwaysConverter::createHoldSlice` 在需要时生成保持片段）。典型 `if (en) r <= d;` 产出 `kMux(en, d, Q)`。
 - KR3（内存端口使能与掩码）：
   - LHS 检测到 `mem[...] <= ...` 或 `mem[...][i] <= b` 时记录 `MemoryWriteIntent`/`MemoryBitWriteIntent`，将当前 guard 作为 `enable` 保存；Finalize 阶段创建 `kMemoryWritePort`/`kMemoryMaskWritePort` 并连接 `clk/addr/enable/data(/mask)`。

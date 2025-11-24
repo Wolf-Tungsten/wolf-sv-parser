@@ -2378,31 +2378,26 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                 grh::Value* q = entry.target->value;
                 grh::Value* enRaw = nullptr;
                 grh::Value* newData = nullptr;
-                bool invert = false;
+                bool activeLow = false;
                 if (fVal == q) {
                     // mux(en, d, Q)
                     enRaw = cond;
                     newData = tVal;
                 } else if (tVal == q) {
-                    // mux(en, Q, d) => use ~en
+                    // mux(en, Q, d) => load when !en
                     enRaw = cond;
                     newData = fVal;
-                    invert = true;
+                    activeLow = true;
                 }
                 if (enRaw && newData && newData->width() == q->width()) {
                     grh::Value* enBit = coerceToCondition(*enRaw);
-                    if (enBit && invert) {
-                        if (grh::Value* inv = buildLogicNot(*enBit)) {
-                            enBit = inv;
-                        } else {
-                            enBit = nullptr;
-                        }
-                    }
                     if (enBit) {
+                        const std::string enLevel = activeLow ? "low" : "high";
                         switch (stateOp->kind()) {
                         case grh::OperationKind::kRegister:
                             stateOp->setKind(grh::OperationKind::kRegisterEn);
                             stateOp->addOperand(*enBit); // [clk, en]
+                            stateOp->setAttribute("enLevel", enLevel);
                             break;
                         case grh::OperationKind::kRegisterRst:
                             stateOp->setKind(grh::OperationKind::kRegisterEnRst);
@@ -2412,15 +2407,17 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                                 stateOp->replaceOperand(2, *enBit);
                                 stateOp->replaceOperand(3, *rstVal);
                             }
+                            stateOp->setAttribute("enLevel", enLevel);
                             break;
-                        case grh::OperationKind::kRegisterARst:
-                            stateOp->setKind(grh::OperationKind::kRegisterEnARst);
+                        case grh::OperationKind::kRegisterArst:
+                            stateOp->setKind(grh::OperationKind::kRegisterEnArst);
                             stateOp->addOperand(*enBit);
                             if (stateOp->operands().size() == 4) {
                                 grh::Value* rstVal = stateOp->operands()[2];
                                 stateOp->replaceOperand(2, *enBit);
                                 stateOp->replaceOperand(3, *rstVal);
                             }
+                            stateOp->setAttribute("enLevel", enLevel);
                             break;
                         default:
                             break;
@@ -3155,10 +3152,10 @@ bool SeqAlwaysConverter::attachDataOperand(grh::Operation& stateOp, grh::Value& 
     if (stateOp.kind() == grh::OperationKind::kRegisterEn) {
         expected = 2;
     } else if (stateOp.kind() == grh::OperationKind::kRegisterRst ||
-               stateOp.kind() == grh::OperationKind::kRegisterARst) {
+               stateOp.kind() == grh::OperationKind::kRegisterArst) {
         expected = 3;
     } else if (stateOp.kind() == grh::OperationKind::kRegisterEnRst ||
-               stateOp.kind() == grh::OperationKind::kRegisterEnARst) {
+               stateOp.kind() == grh::OperationKind::kRegisterEnArst) {
         expected = 4;
     }
     if (operands.size() != expected) {
@@ -3234,7 +3231,7 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
     }
     ResetContext context;
     switch (entry.stateOp->kind()) {
-    case grh::OperationKind::kRegisterARst:
+    case grh::OperationKind::kRegisterArst:
         if (!entry.asyncResetExpr) {
             return std::nullopt;
         }
@@ -3310,9 +3307,9 @@ bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value
                                              const WriteBackMemo::Entry& entry) {
     auto& operands = stateOp.operands();
     if (stateOp.kind() != grh::OperationKind::kRegisterRst &&
-        stateOp.kind() != grh::OperationKind::kRegisterARst &&
+        stateOp.kind() != grh::OperationKind::kRegisterArst &&
         stateOp.kind() != grh::OperationKind::kRegisterEnRst &&
-        stateOp.kind() != grh::OperationKind::kRegisterEnARst) {
+        stateOp.kind() != grh::OperationKind::kRegisterEnArst) {
         reportFinalizeIssue(entry, "Register does not expect reset operands");
         return false;
     }
@@ -5896,7 +5893,7 @@ grh::Value* RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
     if (entry.stateOp) {
         const grh::OperationKind kind = entry.stateOp->kind();
         if (kind == grh::OperationKind::kRegister || kind == grh::OperationKind::kRegisterRst ||
-            kind == grh::OperationKind::kRegisterARst) {
+            kind == grh::OperationKind::kRegisterArst) {
             const std::vector<grh::Value*>& results = entry.stateOp->results();
             if (!results.empty() && results.front()) {
                 return results.front();
@@ -7145,20 +7142,20 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
             continue;
         }
 
-        auto makeRstLevel = [](bool activeHigh) {
-            return activeHigh ? std::string("1'b1") : std::string("1'b0");
+        auto makeRstPolarity = [](bool activeHigh) {
+            return activeHigh ? std::string("high") : std::string("low");
         };
 
         grh::OperationKind opKind = grh::OperationKind::kRegister;
-        std::optional<std::string> rstLevel;
+        std::optional<std::string> rstPolarity;
         if (asyncInfo) {
             entry.asyncResetExpr = asyncInfo->expr;
             entry.asyncResetEdge = asyncInfo->edge;
             if (entry.asyncResetExpr && entry.asyncResetEdge != slang::ast::EdgeKind::None &&
                 entry.asyncResetEdge != slang::ast::EdgeKind::BothEdges) {
                 const bool activeHigh = entry.asyncResetEdge == slang::ast::EdgeKind::PosEdge;
-                rstLevel = makeRstLevel(activeHigh);
-                opKind = grh::OperationKind::kRegisterARst;
+                rstPolarity = makeRstPolarity(activeHigh);
+                opKind = grh::OperationKind::kRegisterArst;
             }
             else if (diagnostics_) {
                 diagnostics_->nyi(*entry.symbol,
@@ -7168,7 +7165,7 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         else if (syncInfo && syncInfo->symbol) {
             entry.syncResetSymbol = syncInfo->symbol;
             entry.syncResetActiveHigh = syncInfo->activeHigh;
-            rstLevel = makeRstLevel(syncInfo->activeHigh);
+            rstPolarity = makeRstPolarity(syncInfo->activeHigh);
             opKind = grh::OperationKind::kRegisterRst;
         }
 
@@ -7176,8 +7173,8 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         grh::Operation& op = graph.createOperation(opKind, opName);
         op.addResult(*value);
         op.setAttribute("clkPolarity", *clkPolarity);
-        if (rstLevel) {
-            op.setAttribute("rstLevel", *rstLevel);
+        if (rstPolarity) {
+            op.setAttribute("rstPolarity", *rstPolarity);
         }
         entry.stateOp = &op;
     }

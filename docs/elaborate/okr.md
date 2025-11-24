@@ -148,7 +148,7 @@
 - **Objective** 将寄存器生成的方式改造为“分化形式”，并添加新的寄存器原语
   - KR1 目前实现中，建图初期将 kRegister 和 kMemory 放在了一个 memo 中，请分离成 regMemo 和 memMemo
   - KR2 改为建图初期只产生 kRegister，在 SeqAlwaysConverter 中对 kRegister 的类型和操作数进行补充
-  - KR3 目前 GRH 表示中缺少带有 Enable 的寄存器，请补充 kRegisterEn、kRegisterEnRst、kRegisterEnARst
+  - KR3 目前 GRH 表示中缺少带有 Enable 的寄存器，请补充 kRegisterEn、kRegisterEnRst、kRegisterEnArst
   - KR4 添加对新型寄存器的支持
   - KR5 补充测试样例，并确保已有测试样例正确回归。
 
@@ -177,3 +177,14 @@
   - KR1 在 elaborate 过程中，识别 blackbox 模块声明，blackbox 模块必须被定义，但不能包含任何内部实现细节，否则就应当视为普通模块，可用 blackboxMemo 记录 blackbox 模块的信息
   - KR2 当对 blackbox 模块进行实例化时，elaborate 应当正确处理 blackbox 模块的端口连接、参数配置，生成 kBlackbox 操作，kBlackbox 操作的生成也应该支持 generate，请核查当前对 kBlackbox 的支持
   - KR3 创建测试样例 blackbox.sv，验证 blackbox 模块的正确处理。
+
+## 阶段26-27
+
+略，已完成
+
+## 阶段28: 改进 kRegister 系列原语
+
+- **Objective** 对 GRH-Representation 中 kRegister* 系列原语进行改进
+  - KR1 对 GRH-Represntation 文档进行修改，要求为使能信号添加 enLevel 属性，指示高或低使能
+  - KR2 kRegister*ARst 统一成 kRegister*Arst，并且将所有涉及复位的 rstLevel 属性改为 rstPolarity，和时钟的描述对齐
+  - KR3 将上述修改映射到代码中，更新测试样例，确保仍然能通过
