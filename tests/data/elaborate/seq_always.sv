@@ -391,3 +391,19 @@ module seq_stage21_rst_en_reg (
     end
     assign q = r;
 endmodule
+
+// Stage27: memory address/clkPolarity normalization
+module seq_stage27_mem_addr (
+    input  logic               clk,
+    input  logic signed [31:0] addr_in,
+    input  logic        [7:0]  wdata,
+    input  logic               bit_value,
+    output logic        [7:0]  rdata
+);
+    logic [7:0] mem [0:99]; // 100 rows -> addr width 7
+    always_ff @(posedge clk) begin
+        mem[addr_in] <= wdata;
+        mem[addr_in][2] <= bit_value;
+        rdata <= mem[addr_in + 1];
+    end
+endmodule

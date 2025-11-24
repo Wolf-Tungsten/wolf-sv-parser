@@ -68,8 +68,10 @@ Yosys 的 `proc_case`/`proc_mux` 组合做法是：
 
 ### for 语义
 1. 支持 `for (init; cond; step)`：`init` 需是静态赋值语句（可复用现有局部变量），`cond` 和 `step` 通过 EvalContext 评估成常量。
-2. 迭代变量作用域与 SystemVerilog 一致：loop 结束后销毁；实现上在 LoopScopeGuard 中维护 `ValueSymbol -> ConstantValue`，供 RHS/LHS 查询。
-3. 允许嵌套 for：LoopContextGuard 追踪 loop depth，并在 break/continue 时检查是否仍处于静态上下文（若非静态则报错）。
+2. 允许缺少 inline loopVar 的写法，只要 initializer 列表是针对符号的赋值；step 里的赋值会先 eval 右值再写回 EvalContext，为下一轮迭代提供新的常量值。
+3. 迭代变量作用域与 SystemVerilog 一致：loop 结束后销毁；实现上在 LoopScopeGuard 中维护 `ValueSymbol -> ConstantValue`，供 RHS/LHS 查询。
+4. 允许嵌套 for：LoopContextGuard 追踪 loop depth，并在 break/continue 时检查是否仍处于静态上下文（若非静态则报错）。
+5. RHS 读取 loopVar 由 `AlwaysBlockRHSConverter` 直接返回 loop scope 中的 literal，并在命中自定义值时禁用 RHS 缓存，避免跨迭代复用旧值。
 
 ### foreach 语义
 1. 仅支持静态数组 / 结构体：range 必须是常量，动态数组（或未 flatten 的类型）会直接报 `NYI`。

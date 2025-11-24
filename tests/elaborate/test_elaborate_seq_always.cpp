@@ -1154,5 +1154,63 @@ int main() {
         }
     }
 
+    // -----------------------
+    // Stage27: memory addr/clkPolarity normalization
+    // -----------------------
+    if (const grh::Graph* g27 = fetchGraph("seq_stage27_mem_addr")) {
+        const grh::Value* clk = findPort(*g27, "clk", /*isInput=*/true);
+        if (!clk) {
+            return fail("seq_stage27_mem_addr missing clk port");
+        }
+        const auto* inst =
+            findInstanceByName(compilation->getRoot().topInstances, "seq_stage27_mem_addr");
+        if (!inst) {
+            return fail("seq_stage27_mem_addr instance not found");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage27_mem_addr mem not found or not kMemory");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+        const grh::Operation* wr =
+            findMemoryOp(*g27, grh::OperationKind::kMemoryWritePort, memSymbol);
+        const grh::Operation* mwr =
+            findMemoryOp(*g27, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+        const grh::Operation* rd =
+            findMemoryOp(*g27, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+        if (!wr || !mwr || !rd) {
+            return fail("seq_stage27_mem_addr expected write/mask/read ports");
+        }
+        auto expectAddrShape = [&](const grh::Operation& op, std::string_view label) -> bool {
+            if (op.operands().size() < 2) {
+                std::string msg(label);
+                msg.append(" has insufficient operands");
+                return fail(msg);
+            }
+            const grh::Value* addr = op.operands()[1];
+            if (!addr) {
+                std::string msg(label);
+                msg.append(" addr operand is null");
+                return fail(msg);
+            }
+            if (addr->width() != 7 || addr->isSigned()) {
+                std::string msg(label);
+                msg.append(" addr width/sign mismatch");
+                return fail(msg);
+            }
+            return true;
+        };
+        if (!expectStringAttr(*wr, "clkPolarity", "posedge") ||
+            !expectStringAttr(*mwr, "clkPolarity", "posedge") ||
+            !expectStringAttr(*rd, "clkPolarity", "posedge")) {
+            return fail("seq_stage27_mem_addr clkPolarity missing on memory ports");
+        }
+        if (!expectAddrShape(*wr, "write port") || !expectAddrShape(*mwr, "mask write port") ||
+            !expectAddrShape(*rd, "sync read port")) {
+            return 1;
+        }
+    }
+
     return 0;
 }

@@ -298,6 +298,7 @@ private:
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
     std::unordered_map<const slang::ast::Expression*, grh::Value*> cache_;
+    bool suppressCache_ = false;
     std::size_t valueCounter_ = 0;
     std::size_t operationCounter_ = 0;
     std::size_t instanceId_ = 0;
@@ -685,14 +686,9 @@ protected:
     LoopControl pendingLoopControl_ = LoopControl::None;
     std::size_t pendingLoopDepth_ = 0;
     std::vector<grh::Value*> guardStack_;
-    grh::Value* currentGuardValue() const {
-        return guardStack_.empty() ? nullptr : guardStack_.back();
-    }
-    void pushGuard(grh::Value* guard) { guardStack_.push_back(guard); }
-    void popGuard() {
-        if (!guardStack_.empty())
-            guardStack_.pop_back();
-    }
+    grh::Value* currentGuardValue() const;
+    void pushGuard(grh::Value* guard);
+    void popGuard();
     struct LoopValueInfo {
         slang::SVInt literal;
         grh::Value* value = nullptr;
@@ -772,6 +768,11 @@ private:
                                     const slang::ast::Expression& originExpr,
                                     grh::Value* enableOverride = nullptr);
     int64_t memoryRowWidth(const SignalMemoEntry& entry) const;
+    std::optional<int64_t> memoryRowCount(const SignalMemoEntry& entry) const;
+    int64_t memoryAddrWidth(const SignalMemoEntry& entry) const;
+    grh::Value* normalizeMemoryAddress(const SignalMemoEntry& entry, grh::Value& addrValue,
+                                       const slang::ast::Expression* originExpr);
+    bool applyClockPolarity(grh::Operation& op, std::string_view context);
     void recordMemoryWordWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
                                grh::Value& addrValue, grh::Value& dataValue, grh::Value* enable);
     void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
@@ -880,6 +881,7 @@ private:
                               grh::Netlist& netlist);
     void processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
                                    grh::Graph& graph, grh::Netlist& netlist);
+    void processNetInitializers(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
                                  const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
     void processCombAlways(const slang::ast::ProceduralBlockSymbol& block,

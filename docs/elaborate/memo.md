@@ -13,7 +13,8 @@
 - **生命周期**
   1. `Elaborate::collectSignalMemos` 遍历 `InstanceBodySymbol` 的成员，过滤出固定位宽的 `NetSymbol` / `VariableSymbol`，并记录驱动类别；
   2. `Elaborate::ensureNetValues` 在模块第一次 elaboration 时，根据 memo 信息创建/复用 `grh::Value`；
-  3. 后续 RHS/LHS 访问通过 `SignalMemoEntry` 里的字段直接找到该 `Value`。
+  3. `Elaborate::processNetInitializers` 扫描带 initializer 的 wire，使用 Comb RHS 转换初值并借助 WriteBackMemo 生成连续赋值；即便没有显式驱动也会把此类 wire 留在 netMemo 中，保证 RHS 可解析。
+  4. 后续 RHS/LHS 访问通过 `SignalMemoEntry` 里的字段直接找到该 `Value`。
 
 ## Reg Memo
 - **定义位置**：与 Net Memo 共用 `SignalMemoEntry`，额外使用 `drivingBlock`、`stateOp` 字段，实例存放于 `Elaborate::regMemo_`。

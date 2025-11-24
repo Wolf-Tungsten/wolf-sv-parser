@@ -327,3 +327,9 @@
 > - blackbox 判定逻辑应集中在模块元信息收集处，避免在实例化阶段重复推导；对 pragma/attribute 的解析可复用 slang 的属性接口。
 > - 构造 `kBlackbox` 时复用已有 `kInstance` 的端口 flatten/连接助手，确保 input/output 顺序统一；inout 如未支持需显式报 NYI。
 > - parameterValues 建议统一保存为字符串（常量值转十进制或源码文本一致），保持与规范生成语义匹配；在 diag 中打印实例名与模块名便于定位。
+
+## 阶段27：HDLBits dut_162 时序 memory 端口修复
+- **背景** `make run_hdlbits_test DUT=162` 报告所有 kMemorySyncReadPort/kMemoryWritePort/kMemoryMaskWritePort 缺失 `clkPolarity`，同时 PHT reset 展开出的写地址是 `signed [31:0]`，与实际 7-bit unsigned 地址不符。
+- **KR1（端口属性）** 在 SeqAlwaysConverter 创建 memory 读/写/掩码端口时，无论是否有 `clockPolarityAttr_`，都要显式写入 `clkPolarity`；缺失时直接诊断而非依赖 emit-sv 默认值；回归覆盖 memory 时序端口的属性完整性，确保 warning 清零。
+- **KR2（地址归一化）** 根据 kMemory 的行数推导 addrWidth（ceil(log2(rowCount))），在时序 memory 读/写/掩码写入口统一对地址做 zero-extend/截断到 addrWidth 并标记为 unsigned，避免 `signed [31:0]` 膨胀；在 mem attributes 里记录 row/width 便于推导；用 dut_162 或等效用例验收生成的 SV 地址宽度/符号。
+- **KR3（回归验证）** 复现 dut_162 流程，确认 emit-sv 无 warning，输出的 memory 端口地址宽度正确；必要时补充单元测试锁定 addrWidth 归一化与 clkPolarity 写入行为。
