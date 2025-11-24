@@ -85,13 +85,13 @@ int validateBlackbox(const grh::Netlist& netlist) {
 
     // All parameterized blackbox leaf graphs should be empty (ports only, no placeholder).
     int leafGraphCount = 0;
-    for (const auto& graphPtr : netlist.graphs()) {
+    for (const auto& [symbol, graphPtr] : netlist.graphs()) {
         if (!graphPtr) {
             continue;
         }
-        if (graphPtr->name().rfind("blackbox_leaf", 0) == 0) {
+        if (symbol.rfind("blackbox_leaf", 0) == 0) {
             ++leafGraphCount;
-            if (!graphPtr->operations().empty()) {
+            if (!graphPtr->operationOrder().empty()) {
                 return fail("netlist", "blackbox_leaf graph unexpectedly contains operations");
             }
         }
@@ -101,17 +101,15 @@ int validateBlackbox(const grh::Netlist& netlist) {
     }
 
     std::vector<const grh::Operation*> blackboxes;
-    for (const auto& opPtr : topGraph->operations()) {
-        if (!opPtr) {
+    for (const auto& opSymbol : topGraph->operationOrder()) {
+        const grh::Operation& op = topGraph->getOperation(opSymbol);
+        if (op.kind() != grh::OperationKind::kBlackbox) {
             continue;
         }
-        if (opPtr->kind() != grh::OperationKind::kBlackbox) {
-            continue;
-        }
-        if (opPtr->attributes().count("moduleName") == 0) {
+        if (op.attributes().count("moduleName") == 0) {
             continue; // Skip placeholder TODO nodes.
         }
-        blackboxes.push_back(opPtr.get());
+        blackboxes.push_back(&op);
     }
 
     if (blackboxes.size() != 2) {

@@ -53,13 +53,13 @@ namespace wolf_sv::grh
         if (this != &other)
         {
             graphs_ = std::move(other.graphs_);
-            graphByName_ = std::move(other.graphByName_);
-            graphAliasByName_ = std::move(other.graphAliasByName_);
+            graphAliasBySymbol_ = std::move(other.graphAliasBySymbol_);
+            graphOrder_ = std::move(other.graphOrder_);
             topGraphs_ = std::move(other.topGraphs_);
             resetGraphOwners();
 
-            other.graphByName_.clear();
-            other.graphAliasByName_.clear();
+            other.graphAliasBySymbol_.clear();
+            other.graphOrder_.clear();
             other.topGraphs_.clear();
         }
         return *this;
@@ -67,11 +67,11 @@ namespace wolf_sv::grh
 
     void Netlist::resetGraphOwners()
     {
-        for (auto &graphPtr : graphs_)
+        for (auto &entry : graphs_)
         {
-            if (graphPtr)
+            if (entry.second)
             {
-                graphPtr->owner_ = this;
+                entry.second->owner_ = this;
             }
         }
     }
@@ -753,9 +753,18 @@ namespace wolf_sv::grh
         }
     }
 
-    void Value::setDefiningOp(Operation *op)
+    Operation *Value::definingOp() const noexcept
     {
-        if (defineOp_ && defineOp_ != op)
+        if (!definingOp_)
+        {
+            return nullptr;
+        }
+        return graph_->findOperation(*definingOp_);
+    }
+
+    void Value::setDefiningOp(const OperationId &opSymbol)
+    {
+        if (definingOp_ && *definingOp_ != opSymbol)
         {
             throw std::runtime_error("Value already has a defining operation");
         }
@@ -763,18 +772,18 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Input value cannot have a defining operation");
         }
-        defineOp_ = op;
+        definingOp_ = opSymbol;
     }
 
-    void Value::addUser(Operation *op, std::size_t operandIndex)
+    void Value::addUser(const OperationId &opSymbol, std::size_t operandIndex)
     {
-        users_.push_back(ValueUser{.operation = op, .operandIndex = operandIndex});
+        users_.push_back(ValueUser{.operation = opSymbol, .operandIndex = operandIndex});
     }
 
-    void Value::removeUser(Operation *op, std::size_t operandIndex)
+    void Value::removeUser(const OperationId &opSymbol, std::size_t operandIndex)
     {
         auto it = std::find_if(users_.begin(), users_.end(), [&](const ValueUser &user)
-                               { return user.operation == op && user.operandIndex == operandIndex; });
+                               { return user.operation == opSymbol && user.operandIndex == operandIndex; });
         if (it == users_.end())
         {
             throw std::runtime_error("Value usage entry not found during removal");
@@ -782,13 +791,13 @@ namespace wolf_sv::grh
         users_.erase(it);
     }
 
-    void Value::clearDefiningOp(Operation *op)
+    void Value::clearDefiningOp(const OperationId &opSymbol)
     {
-        if (defineOp_ != op)
+        if (!definingOp_ || *definingOp_ != opSymbol)
         {
             throw std::runtime_error("Defining operation mismatch during clear");
         }
-        defineOp_ = nullptr;
+        definingOp_.reset();
     }
 
     void Value::setAsInput()
@@ -797,7 +806,7 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Value cannot be both input and output");
         }
-        if (defineOp_)
+        if (definingOp_)
         {
             throw std::runtime_error("Input value cannot have a defining operation");
         }
@@ -823,18 +832,56 @@ namespace wolf_sv::grh
         }
     }
 
+    Value *Operation::operandValue(std::size_t index) const
+    {
+        if (index >= operands_.size())
+        {
+            throw std::out_of_range("Operand index out of range");
+        }
+        return graph_->findValue(operands_[index]);
+    }
+
+    Value *Operation::resultValue(std::size_t index) const
+    {
+        if (index >= results_.size())
+        {
+            throw std::out_of_range("Result index out of range");
+        }
+        return graph_->findValue(results_[index]);
+    }
+
+    Operation::ValueHandleRange::Iterator::value_type Operation::ValueHandleRange::Iterator::operator*() const
+    {
+        return graph_->findValue((*storage_)[index_]);
+    }
+
+    Value *Operation::ValueHandleRange::operator[](std::size_t index) const
+    {
+        return graph_->findValue((*storage_)[index]);
+    }
+
+    Value *Operation::ValueHandleRange::front() const
+    {
+        return empty() ? nullptr : graph_->findValue(storage_->front());
+    }
+
+    Value *Operation::ValueHandleRange::back() const
+    {
+        return empty() ? nullptr : graph_->findValue(storage_->back());
+    }
+
     void Operation::addOperand(Value &value)
     {
         ensureGraphOwnership(*graph_, value);
-        operands_.push_back(&value);
-        value.addUser(this, operands_.size() - 1);
+        operands_.push_back(value.symbol());
+        value.addUser(symbol_, operands_.size() - 1);
     }
 
     void Operation::addResult(Value &value)
     {
         ensureGraphOwnership(*graph_, value);
-        results_.push_back(&value);
-        value.setDefiningOp(this);
+        results_.push_back(value.symbol());
+        value.setDefiningOp(symbol_);
     }
 
     void Operation::replaceOperand(std::size_t index, Value &value)
@@ -844,14 +891,16 @@ namespace wolf_sv::grh
             throw std::out_of_range("Operand index out of range");
         }
         ensureGraphOwnership(*graph_, value);
-        Value *current = operands_[index];
-        if (current == &value)
+        if (operands_[index] == value.symbol())
         {
             return;
         }
-        value.addUser(this, index);
-        current->removeUser(this, index);
-        operands_[index] = &value;
+        value.addUser(symbol_, index);
+        if (Value *current = graph_->findValue(operands_[index]))
+        {
+            current->removeUser(symbol_, index);
+        }
+        operands_[index] = value.symbol();
     }
 
     void Operation::replaceResult(std::size_t index, Value &value)
@@ -861,14 +910,16 @@ namespace wolf_sv::grh
             throw std::out_of_range("Result index out of range");
         }
         ensureGraphOwnership(*graph_, value);
-        Value *current = results_[index];
-        if (current == &value)
+        if (results_[index] == value.symbol())
         {
             return;
         }
-        value.setDefiningOp(this);
-        current->clearDefiningOp(this);
-        results_[index] = &value;
+        value.setDefiningOp(symbol_);
+        if (Value *current = graph_->findValue(results_[index]))
+        {
+            current->clearDefiningOp(symbol_);
+        }
+        results_[index] = value.symbol();
     }
 
     void Operation::setAttribute(std::string key, AttributeValue value)
@@ -884,37 +935,37 @@ namespace wolf_sv::grh
         attributes_.insert_or_assign(std::move(key), std::move(value));
     }
 
-    Graph::Graph(Netlist &owner, std::string name) : owner_(&owner),
-                                                     name_(std::move(name))
+    Graph::Graph(Netlist &owner, std::string symbol) : owner_(&owner),
+                                                       symbol_(std::move(symbol))
     {
-        if (name_.empty())
+        if (symbol_.empty())
         {
-            throw std::invalid_argument("Graph name must not be empty");
+            throw std::invalid_argument("Graph symbol must not be empty");
         }
     }
 
     Value &Graph::addValueInternal(std::unique_ptr<Value> value)
     {
-        auto *raw = value.get();
-        auto [it, inserted] = valueBySymbol_.emplace(raw->symbol(), raw);
+        auto sym = value->symbol();
+        auto [it, inserted] = values_.emplace(sym, std::move(value));
         if (!inserted)
         {
-            throw std::runtime_error("Duplicated value symbol: " + raw->symbol());
+            throw std::runtime_error("Duplicated value symbol: " + sym);
         }
-        values_.push_back(std::move(value));
-        return *raw;
+        valueOrder_.push_back(sym);
+        return *it->second;
     }
 
     Operation &Graph::addOperationInternal(std::unique_ptr<Operation> op)
     {
-        auto *raw = op.get();
-        auto [it, inserted] = opBySymbol_.emplace(raw->symbol(), raw);
+        auto sym = op->symbol();
+        auto [it, inserted] = operations_.emplace(sym, std::move(op));
         if (!inserted)
         {
-            throw std::runtime_error("Duplicated operation symbol: " + raw->symbol());
+            throw std::runtime_error("Duplicated operation symbol: " + sym);
         }
-        operations_.push_back(std::move(op));
-        return *raw;
+        operationOrder_.push_back(sym);
+        return *it->second;
     }
 
     Value &Graph::createValue(std::string symbol, int64_t width, bool isSigned)
@@ -937,7 +988,7 @@ namespace wolf_sv::grh
             throw std::runtime_error("Duplicated input port: " + portName);
         }
         value.setAsInput();
-        inputPorts_.emplace(std::move(portName), &value);
+        inputPorts_.emplace(std::move(portName), value.symbol());
     }
 
     void Graph::bindOutputPort(std::string portName, Value &value)
@@ -948,60 +999,140 @@ namespace wolf_sv::grh
             throw std::runtime_error("Duplicated output port: " + portName);
         }
         value.setAsOutput();
-        outputPorts_.emplace(std::move(portName), &value);
+        outputPorts_.emplace(std::move(portName), value.symbol());
     }
 
     Value *Graph::findValue(std::string_view symbol) noexcept
     {
-        auto it = valueBySymbol_.find(std::string(symbol));
-        if (it == valueBySymbol_.end())
+        auto it = values_.find(std::string(symbol));
+        if (it == values_.end())
         {
             return nullptr;
         }
-        return it->second;
+        return it->second.get();
     }
 
     const Value *Graph::findValue(std::string_view symbol) const noexcept
     {
-        auto it = valueBySymbol_.find(std::string(symbol));
-        if (it == valueBySymbol_.end())
+        auto it = values_.find(std::string(symbol));
+        if (it == values_.end())
         {
             return nullptr;
         }
-        return it->second;
+        return it->second.get();
     }
 
     Operation *Graph::findOperation(std::string_view symbol) noexcept
     {
-        auto it = opBySymbol_.find(std::string(symbol));
-        if (it == opBySymbol_.end())
+        auto it = operations_.find(std::string(symbol));
+        if (it == operations_.end())
         {
             return nullptr;
         }
-        return it->second;
+        return it->second.get();
     }
 
     const Operation *Graph::findOperation(std::string_view symbol) const noexcept
     {
-        auto it = opBySymbol_.find(std::string(symbol));
-        if (it == opBySymbol_.end())
+        auto it = operations_.find(std::string(symbol));
+        if (it == operations_.end())
         {
             return nullptr;
         }
-        return it->second;
+        return it->second.get();
+    }
+
+    Value &Graph::getValue(std::string_view symbol)
+    {
+        Value *value = findValue(symbol);
+        if (!value)
+        {
+            throw std::runtime_error("Unknown value symbol: " + std::string(symbol));
+        }
+        return *value;
+    }
+
+    const Value &Graph::getValue(std::string_view symbol) const
+    {
+        const Value *value = findValue(symbol);
+        if (!value)
+        {
+            throw std::runtime_error("Unknown value symbol: " + std::string(symbol));
+        }
+        return *value;
+    }
+
+    Operation &Graph::getOperation(std::string_view symbol)
+    {
+        Operation *op = findOperation(symbol);
+        if (!op)
+        {
+            throw std::runtime_error("Unknown operation symbol: " + std::string(symbol));
+        }
+        return *op;
+    }
+
+    const Operation &Graph::getOperation(std::string_view symbol) const
+    {
+        const Operation *op = findOperation(symbol);
+        if (!op)
+        {
+            throw std::runtime_error("Unknown operation symbol: " + std::string(symbol));
+        }
+        return *op;
+    }
+
+    Value *Graph::inputPortValue(std::string_view portName) noexcept
+    {
+        auto it = inputPorts_.find(std::string(portName));
+        if (it == inputPorts_.end())
+        {
+            return nullptr;
+        }
+        return findValue(it->second);
+    }
+
+    const Value *Graph::inputPortValue(std::string_view portName) const noexcept
+    {
+        auto it = inputPorts_.find(std::string(portName));
+        if (it == inputPorts_.end())
+        {
+            return nullptr;
+        }
+        return findValue(it->second);
+    }
+
+    Value *Graph::outputPortValue(std::string_view portName) noexcept
+    {
+        auto it = outputPorts_.find(std::string(portName));
+        if (it == outputPorts_.end())
+        {
+            return nullptr;
+        }
+        return findValue(it->second);
+    }
+
+    const Value *Graph::outputPortValue(std::string_view portName) const noexcept
+    {
+        auto it = outputPorts_.find(std::string(portName));
+        if (it == outputPorts_.end())
+        {
+            return nullptr;
+        }
+        return findValue(it->second);
     }
 
     void Graph::writeJson(slang::JsonWriter &writer) const
     {
         writer.startObject();
-        writer.writeProperty("name");
-        writer.writeValue(name_);
+        writer.writeProperty("symbol");
+        writer.writeValue(symbol_);
 
         writer.writeProperty("vals");
         writer.startArray();
-        for (const auto &valuePtr : values_)
+        for (const auto &sym : valueOrder_)
         {
-            const Value &value = *valuePtr;
+            const Value &value = getValue(sym);
             writer.startObject();
             writer.writeProperty("sym");
             writer.writeValue(value.symbol());
@@ -1013,10 +1144,10 @@ namespace wolf_sv::grh
             writer.writeValue(value.isInput());
             writer.writeProperty("out");
             writer.writeValue(value.isOutput());
-            if (value.definingOp())
+            if (value.definingOpSymbol())
             {
                 writer.writeProperty("def");
-                writer.writeValue(value.definingOp()->symbol());
+                writer.writeValue(*value.definingOpSymbol());
             }
 
             writer.writeProperty("users");
@@ -1025,7 +1156,7 @@ namespace wolf_sv::grh
             {
                 writer.startObject();
                 writer.writeProperty("op");
-                writer.writeValue(user.operation->symbol());
+                writer.writeValue(user.operation);
                 writer.writeProperty("idx");
                 writer.writeValue(static_cast<int64_t>(user.operandIndex));
                 writer.endObject();
@@ -1040,26 +1171,26 @@ namespace wolf_sv::grh
 
         writer.writeProperty("in");
         writer.startArray();
-        for (const auto &[name, value] : inputPorts_)
+        for (const auto &[name, valueSymbol] : inputPorts_)
         {
             writer.startObject();
             writer.writeProperty("name");
             writer.writeValue(name);
             writer.writeProperty("val");
-            writer.writeValue(value->symbol());
+            writer.writeValue(valueSymbol);
             writer.endObject();
         }
         writer.endArray();
 
         writer.writeProperty("out");
         writer.startArray();
-        for (const auto &[name, value] : outputPorts_)
+        for (const auto &[name, valueSymbol] : outputPorts_)
         {
             writer.startObject();
             writer.writeProperty("name");
             writer.writeValue(name);
             writer.writeProperty("val");
-            writer.writeValue(value->symbol());
+            writer.writeValue(valueSymbol);
             writer.endObject();
         }
         writer.endArray();
@@ -1068,9 +1199,9 @@ namespace wolf_sv::grh
 
         writer.writeProperty("ops");
         writer.startArray();
-        for (const auto &operationPtr : operations_)
+        for (const auto &sym : operationOrder_)
         {
-            const Operation &op = *operationPtr;
+            const Operation &op = getOperation(sym);
             writer.startObject();
             writer.writeProperty("sym");
             writer.writeValue(op.symbol());
@@ -1079,17 +1210,17 @@ namespace wolf_sv::grh
 
             writer.writeProperty("in");
             writer.startArray();
-            for (const Value *operand : op.operands())
+            for (const auto &operand : op.operandSymbols())
             {
-                writer.writeValue(operand->symbol());
+                writer.writeValue(operand);
             }
             writer.endArray();
 
             writer.writeProperty("out");
             writer.startArray();
-            for (const Value *result : op.results())
+            for (const auto &result : op.resultSymbols())
             {
-                writer.writeValue(result->symbol());
+                writer.writeValue(result);
             }
             writer.endArray();
 
@@ -1116,50 +1247,52 @@ namespace wolf_sv::grh
 
     Graph &Netlist::addGraphInternal(std::unique_ptr<Graph> graph)
     {
-        auto *raw = graph.get();
-        auto [it, inserted] = graphByName_.emplace(raw->name(), raw);
+        auto sym = graph->symbol();
+        auto [it, inserted] = graphs_.emplace(sym, std::move(graph));
         if (!inserted)
         {
-            throw std::runtime_error("Duplicated graph name: " + raw->name());
+            throw std::runtime_error("Duplicated graph symbol: " + sym);
         }
-        graphs_.push_back(std::move(graph));
-        return *raw;
+        graphOrder_.push_back(sym);
+        return *it->second;
     }
 
-    Graph &Netlist::createGraph(std::string name)
+    Graph &Netlist::createGraph(std::string symbol)
     {
-        auto instance = std::make_unique<Graph>(*this, std::move(name));
+        auto instance = std::make_unique<Graph>(*this, std::move(symbol));
         return addGraphInternal(std::move(instance));
     }
 
-    Graph *Netlist::findGraph(std::string_view name) noexcept
+    Graph *Netlist::findGraph(std::string_view symbol) noexcept
     {
-        std::string key(name);
-        auto it = graphByName_.find(key);
-        if (it != graphByName_.end())
+        std::string key(symbol);
+        if (auto it = graphs_.find(key); it != graphs_.end())
         {
-            return it->second;
+            return it->second.get();
         }
-        auto aliasIt = graphAliasByName_.find(key);
-        if (aliasIt != graphAliasByName_.end())
+        if (auto aliasIt = graphAliasBySymbol_.find(key); aliasIt != graphAliasBySymbol_.end())
         {
-            return aliasIt->second;
+            if (auto resolved = graphs_.find(aliasIt->second); resolved != graphs_.end())
+            {
+                return resolved->second.get();
+            }
         }
         return nullptr;
     }
 
-    const Graph *Netlist::findGraph(std::string_view name) const noexcept
+    const Graph *Netlist::findGraph(std::string_view symbol) const noexcept
     {
-        std::string key(name);
-        auto it = graphByName_.find(key);
-        if (it != graphByName_.end())
+        std::string key(symbol);
+        if (auto it = graphs_.find(key); it != graphs_.end())
         {
-            return it->second;
+            return it->second.get();
         }
-        auto aliasIt = graphAliasByName_.find(key);
-        if (aliasIt != graphAliasByName_.end())
+        if (auto aliasIt = graphAliasBySymbol_.find(key); aliasIt != graphAliasBySymbol_.end())
         {
-            return aliasIt->second;
+            if (auto resolved = graphs_.find(aliasIt->second); resolved != graphs_.end())
+            {
+                return resolved->second.get();
+            }
         }
         return nullptr;
     }
@@ -1170,19 +1303,19 @@ namespace wolf_sv::grh
         {
             return;
         }
-        graphAliasByName_[std::move(alias)] = &graph;
+        graphAliasBySymbol_[std::move(alias)] = graph.symbol();
     }
 
-    void Netlist::markAsTop(std::string_view graphName)
+    void Netlist::markAsTop(std::string_view graphSymbol)
     {
-        if (!findGraph(graphName))
+        if (!findGraph(graphSymbol))
         {
-            throw std::runtime_error("Cannot mark unknown graph as top: " + std::string(graphName));
+            throw std::runtime_error("Cannot mark unknown graph as top: " + std::string(graphSymbol));
         }
-        auto nameStr = std::string(graphName);
-        if (std::find(topGraphs_.begin(), topGraphs_.end(), nameStr) == topGraphs_.end())
+        auto symbolStr = std::string(graphSymbol);
+        if (std::find(topGraphs_.begin(), topGraphs_.end(), symbolStr) == topGraphs_.end())
         {
-            topGraphs_.push_back(std::move(nameStr));
+            topGraphs_.push_back(std::move(symbolStr));
         }
     }
 
@@ -1319,23 +1452,15 @@ namespace wolf_sv::grh
         for (const auto &graphValue : graphsArray)
         {
             const auto &graphObj = graphValue.asObject("graph");
-            auto nameIt = graphObj.find("name");
-            if (nameIt == graphObj.end())
+            auto symbolIt = graphObj.find("symbol");
+            if (symbolIt == graphObj.end())
             {
-                throw std::runtime_error("Graph JSON missing name");
+                throw std::runtime_error("Graph JSON missing symbol");
             }
-            Graph &graph = netlist.createGraph(nameIt->second.asString("graph.name"));
+            Graph &graph = netlist.createGraph(symbolIt->second.asString("graph.symbol"));
 
-            const JsonValue *valuesValue = nullptr;
-            if (auto valsIt = graphObj.find("vals"); valsIt != graphObj.end())
-            {
-                valuesValue = &valsIt->second;
-            }
-            else if (auto valsIt = graphObj.find("values"); valsIt != graphObj.end())
-            {
-                valuesValue = &valsIt->second;
-            }
-            if (valuesValue == nullptr)
+            const auto valuesIt = graphObj.find("vals");
+            if (valuesIt == graphObj.end())
             {
                 throw std::runtime_error("Graph JSON missing vals array");
             }
@@ -1343,34 +1468,17 @@ namespace wolf_sv::grh
             std::unordered_set<std::string> declaredInputs;
             std::unordered_set<std::string> declaredOutputs;
 
-            const auto &valuesArray = valuesValue->asArray("graph.vals");
+            const auto &valuesArray = valuesIt->second.asArray("graph.vals");
             for (const auto &valueEntry : valuesArray)
             {
                 const auto &valueObj = valueEntry.asObject("value");
-                const auto &symbol = (valueObj.contains("sym") ? valueObj.at("sym") : valueObj.at("symbol")).asString("value.sym");
-                int64_t width = (valueObj.contains("w") ? valueObj.at("w") : valueObj.at("width")).asInt("value.w");
-                bool isSigned = (valueObj.contains("sgn") ? valueObj.at("sgn") : valueObj.at("signed")).asBool("value.sgn");
+                const auto &symbol = valueObj.at("sym").asString("value.sym");
+                int64_t width = valueObj.at("w").asInt("value.w");
+                bool isSigned = valueObj.at("sgn").asBool("value.sgn");
                 Value &value = graph.createValue(symbol, width, isSigned);
 
-                bool isInput = false;
-                if (auto inIt = valueObj.find("in"); inIt != valueObj.end())
-                {
-                    isInput = inIt->second.asBool("value.in");
-                }
-                else
-                {
-                    isInput = valueObj.at("isInput").asBool("value.isInput");
-                }
-
-                bool isOutput = false;
-                if (auto outIt = valueObj.find("out"); outIt != valueObj.end())
-                {
-                    isOutput = outIt->second.asBool("value.out");
-                }
-                else
-                {
-                    isOutput = valueObj.at("isOutput").asBool("value.isOutput");
-                }
+                bool isInput = valueObj.at("in").asBool("value.in");
+                bool isOutput = valueObj.at("out").asBool("value.out");
                 if (isInput && isOutput)
                 {
                     throw std::runtime_error("Value cannot be both input and output in JSON");
@@ -1384,9 +1492,13 @@ namespace wolf_sv::grh
                 {
                     declaredOutputs.insert(symbol);
                 }
+
+                if (auto defIt = valueObj.find("def"); defIt != valueObj.end())
+                {
+                    value.setDefiningOp(defIt->second.asString("value.def"));
+                }
             }
 
-            bool parsedPortsObject = false;
             if (auto portsIt = graphObj.find("ports"); portsIt != graphObj.end())
             {
                 const auto &portsObj = portsIt->second.asObject("graph.ports");
@@ -1424,43 +1536,17 @@ namespace wolf_sv::grh
                 };
                 parsePortArray("in", true);
                 parsePortArray("out", false);
-                parsedPortsObject = true;
+            }
+            else
+            {
+                throw std::runtime_error("Graph JSON missing ports object");
             }
 
-            if (!parsedPortsObject)
+            for (const auto &[_, valueSymbol] : graph.inputPorts())
             {
-                if (auto inputPortsIt = graphObj.find("inputPorts"); inputPortsIt != graphObj.end())
+                if (!declaredInputs.contains(valueSymbol))
                 {
-                    for (const auto &[portName, symbolValue] : inputPortsIt->second.asObject("graph.inputPorts"))
-                    {
-                        Value *value = graph.findValue(symbolValue.asString("graph.inputPort.symbol"));
-                        if (!value)
-                        {
-                            throw std::runtime_error("Input port references unknown value: " + symbolValue.asString("graph.inputPort.symbol"));
-                        }
-                        graph.bindInputPort(portName, *value);
-                    }
-                }
-
-                if (auto outputPortsIt = graphObj.find("outputPorts"); outputPortsIt != graphObj.end())
-                {
-                    for (const auto &[portName, symbolValue] : outputPortsIt->second.asObject("graph.outputPorts"))
-                    {
-                        Value *value = graph.findValue(symbolValue.asString("graph.outputPort.symbol"));
-                        if (!value)
-                        {
-                            throw std::runtime_error("Output port references unknown value: " + symbolValue.asString("graph.outputPort.symbol"));
-                        }
-                        graph.bindOutputPort(portName, *value);
-                    }
-                }
-            }
-
-            for (const auto &[_, value] : graph.inputPorts())
-            {
-                if (!declaredInputs.contains(value->symbol()))
-                {
-                    throw std::runtime_error("Input port missing isInput=true flag for value: " + value->symbol());
+                    throw std::runtime_error("Input port missing isInput=true flag for value: " + valueSymbol);
                 }
             }
             for (const auto &symbol : declaredInputs)
@@ -1468,15 +1554,15 @@ namespace wolf_sv::grh
                 const Value *value = graph.findValue(symbol);
                 if (!value || !value->isInput())
                 {
-                    throw std::runtime_error("Value marked isInput=true but not bound to input port: " + symbol);
+                    throw std::runtime_error("Value marked in=true but not bound to input port: " + symbol);
                 }
             }
 
-            for (const auto &[_, value] : graph.outputPorts())
+            for (const auto &[_, valueSymbol] : graph.outputPorts())
             {
-                if (!declaredOutputs.contains(value->symbol()))
+                if (!declaredOutputs.contains(valueSymbol))
                 {
-                    throw std::runtime_error("Output port missing isOutput=true flag for value: " + value->symbol());
+                    throw std::runtime_error("Output port missing isOutput=true flag for value: " + valueSymbol);
                 }
             }
             for (const auto &symbol : declaredOutputs)
@@ -1484,78 +1570,40 @@ namespace wolf_sv::grh
                 const Value *value = graph.findValue(symbol);
                 if (!value || !value->isOutput())
                 {
-                    throw std::runtime_error("Value marked isOutput=true but not bound to output port: " + symbol);
+                    throw std::runtime_error("Value marked out=true but not bound to output port: " + symbol);
                 }
             }
 
-            const JsonValue *opsValue = nullptr;
             if (auto opsIt = graphObj.find("ops"); opsIt != graphObj.end())
             {
-                opsValue = &opsIt->second;
-            }
-            else if (auto opsIt = graphObj.find("operations"); opsIt != graphObj.end())
-            {
-                opsValue = &opsIt->second;
-            }
-
-            if (opsValue != nullptr)
-            {
-                for (const auto &opEntry : opsValue->asArray("graph.ops"))
+                for (const auto &opEntry : opsIt->second.asArray("graph.ops"))
                 {
                     const auto &opObj = opEntry.asObject("operation");
-                    const JsonValue *kindValue = nullptr;
-                    if (auto kindIt = opObj.find("kind"); kindIt != opObj.end())
-                    {
-                        kindValue = &kindIt->second;
-                    }
-                    else if (auto typeIt = opObj.find("type"); typeIt != opObj.end())
-                    {
-                        kindValue = &typeIt->second;
-                    }
-                    if (!kindValue)
+                    auto kindIt = opObj.find("kind");
+                    if (kindIt == opObj.end())
                     {
                         throw std::runtime_error("Operation missing kind");
                     }
-                    auto kind = parseOperationKind(kindValue->asString("operation.kind"));
+                    auto kind = parseOperationKind(kindIt->second.asString("operation.kind"));
                     if (!kind)
                     {
-                        throw std::runtime_error("Unknown operation kind: " + kindValue->asString("operation.kind"));
+                        throw std::runtime_error("Unknown operation kind: " + kindIt->second.asString("operation.kind"));
                     }
 
-                    const JsonValue *symbolValue = nullptr;
-                    if (auto symIt = opObj.find("sym"); symIt != opObj.end())
-                    {
-                        symbolValue = &symIt->second;
-                    }
-                    else if (auto symIt = opObj.find("symbol"); symIt != opObj.end())
-                    {
-                        symbolValue = &symIt->second;
-                    }
-                    if (!symbolValue)
+                    auto symIt = opObj.find("sym");
+                    if (symIt == opObj.end())
                     {
                         throw std::runtime_error("Operation missing symbol");
                     }
 
-                    Operation &op = graph.createOperation(*kind, symbolValue->asString("operation.symbol"));
+                    Operation &op = graph.createOperation(*kind, symIt->second.asString("operation.sym"));
 
-                    auto parseSymbolList = [&](std::string_view primary,
-                                               std::string_view legacy,
-                                               std::string_view context) -> std::vector<std::string>
+                    auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>
                     {
-                        const JsonValue *listValue = nullptr;
-                        if (auto it = opObj.find(std::string(primary)); it != opObj.end())
-                        {
-                            listValue = &it->second;
-                        }
-                        else if (auto it = opObj.find(std::string(legacy)); it != opObj.end())
-                        {
-                            listValue = &it->second;
-                        }
-
                         std::vector<std::string> entries;
-                        if (listValue)
+                        if (auto it = opObj.find(std::string(key)); it != opObj.end())
                         {
-                            for (const auto &entry : listValue->asArray(std::string(context)))
+                            for (const auto &entry : it->second.asArray(std::string(context)))
                             {
                                 entries.push_back(entry.asString(std::string(context) + "[]"));
                             }
@@ -1563,7 +1611,7 @@ namespace wolf_sv::grh
                         return entries;
                     };
 
-                    for (const auto &symbol : parseSymbolList("in", "operands", "operation.in"))
+                    for (const auto &symbol : parseSymbolList("in", "operation.in"))
                     {
                         Value *operand = graph.findValue(symbol);
                         if (!operand)
@@ -1573,7 +1621,7 @@ namespace wolf_sv::grh
                         op.addOperand(*operand);
                     }
 
-                    for (const auto &symbol : parseSymbolList("out", "results", "operation.out"))
+                    for (const auto &symbol : parseSymbolList("out", "operation.out"))
                     {
                         Value *result = graph.findValue(symbol);
                         if (!result)
@@ -1583,19 +1631,9 @@ namespace wolf_sv::grh
                         op.addResult(*result);
                     }
 
-                    const JsonValue *attrsValue = nullptr;
                     if (auto attrsIt = opObj.find("attrs"); attrsIt != opObj.end())
                     {
-                        attrsValue = &attrsIt->second;
-                    }
-                    else if (auto attrsIt = opObj.find("attributes"); attrsIt != opObj.end())
-                    {
-                        attrsValue = &attrsIt->second;
-                    }
-
-                    if (attrsValue)
-                    {
-                        for (const auto &[attrName, attrValue] : attrsValue->asObject("operation.attrs"))
+                        for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
                         {
                             op.setAttribute(attrName, parseAttributeValue(attrValue));
                         }
@@ -1609,13 +1647,6 @@ namespace wolf_sv::grh
             for (const auto &entry : topIt->second.asArray("netlist.tops"))
             {
                 netlist.markAsTop(entry.asString("netlist.tops[]"));
-            }
-        }
-        else if (auto topLegacyIt = rootObj.find("topGraphs"); topLegacyIt != rootObj.end())
-        {
-            for (const auto &entry : topLegacyIt->second.asArray("netlist.topGraphs"))
-            {
-                netlist.markAsTop(entry.asString("netlist.topGraphs[]"));
             }
         }
 

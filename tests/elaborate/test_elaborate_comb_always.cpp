@@ -41,7 +41,7 @@ const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool 
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
     auto it = ports.find(std::string(name));
     if (it != ports.end()) {
-        return it->second;
+        return graph.findValue(it->second);
     }
     return nullptr;
 }

@@ -50,7 +50,7 @@ namespace
         assign.addOperand(sum);
         assign.addResult(out);
 
-        netlist.markAsTop(graph.name());
+        netlist.markAsTop(graph.symbol());
         return netlist;
     }
 

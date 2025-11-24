@@ -36,12 +36,13 @@ int testNetWriteBack() {
 
     const grh::Operation* concatOp = nullptr;
     const grh::Operation* assignOp = nullptr;
-    for (const auto& opPtr : graph.operations()) {
-        if (opPtr->kind() == grh::OperationKind::kConcat) {
-            concatOp = opPtr.get();
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() == grh::OperationKind::kConcat) {
+            concatOp = &op;
         }
-        if (opPtr->kind() == grh::OperationKind::kAssign) {
-            assignOp = opPtr.get();
+        if (op.kind() == grh::OperationKind::kAssign) {
+            assignOp = &op;
         }
     }
 
@@ -98,11 +99,11 @@ int testRegWriteBack() {
         return fail("Register state operation should receive the composed data operand");
     }
 
-    for (const auto& opPtr : graph.operations()) {
-        if (opPtr.get() == &regOp) {
+    for (const auto& opSymbol : graph.operationOrder()) {
+        if (opSymbol == regOp.symbol()) {
             continue;
         }
-        if (opPtr->kind() == grh::OperationKind::kAssign) {
+        if (graph.getOperation(opSymbol).kind() == grh::OperationKind::kAssign) {
             return fail("Register write-back should not emit extra kAssign operations");
         }
     }
@@ -129,16 +130,17 @@ int testPartialCoverage() {
     const grh::Operation* concatOp = nullptr;
     const grh::Operation* assignOp = nullptr;
     const grh::Operation* zeroOp = nullptr;
-    for (const auto& opPtr : graph.operations()) {
-        switch (opPtr->kind()) {
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        switch (op.kind()) {
         case grh::OperationKind::kConcat:
-            concatOp = opPtr.get();
+            concatOp = &op;
             break;
         case grh::OperationKind::kAssign:
-            assignOp = opPtr.get();
+            assignOp = &op;
             break;
         case grh::OperationKind::kConstant:
-            zeroOp = opPtr.get();
+            zeroOp = &op;
             break;
         default:
             break;

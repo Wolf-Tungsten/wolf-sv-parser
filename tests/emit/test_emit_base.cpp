@@ -107,7 +107,7 @@ int main()
     StubEmit emitterOk(&diagOk);
     Netlist okNetlist;
     Graph &topGraph = okNetlist.createGraph("top");
-    okNetlist.markAsTop(topGraph.name());
+    okNetlist.markAsTop(topGraph.symbol());
 
     EmitOptions okOptions;
     okOptions.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);

@@ -38,13 +38,13 @@ const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool 
     if (isInput) {
         auto it = graph.inputPorts().find(std::string(name));
         if (it != graph.inputPorts().end()) {
-            return it->second;
+            return graph.findValue(it->second);
         }
     }
     else {
         auto it = graph.outputPorts().find(std::string(name));
         if (it != graph.outputPorts().end()) {
-            return it->second;
+            return graph.findValue(it->second);
         }
     }
     return nullptr;
@@ -169,7 +169,7 @@ int main() {
     if (!scalarNet || !scalarNet->value) {
         return fail("scalar_net memo entry missing value");
     }
-    const grh::Operation* scalarAssign = scalarNet->value->definingOp();
+    const grh::Operation* scalarAssign = scalarNet->value ? scalarNet->value->definingOp() : nullptr;
     if (!scalarAssign || scalarAssign->kind() != grh::OperationKind::kAssign) {
         return fail("scalar_net is not driven by kAssign");
     }
@@ -182,7 +182,7 @@ int main() {
     if (!structNet || !structNet->value) {
         return fail("struct_net memo entry missing value");
     }
-    const grh::Operation* structAssign = structNet->value->definingOp();
+    const grh::Operation* structAssign = structNet->value ? structNet->value->definingOp() : nullptr;
     if (!structAssign || structAssign->kind() != grh::OperationKind::kAssign) {
         return fail("struct_net is not driven by kAssign");
     }
@@ -190,7 +190,7 @@ int main() {
         return fail("struct_net assign has no operand");
     }
     const grh::Value* structComposite = structAssign->operands().front();
-    const grh::Operation* structConcat = structComposite->definingOp();
+    const grh::Operation* structConcat = structComposite ? structComposite->definingOp() : nullptr;
     if (!structConcat || structConcat->kind() != grh::OperationKind::kConcat) {
         return fail("struct_net assign is expected to use kConcat");
     }
@@ -221,12 +221,12 @@ int main() {
     if (!arrayNet || !arrayNet->value) {
         return fail("array_net memo entry missing value");
     }
-    const grh::Operation* arrayAssign = arrayNet->value->definingOp();
+    const grh::Operation* arrayAssign = arrayNet->value ? arrayNet->value->definingOp() : nullptr;
     if (!arrayAssign || arrayAssign->kind() != grh::OperationKind::kAssign) {
         return fail("array_net is not driven by kAssign");
     }
     const grh::Value* arrayComposite = arrayAssign->operands().front();
-    const grh::Operation* arrayConcat = arrayComposite->definingOp();
+    const grh::Operation* arrayConcat = arrayComposite ? arrayComposite->definingOp() : nullptr;
     if (!arrayConcat || arrayConcat->kind() != grh::OperationKind::kConcat) {
         return fail("array_net assign should use kConcat");
     }

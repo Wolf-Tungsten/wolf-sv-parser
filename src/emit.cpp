@@ -90,12 +90,13 @@ namespace wolf_sv::emit
         {
             std::vector<const grh::Graph *> graphs;
             graphs.reserve(netlist.graphs().size());
-            for (const auto &graphPtr : netlist.graphs())
+            for (const auto &symbol : netlist.graphOrder())
             {
-                graphs.push_back(graphPtr.get());
+                if (auto it = netlist.graphs().find(symbol); it != netlist.graphs().end())
+                {
+                    graphs.push_back(it->second.get());
+                }
             }
-            std::sort(graphs.begin(), graphs.end(), [](const grh::Graph *lhs, const grh::Graph *rhs)
-                      { return lhs->name() < rhs->name(); });
             return graphs;
         }
 
@@ -119,7 +120,7 @@ namespace wolf_sv::emit
             writer.startArray();
             for (const grh::Graph *graph : topGraphs)
             {
-                writer.writeValue(graph->name());
+                writer.writeValue(graph->symbol());
             }
             writer.endArray();
 
@@ -171,7 +172,7 @@ namespace wolf_sv::emit
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
                                       prop("op", [&]
-                                           { appendQuotedString(out, user.operation ? user.operation->symbol() : ""); });
+                                           { appendQuotedString(out, user.operation); });
                                       prop("idx", [&]
                                            { out.append(std::to_string(static_cast<int64_t>(user.operandIndex))); });
                                   });
@@ -336,14 +337,14 @@ namespace wolf_sv::emit
                               });
         }
 
-        void writePortInline(std::string &out, std::string_view name, const grh::Value &value, JsonPrintMode mode)
+        void writePortInline(std::string &out, std::string_view name, std::string_view valueSymbol, JsonPrintMode mode)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("name", [&]
                                        { appendQuotedString(out, name); });
                                   prop("val", [&]
-                                       { appendQuotedString(out, value.symbol()); });
+                                       { appendQuotedString(out, valueSymbol); });
                               });
         }
 
@@ -419,21 +420,21 @@ namespace wolf_sv::emit
         }
 
         void writePortsPrettyCompact(std::string &out,
-                                     const std::map<std::string, grh::Value *> &ports,
+                                     const std::map<std::string, grh::ValueId> &ports,
                                      JsonPrintMode mode,
                                      int indent)
         {
             (void)mode;
             out.push_back('[');
             bool first = true;
-            for (const auto &[name, value] : ports)
+            for (const auto &[name, valueSymbol] : ports)
             {
                 if (!first)
                 {
                     out.push_back(',');
                 }
                 appendNewlineAndIndent(out, indent);
-                writePortInline(out, name, *value, mode);
+                writePortInline(out, name, valueSymbol, mode);
                 first = false;
             }
             if (!ports.empty())
@@ -449,17 +450,17 @@ namespace wolf_sv::emit
             int indent = baseIndent + 1;
 
             appendNewlineAndIndent(out, indent);
-            appendQuotedString(out, "name");
+            appendQuotedString(out, "symbol");
             out.append(": ");
-            appendQuotedString(out, graph.name());
+            appendQuotedString(out, graph.symbol());
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "vals");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.values(),
-                             [&](const std::unique_ptr<grh::Value> &value)
-                             { writeValueInline(out, *value, JsonPrintMode::PrettyCompact); });
+            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.valueOrder(),
+                             [&](const grh::ValueId &valueSymbol)
+                             { writeValueInline(out, graph.getValue(valueSymbol), JsonPrintMode::PrettyCompact); });
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
@@ -486,9 +487,9 @@ namespace wolf_sv::emit
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "ops");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.operations(),
-                             [&](const std::unique_ptr<grh::Operation> &op)
-                             { writeOperationInline(out, *op, JsonPrintMode::PrettyCompact); });
+            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.operationOrder(),
+                             [&](const grh::OperationId &opSymbol)
+                             { writeOperationInline(out, graph.getOperation(opSymbol), JsonPrintMode::PrettyCompact); });
 
             appendNewlineAndIndent(out, baseIndent);
             out.push_back('}');
@@ -538,7 +539,7 @@ namespace wolf_sv::emit
                         out.push_back(',');
                     }
                     appendNewlineAndIndent(out, indent + 1);
-                    appendQuotedString(out, graph->name());
+                    appendQuotedString(out, graph->symbol());
                     firstTop = false;
                 }
                 appendNewlineAndIndent(out, indent);
@@ -637,7 +638,7 @@ namespace wolf_sv::emit
                 return;
             }
 
-            seen.insert(std::string(graph->name()));
+            seen.insert(std::string(graph->symbol()));
             result.push_back(graph);
         };
 
@@ -980,17 +981,20 @@ namespace wolf_sv::emit
 
         // Index DPI imports across the netlist for later resolution.
         std::unordered_map<std::string, const grh::Operation *> dpicImports;
-        for (const auto &graphPtr : netlist.graphs())
+        for (const auto &graphSymbol : netlist.graphOrder())
         {
-            if (!graphPtr)
+            auto graphIt = netlist.graphs().find(graphSymbol);
+            if (graphIt == netlist.graphs().end() || !graphIt->second)
             {
                 continue;
             }
-            for (const auto &opPtr : graphPtr->operations())
+            const grh::Graph &graph = *graphIt->second;
+            for (const auto &opSymbol : graph.operationOrder())
             {
-                if (opPtr && opPtr->kind() == grh::OperationKind::kDpicImport)
+                const grh::Operation &op = graph.getOperation(opSymbol);
+                if (op.kind() == grh::OperationKind::kDpicImport)
                 {
-                    dpicImports.emplace(opPtr->symbol(), opPtr.get());
+                    dpicImports.emplace(op.symbol(), &op);
                 }
             }
         }
@@ -1009,16 +1013,18 @@ namespace wolf_sv::emit
             // Ports
             // -------------------------
             std::map<std::string, PortDecl, std::less<>> portDecls;
-            for (const auto &[name, value] : graph->inputPorts())
+            for (const auto &[name, valueSymbol] : graph->inputPorts())
             {
+                const grh::Value *value = graph->findValue(valueSymbol);
                 if (!value)
                 {
                     continue;
                 }
                 portDecls[name] = PortDecl{PortDir::Input, value->width(), value->isSigned(), false};
             }
-            for (const auto &[name, value] : graph->outputPorts())
+            for (const auto &[name, valueSymbol] : graph->outputPorts())
             {
+                const grh::Value *value = graph->findValue(valueSymbol);
                 if (!value)
                 {
                     continue;
@@ -1091,15 +1097,16 @@ namespace wolf_sv::emit
                 }
 
                 std::optional<std::string> candidate;
-                for (const auto &maybeOp : graph->operations())
+                for (const auto &maybeSym : graph->operationOrder())
                 {
-                    if (maybeOp && maybeOp->kind() == grh::OperationKind::kMemory)
+                    const auto &maybeOp = graph->getOperation(maybeSym);
+                    if (maybeOp.kind() == grh::OperationKind::kMemory)
                     {
                         if (candidate)
                         {
                             return std::nullopt;
                         }
-                        candidate = maybeOp->symbol();
+                        candidate = maybeOp.symbol();
                     }
                 }
                 return candidate;
@@ -1108,13 +1115,9 @@ namespace wolf_sv::emit
             // -------------------------
             // Operation traversal
             // -------------------------
-            for (const auto &opPtr : graph->operations())
+            for (const auto &opSymbol : graph->operationOrder())
             {
-                if (!opPtr)
-                {
-                    continue;
-                }
-                const grh::Operation &op = *opPtr;
+                const grh::Operation &op = graph->getOperation(opSymbol);
                 const auto &operands = op.operands();
                 const auto &results = op.results();
 
@@ -1924,13 +1927,9 @@ namespace wolf_sv::emit
             }
 
             // Declare remaining wires for non-port values not defined above.
-            for (const auto &valuePtr : graph->values())
+            for (const auto &valueSymbol : graph->valueOrder())
             {
-                if (!valuePtr)
-                {
-                    continue;
-                }
-                const grh::Value &val = *valuePtr;
+                const grh::Value &val = graph->getValue(valueSymbol);
                 if (val.isInput() || val.isOutput())
                 {
                     continue;
@@ -1941,7 +1940,7 @@ namespace wolf_sv::emit
             // -------------------------
             // Module emission
             // -------------------------
-            moduleBuffer << "module " << graph->name() << " (\n";
+            moduleBuffer << "module " << graph->symbol() << " (\n";
             {
                 bool first = true;
                 auto emitPortLine = [&](const std::string &name)
@@ -2040,7 +2039,7 @@ namespace wolf_sv::emit
                     const std::string sens = sensitivityList(key);
                     if (sens.empty())
                     {
-                        reportError("Sequential block missing sensitivity list", graph->name());
+                        reportError("Sequential block missing sensitivity list", graph->symbol());
                         continue;
                     }
                     moduleBuffer << "  always " << sens << " begin\n";

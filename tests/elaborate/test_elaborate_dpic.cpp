@@ -23,9 +23,10 @@ int fail(const std::string& message) {
 }
 
 const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
-    for (const std::unique_ptr<grh::Operation>& op : graph.operations()) {
-        if (op && op->kind() == kind) {
-            return op.get();
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() == kind) {
+            return &op;
         }
     }
     return nullptr;
@@ -35,7 +36,7 @@ const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool 
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
     auto it = ports.find(std::string(name));
     if (it != ports.end()) {
-        return it->second;
+        return graph.findValue(it->second);
     }
     return nullptr;
 }
@@ -179,11 +180,9 @@ int main() {
     const grh::Operation* callOp = findOpByKind(*graph, grh::OperationKind::kDpicCall);
     if (!callOp) {
         std::cerr << "[elaborate_dpic] Existing operations:\n";
-        for (const std::unique_ptr<grh::Operation>& op : graph->operations()) {
-            if (!op) {
-                continue;
-            }
-            std::cerr << "  - " << std::string(grh::toString(op->kind())) << '\n';
+        for (const auto& opSymbol : graph->operationOrder()) {
+            const grh::Operation& op = graph->getOperation(opSymbol);
+            std::cerr << "  - " << std::string(grh::toString(op.kind())) << '\n';
         }
         std::cerr << "[elaborate_dpic] Reg memo entries: " << regMemo.size() << '\n';
         if (regMemo.empty()) {

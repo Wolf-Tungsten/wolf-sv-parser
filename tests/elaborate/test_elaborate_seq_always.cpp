@@ -40,26 +40,27 @@ const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool 
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
     auto it = ports.find(std::string(name));
     if (it != ports.end()) {
-        return it->second;
+        return graph.findValue(it->second);
     }
     return nullptr;
 }
 
 const grh::Operation* findMemoryOp(const grh::Graph& graph, grh::OperationKind kind,
                                    std::string_view memSymbol) {
-    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
-        if (!opPtr || opPtr->kind() != kind) {
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() != kind) {
             continue;
         }
-        auto it = opPtr->attributes().find("memSymbol");
-        if (it == opPtr->attributes().end()) {
+        auto it = op.attributes().find("memSymbol");
+        if (it == op.attributes().end()) {
             continue;
         }
         if (!std::holds_alternative<std::string>(it->second)) {
             continue;
         }
         if (std::get<std::string>(it->second) == memSymbol) {
-            return opPtr.get();
+            return &op;
         }
     }
     return nullptr;
@@ -129,9 +130,10 @@ bool expectAttrs(const grh::Operation& op, std::string_view key, int64_t value) 
 }
 
 const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
-    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
-        if (opPtr && opPtr->kind() == kind) {
-            return opPtr.get();
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() == kind) {
+            return &op;
         }
     }
     return nullptr;
@@ -140,9 +142,10 @@ const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind k
 std::vector<const grh::Operation*> collectOpsByKind(const grh::Graph& graph,
                                                     grh::OperationKind kind) {
     std::vector<const grh::Operation*> result;
-    for (const std::unique_ptr<grh::Operation>& opPtr : graph.operations()) {
-        if (opPtr && opPtr->kind() == kind) {
-            result.push_back(opPtr.get());
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() == kind) {
+            result.push_back(&op);
         }
     }
     return result;
@@ -752,12 +755,13 @@ int main() {
         const std::string memSymbol = mem->stateOp->symbol();
         // Collect all write ports for this mem
         std::vector<const grh::Operation*> writes;
-        for (const std::unique_ptr<grh::Operation>& opPtr : g19_4->operations()) {
-            if (opPtr && opPtr->kind() == grh::OperationKind::kMemoryWritePort) {
-                auto it = opPtr->attributes().find("memSymbol");
-                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+        for (const auto& opSymbol : g19_4->operationOrder()) {
+            const grh::Operation& op = g19_4->getOperation(opSymbol);
+            if (op.kind() == grh::OperationKind::kMemoryWritePort) {
+                auto it = op.attributes().find("memSymbol");
+                if (it != op.attributes().end() && std::holds_alternative<std::string>(it->second) &&
                     std::get<std::string>(it->second) == memSymbol) {
-                    writes.push_back(opPtr.get());
+                    writes.push_back(&op);
                 }
             }
         }
@@ -1137,18 +1141,18 @@ int main() {
         const std::string memSymbol = mem->stateOp->symbol();
         int wrCount = 0;
         int rdCount = 0;
-        for (const std::unique_ptr<grh::Operation>& opPtr : g20_3->operations()) {
-            if (!opPtr) continue;
-            if (opPtr->kind() == grh::OperationKind::kMemoryWritePort) {
-                auto it = opPtr->attributes().find("memSymbol");
-                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+        for (const auto& opSymbol : g20_3->operationOrder()) {
+            const grh::Operation& op = g20_3->getOperation(opSymbol);
+            if (op.kind() == grh::OperationKind::kMemoryWritePort) {
+                auto it = op.attributes().find("memSymbol");
+                if (it != op.attributes().end() && std::holds_alternative<std::string>(it->second) &&
                     std::get<std::string>(it->second) == memSymbol) {
                     wrCount++;
                 }
             }
-            else if (opPtr->kind() == grh::OperationKind::kMemorySyncReadPort) {
-                auto it = opPtr->attributes().find("memSymbol");
-                if (it != opPtr->attributes().end() && std::holds_alternative<std::string>(it->second) &&
+            else if (op.kind() == grh::OperationKind::kMemorySyncReadPort) {
+                auto it = op.attributes().find("memSymbol");
+                if (it != op.attributes().end() && std::holds_alternative<std::string>(it->second) &&
                     std::get<std::string>(it->second) == memSymbol) {
                     rdCount++;
                 }

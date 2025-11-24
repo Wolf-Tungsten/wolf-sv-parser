@@ -3305,7 +3305,7 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
 bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
                                              grh::Value& resetValue,
                                              const WriteBackMemo::Entry& entry) {
-    auto& operands = stateOp.operands();
+    auto operands = stateOp.operands();
     if (stateOp.kind() != grh::OperationKind::kRegisterRst &&
         stateOp.kind() != grh::OperationKind::kRegisterArst &&
         stateOp.kind() != grh::OperationKind::kRegisterEnRst &&
@@ -5894,7 +5894,7 @@ grh::Value* RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
         const grh::OperationKind kind = entry.stateOp->kind();
         if (kind == grh::OperationKind::kRegister || kind == grh::OperationKind::kRegisterRst ||
             kind == grh::OperationKind::kRegisterArst) {
-            const std::vector<grh::Value*>& results = entry.stateOp->results();
+            auto results = entry.stateOp->results();
             if (!results.empty() && results.front()) {
                 return results.front();
             }
@@ -6299,7 +6299,7 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
         }
 
         convertInstanceBody(*topInstance, *graph, netlist);
-        netlist.markAsTop(graph->name());
+        netlist.markAsTop(graph->symbol());
         if (!topInstance->name.empty()) {
             netlist.registerGraphAlias(std::string(topInstance->name), *graph);
         }
@@ -6882,7 +6882,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
         }
     }
 
-    op.setAttribute("moduleName", targetGraph.name());
+    op.setAttribute("moduleName", targetGraph.symbol());
     op.setAttribute("instanceName", instanceName);
     op.setAttribute("inputPortName", inputPortNames);
     op.setAttribute("outputPortName", outputPortNames);

@@ -119,8 +119,8 @@ int validateNested(const grh::Netlist& netlist) {
     }
 
     bool foundMidInstance = false;
-    for (const std::unique_ptr<grh::Operation>& opPtr : midGraph->operations()) {
-        const grh::Operation& op = *opPtr;
+    for (const auto& opSymbol : midGraph->operationOrder()) {
+        const grh::Operation& op = midGraph->getOperation(opSymbol);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
@@ -132,7 +132,7 @@ int validateNested(const grh::Netlist& netlist) {
             return fail("nested", "Instance operation missing moduleName attribute");
         }
         const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName != leafGraph->name()) {
+        if (moduleName != leafGraph->symbol()) {
             return fail("nested", "Instance moduleName mismatch: " + moduleName);
         }
 
@@ -171,8 +171,8 @@ int validateNested(const grh::Netlist& netlist) {
 
     // Ensure the top graph references the mid graph via instance.
     bool foundTopInstance = false;
-    for (const std::unique_ptr<grh::Operation>& opPtr : topGraph->operations()) {
-        if (opPtr->kind() == grh::OperationKind::kInstance) {
+    for (const auto& opSymbol : topGraph->operationOrder()) {
+        if (topGraph->getOperation(opSymbol).kind() == grh::OperationKind::kInstance) {
             foundTopInstance = true;
             break;
         }
@@ -201,8 +201,8 @@ int validateParameterized(const grh::Netlist& netlist) {
     }
 
     bool foundInstance = false;
-    for (const std::unique_ptr<grh::Operation>& opPtr : topGraph->operations()) {
-        const grh::Operation& op = *opPtr;
+    for (const auto& opSymbol : topGraph->operationOrder()) {
+        const grh::Operation& op = topGraph->getOperation(opSymbol);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
@@ -214,7 +214,7 @@ int validateParameterized(const grh::Netlist& netlist) {
             return fail("param", "Instance missing moduleName attribute");
         }
         const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName != leafGraph->name()) {
+        if (moduleName != leafGraph->symbol()) {
             return fail("param", "Instance moduleName mismatch: " + moduleName);
         }
 
@@ -260,7 +260,9 @@ int validateParameterized(const grh::Netlist& netlist) {
         leafOutputIt == leafGraph->outputPorts().end()) {
         return fail("param", "Leaf graph missing expected ports");
     }
-    if (leafInputIt->second->width() != 4 || leafOutputIt->second->width() != 4) {
+    const grh::Value* leafInVal = leafGraph->findValue(leafInputIt->second);
+    const grh::Value* leafOutVal = leafGraph->findValue(leafOutputIt->second);
+    if (!leafInVal || !leafOutVal || leafInVal->width() != 4 || leafOutVal->width() != 4) {
         return fail("param", "Leaf port widths do not match expected parameterization");
     }
 
@@ -285,7 +287,7 @@ int validateStructArray(const grh::Netlist& netlist) {
         if (it == ports.end()) {
             return false;
         }
-        const grh::Value* value = it->second;
+        const grh::Value* value = graph->findValue(it->second);
         return value && value->width() == expectedWidth;
     };
 
@@ -299,8 +301,8 @@ int validateStructArray(const grh::Netlist& netlist) {
     }
 
     bool foundInstance = false;
-    for (const std::unique_ptr<grh::Operation>& opPtr : topGraph->operations()) {
-        const grh::Operation& op = *opPtr;
+    for (const auto& opSymbol : topGraph->operationOrder()) {
+        const grh::Operation& op = topGraph->getOperation(opSymbol);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
@@ -314,7 +316,7 @@ int validateStructArray(const grh::Netlist& netlist) {
         if (moduleNameIt == op.attributes().end()) {
             return fail("struct", "Missing moduleName attribute on struct instance");
         }
-        if (std::get<std::string>(moduleNameIt->second) != leafGraph->name()) {
+        if (std::get<std::string>(moduleNameIt->second) != leafGraph->symbol()) {
             return fail("struct", "moduleName on struct instance mismatches target graph");
         }
 
@@ -364,8 +366,8 @@ int validateParamGenerate(const grh::Netlist& netlist) {
         if (inputIt == graph->inputPorts().end() || outputIt == graph->outputPorts().end()) {
             return false;
         }
-        const grh::Value* inputValue = inputIt->second;
-        const grh::Value* outputValue = outputIt->second;
+        const grh::Value* inputValue = graph->findValue(inputIt->second);
+        const grh::Value* outputValue = graph->findValue(outputIt->second);
         return inputValue && outputValue && inputValue->width() == expected &&
                outputValue->width() == expected;
     };
@@ -380,8 +382,8 @@ int validateParamGenerate(const grh::Netlist& netlist) {
     std::size_t totalInstances = 0;
     std::size_t width4Instances = 0;
     std::size_t width8Instances = 0;
-    for (const std::unique_ptr<grh::Operation>& opPtr : topGraph->operations()) {
-        const grh::Operation& op = *opPtr;
+    for (const auto& opSymbol : topGraph->operationOrder()) {
+        const grh::Operation& op = topGraph->getOperation(opSymbol);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
@@ -393,10 +395,10 @@ int validateParamGenerate(const grh::Netlist& netlist) {
         }
 
         const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName == leaf4Graph->name()) {
+        if (moduleName == leaf4Graph->symbol()) {
             width4Instances++;
         }
-        else if (moduleName == leaf8Graph->name()) {
+        else if (moduleName == leaf8Graph->symbol()) {
             width8Instances++;
         }
         else {
