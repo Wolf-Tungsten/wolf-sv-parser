@@ -5764,7 +5764,7 @@ grh::Value* RHSConverter::convertConditional(const slang::ast::ConditionalExpres
 
 grh::Value* RHSConverter::convertConcatenation(
     const slang::ast::ConcatenationExpression& expr) {
-    grh::Operation& op = createOperation(grh::OperationKind::kConcat, "concat");
+    std::vector<grh::Value*> operands;
     for (const slang::ast::Expression* operandExpr : expr.operands()) {
         if (!operandExpr) {
             continue;
@@ -5773,9 +5773,22 @@ grh::Value* RHSConverter::convertConcatenation(
         if (!operandValue) {
             return nullptr;
         }
-        op.addOperand(*operandValue);
+        operands.push_back(operandValue);
     }
 
+    if (operands.empty()) {
+        return nullptr;
+    }
+
+    if (operands.size() == 1) {
+        const TypeInfo info = deriveTypeInfo(*expr.type);
+        return resizeValue(*operands.front(), *expr.type, info, expr, "concat");
+    }
+
+    grh::Operation& op = createOperation(grh::OperationKind::kConcat, "concat");
+    for (grh::Value* operand : operands) {
+        op.addOperand(*operand);
+    }
     grh::Value& result = createTemporaryValue(*expr.type, "concat");
     op.addResult(result);
     return &result;
