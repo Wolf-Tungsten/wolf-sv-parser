@@ -5602,8 +5602,12 @@ grh::Value* RHSConverter::convertUnary(const slang::ast::UnaryExpression& expr) 
     }
     case UnaryOperator::BitwiseNot:
         return buildUnaryOp(grh::OperationKind::kNot, *operand, expr, "not");
-    case UnaryOperator::LogicalNot:
-        return buildUnaryOp(grh::OperationKind::kLogicNot, *operand, expr, "lnot");
+    case UnaryOperator::LogicalNot: {
+        grh::Value* logicOperand = reduceToLogicValue(*operand, expr);
+        return logicOperand ? buildUnaryOp(grh::OperationKind::kLogicNot, *logicOperand, expr,
+                                           "lnot")
+                            : nullptr;
+    }
     case UnaryOperator::BitwiseAnd:
         return buildUnaryOp(grh::OperationKind::kReduceAnd, *operand, expr, "red_and");
     case UnaryOperator::BitwiseOr:
@@ -5713,7 +5717,27 @@ grh::Value* RHSConverter::convertBinary(const slang::ast::BinaryExpression& expr
         return nullptr;
     }
 
+    if (opKind == grh::OperationKind::kLogicAnd || opKind == grh::OperationKind::kLogicOr) {
+        lhs = reduceToLogicValue(*lhs, expr);
+        rhs = reduceToLogicValue(*rhs, expr);
+        if (!lhs || !rhs) {
+            return nullptr;
+        }
+    }
+
     return buildBinaryOp(opKind, *lhs, *rhs, expr, "bin");
+}
+
+grh::Value* RHSConverter::reduceToLogicValue(grh::Value& input,
+                                             const slang::ast::Expression& originExpr) {
+    if (input.width() <= 1) {
+        return &input;
+    }
+    grh::Operation& op = createOperation(grh::OperationKind::kReduceOr, "logic_truth");
+    op.addOperand(input);
+    grh::Value& reduced = createTemporaryValue(*originExpr.type, "logic_truth");
+    op.addResult(reduced);
+    return &reduced;
 }
 
 grh::Value* RHSConverter::convertConditional(const slang::ast::ConditionalExpression& expr) {

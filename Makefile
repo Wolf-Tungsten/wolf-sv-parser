@@ -1,9 +1,11 @@
 SHELL := /bin/bash
 
 # Usage: make run_hdlbits_test DUT=001
-DUT ?= 001
+DUT ?=
 
-WOLF_PARSER := build/bin/wolf-sv-parser
+BUILD_DIR ?= build
+CMAKE ?= cmake
+WOLF_PARSER := $(BUILD_DIR)/bin/wolf-sv-parser
 HDLBITS_ROOT := tests/data/hdlbits
 VERILATOR ?= verilator
 VERILATOR_FLAGS ?= -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNDRIVEN \
@@ -20,6 +22,9 @@ SIM_BIN := $(OUT_DIR)/$(SIM_BIN_NAME)
 VERILATOR_PREFIX := Vdut_$(DUT)
 VERILATOR_MK := $(OUT_DIR)/$(VERILATOR_PREFIX).mk
 
+TB_SOURCES := $(wildcard $(HDLBITS_ROOT)/tb/tb_*.cpp)
+HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
+
 .PHONY: all run_hdlbits_test clean check-id
 
 all: run_hdlbits_test
@@ -31,9 +36,12 @@ check-id:
 	fi
 	@test -f $(DUT_SRC) || { echo "Missing DUT source: $(DUT_SRC)"; exit 1; }
 	@test -f $(TB_SRC) || { echo "Missing testbench: $(TB_SRC)"; exit 1; }
-	@test -x $(WOLF_PARSER) || { echo "Missing parser binary: $(WOLF_PARSER). Build it first."; exit 1; }
 
-$(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) check-id
+$(WOLF_PARSER): CMakeLists.txt
+	$(CMAKE) -S . -B $(BUILD_DIR)
+	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
+
+$(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLF_PARSER) check-id
 	@mkdir -p $(OUT_DIR)
 	$(WOLF_PARSER) --emit-sv --dump-grh -o $(EMITTED_DUT) $(DUT_SRC)
 	@if [ -f $(OUT_DIR)/grh.json ]; then mv -f $(OUT_DIR)/grh.json $(EMITTED_JSON); fi
@@ -44,9 +52,26 @@ $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 		--top-module top_module --prefix $(VERILATOR_PREFIX) -Mdir $(OUT_DIR) -o $(SIM_BIN_NAME)
 	CCACHE_DISABLE=1 $(MAKE) -C $(OUT_DIR) -f $(VERILATOR_PREFIX).mk $(SIM_BIN_NAME)
 
-run_hdlbits_test: $(SIM_BIN)
+run_hdlbits_test:
+ifneq ($(strip $(DUT)),)
+  ifeq ($(DUT),$(filter $(DUT),$(HDLBITS_DUTS)))
+	@$(MAKE) --no-print-directory $(SIM_BIN)
 	@echo "[RUN] ./$(SIM_BIN)"
 	@cd $(OUT_DIR) && ./$(SIM_BIN_NAME)
+  else
+	$(error DUT=$(DUT) not found; available: $(HDLBITS_DUTS))
+  endif
+else
+	@echo "DUT not set; running all available DUTs: $(HDLBITS_DUTS)"
+	@$(MAKE) --no-print-directory run_all_hdlbits_tests
+endif
+
+.PHONY: run_all_hdlbits_tests
+run_all_hdlbits_tests: $(WOLF_PARSER)
+	@for dut in $(HDLBITS_DUTS); do \
+		echo "==== Running DUT=$$dut ===="; \
+		$(MAKE) --no-print-directory run_hdlbits_test DUT=$$dut || exit $$?; \
+	done
 
 clean:
-	rm -rf build/hdlbits
+	rm -rf build/
