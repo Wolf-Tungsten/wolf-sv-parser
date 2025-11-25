@@ -200,35 +200,35 @@ namespace wolf_sv::emit
                                           Overloaded{
                                               [&](bool v)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "bool"); });
                                                   prop("v", [&]
                                                        { out.append(v ? "true" : "false"); });
                                               },
                                               [&](int64_t v)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "int"); });
                                                   prop("v", [&]
                                                        { out.append(std::to_string(v)); });
                                               },
                                               [&](double v)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "double"); });
                                                   prop("v", [&]
                                                        { appendDouble(out, v); });
                                               },
                                               [&](const std::string &v)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "string"); });
                                                   prop("v", [&]
                                                        { appendQuotedString(out, v); });
                                               },
                                               [&](const std::vector<bool> &arr)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "bool[]"); });
                                                   prop("vs", [&]
                                                        {
@@ -248,7 +248,7 @@ namespace wolf_sv::emit
                                               },
                                               [&](const std::vector<int64_t> &arr)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "int[]"); });
                                                   prop("vs", [&]
                                                        {
@@ -268,7 +268,7 @@ namespace wolf_sv::emit
                                               },
                                               [&](const std::vector<double> &arr)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "double[]"); });
                                                   prop("vs", [&]
                                                        {
@@ -284,11 +284,11 @@ namespace wolf_sv::emit
                                                               first = false;
                                                           }
                                                           out.push_back(']');
-                                                      });
+                                                       });
                                               },
                                               [&](const std::vector<std::string> &arr)
                                               {
-                                                  prop("k", [&]
+                                                  prop("t", [&]
                                                        { appendQuotedString(out, "string[]"); });
                                                   prop("vs", [&]
                                                        {

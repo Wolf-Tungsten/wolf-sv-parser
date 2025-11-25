@@ -28,8 +28,8 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
   - `attrs`: 可选属性对象，键为属性名，值为属性负载。
 
 ## 属性编码
-- 属性负载统一为对象 `{ k: <kind>, v?: <scalar>, vs?: <array> }`。
-- 支持的 `k`：`bool`、`int`、`double`、`string`、`bool[]`、`int[]`、`double[]`、`string[]`。
+- 属性负载统一为对象 `{ t: <type>, v?: <scalar>, vs?: <array> }`。
+- 支持的 `t`：`bool`、`int`、`double`、`string`、`bool[]`、`int[]`、`double[]`、`string[]`。
 - 标量使用 `v`，数组使用 `vs`，数组条目保持给定顺序；非有限浮点将被拒绝。
 
 ## 排序与布局约定

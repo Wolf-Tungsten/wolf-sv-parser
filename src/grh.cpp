@@ -598,35 +598,35 @@ namespace wolf_sv::grh
                 Overloaded{
                     [&](bool v)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("bool"));
                         writer.writeProperty("v");
                         writer.writeValue(v);
                     },
                     [&](int64_t v)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("int"));
                         writer.writeProperty("v");
                         writer.writeValue(v);
                     },
                     [&](double v)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("double"));
                         writer.writeProperty("v");
                         writer.writeValue(v);
                     },
                     [&](const std::string &v)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("string"));
                         writer.writeProperty("v");
                         writer.writeValue(v);
                     },
                     [&](const std::vector<bool> &arr)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("bool[]"));
                         writer.writeProperty("vs");
                         writer.startArray();
@@ -638,7 +638,7 @@ namespace wolf_sv::grh
                     },
                     [&](const std::vector<int64_t> &arr)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("int[]"));
                         writer.writeProperty("vs");
                         writer.startArray();
@@ -650,7 +650,7 @@ namespace wolf_sv::grh
                     },
                     [&](const std::vector<double> &arr)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("double[]"));
                         writer.writeProperty("vs");
                         writer.startArray();
@@ -662,7 +662,7 @@ namespace wolf_sv::grh
                     },
                     [&](const std::vector<std::string> &arr)
                     {
-                        writer.writeProperty("k");
+                        writer.writeProperty("t");
                         writer.writeValue(std::string_view("string[]"));
                         writer.writeProperty("vs");
                         writer.startArray();
@@ -1328,7 +1328,11 @@ namespace wolf_sv::grh
     AttributeValue parseAttributeValue(const JsonValue &jsonAttr)
     {
         const auto &object = jsonAttr.asObject("attribute");
-        auto kindIt = object.find("k");
+        auto kindIt = object.find("t");
+        if (kindIt == object.end())
+        {
+            kindIt = object.find("k");
+        }
         if (kindIt == object.end())
         {
             kindIt = object.find("kind");
@@ -1337,7 +1341,9 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Attribute object missing kind");
         }
-        const char *kindContext = kindIt->first == "k" ? "attribute.k" : "attribute.kind";
+        const char *kindContext = kindIt->first == "t"   ? "attribute.t"
+                                 : kindIt->first == "k" ? "attribute.k"
+                                                        : "attribute.kind";
         AttributeKind kind = parseAttributeKind(kindIt->second.asString(kindContext));
 
         auto valueIt = object.find("v");
