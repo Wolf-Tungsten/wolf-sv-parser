@@ -1,5 +1,7 @@
 # wolf-sv-parser
-支持 SystemVerilog 的自动 RTL 划片解析器
+
+wolf-sv-parser 致力于将高层次行为化的 RTL（基于 Verilog-2005/SystemVerilog 子集）转换为结构化的 GRH 表示，再由 GRH 表示输出成结构化的 verilog 网表，支持可配置的逻辑变换及插件扩展能力，服务于后续仿真、综合、形式验证与定制分析流程。
+
 
 ## 项目简介
 
