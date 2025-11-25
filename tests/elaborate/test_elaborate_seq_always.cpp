@@ -66,6 +66,26 @@ const grh::Operation* findMemoryOp(const grh::Graph& graph, grh::OperationKind k
     return nullptr;
 }
 
+std::vector<const grh::Operation*> collectMemoryOps(const grh::Graph& graph,
+                                                    grh::OperationKind kind,
+                                                    std::string_view memSymbol) {
+    std::vector<const grh::Operation*> ops;
+    for (const auto& opSymbol : graph.operationOrder()) {
+        const grh::Operation& op = graph.getOperation(opSymbol);
+        if (op.kind() != kind) {
+            continue;
+        }
+        auto it = op.attributes().find("memSymbol");
+        if (it == op.attributes().end() || !std::holds_alternative<std::string>(it->second)) {
+            continue;
+        }
+        if (std::get<std::string>(it->second) == memSymbol) {
+            ops.push_back(&op);
+        }
+    }
+    return ops;
+}
+
 bool writeArtifact(const grh::Netlist& netlist) {
     const std::filesystem::path artifactPath(WOLF_SV_ELAB_SEQ_ALWAYS_ARTIFACT_PATH);
     if (artifactPath.empty()) {
@@ -1218,6 +1238,119 @@ int main() {
         if (!expectAddrShape(*wr, "write port") || !expectAddrShape(*mwr, "mask write port") ||
             !expectAddrShape(*rd, "sync read port")) {
             return 1;
+        }
+    }
+
+    // -----------------------
+    // Stage29: memory ports with reset
+    // -----------------------
+    if (const grh::Graph* g29_arst = fetchGraph("seq_stage29_arst_mem")) {
+        const grh::Value* clk = findPort(*g29_arst, "clk", /*isInput=*/true);
+        const grh::Value* rst_n = findPort(*g29_arst, "rst_n", /*isInput=*/true);
+        if (!clk || !rst_n) {
+            return fail("seq_stage29_arst_mem missing clk/rst_n ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
+                                              "seq_stage29_arst_mem");
+        if (!inst) {
+            return fail("seq_stage29_arst_mem instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage29_arst_mem mem not found or not kMemory");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+
+        auto writes = collectMemoryOps(*g29_arst, grh::OperationKind::kMemoryWritePortArst, memSymbol);
+        auto masks = collectMemoryOps(*g29_arst, grh::OperationKind::kMemoryMaskWritePortArst, memSymbol);
+        auto reads = collectMemoryOps(*g29_arst, grh::OperationKind::kMemorySyncReadPortArst, memSymbol);
+        if (writes.size() != 2 || masks.size() != 2 || reads.size() != 1) {
+            return fail("seq_stage29_arst_mem expected 2 write, 2 mask write, 1 read port");
+        }
+        for (const grh::Operation* op : writes) {
+            if (op->operands().size() < 5 || op->operands()[0] != clk || op->operands()[1] != rst_n) {
+                return fail("seq_stage29_arst_mem write port operands mismatch");
+            }
+            if (!expectStringAttr(*op, "rstPolarity", "low") ||
+                !expectStringAttr(*op, "enLevel", "high") ||
+                !expectStringAttr(*op, "clkPolarity", "posedge")) {
+                return fail("seq_stage29_arst_mem write port attributes mismatch");
+            }
+        }
+        for (const grh::Operation* op : masks) {
+            if (op->operands().size() < 6 || op->operands()[0] != clk || op->operands()[1] != rst_n) {
+                return fail("seq_stage29_arst_mem mask port operands mismatch");
+            }
+            if (!expectStringAttr(*op, "rstPolarity", "low") ||
+                !expectStringAttr(*op, "enLevel", "high") ||
+                !expectStringAttr(*op, "clkPolarity", "posedge")) {
+                return fail("seq_stage29_arst_mem mask port attributes mismatch");
+            }
+        }
+        const grh::Operation* rd = reads.front();
+        if (rd->operands().size() < 4 || rd->operands()[0] != clk || rd->operands()[1] != rst_n) {
+            return fail("seq_stage29_arst_mem read port operands mismatch");
+        }
+        if (!expectStringAttr(*rd, "rstPolarity", "low") ||
+            !expectStringAttr(*rd, "enLevel", "high") ||
+            !expectStringAttr(*rd, "clkPolarity", "posedge")) {
+            return fail("seq_stage29_arst_mem read port attributes mismatch");
+        }
+    }
+
+    if (const grh::Graph* g29_rst = fetchGraph("seq_stage29_rst_mem")) {
+        const grh::Value* clk = findPort(*g29_rst, "clk", /*isInput=*/true);
+        const grh::Value* rst = findPort(*g29_rst, "rst", /*isInput=*/true);
+        if (!clk || !rst) {
+            return fail("seq_stage29_rst_mem missing clk/rst ports");
+        }
+        const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
+                                              "seq_stage29_rst_mem");
+        if (!inst) {
+            return fail("seq_stage29_rst_mem instance missing");
+        }
+        std::span<const SignalMemoEntry> memo = elaborator.peekRegMemo(fetchBody(*inst));
+        const SignalMemoEntry* mem = findEntry(memo, "mem");
+        if (!mem || !mem->stateOp || mem->stateOp->kind() != grh::OperationKind::kMemory) {
+            return fail("seq_stage29_rst_mem mem not found or not kMemory");
+        }
+        const std::string memSymbol = mem->stateOp->symbol();
+
+        auto writes = collectMemoryOps(*g29_rst, grh::OperationKind::kMemoryWritePortRst, memSymbol);
+        auto masks = collectMemoryOps(*g29_rst, grh::OperationKind::kMemoryMaskWritePortRst, memSymbol);
+        auto reads = collectMemoryOps(*g29_rst, grh::OperationKind::kMemorySyncReadPortRst, memSymbol);
+        if (writes.size() != 2 || masks.size() != 2 || reads.size() != 1) {
+            return fail("seq_stage29_rst_mem expected 2 write, 2 mask write, 1 read port");
+        }
+        for (const grh::Operation* op : writes) {
+            if (op->operands().size() < 5 || op->operands()[0] != clk || op->operands()[1] != rst) {
+                return fail("seq_stage29_rst_mem write port operands mismatch");
+            }
+            if (!expectStringAttr(*op, "rstPolarity", "high") ||
+                !expectStringAttr(*op, "enLevel", "high") ||
+                !expectStringAttr(*op, "clkPolarity", "posedge")) {
+                return fail("seq_stage29_rst_mem write port attributes mismatch");
+            }
+        }
+        for (const grh::Operation* op : masks) {
+            if (op->operands().size() < 6 || op->operands()[0] != clk || op->operands()[1] != rst) {
+                return fail("seq_stage29_rst_mem mask port operands mismatch");
+            }
+            if (!expectStringAttr(*op, "rstPolarity", "high") ||
+                !expectStringAttr(*op, "enLevel", "high") ||
+                !expectStringAttr(*op, "clkPolarity", "posedge")) {
+                return fail("seq_stage29_rst_mem mask port attributes mismatch");
+            }
+        }
+        const grh::Operation* rd = reads.front();
+        if (rd->operands().size() < 4 || rd->operands()[0] != clk || rd->operands()[1] != rst) {
+            return fail("seq_stage29_rst_mem read port operands mismatch");
+        }
+        if (!expectStringAttr(*rd, "rstPolarity", "high") ||
+            !expectStringAttr(*rd, "enLevel", "high") ||
+            !expectStringAttr(*rd, "clkPolarity", "posedge")) {
+                return fail("seq_stage29_rst_mem read port attributes mismatch");
         }
     }
 

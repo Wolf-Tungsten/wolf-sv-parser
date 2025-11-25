@@ -407,3 +407,58 @@ module seq_stage27_mem_addr (
         rdata <= mem[addr_in + 1];
     end
 endmodule
+
+// Stage29: memory ports with reset semantics
+module seq_stage29_arst_mem (
+    input  logic        clk,
+    input  logic        rst_n,      // 异步低有效复位
+    input  logic [3:0]  addr_rst,
+    input  logic [7:0]  data_rst,
+    input  logic [3:0]  addr_wr,
+    input  logic [3:0]  addr_bit,
+    input  logic [3:0]  addr_rd,
+    input  logic        en_wr,
+    input  logic        en_bit,
+    input  logic        bit_value,
+    output logic [7:0]  q
+);
+    logic [7:0] mem [0:15];
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mem[addr_rst] <= data_rst;       // 复位分支写整字
+            mem[addr_rst][0] <= 1'b0;         // 复位分支按位写
+        end
+        else begin
+            if (en_wr) begin
+                mem[addr_wr] <= data_rst;
+            end
+            if (en_bit) begin
+                mem[addr_bit][2] <= bit_value;
+            end
+            q <= mem[addr_rd];
+        end
+    end
+endmodule
+
+module seq_stage29_rst_mem (
+    input  logic        clk,
+    input  logic        rst,        // 同步高有效复位
+    input  logic [3:0]  addr,
+    input  logic [7:0]  wdata,
+    input  logic        bit_value,
+    output logic [7:0]  rdata
+);
+    logic [7:0] mem [0:15];
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            mem[addr] <= '0;             // 复位分支写整字
+            mem[addr][1] <= 1'b0;        // 复位分支按位写
+            rdata <= '0;
+        end
+        else begin
+            mem[addr] <= wdata;
+            mem[addr][1] <= bit_value;
+            rdata <= mem[addr];
+        end
+    end
+endmodule

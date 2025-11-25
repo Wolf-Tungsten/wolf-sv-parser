@@ -1120,6 +1120,54 @@ namespace wolf_sv::emit
                 const grh::Operation &op = graph->getOperation(opSymbol);
                 const auto &operands = op.operands();
                 const auto &results = op.results();
+                auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string>
+                {
+                    if (!attr)
+                    {
+                        return std::nullopt;
+                    }
+                    std::string v = *attr;
+                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c)
+                                   { return static_cast<char>(std::tolower(c)); });
+                    return v;
+                };
+                auto parsePolarityBool = [&](const std::optional<std::string> &attr,
+                                             std::string_view name) -> std::optional<bool>
+                {
+                    auto norm = normalizeLower(attr);
+                    if (!norm)
+                    {
+                        reportError(std::string(name) + " missing", op.symbol());
+                        return std::nullopt;
+                    }
+                    if (*norm == "high" || *norm == "1'b1")
+                    {
+                        return true;
+                    }
+                    if (*norm == "low" || *norm == "1'b0")
+                    {
+                        return false;
+                    }
+                    reportError("Unknown " + std::string(name) + " value: " + *attr, op.symbol());
+                    return std::nullopt;
+                };
+                auto formatEnableExpr = [&](const grh::Value *enVal, std::string_view enLevel) -> std::optional<std::string>
+                {
+                    if (!enVal)
+                    {
+                        return std::nullopt;
+                    }
+                    if (enLevel == "high")
+                    {
+                        return enVal->symbol();
+                    }
+                    if (enLevel == "low")
+                    {
+                        return "!(" + enVal->symbol() + ")";
+                    }
+                    reportError("Unknown enLevel: " + std::string(enLevel), op.symbol());
+                    return std::nullopt;
+                };
 
                 switch (op.kind())
                 {
@@ -1381,59 +1429,20 @@ namespace wolf_sv::emit
 
                     auto rstPolarityAttr = getAttribute<std::string>(op, "rstPolarity");
                     auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
-                    auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string> {
-                        if (!attr) {
-                            return std::nullopt;
-                        }
-                        std::string v = *attr;
-                        std::transform(v.begin(), v.end(), v.begin(),
-                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        return v;
-                    };
-                    auto parsePolarityBool = [&](const std::optional<std::string> &attr,
-                                                 std::string_view name) -> std::optional<bool> {
-                        auto norm = normalizeLower(attr);
-                        if (!norm) {
-                            reportError("Register " + std::string(name) + " missing", op.symbol());
-                            return std::nullopt;
-                        }
-                        if (*norm == "high" || *norm == "1'b1") {
-                            return true;
-                        }
-                        if (*norm == "low" || *norm == "1'b0") {
-                            return false;
-                        }
-                        reportError("Unknown " + std::string(name) + " value: " + *attr, op.symbol());
-                        return std::nullopt;
-                    };
-
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    auto formatEnableExpr = [&](const grh::Value* enVal) -> std::optional<std::string> {
-                        if (!enVal) {
-                            return std::nullopt;
-                        }
-                        if (enLevel == "high") {
-                            return enVal->symbol();
-                        }
-                        if (enLevel == "low") {
-                            return "!(" + enVal->symbol() + ")";
-                        }
-                        reportError("Unknown enLevel for register: " + enLevel, op.symbol());
-                        return std::nullopt;
-                    };
-                    const auto enExpr = formatEnableExpr(en);
+                    const auto enExpr = formatEnableExpr(en, enLevel);
                     std::optional<bool> rstActiveHigh;
                     std::string asyncEdge;
                     if (op.kind() == grh::OperationKind::kRegisterArst ||
                         op.kind() == grh::OperationKind::kRegisterEnArst) {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "rstPolarity");
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
                         if (!rstActiveHigh) {
                             break;
                         }
                         asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                     } else if (rst) {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "rstPolarity");
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
                         if (!rstActiveHigh) {
                             break;
                         }
@@ -1573,22 +1582,57 @@ namespace wolf_sv::emit
                     break;
                 }
                 case grh::OperationKind::kMemorySyncReadPort:
+                case grh::OperationKind::kMemorySyncReadPortRst:
+                case grh::OperationKind::kMemorySyncReadPortArst:
                 {
-                    if (operands.size() < 3 || results.empty())
+                    const bool hasReset =
+                        op.kind() == grh::OperationKind::kMemorySyncReadPortRst ||
+                        op.kind() == grh::OperationKind::kMemorySyncReadPortArst;
+                    const bool asyncReset = op.kind() == grh::OperationKind::kMemorySyncReadPortArst;
+                    const std::size_t expectedOperands = hasReset ? 4 : 3;
+                    if (operands.size() < expectedOperands || results.empty())
                     {
-                        reportError("kMemorySyncReadPort missing operands or results", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", op.symbol());
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning("kMemorySyncReadPort missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
                         clkPolarity = std::string("posedge");
+                    }
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                                                    : std::optional<std::string>{};
+                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    const std::string enLevel =
+                        normalizeLower(enLevelAttr).value_or(std::string("high"));
+                    const grh::Value *clk = operands[0];
+                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
+                    const grh::Value *addr = operands[hasReset ? 2 : 1];
+                    const grh::Value *en = operands[hasReset ? 3 : 2];
+                    if (!clk || !addr || !en || (hasReset && !rst))
+                    {
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", op.symbol());
+                        break;
+                    }
+                    auto enExpr = formatEnableExpr(en, enLevel);
+                    if (!enExpr)
+                    {
+                        break;
+                    }
+                    std::optional<bool> rstActiveHigh;
+                    if (hasReset)
+                    {
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
+                        if (!rstActiveHigh)
+                        {
+                            break;
+                        }
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError("kMemorySyncReadPort missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
@@ -1603,13 +1647,20 @@ namespace wolf_sv::emit
                     }
                     ensureRegDecl(op.symbol(), memWidth, memSigned);
 
-                    const grh::Value *clk = operands[0];
-                    const grh::Value *addr = operands[1];
-                    const grh::Value *en = operands[2];
                     SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
+                    if (asyncReset && rst && rstActiveHigh)
+                    {
+                        key.asyncRst = rst;
+                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
+                    }
+                    else if (hasReset && rst && rstActiveHigh)
+                    {
+                        key.syncRst = rst;
+                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
+                    }
 
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + en->symbol() + ") begin");
+                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
                     appendIndented(stmt, 3, op.symbol() + " <= " + memSymbol + "[" + addr->symbol() + "];");
                     appendIndented(stmt, 2, "end");
                     addSequentialStmt(key, stmt.str());
@@ -1627,66 +1678,162 @@ namespace wolf_sv::emit
                     break;
                 }
                 case grh::OperationKind::kMemoryWritePort:
+                case grh::OperationKind::kMemoryWritePortRst:
+                case grh::OperationKind::kMemoryWritePortArst:
                 {
-                    if (operands.size() < 4)
+                    const bool hasReset =
+                        op.kind() == grh::OperationKind::kMemoryWritePortRst ||
+                        op.kind() == grh::OperationKind::kMemoryWritePortArst;
+                    const bool asyncReset = op.kind() == grh::OperationKind::kMemoryWritePortArst;
+                    const std::size_t expectedOperands = hasReset ? 5 : 4;
+                    if (operands.size() < expectedOperands)
                     {
-                        reportError("kMemoryWritePort missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning("kMemoryWritePort missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
                         clkPolarity = std::string("posedge");
+                    }
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                                                    : std::optional<std::string>{};
+                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    const std::string enLevel =
+                        normalizeLower(enLevelAttr).value_or(std::string("high"));
+                    const grh::Value *clk = operands[0];
+                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
+                    const grh::Value *addr = operands[hasReset ? 2 : 1];
+                    const grh::Value *en = operands[hasReset ? 3 : 2];
+                    const grh::Value *data = operands[hasReset ? 4 : 3];
+                    if (!clk || !addr || !en || !data || (hasReset && !rst))
+                    {
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        break;
+                    }
+                    auto enExpr = formatEnableExpr(en, enLevel);
+                    if (!enExpr)
+                    {
+                        break;
+                    }
+                    std::optional<bool> rstActiveHigh;
+                    if (hasReset)
+                    {
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
+                        if (!rstActiveHigh)
+                        {
+                            break;
+                        }
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError("kMemoryWritePort missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
-                    SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
+
+                    SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
+                    if (asyncReset && rst && rstActiveHigh)
+                    {
+                        key.asyncRst = rst;
+                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
+                    }
+                    else if (hasReset && rst && rstActiveHigh)
+                    {
+                        key.syncRst = rst;
+                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
+                    }
+
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + operands[2]->symbol() + ") begin");
-                    appendIndented(stmt, 3, memSymbol + "[" + operands[1]->symbol() + "] <= " + operands[3]->symbol() + ";");
+                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                    appendIndented(stmt, 3, memSymbol + "[" + addr->symbol() + "] <= " + data->symbol() + ";");
                     appendIndented(stmt, 2, "end");
                     addSequentialStmt(key, stmt.str());
                     break;
                 }
                 case grh::OperationKind::kMemoryMaskWritePort:
+                case grh::OperationKind::kMemoryMaskWritePortRst:
+                case grh::OperationKind::kMemoryMaskWritePortArst:
                 {
-                    if (operands.size() < 5)
+                    const bool hasReset =
+                        op.kind() == grh::OperationKind::kMemoryMaskWritePortRst ||
+                        op.kind() == grh::OperationKind::kMemoryMaskWritePortArst;
+                    const bool asyncReset = op.kind() == grh::OperationKind::kMemoryMaskWritePortArst;
+                    const std::size_t expectedOperands = hasReset ? 6 : 5;
+                    if (operands.size() < expectedOperands)
                     {
-                        reportError("kMemoryMaskWritePort missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning("kMemoryMaskWritePort missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
                         clkPolarity = std::string("posedge");
+                    }
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                                                    : std::optional<std::string>{};
+                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    const std::string enLevel =
+                        normalizeLower(enLevelAttr).value_or(std::string("high"));
+                    const grh::Value *clk = operands[0];
+                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
+                    const grh::Value *addr = operands[hasReset ? 2 : 1];
+                    const grh::Value *en = operands[hasReset ? 3 : 2];
+                    const grh::Value *data = operands[hasReset ? 4 : 3];
+                    const grh::Value *mask = operands[hasReset ? 5 : 4];
+                    if (!clk || !addr || !en || !data || !mask || (hasReset && !rst))
+                    {
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        break;
+                    }
+                    auto enExpr = formatEnableExpr(en, enLevel);
+                    if (!enExpr)
+                    {
+                        break;
+                    }
+                    std::optional<bool> rstActiveHigh;
+                    if (hasReset)
+                    {
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
+                        if (!rstActiveHigh)
+                        {
+                            break;
+                        }
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError("kMemoryMaskWritePort missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
                     const grh::Operation *memOp = graph->findOperation(memSymbol);
                     int64_t memWidth = memOp ? getAttribute<int64_t>(*memOp, "width").value_or(1) : 1;
 
-                    SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
+                    SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
+                    if (asyncReset && rst && rstActiveHigh)
+                    {
+                        key.asyncRst = rst;
+                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
+                    }
+                    else if (hasReset && rst && rstActiveHigh)
+                    {
+                        key.syncRst = rst;
+                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
+                    }
+
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + operands[2]->symbol() + ") begin");
-                    appendIndented(stmt, 3, "if (" + operands[4]->symbol() + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                    appendIndented(stmt, 4, memSymbol + "[" + operands[1]->symbol() + "] <= " + operands[3]->symbol() + ";");
+                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                    appendIndented(stmt, 3, "if (" + mask->symbol() + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
+                    appendIndented(stmt, 4, memSymbol + "[" + addr->symbol() + "] <= " + data->symbol() + ";");
                     appendIndented(stmt, 3, "end else begin");
                     appendIndented(stmt, 4, "integer i;");
                     appendIndented(stmt, 4, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
-                    appendIndented(stmt, 5, "if (" + operands[4]->symbol() + "[i]) begin");
-                    appendIndented(stmt, 6, memSymbol + "[" + operands[1]->symbol() + "][i] <= " + operands[3]->symbol() + "[i];");
+                    appendIndented(stmt, 5, "if (" + mask->symbol() + "[i]) begin");
+                    appendIndented(stmt, 6, memSymbol + "[" + addr->symbol() + "][i] <= " + data->symbol() + "[i];");
                     appendIndented(stmt, 5, "end");
                     appendIndented(stmt, 4, "end");
                     appendIndented(stmt, 3, "end");

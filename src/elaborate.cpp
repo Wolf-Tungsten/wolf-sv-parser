@@ -2459,6 +2459,13 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         return false;
     }
 
+    auto resetCtxOpt = deriveBlockResetContext();
+    const ResetContext* resetCtx =
+        resetCtxOpt && resetCtxOpt->signal ? &*resetCtxOpt : nullptr;
+    auto resetPolarityString = [&](const ResetContext& ctx) {
+        return ctx.activeHigh ? std::string("high") : std::string("low");
+    };
+
     auto emitWritePort = [&](const MemoryWriteIntent& intent) {
         if (!intent.entry || !intent.addr || !intent.data) {
             return;
@@ -2479,12 +2486,24 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
             return;
         }
 
+        grh::OperationKind opKind = grh::OperationKind::kMemoryWritePort;
+        if (resetCtx) {
+            opKind = resetCtx->kind == ResetContext::Kind::Async
+                         ? grh::OperationKind::kMemoryWritePortArst
+                         : grh::OperationKind::kMemoryWritePortRst;
+        }
         grh::Operation& port =
-            graph().createOperation(grh::OperationKind::kMemoryWritePort,
-                                    makeFinalizeOpName(*intent.entry, "mem_wr"));
+            graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_wr"));
         port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
+        port.setAttribute("enLevel", std::string("high"));
+        if (resetCtx) {
+            port.setAttribute("rstPolarity", resetPolarityString(*resetCtx));
+        }
         applyClockPolarity(port, "memory write port");
         port.addOperand(clockValue);
+        if (resetCtx && resetCtx->signal) {
+            port.addOperand(*resetCtx->signal);
+        }
         port.addOperand(*intent.addr);
         port.addOperand(*enableValue);
         port.addOperand(*intent.data);
@@ -2521,12 +2540,24 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
             return;
         }
 
+        grh::OperationKind opKind = grh::OperationKind::kMemoryMaskWritePort;
+        if (resetCtx) {
+            opKind = resetCtx->kind == ResetContext::Kind::Async
+                         ? grh::OperationKind::kMemoryMaskWritePortArst
+                         : grh::OperationKind::kMemoryMaskWritePortRst;
+        }
         grh::Operation& port =
-            graph().createOperation(grh::OperationKind::kMemoryMaskWritePort,
-                                    makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
+            graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
         port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
+        port.setAttribute("enLevel", std::string("high"));
+        if (resetCtx) {
+            port.setAttribute("rstPolarity", resetPolarityString(*resetCtx));
+        }
         applyClockPolarity(port, "memory mask write port");
         port.addOperand(clockValue);
+        if (resetCtx && resetCtx->signal) {
+            port.addOperand(*resetCtx->signal);
+        }
         port.addOperand(*intent.addr);
         port.addOperand(*enableValue);
         port.addOperand(*dataValue);
@@ -2648,12 +2679,28 @@ grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry
         isSigned = type->isSigned();
     }
 
+    auto resetCtxOpt = deriveBlockResetContext();
+    const ResetContext* resetCtx =
+        resetCtxOpt && resetCtxOpt->signal ? &*resetCtxOpt : nullptr;
+    grh::OperationKind kind = grh::OperationKind::kMemorySyncReadPort;
+    if (resetCtx) {
+        kind = resetCtx->kind == ResetContext::Kind::Async
+                   ? grh::OperationKind::kMemorySyncReadPortArst
+                   : grh::OperationKind::kMemorySyncReadPortRst;
+    }
+
     grh::Operation& port =
-        graph().createOperation(grh::OperationKind::kMemorySyncReadPort,
-                                makeFinalizeOpName(entry, "mem_sync_rd"));
+        graph().createOperation(kind, makeFinalizeOpName(entry, "mem_sync_rd"));
     port.setAttribute("memSymbol", entry.stateOp->symbol());
+    port.setAttribute("enLevel", std::string("high"));
+    if (resetCtx) {
+        port.setAttribute("rstPolarity", resetCtx->activeHigh ? "high" : "low");
+    }
     applyClockPolarity(port, "memory sync read port");
     port.addOperand(*clkValue);
+    if (resetCtx && resetCtx->signal) {
+        port.addOperand(*resetCtx->signal);
+    }
     port.addOperand(*normalizedAddr);
     port.addOperand(*enValue);
 
@@ -2957,6 +3004,49 @@ grh::Value* SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& 
         timingValueCache_[&expr] = value;
     }
     return value;
+}
+
+std::optional<SeqAlwaysConverter::ResetContext> SeqAlwaysConverter::deriveBlockResetContext() {
+    if (blockResetDerived_) {
+        if (blockResetContext_.kind == ResetContext::Kind::None || !blockResetContext_.signal) {
+            return std::nullopt;
+        }
+        return blockResetContext_;
+    }
+    blockResetDerived_ = true;
+    blockResetContext_ = ResetContext{};
+
+    if (auto asyncInfo = detectAsyncResetEvent(block(), diagnostics())) {
+        if (asyncInfo->edge == slang::ast::EdgeKind::PosEdge ||
+            asyncInfo->edge == slang::ast::EdgeKind::NegEdge) {
+            grh::Value* rstValue = asyncInfo->expr ? resolveAsyncResetSignal(*asyncInfo->expr) : nullptr;
+            if (rstValue) {
+                blockResetContext_.kind = ResetContext::Kind::Async;
+                blockResetContext_.signal = rstValue;
+                blockResetContext_.activeHigh = asyncInfo->edge == slang::ast::EdgeKind::PosEdge;
+                return blockResetContext_;
+            }
+        }
+        else if (diagnostics()) {
+            diagnostics()->nyi(block(), "Async reset edge kind is not supported for this sequential block");
+        }
+    }
+
+    if (auto syncInfo = detectSyncReset(block().getBody())) {
+        if (syncInfo->symbol) {
+            if (grh::Value* rstValue = resolveSyncResetSignal(*syncInfo->symbol)) {
+                blockResetContext_.kind = ResetContext::Kind::Sync;
+                blockResetContext_.signal = rstValue;
+                blockResetContext_.activeHigh = syncInfo->activeHigh;
+                return blockResetContext_;
+            }
+        }
+    }
+
+    blockResetContext_.kind = ResetContext::Kind::None;
+    blockResetContext_.signal = nullptr;
+    blockResetContext_.activeHigh = true;
+    return std::nullopt;
 }
 
 grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& entry) {

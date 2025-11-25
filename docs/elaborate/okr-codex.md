@@ -339,3 +339,10 @@
 - **KR1（规范更新：enLevel）** 修改 `docs/GRH-representation.md` 中所有带 enable 的寄存器原语（kRegisterEn/kRegisterEnRst/kRegisterEnArst），增加 `enLevel` attribute，取值 high/low 表示使能极性；明确默认值（若缺省则为 high）与语义（当 enLevel=low 时等价于 `if (!en) hold else load`），并更新操作数/属性表、示例。
 - **KR2（命名与极性一致性）** 规范层将 `kRegister*ARst` 重命名为 `kRegister*Arst`，同时把所有寄存器原语中的 `rstLevel` 属性改为 `rstPolarity`（含同步/异步、带/不带 enable 的变体），与 `clkPolarity` 命名对齐；文档中的 type 名称、attribute 表、行内引用与编号需全部替换，保留变更记录供后续 review。
 - **KR3（实现与回归迁移）** 将上述规范变更映射到代码与测试：更新 OperationKind/enum/creator 中的类型名与 attribute 键，所有构建寄存器节点的路径（SeqAlwaysConverter 提取复位/使能、emit-sv、Graph 序列化）必须写入新的 `enLevel`/`rstPolarity`，删除或兼容旧字段；同时批量更新单元测试与 JSON dump 的字段名与预期值，保证现有回归（含阶段21 enable 抽取与阶段17/19 复位提取）在新命名下仍然通过。
+
+## 阶段29：改进 kMemory 读写口系列原语
+- **目标定位** 让 memory 端口在规范与实现上具备与寄存器同等级的复位/使能极性表达能力，覆盖带复位 always 块中的读写语义，避免 downstream 需要从 guard 反推时序事件或极性。
+- **KR1（规范扩展：带复位端口族）** 在 `docs/GRH-representation.md` 为 memory 端口新增 `kMemorySyncReadPortRst/Arst`、`kMemoryWritePortRst/Arst`、`kMemoryMaskWritePortRst/Arst` 六个原语：补充 operands/attributes/生成语义，明确同步复位与异步复位的事件列表、rst operand 的含义（是否参与敏感表还是作为数据路径条件）、以及读端口在复位时的 data 行为（需要能表达复位输出值/保持/清零的选项）。同时更新 type 总览表与示例，列出各端口与基础版本的差异。
+- **KR2（属性一致性：enLevel/rstPolarity）** 为所有带 en 的 memory 端口（含新旧变体）增加 `enLevel`，为带复位的端口增加 `rstPolarity`，默认值与语义对齐阶段28 的寄存器定义；在规范中写清 guard -> en 的规约方式（例如当前 guard 恒 1 时 enLevel 是否仍写 high）以及 rst 对事件列表和数据路径的影响，避免实现各自为政。
+- **KR3（实现映射与迁移）** 增加新的 OperationKind/属性键，更新构建/序列化/emit-sv 路径：SeqAlwaysConverter 在存在同步/异步复位的块中创建对应的 *Rst/*Arst 端口并填充 rstPolarity/enLevel，已有无复位路径继续使用基础端口但也要写 enLevel；需要检查现有 guard->enable 的生成逻辑、address 归一化、clkPolarity 等是否对新端口同样适用，并确保 JSON dump/graph 打印包含新字段。
+- **KR4（测试与回归）** 新增覆盖同步复位与异步复位的 memory 读/写/掩码写样例（如 reset 分支清空/保持、低有效使能/复位），验证生成的端口类型、clk/rst/en 连接、enLevel/rstPolarity 属性；回归阶段18/19/27 相关用例，调整预期字段名与新原语，确保新增原语不破坏已有行为。

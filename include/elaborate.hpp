@@ -759,6 +759,7 @@ private:
     friend class SeqAlwaysRHSConverter;
     friend class SeqAlwaysLHSConverter;
 
+    struct ResetContext;
     void planSequentialFinalize();
     bool finalizeRegisterWrites(grh::Value& clockValue);
     bool finalizeMemoryWrites(grh::Value& clockValue);
@@ -773,6 +774,7 @@ private:
     grh::Value* normalizeMemoryAddress(const SignalMemoEntry& entry, grh::Value& addrValue,
                                        const slang::ast::Expression* originExpr);
     bool applyClockPolarity(grh::Operation& op, std::string_view context);
+    std::optional<ResetContext> deriveBlockResetContext();
     void recordMemoryWordWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
                                grh::Value& addrValue, grh::Value& dataValue, grh::Value* enable);
     void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
@@ -842,6 +844,8 @@ private:
     bool clockDeriveAttempted_ = false;
     grh::Value* memoryEnableOne_ = nullptr;
     std::optional<std::string> clockPolarityAttr_;
+    bool blockResetDerived_ = false;
+    ResetContext blockResetContext_{};
 };
 
 /// Elaborates slang AST into GRH representation.

@@ -188,3 +188,10 @@
   - KR1 对 GRH-Represntation 文档进行修改，要求为使能信号添加 enLevel 属性，指示高或低使能
   - KR2 kRegister*ARst 统一成 kRegister*Arst，并且将所有涉及复位的 rstLevel 属性改为 rstPolarity，和时钟的描述对齐
   - KR3 将上述修改映射到代码中，更新测试样例，确保仍然能通过
+
+## 阶段29: 改进 kMemory 读写口系列原语
+
+- **Objective** 对 GRH-Representation 中 kMemory 读写口系列原语进行开进
+  - KR1 对 GRH-Represntation 文档进行修改，添加`kMemorySyncReadPortRst`、`kMemoryWritePortRst`、`kMemoryMaskWritePortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePortArst`、`kMemoryMaskWritePortArst`，用于建模那些在具有复位过程块中的memory读写口
+  - KR2 对新添加的原语和已有的原语，如果有 en 信号，则增加 enLevel 属性，如果有 rst/arst 则增加 rstPolarity 属性，和 kRegister* 原语对齐
+  - KR3 将上述修改映射到代码中，更新补充测试样例，确保仍然能通过
