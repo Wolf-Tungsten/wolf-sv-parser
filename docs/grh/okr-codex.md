@@ -33,3 +33,37 @@
 ## KR5：验证与收敛
 - 单测与断言：新增覆盖 symbol 查找、alias 解析、端口绑定、用户列表更新、移动语义下 owner 重绑的测试；引入断言防重复 symbol、悬空引用。
 - 回归：完成重写后运行 `ctest`（或 `ninja test`）确保行为一致；必要时新增 JSON roundtrip 测试确认仅有 symbol 字段。
+
+# Objective 2
+
+> 目标：在 GRH 表示中引入电平敏感 latch（含可选异步复位），贯通文档、数据结构、elaborate、emit 与测试，从原先“报 latch 错误”转变为“生成 latch + warning”。
+
+## 原则与顺序
+- 语义对齐 `docs/grh/dlatch_support_request.md`/Yosys `$dlatch`、`$adlatch`：统一使用 `enLevel`/`rstPolarity` 字段，resetValue 宽度与数据一致，禁止零宽或多比特使能/复位。
+- 仅在明确 latch 语境生成：`always_latch` 或组合写入覆盖缺失时产出 latch，同时保留 warning 诊断；其他流程（寄存器/内存）保持不变。
+- 文档、JSON schema 与 emit 一次性补齐，属性/操作数校验与寄存器族一致，不留 TODO。
+
+## KR1：需求与约束梳理
+- 将 `docs/grh/dlatch_support_request.md` 的约束写清：`kLatch(en, d) -> q`，`enLevel=high/low`；`kLatchArst(en, rst, resetValue, d) -> q`，`rstPolarity=high/low`，`resetValue` 与 `d/q` 同宽。
+- 明确 width 来源：沿用 Value 的位宽，不新增额外属性；en/rst 必须 1 bit，缺失或位宽不符时报错。
+- 与寄存器区别：无 clk，透明窗口由 en 决定；symbol 仍需合法 Verilog 标识符。
+
+## KR2：文档/表示层扩展
+- 在 `docs/GRH-representation.md` 补充 kLatch/kLatchArst 小节，列出 operands/attributes/result、生成语义（参考 `$dlatch`/`$adlatch`），并更新操作列表与 JSON 字段说明。
+- 若 `docs/overview.md` 或其他原语索引有列举，追加 latch 条目，保持属性命名一致。
+
+## KR3：grh.hpp/cpp/序列化支持
+- 扩展 `OperationKind`、`kOperationNames`、`toString`、`parseOperationKind`，让 latch 可被创建、dump、解析；新增属性校验：`enLevel`/`rstPolarity` 缺失或非法时报错，`resetValue` 必须存在于 kLatchArst。
+- 若有操作数/结果数量检查，补充 latch 路径，确保 roundtrip/JSON dump 无歧义字段。
+
+## KR4：elaborate 生成 latch（含告警）
+- 组合流程的覆盖检查命中潜在 latch 时，不再终止：发出 warning（带位宽/位置），同时创建 kLatch/kLatchArst。enable 取当前 guard，data 取分支 RHS；存在显式异步复位时转 kLatchArst 并绑定 resetValue。
+- `always_latch` 或显式 latch 模式复用同一构造路径；多个分支写同一目标时先合成 mux 得到 data，再接入 latch；未提供有效 enable 时给出错误而非静默生成。
+
+## KR5：emit 支持 latch
+- 为 kLatch/kLatchArst 生成 `always_latch`（或等效 `always @*`）块：`enLevel` 高/低，`rstPolarity` 高/低 + `resetValue`，保持 reg 声明/assign 与现有顺序一致。若缺失属性/操作数，输出清晰报错。
+- 若 sequential block 分组逻辑需要，添加 latch 的 key/归类，避免与寄存器排序冲突。
+
+## KR6：测试与回归
+- 新增 Graph/JSON roundtrip/emit 用例：kLatch（en 高/低）、kLatchArst（rst 高/低 + resetValue）、elaboration latch 推断（缺失 else、`always_latch`）。检查 warning 文本与定位。
+- 更新现有“防 latch”负例预期：从报错改为 warning + latch 节点；回归 `ctest` 或相关目标，确认寄存器/内存路径未被破坏。

@@ -177,7 +177,20 @@ int main(int argc, char **argv)
         const auto *sourceManager = compilation->getSourceManager();
         for (const auto &message : elaborateDiagnostics.messages())
         {
-            const char *tag = message.kind == wolf_sv::ElaborateDiagnosticKind::Todo ? "TODO" : "NYI";
+            const char *tag = "NYI";
+            switch (message.kind)
+            {
+            case wolf_sv::ElaborateDiagnosticKind::Todo:
+                tag = "TODO";
+                break;
+            case wolf_sv::ElaborateDiagnosticKind::Warning:
+                tag = "WARN";
+                break;
+            case wolf_sv::ElaborateDiagnosticKind::NotYetImplemented:
+            default:
+                tag = "NYI";
+                break;
+            }
             std::cerr << "[elaborate] [" << tag << "] ";
 
             bool printedLocation = false;

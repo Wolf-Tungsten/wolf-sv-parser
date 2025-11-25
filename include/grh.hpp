@@ -54,6 +54,8 @@ enum class OperationKind {
     kSliceStatic,
     kSliceDynamic,
     kSliceArray,
+    kLatch,
+    kLatchArst,
     kRegister,
     kRegisterEn,
     kRegisterRst,

@@ -124,6 +124,8 @@ namespace wolf_sv::grh
             "kSliceStatic",
             "kSliceDynamic",
             "kSliceArray",
+            "kLatch",
+            "kLatchArst",
             "kRegister",
             "kRegisterEn",
             "kRegisterRst",

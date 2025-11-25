@@ -1866,6 +1866,8 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                          const slang::ast::ProceduralBlockSymbol& block,
                                          ElaborateDiagnostics* diagnostics) :
     AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics) {
+    const bool isAlwaysLatch =
+        block.procedureKind == slang::ast::ProceduralBlockKind::AlwaysLatch;
     auto rhs = std::make_unique<CombAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
@@ -1877,7 +1879,7 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
     auto lhs = std::make_unique<CombAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
-                              .regMemo = {},
+                              .regMemo = isAlwaysLatch ? regMemo : std::span<const SignalMemoEntry>(),
                               .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics},
@@ -4357,15 +4359,26 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
 
         auto trueIt = trueFrame.map.find(entry);
         auto falseIt = falseFrame.map.find(entry);
-        if (!isSequential()) {
-            if (trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) {
-                reportLatchIssue("comb always branch coverage incomplete", entry);
-                return std::nullopt;
-            }
-        }
-
         grh::Value* trueValue = nullptr;
         grh::Value* falseValue = nullptr;
+        bool inferredLatch = false;
+
+        if (!isSequential()) {
+            grh::Value* holdValue = entry->value;
+            if ((trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) && !holdValue) {
+                reportLatchIssue("comb always branch coverage incomplete but missing hold value",
+                                 entry);
+                return std::nullopt;
+            }
+            if (trueIt == trueFrame.map.end()) {
+                trueValue = holdValue;
+                inferredLatch = true;
+            }
+            if (falseIt == falseFrame.map.end()) {
+                falseValue = holdValue;
+                inferredLatch = true;
+            }
+        }
 
         if (trueIt != trueFrame.map.end()) {
             trueValue = rebuildShadowValue(*entry, trueIt->second);
@@ -4400,6 +4413,9 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         grh::Value* muxValue = createMuxForEntry(*entry, *condBit, *trueValue, *falseValue, label);
         if (!muxValue) {
             return std::nullopt;
+        }
+        if (inferredLatch) {
+            reportLatchIssue("comb always branch coverage incomplete; latch inferred", entry);
         }
 
         ShadowState mergedState;
@@ -4689,7 +4705,7 @@ void AlwaysConverter::reportLatchIssue(std::string_view context,
         message.append(std::string(entry->symbol->name));
         message.push_back(')');
     }
-    diagnostics_->nyi(block_, std::move(message));
+    diagnostics_->warn(block_, std::move(message));
 }
 
 void AlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {
@@ -5400,6 +5416,157 @@ grh::Value* WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, gr
     return &value;
 }
 
+bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Graph& graph,
+                                  ElaborateDiagnostics* diagnostics) {
+    const auto* block = entry.originSymbol ? entry.originSymbol->as_if<slang::ast::ProceduralBlockSymbol>()
+                                           : nullptr;
+    if (!block) {
+        return false;
+    }
+    if (entry.kind != AssignmentKind::Procedural) {
+        return false;
+    }
+    using slang::ast::ProceduralBlockKind;
+    if (block->procedureKind != ProceduralBlockKind::AlwaysComb &&
+        block->procedureKind != ProceduralBlockKind::Always &&
+        block->procedureKind != ProceduralBlockKind::AlwaysLatch) {
+        return false;
+    }
+    if (!entry.target || !entry.target->value) {
+        reportIssue(entry, "Latch lowering missing target value", diagnostics);
+        return false;
+    }
+    if (entry.target->stateOp) {
+        return false;
+    }
+
+    grh::Value* q = entry.target->value;
+    const int64_t targetWidth = q->width();
+    auto ensureOneBit = [&](grh::Value* cond, std::string_view label) -> grh::Value* {
+        if (!cond) {
+            return nullptr;
+        }
+        if (cond->width() != 1) {
+            std::ostringstream oss;
+            oss << "Latch " << label << " must be 1 bit (got " << cond->width() << ")";
+            reportIssue(entry, oss.str(), diagnostics);
+            return nullptr;
+        }
+        return cond;
+    };
+
+    struct LatchInfo {
+        grh::Value* enable = nullptr;
+        bool enableActiveLow = false;
+        grh::Value* data = nullptr;
+        grh::Value* resetSignal = nullptr;
+        bool resetActiveHigh = true;
+        grh::Value* resetValue = nullptr;
+    };
+
+    auto parseEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
+        grh::Operation* op = candidate.definingOp();
+        if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+            return std::nullopt;
+        }
+        grh::Value* cond = ensureOneBit(op->operands()[0], "enable condition");
+        if (!cond) {
+            return std::nullopt;
+        }
+        grh::Value* tVal = op->operands()[1];
+        grh::Value* fVal = op->operands()[2];
+
+        if (tVal == q && fVal && fVal->width() == targetWidth) {
+            return LatchInfo{.enable = cond,
+                             .enableActiveLow = true,
+                             .data = fVal};
+        }
+        if (fVal == q && tVal && tVal->width() == targetWidth) {
+            return LatchInfo{.enable = cond,
+                             .enableActiveLow = false,
+                             .data = tVal};
+        }
+        return std::nullopt;
+    };
+
+    auto parseResetEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
+        grh::Operation* op = candidate.definingOp();
+        if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+            return std::nullopt;
+        }
+        grh::Value* cond = ensureOneBit(op->operands()[0], "reset condition");
+        if (!cond) {
+            return std::nullopt;
+        }
+        grh::Value* tVal = op->operands()[1];
+        grh::Value* fVal = op->operands()[2];
+
+        auto tryBranch = [&](grh::Value* resetBranch, grh::Value* dataBranch,
+                             bool resetActiveHigh) -> std::optional<LatchInfo> {
+            if (!resetBranch || resetBranch->width() != targetWidth) {
+                return std::nullopt;
+            }
+            if (!dataBranch) {
+                return std::nullopt;
+            }
+            if (auto info = parseEnableMux(*dataBranch)) {
+                info->resetSignal = cond;
+                info->resetActiveHigh = resetActiveHigh;
+                info->resetValue = resetBranch;
+                return info;
+            }
+            return std::nullopt;
+        };
+
+        if (auto info = tryBranch(tVal, fVal, /*resetActiveHigh=*/true)) {
+            return info;
+        }
+        if (auto info = tryBranch(fVal, tVal, /*resetActiveHigh=*/false)) {
+            return info;
+        }
+        return std::nullopt;
+    };
+
+    std::optional<LatchInfo> latch = parseResetEnableMux(dataValue);
+    if (!latch) {
+        latch = parseEnableMux(dataValue);
+    }
+    if (!latch) {
+        return false;
+    }
+
+    grh::OperationKind opKind =
+        latch->resetSignal ? grh::OperationKind::kLatchArst : grh::OperationKind::kLatch;
+    grh::Operation& op = graph.createOperation(opKind, makeOperationName(entry, "latch"));
+    op.addOperand(*latch->enable);
+    if (latch->resetSignal && latch->resetValue) {
+        op.addOperand(*latch->resetSignal);
+        op.addOperand(*latch->resetValue);
+    }
+    if (latch->data) {
+        op.addOperand(*latch->data);
+    }
+    op.addResult(*q);
+    op.setAttribute("enLevel", latch->enableActiveLow ? std::string("low")
+                                                      : std::string("high"));
+    if (latch->resetSignal) {
+        op.setAttribute("rstPolarity",
+                        latch->resetActiveHigh ? std::string("high") : std::string("low"));
+    }
+
+    if (diagnostics) {
+        std::string msg = "Latch inferred for procedural block";
+        if (entry.target && entry.target->symbol && !entry.target->symbol->name.empty()) {
+            msg.append(" (signal=");
+            msg.append(entry.target->symbol->name);
+            msg.push_back(')');
+        }
+        diagnostics->warn(*block, std::move(msg));
+    }
+    entry.consumed = true;
+    return true;
+}
+
 void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
     for (Entry& entry : entries_) {
         if (entry.consumed) {
@@ -5407,6 +5574,9 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
         }
         grh::Value* composed = composeSlices(entry, graph, diagnostics);
         if (!composed) {
+            continue;
+        }
+        if (tryLowerLatch(entry, *composed, graph, diagnostics)) {
             continue;
         }
         attachToTarget(entry, *composed, graph, diagnostics);
@@ -6391,6 +6561,10 @@ void ElaborateDiagnostics::nyi(const slang::ast::Symbol& symbol, std::string mes
     add(ElaborateDiagnosticKind::NotYetImplemented, symbol, std::move(message));
 }
 
+void ElaborateDiagnostics::warn(const slang::ast::Symbol& symbol, std::string message) {
+    add(ElaborateDiagnosticKind::Warning, symbol, std::move(message));
+}
+
 void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, const slang::ast::Symbol& symbol,
                                std::string message) {
     ElaborateDiagnostic diagnostic{
@@ -6665,7 +6839,8 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
         }
 
         if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
-            if (isCombProceduralBlock(*block)) {
+            using slang::ast::ProceduralBlockKind;
+            if (block->procedureKind == ProceduralBlockKind::AlwaysLatch || isCombProceduralBlock(*block)) {
                 processCombAlways(*block, body, graph);
             }
             else if (isSeqProceduralBlock(*block)) {
@@ -7232,6 +7407,12 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         grh::Value* value = ensureValueForSymbol(*entry.symbol, graph);
         entry.value = value;
         if (!value) {
+            continue;
+        }
+
+        if (entry.drivingBlock &&
+            entry.drivingBlock->procedureKind == slang::ast::ProceduralBlockKind::AlwaysLatch) {
+            // latch 在组合流程中处理，这里不预先生成寄存器占位
             continue;
         }
 

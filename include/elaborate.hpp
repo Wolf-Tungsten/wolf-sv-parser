@@ -65,7 +65,8 @@ namespace wolf_sv {
 /// Diagnostic categories emitted by the elaboration pipeline.
 enum class ElaborateDiagnosticKind {
     Todo,
-    NotYetImplemented
+    NotYetImplemented,
+    Warning
 };
 
 /// A diagnostic message generated during elaboration.
@@ -81,6 +82,7 @@ class ElaborateDiagnostics {
 public:
     void todo(const slang::ast::Symbol& symbol, std::string message);
     void nyi(const slang::ast::Symbol& symbol, std::string message);
+    void warn(const slang::ast::Symbol& symbol, std::string message);
 
     const std::vector<ElaborateDiagnostic>& messages() const noexcept { return messages_; }
     bool empty() const noexcept { return messages_.empty(); }
@@ -209,6 +211,8 @@ private:
     void attachToTarget(const Entry& entry, grh::Value& composedValue, grh::Graph& graph,
                         ElaborateDiagnostics* diagnostics);
     grh::Value* createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph);
+    bool tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Graph& graph,
+                       ElaborateDiagnostics* diagnostics);
 
     std::vector<Entry> entries_;
     std::size_t nameCounter_ = 0;

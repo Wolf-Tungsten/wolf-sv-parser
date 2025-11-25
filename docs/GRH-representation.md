@@ -46,7 +46,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
-- 时序：`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryWritePortRst`、`kMemoryWritePortArst`、`kMemoryMaskWritePort`、`kMemoryMaskWritePortRst`、`kMemoryMaskWritePortArst`
+- 时序：`kLatch`、`kLatchArst`、`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryWritePortRst`、`kMemoryWritePortArst`、`kMemoryMaskWritePort`、`kMemoryMaskWritePortRst`、`kMemoryMaskWritePortArst`
 - 层次：`kInstance`、`kBlackbox`
 - 调试：`kDisplay`、`kAssert`
 - DPI：`kDpicImport`、`kDpicCall`
@@ -279,6 +279,60 @@ assign ${res.symbol} = ${input.symbol}[${index.symbol} * ${sliceWidth} +: ${slic
 GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
 
 ## 时序逻辑操作
+### 电平敏感锁存器 kLatch
+
+kLatch 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
+
+- operands：
+    - en：使能信号，必须为 1 bit
+    - d：数据输入
+- result：
+    - q：锁存器输出
+- attributes：
+    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
+
+生成语义：
+```
+wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always_latch begin
+    if (en_active) begin
+        ${symbol} = ${d.symbol};
+    end
+end
+assign ${q.symbol} = ${symbol};
+```
+
+### 带异步复位的锁存器 kLatchArst
+
+kLatchArst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
+
+- operands：
+    - en：使能信号，必须为 1 bit
+    - rst：异步复位信号，必须为 1 bit
+    - resetValue：复位值，位宽需与数据输入一致
+    - d：数据输入
+- result：
+    - q：锁存器输出
+- attributes：
+    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
+    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性
+
+生成语义：
+```
+wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
+wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
+reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+always_latch begin
+    if (rst_active) begin
+        ${symbol} = ${resetValue.symbol};
+    end else if (en_active) begin
+        ${symbol} = ${d.symbol};
+    end
+end
+assign ${q.symbol} = ${symbol};
+```
+
 ### 无复位寄存器 kRegister
 
 kRegister 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。

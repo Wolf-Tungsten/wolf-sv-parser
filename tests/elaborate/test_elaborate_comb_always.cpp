@@ -679,7 +679,8 @@ int main() {
         if (diag.message == "Module body elaboration pending") {
             continue;
         }
-        if (diag.message.find("comb always branch coverage incomplete") != std::string::npos) {
+        if (diag.message.find("comb always branch coverage incomplete") != std::string::npos ||
+            diag.message.find("Latch inferred for procedural block") != std::string::npos) {
             sawExpectedLatchDiag = true;
             continue;
         }

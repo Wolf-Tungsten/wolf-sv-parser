@@ -289,6 +289,24 @@ target_compile_definitions(elaborate-comb-always
 
 register_test_exe(elaborate-comb-always)
 
+add_executable(elaborate-latch
+    tests/elaborate/test_elaborate_latch.cpp
+)
+
+target_link_libraries(elaborate-latch
+    PRIVATE
+        elaborate
+        emit
+)
+
+target_compile_definitions(elaborate-latch
+    PRIVATE
+        WOLF_SV_ELAB_LATCH_DATA_PATH="${ELABORATE_INPUT_DIR}/latch.sv"
+        WOLF_SV_ELAB_LATCH_ARTIFACT_PATH="${ELABORATE_ARTIFACT_DIR}/latch.json"
+)
+
+register_test_exe(elaborate-latch)
+
 # elaborate: seq always
 add_executable(elaborate-seq-always
     tests/elaborate/test_elaborate_seq_always.cpp

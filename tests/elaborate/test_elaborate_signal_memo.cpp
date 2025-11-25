@@ -321,8 +321,21 @@ int main() {
 
     std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
     for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
-        std::cout << "  - kind=" << (diag.kind == ElaborateDiagnosticKind::Todo ? "TODO" : "NYI")
-                  << " origin=" << diag.originSymbol << " message=" << diag.message << '\n';
+        const char* kindStr = "NYI";
+        switch (diag.kind) {
+        case ElaborateDiagnosticKind::Todo:
+            kindStr = "TODO";
+            break;
+        case ElaborateDiagnosticKind::Warning:
+            kindStr = "WARN";
+            break;
+        case ElaborateDiagnosticKind::NotYetImplemented:
+        default:
+            kindStr = "NYI";
+            break;
+        }
+        std::cout << "  - kind=" << kindStr << " origin=" << diag.originSymbol
+                  << " message=" << diag.message << '\n';
     }
 
     bool foundConflictDiag = false;

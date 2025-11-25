@@ -1046,6 +1046,7 @@ namespace wolf_sv::emit
             std::vector<std::string> instanceDecls;
             std::vector<std::string> dpiImportDecls;
             std::vector<std::string> assignStmts;
+            std::vector<std::string> latchBlocks;
             std::vector<std::pair<SeqKey, std::vector<std::string>>> seqBlocks;
 
             auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned)
@@ -1077,6 +1078,11 @@ namespace wolf_sv::emit
             auto addSequentialStmt = [&](const SeqKey &key, std::string stmt)
             {
                 seqBlocks.emplace_back(key, std::vector<std::string>{std::move(stmt)});
+            };
+
+            auto addLatchBlock = [&](std::string stmt)
+            {
+                latchBlocks.push_back(std::move(stmt));
             };
 
             auto markPortAsRegIfNeeded = [&](const grh::Value &value)
@@ -1357,6 +1363,136 @@ namespace wolf_sv::emit
                     expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[" << operands[1]->symbol() << " * " << *width << " +: " << *width << "];";
                     addAssign(expr.str());
                     ensureWireDecl(*results[0]);
+                    break;
+                }
+                case grh::OperationKind::kLatch:
+                case grh::OperationKind::kLatchArst:
+                {
+                    if (operands.size() < 2 || results.empty())
+                    {
+                        reportError("Latch operation missing operands or results", op.symbol());
+                        break;
+                    }
+                    const grh::Value *en = operands[0];
+                    const grh::Value *rst = nullptr;
+                    const grh::Value *resetVal = nullptr;
+                    const grh::Value *d = nullptr;
+
+                    if (op.kind() == grh::OperationKind::kLatch)
+                    {
+                        if (operands.size() >= 2)
+                        {
+                            d = operands[1];
+                        }
+                    }
+                    else
+                    {
+                        if (operands.size() >= 4)
+                        {
+                            rst = operands[1];
+                            resetVal = operands[2];
+                            d = operands[3];
+                        }
+                    }
+
+                    if (!en || !d)
+                    {
+                        reportError("Latch operation missing enable or data operand", op.symbol());
+                        break;
+                    }
+                    if (en->width() != 1)
+                    {
+                        reportError("Latch enable must be 1 bit", op.symbol());
+                        break;
+                    }
+                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    {
+                        if (!rst || !resetVal)
+                        {
+                            reportError("kLatchArst missing reset operands", op.symbol());
+                            break;
+                        }
+                        if (rst->width() != 1)
+                        {
+                            reportError("Latch reset must be 1 bit", op.symbol());
+                            break;
+                        }
+                    }
+
+                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    const std::string enLevel =
+                        normalizeLower(enLevelAttr).value_or(std::string("high"));
+                    auto enExpr = formatEnableExpr(en, enLevel);
+                    if (!enExpr)
+                    {
+                        break;
+                    }
+
+                    std::optional<bool> rstActiveHigh;
+                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    {
+                        auto rstPolarityAttr = getAttribute<std::string>(op, "rstPolarity");
+                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity");
+                        if (!rstActiveHigh)
+                        {
+                            break;
+                        }
+                    }
+
+                    const std::string &regName = op.symbol();
+                    const grh::Value *q = results[0];
+                    if (q->width() != d->width())
+                    {
+                        reportError("Latch data/output width mismatch", op.symbol());
+                        break;
+                    }
+                    if (op.kind() == grh::OperationKind::kLatchArst && resetVal &&
+                        resetVal->width() != d->width())
+                    {
+                        reportError("Latch resetValue width mismatch", op.symbol());
+                        break;
+                    }
+                    ensureRegDecl(regName, d->width(), d->isSigned());
+                    const bool directDrive = q->symbol() == regName;
+                    if (directDrive)
+                    {
+                        markPortAsRegIfNeeded(*q);
+                    }
+                    else
+                    {
+                        ensureWireDecl(*q);
+                        addAssign("assign " + q->symbol() + " = " + regName + ";");
+                    }
+
+                    std::ostringstream stmt;
+                    const int baseIndent = 2;
+                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    {
+                        if (!rst || !resetVal || !rstActiveHigh)
+                        {
+                            reportError("Latch with reset missing operands or polarity", op.symbol());
+                            break;
+                        }
+                        const std::string rstCond =
+                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + resetVal->symbol() + ";");
+                        appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent, "end");
+                    }
+                    else
+                    {
+                        appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent, "end");
+                    }
+
+                    std::ostringstream block;
+                    block << "  always_latch begin\n";
+                    block << stmt.str();
+                    block << "  end";
+                    addLatchBlock(block.str());
                     break;
                 }
                 case grh::OperationKind::kRegister:
@@ -2175,6 +2311,15 @@ namespace wolf_sv::emit
                 for (const auto &stmt : assignStmts)
                 {
                     moduleBuffer << "  " << stmt << '\n';
+                }
+            }
+
+            if (!latchBlocks.empty())
+            {
+                moduleBuffer << '\n';
+                for (const auto &block : latchBlocks)
+                {
+                    moduleBuffer << block << '\n';
                 }
             }
 
