@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(wolf-sv-compiler VERSION 0.1.0 LANGUAGES CXX)
+project(wolf-sv-parser VERSION 0.1.0 LANGUAGES CXX)
 
 # Toolchain / language
 set(CMAKE_CXX_STANDARD 20)
@@ -61,11 +61,11 @@ target_link_libraries(elaborate
 )
 
 # Application
-add_executable(wolf-sv-compiler
+add_executable(wolf-sv-parser
     src/main.cpp
 )
 
-target_link_libraries(wolf-sv-compiler
+target_link_libraries(wolf-sv-parser
     PRIVATE
         elaborate
         emit
@@ -363,4 +363,4 @@ target_compile_definitions(elaborate-dpic
 register_test_exe(elaborate-dpic)
 
 # Installation rules
-install(TARGETS wolf-sv-compiler DESTINATION bin)
+install(TARGETS wolf-sv-parser DESTINATION bin)
