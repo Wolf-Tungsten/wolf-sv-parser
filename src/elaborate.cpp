@@ -7171,8 +7171,11 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kInstance, opName);
 
-    std::string instanceName =
-        childInstance.name.empty() ? deriveSymbolPath(childInstance) : std::string(childInstance.name);
+    std::string instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    if (instanceName.empty()) {
+        instanceName = childInstance.name.empty() ? std::string("_inst_") + std::to_string(instanceCounter_++)
+                                                  : sanitizeForGraphName(childInstance.name);
+    }
     if (instanceName.empty()) {
         instanceName = "_inst_" + std::to_string(instanceCounter_++);
     }
@@ -7346,9 +7349,11 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kBlackbox, opName);
 
-    std::string instanceName = childInstance.name.empty()
-                                   ? deriveSymbolPath(childInstance)
-                                   : std::string(childInstance.name);
+    std::string instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    if (instanceName.empty()) {
+        instanceName = childInstance.name.empty() ? std::string("_inst_") + std::to_string(instanceCounter_++)
+                                                  : sanitizeForGraphName(childInstance.name);
+    }
     if (instanceName.empty()) {
         instanceName = "_inst_" + std::to_string(instanceCounter_++);
     }
