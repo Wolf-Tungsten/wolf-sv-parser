@@ -1,0 +1,83 @@
+{
+  "graphs": [
+    {
+      "symbol": "emit_sv_top",
+      "vals": [
+        {"sym": "clk", "w": 1, "sgn": false, "in": true, "out": false, "users": [{"op": "dout", "idx": 0}, {"op": "async_dout", "idx": 0}, {"op": "mem_mem_wr_0", "idx": 0}]},
+        {"sym": "rst", "w": 1, "sgn": false, "in": true, "out": false, "users": [{"op": "_comb_ctrl_op_not_3_0", "idx": 0}, {"op": "dout_if_2", "idx": 0}, {"op": "dout", "idx": 1}, {"op": "lnot_6_0", "idx": 0}, {"op": "async_dout", "idx": 1}]},
+        {"sym": "en", "w": 1, "sgn": false, "in": true, "out": false, "users": [{"op": "u_child", "idx": 0}, {"op": "_comb_ctrl_op_not_3_2", "idx": 0}, {"op": "_comb_ctrl_op_and_3_4", "idx": 1}, {"op": "dout_if_0", "idx": 0}, {"op": "dout", "idx": 2}, {"op": "_comb_ctrl_op_not_7_0", "idx": 0}, {"op": "mem_mem_wr_0", "idx": 2}]},
+        {"sym": "din", "w": 8, "sgn": false, "in": true, "out": false, "users": [{"op": "dout_if_0", "idx": 1}, {"op": "dout", "idx": 4}, {"op": "async_dout_if_0", "idx": 2}, {"op": "mem_mem_wr_0", "idx": 3}]},
+        {"sym": "addr", "w": 2, "sgn": false, "in": true, "out": false, "users": [{"op": "mem_mem_wr_0", "idx": 1}]},
+        {"sym": "mask", "w": 8, "sgn": false, "in": true, "out": false, "users": []},
+        {"sym": "dout", "w": 8, "sgn": false, "in": false, "out": true, "def": "dout", "users": [{"op": "dout_if_0", "idx": 2}]},
+        {"sym": "async_dout", "w": 8, "sgn": false, "in": false, "out": true, "def": "async_dout", "users": []},
+        {"sym": "cout", "w": 1, "sgn": false, "in": false, "out": true, "def": "u_child", "users": []},
+        {"sym": "_comb_ctrl_val_not_3_1", "w": 1, "sgn": false, "in": false, "out": false, "def": "_comb_ctrl_op_not_3_0", "users": [{"op": "_comb_ctrl_op_and_3_4", "idx": 0}]},
+        {"sym": "convert_4_0", "w": 8, "sgn": false, "in": false, "out": false, "def": "convert_4_0", "users": [{"op": "dout_if_2", "idx": 1}, {"op": "dout", "idx": 3}]},
+        {"sym": "_comb_ctrl_val_not_3_3", "w": 1, "sgn": false, "in": false, "out": false, "def": "_comb_ctrl_op_not_3_2", "users": []},
+        {"sym": "_comb_ctrl_val_and_3_5", "w": 1, "sgn": false, "in": false, "out": false, "def": "_comb_ctrl_op_and_3_4", "users": []},
+        {"sym": "dout_if_1", "w": 8, "sgn": false, "in": false, "out": false, "def": "dout_if_0", "users": [{"op": "dout_if_2", "idx": 2}]},
+        {"sym": "dout_if_3", "w": 8, "sgn": false, "in": false, "out": false, "def": "dout_if_2", "users": []},
+        {"sym": "lnot_6_0", "w": 1, "sgn": false, "in": false, "out": false, "def": "lnot_6_0", "users": [{"op": "_comb_ctrl_op_not_5_0", "idx": 0}, {"op": "async_dout_if_0", "idx": 0}]},
+        {"sym": "_comb_ctrl_val_not_5_1", "w": 1, "sgn": false, "in": false, "out": false, "def": "_comb_ctrl_op_not_5_0", "users": []},
+        {"sym": "convert_6_1", "w": 8, "sgn": false, "in": false, "out": false, "def": "convert_6_1", "users": [{"op": "async_dout_if_0", "idx": 1}, {"op": "async_dout", "idx": 2}]},
+        {"sym": "async_dout_if_1", "w": 8, "sgn": false, "in": false, "out": false, "def": "async_dout_if_0", "users": [{"op": "async_dout", "idx": 3}]},
+        {"sym": "_comb_ctrl_val_not_7_1", "w": 1, "sgn": false, "in": false, "out": false, "def": "_comb_ctrl_op_not_7_0", "users": []}
+      ],
+      "ports": {
+        "in": [
+          {"name": "addr", "val": "addr"},
+          {"name": "clk", "val": "clk"},
+          {"name": "din", "val": "din"},
+          {"name": "en", "val": "en"},
+          {"name": "mask", "val": "mask"},
+          {"name": "rst", "val": "rst"}
+        ],
+        "out": [
+          {"name": "async_dout", "val": "async_dout"},
+          {"name": "cout", "val": "cout"},
+          {"name": "dout", "val": "dout"}
+        ]
+      },
+      "ops": [
+        {"sym": "async_dout", "kind": "kRegisterArst", "in": ["clk", "rst", "convert_6_1", "async_dout_if_1"], "out": ["async_dout"], "attrs": {"clkPolarity": {"t": "string", "v": "posedge"}, "rstPolarity": {"t": "string", "v": "low"}}},
+        {"sym": "dout", "kind": "kRegisterEnRst", "in": ["clk", "rst", "en", "convert_4_0", "din"], "out": ["dout"], "attrs": {"clkPolarity": {"t": "string", "v": "posedge"}, "enLevel": {"t": "string", "v": "high"}, "rstPolarity": {"t": "string", "v": "high"}}},
+        {"sym": "mem", "kind": "kMemory", "in": [], "out": [], "attrs": {"isSigned": {"t": "bool", "v": false}, "row": {"t": "int", "v": 4}, "width": {"t": "int", "v": 8}}},
+        {"sym": "u_child", "kind": "kInstance", "in": ["en"], "out": ["cout"], "attrs": {"inputPortName": {"t": "string[]", "vs": ["cin"]}, "instanceName": {"t": "string", "v": "u_child"}, "moduleName": {"t": "string", "v": "emit_sv_child"}, "outputPortName": {"t": "string[]", "vs": ["cout"]}}},
+        {"sym": "_comb_ctrl_op_not_3_0", "kind": "kLogicNot", "in": ["rst"], "out": ["_comb_ctrl_val_not_3_1"]},
+        {"sym": "convert_4_0", "kind": "kConstant", "in": [], "out": ["convert_4_0"], "attrs": {"constValue": {"t": "string", "v": "8'h0"}}},
+        {"sym": "_comb_ctrl_op_not_3_2", "kind": "kLogicNot", "in": ["en"], "out": ["_comb_ctrl_val_not_3_3"]},
+        {"sym": "_comb_ctrl_op_and_3_4", "kind": "kAnd", "in": ["_comb_ctrl_val_not_3_1", "en"], "out": ["_comb_ctrl_val_and_3_5"]},
+        {"sym": "dout_if_0", "kind": "kMux", "in": ["en", "din", "dout"], "out": ["dout_if_1"]},
+        {"sym": "dout_if_2", "kind": "kMux", "in": ["rst", "convert_4_0", "dout_if_1"], "out": ["dout_if_3"]},
+        {"sym": "lnot_6_0", "kind": "kLogicNot", "in": ["rst"], "out": ["lnot_6_0"]},
+        {"sym": "_comb_ctrl_op_not_5_0", "kind": "kLogicNot", "in": ["lnot_6_0"], "out": ["_comb_ctrl_val_not_5_1"]},
+        {"sym": "convert_6_1", "kind": "kConstant", "in": [], "out": ["convert_6_1"], "attrs": {"constValue": {"t": "string", "v": "8'h0"}}},
+        {"sym": "async_dout_if_0", "kind": "kMux", "in": ["lnot_6_0", "convert_6_1", "din"], "out": ["async_dout_if_1"]},
+        {"sym": "_comb_ctrl_op_not_7_0", "kind": "kLogicNot", "in": ["en"], "out": ["_comb_ctrl_val_not_7_1"]},
+        {"sym": "mem_mem_wr_0", "kind": "kMemoryWritePort", "in": ["clk", "addr", "en", "din"], "out": [], "attrs": {"clkPolarity": {"t": "string", "v": "posedge"}, "enLevel": {"t": "string", "v": "high"}, "memSymbol": {"t": "string", "v": "mem"}}}
+      ]
+    },
+    {
+      "symbol": "emit_sv_child",
+      "vals": [
+        {"sym": "cin", "w": 1, "sgn": false, "in": true, "out": false, "users": [{"op": "cout_assign_0", "idx": 0}]},
+        {"sym": "cout", "w": 1, "sgn": false, "in": false, "out": true, "def": "cout_assign_0", "users": []}
+      ],
+      "ports": {
+        "in": [
+          {"name": "cin", "val": "cin"}
+        ],
+        "out": [
+          {"name": "cout", "val": "cout"}
+        ]
+      },
+      "ops": [
+        {"sym": "cout_assign_0", "kind": "kAssign", "in": ["cin"], "out": ["cout"]}
+      ]
+    }
+  ],
+  "tops": [
+    "emit_sv_top"
+  ]
+}

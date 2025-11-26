@@ -1236,7 +1236,11 @@ LHSConverter::resolveBitRange(const SignalMemoEntry& entry, const slang::ast::Ex
 
     std::optional<std::string> path = buildFieldPath(expr);
     if (!path) {
-        report("Unable to derive flatten path for assign LHS");
+        std::string message = "Unable to derive flatten path for assign LHS";
+        message.append(" (kind=");
+        message.append(slang::ast::toString(expr.kind));
+        message.push_back(')');
+        report(std::move(message));
         return std::nullopt;
     }
 
@@ -7173,6 +7177,54 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
         instanceName = "_inst_" + std::to_string(instanceCounter_++);
     }
 
+    const slang::ast::InstanceBodySymbol* contextBody = nullptr;
+    for (const auto& [body, mappedGraph] : graphByBody_) {
+        if (mappedGraph == &parentGraph) {
+            contextBody = body;
+            break;
+        }
+    }
+
+    std::span<const SignalMemoEntry> netMemo;
+    std::span<const SignalMemoEntry> regMemo;
+    std::span<const SignalMemoEntry> memMemo;
+    WriteBackMemo* portWriteMemo = nullptr;
+    if (contextBody) {
+        netMemo = peekNetMemo(*contextBody);
+        regMemo = peekRegMemo(*contextBody);
+        memMemo = peekMemMemo(*contextBody);
+        portWriteMemo = &ensureWriteBackMemo(*contextBody);
+    }
+
+    class PortLHSConverter : public LHSConverter {
+    public:
+        using LHSConverter::LHSConverter;
+        bool convert(const slang::ast::Expression& expr, grh::Value& rhsValue,
+                     std::vector<WriteResult>& outResults) {
+            return lowerExpression(expr, rhsValue, outResults);
+        }
+    };
+
+    auto makePortValue = [&](const slang::ast::PortSymbol& port) -> grh::Value* {
+        TypeHelper::Info info = TypeHelper::analyze(port.getType(), port, diagnostics_);
+        std::string base =
+            instanceName.empty() || port.name.empty()
+                ? std::string(port.name.empty() ? "_port" : port.name)
+                : sanitizeForGraphName(instanceName + "_" + std::string(port.name));
+        if (base.empty()) {
+            base = "_port";
+        }
+        std::string candidate = base;
+        std::size_t suffix = 0;
+        while (parentGraph.findValue(candidate)) {
+            candidate = base;
+            candidate.push_back('_');
+            candidate.append(std::to_string(++suffix));
+        }
+        const int64_t width = info.width > 0 ? info.width : 1;
+        return &parentGraph.createValue(candidate, width, info.isSigned);
+    };
+
     std::vector<std::string> inputPortNames;
     std::vector<std::string> outputPortNames;
 
@@ -7191,27 +7243,66 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             }
 
             const slang::ast::Expression* expr = connection->getExpression();
-            if (!expr) {
-                if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Port connection without explicit expression");
-                }
-                continue;
-            }
-
-            grh::Value* value = resolveConnectionValue(*expr, parentGraph, port);
-            if (!value) {
-                continue;
-            }
 
             switch (port->direction) {
-            case slang::ast::ArgumentDirection::In:
+            case slang::ast::ArgumentDirection::In: {
+                if (!expr) {
+                    break;
+                }
+                grh::Value* value = resolveConnectionValue(*expr, parentGraph, port);
+                if (!value) {
+                    break;
+                }
                 op.addOperand(*value);
                 inputPortNames.emplace_back(port->name);
                 break;
-            case slang::ast::ArgumentDirection::Out:
-                op.addResult(*value);
+            }
+            case slang::ast::ArgumentDirection::Out: {
+                grh::Value* resolved = expr ? resolveConnectionValue(*expr, parentGraph, port)
+                                            : nullptr;
+                if (resolved && !resolved->definingOp()) {
+                    op.addResult(*resolved);
+                    outputPortNames.emplace_back(port->name);
+                    break;
+                }
+
+                grh::Value* resultValue = makePortValue(*port);
+                if (!resultValue) {
+                    break;
+                }
+                op.addResult(*resultValue);
                 outputPortNames.emplace_back(port->name);
+
+                const slang::ast::Expression* targetExpr = expr;
+                if (targetExpr && targetExpr->kind == slang::ast::ExpressionKind::Assignment) {
+                    const auto& assign = targetExpr->as<slang::ast::AssignmentExpression>();
+                    if (assign.isLValueArg()) {
+                        targetExpr = &assign.left();
+                    }
+                }
+                if (targetExpr && portWriteMemo) {
+                    LHSConverter::Context lhsContext{
+                        .graph = &parentGraph,
+                        .netMemo = netMemo,
+                        .regMemo = regMemo,
+                        .memMemo = memMemo,
+                        .origin = port,
+                        .diagnostics = diagnostics_};
+                    PortLHSConverter lhsConverter(lhsContext);
+                    std::vector<LHSConverter::WriteResult> writeResults;
+                    if (lhsConverter.convert(*targetExpr, *resultValue, writeResults)) {
+                        for (LHSConverter::WriteResult& result : writeResults) {
+                            if (!result.target) {
+                                continue;
+                            }
+                            portWriteMemo->recordWrite(*result.target,
+                                                       WriteBackMemo::AssignmentKind::Continuous,
+                                                       port, std::move(result.slices));
+                        }
+                    }
+                }
                 break;
+            }
             case slang::ast::ArgumentDirection::InOut:
             case slang::ast::ArgumentDirection::Ref:
                 if (diagnostics_) {
@@ -7287,9 +7378,6 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
 
         const slang::ast::Expression* expr = connection->getExpression();
         if (!expr) {
-            if (diagnostics_) {
-                diagnostics_->nyi(*port, "Port connection without explicit expression");
-            }
             continue;
         }
 
@@ -7366,36 +7454,62 @@ grh::Value* Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbo
 grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr,
                                               grh::Graph& graph,
                                               const slang::ast::Symbol* origin) {
-    switch (expr.kind) {
-    case slang::ast::ExpressionKind::NamedValue: {
-        const auto& named = expr.as<slang::ast::NamedValueExpression>();
-        return ensureValueForSymbol(named.symbol, graph);
-    }
-    case slang::ast::ExpressionKind::Assignment: {
+    const slang::ast::Expression* targetExpr = &expr;
+    if (expr.kind == slang::ast::ExpressionKind::Assignment) {
         const auto& assign = expr.as<slang::ast::AssignmentExpression>();
         if (assign.isLValueArg()) {
-            return resolveConnectionValue(assign.left(), graph, origin);
+            targetExpr = &assign.left();
         }
-
-        if (diagnostics_ && origin) {
-            diagnostics_->nyi(*origin, "Assignment port connections are not supported yet");
+        else {
+            if (diagnostics_ && origin) {
+                diagnostics_->nyi(*origin, "Assignment port connections are not supported yet");
+            }
+            return nullptr;
         }
-        return nullptr;
     }
-    case slang::ast::ExpressionKind::HierarchicalValue:
+
+    if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
         if (diagnostics_ && origin) {
             diagnostics_->nyi(*origin, "Hierarchical port connections are not supported yet");
         }
         return nullptr;
-    default:
-        if (diagnostics_ && origin) {
-            std::string message = "Unsupported port connection expression (kind = ";
-            message.append(std::to_string(static_cast<int>(expr.kind)));
-            message.push_back(')');
-            diagnostics_->nyi(*origin, std::move(message));
-        }
-        return nullptr;
     }
+
+    const slang::ast::InstanceBodySymbol* contextBody = nullptr;
+    for (const auto& [body, mappedGraph] : graphByBody_) {
+        if (mappedGraph == &graph) {
+            contextBody = body;
+            break;
+        }
+    }
+
+    std::span<const SignalMemoEntry> netMemo;
+    std::span<const SignalMemoEntry> regMemo;
+    std::span<const SignalMemoEntry> memMemo;
+    if (contextBody) {
+        netMemo = peekNetMemo(*contextBody);
+        regMemo = peekRegMemo(*contextBody);
+        memMemo = peekMemMemo(*contextBody);
+    }
+
+    RHSConverter::Context context{
+        .graph = &graph,
+        .netMemo = netMemo,
+        .regMemo = regMemo,
+        .memMemo = memMemo,
+        .origin = origin,
+        .diagnostics = diagnostics_};
+    CombRHSConverter converter(context);
+    if (grh::Value* value = converter.convert(*targetExpr)) {
+        return value;
+    }
+
+    if (targetExpr->kind == slang::ast::ExpressionKind::NamedValue) {
+        const auto& named = targetExpr->as<slang::ast::NamedValueExpression>();
+        return ensureValueForSymbol(named.symbol, graph);
+    }
+
+    return nullptr;
 }
 
 std::string Elaborate::makeUniqueOperationName(grh::Graph& graph, std::string baseName) {
