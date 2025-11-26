@@ -39,3 +39,16 @@ module latch_inferred_arst(
         // else missing on purpose to trigger latch with async reset
     end
 endmodule
+
+module latch_inferred_case(
+    input  logic       sel,
+    input  logic [3:0] a,
+    output logic [3:0] y
+);
+    always_comb begin
+        case (sel)
+            1'b0: y = a;
+            // missing 1'b1 on purpose to trigger inferred latch from case
+        endcase
+    end
+endmodule

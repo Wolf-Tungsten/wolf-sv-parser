@@ -128,7 +128,8 @@ int main() {
     }
 
     auto expectLatchOp = [&](std::string_view graphName, grh::OperationKind kind,
-                             std::string_view enName, std::string_view dataName,
+                             std::optional<std::string_view> enName,
+                             std::optional<std::string_view> dataName,
                              std::optional<std::string_view> rstName,
                              std::optional<std::string_view> resetValName) -> bool {
         const grh::Graph* graph = findGraph(netlist, graphName);
@@ -159,12 +160,20 @@ int main() {
 
         const grh::Value* en = operands[0];
         const grh::Value* d = operands.back();
-        if (!en || en->symbol() != enName || en->width() != 1) {
+        if (!en || en->width() != 1) {
             fail("Latch enable mismatch");
             return false;
         }
-        if (!d || d->symbol() != dataName) {
-            fail("Latch data mismatch");
+        if (enName && en->symbol() != *enName) {
+            fail("Latch enable symbol mismatch");
+            return false;
+        }
+        if (!d) {
+            fail("Latch data missing");
+            return false;
+        }
+        if (dataName && d->symbol() != *dataName) {
+            fail("Latch data symbol mismatch");
             return false;
         }
         if (rstName) {
@@ -196,16 +205,24 @@ int main() {
         return true;
     };
 
-    if (!expectLatchOp("latch_always_latch", grh::OperationKind::kLatch, "en", "d", std::nullopt,
-                       std::nullopt)) {
+    if (!expectLatchOp("latch_always_latch", grh::OperationKind::kLatch,
+                       std::optional<std::string_view>("en"),
+                       std::optional<std::string_view>("d"), std::nullopt, std::nullopt)) {
         return 1;
     }
-    if (!expectLatchOp("latch_inferred", grh::OperationKind::kLatch, "en", "d", std::nullopt,
-                       std::nullopt)) {
+    if (!expectLatchOp("latch_inferred", grh::OperationKind::kLatch,
+                       std::optional<std::string_view>("en"),
+                       std::optional<std::string_view>("d"), std::nullopt, std::nullopt)) {
         return 1;
     }
-    if (!expectLatchOp("latch_inferred_arst", grh::OperationKind::kLatchArst, "en", "d",
+    if (!expectLatchOp("latch_inferred_arst", grh::OperationKind::kLatchArst,
+                       std::optional<std::string_view>("en"),
+                       std::optional<std::string_view>("d"),
                        std::optional<std::string_view>("rst"), std::nullopt)) {
+        return 1;
+    }
+    if (!expectLatchOp("latch_inferred_case", grh::OperationKind::kLatch, std::nullopt,
+                       std::optional<std::string_view>("a"), std::nullopt, std::nullopt)) {
         return 1;
     }
 

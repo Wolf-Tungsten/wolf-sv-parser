@@ -172,6 +172,7 @@ int main(int argc, char **argv)
     wolf_sv::Elaborate elaborator(&elaborateDiagnostics);
     auto netlist = elaborator.convert(root);
 
+    bool hasElaborateError = false;
     if (!elaborateDiagnostics.empty())
     {
         const auto *sourceManager = compilation->getSourceManager();
@@ -189,6 +190,7 @@ int main(int argc, char **argv)
             case wolf_sv::ElaborateDiagnosticKind::NotYetImplemented:
             default:
                 tag = "NYI";
+                hasElaborateError = true;
                 break;
             }
             std::cerr << "[elaborate] [" << tag << "] ";
@@ -211,6 +213,13 @@ int main(int argc, char **argv)
             }
             std::cerr << "- " << message.message << '\n';
         }
+    }
+
+    // Terminate if there are NYI (Not Yet Implemented) errors
+    if (hasElaborateError)
+    {
+        std::cerr << "Build failed: elaboration encountered Not Yet Implemented features\n";
+        return 2;
     }
 
     bool emitOk = true;

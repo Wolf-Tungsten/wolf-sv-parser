@@ -3874,6 +3874,7 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     }
 
     ShadowFrame baseSnapshot = currentFrame();
+    const bool combinationalFullCase = isCombinationalFullCase(stmt);
     std::vector<CaseBranch> branches;
     branches.reserve(stmt.items.size());
 
@@ -3918,7 +3919,15 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         }
     }
     else {
-        accumulator = baseSnapshot;
+        if (combinationalFullCase && !branches.empty()) {
+            // Fully covered combinational case without default: treat the final branch as the
+            // implicit catch-all to avoid inferring a hold/latch that feeds back the output.
+            accumulator = std::move(branches.back().frame);
+            branches.pop_back();
+        }
+        else {
+            accumulator = baseSnapshot;
+        }
     }
 
     if (branches.empty()) {
@@ -4706,6 +4715,55 @@ void AlwaysConverter::reportLatchIssue(std::string_view context,
         message.push_back(')');
     }
     diagnostics_->warn(block_, std::move(message));
+}
+
+bool AlwaysConverter::isCombinationalFullCase(const slang::ast::CaseStatement& stmt) {
+    using slang::ast::CaseStatementCondition;
+    if (isSequential() || stmt.defaultCase) {
+        return false;
+    }
+    if (stmt.condition != CaseStatementCondition::Normal) {
+        return false;
+    }
+
+    const slang::ast::Type* type = stmt.expr.unwrapImplicitConversions().type;
+    if (!type || !type->isIntegral()) {
+        return false;
+    }
+    const int64_t bitWidth = type->getBitWidth();
+    if (bitWidth <= 0 || bitWidth >= 32) {
+        return false;
+    }
+
+    const uint64_t required = 1ull << bitWidth;
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(stmt.items.size());
+
+    for (const auto& item : stmt.items) {
+        for (const slang::ast::Expression* expr : item.expressions) {
+            if (!expr) {
+                continue;
+            }
+            std::optional<slang::SVInt> constant =
+                evaluateConstantInt(*expr, /*allowUnknown=*/false);
+            if (!constant) {
+                return false;
+            }
+            slang::SVInt normalized =
+                constant->trunc(static_cast<slang::bitwidth_t>(bitWidth));
+            normalized.setSigned(false);
+            std::optional<uint64_t> valueOpt = normalized.as<uint64_t>();
+            if (!valueOpt) {
+                return false;
+            }
+            seen.insert(*valueOpt);
+            if (seen.size() >= required) {
+                return true;
+            }
+        }
+    }
+
+    return seen.size() >= required;
 }
 
 void AlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {

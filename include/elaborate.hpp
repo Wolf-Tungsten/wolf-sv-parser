@@ -622,6 +622,7 @@ protected:
     grh::Value* coerceToCondition(grh::Value& v);
     std::string makeControlOpName(std::string_view suffix);
     std::string makeControlValueName(std::string_view suffix);
+    bool isCombinationalFullCase(const slang::ast::CaseStatement& stmt);
     void reportLatchIssue(std::string_view context, const SignalMemoEntry* entry = nullptr);
     void checkCaseUniquePriority(const slang::ast::CaseStatement& stmt);
     std::optional<slang::SVInt> evaluateConstantInt(const slang::ast::Expression& expr,
