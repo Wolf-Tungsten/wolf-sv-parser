@@ -6311,8 +6311,10 @@ RHSConverter::TypeInfo RHSConverter::deriveTypeInfo(const slang::ast::Type& type
 std::string RHSConverter::formatConstantLiteral(const slang::SVInt& value,
                                                 const slang::ast::Type& type) const {
     (void)type;
-    return value.toString(slang::LiteralBase::Hex, /* includeBase */ true,
-                          slang::SVInt::MAX_BITS);
+    const bool hasUnknown = value.hasUnknown();
+    const auto base =
+        hasUnknown ? slang::LiteralBase::Binary : slang::LiteralBase::Hex;
+    return value.toString(base, /* includeBase */ true, slang::SVInt::MAX_BITS);
 }
 
 void RHSConverter::reportUnsupported(std::string_view what,
