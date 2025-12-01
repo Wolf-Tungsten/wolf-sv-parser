@@ -1037,7 +1037,9 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     regMemo_(context.regMemo),
     memMemo_(context.memMemo),
     origin_(context.origin),
-    diagnostics_(context.diagnostics) {}
+    diagnostics_(context.diagnostics) {
+    instanceId_ = nextConverterInstanceId();
+}
 
 bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
                          std::vector<LHSConverter::WriteResult>& outResults) {
@@ -1474,11 +1476,10 @@ grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int6
         return nullptr;
     }
 
-    const auto tag = static_cast<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(this));
-    std::string opName =
-        "_assign_slice_op_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
-    std::string valueName =
-        "_assign_slice_val_" + std::to_string(tag) + "_" + std::to_string(sliceCounter_);
+    std::string opName = "_assign_slice_op_" + std::to_string(instanceId_) + "_" +
+                         std::to_string(sliceCounter_);
+    std::string valueName = "_assign_slice_val_" + std::to_string(instanceId_) + "_" +
+                            std::to_string(sliceCounter_);
     ++sliceCounter_;
 
     grh::Operation& op = graph().createOperation(grh::OperationKind::kSliceStatic, opName);

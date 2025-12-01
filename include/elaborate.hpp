@@ -414,6 +414,7 @@ private:
     ElaborateDiagnostics* diagnostics_ = nullptr;
     std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    std::size_t instanceId_ = 0;
     std::size_t sliceCounter_ = 0;
 };
 
