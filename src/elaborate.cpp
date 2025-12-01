@@ -3681,6 +3681,10 @@ void AlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
             return;
         }
 
+        if (rhsConverter_) {
+            rhsConverter_->clearCache();
+        }
+
         visitStatement(stmt.body);
 
         if (loopControlTargetsCurrentLoop()) {
@@ -5143,6 +5147,9 @@ bool AlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopStatement
             }
             return false;
         }
+        if (rhsConverter_) {
+            rhsConverter_->clearCache();
+        }
         visitStatement(stmt.body);
         if (loopControlTargetsCurrentLoop()) {
             if (pendingLoopControl_ == LoopControl::Break) {
@@ -5674,6 +5681,11 @@ grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
     return value;
 }
 
+void RHSConverter::clearCache() {
+    cache_.clear();
+    suppressCache_ = false;
+}
+
 std::string RHSConverter::makeValueName(std::string_view hint, std::size_t index) const {
     std::string base = hint.empty() ? std::string("_rhs_value")
                                     : sanitizeForGraphName(hint, /* allowLeadingDigit */ false);
@@ -5726,6 +5738,8 @@ grh::Value* RHSConverter::convertExpression(const slang::ast::Expression& expr) 
         return convertReplication(expr.as<slang::ast::ReplicationExpression>());
     case ExpressionKind::Conversion:
         return convertConversion(expr.as<slang::ast::ConversionExpression>());
+    case ExpressionKind::Call:
+        return convertCall(expr.as<slang::ast::CallExpression>());
     default:
         reportUnsupported("expression kind", expr);
         return nullptr;
@@ -6058,6 +6072,23 @@ grh::Value* RHSConverter::convertConversion(const slang::ast::ConversionExpressi
     }
 
     return resizeValue(*operand, *expr.type, info, expr, "convert");
+}
+
+grh::Value* RHSConverter::convertCall(const slang::ast::CallExpression& expr) {
+    if (std::optional<slang::SVInt> constant = evaluateConstantSvInt(expr)) {
+        std::string hint =
+            sanitizeForGraphName(expr.getSubroutineName(), /* allowLeadingDigit */ false);
+        if (!hint.empty() && hint.front() == '$') {
+            hint.erase(hint.begin());
+        }
+        if (hint.empty()) {
+            hint = "call";
+        }
+        return createConstantValue(*constant, *expr.type, hint);
+    }
+
+    reportUnsupported("call expression", expr);
+    return nullptr;
 }
 
 grh::Value* RHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {

@@ -235,6 +235,7 @@ public:
 
     /// Lowers the provided expression into the GRH graph, returning the resulting value.
     grh::Value* convert(const slang::ast::Expression& expr);
+    void clearCache();
 
 protected:
     struct TypeInfo {
@@ -291,6 +292,7 @@ private:
     grh::Value* convertConcatenation(const slang::ast::ConcatenationExpression& expr);
     grh::Value* convertReplication(const slang::ast::ReplicationExpression& expr);
     grh::Value* convertConversion(const slang::ast::ConversionExpression& expr);
+    grh::Value* convertCall(const slang::ast::CallExpression& expr);
     grh::Value* reduceToLogicValue(grh::Value& input, const slang::ast::Expression& originExpr);
     grh::Value* materializeParameterValue(const slang::ast::NamedValueExpression& expr);
     std::string formatConstantLiteral(const slang::SVInt& value,
