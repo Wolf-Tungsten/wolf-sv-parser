@@ -76,6 +76,7 @@
   - **组合逻辑区段**：理论上不生成 `always @*` 组合块，尽量用 `assign` 完成纯组合逻辑；如确需过程块需显式标注原因并保持单驱动。
   - **时序逻辑区段**：将寄存器更新等时序操作收敛到 `always @(posedge clk ... )`（按需添加复位/使能），使用非阻塞赋值；相同时钟/复位特性的寄存器与 memport 写入尽量聚合进同一个 always 块，保持驱动与 reg 定义一一对应。
   - 区段顺序/空行格式固定，形成可预测布局；为尚未覆盖的 op 种类留出 TODO/诊断提示，避免静默忽略。
+- **KR4（切片输出友好化）** 细化切片的 Verilog 序列化：1）`kSliceStatic` 当 `sliceStart == sliceEnd` 时输出 `sym[sliceStart]`，避免 `[i:i]` 冗余；2）`kSliceArray` 当 `sliceWidth == 1` 时直接输出 `sym[index]` 而非 `[index +: 1]`，保证单 bit 访问与静态切片的打印风格一致；保留 multi-bit 情形的原有语义并增加快照测试。
 - **KR3 对齐：样例与 lint 验证**
   - 在 `tests/data/emit` 添加覆盖多段的最小网表示例（含端口/wire/reg/mem/实例/DPIC/组合/时序），并提供期望 `.sv` 片段或快照。
   - 在 `tests/emit` 编写单元测试：调用 `EmitSystemVerilog` 生成文件，与期望字符串/正则匹配；校验命名去重、段落顺序与必备语句存在。

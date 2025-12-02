@@ -6559,12 +6559,27 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
     }
 
     grh::Value* input = convert(expr.value());
-    grh::Value* index = convert(expr.selector());
-    if (!input || !index) {
+    if (!input) {
         return nullptr;
     }
 
     const TypeInfo info = deriveTypeInfo(*expr.type);
+    // 尽可能在 elaboration 期把元素选择降级成静态切片，避免生成 kSliceArray。
+    if (std::optional<int64_t> indexConst = evaluateConstantInt(expr.selector())) {
+        if (*indexConst >= 0 && info.width > 0) {
+            const int64_t sliceStart = (*indexConst) * info.width;
+            const int64_t sliceEnd = sliceStart + info.width - 1;
+            if (sliceStart >= 0 && sliceEnd >= sliceStart) {
+                return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "array_static");
+            }
+        }
+    }
+
+    grh::Value* index = convert(expr.selector());
+    if (!index) {
+        return nullptr;
+    }
+
     return buildArraySlice(*input, *index, info.width, expr);
 }
 
@@ -7205,7 +7220,12 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kInstance, opName);
 
-    std::string instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    // Prefer本地实例名，若缺失再回退层级路径，避免在 emit 时打印带前缀的层次化名字。
+    std::string instanceName =
+        childInstance.name.empty() ? std::string() : sanitizeForGraphName(childInstance.name);
+    if (instanceName.empty()) {
+        instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    }
     if (instanceName.empty()) {
         instanceName = childInstance.name.empty() ? std::string("_inst_") + std::to_string(instanceCounter_++)
                                                   : sanitizeForGraphName(childInstance.name);
@@ -7383,7 +7403,11 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kBlackbox, opName);
 
-    std::string instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    std::string instanceName =
+        childInstance.name.empty() ? std::string() : sanitizeForGraphName(childInstance.name);
+    if (instanceName.empty()) {
+        instanceName = sanitizeForGraphName(deriveSymbolPath(childInstance));
+    }
     if (instanceName.empty()) {
         instanceName = childInstance.name.empty() ? std::string("_inst_") + std::to_string(instanceCounter_++)
                                                   : sanitizeForGraphName(childInstance.name);

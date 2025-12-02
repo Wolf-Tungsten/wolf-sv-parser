@@ -20,6 +20,7 @@
 - **KR2（内存读取）** 当 RHS 涉及 mem（reg memo 中标记为 kMemory 的条目），需要生成 kMemoryAsyncReadPort Operation；这意味着 CombRHSConverter 要能识别地址/掩码等输入来源，并在 GRH 图中注入一个异步读端口节点，输出 Value 回填到表达式求值路径。
 - **KR3（简单 concat/slice）** 对标量或扁平化后的 net/reg，需支持组合逻辑层面的按位切片和拼接，常见于连续位段选取、{a,b} 形式；实现上要确保位宽校验、GRH Value 顺序正确以及与 TypeHelper 的一致性。
 - **KR4（测试与人工审查）** 测试集需覆盖上面三类场景，并把 CombRHSConverter 生成的 Operation/Value Graph 导出成可读 JSON 供人工对照；自动化测试继续走 ctest，重点校验 slice/concat/memory read 的位宽与连接是否符合预期。
+- **KR5（静态索引降级）** 当 ElementSelect 的索引在 elaboration 期可求出常量（例如 for 展开后的 `a[0]`/`cout[1]`），优先生成 `kSliceStatic(sliceStart=sliceEnd=index)` 而非 `kSliceArray`，仅在运行期索引或多维 flatten 需要时才使用 `kSliceArray`。补充用例（包含 hdlbits 068 ripple 形式）验证静态索引走 kSliceStatic、动态索引仍走 kSliceArray。
 
 ## 阶段10：设计实现 Value 写回 memo 数据结构
 - **动机** 连续赋值与过程块的 LHS 可以是切片、层级结构体或拼接表达式，若直接覆写 net/reg memo 中已 flatten 的 Value，会破坏 GRH 的 SSA 约束。因此阶段10要引入 writeBack memo，先收集「写意图」，待所有 assign/always 解析完毕后再统一生成 kConcat 或直接赋值到既有 Value。

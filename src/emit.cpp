@@ -1322,7 +1322,16 @@ namespace wolf_sv::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[" << *sliceEnd << ":" << *sliceStart << "];";
+                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[";
+                    if (*sliceStart == *sliceEnd)
+                    {
+                        expr << *sliceStart;
+                    }
+                    else
+                    {
+                        expr << *sliceEnd << ":" << *sliceStart;
+                    }
+                    expr << "];";
                     addAssign(expr.str());
                     ensureWireDecl(*results[0]);
                     break;
@@ -1360,7 +1369,16 @@ namespace wolf_sv::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[" << operands[1]->symbol() << " * " << *width << " +: " << *width << "];";
+                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[";
+                    if (*width == 1)
+                    {
+                        expr << operands[1]->symbol();
+                    }
+                    else
+                    {
+                        expr << operands[1]->symbol() << " * " << *width << " +: " << *width;
+                    }
+                    expr << "];";
                     addAssign(expr.str());
                     ensureWireDecl(*results[0]);
                     break;

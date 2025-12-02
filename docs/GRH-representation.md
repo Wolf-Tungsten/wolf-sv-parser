@@ -242,7 +242,10 @@ assign ${res.symbol} = {${rep}{op.symbol}};
 
 生成语义：
 ```
-assign ${res.symbol} = ${input.symbol}[${sliceEnd}:${sliceStart}];
+// 更偏向 Verilog 的紧凑写法：单比特切片用 bit-select，多比特用 range-select。
+assign ${res.symbol} = (sliceEnd == sliceStart)
+    ? ${input.symbol}[${sliceStart}]
+    : ${input.symbol}[${sliceEnd}:${sliceStart}];
 ```
 
 GRH 的 Value 不保留结构体、数组结构语义，但需要支持数组和结构体的访问，使用 kSlice* 系列操作符实现。
@@ -273,7 +276,10 @@ assign ${res.symbol} = ${input.symbol}[${offset.symbol} +: ${sliceWidth}];
 
 生成语义：
 ```
-assign ${res.symbol} = ${input.symbol}[${index.symbol} * ${sliceWidth} +: ${sliceWidth}];
+// 单比特数组元素用 bit-select，多比特保持 indexed part-select。
+assign ${res.symbol} = (sliceWidth == 1)
+    ? ${input.symbol}[${index.symbol}]
+    : ${input.symbol}[${index.symbol} * ${sliceWidth} +: ${sliceWidth}];
 ```
 
 GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
