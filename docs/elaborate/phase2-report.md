@@ -2,7 +2,7 @@
 
 ## Objective 进展
 - 完成从 slang AST 到 GRH Netlist 的最小可行链路，实现端口信息同步与占位节点生成。
-- 新增 `--dump-grh` 命令行选项，可以在编译结束后输出 GRH JSON，便于人工抽查。
+- 新增 `--emit-json` 命令行选项，可以在编译结束后输出 GRH JSON，便于人工抽查。
 
 ## KR1 slang 前端加载管线
 - 复用 `slang::driver::Driver` 构建前端流程，保持与 CLI 一致的选项处理，并在 `tests/elaborate/test_elaborate_smoke.cpp` 中走通从源文件到 `Compilation` 的管线。
@@ -11,7 +11,7 @@
 ## KR2 elaborate 管线骨架
 - 在 `Elaborate::convert` 中针对顶层模块创建 GRH Graph，生成输入/输出端口对应的 SSA Value 并标记顶层图。
 - 为模块体添加 `kBlackbox` 占位 Operation，记录模块名称与“TODO”状态，JSON 导出时可见。
-- CLI 新增 `--dump-grh`，调用 `EmitJSON` 生成 JSON（默认 prettyCompact），手动评审时可与占位节点一并查看。
+- CLI 新增 `--emit-json`，调用 `EmitJSON` 生成 JSON（默认 prettyCompact），手动评审时可与占位节点一并查看。
 
 ## KR3 诊断与 smoke 测试
 - 新增 `ElaborateDiagnostics`，支持 `TODO` / `NYI` 分类及源符号路径；CLI 会打印对应信息，并尝试解析文件位置。

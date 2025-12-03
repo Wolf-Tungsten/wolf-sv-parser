@@ -12,7 +12,7 @@
 - Build: `cmake --build build -j$(nproc)`; resulting binary is `build/bin/wolf-sv-parser`.
 - Tests: `ctest --test-dir build --output-on-failure` after configuring; CTest wraps the per-target executables.
 - HDLBits flow: `make run_hdlbits_test DUT=001` (or `make run_all_hdlbits_tests`) builds the parser, emits SV/JSON, and runs Verilator; needs Verilator in PATH.
-- Manual run example: `./build/bin/wolf-sv-parser --emit-sv --dump-grh -o out.sv path/to/file.sv`.
+- Manual run example: `./build/bin/wolf-sv-parser --emit-sv --emit-json -o out.sv path/to/file.sv`.
 
 ## Coding Style & Naming Conventions
 - C++20 code with 4-space indentation and braces on the same line as control statements; keep includes ordered and minimal.

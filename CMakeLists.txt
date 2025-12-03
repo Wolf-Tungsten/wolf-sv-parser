@@ -30,6 +30,22 @@ target_link_libraries(grh
         slang::slang
 )
 
+## transform
+add_library(transform STATIC
+    src/transform.cpp
+    src/pass/demo_stats.cpp
+)
+
+target_include_directories(transform
+    PUBLIC
+        include
+)
+
+target_link_libraries(transform
+    PUBLIC
+        grh
+)
+
 ## emit
 add_library(emit STATIC
     src/emit.cpp
@@ -67,6 +83,7 @@ add_executable(wolf-sv-parser
 
 target_link_libraries(wolf-sv-parser
     PRIVATE
+        transform
         elaborate
         emit
 )
@@ -379,6 +396,18 @@ target_compile_definitions(elaborate-dpic
 )
 
 register_test_exe(elaborate-dpic)
+
+# transform: pass manager
+add_executable(transform-pass-manager
+    tests/transform/test_transform_pass_manager.cpp
+)
+
+target_link_libraries(transform-pass-manager
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-pass-manager)
 
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

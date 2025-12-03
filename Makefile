@@ -43,7 +43,7 @@ $(WOLF_PARSER): CMakeLists.txt
 
 $(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLF_PARSER) check-id
 	@mkdir -p $(OUT_DIR)
-	$(WOLF_PARSER) --emit-sv --dump-grh -o $(EMITTED_DUT) $(DUT_SRC)
+	$(WOLF_PARSER) --emit-sv --emit-json -o $(EMITTED_DUT) $(DUT_SRC)
 	@if [ -f $(OUT_DIR)/grh.json ]; then mv -f $(OUT_DIR)/grh.json $(EMITTED_JSON); fi
 
 $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id

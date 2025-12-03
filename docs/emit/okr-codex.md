@@ -32,7 +32,7 @@
 - **KR2 对齐：EmitJSON 实现与集成**
   - 新增 `EmitJSON`（头在emit.hpp/源文件在emit.cpp，命名空间 emit），继承基类并实现 `emitImpl`：接受 `Netlist` 和顶层列表，输出到指定目录（默认 `grh.json`），支持 `jsonMode` 以切换 compact/prettyCompact/pretty。
   - 将历史的 `toJsonString` 入口迁移/薄包装到 `EmitJSON`，避免网表类直接持有序列化逻辑，减少重复实现。
-  - 更新 CLI `--dump-grh` 和内部调用路径，改用 `EmitJSON`，确保诊断透传（如缺少 top 时提示）并保持现有行为兼容。
+  - 更新 CLI `--emit-json` 和内部调用路径，改用 `EmitJSON`，确保诊断透传（如缺少 top 时提示）并保持现有行为兼容。
 - **KR3 对齐：测试与回归覆盖**
   - 在 `tests/emit` 增加针对 `EmitJSON` 的单元测试：1）空/无顶层报错；2）单模块最小网表输出、校验关键字段与 key 简写；3）pretty/compact 差异。
   - 回归现有依赖 JSON 的测试（例如 `tests/grh/test_grh.cpp` 写文件路径、elaborate 阶段 JSON dump），迁移到新接口或更新期望输出，确保 ctest 全通过。

@@ -29,3 +29,30 @@
 - Graph/Netlist 拷贝或 transform 中克隆节点时只复制 symbol 与属性，指针缓存通过集中钩子重建；禁止裸 memcpy 导致悬垂。
 - emit/transform/JSON dump/pretty 打印等输出路径以 symbol 生成关系，确保缓存缺失也能 roundtrip；必要时在拷贝路径上修复/补充 def 与 users。
 - 补充测试：构造含多用户与替换操作的图，验证移动后缓存重建、def/users 与 operands/results 双向一致，`ctest` 回归通过且性能热点查找次数下降。
+
+# Objective 2
+
+> 目标：Transform 以独立 pass 的形式实现，实现支持 pass 的基本框架。
+
+## 框架定位与拆分
+- 在 `wolf_sv::transform` 命名空间新增公共头 `include/transform.hpp` 与实现 `src/transform.cpp`，所有与Pass相关的基础设施（基类）都在上述两个文件中实现，创建 src/pass 文件夹 和 include/pass 文件夹，存放具体pass的实现（子类）
+- Pass 持有对 `grh::Netlist` 的可变引用，明确 transform 仅在 Elaborate → Emit 之间运行。
+- Pass 以就地修改 Netlist/Graph 为原则，不直接处理 I/O；与 emit/elaborate 同样使用轻量诊断结构，主流程统一汇总/打印。
+- 约定 pass id（短字符串）与可读 name/desc，id 用于 CLI/注册，desc 用于日志/诊断，便于后续扩展内置/自定义 pass。
+
+## KR1：Pass 基类（含参数）
+- 定义 `struct PassContext { grh::Netlist& netlist; PassDiagnostics& diags; bool verbose; }`，预留 `Graph* currentGraph`/`std::string_view entryName` 等可选字段以支撑图级遍历。
+- 引入 `using PassArgMap = std::unordered_map<std::string, std::string>; struct PassConfig { PassArgMap args; bool enabled = true; };`，提供 `getBool/getInt/getString` 辅助与默认值，避免各 pass 重复解析。
+- `class Pass { virtual PassResult run(PassContext&) = 0; virtual void configure(const PassConfig&); std::string id() const; std::string name() const; };`，`PassResult` 含 `bool changed`, `bool failed` 和可选 `std::vector<std::string> artifacts`，失败时通过 `diags` 记录错误原因。
+- 诊断沿用 Elaborate/Emit 风格：`TransformDiagnostics`/`PassDiagnostics` 记录 `kind (Error/Warn)`、`message`、`context`，打印时带 `[pass-id]` 前缀，方便定位。
+
+## KR2：PassManager 顺序注册与执行
+- 新增 `class PassManager { PassPipelineOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`config`、`id`，注册顺序即执行顺序。
+- `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `constprop,inline`）构建；测试可注入 fake pass factory 验证执行顺序与参数传递。
+- `run(Netlist&, PassDiagnostics&)` 逐个执行，累积 `changed`；遇到 `failed` 或 diagnostics 中 error 时根据 `options.stopOnError` 决定立即终止或继续，统一返回 `TransformResult{success, changed}`。
+- 提供 `addPass(id, config)`/`addPass(std::unique_ptr<Pass>, config)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbose` 控制每个 pass 的开始/结束日志。
+
+## KR3：main 集成 Elaborate→Transform→Emit
+- 在 `src/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(netlist, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
+- CMake 将 `src/transform/*.cpp` 与 `include/transform/*.hpp` 编译入主二进制；新增最小单元测试覆盖管线顺序、参数绑定与错误短路，后续可用 fake pass 验证 changed/diagnostics 聚合。
+- 日志格式与 emit/elaborate 对齐（前缀 `[transform]` + pass id），保持 JSON/SV 输出不受影响，若 pipeline 为空则完全复用当前输出路径。

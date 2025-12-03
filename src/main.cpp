@@ -17,40 +17,10 @@
 
 #include "elaborate.hpp"
 #include "emit.hpp"
+#include "transform.hpp"
+#include "pass/demo_stats.hpp"
 
 using namespace slang::driver;
-
-namespace
-{
-
-    void dumpScope(const slang::ast::Scope &scope, int indent = 0)
-    {
-        const std::string indentStr(static_cast<size_t>(indent) * 2, ' ');
-        for (const slang::ast::Symbol &symbol : scope.members())
-        {
-            std::cout << indentStr << "- [" << slang::ast::toString(symbol.kind) << "] ";
-            if (symbol.name.empty())
-            {
-                std::cout << "<anonymous>";
-            }
-            else
-            {
-                std::cout << symbol.name;
-            }
-            std::cout << '\n';
-
-            if (const auto *instance = symbol.as_if<slang::ast::InstanceSymbol>())
-            {
-                dumpScope(instance->body, indent + 1);
-            }
-            else if (symbol.isScope())
-            {
-                dumpScope(symbol.as<slang::ast::Scope>(), indent + 1);
-            }
-        }
-    }
-
-} // namespace
 
 int main(int argc, char **argv)
 {
@@ -60,8 +30,8 @@ int main(int argc, char **argv)
 
     std::optional<bool> dumpAst;
     driver.cmdLine.add("--dump-ast", dumpAst, "Dump a summary of the elaborated AST");
-    std::optional<bool> dumpGrh;
-    driver.cmdLine.add("--dump-grh", dumpGrh, "Dump GRH JSON after elaboration");
+    std::optional<bool> dumpJson;
+    driver.cmdLine.add("--emit-json", dumpJson, "Emit GRH JSON after elaboration");
     std::optional<bool> dumpSv;
     driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after elaboration");
     std::optional<std::string> emitOutputDir;
@@ -118,7 +88,7 @@ int main(int argc, char **argv)
         }
 
         const bool wantsSv = dumpSv == true;
-        const bool wantsJson = dumpGrh == true;
+        const bool wantsJson = dumpJson == true;
 
         if (ext == ".sv" || ext == ".v")
         {
@@ -222,8 +192,33 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
+    wolf_sv::transform::PassDiagnostics transformDiagnostics;
+    wolf_sv::transform::PassManager passManager;
+    passManager.addPass(std::make_unique<wolf_sv::transform::StatsPass>());
+    wolf_sv::transform::TransformResult transformResult = passManager.run(netlist, transformDiagnostics);
+
+    if (!transformDiagnostics.empty())
+    {
+        for (const auto &message : transformDiagnostics.messages())
+        {
+            const char *tag = message.kind == wolf_sv::transform::PassDiagnosticKind::Error ? "error" : "warn";
+            std::cerr << "[transform] [" << message.passId << "] [" << tag << "] " << message.message;
+            if (!message.context.empty())
+            {
+                std::cerr << " (" << message.context << ")";
+            }
+            std::cerr << '\n';
+        }
+    }
+
+    if (!transformResult.success || transformDiagnostics.hasError())
+    {
+        return 5;
+    }
+
     bool emitOk = true;
-    if (dumpGrh == true)
+    if (dumpJson == true)
     {
         wolf_sv::emit::EmitDiagnostics emitDiagnostics;
         wolf_sv::emit::EmitJSON emitter(&emitDiagnostics);
@@ -254,17 +249,7 @@ int main(int argc, char **argv)
         emitOk = emitResult.success && !emitDiagnostics.hasError();
         if (emitResult.success && !emitResult.artifacts.empty())
         {
-            std::cout << "=== GRH JSON ===\n";
-            std::ifstream jsonFile(emitResult.artifacts.front());
-            if (!jsonFile.is_open())
-            {
-                std::cerr << "[emit-json] Failed to read emitted artifact: " << emitResult.artifacts.front() << '\n';
-                emitOk = false;
-            }
-            else
-            {
-                std::cout << jsonFile.rdbuf() << '\n';
-            }
+            std::cout << "[emit-json] Wrote GRH JSON to " << emitResult.artifacts.front() << '\n';
         }
         else if (!emitResult.success)
         {
