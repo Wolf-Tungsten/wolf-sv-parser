@@ -723,6 +723,27 @@ namespace wolf_sv::grh
             }
         }
 
+        void writeSrcLoc(slang::JsonWriter &writer, const std::optional<SrcLoc> &srcLoc)
+        {
+            if (!srcLoc || srcLoc->file.empty())
+            {
+                return;
+            }
+            writer.writeProperty("loc");
+            writer.startObject();
+            writer.writeProperty("file");
+            writer.writeValue(srcLoc->file);
+            writer.writeProperty("line");
+            writer.writeValue(static_cast<int64_t>(srcLoc->line));
+            writer.writeProperty("col");
+            writer.writeValue(static_cast<int64_t>(srcLoc->column));
+            writer.writeProperty("endLine");
+            writer.writeValue(static_cast<int64_t>(srcLoc->endLine));
+            writer.writeProperty("endCol");
+            writer.writeValue(static_cast<int64_t>(srcLoc->endColumn));
+            writer.endObject();
+        }
+
     } // namespace
 
     std::string_view toString(OperationKind kind) noexcept
@@ -1344,6 +1365,7 @@ namespace wolf_sv::grh
                 writer.endObject();
             }
             writer.endArray();
+            writeSrcLoc(writer, value.srcLoc());
             writer.endObject();
         }
         writer.endArray();
@@ -1420,6 +1442,7 @@ namespace wolf_sv::grh
                 writer.endObject();
             }
 
+            writeSrcLoc(writer, op.srcLoc());
             writer.endObject();
         }
         writer.endArray();
@@ -1625,6 +1648,43 @@ namespace wolf_sv::grh
         throw std::runtime_error("Unhandled attribute kind");
     }
 
+    std::optional<SrcLoc> parseSrcLoc(const JsonValue &json, std::string_view context)
+    {
+        const auto &object = json.asObject(context);
+        SrcLoc info{};
+
+        if (auto fileIt = object.find("file"); fileIt != object.end())
+        {
+            info.file = fileIt->second.asString(std::string(context) + ".file");
+        }
+
+        if (auto lineIt = object.find("line"); lineIt != object.end())
+        {
+            info.line = static_cast<uint32_t>(lineIt->second.asInt(std::string(context) + ".line"));
+        }
+
+        if (auto colIt = object.find("col"); colIt != object.end())
+        {
+            info.column = static_cast<uint32_t>(colIt->second.asInt(std::string(context) + ".col"));
+        }
+
+        if (auto endLineIt = object.find("endLine"); endLineIt != object.end())
+        {
+            info.endLine = static_cast<uint32_t>(endLineIt->second.asInt(std::string(context) + ".endLine"));
+        }
+
+        if (auto endColIt = object.find("endCol"); endColIt != object.end())
+        {
+            info.endColumn = static_cast<uint32_t>(endColIt->second.asInt(std::string(context) + ".endCol"));
+        }
+
+        if (info.file.empty() && info.line == 0)
+        {
+            return std::nullopt;
+        }
+        return info;
+    }
+
     Netlist Netlist::fromJsonString(std::string_view json)
     {
         JsonValue root = parseJson(json);
@@ -1684,6 +1744,14 @@ namespace wolf_sv::grh
                 if (auto defIt = valueObj.find("def"); defIt != valueObj.end())
                 {
                     value.setDefiningOpSymbol(defIt->second.asString("value.def"));
+                }
+
+                if (auto dbgIt = valueObj.find("loc"); dbgIt != valueObj.end())
+                {
+                    if (auto loc = parseSrcLoc(dbgIt->second, "value.loc"))
+                    {
+                        value.setSrcLoc(std::move(*loc));
+                    }
                 }
             }
 
@@ -1824,6 +1892,14 @@ namespace wolf_sv::grh
                         for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
                         {
                             op.setAttribute(attrName, parseAttributeValue(attrValue));
+                        }
+                    }
+
+                    if (auto dbgIt = opObj.find("loc"); dbgIt != opObj.end())
+                    {
+                        if (auto loc = parseSrcLoc(dbgIt->second, "operation.loc"))
+                        {
+                            op.setSrcLoc(std::move(*loc));
                         }
                     }
                 }

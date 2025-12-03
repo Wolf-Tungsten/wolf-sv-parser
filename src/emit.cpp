@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <exception>
+#include <optional>
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
@@ -156,6 +157,54 @@ namespace wolf_sv::emit
                        first = false;
                    });
             out.push_back('}');
+        }
+
+        void writeDebugInline(std::string &out, JsonPrintMode mode,
+                              const std::optional<grh::SrcLoc> &debugInfo)
+        {
+            writeInlineObject(out, mode, [&](auto &&prop)
+                              {
+                                  prop("file", [&]
+                                       { appendQuotedString(out, debugInfo->file); });
+                                  prop("line", [&]
+                                       { out.append(std::to_string(debugInfo->line)); });
+                                  prop("col", [&]
+                                       { out.append(std::to_string(debugInfo->column)); });
+                                  prop("endLine", [&]
+                                       { out.append(std::to_string(debugInfo->endLine)); });
+                                  prop("endCol", [&]
+                                       { out.append(std::to_string(debugInfo->endColumn)); });
+                              });
+        }
+
+        std::string formatSrcAttribute(const std::optional<grh::SrcLoc> &srcLoc)
+        {
+            if (!srcLoc || srcLoc->file.empty() || srcLoc->line == 0)
+            {
+                return {};
+            }
+
+            const uint32_t startLine = srcLoc->line;
+            const uint32_t startCol = srcLoc->column;
+            const uint32_t endLine = srcLoc->endLine ? srcLoc->endLine : startLine;
+            const uint32_t endCol = srcLoc->endColumn ? srcLoc->endColumn : startCol;
+
+            std::ostringstream oss;
+            oss << "(* src = \"" << srcLoc->file << ":" << startLine;
+            if (startCol != 0)
+            {
+                oss << "." << startCol;
+            }
+            if (endLine != 0 || endCol != 0)
+            {
+                oss << "-" << endLine;
+                if (endCol != 0)
+                {
+                    oss << "." << endCol;
+                }
+            }
+            oss << "\" *)";
+            return oss.str();
         }
 
         void writeUsersInline(std::string &out, std::span<const grh::ValueUser> users, JsonPrintMode mode)
@@ -334,6 +383,11 @@ namespace wolf_sv::emit
                                   }
                                   prop("users", [&]
                                        { writeUsersInline(out, value.users(), mode); });
+                                  if (value.srcLoc())
+                                  {
+                                      prop("loc", [&]
+                                           { writeDebugInline(out, mode, value.srcLoc()); });
+                                  }
                               });
         }
 
@@ -394,6 +448,11 @@ namespace wolf_sv::emit
                                   {
                                       prop("attrs", [&]
                                            { writeAttrsInline(out, op.attributes(), mode); });
+                                  }
+                                  if (op.srcLoc())
+                                  {
+                                      prop("loc", [&]
+                                           { writeDebugInline(out, mode, op.srcLoc()); });
                                   }
                               });
         }
@@ -789,6 +848,7 @@ namespace wolf_sv::emit
         {
             int64_t width = 1;
             bool isSigned = false;
+            std::optional<grh::SrcLoc> debug;
         };
 
         struct PortDecl
@@ -797,6 +857,7 @@ namespace wolf_sv::emit
             int64_t width = 1;
             bool isSigned = false;
             bool isReg = false;
+            std::optional<grh::SrcLoc> debug;
         };
 
         struct SeqKey
@@ -817,6 +878,13 @@ namespace wolf_sv::emit
                 auto rhsTuple = std::make_tuple(rhs.clk, rhs.clkEdge, rhs.asyncRst, rhs.asyncEdge, rhs.syncRst, rhs.syncPolarity);
                 return lhsTuple < rhsTuple;
             }
+        };
+
+        struct SeqBlock
+        {
+            SeqKey key{};
+            std::vector<std::string> stmts;
+            const grh::Operation *op = nullptr;
         };
 
         void appendIndented(std::ostringstream &out, int indent, const std::string &text)
@@ -929,7 +997,8 @@ namespace wolf_sv::emit
 
         std::string formatNetDecl(std::string_view type, const std::string &name, const NetDecl &decl)
         {
-            std::string out(type);
+            std::string out;
+            out.append(type);
             out.push_back(' ');
             out.append(signedPrefix(decl.isSigned));
             const std::string range = widthRange(decl.width);
@@ -1022,7 +1091,8 @@ namespace wolf_sv::emit
                 {
                     continue;
                 }
-                portDecls[name] = PortDecl{PortDir::Input, value->width(), value->isSigned(), false};
+                portDecls[name] = PortDecl{PortDir::Input, value->width(), value->isSigned(), false,
+                                           value->srcLoc()};
             }
             for (const auto &[name, valueSymbol] : graph->outputPorts())
             {
@@ -1031,7 +1101,8 @@ namespace wolf_sv::emit
                 {
                     continue;
                 }
-                portDecls[name] = PortDecl{PortDir::Output, value->width(), value->isSigned(), false};
+                portDecls[name] = PortDecl{PortDir::Output, value->width(), value->isSigned(), false,
+                                           value->srcLoc()};
             }
 
             // Book-keeping for declarations.
@@ -1044,21 +1115,27 @@ namespace wolf_sv::emit
             // Storage for various sections.
             std::map<std::string, NetDecl, std::less<>> regDecls;
             std::map<std::string, NetDecl, std::less<>> wireDecls;
-            std::vector<std::string> memoryDecls;
-            std::vector<std::string> instanceDecls;
-            std::vector<std::string> dpiImportDecls;
-            std::vector<std::string> assignStmts;
-            std::vector<std::string> latchBlocks;
-            std::vector<std::pair<SeqKey, std::vector<std::string>>> seqBlocks;
+            std::vector<std::pair<std::string, const grh::Operation *>> memoryDecls;
+            std::vector<std::pair<std::string, const grh::Operation *>> instanceDecls;
+            std::vector<std::pair<std::string, const grh::Operation *>> dpiImportDecls;
+            std::vector<std::pair<std::string, const grh::Operation *>> assignStmts;
+            std::vector<std::pair<std::string, const grh::Operation *>> latchBlocks;
+            std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
 
-            auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned)
+            auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
+                                     const std::optional<grh::SrcLoc> &debug = std::nullopt)
             {
                 if (declaredNames.find(name) != declaredNames.end())
                 {
+                    auto it = regDecls.find(name);
+                    if (it != regDecls.end() && debug && !it->second.debug)
+                    {
+                        it->second.debug = *debug;
+                    }
                     return;
                 }
-                regDecls.emplace(name, NetDecl{width, isSigned});
+                regDecls.emplace(name, NetDecl{width, isSigned, debug});
                 declaredNames.insert(name);
             };
 
@@ -1067,25 +1144,31 @@ namespace wolf_sv::emit
                 const std::string &name = value.symbol();
                 if (declaredNames.find(name) != declaredNames.end())
                 {
+                    auto it = wireDecls.find(name);
+                    if (it != wireDecls.end() && value.srcLoc() && !it->second.debug)
+                    {
+                        it->second.debug = *value.srcLoc();
+                    }
                     return;
                 }
-                wireDecls.emplace(name, NetDecl{value.width(), value.isSigned()});
+                wireDecls.emplace(name, NetDecl{value.width(), value.isSigned(), value.srcLoc()});
                 declaredNames.insert(name);
             };
 
-            auto addAssign = [&](std::string stmt)
+            auto addAssign = [&](std::string stmt, const grh::Operation *sourceOp)
             {
-                assignStmts.push_back(std::move(stmt));
+                assignStmts.emplace_back(std::move(stmt), sourceOp);
             };
 
-            auto addSequentialStmt = [&](const SeqKey &key, std::string stmt)
+            auto addSequentialStmt = [&](const SeqKey &key, std::string stmt,
+                                         const grh::Operation *sourceOp)
             {
-                seqBlocks.emplace_back(key, std::vector<std::string>{std::move(stmt)});
+                seqBlocks.push_back(SeqBlock{key, std::vector<std::string>{std::move(stmt)}, sourceOp});
             };
 
-            auto addLatchBlock = [&](std::string stmt)
+            auto addLatchBlock = [&](std::string stmt, const grh::Operation *sourceOp)
             {
-                latchBlocks.push_back(std::move(stmt));
+                latchBlocks.emplace_back(std::move(stmt), sourceOp);
             };
 
             auto markPortAsRegIfNeeded = [&](const grh::Value &value)
@@ -1193,7 +1276,7 @@ namespace wolf_sv::emit
                         reportError("kConstant missing constValue attribute", op.symbol());
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + *constValue + ";");
+                    addAssign("assign " + results[0]->symbol() + " = " + *constValue + ";", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1224,7 +1307,7 @@ namespace wolf_sv::emit
                         break;
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " " + tok + " " + operands[1]->symbol() + ";");
+                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " " + tok + " " + operands[1]->symbol() + ";", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1243,7 +1326,7 @@ namespace wolf_sv::emit
                         break;
                     }
                     const std::string tok = unaryOpToken(op.kind());
-                    addAssign("assign " + results[0]->symbol() + " = " + tok + operands[0]->symbol() + ";");
+                    addAssign("assign " + results[0]->symbol() + " = " + tok + operands[0]->symbol() + ";", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1254,7 +1337,7 @@ namespace wolf_sv::emit
                         reportError("kMux missing operands or results", op.symbol());
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " ? " + operands[1]->symbol() + " : " + operands[2]->symbol() + ";");
+                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " ? " + operands[1]->symbol() + " : " + operands[2]->symbol() + ";", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1265,7 +1348,7 @@ namespace wolf_sv::emit
                         reportError("kAssign missing operands or results", op.symbol());
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + ";");
+                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + ";", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1287,7 +1370,7 @@ namespace wolf_sv::emit
                         expr << operands[i]->symbol();
                     }
                     expr << "};";
-                    addAssign(expr.str());
+                    addAssign(expr.str(), &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1306,7 +1389,7 @@ namespace wolf_sv::emit
                     }
                     std::ostringstream expr;
                     expr << "assign " << results[0]->symbol() << " = {" << *rep << "{" << operands[0]->symbol() << "}};";
-                    addAssign(expr.str());
+                    addAssign(expr.str(), &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1335,7 +1418,7 @@ namespace wolf_sv::emit
                         expr << *sliceEnd << ":" << *sliceStart;
                     }
                     expr << "];";
-                    addAssign(expr.str());
+                    addAssign(expr.str(), &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1354,7 +1437,7 @@ namespace wolf_sv::emit
                     }
                     std::ostringstream expr;
                     expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[" << operands[1]->symbol() << " +: " << *width << "];";
-                    addAssign(expr.str());
+                    addAssign(expr.str(), &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1382,7 +1465,7 @@ namespace wolf_sv::emit
                         expr << operands[1]->symbol() << " * " << *width << " +: " << *width;
                     }
                     expr << "];";
-                    addAssign(expr.str());
+                    addAssign(expr.str(), &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1473,7 +1556,7 @@ namespace wolf_sv::emit
                         reportError("Latch resetValue width mismatch", op.symbol());
                         break;
                     }
-                    ensureRegDecl(regName, d->width(), d->isSigned());
+                    ensureRegDecl(regName, d->width(), d->isSigned(), op.srcLoc());
                     const bool directDrive = q->symbol() == regName;
                     if (directDrive)
                     {
@@ -1482,7 +1565,7 @@ namespace wolf_sv::emit
                     else
                     {
                         ensureWireDecl(*q);
-                        addAssign("assign " + q->symbol() + " = " + regName + ";");
+                        addAssign("assign " + q->symbol() + " = " + regName + ";", &op);
                     }
 
                     std::ostringstream stmt;
@@ -1513,7 +1596,7 @@ namespace wolf_sv::emit
                     block << "  always_latch begin\n";
                     block << stmt.str();
                     block << "  end";
-                    addLatchBlock(block.str());
+                    addLatchBlock(block.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kRegister:
@@ -1606,7 +1689,7 @@ namespace wolf_sv::emit
                     }
 
                     const bool directDrive = q->symbol() == regName;
-                    ensureRegDecl(regName, d->width(), d->isSigned());
+                    ensureRegDecl(regName, d->width(), d->isSigned(), op.srcLoc());
                     if (directDrive)
                     {
                         markPortAsRegIfNeeded(*q);
@@ -1614,7 +1697,7 @@ namespace wolf_sv::emit
                     else
                     {
                         ensureWireDecl(*q);
-                        addAssign("assign " + q->symbol() + " = " + regName + ";");
+                        addAssign("assign " + q->symbol() + " = " + regName + ";", &op);
                     }
 
                     SeqKey key;
@@ -1701,7 +1784,7 @@ namespace wolf_sv::emit
 
                     if (emitted)
                     {
-                        addSequentialStmt(key, stmt.str());
+                        addSequentialStmt(key, stmt.str(), &op);
                     }
                     break;
                 }
@@ -1717,7 +1800,7 @@ namespace wolf_sv::emit
                     }
                     std::ostringstream decl;
                     decl << "reg " << (*isSignedAttr ? "signed " : "") << "[" << (*widthAttr - 1) << ":0] " << op.symbol() << " [0:" << (*rowAttr - 1) << "];";
-                    memoryDecls.push_back(decl.str());
+                    memoryDecls.emplace_back(decl.str(), &op);
                     declaredNames.insert(op.symbol());
                     break;
                 }
@@ -1734,7 +1817,7 @@ namespace wolf_sv::emit
                         reportError("kMemoryAsyncReadPort missing memSymbol", op.symbol());
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + *memSymbol + "[" + operands[0]->symbol() + "];");
+                    addAssign("assign " + results[0]->symbol() + " = " + *memSymbol + "[" + operands[0]->symbol() + "];", &op);
                     ensureWireDecl(*results[0]);
                     break;
                 }
@@ -1802,7 +1885,7 @@ namespace wolf_sv::emit
                         memWidth = getAttribute<int64_t>(*memOp, "width").value_or(1);
                         memSigned = getAttribute<bool>(*memOp, "isSigned").value_or(false);
                     }
-                    ensureRegDecl(op.symbol(), memWidth, memSigned);
+                    ensureRegDecl(op.symbol(), memWidth, memSigned, op.srcLoc());
 
                     SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
                     if (asyncReset && rst && rstActiveHigh)
@@ -1820,13 +1903,13 @@ namespace wolf_sv::emit
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
                     appendIndented(stmt, 3, op.symbol() + " <= " + memSymbol + "[" + addr->symbol() + "];");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
 
                     const grh::Value *data = results[0];
                     if (data->symbol() != op.symbol())
                     {
                         ensureWireDecl(*data);
-                        addAssign("assign " + data->symbol() + " = " + op.symbol() + ";");
+                        addAssign("assign " + data->symbol() + " = " + op.symbol() + ";", &op);
                     }
                     else
                     {
@@ -1907,7 +1990,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
                     appendIndented(stmt, 3, memSymbol + "[" + addr->symbol() + "] <= " + data->symbol() + ";");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kMemoryMaskWritePort:
@@ -1995,7 +2078,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, 4, "end");
                     appendIndented(stmt, 3, "end");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kInstance:
@@ -2058,7 +2141,7 @@ namespace wolf_sv::emit
                         }
                     }
                     decl << "  );";
-                    instanceDecls.push_back(decl.str());
+                    instanceDecls.emplace_back(decl.str(), &op);
 
                     for (const grh::Value *res : results)
                     {
@@ -2090,7 +2173,7 @@ namespace wolf_sv::emit
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kAssert:
@@ -2112,7 +2195,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, 2, "if (!" + operands[1]->symbol() + ") begin");
                     appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kDpicImport:
@@ -2138,7 +2221,7 @@ namespace wolf_sv::emit
                         decl << (i + 1 == argsDir->size() ? "\n" : ",\n");
                     }
                     decl << ");";
-                    dpiImportDecls.push_back(decl.str());
+                    dpiImportDecls.emplace_back(decl.str(), &op);
                     break;
                 }
                 case grh::OperationKind::kDpicCall:
@@ -2179,8 +2262,8 @@ namespace wolf_sv::emit
                             continue;
                         }
                         const std::string tempName = res->symbol() + "_intm";
-                        ensureRegDecl(tempName, res->width(), res->isSigned());
-                        addAssign("assign " + res->symbol() + " = " + tempName + ";");
+                        ensureRegDecl(tempName, res->width(), res->isSigned(), op.srcLoc());
+                        addAssign("assign " + res->symbol() + " = " + tempName + ";", &op);
                     }
 
                     SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
@@ -2227,7 +2310,7 @@ namespace wolf_sv::emit
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str());
+                    addSequentialStmt(key, stmt.str(), &op);
                     break;
                 }
                 default:
@@ -2261,11 +2344,16 @@ namespace wolf_sv::emit
                         return;
                     }
                     const PortDecl &decl = it->second;
+                    const std::string attr = formatSrcAttribute(decl.debug);
                     if (!first)
                     {
                         moduleBuffer << ",\n";
                     }
                     first = false;
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  " << (decl.dir == PortDir::Input ? "input wire " : (decl.isReg ? "output reg " : "output wire "));
                     moduleBuffer << signedPrefix(decl.isSigned);
                     const std::string range = widthRange(decl.width);
@@ -2308,8 +2396,14 @@ namespace wolf_sv::emit
             if (!memoryDecls.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &decl : memoryDecls)
+                for (const auto &[decl, opPtr] : memoryDecls)
                 {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  " << decl << '\n';
                 }
             }
@@ -2317,8 +2411,14 @@ namespace wolf_sv::emit
             if (!instanceDecls.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &inst : instanceDecls)
+                for (const auto &[inst, opPtr] : instanceDecls)
                 {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  " << inst << '\n';
                 }
             }
@@ -2326,8 +2426,14 @@ namespace wolf_sv::emit
             if (!dpiImportDecls.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &decl : dpiImportDecls)
+                for (const auto &[decl, opPtr] : dpiImportDecls)
                 {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  " << decl << '\n';
                 }
             }
@@ -2335,8 +2441,14 @@ namespace wolf_sv::emit
             if (!assignStmts.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &stmt : assignStmts)
+                for (const auto &[stmt, opPtr] : assignStmts)
                 {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  " << stmt << '\n';
                 }
             }
@@ -2344,8 +2456,14 @@ namespace wolf_sv::emit
             if (!latchBlocks.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &block : latchBlocks)
+                for (const auto &[block, opPtr] : latchBlocks)
                 {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << '\n';
+                    }
                     moduleBuffer << block << '\n';
                 }
             }
@@ -2353,16 +2471,22 @@ namespace wolf_sv::emit
             if (!seqBlocks.empty())
             {
                 moduleBuffer << '\n';
-                for (const auto &[key, stmts] : seqBlocks)
+                for (const auto &seq : seqBlocks)
                 {
-                    const std::string sens = sensitivityList(key);
+                    const std::string sens = sensitivityList(seq.key);
                     if (sens.empty())
                     {
                         reportError("Sequential block missing sensitivity list", graph->symbol());
                         continue;
                     }
+                    const std::string attr =
+                        formatSrcAttribute(seq.op ? seq.op->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
                     moduleBuffer << "  always " << sens << " begin\n";
-                    for (const auto &stmt : stmts)
+                    for (const auto &stmt : seq.stmts)
                     {
                         moduleBuffer << stmt;
                         if (!stmt.empty() && stmt.back() != '\n')

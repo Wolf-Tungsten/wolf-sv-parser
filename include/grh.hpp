@@ -90,6 +90,17 @@ using OperationId = std::string;
 
 using AttributeValue = std::variant<bool, int64_t, double, std::string, std::vector<bool>, std::vector<int64_t>, std::vector<double>, std::vector<std::string>>;
 
+struct SrcLoc
+{
+    std::string file;
+    uint32_t line = 0;
+    uint32_t column = 0;
+    uint32_t endLine = 0;
+    uint32_t endColumn = 0;
+};
+
+using DebugInfo = SrcLoc;
+
 [[nodiscard]] bool attributeValueIsJsonSerializable(const AttributeValue &value);
 
 class Graph;
@@ -112,6 +123,8 @@ public:
     Operation* definingOp() const noexcept;
     const std::optional<OperationId>& definingOpSymbol() const noexcept { return definingOpSymbol_; }
     const std::vector<ValueUser>& users() const noexcept { return users_; }
+    const std::optional<SrcLoc> &srcLoc() const noexcept { return srcLoc_; }
+    void setSrcLoc(SrcLoc info) { srcLoc_ = std::move(info); }
 
 private:
     friend class Graph;
@@ -141,6 +154,7 @@ private:
     bool isInput_ = false;
     bool isOutput_ = false;
     std::vector<ValueUser> users_;
+    std::optional<SrcLoc> srcLoc_;
 };
 
 class Operation {
@@ -242,6 +256,8 @@ public:
     const std::vector<ValueId>& operandSymbols() const noexcept { return operands_; }
     const std::vector<ValueId>& resultSymbols() const noexcept { return results_; }
     const std::map<std::string, AttributeValue>& attributes() const noexcept { return attributes_; }
+    const std::optional<SrcLoc> &srcLoc() const noexcept { return srcLoc_; }
+    void setSrcLoc(SrcLoc info) { srcLoc_ = std::move(info); }
 
     Value& operandValue(std::size_t index) const;
     Value& resultValue(std::size_t index) const;
@@ -269,6 +285,7 @@ private:
     mutable std::vector<Value*> operandPtrs_;
     mutable std::vector<Value*> resultPtrs_;
     std::map<std::string, AttributeValue> attributes_;
+    std::optional<SrcLoc> srcLoc_;
 };
 
 class Netlist;

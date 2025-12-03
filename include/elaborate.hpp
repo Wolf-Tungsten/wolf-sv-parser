@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <optional>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,6 +29,7 @@
 
 namespace slang {
 class SVInt;
+class SourceManager;
 } // namespace slang
 
 namespace slang::ast {
@@ -199,11 +201,13 @@ public:
     bool empty() const noexcept { return entries_.empty(); }
     void clear();
     void finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics);
+    void setSourceManager(const slang::SourceManager* sourceManager) { sourceManager_ = sourceManager; }
 
 private:
     std::string makeOperationName(const Entry& entry, std::string_view suffix);
     std::string makeValueName(const Entry& entry, std::string_view suffix);
     const slang::ast::Symbol* originFor(const Entry& entry) const;
+    std::optional<grh::SrcLoc> srcLocForEntry(const Entry& entry) const;
     void reportIssue(const Entry& entry, std::string message,
                      ElaborateDiagnostics* diagnostics) const;
     grh::Value* composeSlices(Entry& entry, grh::Graph& graph,
@@ -216,6 +220,7 @@ private:
 
     std::vector<Entry> entries_;
     std::size_t nameCounter_ = 0;
+    const slang::SourceManager* sourceManager_ = nullptr;
 };
 
 /// Converts RHS expressions into GRH operations / values.
@@ -228,6 +233,7 @@ public:
         std::span<const SignalMemoEntry> memMemo;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
+        const slang::SourceManager* sourceManager = nullptr;
     };
 
     explicit RHSConverter(Context context);
@@ -301,6 +307,7 @@ private:
     grh::Graph* graph_ = nullptr;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
+    const slang::SourceManager* sourceManager_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
@@ -310,6 +317,7 @@ private:
     std::size_t operationCounter_ = 0;
     std::size_t instanceId_ = 0;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
+    const slang::ast::Expression* currentExpr_ = nullptr;
 };
 
 /// Converts RHS expressions specifically for combinational contexts.
@@ -355,6 +363,7 @@ public:
         std::span<const SignalMemoEntry> memMemo;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
+        const slang::SourceManager* sourceManager = nullptr;
     };
 
     struct WriteResult {
@@ -412,6 +421,7 @@ private:
     std::span<const SignalMemoEntry> memMemo_;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
+    const slang::SourceManager* sourceManager_ = nullptr;
     std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
     std::size_t instanceId_ = 0;
@@ -503,7 +513,7 @@ public:
                     std::span<const SignalMemoEntry> memMemo,
                     std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                     const slang::ast::ProceduralBlockSymbol& block,
-                    ElaborateDiagnostics* diagnostics);
+                    ElaborateDiagnostics* diagnostics, const slang::SourceManager* sourceManager);
     virtual ~AlwaysConverter() = default;
 
     void traverse();
@@ -680,6 +690,7 @@ protected:
     WriteBackMemo& memo_;
     const slang::ast::ProceduralBlockSymbol& block_;
     ElaborateDiagnostics* diagnostics_;
+    const slang::SourceManager* sourceManager_ = nullptr;
     std::unique_ptr<AlwaysBlockRHSConverter> rhsConverter_;
     std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
     std::vector<ShadowFrame> shadowStack_;
@@ -717,7 +728,8 @@ public:
                         std::span<const SignalMemoEntry> memMemo,
                         std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                         const slang::ast::ProceduralBlockSymbol& block,
-                        ElaborateDiagnostics* diagnostics);
+                        ElaborateDiagnostics* diagnostics,
+                        const slang::SourceManager* sourceManager);
 
     void run();
 
@@ -745,7 +757,8 @@ public:
                        std::span<const SignalMemoEntry> memMemo,
                        std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                        const slang::ast::ProceduralBlockSymbol& block,
-                       ElaborateDiagnostics* diagnostics);
+                       ElaborateDiagnostics* diagnostics,
+                       const slang::SourceManager* sourceManager);
 
     void run();
 
@@ -930,6 +943,7 @@ private:
     ElaborateOptions options_;
     std::size_t placeholderCounter_ = 0;
     std::size_t instanceCounter_ = 0;
+    const slang::SourceManager* sourceManager_ = nullptr;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, grh::Graph*> graphByBody_;
     std::unordered_set<const slang::ast::InstanceBodySymbol*> processedBodies_;
     std::unordered_map<const slang::ast::Symbol*, grh::Value*> valueCache_;

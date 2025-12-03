@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -48,6 +49,7 @@
 #include "slang/ast/types/Type.h"
 #include "slang/numeric/ConstantValue.h"
 #include "slang/numeric/SVInt.h"
+#include "slang/text/SourceManager.h"
 
 namespace wolf_sv {
 
@@ -132,6 +134,117 @@ std::string normalizeDisplayKind(std::string_view name) {
         lowered.erase(lowered.begin());
     }
     return lowered.empty() ? std::string("display") : lowered;
+}
+
+std::optional<grh::SrcLoc> makeSrcLoc(const slang::SourceManager* sourceManager,
+                                      slang::SourceLocation start,
+                                      slang::SourceLocation end = {}) {
+    if (!sourceManager || !start.valid()) {
+        return std::nullopt;
+    }
+    const auto original = sourceManager->getFullyOriginalLoc(start);
+    if (!original.valid() || !sourceManager->isFileLoc(original)) {
+        return std::nullopt;
+    }
+    grh::SrcLoc info;
+    const auto& fullPath = sourceManager->getFullPath(original.buffer());
+    std::filesystem::path path = fullPath.empty()
+                                     ? std::filesystem::path(sourceManager->getFileName(original))
+                                     : fullPath;
+    std::error_code ec;
+    std::filesystem::path baseDir = std::filesystem::current_path();
+    std::filesystem::path relative = std::filesystem::relative(path, baseDir, ec);
+    if (!ec && !relative.empty()) {
+        const std::string relStr = relative.generic_string();
+        if (relStr.rfind("..", 0) == std::string::npos) {
+            path = relative;
+        } else if (!path.filename().empty()) {
+            path = path.filename();
+        }
+    }
+    info.file = path.generic_string();
+    info.line = sourceManager->getLineNumber(original);
+    info.column = sourceManager->getColumnNumber(original);
+
+    auto resolveEnd = [&](slang::SourceLocation loc) {
+        auto endLoc = sourceManager->getFullyOriginalLoc(loc);
+        if (endLoc.valid() && sourceManager->isFileLoc(endLoc)) {
+            info.endLine = sourceManager->getLineNumber(endLoc);
+            info.endColumn = sourceManager->getColumnNumber(endLoc);
+        }
+    };
+
+    if (end.valid()) {
+        resolveEnd(end);
+    }
+    else {
+        resolveEnd(start);
+    }
+    if (info.file.empty()) {
+        return std::nullopt;
+    }
+    return info;
+}
+
+std::optional<grh::SrcLoc> makeSrcLoc(const slang::SourceManager* sourceManager,
+                                      const slang::ast::Symbol* symbol) {
+    if (!symbol) {
+        return std::nullopt;
+    }
+    return makeSrcLoc(sourceManager, symbol->location, symbol->location);
+}
+
+std::optional<grh::SrcLoc> makeSrcLoc(const slang::SourceManager* sourceManager,
+                                      const slang::ast::Expression* expr) {
+    if (!expr) {
+        return std::nullopt;
+    }
+    return makeSrcLoc(sourceManager, expr->sourceRange.start(), expr->sourceRange.end());
+}
+
+std::optional<grh::SrcLoc> makeSrcLoc(const slang::SourceManager* sourceManager,
+                                      const slang::ast::Statement* stmt) {
+    if (!stmt) {
+        return std::nullopt;
+    }
+    return makeSrcLoc(sourceManager, stmt->sourceRange.start(), stmt->sourceRange.end());
+}
+
+void applySrcLoc(grh::Value& value, const std::optional<grh::SrcLoc>& info) {
+    if (info) {
+        value.setSrcLoc(*info);
+    }
+}
+
+void applySrcLoc(grh::Operation& op, const std::optional<grh::SrcLoc>& info) {
+    if (info) {
+        op.setSrcLoc(*info);
+    }
+}
+
+// Backward-compat helper names.
+inline std::optional<grh::SrcLoc> makeDebugInfo(const slang::SourceManager* sm,
+                                                slang::SourceLocation start,
+                                                slang::SourceLocation end = {}) {
+    return makeSrcLoc(sm, start, end);
+}
+inline std::optional<grh::SrcLoc> makeDebugInfo(const slang::SourceManager* sm,
+                                                const slang::ast::Symbol* sym) {
+    return makeSrcLoc(sm, sym);
+}
+inline std::optional<grh::SrcLoc> makeDebugInfo(const slang::SourceManager* sm,
+                                                const slang::ast::Expression* expr) {
+    return makeSrcLoc(sm, expr);
+}
+inline std::optional<grh::SrcLoc> makeDebugInfo(const slang::SourceManager* sm,
+                                                const slang::ast::Statement* stmt) {
+    return makeSrcLoc(sm, stmt);
+}
+inline void applyDebug(grh::Value& value, const std::optional<grh::SrcLoc>& info) {
+    applySrcLoc(value, info);
+}
+inline void applyDebug(grh::Operation& op, const std::optional<grh::SrcLoc>& info) {
+    applySrcLoc(op, info);
 }
 
 bool hasBlackboxAttribute(const slang::ast::InstanceBodySymbol& body) {
@@ -1037,7 +1150,8 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     regMemo_(context.regMemo),
     memMemo_(context.memMemo),
     origin_(context.origin),
-    diagnostics_(context.diagnostics) {
+    diagnostics_(context.diagnostics),
+    sourceManager_(context.sourceManager) {
     instanceId_ = nextConverterInstanceId();
 }
 
@@ -1483,6 +1597,7 @@ grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int6
     ++sliceCounter_;
 
     grh::Operation& op = graph().createOperation(grh::OperationKind::kSliceStatic, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &originExpr));
     op.addOperand(source);
     op.setAttribute("sliceStart", lsb);
     op.setAttribute("sliceEnd", msb);
@@ -1490,6 +1605,7 @@ grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int6
     const int64_t width = msb - lsb + 1;
     grh::Value& value = graph().createValue(
         valueName, width, originExpr.type ? originExpr.type->isSigned() : false);
+    applyDebug(value, makeDebugInfo(sourceManager_, &originExpr));
     op.addResult(value);
     return &value;
 }
@@ -1833,7 +1949,8 @@ AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEn
                                  std::span<const SignalMemoEntry> memMemo,
                                  std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
                                  const slang::ast::ProceduralBlockSymbol& block,
-                                 ElaborateDiagnostics* diagnostics) :
+                                 ElaborateDiagnostics* diagnostics,
+                                 const slang::SourceManager* sourceManager) :
     graph_(graph),
     netMemo_(netMemo),
     regMemo_(regMemo),
@@ -1841,7 +1958,8 @@ AlwaysConverter::AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEn
     dpiImports_(dpiImports),
     memo_(memo),
     block_(block),
-    diagnostics_(diagnostics) {
+    diagnostics_(diagnostics),
+    sourceManager_(sourceManager) {
     shadowStack_.emplace_back();
     controlContextStack_.push_back(true);
     controlInstanceId_ = nextConverterInstanceId();
@@ -1869,8 +1987,10 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                                          std::span<const DpiImportEntry> dpiImports,
                                          WriteBackMemo& memo,
                                          const slang::ast::ProceduralBlockSymbol& block,
-                                         ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics) {
+                                         ElaborateDiagnostics* diagnostics,
+                                         const slang::SourceManager* sourceManager) :
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics,
+                    sourceManager) {
     const bool isAlwaysLatch =
         block.procedureKind == slang::ast::ProceduralBlockKind::AlwaysLatch;
     auto rhs = std::make_unique<CombAlwaysRHSConverter>(
@@ -1879,7 +1999,8 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                               .regMemo = regMemo,
                               .memMemo = memMemo,
                               .origin = &block,
-                              .diagnostics = diagnostics},
+                              .diagnostics = diagnostics,
+                              .sourceManager = sourceManager_},
         *this);
     auto lhs = std::make_unique<CombAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
@@ -1887,7 +2008,8 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                               .regMemo = isAlwaysLatch ? regMemo : std::span<const SignalMemoEntry>(),
                               .memMemo = memMemo,
                               .origin = &block,
-                              .diagnostics = diagnostics},
+                              .diagnostics = diagnostics,
+                              .sourceManager = sourceManager_},
         *this);
     setConverters(std::move(rhs), std::move(lhs));
 }
@@ -1953,15 +2075,18 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                                        std::span<const DpiImportEntry> dpiImports,
                                        WriteBackMemo& memo,
                                        const slang::ast::ProceduralBlockSymbol& block,
-                                       ElaborateDiagnostics* diagnostics) :
-    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics) {
+                                       ElaborateDiagnostics* diagnostics,
+                                       const slang::SourceManager* sourceManager) :
+    AlwaysConverter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block, diagnostics,
+                    sourceManager) {
     auto rhs = std::make_unique<SeqAlwaysRHSConverter>(
         RHSConverter::Context{.graph = &graph,
                               .netMemo = netMemo,
                               .regMemo = regMemo,
                               .memMemo = memMemo,
                               .origin = &block,
-                              .diagnostics = diagnostics},
+                              .diagnostics = diagnostics,
+                              .sourceManager = sourceManager_},
         *this);
     auto lhs = std::make_unique<SeqAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
@@ -1969,7 +2094,8 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                               .regMemo = regMemo,
                               .memMemo = memMemo,
                               .origin = &block,
-                              .diagnostics = diagnostics},
+                              .diagnostics = diagnostics,
+                              .sourceManager = sourceManager_},
         *this);
     setConverters(std::move(rhs), std::move(lhs));
 }
@@ -2087,6 +2213,7 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
 
     grh::Operation& op =
         graph().createOperation(grh::OperationKind::kDisplay, makeControlOpName("display"));
+    applyDebug(op, makeDebugInfo(sourceManager_, &call));
     op.addOperand(*clkValue);
     op.addOperand(*enableValue);
     for (grh::Value* operand : valueOperands) {
@@ -2183,6 +2310,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
             grh::Value& resultValue =
                 graph().createValue(valueName, argInfo.width > 0 ? argInfo.width : 1,
                                     argInfo.isSigned);
+            applyDebug(resultValue, makeDebugInfo(sourceManager_, actual));
             if (!lhsConverter_->convertExpression(*actual, resultValue)) {
                 const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*actual);
                 const SignalMemoEntry* entry =
@@ -2211,6 +2339,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
 
     grh::Operation& op =
         graph().createOperation(grh::OperationKind::kDpicCall, makeControlOpName("dpic_call"));
+    applyDebug(op, makeDebugInfo(sourceManager_, &call));
     op.addOperand(*clkValue);
     op.addOperand(*enableValue);
     for (grh::Value* operand : inputOperands) {
@@ -2289,6 +2418,8 @@ bool SeqAlwaysConverter::handleAssertionIntent(const slang::ast::Expression* con
 
     grh::Operation& op =
         graph().createOperation(grh::OperationKind::kAssert, makeControlOpName("assert"));
+    applyDebug(op, origin ? makeDebugInfo(sourceManager_, origin)
+                          : makeDebugInfo(sourceManager_, condition));
     op.addOperand(*clkValue);
     op.addOperand(*finalCond);
     if (clockPolarityAttr_) {
@@ -2505,6 +2636,8 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         }
         grh::Operation& port =
             graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_wr"));
+        applyDebug(port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
+                                           : makeDebugInfo(sourceManager_, intent.entry->symbol));
         port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
         port.setAttribute("enLevel", std::string("high"));
         if (resetCtx) {
@@ -2559,6 +2692,8 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         }
         grh::Operation& port =
             graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
+        applyDebug(port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
+                                           : makeDebugInfo(sourceManager_, intent.entry->symbol));
         port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
         port.setAttribute("enLevel", std::string("high"));
         if (resetCtx) {
@@ -2605,8 +2740,10 @@ grh::Value* SeqAlwaysConverter::ensureMemoryEnableValue() {
     }
     grh::Operation& op =
         graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName("en"));
+    applyDebug(op, makeDebugInfo(sourceManager_, &block()));
     grh::Value& value =
         graph().createValue(makeMemoryHelperValueName("en"), 1, /*isSigned=*/false);
+    applyDebug(value, makeDebugInfo(sourceManager_, &block()));
     op.addResult(value);
     op.setAttribute("constValue", "1'h1");
     memoryEnableOne_ = &value;
@@ -2700,8 +2837,10 @@ grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry
                    : grh::OperationKind::kMemorySyncReadPortRst;
     }
 
+    const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
     grh::Operation& port =
         graph().createOperation(kind, makeFinalizeOpName(entry, "mem_sync_rd"));
+    applyDebug(port, debugInfo);
     port.setAttribute("memSymbol", entry.stateOp->symbol());
     port.setAttribute("enLevel", std::string("high"));
     if (resetCtx) {
@@ -2717,6 +2856,7 @@ grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry
 
     grh::Value& result =
         graph().createValue(makeFinalizeValueName(entry, "mem_sync_rd"), width, isSigned);
+    applyDebug(result, debugInfo);
     port.addResult(result);
     return &result;
 }
@@ -2790,6 +2930,8 @@ grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& en
         return nullptr;
     }
 
+    const auto debugInfo = originExpr ? makeDebugInfo(sourceManager_, originExpr)
+                                      : makeDebugInfo(sourceManager_, entry.symbol);
     grh::Value* current = &addrValue;
     const int64_t currentWidth = current->width() > 0 ? current->width() : 1;
 
@@ -2797,12 +2939,14 @@ grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& en
         grh::Operation& slice =
             graph().createOperation(grh::OperationKind::kSliceStatic,
                                     makeMemoryHelperOpName("addr_trunc"));
+        applyDebug(slice, debugInfo);
         slice.addOperand(*current);
         slice.setAttribute("sliceStart", int64_t(0));
         slice.setAttribute("sliceEnd", targetWidth - 1);
         grh::Value& sliced =
             graph().createValue(makeMemoryHelperValueName("addr_trunc"), targetWidth,
                                 /*isSigned=*/false);
+        applyDebug(sliced, debugInfo);
         slice.addResult(sliced);
         current = &sliced;
     }
@@ -2818,11 +2962,13 @@ grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& en
         grh::Operation& concat =
             graph().createOperation(grh::OperationKind::kConcat,
                                     makeMemoryHelperOpName("addr_zext"));
+        applyDebug(concat, debugInfo);
         concat.addOperand(*zero);
         concat.addOperand(*current);
         grh::Value& extended =
             graph().createValue(makeMemoryHelperValueName("addr_zext"), targetWidth,
                                 /*isSigned=*/false);
+        applyDebug(extended, debugInfo);
         concat.addResult(extended);
         current = &extended;
     }
@@ -2831,10 +2977,12 @@ grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& en
         grh::Operation& assign =
             graph().createOperation(grh::OperationKind::kAssign,
                                     makeMemoryHelperOpName("addr_cast"));
+        applyDebug(assign, debugInfo);
         assign.addOperand(*current);
         grh::Value& casted =
             graph().createValue(makeMemoryHelperValueName("addr_cast"), current->width(),
                                 /*isSigned=*/false);
+        applyDebug(casted, debugInfo);
         assign.addResult(casted);
         current = &casted;
     }
@@ -2871,14 +3019,17 @@ grh::Value* SeqAlwaysConverter::createConcatWithZeroPadding(grh::Value& value, i
     if (!zeroPad) {
         return nullptr;
     }
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block());
     grh::Operation& concat =
         graph().createOperation(grh::OperationKind::kConcat, makeMemoryHelperOpName(label));
+    applyDebug(concat, debugInfo);
     concat.addOperand(*zeroPad);
     concat.addOperand(value);
 
     grh::Value& wide =
         graph().createValue(makeMemoryHelperValueName(label), padWidth + value.width(),
                             value.isSigned());
+    applyDebug(wide, debugInfo);
     concat.addResult(wide);
     return &wide;
 }
@@ -2894,12 +3045,15 @@ grh::Value* SeqAlwaysConverter::buildShiftedBitValue(grh::Value& sourceBit, grh:
         return nullptr;
     }
 
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block());
     grh::Operation& shl =
         graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    applyDebug(shl, debugInfo);
     shl.addOperand(*extended);
     shl.addOperand(bitIndex);
     grh::Value& shifted =
         graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(shifted, debugInfo);
     shl.addResult(shifted);
     return &shifted;
 }
@@ -2910,10 +3064,13 @@ grh::Value* SeqAlwaysConverter::buildShiftedMask(grh::Value& bitIndex, int64_t t
         return nullptr;
     }
     slang::SVInt literal(static_cast<slang::bitwidth_t>(targetWidth), 1, /*isSigned=*/false);
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block());
     grh::Operation& constOp =
         graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName(label));
+    applyDebug(constOp, debugInfo);
     grh::Value& baseValue =
         graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(baseValue, debugInfo);
     constOp.addResult(baseValue);
     constOp.setAttribute(
         "constValue",
@@ -2925,10 +3082,12 @@ grh::Value* SeqAlwaysConverter::buildShiftedMask(grh::Value& bitIndex, int64_t t
 
     grh::Operation& shl =
         graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    applyDebug(shl, debugInfo);
     shl.addOperand(*base);
     shl.addOperand(bitIndex);
     grh::Value& shifted =
         graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(shifted, debugInfo);
     shl.addResult(shifted);
     return &shifted;
 }
@@ -3124,6 +3283,8 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
         expectedMsb = slice.lsb - 1;
     }
 
+    const auto debugInfo =
+        makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
     if (expectedMsb >= 0) {
         if (!appendHoldRange(expectedMsb, 0)) {
             return nullptr;
@@ -3152,12 +3313,14 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
                 grh::Operation& c =
                     graph().createOperation(grh::OperationKind::kConcat,
                                             makeFinalizeOpName(*entry.target, "seq_concat_lo"));
+                applyDebug(c, debugInfo);
                 c.addOperand(*acc);
                 c.addOperand(**it);
                 const int64_t w = acc->width() + (*it)->width();
                 grh::Value& v =
                     graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat_lo"),
                                         w, entry.target->isSigned);
+                applyDebug(v, debugInfo);
                 c.addResult(v);
                 acc = &v;
             }
@@ -3173,11 +3336,13 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
         grh::Operation& concatTop =
             graph().createOperation(grh::OperationKind::kConcat,
                                     makeFinalizeOpName(*entry.target, "seq_concat"));
+        applyDebug(concatTop, debugInfo);
         concatTop.addOperand(*hi);
         concatTop.addOperand(*lo);
         grh::Value& composed =
             graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"),
                                 targetWidth, entry.target->isSigned);
+        applyDebug(composed, debugInfo);
         concatTop.addResult(composed);
         return &composed;
     }
@@ -3185,6 +3350,7 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
     grh::Operation& concat =
         graph().createOperation(grh::OperationKind::kConcat,
                                 makeFinalizeOpName(*entry.target, "seq_concat"));
+    applyDebug(concat, debugInfo);
     for (grh::Value* component : components) {
         concat.addOperand(*component);
     }
@@ -3192,6 +3358,7 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
     grh::Value& composed =
         graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"), targetWidth,
                             entry.target->isSigned);
+    applyDebug(composed, debugInfo);
     concat.addResult(composed);
     return &composed;
 }
@@ -3218,8 +3385,11 @@ grh::Value* SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entr
         return source;
     }
 
+    const auto debugInfo =
+        makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
     grh::Operation& sliceOp = graph().createOperation(grh::OperationKind::kSliceStatic,
                                                       makeFinalizeOpName(*entry.target, "hold"));
+    applyDebug(sliceOp, debugInfo);
     sliceOp.addOperand(*source);
     sliceOp.setAttribute("sliceStart", lsb);
     sliceOp.setAttribute("sliceEnd", msb);
@@ -3227,6 +3397,7 @@ grh::Value* SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entr
     grh::Value& result =
         graph().createValue(makeFinalizeValueName(*entry.target, "hold"), msb - lsb + 1,
                             source->isSigned());
+    applyDebug(result, debugInfo);
     sliceOp.addResult(result);
     return &result;
 }
@@ -4220,6 +4391,7 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
         components.push_back(zero);
     }
 
+    const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
     grh::Value* composed = nullptr;
     if (components.size() == 1) {
         composed = components.front();
@@ -4228,11 +4400,13 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
         grh::Operation& concat =
             graph_.createOperation(grh::OperationKind::kConcat,
                                    makeShadowOpName(entry, "shadow_concat"));
+        applyDebug(concat, debugInfo);
         for (grh::Value* operand : components) {
             concat.addOperand(*operand);
         }
         grh::Value& value =
             graph_.createValue(makeShadowValueName(entry, "shadow"), targetWidth, entry.isSigned);
+        applyDebug(value, debugInfo);
         concat.addResult(value);
         composed = &value;
     }
@@ -4256,7 +4430,9 @@ grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
     valueName.append(std::to_string(shadowNameCounter_++));
 
     grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &block_));
     grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
+    applyDebug(value, makeDebugInfo(sourceManager_, &block_));
     op.addResult(value);
     std::ostringstream oss;
     oss << width << "'h0";
@@ -4277,7 +4453,9 @@ grh::Value* AlwaysConverter::createOneValue(int64_t width) {
     std::string valueName = "_comb_one_val_";
     valueName.append(std::to_string(shadowNameCounter_++));
     grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &block_));
     grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
+    applyDebug(value, makeDebugInfo(sourceManager_, &block_));
     op.addResult(value);
     std::ostringstream oss;
     // Fill with ones: e.g. 8'hff
@@ -4479,13 +4657,16 @@ grh::Value* AlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
         return nullptr;
     }
 
+    const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kMux, makeShadowOpName(entry, label));
+    applyDebug(op, debugInfo);
     op.addOperand(condition);
     op.addOperand(onTrue);
     op.addOperand(onFalse);
     grh::Value& result =
         graph_.createValue(makeShadowValueName(entry, label), width, entry.isSigned);
+    applyDebug(result, debugInfo);
     op.addResult(result);
     return &result;
 }
@@ -4536,33 +4717,42 @@ grh::Value* AlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::Ite
 
 grh::Value* AlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
                                                std::string_view hint) {
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kEq, makeControlOpName(hint));
+    applyDebug(op, debugInfo);
     op.addOperand(lhs);
     op.addOperand(rhs);
     grh::Value& result = graph_.createValue(makeControlValueName(hint), 1, /*isSigned=*/false);
+    applyDebug(result, debugInfo);
     op.addResult(result);
     return &result;
 }
 
 grh::Value* AlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kOr, makeControlOpName("case_or"));
+    applyDebug(op, debugInfo);
     op.addOperand(lhs);
     op.addOperand(rhs);
     grh::Value& result = graph_.createValue(makeControlValueName("case_or"), 1,
                                             /*isSigned=*/false);
+    applyDebug(result, debugInfo);
     op.addResult(result);
     return &result;
 }
 
 grh::Value* AlwaysConverter::buildLogicAnd(grh::Value& lhs, grh::Value& rhs) {
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("and"));
+    applyDebug(op, debugInfo);
     op.addOperand(lhs);
     op.addOperand(rhs);
     grh::Value& result =
         graph_.createValue(makeControlValueName("and"), 1, /*isSigned=*/false);
+    applyDebug(result, debugInfo);
     op.addResult(result);
     return &result;
 }
@@ -4591,11 +4781,14 @@ void AlwaysConverter::popGuard() {
 }
 
 grh::Value* AlwaysConverter::buildLogicNot(grh::Value& v) {
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kLogicNot, makeControlOpName("not"));
+    applyDebug(op, debugInfo);
     op.addOperand(v);
     grh::Value& result =
         graph_.createValue(makeControlValueName("not"), 1, /*isSigned=*/false);
+    applyDebug(result, debugInfo);
     op.addResult(result);
     return &result;
 }
@@ -4623,6 +4816,7 @@ grh::Value* AlwaysConverter::buildWildcardEquality(
         return nullptr;
     }
 
+    const auto debugInfo = makeDebugInfo(sourceManager_, &rhsExpr);
     std::optional<slang::SVInt> literalOpt = evaluateConstantInt(rhsExpr, /*allowUnknown=*/true);
     if (!literalOpt) {
         return nullptr;
@@ -4657,10 +4851,12 @@ grh::Value* AlwaysConverter::buildWildcardEquality(
     slang::SVInt maskValue = slang::SVInt::fromString(maskLiteral);
     grh::Operation& xorOp =
         graph_.createOperation(grh::OperationKind::kXor, makeControlOpName("case_wild_xor"));
+    applyDebug(xorOp, debugInfo);
     xorOp.addOperand(controlValue);
     xorOp.addOperand(rhsValue);
     grh::Value& xorResult =
         graph_.createValue(makeControlValueName("case_wild_xor"), width, /*isSigned=*/false);
+    applyDebug(xorResult, debugInfo);
     xorOp.addResult(xorResult);
 
     grh::Value* maskConst = createLiteralValue(maskValue, /*isSigned=*/false, "case_wild_mask");
@@ -4670,10 +4866,12 @@ grh::Value* AlwaysConverter::buildWildcardEquality(
 
     grh::Operation& andOp =
         graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("case_wild_and"));
+    applyDebug(andOp, debugInfo);
     andOp.addOperand(xorResult);
     andOp.addOperand(*maskConst);
     grh::Value& masked =
         graph_.createValue(makeControlValueName("case_wild_and"), width, /*isSigned=*/false);
+    applyDebug(masked, debugInfo);
     andOp.addResult(masked);
 
     grh::Value* zero = createZeroValue(width);
@@ -4685,11 +4883,14 @@ grh::Value* AlwaysConverter::buildWildcardEquality(
 
 grh::Value* AlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                                     std::string_view hint) {
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
     grh::Operation& op =
         graph_.createOperation(grh::OperationKind::kConstant, makeControlOpName(hint));
+    applyDebug(op, debugInfo);
     grh::Value& value = graph_.createValue(makeControlValueName(hint),
                                            static_cast<int64_t>(literal.getBitWidth()),
                                            isSigned);
+    applyDebug(value, debugInfo);
     op.addResult(value);
     op.setAttribute("constValue",
                     literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
@@ -5302,6 +5503,25 @@ const slang::ast::Symbol* WriteBackMemo::originFor(const Entry& entry) const {
     return nullptr;
 }
 
+std::optional<grh::SrcLoc> WriteBackMemo::srcLocForEntry(const Entry& entry) const {
+    for (const auto& slice : entry.slices) {
+        if (slice.originExpr) {
+            if (auto info = makeDebugInfo(sourceManager_, slice.originExpr)) {
+                return info;
+            }
+        }
+    }
+    if (entry.originSymbol) {
+        if (auto info = makeDebugInfo(sourceManager_, entry.originSymbol)) {
+            return info;
+        }
+    }
+    if (entry.target && entry.target->symbol) {
+        return makeDebugInfo(sourceManager_, entry.target->symbol);
+    }
+    return std::nullopt;
+}
+
 void WriteBackMemo::reportIssue(const Entry& entry, std::string message,
                                 ElaborateDiagnostics* diagnostics) const {
     if (!diagnostics) {
@@ -5333,6 +5553,7 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
 
     const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
     int64_t expectedMsb = targetWidth - 1;
+    const auto debugInfo = srcLocForEntry(entry);
     std::vector<grh::Value*> components;
     components.reserve(entry.slices.size() + 2);
 
@@ -5408,12 +5629,14 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
 
     grh::Operation& concat =
         graph.createOperation(grh::OperationKind::kConcat, makeOperationName(entry, "concat"));
+    applyDebug(concat, debugInfo);
     for (grh::Value* component : components) {
         concat.addOperand(*component);
     }
 
     grh::Value& composed =
         graph.createValue(makeValueName(entry, "concat"), targetWidth, entry.target->isSigned);
+    applyDebug(composed, debugInfo);
     concat.addResult(composed);
     return &composed;
 }
@@ -5440,6 +5663,7 @@ void WriteBackMemo::attachToTarget(const Entry& entry, grh::Value& composedValue
         }
         grh::Operation& assign =
             graph.createOperation(grh::OperationKind::kAssign, makeOperationName(entry, "assign"));
+        applyDebug(assign, srcLocForEntry(entry));
         assign.addOperand(composedValue);
         assign.addResult(*targetValue);
         return;
@@ -5480,9 +5704,12 @@ grh::Value* WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, gr
         return nullptr;
     }
 
+    const auto info = srcLocForEntry(entry);
     grh::Operation& op =
         graph.createOperation(grh::OperationKind::kConstant, makeOperationName(entry, "zero"));
+    applyDebug(op, info);
     grh::Value& value = graph.createValue(makeValueName(entry, "zero"), width, /*isSigned=*/false);
+    applyDebug(value, info);
     op.addResult(value);
     std::ostringstream oss;
     oss << width << "'h0";
@@ -5609,9 +5836,11 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         return false;
     }
 
+    const auto debugInfo = srcLocForEntry(entry);
     grh::OperationKind opKind =
         latch->resetSignal ? grh::OperationKind::kLatchArst : grh::OperationKind::kLatch;
     grh::Operation& op = graph.createOperation(opKind, makeOperationName(entry, "latch"));
+    applyDebug(op, debugInfo);
     op.addOperand(*latch->enable);
     if (latch->resetSignal && latch->resetValue) {
         op.addOperand(*latch->resetSignal);
@@ -5664,6 +5893,7 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
 
 RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(context.origin),
                                               diagnostics_(context.diagnostics),
+                                              sourceManager_(context.sourceManager),
                                               netMemo_(context.netMemo), regMemo_(context.regMemo),
                                               memMemo_(context.memMemo) {
     instanceId_ = nextConverterInstanceId();
@@ -5678,7 +5908,10 @@ grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
         return it->second;
     }
 
+    const slang::ast::Expression* previous = currentExpr_;
+    currentExpr_ = &expr;
     grh::Value* value = convertExpression(expr);
+    currentExpr_ = previous;
     if (value && !suppressCache_) {
         cache_[&expr] = value;
     }
@@ -6124,12 +6357,17 @@ grh::Value& RHSConverter::createTemporaryValue(const slang::ast::Type& type,
                                                std::string_view hint) {
     const TypeInfo info = deriveTypeInfo(type);
     std::string name = makeValueName(hint, valueCounter_++);
-    return graph_->createValue(name, info.width > 0 ? info.width : 1, info.isSigned);
+    grh::Value& value =
+        graph_->createValue(name, info.width > 0 ? info.width : 1, info.isSigned);
+    applyDebug(value, makeDebugInfo(sourceManager_, currentExpr_));
+    return value;
 }
 
 grh::Operation& RHSConverter::createOperation(grh::OperationKind kind, std::string_view hint) {
     std::string name = makeOperationName(hint, operationCounter_++);
-    return graph_->createOperation(kind, name);
+    grh::Operation& op = graph_->createOperation(kind, name);
+    applyDebug(op, makeDebugInfo(sourceManager_, currentExpr_));
+    return op;
 }
 
 grh::Value* RHSConverter::createConstantValue(const slang::SVInt& value,
@@ -6232,6 +6470,7 @@ grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type&
 
         std::string signName = makeValueName("sign", valueCounter_++);
         grh::Value& signBit = graph_->createValue(signName, 1, input.isSigned());
+        applyDebug(signBit, makeDebugInfo(sourceManager_, currentExpr_));
         signSlice.addResult(signBit);
 
         grh::Operation& rep = createOperation(grh::OperationKind::kReplicate, "signext");
@@ -6239,6 +6478,7 @@ grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type&
         rep.setAttribute("rep", extendWidth);
         std::string repName = makeValueName("signext", valueCounter_++);
         grh::Value& extBits = graph_->createValue(repName, extendWidth, targetInfo.isSigned);
+        applyDebug(extBits, makeDebugInfo(sourceManager_, currentExpr_));
         rep.addResult(extBits);
         extendValue = &extBits;
     }
@@ -6246,6 +6486,7 @@ grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type&
         grh::Operation& zeroOp = createOperation(grh::OperationKind::kConstant, "zext");
         std::string valName = makeValueName("zext", valueCounter_++);
         grh::Value& zeros = graph_->createValue(valName, extendWidth, /*isSigned=*/false);
+        applyDebug(zeros, makeDebugInfo(sourceManager_, currentExpr_));
         zeroOp.addResult(zeros);
         std::ostringstream oss;
         oss << extendWidth << "'h0";
@@ -6694,6 +6935,7 @@ Elaborate::Elaborate(ElaborateDiagnostics* diagnostics, ElaborateOptions options
     diagnostics_(diagnostics), options_(options) {}
 
 grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
+    sourceManager_ = root.getCompilation().getSourceManager();
     grh::Netlist netlist;
 
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances) {
@@ -6844,6 +7086,7 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
 
             std::string portName(port->name);
             grh::Value& value = graph.createValue(portName, width, isSigned);
+            applyDebug(value, makeDebugInfo(sourceManager_, port));
             registerValueForSymbol(*port, value);
             if (const auto* internal = port->internalSymbol ?
                                            port->internalSymbol->as_if<slang::ast::ValueSymbol>()
@@ -6901,6 +7144,7 @@ void Elaborate::emitModulePlaceholder(const slang::ast::InstanceSymbol& instance
     ++placeholderCounter_;
 
     grh::Operation& op = graph.createOperation(grh::OperationKind::kBlackbox, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &instance));
 
     const auto& definition = instance.body.getDefinition();
     std::string moduleName = !definition.name.empty() ? std::string(definition.name)
@@ -7102,6 +7346,7 @@ void Elaborate::processNetInitializers(const slang::ast::InstanceBodySymbol& bod
             .memMemo = memMemo,
             .origin = net,
             .diagnostics = diagnostics_,
+            .sourceManager = sourceManager_,
         };
         CombRHSConverter converter(context);
         grh::Value* rhsValue = converter.convert(*init);
@@ -7144,7 +7389,8 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .regMemo = regMemo,
         .memMemo = peekMemMemo(body),
         .origin = &assign,
-        .diagnostics = diagnostics_};
+        .diagnostics = diagnostics_,
+        .sourceManager = sourceManager_};
     CombRHSConverter converter(context);
     grh::Value* rhsValue = converter.convert(assignment->right());
     if (!rhsValue) {
@@ -7157,7 +7403,8 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .netMemo = netMemo,
         .regMemo = {},
         .origin = &assign,
-        .diagnostics = diagnostics_};
+        .diagnostics = diagnostics_,
+        .sourceManager = sourceManager_};
     ContinuousAssignLHSConverter lhsConverter(lhsContext, memo);
     lhsConverter.convert(*assignment, *rhsValue);
 }
@@ -7171,7 +7418,7 @@ void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block
     std::span<const DpiImportEntry> dpiImports = peekDpiImports(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
     CombAlwaysConverter converter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block,
-                                  diagnostics_);
+                                  diagnostics_, sourceManager_);
     converter.run();
 }
 
@@ -7184,7 +7431,7 @@ void Elaborate::processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
     std::span<const DpiImportEntry> dpiImports = peekDpiImports(body);
     WriteBackMemo& memo = ensureWriteBackMemo(body);
     SeqAlwaysConverter converter(graph, netMemo, regMemo, memMemo, dpiImports, memo, block,
-                                 diagnostics_);
+                                 diagnostics_, sourceManager_);
     converter.run();
 }
 
@@ -7223,6 +7470,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
         childInstance.name.empty() ? std::string("inst") : std::string(childInstance.name);
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kInstance, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &childInstance));
 
     // Prefer本地实例名，若缺失再回退层级路径，避免在 emit 时打印带前缀的层次化名字。
     std::string instanceName =
@@ -7283,7 +7531,9 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             candidate.append(std::to_string(++suffix));
         }
         const int64_t width = info.width > 0 ? info.width : 1;
-        return &parentGraph.createValue(candidate, width, info.isSigned);
+        grh::Value& value = parentGraph.createValue(candidate, width, info.isSigned);
+        applyDebug(value, makeDebugInfo(sourceManager_, &port));
+        return &value;
     };
 
     std::vector<std::string> inputPortNames;
@@ -7348,7 +7598,8 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                         .regMemo = regMemo,
                         .memMemo = memMemo,
                         .origin = port,
-                        .diagnostics = diagnostics_};
+                        .diagnostics = diagnostics_,
+                        .sourceManager = sourceManager_};
                     PortLHSConverter lhsConverter(lhsContext);
                     std::vector<LHSConverter::WriteResult> writeResults;
                     if (lhsConverter.convert(*targetExpr, *resultValue, writeResults)) {
@@ -7406,6 +7657,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         childInstance.name.empty() ? std::string("inst") : std::string(childInstance.name);
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
     grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kBlackbox, opName);
+    applyDebug(op, makeDebugInfo(sourceManager_, &childInstance));
 
     std::string instanceName =
         childInstance.name.empty() ? std::string() : sanitizeForGraphName(childInstance.name);
@@ -7514,6 +7766,7 @@ grh::Value* Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbo
 
     grh::Value& value = graph.createValue(candidate, info.width > 0 ? info.width : 1,
                                           info.isSigned);
+    applyDebug(value, makeDebugInfo(sourceManager_, &symbol));
     registerValueForSymbol(symbol, value);
     return &value;
 }
@@ -7565,7 +7818,8 @@ grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr
         .regMemo = regMemo,
         .memMemo = memMemo,
         .origin = origin,
-        .diagnostics = diagnostics_};
+        .diagnostics = diagnostics_,
+        .sourceManager = sourceManager_};
     CombRHSConverter converter(context);
     if (grh::Value* value = converter.convert(*targetExpr)) {
         return value;
@@ -7718,6 +7972,7 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
 
         std::string opName = makeOperationNameForSymbol(*entry.symbol, "register", graph);
         grh::Operation& op = graph.createOperation(opKind, opName);
+        applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
         op.addResult(*value);
         op.setAttribute("clkPolarity", *clkPolarity);
         if (rstPolarity) {
@@ -7742,6 +7997,7 @@ void Elaborate::ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::
         if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
             std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
             grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
+            applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
             op.setAttribute("width", layout->rowWidth);
             op.setAttribute("row", layout->rowCount);
             op.setAttribute("isSigned", layout->isSigned);
@@ -7760,7 +8016,9 @@ void Elaborate::ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::
     }
 }
 WriteBackMemo& Elaborate::ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body) {
-    return writeBackMemo_[&body];
+    auto [it, inserted] = writeBackMemo_.try_emplace(&body);
+    it->second.setSourceManager(sourceManager_);
+    return it->second;
 }
 
 void Elaborate::finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body,
@@ -8241,6 +8499,7 @@ void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body
         }
         std::string opName = makeUniqueOperationName(graph, baseName);
         grh::Operation& op = graph.createOperation(grh::OperationKind::kDpicImport, opName);
+        applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
         entry.importOp = &op;
 
         std::vector<std::string> directions;
