@@ -81,7 +81,7 @@ int main()
             return fail("Assign result defining operation not set");
         }
 
-        if (a.users().size() != 1 || a.users()[0].operation != op.symbol())
+        if (a.users().size() != 1 || a.users()[0].operationSymbol != op.symbol())
         {
             return fail("Operand usage tracking failed");
         }
@@ -102,7 +102,7 @@ int main()
         {
             return fail("Old operand still listed as user after replacement");
         }
-        if (c.users().size() != 1 || c.users()[0].operation != op.symbol() || c.users()[0].operandIndex != 1)
+        if (c.users().size() != 1 || c.users()[0].operationSymbol != op.symbol() || c.users()[0].operandIndex != 1)
         {
             return fail("New operand usage tracking incorrect after replacement");
         }

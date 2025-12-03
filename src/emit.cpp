@@ -172,7 +172,7 @@ namespace wolf_sv::emit
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
                                       prop("op", [&]
-                                           { appendQuotedString(out, user.operation); });
+                                           { appendQuotedString(out, user.operationSymbol); });
                                       prop("idx", [&]
                                            { out.append(std::to_string(static_cast<int64_t>(user.operandIndex))); });
                                   });
@@ -361,13 +361,14 @@ namespace wolf_sv::emit
                                            out.push_back('[');
                                            bool first = true;
                                            const char *comma = commaToken(mode);
-                                           for (const grh::Value *operand : op.operands())
+                                           for (const grh::Value *operandPtr : op.operands())
                                            {
+                                               const grh::Value &operand = *operandPtr;
                                                if (!first)
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, operand->symbol());
+                                               appendQuotedString(out, operand.symbol());
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -377,13 +378,14 @@ namespace wolf_sv::emit
                                            out.push_back('[');
                                            bool first = true;
                                            const char *comma = commaToken(mode);
-                                           for (const grh::Value *result : op.results())
+                                           for (const grh::Value *resultPtr : op.results())
                                            {
+                                               const grh::Value &result = *resultPtr;
                                                if (!first)
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, result->symbol());
+                                               appendQuotedString(out, result.symbol());
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -1048,6 +1050,7 @@ namespace wolf_sv::emit
             std::vector<std::string> assignStmts;
             std::vector<std::string> latchBlocks;
             std::vector<std::pair<SeqKey, std::vector<std::string>>> seqBlocks;
+            std::unordered_set<std::string> instanceNamesUsed;
 
             auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned)
             {
@@ -2001,7 +2004,13 @@ namespace wolf_sv::emit
                     auto moduleName = getAttribute<std::string>(op, "moduleName");
                     auto inputNames = getAttribute<std::vector<std::string>>(op, "inputPortName");
                     auto outputNames = getAttribute<std::vector<std::string>>(op, "outputPortName");
-                    auto instanceName = getAttribute<std::string>(op, "instanceName").value_or(op.symbol());
+                    auto instanceNameBase = getAttribute<std::string>(op, "instanceName").value_or(op.symbol());
+                    std::string instanceName = instanceNameBase;
+                    int instSuffix = 1;
+                    while (!instanceNamesUsed.insert(instanceName).second)
+                    {
+                        instanceName = instanceNameBase + "_" + std::to_string(instSuffix++);
+                    }
                     if (!moduleName || !inputNames || !outputNames)
                     {
                         reportError("Instance missing module or port names", op.symbol());
@@ -2030,7 +2039,7 @@ namespace wolf_sv::emit
                     }
                     else
                     {
-                    decl << *moduleName << " ";
+                        decl << *moduleName << " ";
                     }
                     decl << instanceName << " (\n";
                     for (std::size_t i = 0; i < inputNames->size(); ++i)

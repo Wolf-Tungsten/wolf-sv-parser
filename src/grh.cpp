@@ -72,6 +72,7 @@ namespace wolf_sv::grh
             if (entry.second)
             {
                 entry.second->owner_ = this;
+                entry.second->rehydratePointers();
             }
         }
     }
@@ -763,16 +764,21 @@ namespace wolf_sv::grh
 
     Operation *Value::definingOp() const noexcept
     {
-        if (!definingOp_)
+        if (definingOpPtr_)
+        {
+            return definingOpPtr_;
+        }
+        if (!definingOpSymbol_)
         {
             return nullptr;
         }
-        return graph_->findOperation(*definingOp_);
+        definingOpPtr_ = graph_->findOperation(*definingOpSymbol_);
+        return definingOpPtr_;
     }
 
-    void Value::setDefiningOp(const OperationId &opSymbol)
+    void Value::setDefiningOp(Operation &op)
     {
-        if (definingOp_ && *definingOp_ != opSymbol)
+        if (definingOpSymbol_ && *definingOpSymbol_ != op.symbol())
         {
             throw std::runtime_error("Value already has a defining operation");
         }
@@ -780,18 +786,38 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Input value cannot have a defining operation");
         }
-        definingOp_ = opSymbol;
+        definingOpSymbol_ = op.symbol();
+        definingOpPtr_ = &op;
     }
 
-    void Value::addUser(const OperationId &opSymbol, std::size_t operandIndex)
+    void Value::setDefiningOpSymbol(const OperationId &opSymbol)
     {
-        users_.push_back(ValueUser{.operation = opSymbol, .operandIndex = operandIndex});
+        if (definingOpSymbol_ && *definingOpSymbol_ != opSymbol)
+        {
+            throw std::runtime_error("Value already has a defining operation");
+        }
+        if (isInput_)
+        {
+            throw std::runtime_error("Input value cannot have a defining operation");
+        }
+        definingOpSymbol_ = opSymbol;
+        definingOpPtr_ = nullptr;
     }
 
-    void Value::removeUser(const OperationId &opSymbol, std::size_t operandIndex)
+    void Value::addUser(Operation &op, std::size_t operandIndex)
+    {
+        users_.push_back(ValueUser{.operationSymbol = op.symbol(), .operationPtr = &op, .operandIndex = operandIndex});
+    }
+
+    void Value::addUserSymbol(const OperationId &opSymbol, std::size_t operandIndex)
+    {
+        users_.push_back(ValueUser{.operationSymbol = opSymbol, .operationPtr = nullptr, .operandIndex = operandIndex});
+    }
+
+    void Value::removeUser(Operation &op, std::size_t operandIndex)
     {
         auto it = std::find_if(users_.begin(), users_.end(), [&](const ValueUser &user)
-                               { return user.operation == opSymbol && user.operandIndex == operandIndex; });
+                               { return user.operationSymbol == op.symbol() && user.operandIndex == operandIndex; });
         if (it == users_.end())
         {
             throw std::runtime_error("Value usage entry not found during removal");
@@ -799,13 +825,53 @@ namespace wolf_sv::grh
         users_.erase(it);
     }
 
-    void Value::clearDefiningOp(const OperationId &opSymbol)
+    void Value::clearDefiningOp(Operation &op)
     {
-        if (!definingOp_ || *definingOp_ != opSymbol)
+        if (!definingOpSymbol_ || *definingOpSymbol_ != op.symbol())
         {
             throw std::runtime_error("Defining operation mismatch during clear");
         }
-        definingOp_.reset();
+        definingOpSymbol_.reset();
+        definingOpPtr_ = nullptr;
+    }
+
+    void Value::clearDefiningOpSymbol(const OperationId &opSymbol)
+    {
+        if (!definingOpSymbol_ || *definingOpSymbol_ != opSymbol)
+        {
+            throw std::runtime_error("Defining operation mismatch during clear");
+        }
+        definingOpSymbol_.reset();
+        definingOpPtr_ = nullptr;
+    }
+
+    void Value::resetDefiningOpPtr(Graph &graph)
+    {
+        definingOpPtr_ = nullptr;
+        if (definingOpSymbol_)
+        {
+            definingOpPtr_ = graph.findOperation(*definingOpSymbol_);
+            if (!definingOpPtr_)
+            {
+                throw std::runtime_error("Defining operation not found during rehydrate: " + *definingOpSymbol_);
+            }
+        }
+    }
+
+    void Value::resetUserPointers(Graph &graph)
+    {
+        for (auto &user : users_)
+        {
+            user.operationPtr = nullptr;
+            if (!user.operationSymbol.empty())
+            {
+                user.operationPtr = graph.findOperation(user.operationSymbol);
+                if (!user.operationPtr)
+                {
+                    throw std::runtime_error("User operation not found during rehydrate: " + user.operationSymbol);
+                }
+            }
+        }
     }
 
     void Value::setAsInput()
@@ -814,7 +880,7 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Value cannot be both input and output");
         }
-        if (definingOp_)
+        if (definingOpSymbol_)
         {
             throw std::runtime_error("Input value cannot have a defining operation");
         }
@@ -840,56 +906,90 @@ namespace wolf_sv::grh
         }
     }
 
-    Value *Operation::operandValue(std::size_t index) const
+    Value *Operation::resolveValueAt(std::size_t index, const std::vector<ValueId> &symbols, std::vector<Value *> &pointers) const
     {
-        if (index >= operands_.size())
+        if (index >= symbols.size())
         {
             throw std::out_of_range("Operand index out of range");
         }
-        return graph_->findValue(operands_[index]);
+        if (pointers.size() < symbols.size())
+        {
+            pointers.resize(symbols.size(), nullptr);
+        }
+        if (!pointers[index])
+        {
+            Value *resolved = graph_->findValue(symbols[index]);
+            if (!resolved)
+            {
+                throw std::runtime_error("Operation references unknown value: " + symbols[index]);
+            }
+            pointers[index] = resolved;
+        }
+        return pointers[index];
     }
 
-    Value *Operation::resultValue(std::size_t index) const
+    Value &Operation::operandValue(std::size_t index) const
     {
-        if (index >= results_.size())
+        Value *ptr = resolveValueAt(index, operands_, operandPtrs_);
+        if (!ptr)
         {
-            throw std::out_of_range("Result index out of range");
+            throw std::runtime_error("Operand value not found");
         }
-        return graph_->findValue(results_[index]);
+        return *ptr;
+    }
+
+    Value &Operation::resultValue(std::size_t index) const
+    {
+        Value *ptr = resolveValueAt(index, results_, resultPtrs_);
+        if (!ptr)
+        {
+            throw std::runtime_error("Result value not found");
+        }
+        return *ptr;
     }
 
     Operation::ValueHandleRange::Iterator::value_type Operation::ValueHandleRange::Iterator::operator*() const
     {
-        return graph_->findValue((*storage_)[index_]);
+        return owner_->resolveValueAt(index_, *symbols_, *pointers_);
     }
 
     Value *Operation::ValueHandleRange::operator[](std::size_t index) const
     {
-        return graph_->findValue((*storage_)[index]);
+        return owner_->resolveValueAt(index, *symbols_, *pointers_);
     }
 
     Value *Operation::ValueHandleRange::front() const
     {
-        return empty() ? nullptr : graph_->findValue(storage_->front());
+        if (empty())
+        {
+            return nullptr;
+        }
+        return owner_->resolveValueAt(0, *symbols_, *pointers_);
     }
 
     Value *Operation::ValueHandleRange::back() const
     {
-        return empty() ? nullptr : graph_->findValue(storage_->back());
+        if (empty())
+        {
+            return nullptr;
+        }
+        return owner_->resolveValueAt(symbols_->size() - 1, *symbols_, *pointers_);
     }
 
     void Operation::addOperand(Value &value)
     {
         ensureGraphOwnership(*graph_, value);
         operands_.push_back(value.symbol());
-        value.addUser(symbol_, operands_.size() - 1);
+        operandPtrs_.push_back(&value);
+        value.addUser(*this, operands_.size() - 1);
     }
 
     void Operation::addResult(Value &value)
     {
         ensureGraphOwnership(*graph_, value);
         results_.push_back(value.symbol());
-        value.setDefiningOp(symbol_);
+        resultPtrs_.push_back(&value);
+        value.setDefiningOp(*this);
     }
 
     void Operation::replaceOperand(std::size_t index, Value &value)
@@ -901,14 +1001,24 @@ namespace wolf_sv::grh
         ensureGraphOwnership(*graph_, value);
         if (operands_[index] == value.symbol())
         {
+            if (operandPtrs_.size() < operands_.size())
+            {
+                operandPtrs_.resize(operands_.size(), nullptr);
+            }
+            operandPtrs_[index] = &value;
             return;
         }
-        value.addUser(symbol_, index);
-        if (Value *current = graph_->findValue(operands_[index]))
+        if (operandPtrs_.size() < operands_.size())
         {
-            current->removeUser(symbol_, index);
+            operandPtrs_.resize(operands_.size(), nullptr);
+        }
+        value.addUser(*this, index);
+        if (Value *current = operandPtrs_[index] ? operandPtrs_[index] : graph_->findValue(operands_[index]))
+        {
+            current->removeUser(*this, index);
         }
         operands_[index] = value.symbol();
+        operandPtrs_[index] = &value;
     }
 
     void Operation::replaceResult(std::size_t index, Value &value)
@@ -920,14 +1030,24 @@ namespace wolf_sv::grh
         ensureGraphOwnership(*graph_, value);
         if (results_[index] == value.symbol())
         {
+            if (resultPtrs_.size() < results_.size())
+            {
+                resultPtrs_.resize(results_.size(), nullptr);
+            }
+            resultPtrs_[index] = &value;
             return;
         }
-        value.setDefiningOp(symbol_);
-        if (Value *current = graph_->findValue(results_[index]))
+        if (resultPtrs_.size() < results_.size())
         {
-            current->clearDefiningOp(symbol_);
+            resultPtrs_.resize(results_.size(), nullptr);
+        }
+        value.setDefiningOp(*this);
+        if (Value *current = resultPtrs_[index] ? resultPtrs_[index] : graph_->findValue(results_[index]))
+        {
+            current->clearDefiningOp(*this);
         }
         results_[index] = value.symbol();
+        resultPtrs_[index] = &value;
     }
 
     void Operation::setAttribute(std::string key, AttributeValue value)
@@ -941,6 +1061,34 @@ namespace wolf_sv::grh
             throw std::invalid_argument("Attribute value must be JSON-serializable basic type or array");
         }
         attributes_.insert_or_assign(std::move(key), std::move(value));
+    }
+
+    void Operation::rehydrateOperands(Graph &graph)
+    {
+        operandPtrs_.assign(operands_.size(), nullptr);
+        for (std::size_t i = 0; i < operands_.size(); ++i)
+        {
+            Value *value = graph.findValue(operands_[i]);
+            if (!value)
+            {
+                throw std::runtime_error("Operand references unknown value during rehydrate: " + operands_[i]);
+            }
+            operandPtrs_[i] = value;
+        }
+    }
+
+    void Operation::rehydrateResults(Graph &graph)
+    {
+        resultPtrs_.assign(results_.size(), nullptr);
+        for (std::size_t i = 0; i < results_.size(); ++i)
+        {
+            Value *value = graph.findValue(results_[i]);
+            if (!value)
+            {
+                throw std::runtime_error("Result references unknown value during rehydrate: " + results_[i]);
+            }
+            resultPtrs_[i] = value;
+        }
     }
 
     Graph::Graph(Netlist &owner, std::string symbol) : owner_(&owner),
@@ -1130,6 +1278,32 @@ namespace wolf_sv::grh
         return findValue(it->second);
     }
 
+    void Graph::rehydratePointers()
+    {
+        for (auto &entry : values_)
+        {
+            if (entry.second)
+            {
+                entry.second->resetDefiningOpPtr(*this);
+            }
+        }
+        for (auto &entry : operations_)
+        {
+            if (entry.second)
+            {
+                entry.second->rehydrateOperands(*this);
+                entry.second->rehydrateResults(*this);
+            }
+        }
+        for (auto &entry : values_)
+        {
+            if (entry.second)
+            {
+                entry.second->resetUserPointers(*this);
+            }
+        }
+    }
+
     void Graph::writeJson(slang::JsonWriter &writer) const
     {
         writer.startObject();
@@ -1164,7 +1338,7 @@ namespace wolf_sv::grh
             {
                 writer.startObject();
                 writer.writeProperty("op");
-                writer.writeValue(user.operation);
+                writer.writeValue(user.operationSymbol);
                 writer.writeProperty("idx");
                 writer.writeValue(static_cast<int64_t>(user.operandIndex));
                 writer.endObject();
@@ -1509,7 +1683,7 @@ namespace wolf_sv::grh
 
                 if (auto defIt = valueObj.find("def"); defIt != valueObj.end())
                 {
-                    value.setDefiningOp(defIt->second.asString("value.def"));
+                    value.setDefiningOpSymbol(defIt->second.asString("value.def"));
                 }
             }
 
@@ -1661,6 +1835,14 @@ namespace wolf_sv::grh
             for (const auto &entry : topIt->second.asArray("netlist.tops"))
             {
                 netlist.markAsTop(entry.asString("netlist.tops[]"));
+            }
+        }
+
+        for (auto &entry : netlist.graphs_)
+        {
+            if (entry.second)
+            {
+                entry.second->rehydratePointers();
             }
         }
 

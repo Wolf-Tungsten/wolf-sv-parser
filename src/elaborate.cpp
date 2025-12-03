@@ -2411,8 +2411,10 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                             stateOp->addOperand(*enBit); // [clk, rst, resetValue, en]
                             if (stateOp->operands().size() == 4) {
                                 grh::Value* rstVal = stateOp->operands()[2];
-                                stateOp->replaceOperand(2, *enBit);
-                                stateOp->replaceOperand(3, *rstVal);
+                                if (rstVal) {
+                                    stateOp->replaceOperand(2, *enBit);
+                                    stateOp->replaceOperand(3, *rstVal);
+                                }
                             }
                             stateOp->setAttribute("enLevel", enLevel);
                             break;
@@ -2421,8 +2423,10 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                             stateOp->addOperand(*enBit);
                             if (stateOp->operands().size() == 4) {
                                 grh::Value* rstVal = stateOp->operands()[2];
-                                stateOp->replaceOperand(2, *enBit);
-                                stateOp->replaceOperand(3, *rstVal);
+                                if (rstVal) {
+                                    stateOp->replaceOperand(2, *enBit);
+                                    stateOp->replaceOperand(3, *rstVal);
+                                }
                             }
                             stateOp->setAttribute("enLevel", enLevel);
                             break;
@@ -5546,12 +5550,12 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         grh::Value* tVal = op->operands()[1];
         grh::Value* fVal = op->operands()[2];
 
-        if (tVal == q && fVal && fVal->width() == targetWidth) {
+        if (tVal && fVal && tVal == q && fVal->width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = true,
                              .data = fVal};
         }
-        if (fVal == q && tVal && tVal->width() == targetWidth) {
+        if (fVal && tVal && fVal == q && tVal->width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = false,
                              .data = tVal};

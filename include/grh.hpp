@@ -96,7 +96,8 @@ class Graph;
 class Operation;
 
 struct ValueUser {
-    OperationId operation;
+    OperationId operationSymbol;
+    Operation* operationPtr = nullptr;
     std::size_t operandIndex = 0;
 };
 
@@ -109,7 +110,7 @@ public:
     bool isInput() const noexcept { return isInput_; }
     bool isOutput() const noexcept { return isOutput_; }
     Operation* definingOp() const noexcept;
-    const std::optional<OperationId>& definingOpSymbol() const noexcept { return definingOp_; }
+    const std::optional<OperationId>& definingOpSymbol() const noexcept { return definingOpSymbol_; }
     const std::vector<ValueUser>& users() const noexcept { return users_; }
 
 private:
@@ -119,15 +120,21 @@ private:
 
     Value(Graph& graph, ValueId symbol, int64_t width, bool isSigned);
 
-    void setDefiningOp(const OperationId& opSymbol);
-    void addUser(const OperationId& opSymbol, std::size_t operandIndex);
-    void removeUser(const OperationId& opSymbol, std::size_t operandIndex);
-    void clearDefiningOp(const OperationId& opSymbol);
+    void setDefiningOp(Operation& op);
+    void setDefiningOpSymbol(const OperationId& opSymbol);
+    void addUser(Operation& op, std::size_t operandIndex);
+    void addUserSymbol(const OperationId& opSymbol, std::size_t operandIndex);
+    void removeUser(Operation& op, std::size_t operandIndex);
+    void clearDefiningOp(Operation& op);
+    void clearDefiningOpSymbol(const OperationId& opSymbol);
+    void resetDefiningOpPtr(Graph& graph);
+    void resetUserPointers(Graph& graph);
     void setAsInput();
     void setAsOutput();
 
     Graph* graph_;
-    std::optional<OperationId> definingOp_;
+    std::optional<OperationId> definingOpSymbol_;
+    mutable Operation* definingOpPtr_ = nullptr;
     ValueId symbol_;
     int64_t width_;
     bool isSigned_;
@@ -148,7 +155,7 @@ public:
             using difference_type = std::ptrdiff_t;
             using iterator_category = std::random_access_iterator_tag;
 
-            Iterator(Graph *graph, const std::vector<ValueId> *storage, std::size_t index) : graph_(graph), storage_(storage), index_(index) {}
+            Iterator(const Operation *owner, const std::vector<ValueId> *symbols, std::vector<Value *> *pointers, std::size_t index) : owner_(owner), symbols_(symbols), pointers_(pointers), index_(index) {}
 
             value_type operator*() const;
             Iterator &operator++()
@@ -197,7 +204,7 @@ public:
             {
                 return static_cast<difference_type>(lhs.index_) - static_cast<difference_type>(rhs.index_);
             }
-            friend bool operator==(const Iterator &lhs, const Iterator &rhs) { return lhs.index_ == rhs.index_ && lhs.storage_ == rhs.storage_; }
+            friend bool operator==(const Iterator &lhs, const Iterator &rhs) { return lhs.index_ == rhs.index_ && lhs.symbols_ == rhs.symbols_; }
             friend bool operator!=(const Iterator &lhs, const Iterator &rhs) { return !(lhs == rhs); }
             friend bool operator<(const Iterator &lhs, const Iterator &rhs) { return lhs.index_ < rhs.index_; }
             friend bool operator>(const Iterator &lhs, const Iterator &rhs) { return rhs < lhs; }
@@ -205,37 +212,39 @@ public:
             friend bool operator>=(const Iterator &lhs, const Iterator &rhs) { return !(lhs < rhs); }
 
         private:
-            Graph *graph_;
-            const std::vector<ValueId> *storage_;
+            const Operation *owner_;
+            const std::vector<ValueId> *symbols_;
+            mutable std::vector<Value *> *pointers_;
             std::size_t index_;
         };
 
-        ValueHandleRange(Graph *graph, const std::vector<ValueId> &storage) : graph_(graph), storage_(&storage) {}
+        ValueHandleRange(const Operation *owner, const std::vector<ValueId> &symbols, std::vector<Value *> &pointers) : owner_(owner), symbols_(&symbols), pointers_(&pointers) {}
 
-        Iterator begin() const { return Iterator(graph_, storage_, 0); }
-        Iterator end() const { return Iterator(graph_, storage_, storage_->size()); }
-        std::size_t size() const noexcept { return storage_->size(); }
-        bool empty() const noexcept { return storage_->empty(); }
+        Iterator begin() const { return Iterator(owner_, symbols_, pointers_, 0); }
+        Iterator end() const { return Iterator(owner_, symbols_, pointers_, symbols_->size()); }
+        std::size_t size() const noexcept { return symbols_->size(); }
+        bool empty() const noexcept { return symbols_->empty(); }
         Value *operator[](std::size_t index) const;
         Value *front() const;
         Value *back() const;
 
     private:
-        Graph *graph_;
-        const std::vector<ValueId> *storage_;
+        const Operation *owner_;
+        const std::vector<ValueId> *symbols_;
+        mutable std::vector<Value *> *pointers_;
     };
 
     Graph& graph() const noexcept { return *graph_; }
     OperationKind kind() const noexcept { return kind_; }
     const OperationId& symbol() const noexcept { return symbol_; }
-    ValueHandleRange operands() const noexcept { return ValueHandleRange(graph_, operands_); }
-    ValueHandleRange results() const noexcept { return ValueHandleRange(graph_, results_); }
+    ValueHandleRange operands() const noexcept { return ValueHandleRange(this, operands_, operandPtrs_); }
+    ValueHandleRange results() const noexcept { return ValueHandleRange(this, results_, resultPtrs_); }
     const std::vector<ValueId>& operandSymbols() const noexcept { return operands_; }
     const std::vector<ValueId>& resultSymbols() const noexcept { return results_; }
     const std::map<std::string, AttributeValue>& attributes() const noexcept { return attributes_; }
 
-    Value* operandValue(std::size_t index) const;
-    Value* resultValue(std::size_t index) const;
+    Value& operandValue(std::size_t index) const;
+    Value& resultValue(std::size_t index) const;
 
     void addOperand(Value& value);
     void addResult(Value& value);
@@ -248,12 +257,17 @@ private:
     friend class Graph;
 
     Operation(Graph& graph, OperationKind kind, OperationId symbol);
+    Value* resolveValueAt(std::size_t index, const std::vector<ValueId>& symbols, std::vector<Value*>& pointers) const;
+    void rehydrateOperands(Graph& graph);
+    void rehydrateResults(Graph& graph);
 
     Graph* graph_;
     OperationKind kind_;
     OperationId symbol_;
     std::vector<ValueId> operands_;
     std::vector<ValueId> results_;
+    mutable std::vector<Value*> operandPtrs_;
+    mutable std::vector<Value*> resultPtrs_;
     std::map<std::string, AttributeValue> attributes_;
 };
 
@@ -292,6 +306,7 @@ public:
     Value* outputPortValue(std::string_view portName) noexcept;
     const Value* outputPortValue(std::string_view portName) const noexcept;
 
+    void rehydratePointers();
     void writeJson(slang::JsonWriter& writer) const;
 
 private:

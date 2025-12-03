@@ -303,7 +303,7 @@ int main() {
     }
     grh::Value* replicateOperand = replicateOp->operands()[0];
     if (replicateOperand != ctrlSelValue) {
-        const grh::Operation* concatOperand = replicateOperand->definingOp();
+        const grh::Operation* concatOperand = replicateOperand ? replicateOperand->definingOp() : nullptr;
         if (!concatOperand || concatOperand->kind() != grh::OperationKind::kConcat ||
             concatOperand->operands().size() != 1 ||
             concatOperand->operands()[0] != ctrlSelValue) {

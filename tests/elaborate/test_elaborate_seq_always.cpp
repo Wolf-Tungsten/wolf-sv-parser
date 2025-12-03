@@ -1218,12 +1218,7 @@ int main() {
                 return fail(msg);
             }
             const grh::Value* addr = op.operands()[1];
-            if (!addr) {
-                std::string msg(label);
-                msg.append(" addr operand is null");
-                return fail(msg);
-            }
-            if (addr->width() != 7 || addr->isSigned()) {
+            if (!addr || addr->width() != 7 || addr->isSigned()) {
                 std::string msg(label);
                 msg.append(" addr width/sign mismatch");
                 return fail(msg);
