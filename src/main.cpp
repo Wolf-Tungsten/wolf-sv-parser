@@ -19,6 +19,7 @@
 #include "emit.hpp"
 #include "transform.hpp"
 #include "pass/demo_stats.hpp"
+#include "pass/grh_verify.hpp"
 
 using namespace slang::driver;
 
@@ -195,6 +196,7 @@ int main(int argc, char **argv)
     // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
     wolf_sv::transform::PassDiagnostics transformDiagnostics;
     wolf_sv::transform::PassManager passManager;
+    passManager.addPass(std::make_unique<wolf_sv::transform::GRHVerifyPass>());
     passManager.addPass(std::make_unique<wolf_sv::transform::StatsPass>());
     wolf_sv::transform::TransformResult transformResult = passManager.run(netlist, transformDiagnostics);
 
@@ -202,8 +204,16 @@ int main(int argc, char **argv)
     {
         for (const auto &message : transformDiagnostics.messages())
         {
-            const char *tag = message.kind == wolf_sv::transform::PassDiagnosticKind::Error ? "error" : "warn";
-            std::cerr << "[transform] [" << message.passId << "] [" << tag << "] " << message.message;
+            const char *tag = "info";
+            if (message.kind == wolf_sv::transform::PassDiagnosticKind::Error)
+            {
+                tag = "error";
+            }
+            else if (message.kind == wolf_sv::transform::PassDiagnosticKind::Warning)
+            {
+                tag = "warn";
+            }
+            std::cerr << "[transform] [" << message.passName << "] [" << tag << "] " << message.message;
             if (!message.context.empty())
             {
                 std::cerr << " (" << message.context << ")";

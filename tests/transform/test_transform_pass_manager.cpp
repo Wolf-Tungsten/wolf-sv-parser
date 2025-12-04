@@ -22,10 +22,6 @@ namespace
     {
         bool ran = false;
         bool verbose = false;
-        bool flagArg = false;
-        int64_t countArg = 0;
-        std::string nameArg;
-        int configureCount = 0;
     };
 
     class RecordingPass : public Pass
@@ -36,22 +32,14 @@ namespace
         {
         }
 
-        void configure(const PassConfig &config) override
-        {
-            ++record_.configureCount;
-            record_.flagArg = config.getBool("flag");
-            record_.countArg = config.getInt("count", record_.countArg);
-            record_.nameArg = config.getString("name", record_.nameArg);
-        }
-
-        PassResult run(PassContext &context) override
+        PassResult run() override
         {
             record_.ran = true;
-            record_.verbose = context.verbose;
+            record_.verbose = verbose();
             order_.push_back(id());
             if (emitDiagError)
             {
-                context.diags.error(id(), "diagnostic failure");
+                diags().error(id(), "diagnostic failure");
             }
             return PassResult{changedOnRun, failOnRun, {}};
         }
@@ -72,7 +60,7 @@ int main()
     grh::Netlist netlist;
     netlist.createGraph("top");
 
-    // Case 1: pipeline order and config helpers with explicit pass instances
+    // Case 1: pipeline order and aggregated changed flag
     {
         PassManager manager;
         manager.options().verbose = true;
@@ -82,20 +70,12 @@ int main()
         PassRecord firstRecord;
         PassRecord secondRecord;
 
-        PassConfig firstConfig;
-        firstConfig.args.emplace("flag", "true");
-        firstConfig.args.emplace("name", "alpha");
-
-        PassConfig secondConfig;
-        secondConfig.args.emplace("count", "7");
-        secondConfig.args.emplace("name", "beta");
-
         auto firstPass = std::make_unique<RecordingPass>("first", firstRecord, order);
         firstPass->changedOnRun = true;
-        manager.addPass(std::move(firstPass), std::move(firstConfig));
+        manager.addPass(std::move(firstPass));
 
         auto secondPass = std::make_unique<RecordingPass>("second", secondRecord, order);
-        manager.addPass(std::move(secondPass), std::move(secondConfig));
+        manager.addPass(std::move(secondPass));
 
         TransformResult result = manager.run(netlist, diags);
         if (!result.success)
@@ -117,18 +97,6 @@ int main()
         if (!firstRecord.verbose || !secondRecord.verbose)
         {
             return fail("Expected verbose flag to propagate through context");
-        }
-        if (!firstRecord.flagArg || firstRecord.nameArg != "alpha")
-        {
-            return fail("PassConfig helpers did not parse first pass arguments");
-        }
-        if (secondRecord.countArg != 7 || secondRecord.nameArg != "beta")
-        {
-            return fail("PassConfig helpers did not parse second pass arguments");
-        }
-        if (firstRecord.configureCount == 0 || secondRecord.configureCount == 0)
-        {
-            return fail("configure should be invoked for each pass");
         }
         if (!diags.empty())
         {
@@ -228,7 +196,7 @@ int main()
             return fail("Stats pass should emit a diagnostic with counts");
         }
         const auto &message = diags.messages().front();
-        if (message.passId != "stats" || message.kind != PassDiagnosticKind::Warning)
+        if (message.passName != "stats" || message.kind != PassDiagnosticKind::Warning)
         {
             return fail("Stats pass should emit a warning diagnostic");
         }

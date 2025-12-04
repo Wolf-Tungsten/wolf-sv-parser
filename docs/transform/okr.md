@@ -12,3 +12,9 @@
 - KR1: 创建 Pass 基类，支持参数配置，之后的 Pass 从基类派生，Pass 对 Netlist 进行修改
 - KR2: 创建 PassManager 类，所有 pass 按顺序注册到 PassManager 中，绑定好参数，按顺序执行
 - KR3: 修改入口 main 函数，在 Elaborate 和 Emit 之间创建 PassManager，注册 Pass，执行变换流程
+
+## Objective3: GRHVerifyPass 检查图结构合法性与完整性的Pass
+
+- KR1: 在现有pass framework 的基础上，创建 GRHVerifyPass
+- KR2: GRHVerifyPass 检查 op 的合法性，kind 和 操作数、结果数 的关系是否正确，kind 要求的 attr 是否都存在并合法，不合法则报错，输出错误情况便于排查
+- KR3: GRHVerifyPass 检查并尝试修复 op 和 value 连接关系的合法性，先通过 symbol 检查存在性，不存在则无法修复直接报错；再检查 ptr 指向与 symbol 指向是否一致，若不一致则修复 ptr

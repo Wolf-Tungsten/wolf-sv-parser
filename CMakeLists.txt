@@ -34,6 +34,7 @@ target_link_libraries(grh
 add_library(transform STATIC
     src/transform.cpp
     src/pass/demo_stats.cpp
+    src/pass/grh_verify.cpp
 )
 
 target_include_directories(transform
@@ -198,6 +199,29 @@ target_compile_definitions(elaborate-smoke
 )
 
 register_test_exe(elaborate-smoke)
+
+# transform tests
+add_executable(transform-pass-manager
+    tests/transform/test_transform_pass_manager.cpp
+)
+
+target_link_libraries(transform-pass-manager
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-pass-manager)
+
+add_executable(transform-grh-verify
+    tests/transform/test_grh_verify_pass.cpp
+)
+
+target_link_libraries(transform-grh-verify
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-grh-verify)
 
 # elaborate: hierarchy
 add_executable(elaborate-hierarchy
@@ -396,18 +420,6 @@ target_compile_definitions(elaborate-dpic
 )
 
 register_test_exe(elaborate-dpic)
-
-# transform: pass manager
-add_executable(transform-pass-manager
-    tests/transform/test_transform_pass_manager.cpp
-)
-
-target_link_libraries(transform-pass-manager
-    PRIVATE
-        transform
-)
-
-register_test_exe(transform-pass-manager)
 
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

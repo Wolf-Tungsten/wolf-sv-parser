@@ -10,7 +10,7 @@ namespace wolf_sv::transform
     public:
         StatsPass();
 
-        PassResult run(PassContext &context) override;
+        PassResult run() override;
     };
 
 } // namespace wolf_sv::transform

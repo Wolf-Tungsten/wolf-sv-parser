@@ -2,7 +2,6 @@
 
 #include "grh.hpp"
 
-#include <iostream>
 #include <sstream>
 #include <string>
 
@@ -11,13 +10,13 @@ namespace wolf_sv::transform
 
     StatsPass::StatsPass() : Pass("stats", "operation-value-stats", "Count graphs, operations, and values for diagnostics") {}
 
-    PassResult StatsPass::run(PassContext &context)
+    PassResult StatsPass::run()
     {
         std::size_t graphCount = 0;
         std::size_t opCount = 0;
         std::size_t valueCount = 0;
 
-        for (const auto &entry : context.netlist.graphs())
+        for (const auto &entry : netlist().graphs())
         {
             ++graphCount;
             const auto &graph = entry.second;
@@ -28,9 +27,7 @@ namespace wolf_sv::transform
         std::ostringstream oss;
         oss << "graphs=" << graphCount << ", operations=" << opCount << ", values=" << valueCount;
 
-        // Surface counts via diagnostics as a lightweight, non-fatal message and print for convenience.
-        context.diags.warning(id(), oss.str());
-        // std::cout << "[transform] [stats] " << oss.str() << '\n';
+        warning(oss.str());
 
         PassResult result;
         result.changed = false;

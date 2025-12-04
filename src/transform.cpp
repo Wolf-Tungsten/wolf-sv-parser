@@ -1,46 +1,62 @@
 #include "transform.hpp"
 
-#include <charconv>
-#include <cctype>
 #include <iostream>
-#include <system_error>
-#include <utility>
 
 namespace wolf_sv::transform
 {
 
     namespace
     {
-        std::string toLowerCopy(std::string_view text)
+        std::string formatContext(const grh::Graph *graph, const grh::Operation *op, const grh::Value *value)
         {
-            std::string lowered;
-            lowered.reserve(text.size());
-            for (char c : text)
+            std::string ctx;
+            if (graph)
             {
-                lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                ctx += graph->symbol();
             }
-            return lowered;
+            if (op)
+            {
+                if (!ctx.empty())
+                {
+                    ctx += "::";
+                }
+                ctx += op->symbol();
+            }
+            if (value)
+            {
+                if (!ctx.empty())
+                {
+                    ctx += "::";
+                }
+                ctx += value->symbol();
+            }
+            return ctx;
+        }
+
+        void appendMessage(std::vector<PassDiagnostic> &messages, PassDiagnosticKind kind, std::string passName, std::string message, std::string context)
+        {
+            messages.push_back(PassDiagnostic{
+                .kind = kind,
+                .message = std::move(message),
+                .context = std::move(context),
+                .passName = std::move(passName),
+            });
         }
     } // namespace
 
-    void PassDiagnostics::error(std::string passId, std::string message, std::string context)
+    void PassDiagnostics::error(std::string passName, std::string message, std::string context)
     {
-        messages_.push_back(PassDiagnostic{
-            .kind = PassDiagnosticKind::Error,
-            .message = std::move(message),
-            .context = std::move(context),
-            .passId = std::move(passId),
-        });
+        appendMessage(messages_, PassDiagnosticKind::Error, std::move(passName), std::move(message), std::move(context));
     }
 
-    void PassDiagnostics::warning(std::string passId, std::string message, std::string context)
+    void PassDiagnostics::warning(std::string passName, std::string message, std::string context)
     {
-        messages_.push_back(PassDiagnostic{
-            .kind = PassDiagnosticKind::Warning,
-            .message = std::move(message),
-            .context = std::move(context),
-            .passId = std::move(passId),
-        });
+        appendMessage(messages_, PassDiagnosticKind::Warning, std::move(passName), std::move(message), std::move(context));
+    }
+
+    void PassDiagnostics::info(std::string passName, std::string message, std::string context)
+    {
+        appendMessage(messages_, PassDiagnosticKind::Info, std::move(passName), std::move(message), std::move(context));
     }
 
     bool PassDiagnostics::hasError() const noexcept
@@ -55,63 +71,69 @@ namespace wolf_sv::transform
         return false;
     }
 
-    bool PassConfig::getBool(std::string_view key, bool defaultValue) const
-    {
-        auto it = args.find(std::string(key));
-        if (it == args.end())
-        {
-            return defaultValue;
-        }
-
-        const std::string lowered = toLowerCopy(it->second);
-        if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on")
-        {
-            return true;
-        }
-        if (lowered == "0" || lowered == "false" || lowered == "no" || lowered == "off")
-        {
-            return false;
-        }
-        return defaultValue;
-    }
-
-    int64_t PassConfig::getInt(std::string_view key, int64_t defaultValue) const
-    {
-        auto it = args.find(std::string(key));
-        if (it == args.end())
-        {
-            return defaultValue;
-        }
-
-        int64_t value = defaultValue;
-        const std::string &text = it->second;
-        const char *begin = text.data();
-        const char *end = text.data() + text.size();
-        auto result = std::from_chars(begin, end, value);
-        if (result.ec != std::errc())
-        {
-            return defaultValue;
-        }
-        return value;
-    }
-
-    std::string PassConfig::getString(std::string_view key, std::string defaultValue) const
-    {
-        auto it = args.find(std::string(key));
-        if (it == args.end())
-        {
-            return defaultValue;
-        }
-        return it->second;
-    }
-
     Pass::Pass(std::string id, std::string name, std::string description)
         : id_(std::move(id)), name_(std::move(name)), description_(std::move(description))
     {
     }
 
-    void Pass::configure(const PassConfig &)
+    void Pass::error(std::string message, std::string context)
     {
+        diags().error(name_.empty() ? id_ : name_, std::move(message), std::move(context));
+    }
+
+    void Pass::warning(std::string message, std::string context)
+    {
+        diags().warning(name_.empty() ? id_ : name_, std::move(message), std::move(context));
+    }
+
+    void Pass::info(std::string message, std::string context)
+    {
+        diags().info(name_.empty() ? id_ : name_, std::move(message), std::move(context));
+    }
+
+    void Pass::error(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    {
+        diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
+    }
+
+    void Pass::warning(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    {
+        diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
+    }
+
+    void Pass::info(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    {
+        diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
+    }
+
+    void Pass::error(const grh::Graph &graph, const grh::Value &value, std::string message)
+    {
+        diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
+    }
+
+    void Pass::warning(const grh::Graph &graph, const grh::Value &value, std::string message)
+    {
+        diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
+    }
+
+    void Pass::info(const grh::Graph &graph, const grh::Value &value, std::string message)
+    {
+        diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
+    }
+
+    void Pass::error(const grh::Graph &graph, std::string message)
+    {
+        diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
+    }
+
+    void Pass::warning(const grh::Graph &graph, std::string message)
+    {
+        diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
+    }
+
+    void Pass::info(const grh::Graph &graph, std::string message)
+    {
+        diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
     }
 
     PassManager::PassManager(PassPipelineOptions options)
@@ -119,10 +141,20 @@ namespace wolf_sv::transform
     {
     }
 
-    void PassManager::addPass(std::unique_ptr<Pass> pass, PassConfig config)
+    void PassManager::addPass(std::unique_ptr<Pass> pass, std::string instanceName)
     {
         PassEntry entry;
-        entry.config = std::move(config);
+        if (pass)
+        {
+            if (!instanceName.empty())
+            {
+                pass->setName(std::move(instanceName));
+            }
+            else
+            {
+                pass->setName(pass->id());
+            }
+        }
         entry.instance = std::move(pass);
         pipeline_.push_back(std::move(entry));
     }
@@ -140,18 +172,13 @@ namespace wolf_sv::transform
 
         for (auto &entry : pipeline_)
         {
-            if (!entry.config.enabled)
-            {
-                continue;
-            }
-
             if (options_.stopOnError && diags.hasError())
             {
                 encounteredFailure = true;
                 break;
             }
 
-            context.entryName = entry.instance ? entry.instance->id() : std::string_view();
+            context.entryName = entry.instance ? entry.instance->name() : std::string_view();
             context.currentGraph = nullptr;
 
             Pass *pass = entry.instance.get();
@@ -167,14 +194,14 @@ namespace wolf_sv::transform
                 continue;
             }
 
-            pass->configure(entry.config);
-
             if (options_.verbose)
             {
                 std::cerr << "[transform] [" << pass->id() << "] start\n";
             }
 
-            PassResult passResult = pass->run(context);
+            pass->setContext(&context);
+            PassResult passResult = pass->run();
+            pass->clearContext();
             result.changed = result.changed || passResult.changed;
 
             if (options_.verbose)

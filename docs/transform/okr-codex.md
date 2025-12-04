@@ -42,17 +42,45 @@
 
 ## KR1：Pass 基类（含参数）
 - 定义 `struct PassContext { grh::Netlist& netlist; PassDiagnostics& diags; bool verbose; }`，预留 `Graph* currentGraph`/`std::string_view entryName` 等可选字段以支撑图级遍历。
-- 引入 `using PassArgMap = std::unordered_map<std::string, std::string>; struct PassConfig { PassArgMap args; bool enabled = true; };`，提供 `getBool/getInt/getString` 辅助与默认值，避免各 pass 重复解析。
-- `class Pass { virtual PassResult run(PassContext&) = 0; virtual void configure(const PassConfig&); std::string id() const; std::string name() const; };`，`PassResult` 含 `bool changed`, `bool failed` 和可选 `std::vector<std::string> artifacts`，失败时通过 `diags` 记录错误原因。
+- Pass 配置直接通过子类构造函数传入（不再有统一 PassConfig），基类接口保持精简：`class Pass { virtual PassResult run(PassContext&) = 0; std::string id() const; std::string name() const; };`，`PassResult` 含 `bool changed`, `bool failed` 和可选 `std::vector<std::string> artifacts`，失败时通过 `diags` 记录错误原因。
 - 诊断沿用 Elaborate/Emit 风格：`TransformDiagnostics`/`PassDiagnostics` 记录 `kind (Error/Warn)`、`message`、`context`，打印时带 `[pass-id]` 前缀，方便定位。
 
 ## KR2：PassManager 顺序注册与执行
-- 新增 `class PassManager { PassPipelineOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`config`、`id`，注册顺序即执行顺序。
-- `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `constprop,inline`）构建；测试可注入 fake pass factory 验证执行顺序与参数传递。
+- 新增 `class PassManager { PassPipelineOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`id`，注册顺序即执行顺序。
+- `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `constprop,inline`）构建；测试可注入 fake pass factory 验证执行顺序。
 - `run(Netlist&, PassDiagnostics&)` 逐个执行，累积 `changed`；遇到 `failed` 或 diagnostics 中 error 时根据 `options.stopOnError` 决定立即终止或继续，统一返回 `TransformResult{success, changed}`。
-- 提供 `addPass(id, config)`/`addPass(std::unique_ptr<Pass>, config)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbose` 控制每个 pass 的开始/结束日志。
+- 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbose` 控制每个 pass 的开始/结束日志。
 
 ## KR3：main 集成 Elaborate→Transform→Emit
 - 在 `src/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(netlist, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
 - CMake 将 `src/transform/*.cpp` 与 `include/transform/*.hpp` 编译入主二进制；新增最小单元测试覆盖管线顺序、参数绑定与错误短路，后续可用 fake pass 验证 changed/diagnostics 聚合。
 - 日志格式与 emit/elaborate 对齐（前缀 `[transform]` + pass id），保持 JSON/SV 输出不受影响，若 pipeline 为空则完全复用当前输出路径。
+
+# Objective 3
+
+> 目标：构建 GRHVerifyPass，校验/修复 GRH 图结构合法性，保证后续 transform 基于一致的拓扑与元数据运行。
+
+## 定位与策略
+- Pass id `grh-verify`，默认在 elaboration 后、其他变换前运行；定位为结构验证/轻量修复，不更改语义或生成新节点。
+- 仅依赖 Netlist/Graph 状态与 pass diagnostics，不触碰 I/O；支持 `verbose` 打印检查统计（节点数、修复数、失败数）。
+- 检查顺序：先 schema（kind 与 operand/result/attr 的约束），再 symbol 存在性，最后指针缓存/用户列表一致性；可在致命错误后继续收集其余错误以便一次性暴露问题。
+
+## KR1：创建 GRHVerifyPass 骨架
+- 文件落在 `include/pass/grh_verify.hpp` 与 `src/pass/grh_verify.cpp`，通过 PassRegistry 注册 id/name/desc；构造函数参数控制是否自动修复指针缓存（默认开启）与 `stop_on_error`。
+- PassContext 复用 diagnostics，增加轻量统计结构记录修复次数/错误计数；遍历入口覆盖所有 Graph/Operation/Value（含子图），保持拓扑遍历封装在私有辅助函数中。
+- 失败条件：遇到不可修复的缺失 symbol/未知 kind 等直接标记 `failed`，并写入 diag；可修复项完成修复后仅计入 warn/info。
+
+## KR2：Op 合法性校验
+- 建立 `OperationSpec`（按 `OpKind`）描述 `expectedOperands`/`expectedResults`（固定或区间）与必需属性列表；若已有枚举/元数据结构则优先复用。
+- 遍历 Operation 时校验 kind 合法性、操作数与结果数量匹配，缺失 attr 记为 Error，属性类型错误同样 Error；多余的 attr 仅做 Info 级提示，不阻断流程；属性类型检查（如整数/字符串/枚举范围）用专门校验器，避免散落在 pass 逻辑中。
+- 对于 schema 违规的 op，输出携带 op symbol/kind 与期望/实际值的错误信息，帮助定位；保持统计以便 verbose 输出摘要。
+
+## KR3：连接关系校验与修复
+- 先按 symbol 检查 `operandsSymbols/resultsSymbols`、Value `definingOpSymbol`、user 记录的 `opSymbol` 是否能在所属 Graph/Netlist 中解析；缺失直接报错并视为不可修复。
+- 对解析成功的实体比对指针缓存与 symbol 反查结果：不一致则在 `autoFixPointers` 开启时回填/纠正（`operandsPtrs/resultsPtrs/definingOpPtr` 等），并诊断一次修复；关闭自动修复则仅报 warn。
+- 校验 Value 的 users 列表：验证用户 op 与 operandIndex 合法、去重，同步回写缺失/错误的 user 关系；必要时重建单个 Value 的 user 集合以消除漂移。
+- 检查节点所属 Graph 一致性与循环引用（如 def 与 user 不在同一图、或 def 指向空），发现后报错并阻止后续 fix，避免破坏拓扑。
+
+## 诊断与测试
+- Diagnostics 分级：schema/缺失 symbol 记为 Error，自动修复记为 Warn/Info（含修复详情与节点标识），多余 attr 仅 Info；pass 结束时在 verbose 下打印统计摘要。
+- 新增 transform 单测覆盖：1) kind/schema 违规报错；2) symbol 缺失导致失败；3) 指针缓存错误但可按 symbol 修复；4) user 列表缺项/错位被重建；5) 多余 attr 仅产生 Info 诊断；相关 fixture 写在 `tests/data/transform/grh_verify_*`。
