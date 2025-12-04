@@ -5,7 +5,7 @@
 - 结论：已完成。主程序在 Elaborate 后创建 PassManager，按顺序执行显式注册的 pass，当前默认运行 demo `stats` pass。
 
 ## 主要实现
-- 新增 `Pass`/`PassManager`/`PassConfig`/`PassDiagnostics`，以显式 `unique_ptr` 传入的方式串行执行 pipeline，支持 `stopOnError` 与 verbose 日志。
+- 新增 `Pass`/`PassManager`/`PassConfig`/`PassDiagnostics`，以显式 `unique_ptr` 传入的方式串行执行 pipeline，支持 `stopOnError` 与按 `verbosity` 阈值控制的日志。
 - Demo `StatsPass` 统计 netlist 的 graph/operation/value 数量，输出诊断并打印 `[transform][stats]` 摘要，便于观察。
 - CLI 参数精简：移除 transform pipeline 配置，默认挂载 stats pass；JSON 输出参数改为 `--emit-json` 并仅提示生成路径。
 

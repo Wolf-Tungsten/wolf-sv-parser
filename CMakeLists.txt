@@ -13,6 +13,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
 add_subdirectory(external/slang)
+add_subdirectory(src/pass)
 
 # Libraries
 ## grh
@@ -33,8 +34,7 @@ target_link_libraries(grh
 ## transform
 add_library(transform STATIC
     src/transform.cpp
-    src/pass/demo_stats.cpp
-    src/pass/grh_verify.cpp
+    ${TRANSFORM_PASS_SOURCES}
 )
 
 target_include_directories(transform

@@ -34,7 +34,7 @@ int main()
         manager.addPass(std::make_unique<GRHVerifyPass>());
 
         PassDiagnostics diags;
-        TransformResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(netlist, diags);
         if (result.success || !diags.hasError())
         {
             return fail("Missing attribute should be reported as error and fail the pass");
@@ -59,7 +59,7 @@ int main()
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
         PassDiagnostics diags;
-        TransformResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(netlist, diags);
         if (result.success || !diags.hasError())
         {
             return fail("Unresolvable operand symbol should be reported as error");
@@ -84,7 +84,7 @@ int main()
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
         PassDiagnostics diags;
-        TransformResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(netlist, diags);
         if (!result.success || diags.hasError())
         {
             return fail("User list rebuild should succeed without errors");
@@ -113,11 +113,12 @@ int main()
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
         PassDiagnostics diags;
-        TransformResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(netlist, diags);
         if (!result.success || diags.hasError())
         {
             return fail("Extra attribute should not cause an error");
         }
+#if WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS
         bool hasInfo = false;
         for (const auto &msg : diags.messages())
         {
@@ -131,6 +132,7 @@ int main()
         {
             return fail("Extra attribute should be reported as info");
         }
+#endif
     }
 
     return 0;

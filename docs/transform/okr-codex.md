@@ -41,15 +41,15 @@
 - 约定 pass id（短字符串）与可读 name/desc，id 用于 CLI/注册，desc 用于日志/诊断，便于后续扩展内置/自定义 pass。
 
 ## KR1：Pass 基类（含参数）
-- 定义 `struct PassContext { grh::Netlist& netlist; PassDiagnostics& diags; bool verbose; }`，预留 `Graph* currentGraph`/`std::string_view entryName` 等可选字段以支撑图级遍历。
+- 定义 `struct PassContext { grh::Netlist& netlist; PassDiagnostics& diags; PassVerbosity verbosity; std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>> scratchpad; }`，保持上下文精简，并提供 `scratchpad` 供 pipeline 内部跨 pass 传递数据（每项堆分配，移除即释放）。
 - Pass 配置直接通过子类构造函数传入（不再有统一 PassConfig），基类接口保持精简：`class Pass { virtual PassResult run(PassContext&) = 0; std::string id() const; std::string name() const; };`，`PassResult` 含 `bool changed`, `bool failed` 和可选 `std::vector<std::string> artifacts`，失败时通过 `diags` 记录错误原因。
-- 诊断沿用 Elaborate/Emit 风格：`TransformDiagnostics`/`PassDiagnostics` 记录 `kind (Error/Warn)`、`message`、`context`，打印时带 `[pass-id]` 前缀，方便定位。
+- 诊断沿用 Elaborate/Emit 风格：`TransformDiagnostics`/`PassDiagnostics` 记录 `kind (Debug/Info/Warn/Error)`、`message`、`context`，打印时带 `[pass-id]` 前缀，方便定位；诊断会按 `verbosity` 阈值过滤。
 
 ## KR2：PassManager 顺序注册与执行
-- 新增 `class PassManager { PassPipelineOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`id`，注册顺序即执行顺序。
+- 新增 `class PassManager { PassManagerOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`id`，注册顺序即执行顺序。
 - `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `constprop,inline`）构建；测试可注入 fake pass factory 验证执行顺序。
-- `run(Netlist&, PassDiagnostics&)` 逐个执行，累积 `changed`；遇到 `failed` 或 diagnostics 中 error 时根据 `options.stopOnError` 决定立即终止或继续，统一返回 `TransformResult{success, changed}`。
-- 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbose` 控制每个 pass 的开始/结束日志。
+- `run(Netlist&, PassDiagnostics&)` 逐个执行，累积 `changed`；遇到 `failed` 或 diagnostics 中 error 时根据 `options.stopOnError` 决定立即终止或继续，统一返回 `PassManagerResult{success, changed}`。
+- 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbosity` 控制最低诊断保留级别以及调试级别的 start/finish 日志。
 
 ## KR3：main 集成 Elaborate→Transform→Emit
 - 在 `src/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(netlist, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
@@ -62,7 +62,7 @@
 
 ## 定位与策略
 - Pass id `grh-verify`，默认在 elaboration 后、其他变换前运行；定位为结构验证/轻量修复，不更改语义或生成新节点。
-- 仅依赖 Netlist/Graph 状态与 pass diagnostics，不触碰 I/O；支持 `verbose` 打印检查统计（节点数、修复数、失败数）。
+- 仅依赖 Netlist/Graph 状态与 pass diagnostics，不触碰 I/O；支持 `verbosity` 控制的统计输出（节点数、修复数、失败数）。
 - 检查顺序：先 schema（kind 与 operand/result/attr 的约束），再 symbol 存在性，最后指针缓存/用户列表一致性；可在致命错误后继续收集其余错误以便一次性暴露问题。
 
 ## KR1：创建 GRHVerifyPass 骨架
@@ -73,7 +73,7 @@
 ## KR2：Op 合法性校验
 - 建立 `OperationSpec`（按 `OpKind`）描述 `expectedOperands`/`expectedResults`（固定或区间）与必需属性列表；若已有枚举/元数据结构则优先复用。
 - 遍历 Operation 时校验 kind 合法性、操作数与结果数量匹配，缺失 attr 记为 Error，属性类型错误同样 Error；多余的 attr 仅做 Info 级提示，不阻断流程；属性类型检查（如整数/字符串/枚举范围）用专门校验器，避免散落在 pass 逻辑中。
-- 对于 schema 违规的 op，输出携带 op symbol/kind 与期望/实际值的错误信息，帮助定位；保持统计以便 verbose 输出摘要。
+- 对于 schema 违规的 op，输出携带 op symbol/kind 与期望/实际值的错误信息，帮助定位；保持统计以便在低阈值 verbosity 下输出摘要。
 
 ## KR3：连接关系校验与修复
 - 先按 symbol 检查 `operandsSymbols/resultsSymbols`、Value `definingOpSymbol`、user 记录的 `opSymbol` 是否能在所属 Graph/Netlist 中解析；缺失直接报错并视为不可修复。

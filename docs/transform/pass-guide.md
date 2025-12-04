@@ -54,16 +54,44 @@ namespace wolf_sv::transform {
 - 参数通过构造参数传入，必要时定义 options 结构体；保持默认值合理，便于调用方直接构造。
 
 ## 诊断与中断策略
-- 基类提供便捷访问器：`netlist()`、`diags()`、`verbose()`、`currentGraph()`、`entryName()`，无需在 run 传参。
-- 直接在 Pass 内调用辅助方法（自动带上 pass id）：
-  - `error/warning/info(message, context = {})`。
-  - `error/warning/info(graph, op, message)`，`error/warning/info(graph, value, message)`，`error/warning/info(graph, message)` 自动生成 `graph::op::val` 上下文。
+- 基类提供便捷访问器：`netlist()`、`diags()`、`verbosity()`，无需在 run 传参。
+- 直接在 Pass 内调用辅助方法（自动带上 pass id），低于 `PassContext::verbosity` 的诊断会被过滤，不会写入 `PassDiagnostics`：
+  - `debug/info/warning/error(message, context = {})`。
+  - `debug/info/warning/error(graph, op|value|graph, message)` 自动生成 `graph::op::val` 上下文。
 - `PassResult`：
   - `changed = true` 表示已修改 Netlist/Graph。
   - `failed = true` 表示该 pass 自身失败（即使没有 error 诊断）。通常在遇到不可恢复状态时置位。
 - `PassManager` 行为：
   - 如果 `options.stopOnError == true`，遇到 `failed` 或已有 error 诊断会短路后续 pass。
-  - 返回的 `TransformResult::success` 只有在没有 error 且未遇到 failed 时才为 true。
+  - 返回的 `PassManagerResult::success` 只有在没有 error 且未遇到 failed 时才为 true。
+- 诊断级别：`Debug < Info < Warning < Error`。`PassManagerOptions::verbosity`/`PassContext::verbosity` 控制最低保留级别（默认 `Info`，仅屏蔽 `Debug`）。`WOLF_SV_TRANSFORM_ENABLE_DEBUG_DIAGNOSTICS` / `WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS` 宏（默认在 `NDEBUG` 下关闭）可在编译期直接屏蔽对应级别的代码。
+
+## Scratchpad 跨 pass 共享
+- `PassContext` 暴露 `scratchpad`（`std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>>`），每个条目堆分配，移除后立即释放。基类封装了访问器：
+  - `setScratchpad(key, value)` 支持传值/移动，优先传 `std::move(heavyObj)` 或直接存 `std::unique_ptr<T>` 以避免大对象拷贝。
+  - `getScratchpad<T>(key)` 返回指向存储对象的指针，类型不匹配时返回 `nullptr`。
+  - `hasScratchpad(key)` / `eraseScratchpad(key)` 检查或移除条目。
+- 生命周期：`scratchpad` 在每次 `PassManager::run` 开始时创建，run 结束后整个 map 被销毁；`eraseScratchpad`/`clear` 可提前释放单项。
+- 命名建议：用 `<pass-id>/<name>` 形式避免冲突，例如 `setScratchpad("constprop/stats", Stats{...});`，下游读者检查指针非空再使用。
+- 示例（写入/读取整数计数）：
+```cpp
+class CountProducer : public Pass {
+    PassResult run() override {
+        setScratchpad("counting/ops", netlist().graph("top").operations().size());
+        return {};
+    }
+};
+class CountConsumer : public Pass {
+    PassResult run() override {
+        if (const size_t* n = getScratchpad<size_t>("counting/ops")) {
+            info("ops from producer: " + std::to_string(*n));
+        } else {
+            warning("count missing in scratchpad");
+        }
+        return {};
+    }
+};
+```
 
 ## 注册与集成
 - 在 CMake 中将新实现编译入 `transform` 库：添加到 `CMakeLists.txt` 的 `add_library(transform ...)` 源文件列表。

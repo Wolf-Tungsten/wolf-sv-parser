@@ -198,20 +198,28 @@ int main(int argc, char **argv)
     wolf_sv::transform::PassManager passManager;
     passManager.addPass(std::make_unique<wolf_sv::transform::GRHVerifyPass>());
     passManager.addPass(std::make_unique<wolf_sv::transform::StatsPass>());
-    wolf_sv::transform::TransformResult transformResult = passManager.run(netlist, transformDiagnostics);
+    wolf_sv::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
 
     if (!transformDiagnostics.empty())
     {
         for (const auto &message : transformDiagnostics.messages())
         {
             const char *tag = "info";
-            if (message.kind == wolf_sv::transform::PassDiagnosticKind::Error)
+            switch (message.kind)
             {
+            case wolf_sv::transform::PassDiagnosticKind::Error:
                 tag = "error";
-            }
-            else if (message.kind == wolf_sv::transform::PassDiagnosticKind::Warning)
-            {
+                break;
+            case wolf_sv::transform::PassDiagnosticKind::Warning:
                 tag = "warn";
+                break;
+            case wolf_sv::transform::PassDiagnosticKind::Debug:
+                tag = "debug";
+                break;
+            case wolf_sv::transform::PassDiagnosticKind::Info:
+            default:
+                tag = "info";
+                break;
             }
             std::cerr << "[transform] [" << message.passName << "] [" << tag << "] " << message.message;
             if (!message.context.empty())
@@ -222,7 +230,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (!transformResult.success || transformDiagnostics.hasError())
+    if (!passManagerResult.success || transformDiagnostics.hasError())
     {
         return 5;
     }

@@ -7,13 +7,40 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <type_traits>
+#include <utility>
 #include <vector>
+
+#ifndef WOLF_SV_TRANSFORM_ENABLE_DEBUG_DIAGNOSTICS
+#    ifdef NDEBUG
+#        define WOLF_SV_TRANSFORM_ENABLE_DEBUG_DIAGNOSTICS 0
+#    else
+#        define WOLF_SV_TRANSFORM_ENABLE_DEBUG_DIAGNOSTICS 1
+#    endif
+#endif
+
+#ifndef WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS
+#    ifdef NDEBUG
+#        define WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS 0
+#    else
+#        define WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS 1
+#    endif
+#endif
 
 namespace wolf_sv::transform
 {
 
+    enum class PassVerbosity
+    {
+        Debug = 0,
+        Info = 1,
+        Warning = 2,
+        Error = 3
+    };
+
     enum class PassDiagnosticKind
     {
+        Debug,
         Error,
         Warning,
         Info
@@ -33,6 +60,7 @@ namespace wolf_sv::transform
         void error(std::string passName, std::string message, std::string context = {});
         void warning(std::string passName, std::string message, std::string context = {});
         void info(std::string passName, std::string message, std::string context = {});
+        void debug(std::string passName, std::string message, std::string context = {});
 
         const std::vector<PassDiagnostic> &messages() const noexcept { return messages_; }
         bool hasError() const noexcept;
@@ -45,13 +73,26 @@ namespace wolf_sv::transform
 
     using TransformDiagnostics = PassDiagnostics;
 
+    struct ScratchpadSlot
+    {
+        virtual ~ScratchpadSlot() = default;
+    };
+
+    template <typename T>
+    struct ScratchpadSlotValue : ScratchpadSlot
+    {
+        template <typename U>
+        explicit ScratchpadSlotValue(U &&v) : value(std::forward<U>(v)) {}
+
+        T value;
+    };
+
     struct PassContext
     {
         grh::Netlist &netlist;
         PassDiagnostics &diags;
-        bool verbose = false;
-        grh::Graph *currentGraph = nullptr;
-        std::string_view entryName;
+        PassVerbosity verbosity = PassVerbosity::Info;
+        std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>> scratchpad;
     };
 
     struct PassResult
@@ -77,25 +118,97 @@ namespace wolf_sv::transform
     protected:
         grh::Netlist &netlist() { return context_->netlist; }
         PassDiagnostics &diags() { return context_->diags; }
-        bool verbose() const noexcept { return context_ ? context_->verbose : false; }
-        grh::Graph *currentGraph() const noexcept { return context_ ? context_->currentGraph : nullptr; }
-        std::string_view entryName() const noexcept { return context_ ? context_->entryName : std::string_view(); }
+        PassVerbosity verbosity() const noexcept { return context_ ? context_->verbosity : PassVerbosity::Error; }
+        bool hasScratchpad(std::string_view key) const noexcept
+        {
+            if (!context_)
+            {
+                return false;
+            }
+            return context_->scratchpad.find(std::string(key)) != context_->scratchpad.end();
+        }
+        ScratchpadSlot *getScratchpadSlot(std::string_view key) noexcept
+        {
+            if (!context_)
+            {
+                return nullptr;
+            }
+            auto it = context_->scratchpad.find(std::string(key));
+            return it == context_->scratchpad.end() ? nullptr : it->second.get();
+        }
+        const ScratchpadSlot *getScratchpadSlot(std::string_view key) const noexcept
+        {
+            if (!context_)
+            {
+                return nullptr;
+            }
+            auto it = context_->scratchpad.find(std::string(key));
+            return it == context_->scratchpad.end() ? nullptr : it->second.get();
+        }
+        template <typename T>
+        T *getScratchpad(std::string_view key) noexcept
+        {
+            if (auto *slot = getScratchpadSlot(key))
+            {
+                if (auto *typed = dynamic_cast<ScratchpadSlotValue<T> *>(slot))
+                {
+                    return &typed->value;
+                }
+            }
+            return nullptr;
+        }
+        template <typename T>
+        const T *getScratchpad(std::string_view key) const noexcept
+        {
+            if (const auto *slot = getScratchpadSlot(key))
+            {
+                if (const auto *typed = dynamic_cast<const ScratchpadSlotValue<T> *>(slot))
+                {
+                    return &typed->value;
+                }
+            }
+            return nullptr;
+        }
+        template <typename T>
+        void setScratchpad(std::string key, T &&value)
+        {
+            if (!context_)
+            {
+                return;
+            }
+            context_->scratchpad.insert_or_assign(
+                std::move(key),
+                std::make_unique<ScratchpadSlotValue<std::decay_t<T>>>(std::forward<T>(value)));
+        }
+        void eraseScratchpad(std::string_view key)
+        {
+            if (!context_)
+            {
+                return;
+            }
+            context_->scratchpad.erase(std::string(key));
+        }
+        void debug(std::string message, std::string context = {});
         void error(std::string message, std::string context = {});
         void warning(std::string message, std::string context = {});
         void info(std::string message, std::string context = {});
         void error(const grh::Graph &graph, const grh::Operation &op, std::string message);
         void warning(const grh::Graph &graph, const grh::Operation &op, std::string message);
         void info(const grh::Graph &graph, const grh::Operation &op, std::string message);
+        void debug(const grh::Graph &graph, const grh::Operation &op, std::string message);
         void error(const grh::Graph &graph, const grh::Value &value, std::string message);
         void warning(const grh::Graph &graph, const grh::Value &value, std::string message);
         void info(const grh::Graph &graph, const grh::Value &value, std::string message);
+        void debug(const grh::Graph &graph, const grh::Value &value, std::string message);
         void error(const grh::Graph &graph, std::string message);
         void warning(const grh::Graph &graph, std::string message);
         void info(const grh::Graph &graph, std::string message);
+        void debug(const grh::Graph &graph, std::string message);
 
     private:
         friend class PassManager;
 
+        bool shouldEmit(PassDiagnosticKind kind) const noexcept;
         void setContext(PassContext *ctx) { context_ = ctx; }
         void clearContext() { context_ = nullptr; }
 
@@ -105,13 +218,13 @@ namespace wolf_sv::transform
         PassContext *context_ = nullptr;
     };
 
-    struct PassPipelineOptions
+    struct PassManagerOptions
     {
         bool stopOnError = true;
-        bool verbose = false;
+        PassVerbosity verbosity = PassVerbosity::Info;
     };
 
-    struct TransformResult
+    struct PassManagerResult
     {
         bool success = true;
         bool changed = false;
@@ -120,15 +233,15 @@ namespace wolf_sv::transform
     class PassManager
     {
     public:
-        explicit PassManager(PassPipelineOptions options = PassPipelineOptions());
+        explicit PassManager(PassManagerOptions options = PassManagerOptions());
 
         void addPass(std::unique_ptr<Pass> pass, std::string instanceName = {});
         void clear();
 
-        TransformResult run(grh::Netlist &netlist, PassDiagnostics &diags);
+        PassManagerResult run(grh::Netlist &netlist, PassDiagnostics &diags);
 
-        PassPipelineOptions &options() noexcept { return options_; }
-        const PassPipelineOptions &options() const noexcept { return options_; }
+        PassManagerOptions &options() noexcept { return options_; }
+        const PassManagerOptions &options() const noexcept { return options_; }
 
     private:
         struct PassEntry
@@ -137,7 +250,7 @@ namespace wolf_sv::transform
         };
 
         std::vector<PassEntry> pipeline_;
-        PassPipelineOptions options_;
+        PassManagerOptions options_;
     };
 
 } // namespace wolf_sv::transform
