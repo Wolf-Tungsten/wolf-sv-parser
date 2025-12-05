@@ -339,6 +339,12 @@ private:
 
     std::optional<SliceRange>
     deriveStructFieldSlice(const slang::ast::MemberAccessExpression& expr) const;
+    std::optional<int64_t> translateStaticIndex(const slang::ast::Expression& valueExpr,
+                                                int64_t rawIndex) const;
+    grh::Value* translateDynamicIndex(const slang::ast::Expression& valueExpr,
+                                      grh::Value& rawIndex,
+                                      const slang::ast::Expression& originExpr,
+                                      std::string_view hint);
     grh::Value* buildStaticSlice(grh::Value& input, int64_t sliceStart, int64_t sliceEnd,
                                  const slang::ast::Expression& originExpr,
                                  std::string_view hint);
@@ -623,6 +629,8 @@ protected:
                                                  const slang::ast::Statement& originStmt,
                                                  std::string_view label);
     WriteBackMemo::Slice buildFullSlice(const SignalMemoEntry& entry, grh::Value& value);
+    grh::Value* sliceExistingValue(const WriteBackMemo::Slice& existing, int64_t segMsb,
+                                   int64_t segLsb);
     grh::Value* createMuxForEntry(const SignalMemoEntry& entry, grh::Value& condition,
                                   grh::Value& onTrue, grh::Value& onFalse, std::string_view label);
     grh::Value* buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,

@@ -1119,6 +1119,7 @@ namespace wolf_sv::emit
             std::vector<std::pair<std::string, const grh::Operation *>> instanceDecls;
             std::vector<std::pair<std::string, const grh::Operation *>> dpiImportDecls;
             std::vector<std::pair<std::string, const grh::Operation *>> assignStmts;
+            std::vector<std::pair<std::string, const grh::Operation *>> portBindingStmts;
             std::vector<std::pair<std::string, const grh::Operation *>> latchBlocks;
             std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
@@ -1203,6 +1204,42 @@ namespace wolf_sv::emit
                 }
                 return candidate;
             };
+
+            // -------------------------
+            // Port bindings (handle ports mapped to internal nets with different names)
+            // -------------------------
+            auto bindInputPort = [&](const std::string &portName, const std::string &valueSymbol)
+            {
+                if (portName == valueSymbol)
+                {
+                    return;
+                }
+                if (const grh::Value *val = graph->findValue(valueSymbol))
+                {
+                    ensureWireDecl(*val);
+                }
+                portBindingStmts.emplace_back(
+                    "assign " + valueSymbol + " = " + portName + ";", nullptr);
+            };
+
+            auto bindOutputPort = [&](const std::string &portName, const std::string &valueSymbol)
+            {
+                if (portName == valueSymbol)
+                {
+                    return;
+                }
+                portBindingStmts.emplace_back(
+                    "assign " + portName + " = " + valueSymbol + ";", nullptr);
+            };
+
+            for (const auto &[name, valueSymbol] : graph->inputPorts())
+            {
+                bindInputPort(name, valueSymbol);
+            }
+            for (const auto &[name, valueSymbol] : graph->outputPorts())
+            {
+                bindOutputPort(name, valueSymbol);
+            }
 
             // -------------------------
             // Operation traversal
@@ -2435,6 +2472,21 @@ namespace wolf_sv::emit
                         moduleBuffer << "  " << attr << "\n";
                     }
                     moduleBuffer << "  " << decl << '\n';
+                }
+            }
+
+            if (!portBindingStmts.empty())
+            {
+                moduleBuffer << '\n';
+                for (const auto &[stmt, opPtr] : portBindingStmts)
+                {
+                    const std::string attr =
+                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << "\n";
+                    }
+                    moduleBuffer << "  " << stmt << '\n';
                 }
             }
 

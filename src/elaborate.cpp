@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2465,6 +2466,18 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
             continue;
         }
 
+        std::fprintf(stderr, "[seq] entry symbol=%s slices=%zu\n",
+                     entry.target->symbol ? std::string(entry.target->symbol->name).c_str()
+                                          : "<null>",
+                     entry.slices.size());
+        for (const auto& s : entry.slices) {
+            std::fprintf(stderr, "  slice msb=%lld lsb=%lld width=%lld valw=%lld\n",
+                         static_cast<long long>(s.msb),
+                         static_cast<long long>(s.lsb),
+                         static_cast<long long>(s.msb - s.lsb + 1),
+                         s.value ? static_cast<long long>(s.value->width()) : -1LL);
+        }
+
         grh::Operation* stateOp = entry.target->stateOp;
         if (stateOp->kind() == grh::OperationKind::kMemory) {
             continue;
@@ -3546,7 +3559,72 @@ std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& conditio
 std::optional<SeqAlwaysConverter::ResetExtraction>
 SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal,
                                          bool activeHigh, const WriteBackMemo::Entry& entry) {
-    grh::Operation* muxOp = dataValue.definingOp();
+    // Some guarded registers get sliced and re-concatenated during shadow merge. If all slices
+    // come from the same mux in natural bit order, peel the concat back to the mux so we can
+    // inspect its reset branch.
+    auto tryCollapseConcat = [&](grh::Value& candidate) -> grh::Value* {
+        if (!entry.target) {
+            return &candidate;
+        }
+        const int64_t targetWidth = entry.target->width > 0 ? entry.target->width
+                                                            : candidate.width();
+        grh::Operation* concatOp = candidate.definingOp();
+        if (!concatOp || concatOp->kind() != grh::OperationKind::kConcat) {
+            return &candidate;
+        }
+
+        grh::Value* commonBase = nullptr;
+        int64_t expectedMsb = targetWidth - 1;
+        for (grh::Value* part : concatOp->operands()) {
+            if (!part) {
+                return &candidate;
+            }
+            grh::Operation* sliceOp = part->definingOp();
+            if (!sliceOp || sliceOp->kind() != grh::OperationKind::kSliceStatic ||
+                sliceOp->operands().size() != 1) {
+                return &candidate;
+            }
+            grh::Value* base = sliceOp->operands().front();
+            if (!base) {
+                return &candidate;
+            }
+
+            const auto& attrs = sliceOp->attributes();
+            auto itStart = attrs.find("sliceStart");
+            auto itEnd = attrs.find("sliceEnd");
+            const int64_t* start = itStart != attrs.end() ? std::get_if<int64_t>(&itStart->second)
+                                                          : nullptr;
+            const int64_t* end = itEnd != attrs.end() ? std::get_if<int64_t>(&itEnd->second)
+                                                      : nullptr;
+            if (!start || !end) {
+                return &candidate;
+            }
+            if ((*end - *start + 1) != part->width()) {
+                return &candidate;
+            }
+            if (*end != expectedMsb) {
+                return &candidate;
+            }
+            expectedMsb = *start - 1;
+
+            if (!commonBase) {
+                commonBase = base;
+            } else if (commonBase != base) {
+                return &candidate;
+            }
+        }
+
+        if (expectedMsb != -1) {
+            return &candidate;
+        }
+        if (!commonBase || commonBase->width() != targetWidth) {
+            return &candidate;
+        }
+        return commonBase;
+    };
+
+    grh::Value* muxValue = tryCollapseConcat(dataValue);
+    grh::Operation* muxOp = muxValue ? muxValue->definingOp() : nullptr;
     if (!muxOp || muxOp->kind() != grh::OperationKind::kMux || muxOp->operands().size() != 3) {
         reportFinalizeIssue(entry, "Expected mux structure to derive reset value");
         return std::nullopt;
@@ -4267,6 +4345,14 @@ void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     if (slices.empty()) {
         return;
     }
+    std::fprintf(stderr, "[shadow-write] %s slices=%zu\n",
+                 entry.symbol ? std::string(entry.symbol->name).c_str() : "<null>",
+                 slices.size());
+    for (const auto& s : slices) {
+        std::fprintf(stderr, "  slice %lld:%lld valw=%lld\n",
+                     static_cast<long long>(s.msb), static_cast<long long>(s.lsb),
+                     s.value ? static_cast<long long>(s.value->width()) : -1LL);
+    }
     ShadowState& state = currentFrame().map[&entry];
     for (WriteBackMemo::Slice& slice : slices) {
         insertShadowSlice(state, slice);
@@ -4295,24 +4381,84 @@ AlwaysConverter::findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) c
     return findIn(regMemo_);
 }
 
+grh::Value* AlwaysConverter::sliceExistingValue(const WriteBackMemo::Slice& existing,
+                                                int64_t segMsb, int64_t segLsb) {
+    if (!existing.value) {
+        return nullptr;
+    }
+    if (segLsb == existing.lsb && segMsb == existing.msb) {
+        return existing.value;
+    }
+    if (segLsb < existing.lsb || segMsb > existing.msb || segMsb < segLsb) {
+        return nullptr;
+    }
+
+    const int64_t relStart = segLsb - existing.lsb;
+    const int64_t relEnd = segMsb - existing.lsb;
+    const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
+    grh::Operation& op =
+        graph_.createOperation(grh::OperationKind::kSliceStatic, makeControlOpName("shadow_slice"));
+    applyDebug(op, debugInfo);
+    op.addOperand(*existing.value);
+    op.setAttribute("sliceStart", relStart);
+    op.setAttribute("sliceEnd", relEnd);
+
+    grh::Value& result = graph_.createValue(makeControlValueName("shadow_slice"),
+                                            segMsb - segLsb + 1, existing.value->isSigned());
+    applyDebug(result, debugInfo);
+    op.addResult(result);
+    return &result;
+}
+
 void AlwaysConverter::insertShadowSlice(ShadowState& state,
-                                            const WriteBackMemo::Slice& slice) {
+                                        const WriteBackMemo::Slice& slice) {
     WriteBackMemo::Slice copy = slice;
     auto& entries = state.slices;
-    entries.erase(std::remove_if(entries.begin(), entries.end(),
-                                 [&](const WriteBackMemo::Slice& existing) {
-                                     return !(copy.msb < existing.lsb || copy.lsb > existing.msb);
-                                 }),
-                  entries.end());
+    std::vector<WriteBackMemo::Slice> preserved;
+    preserved.reserve(entries.size() + 2);
 
-    auto insertPos =
-        std::find_if(entries.begin(), entries.end(), [&](const WriteBackMemo::Slice& existing) {
-            if (copy.msb != existing.msb) {
-                return copy.msb > existing.msb;
+    for (const WriteBackMemo::Slice& existing : entries) {
+        const bool overlap = !(copy.msb < existing.lsb || copy.lsb > existing.msb);
+        if (!overlap) {
+            preserved.push_back(existing);
+            continue;
+        }
+
+        // Preserve upper segment of existing slice if it sits above the new slice.
+        if (existing.msb > copy.msb) {
+            const int64_t segLsb = copy.msb + 1;
+            WriteBackMemo::Slice upper = existing;
+            upper.msb = existing.msb;
+            upper.lsb = segLsb;
+            upper.value = sliceExistingValue(existing, upper.msb, upper.lsb);
+            if (upper.value) {
+                preserved.push_back(std::move(upper));
             }
-            return copy.lsb > existing.lsb;
-        });
-    entries.insert(insertPos, std::move(copy));
+        }
+
+        // Preserve lower segment of existing slice if it sits below the new slice.
+        if (existing.lsb < copy.lsb) {
+            const int64_t segMsb = copy.lsb - 1;
+            WriteBackMemo::Slice lower = existing;
+            lower.msb = segMsb;
+            lower.lsb = existing.lsb;
+            lower.value = sliceExistingValue(existing, lower.msb, lower.lsb);
+            if (lower.value) {
+                preserved.push_back(std::move(lower));
+            }
+        }
+    }
+
+    preserved.push_back(std::move(copy));
+    entries = std::move(preserved);
+
+    std::sort(entries.begin(), entries.end(), [](const WriteBackMemo::Slice& lhs,
+                                                 const WriteBackMemo::Slice& rhs) {
+        if (lhs.msb != rhs.msb) {
+            return lhs.msb > rhs.msb;
+        }
+        return lhs.lsb > rhs.lsb;
+    });
 }
 
 grh::Value* AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
@@ -4365,16 +4511,53 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
     std::vector<grh::Value*> components;
     components.reserve(state.slices.size() + 2);
 
+    auto appendHoldRange = [&](int64_t msb, int64_t lsb) -> bool {
+        if (msb < lsb) {
+            return true;
+        }
+        grh::Value* hold = nullptr;
+        if (entry.value) {
+            if (lsb == 0 && msb == entry.value->width() - 1) {
+                hold = entry.value;
+            }
+            else {
+                const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
+                grh::Operation& sliceOp =
+                    graph_.createOperation(grh::OperationKind::kSliceStatic,
+                                            makeShadowOpName(entry, "hold"));
+                applyDebug(sliceOp, debugInfo);
+                sliceOp.addOperand(*entry.value);
+                sliceOp.setAttribute("sliceStart", lsb);
+                sliceOp.setAttribute("sliceEnd", msb);
+
+                grh::Value& result = graph_.createValue(
+                    makeShadowValueName(entry, "hold"), msb - lsb + 1, entry.isSigned);
+                applyDebug(result, debugInfo);
+                sliceOp.addResult(result);
+                hold = &result;
+            }
+        }
+        else {
+            std::fprintf(stderr, "[shadow] entry=%s missing value; zero-fill %lld:%lld\n",
+                         entry.symbol ? std::string(entry.symbol->name).c_str() : "<null>",
+                         static_cast<long long>(msb), static_cast<long long>(lsb));
+            hold = createZeroValue(msb - lsb + 1);
+        }
+        if (!hold) {
+            state.composed = nullptr;
+            state.dirty = false;
+            return false;
+        }
+        components.push_back(hold);
+        return true;
+    };
+
     for (const WriteBackMemo::Slice& slice : state.slices) {
         const int64_t gapWidth = expectedMsb - slice.msb;
         if (gapWidth > 0) {
-            grh::Value* zero = createZeroValue(gapWidth);
-            if (!zero) {
-                state.composed = nullptr;
-                state.dirty = false;
+            if (!appendHoldRange(expectedMsb, slice.msb + 1)) {
                 return nullptr;
             }
-            components.push_back(zero);
             expectedMsb -= gapWidth;
         }
         components.push_back(slice.value);
@@ -4382,13 +4565,9 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
     }
 
     if (expectedMsb >= 0) {
-        grh::Value* zero = createZeroValue(expectedMsb + 1);
-        if (!zero) {
-            state.composed = nullptr;
-            state.dirty = false;
+        if (!appendHoldRange(expectedMsb, 0)) {
             return nullptr;
         }
-        components.push_back(zero);
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
@@ -4619,7 +4798,54 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         }
 
         ShadowState mergedState;
-        mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+        if (isSequential()) {
+            std::vector<int64_t> cuts;
+            const int64_t top = entry->width > 0 ? entry->width - 1 : 0;
+            cuts.push_back(top);
+            cuts.push_back(-1);
+            auto collectCuts = [&](const ShadowState* state) {
+                if (!state) {
+                    return;
+                }
+                for (const auto& s : state->slices) {
+                    cuts.push_back(s.msb);
+                    cuts.push_back(s.lsb - 1);
+                }
+            };
+            collectCuts(trueIt != trueFrame.map.end() ? &trueIt->second : nullptr);
+            collectCuts(falseIt != falseFrame.map.end() ? &falseIt->second : nullptr);
+            std::sort(cuts.begin(), cuts.end(), std::greater<int64_t>());
+            cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+
+            WriteBackMemo::Slice muxSlice;
+            if (entry->symbol && !entry->symbol->name.empty()) {
+                muxSlice.path = std::string(entry->symbol->name);
+            }
+            muxSlice.msb = top;
+            muxSlice.lsb = 0;
+            muxSlice.value = muxValue;
+
+            for (std::size_t i = 0; i + 1 < cuts.size(); ++i) {
+                const int64_t segMsb = cuts[i];
+                const int64_t segLsb = cuts[i + 1] + 1;
+                if (segMsb < segLsb) {
+                    continue;
+                }
+                WriteBackMemo::Slice seg = muxSlice;
+                seg.msb = segMsb;
+                seg.lsb = segLsb;
+                seg.value = sliceExistingValue(muxSlice, segMsb, segLsb);
+                if (seg.value) {
+                    mergedState.slices.push_back(std::move(seg));
+                }
+            }
+            if (mergedState.slices.empty()) {
+                mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+            }
+        }
+        else {
+            mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+        }
         mergedState.composed = muxValue;
         mergedState.dirty = false;
         if (falseIt == falseFrame.map.end()) {
@@ -5871,9 +6097,23 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
 }
 
 void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
+    std::fprintf(stderr, "[wb] finalize entries=%zu\n", entries_.size());
     for (Entry& entry : entries_) {
         if (entry.consumed) {
             continue;
+        }
+        std::fprintf(stderr, "[wb] entry target=%p symbol=%s slices=%zu\n",
+                     static_cast<const void*>(entry.target),
+                     entry.target && entry.target->symbol
+                         ? std::string(entry.target->symbol->name).c_str()
+                         : "<null>",
+                     entry.slices.size());
+        for (const auto& s : entry.slices) {
+            std::fprintf(stderr, "  slice msb=%lld lsb=%lld width=%lld valw=%lld\n",
+                         static_cast<long long>(s.msb),
+                         static_cast<long long>(s.lsb),
+                         static_cast<long long>(s.msb - s.lsb + 1),
+                         s.value ? static_cast<long long>(s.value->width()) : -1LL);
         }
         grh::Value* composed = composeSlices(entry, graph, diagnostics);
         if (!composed) {
@@ -6795,6 +7035,54 @@ grh::Value* CombRHSConverter::createIntConstant(int64_t value, const slang::ast:
     return createConstantValue(literal, type, hint);
 }
 
+std::optional<int64_t>
+CombRHSConverter::translateStaticIndex(const slang::ast::Expression& valueExpr,
+                                       int64_t rawIndex) const {
+    const SignalMemoEntry* entry = findMemoEntryFromExpression(valueExpr);
+    if (entry && entry->symbol) {
+        const std::string suffix = "[" + std::to_string(rawIndex) + "]";
+        for (const auto& field : entry->fields) {
+            if (field.path.ends_with(suffix)) {
+                return field.lsb;
+            }
+        }
+    }
+
+    if (!valueExpr.type || !valueExpr.type->isFixedSize()) {
+        return std::nullopt;
+    }
+    const slang::ConstantRange range = valueExpr.type->getFixedRange();
+    return static_cast<int64_t>(range.translateIndex(static_cast<int32_t>(rawIndex)));
+}
+
+grh::Value* CombRHSConverter::translateDynamicIndex(const slang::ast::Expression& valueExpr,
+                                                    grh::Value& rawIndex,
+                                                    const slang::ast::Expression& originExpr,
+                                                    std::string_view hint) {
+    if (!valueExpr.type || !valueExpr.type->isFixedSize()) {
+        return &rawIndex;
+    }
+    const slang::ConstantRange range = valueExpr.type->getFixedRange();
+    if (range.isLittleEndian()) {
+        const int64_t lower = range.lower();
+        if (lower == 0) {
+            return &rawIndex;
+        }
+        grh::Value* lowerConst = createIntConstant(lower, *originExpr.type, hint);
+        if (!lowerConst) {
+            return nullptr;
+        }
+        return buildBinaryOp(grh::OperationKind::kSub, rawIndex, *lowerConst, originExpr,
+                             hint);
+    }
+
+    grh::Value* upperConst = createIntConstant(range.upper(), *originExpr.type, hint);
+    if (!upperConst) {
+        return nullptr;
+    }
+    return buildBinaryOp(grh::OperationKind::kSub, *upperConst, rawIndex, originExpr, hint);
+}
+
 grh::Value*
 CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
     if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
@@ -6811,8 +7099,10 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
     const TypeInfo info = deriveTypeInfo(*expr.type);
     // 尽可能在 elaboration 期把元素选择降级成静态切片，避免生成 kSliceArray。
     if (std::optional<int64_t> indexConst = evaluateConstantInt(expr.selector())) {
-        if (*indexConst >= 0 && info.width > 0) {
-            const int64_t sliceStart = (*indexConst) * info.width;
+        if (info.width > 0) {
+            const int64_t baseIndex =
+                translateStaticIndex(expr.value(), *indexConst).value_or(*indexConst);
+            const int64_t sliceStart = baseIndex * info.width;
             const int64_t sliceEnd = sliceStart + info.width - 1;
             if (sliceStart >= 0 && sliceEnd >= sliceStart) {
                 return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "array_static");
@@ -6825,7 +7115,13 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
         return nullptr;
     }
 
-    return buildArraySlice(*input, *index, info.width, expr);
+    grh::Value* normalizedIndex =
+        translateDynamicIndex(expr.value(), *index, expr.selector(), "array_index");
+    if (!normalizedIndex) {
+        return nullptr;
+    }
+
+    return buildArraySlice(*input, *normalizedIndex, info.width, expr);
 }
 
 grh::Value*
@@ -6833,6 +7129,11 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
     grh::Value* input = convert(expr.value());
     if (!input) {
         return nullptr;
+    }
+
+    std::optional<slang::ConstantRange> valueRange;
+    if (expr.value().type && expr.value().type->isFixedSize()) {
+        valueRange = expr.value().type->getFixedRange();
     }
 
     using slang::ast::RangeSelectionKind;
@@ -6844,45 +7145,115 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
             reportUnsupported("static range bounds", expr);
             return nullptr;
         }
-        const int64_t sliceStart = std::min(*left, *right);
-        const int64_t sliceEnd = std::max(*left, *right);
+        const int64_t normLeft =
+            translateStaticIndex(expr.value(), *left).value_or(*left);
+        const int64_t normRight =
+            translateStaticIndex(expr.value(), *right).value_or(*right);
+        const int64_t sliceStart = std::min(normLeft, normRight);
+        const int64_t sliceEnd = std::max(normLeft, normRight);
         return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_slice");
     }
     case RangeSelectionKind::IndexedUp: {
-        grh::Value* offset = convert(expr.left());
-        if (!offset) {
-            return nullptr;
-        }
         std::optional<int64_t> width = evaluateConstantInt(expr.right());
         if (!width || *width <= 0) {
             reportUnsupported("indexed range width", expr);
             return nullptr;
         }
-        return buildDynamicSlice(*input, *offset, *width, expr, "range_up");
-    }
-    case RangeSelectionKind::IndexedDown: {
+
+        if (std::optional<int64_t> baseConst = evaluateConstantInt(expr.left())) {
+            const int64_t msbIndex = *baseConst + *width - 1;
+            const int64_t lsbIndex = *baseConst;
+            const int64_t normMsb =
+                translateStaticIndex(expr.value(), msbIndex).value_or(msbIndex);
+            const int64_t normLsb =
+                translateStaticIndex(expr.value(), lsbIndex).value_or(lsbIndex);
+            const int64_t sliceStart = std::min(normLsb, normMsb);
+            const int64_t sliceEnd = std::max(normLsb, normMsb);
+            return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_up");
+        }
+
+        if (!expr.left().type) {
+            reportUnsupported("indexed range base type", expr);
+            return nullptr;
+        }
+
         grh::Value* base = convert(expr.left());
         if (!base) {
             return nullptr;
         }
+
+        grh::Value* lsbIndex = base;
+        if (*width > 1 && valueRange && !valueRange->isLittleEndian()) {
+            grh::Value* widthValue =
+                createIntConstant(*width - 1, *expr.left().type, "range_up_width");
+            if (!widthValue) {
+                return nullptr;
+            }
+            lsbIndex =
+                buildBinaryOp(grh::OperationKind::kAdd, *base, *widthValue, expr.left(),
+                              "range_up_base");
+            if (!lsbIndex) {
+                return nullptr;
+            }
+        }
+
+        grh::Value* offset =
+            translateDynamicIndex(expr.value(), *lsbIndex, expr.left(), "range_up_index");
+        if (!offset) {
+            return nullptr;
+        }
+
+        return buildDynamicSlice(*input, *offset, *width, expr, "range_up");
+    }
+    case RangeSelectionKind::IndexedDown: {
         std::optional<int64_t> width = evaluateConstantInt(expr.right());
         if (!width || *width <= 0) {
             reportUnsupported("indexed range width", expr);
             return nullptr;
         }
-        grh::Value* offset = base;
+
+        if (std::optional<int64_t> baseConst = evaluateConstantInt(expr.left())) {
+            const int64_t msbIndex = *baseConst;
+            const int64_t lsbIndex = *baseConst - *width + 1;
+            const int64_t normMsb =
+                translateStaticIndex(expr.value(), msbIndex).value_or(msbIndex);
+            const int64_t normLsb =
+                translateStaticIndex(expr.value(), lsbIndex).value_or(lsbIndex);
+            const int64_t sliceStart = std::min(normLsb, normMsb);
+            const int64_t sliceEnd = std::max(normLsb, normMsb);
+            return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_down");
+        }
+
+        if (!expr.left().type) {
+            reportUnsupported("indexed range base type", expr);
+            return nullptr;
+        }
+
+        grh::Value* base = convert(expr.left());
+        if (!base) {
+            return nullptr;
+        }
+
+        grh::Value* lsbIndex = base;
         if (*width > 1) {
             grh::Value* widthValue =
                 createIntConstant(*width - 1, *expr.left().type, "range_down_width");
             if (!widthValue) {
                 return nullptr;
             }
-            offset = buildBinaryOp(grh::OperationKind::kSub, *base, *widthValue, expr.left(),
-                                   "range_down_off");
-            if (!offset) {
+            lsbIndex = buildBinaryOp(grh::OperationKind::kSub, *base, *widthValue, expr.left(),
+                                     "range_down_base");
+            if (!lsbIndex) {
                 return nullptr;
             }
         }
+
+        grh::Value* offset =
+            translateDynamicIndex(expr.value(), *lsbIndex, expr.left(), "range_down_index");
+        if (!offset) {
+            return nullptr;
+        }
+
         return buildDynamicSlice(*input, *offset, *width, expr, "range_down");
     }
     default:
