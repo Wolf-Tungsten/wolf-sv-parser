@@ -2029,7 +2029,7 @@ bool CombAlwaysConverter::allowBlockingAssignments() const {
 }
 
 bool CombAlwaysConverter::allowNonBlockingAssignments() const {
-    return false;
+    return true;
 }
 
 bool CombAlwaysConverter::requireNonBlockingAssignments() const {
@@ -4213,6 +4213,7 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
 void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& expr,
                                        const slang::ast::Expression& /*originExpr*/) {
     const bool isNonBlocking = expr.isNonBlocking();
+    bool effectiveNonBlocking = isNonBlocking;
     if (isNonBlocking && !allowNonBlockingAssignments()) {
         if (diagnostics_) {
             std::string message = std::string(modeLabel()) +
@@ -4221,13 +4222,30 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
         }
         return;
     }
-    if (!isNonBlocking && (!allowBlockingAssignments() || requireNonBlockingAssignments())) {
-        if (diagnostics_) {
-            std::string message = std::string(modeLabel()) +
-                                  " requires non-blocking procedural assignments";
-            diagnostics_->nyi(block_, std::move(message));
+    if (!isNonBlocking) {
+        if (requireNonBlockingAssignments()) {
+            effectiveNonBlocking = true;
+            if (diagnostics_) {
+                std::string message =
+                    "blocking assignment inside sequential always/always_ff treated as "
+                    "non-blocking (discouraged coding style)";
+                diagnostics_->warn(block_, std::move(message));
+            }
         }
-        return;
+        else if (!allowBlockingAssignments()) {
+            if (diagnostics_) {
+                std::string message = std::string(modeLabel()) +
+                                      " does not allow blocking procedural assignments";
+                diagnostics_->nyi(block_, std::move(message));
+            }
+            return;
+        }
+    }
+    if (effectiveNonBlocking && !isSequential()) {
+        if (diagnostics_) {
+            diagnostics_->warn(block_,
+                               "comb always uses non-blocking assignment; treated as blocking");
+        }
     }
     if (!rhsConverter_ || !lhsConverter_) {
         if (diagnostics_) {
@@ -5989,6 +6007,7 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         grh::Value* resetSignal = nullptr;
         bool resetActiveHigh = true;
         grh::Value* resetValue = nullptr;
+        std::vector<grh::Value*> muxValues;
     };
 
     auto parseEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
@@ -6006,12 +6025,14 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         if (tVal && fVal && tVal == q && fVal->width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = true,
-                             .data = fVal};
+                             .data = fVal,
+                             .muxValues = {&candidate}};
         }
         if (fVal && tVal && fVal == q && tVal->width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = false,
-                             .data = tVal};
+                             .data = tVal,
+                             .muxValues = {&candidate}};
         }
         return std::nullopt;
     };
@@ -6040,6 +6061,7 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
                 info->resetSignal = cond;
                 info->resetActiveHigh = resetActiveHigh;
                 info->resetValue = resetBranch;
+                info->muxValues.push_back(&candidate);
                 return info;
             }
             return std::nullopt;
@@ -6081,6 +6103,27 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
     if (latch->resetSignal) {
         op.setAttribute("rstPolarity",
                         latch->resetActiveHigh ? std::string("high") : std::string("low"));
+    }
+
+    auto pruneMuxValue = [&](grh::Value* value) {
+        if (!value) {
+            return;
+        }
+        if (!value->users().empty()) {
+            return;
+        }
+        grh::Operation* op = value->definingOp();
+        if (!op || op->kind() != grh::OperationKind::kMux) {
+            return;
+        }
+        if (op->results().size() != 1 || op->results().front() != value) {
+            return;
+        }
+        const std::string opSymbol = op->symbol();
+        graph.removeOperation(opSymbol);
+    };
+    for (grh::Value* muxVal : latch->muxValues) {
+        pruneMuxValue(muxVal);
     }
 
     if (diagnostics) {
