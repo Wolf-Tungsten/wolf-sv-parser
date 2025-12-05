@@ -47,7 +47,7 @@
 
 ## KR2：PassManager 顺序注册与执行
 - 新增 `class PassManager { PassManagerOptions options; std::vector<PassEntry> pipeline; PassRegistry registry; };`，`PassEntry` 持有 `factory`、`id`，注册顺序即执行顺序。
-- `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `constprop,inline`）构建；测试可注入 fake pass factory 验证执行顺序。
+- `registry` 支持按 id 创建 pass，便于主流程通过字符串管线（如 `const-fold,inline`）构建；测试可注入 fake pass factory 验证执行顺序。
 - `run(Netlist&, PassDiagnostics&)` 逐个执行，累积 `changed`；遇到 `failed` 或 diagnostics 中 error 时根据 `options.stopOnError` 决定立即终止或继续，统一返回 `PassManagerResult{success, changed}`。
 - 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbosity` 控制最低诊断保留级别以及调试级别的 start/finish 日志。
 
@@ -66,7 +66,7 @@
 - 检查顺序：先 schema（kind 与 operand/result/attr 的约束），再 symbol 存在性，最后指针缓存/用户列表一致性；可在致命错误后继续收集其余错误以便一次性暴露问题。
 
 ## KR1：创建 GRHVerifyPass 骨架
-- 文件落在 `include/pass/grh_verify.hpp` 与 `src/pass/grh_verify.cpp`，通过 PassRegistry 注册 id/name/desc；构造函数参数控制是否自动修复指针缓存（默认开启）与 `stop_on_error`。
+- 文件落在 `include/pass/grh_verify.hpp` 与 `src/pass/grh_verify.cpp`，通过 PassRegistry 注册 id/name/desc；构造函数参数仅控制是否自动修复指针缓存（默认开启）。
 - PassContext 复用 diagnostics，增加轻量统计结构记录修复次数/错误计数；遍历入口覆盖所有 Graph/Operation/Value（含子图），保持拓扑遍历封装在私有辅助函数中。
 - 失败条件：遇到不可修复的缺失 symbol/未知 kind 等直接标记 `failed`，并写入 diag；可修复项完成修复后仅计入 warn/info。
 
@@ -76,11 +76,41 @@
 - 对于 schema 违规的 op，输出携带 op symbol/kind 与期望/实际值的错误信息，帮助定位；保持统计以便在低阈值 verbosity 下输出摘要。
 
 ## KR3：连接关系校验与修复
-- 先按 symbol 检查 `operandsSymbols/resultsSymbols`、Value `definingOpSymbol`、user 记录的 `opSymbol` 是否能在所属 Graph/Netlist 中解析；缺失直接报错并视为不可修复。
-- 对解析成功的实体比对指针缓存与 symbol 反查结果：不一致则在 `autoFixPointers` 开启时回填/纠正（`operandsPtrs/resultsPtrs/definingOpPtr` 等），并诊断一次修复；关闭自动修复则仅报 warn。
-- 校验 Value 的 users 列表：验证用户 op 与 operandIndex 合法、去重，同步回写缺失/错误的 user 关系；必要时重建单个 Value 的 user 集合以消除漂移。
-- 检查节点所属 Graph 一致性与循环引用（如 def 与 user 不在同一图、或 def 指向空），发现后报错并阻止后续 fix，避免破坏拓扑。
+- 先按 symbol 检查 `operandsSymbols/resultsSymbols`、Value `definingOpSymbol`、user 记录的 `opSymbol` 是否能在所属 Graph 中解析；缺失直接报错，生产者存在但 `definingOpSymbol` 为空时发出警告。
+- `autoFixPointers` 开启时通过 `operandValue`/`resultValue` 解析填充指针缓存，解析失败报错；当前不额外比对已有指针与 symbol 的一致性。
+- 基于操作数引用构建期望的 users 列表，若不一致则重建并标记 changed，同时为 user 填充 `operationPtr`；未做 operandIndex 合法性或跨图一致性校验。
 
 ## 诊断与测试
 - Diagnostics 分级：schema/缺失 symbol 记为 Error，自动修复记为 Warn/Info（含修复详情与节点标识），多余 attr 仅 Info；pass 结束时在 verbose 下打印统计摘要。
-- 新增 transform 单测覆盖：1) kind/schema 违规报错；2) symbol 缺失导致失败；3) 指针缓存错误但可按 symbol 修复；4) user 列表缺项/错位被重建；5) 多余 attr 仅产生 Info 诊断；相关 fixture 写在 `tests/data/transform/grh_verify_*`。
+- 单测覆盖当前实现的核心路径：1) kind/schema 违规报错；2) operand symbol 缺失导致失败；3) user 列表缺失时按操作数重建并返回 changed；4) 多余 attr 仅产生 Info 诊断。
+
+# Objective 4
+
+> 目标：构建 ConstantFoldPass，对所有输入均为常量的纯组合节点做常量传播和折叠，生成新的 kConstant 并迭代收敛，同时遵守 SystemVerilog 的宽度/符号/四态规则。
+
+## 定位与策略
+- Pass id `const-fold`，默认在 `grh-verify` 之后运行；仅处理纯组合且无副作用的算子（kConstant/算术逻辑/concat/replicate/slice/mux/assign），跳过 memory/instance/dpic/时序寄存器等节点。
+- 统一使用 `slang::SVInt`/`logic_t` 做常量解析与运算，按 Value 的 `width/isSigned` 控制 resize 与有符号/无符号运算，避免自定义位宽规则偏离 SystemVerilog。
+- 新生成的常量 op/result 与原 Graph 同级创建，命名使用稳定前缀（如 `__constfold_${op.symbol()}_${resIdx}`），在 debug/info 级诊断中记录替换来源与 constValue。
+
+## KR1：ConstantFoldPass 骨架与配置
+- 新增 `include/pass/const_fold.hpp`、`src/pass/const_fold.cpp`，注册到 PassManager；选项包含 `maxIterations`（默认 8）、`allowXProp`（遇到 X/Z 是否仍折叠）、`verbosity` 透传。
+- 运行前扫描所有 Graph，解析现有 `kConstant` 的 constValue 建立常量表（Value symbol → 解析后的 SVInt）；解析失败直接报错并返回 failed，避免污染后续计算。
+- Pass 内维护 `ConstantStore`（符号到 SVInt+sign+width）与 `FoldCandidate` 辅助结构，减少重复解析与字符串拷贝；每轮清零 changed，结束后累积到 PassResult.changed。
+
+## KR2：常量折叠引擎
+- 解析：`parseConst(Value&, const std::string&)` 基于 `SVInt::fromString`，失败报错；随后按 Value 元信息执行 `resize(width, isSigned)`（不合法宽度报错），记录是否含 unknown。
+- 支持的折叠表：kAdd/Sub/Mul/Div/Mod/And/Or/Xor/Xnor/Shl/LShr/AShr，kNot/LogicNot/Reduce{And/Or/Xor/Nor/Nand/Xnor}，kLogicAnd/LogicOr，kMux，kConcat，kReplicate（用 `rep` 属性），kSliceStatic（`sliceStart/sliceEnd`）、kSliceDynamic/kSliceArray（`sliceWidth`），kAssign（传递）。缺属性或未知 kind 返回 nullopt 并记 debug。
+- 运算前先将每个操作数按自身 Value 的 `width/isSigned` 统一 `resize`/sign-extend，避免宽度漂移；结果再按 result Value 目标宽度 `resize`，`allowXProp=false` 且任一操作数含 X/Z 时放弃折叠并记录 warning。
+- 新常量字符串：通过 `SVInt::toString(LiteralBase::Hex, minDigits)`（minDigits 由结果 width/4 向上取整）生成 `'h` 表示，保留符号位信息，保证 emit 与既有 constValue 兼容。
+
+## KR3：迭代收敛与替换策略
+- 单轮：按 operationOrder 遍历可折叠节点，所有 operands 均在常量表时调用折叠引擎；成功则将每个 result 写入常量表，并记录待替换队列。
+- 插入与替换：为每个折叠结果创建新的 Value 与 kConstant op（addResult 关联），遍历原 result users 调用 `replaceOperand` 指向新常量；标记 changed，统计被解绑的旧 users（暂不删除原 op）。
+- 迭代到 `maxIterations` 或无新增常量即停止；达到上限仍有可折叠节点时发 warning；PassResult.failed 仅在解析/必需属性缺失等错误发生时置位。
+- 诊断：error（const 解析失败、缺 attr）、warning（遇 X/Z 放弃折叠、迭代上限）、info/debug（折叠详情、替换节点/新 constValue），遵循 verbosity 过滤。
+
+## KR4：测试与覆盖
+- 新增 `tests/transform/test_const_fold_pass.cpp`，用 PassManager 跑 `const-fold` 验证：1) 算术/位/逻辑基础折叠（含 sign/width 调整），2) concat/replicate/slice/mux/assign 折叠，3) allowXProp=false 时含 X/Z 不替换，4) 链式/互依赖场景需多轮迭代收敛，5) 缺属性或 constValue 无法解析时报错。
+- 断言 PassResult.changed/failed、diag 种类与数量以及结果 Value 的 constValue 字符串符合预期；覆盖 signed/unsigned 与宽度截断场景，避免误扩展。
+- CMake 注册新测试 target，纳入 `ctest`；必要时增加构造辅助函数减少重复样例代码。

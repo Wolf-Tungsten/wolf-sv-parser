@@ -19,6 +19,7 @@
 #include "emit.hpp"
 #include "transform.hpp"
 #include "pass/demo_stats.hpp"
+#include "pass/const_fold.hpp"
 #include "pass/grh_verify.hpp"
 
 using namespace slang::driver;
@@ -197,6 +198,7 @@ int main(int argc, char **argv)
     wolf_sv::transform::PassDiagnostics transformDiagnostics;
     wolf_sv::transform::PassManager passManager;
     passManager.addPass(std::make_unique<wolf_sv::transform::GRHVerifyPass>());
+    passManager.addPass(std::make_unique<wolf_sv::transform::ConstantFoldPass>());
     passManager.addPass(std::make_unique<wolf_sv::transform::StatsPass>());
     wolf_sv::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
 

@@ -223,6 +223,17 @@ target_link_libraries(transform-grh-verify
 
 register_test_exe(transform-grh-verify)
 
+add_executable(transform-const-fold
+    tests/transform/test_const_fold_pass.cpp
+)
+
+target_link_libraries(transform-const-fold
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-const-fold)
+
 # elaborate: hierarchy
 add_executable(elaborate-hierarchy
     tests/elaborate/test_elaborate_hierarchy.cpp

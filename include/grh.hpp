@@ -322,6 +322,9 @@ public:
     const Value* inputPortValue(std::string_view portName) const noexcept;
     Value* outputPortValue(std::string_view portName) noexcept;
     const Value* outputPortValue(std::string_view portName) const noexcept;
+    void replaceOutputValue(Value& oldValue, Value& newValue);
+
+    bool removeOperation(std::string_view symbol);
 
     void rehydratePointers();
     void writeJson(slang::JsonWriter& writer) const;

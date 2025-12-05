@@ -1299,6 +1299,71 @@ namespace wolf_sv::grh
         return findValue(it->second);
     }
 
+    void Graph::replaceOutputValue(Value &oldValue, Value &newValue)
+    {
+        ensureGraphOwnership(*this, oldValue);
+        ensureGraphOwnership(*this, newValue);
+        for (auto &entry : outputPorts_)
+        {
+            if (entry.second == oldValue.symbol())
+            {
+                entry.second = newValue.symbol();
+                oldValue.isOutput_ = false;
+                newValue.setAsOutput();
+            }
+        }
+    }
+
+    bool Graph::removeOperation(std::string_view symbol)
+    {
+        auto it = operations_.find(std::string(symbol));
+        if (it == operations_.end())
+        {
+            return false;
+        }
+
+        Operation &op = *it->second;
+
+        for (std::size_t i = 0; i < op.operands_.size(); ++i)
+        {
+            Value *operand = (i < op.operandPtrs_.size()) ? op.operandPtrs_[i] : nullptr;
+            if (!operand)
+            {
+                operand = findValue(op.operands_[i]);
+            }
+            if (!operand)
+            {
+                continue;
+            }
+            auto &users = operand->users_;
+            users.erase(std::remove_if(users.begin(), users.end(), [&](const ValueUser &user)
+                                       { return user.operationSymbol == op.symbol() && user.operandIndex == i; }),
+                        users.end());
+        }
+
+        for (std::size_t i = 0; i < op.results_.size(); ++i)
+        {
+            Value *result = (i < op.resultPtrs_.size()) ? op.resultPtrs_[i] : nullptr;
+            if (!result)
+            {
+                result = findValue(op.results_[i]);
+            }
+            if (!result)
+            {
+                continue;
+            }
+            if (result->definingOpSymbol_ && *result->definingOpSymbol_ == op.symbol())
+            {
+                result->definingOpSymbol_.reset();
+                result->definingOpPtr_ = nullptr;
+            }
+        }
+
+        operations_.erase(it);
+        operationOrder_.erase(std::remove(operationOrder_.begin(), operationOrder_.end(), std::string(symbol)), operationOrder_.end());
+        return true;
+    }
+
     void Graph::rehydratePointers()
     {
         for (auto &entry : values_)
