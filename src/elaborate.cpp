@@ -6410,6 +6410,34 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         return std::nullopt;
     };
 
+    auto makeLogicNot = [&](grh::Value& input, std::string_view label) -> grh::Value* {
+        const auto info = srcLocForEntry(entry);
+        grh::Operation& op = graph.createOperation(grh::OperationKind::kLogicNot,
+                                                   makeOperationName(entry, label));
+        applyDebug(op, info);
+        op.addOperand(input);
+        grh::Value& result =
+            graph.createValue(makeValueName(entry, label), 1, /*isSigned=*/false);
+        applyDebug(result, info);
+        op.addResult(result);
+        return &result;
+    };
+
+    auto makeLogicOr = [&](grh::Value& lhs, grh::Value& rhs, std::string_view label)
+                           -> grh::Value* {
+        const auto info = srcLocForEntry(entry);
+        grh::Operation& op = graph.createOperation(grh::OperationKind::kLogicOr,
+                                                   makeOperationName(entry, label));
+        applyDebug(op, info);
+        op.addOperand(lhs);
+        op.addOperand(rhs);
+        grh::Value& result =
+            graph.createValue(makeValueName(entry, label), 1, /*isSigned=*/false);
+        applyDebug(result, info);
+        op.addResult(result);
+        return &result;
+    };
+
     auto parseResetEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
         grh::Operation* op = candidate.definingOp();
         if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
@@ -6449,9 +6477,138 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         return std::nullopt;
     };
 
+    auto parseMuxChainLatch = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
+        if (!entry.target || !entry.target->value) {
+            return std::nullopt;
+        }
+        struct ChainStep {
+            grh::Value* muxValue = nullptr;
+            grh::Value* cond = nullptr;
+            grh::Value* dataBranch = nullptr;
+            bool holdOnTrue = false;
+        };
+
+        grh::Value* q = entry.target->value;
+        auto reachesHold = [&](grh::Value* value, auto&& self,
+                               std::unordered_set<const grh::Value*>& visited) -> bool {
+            if (!value) {
+                return false;
+            }
+            if (!visited.insert(value).second) {
+                return false;
+            }
+            if (value == q) {
+                return true;
+            }
+            grh::Operation* op = value->definingOp();
+            if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+                return false;
+            }
+            return self(op->operands()[1], self, visited) || self(op->operands()[2], self, visited);
+        };
+
+        std::vector<ChainStep> chain;
+        std::unordered_set<const grh::Value*> visited;
+        grh::Value* cursor = &candidate;
+        while (true) {
+            if (cursor == q) {
+                break;
+            }
+            if (!visited.insert(cursor).second) {
+                return std::nullopt;
+            }
+            grh::Operation* op = cursor->definingOp();
+            if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+                return std::nullopt;
+            }
+            grh::Value* cond = ensureOneBit(op->operands()[0], "mux condition");
+            if (!cond) {
+                return std::nullopt;
+            }
+            grh::Value* tVal = op->operands()[1];
+            grh::Value* fVal = op->operands()[2];
+            std::unordered_set<const grh::Value*> seenTrue;
+            const bool trueHolds = reachesHold(tVal, reachesHold, seenTrue);
+            std::unordered_set<const grh::Value*> seenFalse;
+            const bool falseHolds = reachesHold(fVal, reachesHold, seenFalse);
+            if (trueHolds == falseHolds) {
+                return std::nullopt;
+            }
+            ChainStep step;
+            step.muxValue = cursor;
+            step.cond = cond;
+            step.dataBranch = trueHolds ? fVal : tVal;
+            step.holdOnTrue = trueHolds;
+            chain.push_back(step);
+            cursor = trueHolds ? tVal : fVal;
+        }
+
+        if (chain.empty()) {
+            return std::nullopt;
+        }
+
+        grh::Value* enable = nullptr;
+        for (const ChainStep& step : chain) {
+            grh::Value* clause =
+                step.holdOnTrue ? makeLogicNot(*step.cond, "latch_hold_not") : step.cond;
+            if (!clause) {
+                return std::nullopt;
+            }
+            if (!enable) {
+                enable = clause;
+            }
+            else {
+                grh::Value* combined = makeLogicOr(*enable, *clause, "latch_hold_or");
+                if (!combined) {
+                    return std::nullopt;
+                }
+                enable = combined;
+            }
+        }
+
+        grh::Value* replacement = createZeroValue(entry, targetWidth, graph);
+        if (!replacement) {
+            reportIssue(entry, "Latch reconstruction failed to create hold replacement", diagnostics);
+            return std::nullopt;
+        }
+        grh::Value* dataExpr = replacement;
+        const auto info = srcLocForEntry(entry);
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            if (!it->dataBranch || it->dataBranch->width() != targetWidth) {
+                reportIssue(entry, "Latch mux data width mismatch", diagnostics);
+                return std::nullopt;
+            }
+            grh::Value* trueVal = it->holdOnTrue ? dataExpr : it->dataBranch;
+            grh::Value* falseVal = it->holdOnTrue ? it->dataBranch : dataExpr;
+            grh::Operation& mux =
+                graph.createOperation(grh::OperationKind::kMux, makeOperationName(entry, "latch_mux"));
+            applyDebug(mux, info);
+            mux.addOperand(*it->cond);
+            mux.addOperand(*trueVal);
+            mux.addOperand(*falseVal);
+            grh::Value& muxResult =
+                graph.createValue(makeValueName(entry, "latch_mux"), targetWidth, entry.target->isSigned);
+            applyDebug(muxResult, info);
+            mux.addResult(muxResult);
+            dataExpr = &muxResult;
+        }
+
+        LatchInfo infoStruct;
+        infoStruct.enable = enable;
+        infoStruct.enableActiveLow = false;
+        infoStruct.data = dataExpr;
+        for (const ChainStep& step : chain) {
+            infoStruct.muxValues.push_back(step.muxValue);
+        }
+        return infoStruct;
+    };
+
     std::optional<LatchInfo> latch = parseResetEnableMux(dataValue);
     if (!latch) {
         latch = parseEnableMux(dataValue);
+    }
+    if (!latch) {
+        latch = parseMuxChainLatch(dataValue);
     }
     if (!latch) {
         return false;
