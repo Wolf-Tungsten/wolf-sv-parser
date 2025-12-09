@@ -407,6 +407,8 @@ protected:
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
     const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
+    std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
+    slang::ast::EvalContext& ensureEvalContext();
 
 private:
     struct BitRange {
@@ -426,13 +428,13 @@ private:
                                                const slang::ast::RangeSelectExpression& expr,
                                                const std::string& basePath, std::string& pathOut);
     std::optional<std::string> buildFieldPath(const slang::ast::Expression& expr);
-    std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
+
+private:
     std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
                                               std::string_view path) const;
     grh::Value* createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
                                  const slang::ast::Expression& originExpr);
     void report(std::string message);
-    slang::ast::EvalContext& ensureEvalContext();
     static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
     void flushPending(std::vector<WriteResult>& outResults);
 
@@ -491,6 +493,10 @@ public:
     bool convert(const slang::ast::AssignmentExpression& assignment,
                  grh::Value& rhsValue) override;
     bool convertExpression(const slang::ast::Expression& expr, grh::Value& rhsValue) override;
+
+private:
+    bool handleDynamicElementAssign(const slang::ast::ElementSelectExpression& element,
+                                    grh::Value& rhsValue);
 };
 
 /// RHS converter used by procedural always blocks.

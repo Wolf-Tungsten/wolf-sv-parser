@@ -1888,6 +1888,15 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
         return true;
     }
 
+    if (const auto* element = root->as_if<slang::ast::ElementSelectExpression>()) {
+        std::optional<int64_t> staticIndex = evaluateConstant(element->selector());
+        if (!staticIndex) {
+            if (handleDynamicElementAssign(*element, rhsValue)) {
+                return true;
+            }
+        }
+    }
+
     return AlwaysBlockLHSConverter::convert(assignment, rhsValue);
 }
 
@@ -1925,7 +1934,144 @@ bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr
         break;
     }
 
+    if (const auto* element = root->as_if<slang::ast::ElementSelectExpression>()) {
+        std::optional<int64_t> staticIndex = evaluateConstant(element->selector());
+        if (!staticIndex) {
+            if (handleDynamicElementAssign(*element, rhsValue)) {
+                return true;
+            }
+        }
+    }
+
     return AlwaysBlockLHSConverter::convertExpression(expr, rhsValue);
+}
+
+bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
+    const slang::ast::ElementSelectExpression& element, grh::Value& rhsValue) {
+    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+    if (!seqOwner) {
+        return false;
+    }
+
+    const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(element);
+    const SignalMemoEntry* entry = symbol ? findMemoEntry(*symbol) : nullptr;
+    if (!entry || (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory)) {
+        return false;
+    }
+
+    if (!owner_.rhsConverter_) {
+        if (diagnostics()) {
+            diagnostics()->nyi(owner_.block(), "Dynamic LHS index requires RHS converter context");
+        }
+        return true;
+    }
+
+    grh::Value* indexValue = owner_.rhsConverter_->convert(element.selector());
+    if (!indexValue) {
+        return true;
+    }
+
+    const int64_t targetWidth = entry->width > 0 ? entry->width : 1;
+    if (rhsValue.width() <= 0 || rhsValue.width() > targetWidth) {
+        if (diagnostics()) {
+            diagnostics()->nyi(owner_.block(), "Dynamic bit select RHS width mismatch");
+        }
+        return true;
+    }
+
+    grh::Value* baseValue = owner_.lookupShadowValue(*entry);
+    if (!baseValue) {
+        baseValue = entry->value;
+    }
+    if (!baseValue) {
+        baseValue = owner_.createZeroValue(targetWidth);
+    }
+    if (!baseValue) {
+        return true;
+    }
+
+    grh::Value* maskValue =
+        seqOwner->buildShiftedMask(*indexValue, targetWidth, "lhs_dyn_mask");
+    if (!maskValue) {
+        return true;
+    }
+
+    const auto debugInfo = makeDebugInfo(owner_.sourceManager_, &element);
+    grh::Operation& invMaskOp = owner_.graph_.createOperation(
+        grh::OperationKind::kNot, owner_.makeControlOpName("lhs_dyn_inv_mask"));
+    applyDebug(invMaskOp, debugInfo);
+    invMaskOp.addOperand(*maskValue);
+    grh::Value& invMaskVal = owner_.graph_.createValue(
+        owner_.makeControlValueName("lhs_dyn_inv_mask"), targetWidth, /*isSigned=*/false);
+    applyDebug(invMaskVal, debugInfo);
+    invMaskOp.addResult(invMaskVal);
+
+    grh::Operation& holdOp = owner_.graph_.createOperation(
+        grh::OperationKind::kAnd, owner_.makeControlOpName("lhs_dyn_hold"));
+    applyDebug(holdOp, debugInfo);
+    holdOp.addOperand(*baseValue);
+    holdOp.addOperand(invMaskVal);
+    grh::Value& holdVal = owner_.graph_.createValue(
+        owner_.makeControlValueName("lhs_dyn_hold"), targetWidth, entry->isSigned);
+    applyDebug(holdVal, debugInfo);
+    holdOp.addResult(holdVal);
+
+    const int64_t padWidth = targetWidth - rhsValue.width();
+    grh::Value* paddedRhs = rhsValue.width() == targetWidth
+                                ? &rhsValue
+                                : seqOwner->createConcatWithZeroPadding(rhsValue, padWidth,
+                                                                        "lhs_dyn_rhs_pad");
+    if (!paddedRhs) {
+        return true;
+    }
+
+    grh::Value* shiftedData =
+        seqOwner->buildShiftedBitValue(*paddedRhs, *indexValue, targetWidth, "lhs_dyn_data");
+    if (!shiftedData) {
+        return true;
+    }
+
+    grh::Operation& mergeOp = owner_.graph_.createOperation(
+        grh::OperationKind::kOr, owner_.makeControlOpName("lhs_dyn_merge"));
+    applyDebug(mergeOp, debugInfo);
+    mergeOp.addOperand(holdVal);
+    mergeOp.addOperand(*shiftedData);
+    grh::Value& mergedVal = owner_.graph_.createValue(
+        owner_.makeControlValueName("lhs_dyn_merge"), targetWidth, entry->isSigned);
+    applyDebug(mergedVal, debugInfo);
+    mergeOp.addResult(mergedVal);
+
+    grh::Value* finalVal = &mergedVal;
+    if (grh::Value* guard = owner_.currentGuardValue()) {
+        grh::Value* guardBit = owner_.coerceToCondition(*guard);
+        if (guardBit) {
+            grh::Operation& muxOp = owner_.graph_.createOperation(
+                grh::OperationKind::kMux, owner_.makeControlOpName("lhs_dyn_guard"));
+            applyDebug(muxOp, debugInfo);
+            muxOp.addOperand(*guardBit);
+            muxOp.addOperand(mergedVal);
+            muxOp.addOperand(*baseValue);
+            grh::Value& muxVal = owner_.graph_.createValue(
+                owner_.makeControlValueName("lhs_dyn_guard"), targetWidth, entry->isSigned);
+            applyDebug(muxVal, debugInfo);
+            muxOp.addResult(muxVal);
+            finalVal = &muxVal;
+        }
+    }
+
+    WriteBackMemo::Slice slice;
+    if (entry->symbol && !entry->symbol->name.empty()) {
+        slice.path = std::string(entry->symbol->name);
+    }
+    slice.msb = targetWidth - 1;
+    slice.lsb = 0;
+    slice.value = finalVal;
+    slice.originExpr = &element;
+
+    std::vector<WriteBackMemo::Slice> slices;
+    slices.push_back(std::move(slice));
+    owner_.handleEntryWrite(*entry, std::move(slices));
+    return true;
 }
 
 AlwaysConverter::LoopScopeGuard::LoopScopeGuard(
