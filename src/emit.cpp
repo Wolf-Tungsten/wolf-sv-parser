@@ -2161,21 +2161,29 @@ namespace wolf_sv::emit
                     {
                         decl << *moduleName << " ";
                     }
-                    decl << instanceName << " (\n";
+                    std::vector<std::pair<std::string, std::string>> connections;
+                    connections.reserve(inputNames->size() + outputNames->size());
                     for (std::size_t i = 0; i < inputNames->size(); ++i)
                     {
                         if (i < operands.size())
                         {
-                            decl << "    ." << (*inputNames)[i] << "(" << operands[i]->symbol() << "),\n";
+                            connections.emplace_back((*inputNames)[i], operands[i]->symbol());
                         }
                     }
                     for (std::size_t i = 0; i < outputNames->size(); ++i)
                     {
                         if (i < results.size())
                         {
-                            decl << "    ." << (*outputNames)[i] << "(" << results[i]->symbol() << ")";
-                            decl << (i + 1 == outputNames->size() ? "\n" : ",\n");
+                            connections.emplace_back((*outputNames)[i], results[i]->symbol());
                         }
+                    }
+
+                    decl << instanceName << " (\n";
+                    for (std::size_t i = 0; i < connections.size(); ++i)
+                    {
+                        const auto &conn = connections[i];
+                        decl << "    ." << conn.first << "(" << conn.second << ")";
+                        decl << (i + 1 == connections.size() ? "\n" : ",\n");
                     }
                     decl << "  );";
                     instanceDecls.emplace_back(decl.str(), &op);
