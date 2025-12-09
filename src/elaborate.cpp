@@ -3874,6 +3874,10 @@ grh::Value* SeqAlwaysConverter::resolveSyncResetSignal(const slang::ast::ValueSy
 }
 
 void AlwaysConverter::visitStatement(const slang::ast::Statement& stmt) {
+    if (stmt.kind == slang::ast::StatementKind::Invalid) {
+        reportInvalidStmt(stmt);
+        return;
+    }
     if (stmt.kind == slang::ast::StatementKind::Break) {
         handleLoopControlRequest(LoopControl::Break, stmt);
         return;
@@ -4514,6 +4518,185 @@ void AlwaysConverter::reportControlFlowTodo(std::string_view label) {
     message.append(") is not implemented yet");
     diagnostics_->todo(block_, std::move(message));
     reportedControlFlowTodo_ = true;
+}
+
+void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
+    if (!diagnostics_) {
+        return;
+    }
+
+    auto emitWireAssignmentDiag = [&](const slang::ast::ValueSymbol& target) {
+        std::string message = std::string(modeLabel());
+        message.append(" performs procedural assignment to wire ");
+        if (!target.name.empty()) {
+            message.append(target.name);
+        }
+        else {
+            message.append("signal");
+        }
+        message.append("; declare it as logic/reg or use a continuous assign");
+        diagnostics_->nyi(target, std::move(message));
+    };
+
+    auto reportWireAssignment = [&](const slang::ast::Expression& expr) -> bool {
+        const auto* assign = expr.as_if<slang::ast::AssignmentExpression>();
+        if (!assign) {
+            return false;
+        }
+        if (const slang::ast::ValueSymbol* target = resolveAssignedSymbol(assign->left())) {
+            if (target->kind == slang::ast::SymbolKind::Net) {
+                emitWireAssignmentDiag(*target);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto findWireAssignment = [&](const slang::ast::Statement& root) -> const slang::ast::ValueSymbol* {
+        const auto checkExpr = [&](const slang::ast::Expression& expr)
+                                   -> const slang::ast::ValueSymbol* {
+            const auto* assign = expr.as_if<slang::ast::AssignmentExpression>();
+            if (!assign) {
+                return nullptr;
+            }
+            if (const slang::ast::ValueSymbol* sym = resolveAssignedSymbol(assign->left())) {
+                if (sym->kind == slang::ast::SymbolKind::Net) {
+                    return sym;
+                }
+            }
+            return nullptr;
+        };
+
+        const auto recurse = [&](const auto& self, const slang::ast::Statement& stmtInfo)
+                                 -> const slang::ast::ValueSymbol* {
+            if (const auto* exprStmt = stmtInfo.as_if<slang::ast::ExpressionStatement>()) {
+                if (const slang::ast::ValueSymbol* sym = checkExpr(exprStmt->expr)) {
+                    return sym;
+                }
+            }
+            if (const auto* procAssign = stmtInfo.as_if<slang::ast::ProceduralAssignStatement>()) {
+                if (const slang::ast::ValueSymbol* sym = checkExpr(procAssign->assignment)) {
+                    return sym;
+                }
+            }
+            if (const auto* timed = stmtInfo.as_if<slang::ast::TimedStatement>()) {
+                if (const slang::ast::ValueSymbol* sym = self(self, timed->stmt)) {
+                    return sym;
+                }
+            }
+            if (const auto* list = stmtInfo.as_if<slang::ast::StatementList>()) {
+                for (const slang::ast::Statement* child : list->list) {
+                    if (child) {
+                        if (const slang::ast::ValueSymbol* sym = self(self, *child)) {
+                            return sym;
+                        }
+                    }
+                }
+            }
+            if (const auto* blockStmt = stmtInfo.as_if<slang::ast::BlockStatement>()) {
+                return self(self, blockStmt->body);
+            }
+            if (const auto* conditional = stmtInfo.as_if<slang::ast::ConditionalStatement>()) {
+                if (const slang::ast::ValueSymbol* sym = self(self, conditional->ifTrue)) {
+                    return sym;
+                }
+                if (conditional->ifFalse) {
+                    if (const slang::ast::ValueSymbol* sym = self(self, *conditional->ifFalse)) {
+                        return sym;
+                    }
+                }
+            }
+            if (const auto* caseStmt = stmtInfo.as_if<slang::ast::CaseStatement>()) {
+                for (const auto& item : caseStmt->items) {
+                    if (item.stmt) {
+                        if (const slang::ast::ValueSymbol* sym = self(self, *item.stmt)) {
+                            return sym;
+                        }
+                    }
+                }
+                if (caseStmt->defaultCase) {
+                    if (const slang::ast::ValueSymbol* sym = self(self, *caseStmt->defaultCase)) {
+                        return sym;
+                    }
+                }
+            }
+            if (const auto* forLoop = stmtInfo.as_if<slang::ast::ForLoopStatement>()) {
+                return self(self, forLoop->body);
+            }
+            if (const auto* repeatLoop = stmtInfo.as_if<slang::ast::RepeatLoopStatement>()) {
+                return self(self, repeatLoop->body);
+            }
+            if (const auto* whileLoop = stmtInfo.as_if<slang::ast::WhileLoopStatement>()) {
+                return self(self, whileLoop->body);
+            }
+            if (const auto* doWhileLoop = stmtInfo.as_if<slang::ast::DoWhileLoopStatement>()) {
+                return self(self, doWhileLoop->body);
+            }
+            if (const auto* foreverLoop = stmtInfo.as_if<slang::ast::ForeverLoopStatement>()) {
+                return self(self, foreverLoop->body);
+            }
+            if (const auto* foreachLoop = stmtInfo.as_if<slang::ast::ForeachLoopStatement>()) {
+                return self(self, foreachLoop->body);
+            }
+            return nullptr;
+        };
+
+        return recurse(recurse, root);
+    };
+
+    auto findWireAssignmentInBlock = [&]() -> const slang::ast::ValueSymbol* {
+        const slang::ast::ValueSymbol* offending = nullptr;
+        AssignmentCollector collector([&](const slang::ast::Expression& lhs) {
+            if (offending) {
+                return;
+            }
+            if (const slang::ast::ValueSymbol* sym = resolveAssignedSymbol(lhs)) {
+                if (sym->kind == slang::ast::SymbolKind::Net) {
+                    offending = sym;
+                }
+            }
+        });
+        block_.getBody().visit(collector);
+        return offending;
+    };
+
+    if (const auto* invalid = stmt.as_if<slang::ast::InvalidStatement>()) {
+        if (const slang::ast::Statement* child = invalid->child) {
+            if (const auto* exprStmt = child->as_if<slang::ast::ExpressionStatement>()) {
+                if (reportWireAssignment(exprStmt->expr)) {
+                    return;
+                }
+            }
+            if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(*child)) {
+                emitWireAssignmentDiag(*netTarget);
+                return;
+            }
+            if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(stmt)) {
+                emitWireAssignmentDiag(*netTarget);
+                return;
+            }
+            if (&stmt != &block_.getBody()) {
+                if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(block_.getBody())) {
+                    emitWireAssignmentDiag(*netTarget);
+                    return;
+                }
+            }
+            if (const slang::ast::ValueSymbol* netTarget = findWireAssignmentInBlock()) {
+                emitWireAssignmentDiag(*netTarget);
+                return;
+            }
+            std::string message = std::string(modeLabel());
+            message.append(
+                " contains an invalid statement; a common cause is procedural assignment to a "
+                "wire (e.g., port not declared logic/reg)");
+            diagnostics_->nyi(block_, std::move(message));
+            return;
+        }
+    }
+
+    std::string message = std::string(modeLabel());
+    message.append(" contains an invalid statement (semantic analysis failed)");
+    diagnostics_->nyi(block_, std::move(message));
 }
 
 void AlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {

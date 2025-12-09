@@ -624,6 +624,7 @@ protected:
                           const slang::ast::Expression& originExpr);
     void flushProceduralWrites();
     void reportControlFlowTodo(std::string_view label);
+    void reportInvalidStmt(const slang::ast::Statement& stmt);
     void reportUnsupportedStmt(const slang::ast::Statement& stmt);
     virtual void recordAssignmentKind(bool /*isNonBlocking*/) {}
     void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
