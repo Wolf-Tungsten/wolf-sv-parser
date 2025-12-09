@@ -1718,6 +1718,12 @@ grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValue
 
 grh::Value* SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                                    const SignalMemoEntry& entry) {
+    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+    if (seqOwner && seqOwner->useSeqShadowValues()) {
+        if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
+            return shadow;
+        }
+    }
     return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
 }
 
@@ -2133,6 +2139,19 @@ bool SeqAlwaysConverter::allowNonBlockingAssignments() const {
 
 bool SeqAlwaysConverter::requireNonBlockingAssignments() const {
     return true;
+}
+
+void SeqAlwaysConverter::recordAssignmentKind(bool isNonBlocking) {
+    if (isNonBlocking) {
+        seenNonBlockingAssignments_ = true;
+    }
+    else {
+        seenBlockingAssignments_ = true;
+    }
+}
+
+bool SeqAlwaysConverter::useSeqShadowValues() const {
+    return seenBlockingAssignments_ && !seenNonBlockingAssignments_;
 }
 
 bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression& call,
@@ -3660,6 +3679,7 @@ bool SeqAlwaysConverter::valueDependsOnSignal(grh::Value& root, grh::Value& need
 std::optional<SeqAlwaysConverter::ResetExtraction>
 SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal,
                                          bool activeHigh, const WriteBackMemo::Entry& entry) {
+    const bool debugReset = std::getenv("WOLF_DEBUG_RESET") != nullptr;
     // Some guarded registers get sliced and re-concatenated during shadow merge. If all slices
     // come from the same mux in natural bit order, peel the concat back to the mux so we can
     // inspect its reset branch.
@@ -3674,9 +3694,37 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
             return &candidate;
         }
 
+        std::vector<grh::Value*> parts;
+        auto collectSlices = [&](auto&& self, grh::Value& node) -> bool {
+            grh::Operation* op = node.definingOp();
+            if (!op) {
+                return false;
+            }
+            if (op->kind() == grh::OperationKind::kConcat) {
+                for (grh::Value* operand : op->operands()) {
+                    if (!operand) {
+                        return false;
+                    }
+                    if (!self(self, *operand)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            if (op->kind() == grh::OperationKind::kSliceStatic && op->operands().size() == 1) {
+                parts.push_back(&node);
+                return true;
+            }
+            return false;
+        };
+
+        if (!collectSlices(collectSlices, candidate)) {
+            return &candidate;
+        }
+
         grh::Value* commonBase = nullptr;
         int64_t expectedMsb = targetWidth - 1;
-        for (grh::Value* part : concatOp->operands()) {
+        for (grh::Value* part : parts) {
             if (!part) {
                 return &candidate;
             }
@@ -3727,6 +3775,26 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
     grh::Value* muxValue = tryCollapseConcat(dataValue);
     grh::Operation* muxOp = muxValue ? muxValue->definingOp() : nullptr;
     if (!muxOp || muxOp->kind() != grh::OperationKind::kMux || muxOp->operands().size() != 3) {
+        if (debugReset) {
+            auto logOp = [](const char* label, grh::Operation* op) {
+                if (!op) {
+                    std::fprintf(stderr, "[reset-debug] %s: <null>\n", label);
+                    return;
+                }
+                std::fprintf(stderr, "[reset-debug] %s: kind=%d operands=%zu\n", label,
+                             static_cast<int>(op->kind()), op->operands().size());
+                std::size_t idx = 0;
+                for (grh::Value* operand : op->operands()) {
+                    grh::Operation* child = operand ? operand->definingOp() : nullptr;
+                    std::fprintf(stderr, "  operand[%zu]: value_width=%lld child_kind=%d\n", idx,
+                                 operand ? static_cast<long long>(operand->width()) : -1LL,
+                                 child ? static_cast<int>(child->kind()) : -1);
+                    ++idx;
+                }
+            };
+            logOp("dataOp", dataValue.definingOp());
+            logOp("collapsedOp", muxOp);
+        }
         reportFinalizeIssue(entry, "Expected mux structure to derive reset value");
         return std::nullopt;
     }
@@ -4315,6 +4383,7 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
                                        const slang::ast::Expression& /*originExpr*/) {
     const bool isNonBlocking = expr.isNonBlocking();
     bool effectiveNonBlocking = isNonBlocking;
+    recordAssignmentKind(isNonBlocking);
     if (isNonBlocking && !allowNonBlockingAssignments()) {
         if (diagnostics_) {
             std::string message = std::string(modeLabel()) +
@@ -4328,8 +4397,8 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
             effectiveNonBlocking = true;
             if (diagnostics_) {
                 std::string message =
-                    "blocking assignment inside sequential always/always_ff treated as "
-                    "non-blocking (discouraged coding style)";
+                    "blocking assignment inside sequential always/always_ff "
+                    "(discouraged coding style; blocking semantics applied)";
                 diagnostics_->warn(block_, std::move(message));
             }
         }

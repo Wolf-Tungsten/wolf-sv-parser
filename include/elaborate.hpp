@@ -625,6 +625,7 @@ protected:
     void flushProceduralWrites();
     void reportControlFlowTodo(std::string_view label);
     void reportUnsupportedStmt(const slang::ast::Statement& stmt);
+    virtual void recordAssignmentKind(bool /*isNonBlocking*/) {}
     void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
     void handleEntryWrite(const SignalMemoEntry& entry, std::vector<WriteBackMemo::Slice> slices);
     const SignalMemoEntry* findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) const;
@@ -860,10 +861,12 @@ private:
                          const WriteBackMemo::Entry& entry);
     std::optional<bool> matchResetCondition(grh::Value& condition, grh::Value& resetSignal);
     bool valueDependsOnSignal(grh::Value& root, grh::Value& needle) const;
+    void recordAssignmentKind(bool isNonBlocking) override;
     bool attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
                              grh::Value& resetValue, const WriteBackMemo::Entry& entry);
     grh::Value* resolveAsyncResetSignal(const slang::ast::Expression& expr);
     grh::Value* resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol);
+    bool useSeqShadowValues() const;
 
     struct MemoryWriteIntent {
         const SignalMemoEntry* entry = nullptr;
@@ -893,6 +896,8 @@ private:
     std::optional<std::string> clockPolarityAttr_;
     bool blockResetDerived_ = false;
     ResetContext blockResetContext_{};
+    bool seenBlockingAssignments_ = false;
+    bool seenNonBlockingAssignments_ = false;
 };
 
 /// Elaborates slang AST into GRH representation.
