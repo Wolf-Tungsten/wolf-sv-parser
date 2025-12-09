@@ -7827,6 +7827,12 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
 
         if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
             using slang::ast::ProceduralBlockKind;
+            if (block->procedureKind == ProceduralBlockKind::Initial) {
+                if (diagnostics_) {
+                    diagnostics_->warn(*block, "initial blocks are ignored (non-synthesizable)");
+                }
+                continue;
+            }
             if (block->procedureKind == ProceduralBlockKind::AlwaysLatch || isCombProceduralBlock(*block)) {
                 processCombAlways(*block, body, graph);
             }
@@ -8904,6 +8910,9 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
 
         if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
+            if (block->procedureKind == slang::ast::ProceduralBlockKind::Initial) {
+                continue;
+            }
             MemoDriverKind driver = classifyProceduralBlock(*block);
             if (driver == MemoDriverKind::None) {
                 continue;
