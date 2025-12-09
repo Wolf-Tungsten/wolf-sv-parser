@@ -1070,6 +1070,29 @@ namespace wolf_sv::emit
             }
         }
 
+        std::unordered_map<std::string, std::string> emittedModuleNames;
+        std::unordered_set<std::string> usedModuleNames;
+        for (const auto &graphSymbol : netlist.graphOrder())
+        {
+            const grh::Graph *graph = netlist.findGraph(graphSymbol);
+            if (!graph)
+            {
+                continue;
+            }
+            std::string emittedName = graphSymbol;
+            auto aliases = netlist.aliasesForGraph(graphSymbol);
+            for (const auto &alias : aliases)
+            {
+                if (usedModuleNames.find(alias) == usedModuleNames.end())
+                {
+                    emittedName = alias;
+                    break;
+                }
+            }
+            usedModuleNames.insert(emittedName);
+            emittedModuleNames.emplace(graphSymbol, std::move(emittedName));
+        }
+
         std::ostringstream moduleBuffer;
         bool firstModule = true;
         for (const grh::Graph *graph : graphsSortedByName(netlist))
@@ -1079,6 +1102,9 @@ namespace wolf_sv::emit
                 moduleBuffer << '\n';
             }
             firstModule = false;
+
+            const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
+            const std::string &moduleName = moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : graph->symbol();
 
             // -------------------------
             // Ports
@@ -2136,6 +2162,9 @@ namespace wolf_sv::emit
                         reportError("Instance missing module or port names", op.symbol());
                         break;
                     }
+                    const auto moduleNameIt = emittedModuleNames.find(*moduleName);
+                    const std::string &targetModuleName =
+                        moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : *moduleName;
 
                     std::ostringstream decl;
                     if (op.kind() == grh::OperationKind::kBlackbox)
@@ -2144,7 +2173,7 @@ namespace wolf_sv::emit
                         auto paramValues = getAttribute<std::vector<std::string>>(op, "parameterValues");
                         if (paramNames && paramValues && !paramNames->empty() && paramNames->size() == paramValues->size())
                         {
-                            decl << *moduleName << " #(" << '\n';
+                            decl << targetModuleName << " #(" << '\n';
                             for (std::size_t i = 0; i < paramNames->size(); ++i)
                             {
                                 decl << "    ." << (*paramNames)[i] << "(" << (*paramValues)[i] << ")";
@@ -2154,12 +2183,12 @@ namespace wolf_sv::emit
                         }
                         else
                         {
-                            decl << *moduleName << " ";
+                            decl << targetModuleName << " ";
                         }
                     }
                     else
                     {
-                        decl << *moduleName << " ";
+                        decl << targetModuleName << " ";
                     }
                     std::vector<std::pair<std::string, std::string>> connections;
                     connections.reserve(inputNames->size() + outputNames->size());
@@ -2378,7 +2407,7 @@ namespace wolf_sv::emit
             // -------------------------
             // Module emission
             // -------------------------
-            moduleBuffer << "module " << graph->symbol() << " (\n";
+            moduleBuffer << "module " << moduleName << " (\n";
             {
                 bool first = true;
                 auto emitPortLine = [&](const std::string &name)

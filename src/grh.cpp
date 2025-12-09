@@ -1576,6 +1576,21 @@ namespace wolf_sv::grh
         return nullptr;
     }
 
+    std::vector<std::string> Netlist::aliasesForGraph(std::string_view symbol) const
+    {
+        std::vector<std::string> aliases;
+        for (const auto &entry : graphAliasBySymbol_)
+        {
+            if (entry.second == symbol)
+            {
+                aliases.push_back(entry.first);
+            }
+        }
+        std::sort(aliases.begin(), aliases.end());
+        aliases.erase(std::unique(aliases.begin(), aliases.end()), aliases.end());
+        return aliases;
+    }
+
     void Netlist::registerGraphAlias(std::string alias, Graph &graph)
     {
         if (alias.empty())

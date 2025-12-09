@@ -7658,6 +7658,9 @@ grh::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
         if (!topInstance->name.empty()) {
             netlist.registerGraphAlias(std::string(topInstance->name), *graph);
         }
+        else if (!topInstance->getDefinition().name.empty()) {
+            netlist.registerGraphAlias(std::string(topInstance->getDefinition().name), *graph);
+        }
     }
 
     return netlist;

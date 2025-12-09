@@ -357,6 +357,7 @@ public:
     Graph& createGraph(std::string name);
     Graph* findGraph(std::string_view name) noexcept;
     const Graph* findGraph(std::string_view name) const noexcept;
+    std::vector<std::string> aliasesForGraph(std::string_view name) const;
     void registerGraphAlias(std::string alias, Graph& graph);
 
     void markAsTop(std::string_view graphName);
