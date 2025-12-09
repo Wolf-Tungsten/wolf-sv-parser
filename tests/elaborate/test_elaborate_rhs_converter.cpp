@@ -466,6 +466,18 @@ int main() {
     if (!arrayOp || arrayOp->kind() != grh::OperationKind::kSliceArray ||
         arrayOp->operands().size() != 2 || arrayOp->operands()[0] != arrayEntry->value ||
         arrayOp->operands()[1] != arrayIndexValue) {
+        std::cerr << "[rhs_converter] array_slice_res debug: op=";
+        if (!arrayOp) {
+            std::cerr << "<null>";
+        } else {
+            std::cerr << grh::toString(arrayOp->kind());
+            std::cerr << " operand_count=" << arrayOp->operands().size();
+            std::cerr << " op0=" << (arrayOp->operands().size() > 0 &&
+                                      arrayOp->operands()[0] ? arrayOp->operands()[0]->symbol() : std::string("<null>"));
+            std::cerr << " op1=" << (arrayOp->operands().size() > 1 &&
+                                      arrayOp->operands()[1] ? arrayOp->operands()[1]->symbol() : std::string("<null>"));
+        }
+        std::cerr << '\n';
         return fail("array_slice_res missing kSliceArray");
     }
     auto arrayAttr = arrayOp->attributes().find("sliceWidth");

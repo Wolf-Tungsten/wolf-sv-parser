@@ -1152,7 +1152,8 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     memMemo_(context.memMemo),
     origin_(context.origin),
     diagnostics_(context.diagnostics),
-    sourceManager_(context.sourceManager) {
+    sourceManager_(context.sourceManager),
+    preferredBlock_(context.preferredBlock) {
     instanceId_ = nextConverterInstanceId();
 }
 
@@ -1318,12 +1319,19 @@ const SignalMemoEntry* LHSConverter::findMemoEntry(const slang::ast::ValueSymbol
             return &entry;
         }
     }
+    const SignalMemoEntry* fallback = nullptr;
     for (const SignalMemoEntry& entry : regMemo_) {
         if (entry.symbol == &symbol) {
+            if (preferredBlock_ && entry.drivingBlock && entry.drivingBlock != preferredBlock_) {
+                if (!fallback) {
+                    fallback = &entry;
+                }
+                continue;
+            }
             return &entry;
         }
     }
-    return nullptr;
+    return fallback;
 }
 
 std::optional<LHSConverter::BitRange>
@@ -2001,7 +2009,8 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                               .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics,
-                              .sourceManager = sourceManager_},
+                              .sourceManager = sourceManager_,
+                              .preferredBlock = &block},
         *this);
     auto lhs = std::make_unique<CombAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
@@ -2010,7 +2019,8 @@ CombAlwaysConverter::CombAlwaysConverter(grh::Graph& graph,
                               .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics,
-                              .sourceManager = sourceManager_},
+                              .sourceManager = sourceManager_,
+                              .preferredBlock = &block},
         *this);
     setConverters(std::move(rhs), std::move(lhs));
 }
@@ -2087,7 +2097,8 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                               .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics,
-                              .sourceManager = sourceManager_},
+                              .sourceManager = sourceManager_,
+                              .preferredBlock = &block},
         *this);
     auto lhs = std::make_unique<SeqAlwaysLHSConverter>(
         LHSConverter::Context{.graph = &graph,
@@ -2096,7 +2107,8 @@ SeqAlwaysConverter::SeqAlwaysConverter(grh::Graph& graph,
                               .memMemo = memMemo,
                               .origin = &block,
                               .diagnostics = diagnostics,
-                              .sourceManager = sourceManager_},
+                              .sourceManager = sourceManager_,
+                              .preferredBlock = &block},
         *this);
     setConverters(std::move(rhs), std::move(lhs));
 }
@@ -2460,7 +2472,7 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
         if (entry.kind != WriteBackMemo::AssignmentKind::Procedural) {
             continue;
         }
-        if (!entry.target || !entry.target->stateOp) {
+        if (!entry.target) {
             reportFinalizeIssue(entry, "Sequential write target lacks register metadata");
             entry.consumed = true;
             continue;
@@ -2478,7 +2490,45 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                          s.value ? static_cast<long long>(s.value->width()) : -1LL);
         }
 
+        if (entry.target->multiDriver) {
+            const auto debugInfo =
+                makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
+            for (const auto& slice : entry.slices) {
+                if (!slice.value) {
+                    reportFinalizeIssue(entry, "Multi-driver register slice missing RHS value");
+                    continue;
+                }
+                const int64_t sliceWidth = slice.msb - slice.lsb + 1;
+                grh::Operation& split =
+                    graph().createOperation(grh::OperationKind::kRegister,
+                                            makeFinalizeOpName(*entry.target, "split"));
+                applyDebug(split, debugInfo);
+                if (clockPolarityAttr_) {
+                    split.setAttribute("clkPolarity", *clockPolarityAttr_);
+                }
+                split.addOperand(clockValue);
+                grh::Value& regVal = graph().createValue(
+                    makeFinalizeValueName(*entry.target, "split"), sliceWidth, entry.target->isSigned);
+                applyDebug(regVal, debugInfo);
+                split.addResult(regVal);
+                if (!attachDataOperand(split, *slice.value, entry)) {
+                    continue;
+                }
+                memo().recordMultiDriverPart(*entry.target,
+                                             WriteBackMemo::MultiDriverPart{slice.msb, slice.lsb,
+                                                                            &regVal});
+            }
+            entry.consumed = true;
+            consumedAny = true;
+            continue;
+        }
+
         grh::Operation* stateOp = entry.target->stateOp;
+        if (!stateOp) {
+            reportFinalizeIssue(entry, "Sequential write target lacks register metadata");
+            entry.consumed = true;
+            continue;
+        }
         if (stateOp->kind() == grh::OperationKind::kMemory) {
             continue;
         }
@@ -2490,23 +2540,43 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
 
         auto resetContext = buildResetContext(*entry.target);
         std::optional<ResetExtraction> resetExtraction;
-        if (resetContext && resetContext->kind != ResetContext::Kind::None) {
+        bool resetActive = resetContext && resetContext->kind != ResetContext::Kind::None;
+        if (resetActive) {
             if (!resetContext->signal) {
                 reportFinalizeIssue(entry, "Reset signal is unavailable for this register");
                 continue;
             }
-            resetExtraction =
-                extractResetBranches(*dataValue, *resetContext->signal, resetContext->activeHigh,
-                                     entry);
-            if (!resetExtraction) {
-                continue;
+            if (!valueDependsOnSignal(*dataValue, *resetContext->signal)) {
+                resetActive = false;
+                resetContext.reset();
+                switch (stateOp->kind()) {
+                case grh::OperationKind::kRegisterRst:
+                case grh::OperationKind::kRegisterArst:
+                    stateOp->setKind(grh::OperationKind::kRegister);
+                    break;
+                case grh::OperationKind::kRegisterEnRst:
+                case grh::OperationKind::kRegisterEnArst:
+                    stateOp->setKind(grh::OperationKind::kRegisterEn);
+                    break;
+                default:
+                    break;
+                }
+                stateOp->clearAttribute("rstPolarity");
+            }
+            else {
+                resetExtraction =
+                    extractResetBranches(*dataValue, *resetContext->signal, resetContext->activeHigh,
+                                         entry);
+                if (!resetExtraction) {
+                    continue;
+                }
             }
         }
 
         if (!attachClockOperand(*stateOp, clockValue, entry)) {
             continue;
         }
-        if (resetContext && resetContext->kind != ResetContext::Kind::None) {
+        if (resetActive) {
             if (!resetExtraction ||
                 !attachResetOperands(*stateOp, *resetContext->signal,
                                      *resetExtraction->resetValue, entry)) {
@@ -3489,6 +3559,8 @@ std::string SeqAlwaysConverter::makeFinalizeOpName(const SignalMemoEntry& entry,
     base.push_back('_');
     base.append(suffix);
     base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
+    base.push_back('_');
     base.append(std::to_string(finalizeNameCounter_++));
     return base;
 }
@@ -3504,6 +3576,8 @@ std::string SeqAlwaysConverter::makeFinalizeValueName(const SignalMemoEntry& ent
     }
     base.push_back('_');
     base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
     base.push_back('_');
     base.append(std::to_string(finalizeNameCounter_++));
     return base;
@@ -3554,6 +3628,33 @@ std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& conditio
         }
     }
     return std::nullopt;
+}
+
+bool SeqAlwaysConverter::valueDependsOnSignal(grh::Value& root, grh::Value& needle) const {
+    std::vector<grh::Value*> stack;
+    stack.push_back(&root);
+    std::unordered_set<grh::Value*> visited;
+    while (!stack.empty()) {
+        grh::Value* current = stack.back();
+        stack.pop_back();
+        if (!current) {
+            continue;
+        }
+        if (!visited.insert(current).second) {
+            continue;
+        }
+        if (current == &needle) {
+            return true;
+        }
+        if (grh::Operation* op = current->definingOp()) {
+            for (grh::Value* operand : op->operands()) {
+                if (operand) {
+                    stack.push_back(operand);
+                }
+            }
+        }
+    }
+    return false;
 }
 
 std::optional<SeqAlwaysConverter::ResetExtraction>
@@ -4622,8 +4723,12 @@ grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
     }
 
     std::string opName = "_comb_zero_";
+    opName.append(std::to_string(controlInstanceId_));
+    opName.push_back('_');
     opName.append(std::to_string(shadowNameCounter_++));
     std::string valueName = "_comb_zero_val_";
+    valueName.append(std::to_string(controlInstanceId_));
+    valueName.push_back('_');
     valueName.append(std::to_string(shadowNameCounter_++));
 
     grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
@@ -4646,8 +4751,12 @@ grh::Value* AlwaysConverter::createOneValue(int64_t width) {
         return it->second;
     }
     std::string opName = "_comb_one_";
+    opName.append(std::to_string(controlInstanceId_));
+    opName.push_back('_');
     opName.append(std::to_string(shadowNameCounter_++));
     std::string valueName = "_comb_one_val_";
+    valueName.append(std::to_string(controlInstanceId_));
+    valueName.push_back('_');
     valueName.append(std::to_string(shadowNameCounter_++));
     grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
     applyDebug(op, makeDebugInfo(sourceManager_, &block_));
@@ -5703,8 +5812,20 @@ void WriteBackMemo::recordWrite(const SignalMemoEntry& target, AssignmentKind ki
     entries_.push_back(std::move(entry));
 }
 
+void WriteBackMemo::recordMultiDriverPart(const SignalMemoEntry& target, MultiDriverPart part) {
+    if (!target.value) {
+        return;
+    }
+    MultiDriverBucket& bucket = multiDriverParts_[target.value];
+    if (!bucket.target) {
+        bucket.target = &target;
+    }
+    bucket.parts.push_back(std::move(part));
+}
+
 void WriteBackMemo::clear() {
     entries_.clear();
+    multiDriverParts_.clear();
 }
 
 std::string WriteBackMemo::makeOperationName(const Entry& entry, std::string_view suffix) {
@@ -6141,6 +6262,72 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
 
 void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
     std::fprintf(stderr, "[wb] finalize entries=%zu\n", entries_.size());
+    for (auto& [valueHandle, bucket] : multiDriverParts_) {
+        const SignalMemoEntry* target = bucket.target;
+        if (!target || !target->value || bucket.parts.empty()) {
+            continue;
+        }
+        if (target->value->definingOp()) {
+            continue;
+        }
+        auto& parts = bucket.parts;
+        std::sort(parts.begin(), parts.end(), [](const MultiDriverPart& lhs,
+                                                 const MultiDriverPart& rhs) {
+            return lhs.msb > rhs.msb;
+        });
+        const int64_t targetWidth = target->width > 0 ? target->width : 1;
+        int64_t expectedMsb = targetWidth - 1;
+        std::vector<grh::Value*> components;
+        components.reserve(parts.size() + 2);
+        Entry temp;
+        temp.target = target;
+        auto appendPad = [&](int64_t msb, int64_t lsb) -> bool {
+            if (msb < lsb) {
+                return true;
+            }
+            grh::Value* zero = createZeroValue(temp, msb - lsb + 1, graph);
+            if (!zero) {
+                return false;
+            }
+            components.push_back(zero);
+            return true;
+        };
+        for (const MultiDriverPart& part : parts) {
+            const int64_t gapWidth = expectedMsb - part.msb;
+            if (gapWidth > 0) {
+                if (!appendPad(expectedMsb, part.msb + 1)) {
+                    break;
+                }
+                expectedMsb -= gapWidth;
+            }
+            components.push_back(part.value);
+            expectedMsb = part.lsb - 1;
+        }
+        if (expectedMsb >= 0) {
+            appendPad(expectedMsb, 0);
+        }
+        if (components.empty()) {
+            continue;
+        }
+        if (components.size() == 1) {
+            grh::Operation& assign =
+                graph.createOperation(grh::OperationKind::kAssign,
+                                      makeOperationName(temp, "split_assign"));
+            applyDebug(assign, makeDebugInfo(sourceManager_, target->symbol));
+            assign.addOperand(*components.front());
+            assign.addResult(*target->value);
+            continue;
+        }
+        grh::Operation& concat =
+            graph.createOperation(grh::OperationKind::kConcat,
+                                  makeOperationName(temp, "split_concat"));
+        applyDebug(concat, makeDebugInfo(sourceManager_, target->symbol));
+        for (grh::Value* component : components) {
+            concat.addOperand(*component);
+        }
+        concat.addResult(*target->value);
+    }
+
     for (Entry& entry : entries_) {
         if (entry.consumed) {
             continue;
@@ -6168,6 +6355,7 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
         attachToTarget(entry, *composed, graph, diagnostics);
     }
     entries_.clear();
+    multiDriverParts_.clear();
 }
 
 //===---------------------------------------------------------------------===//
@@ -6178,7 +6366,8 @@ RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(con
                                               diagnostics_(context.diagnostics),
                                               sourceManager_(context.sourceManager),
                                               netMemo_(context.netMemo), regMemo_(context.regMemo),
-                                              memMemo_(context.memMemo) {
+                                              memMemo_(context.memMemo),
+                                              preferredBlock_(context.preferredBlock) {
     instanceId_ = nextConverterInstanceId();
 }
 
@@ -6786,12 +6975,19 @@ grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type&
 
 const SignalMemoEntry* RHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
     auto finder = [&](std::span<const SignalMemoEntry> memo) -> const SignalMemoEntry* {
+        const SignalMemoEntry* fallback = nullptr;
         for (const SignalMemoEntry& entry : memo) {
             if (entry.symbol == &symbol) {
+                if (preferredBlock_ && entry.drivingBlock && entry.drivingBlock != preferredBlock_) {
+                    if (!fallback) {
+                        fallback = &entry;
+                    }
+                    continue;
+                }
                 return &entry;
             }
         }
-        return nullptr;
+        return fallback;
     };
 
     if (const SignalMemoEntry* entry = finder(netMemo_)) {
@@ -7102,6 +7298,9 @@ grh::Value* CombRHSConverter::translateDynamicIndex(const slang::ast::Expression
                                                     grh::Value& rawIndex,
                                                     const slang::ast::Expression& originExpr,
                                                     std::string_view hint) {
+    if (valueExpr.type && valueExpr.type->isUnpackedArray()) {
+        return &rawIndex;
+    }
     if (!valueExpr.type || !valueExpr.type->isFixedSize()) {
         return &rawIndex;
     }
@@ -7141,14 +7340,29 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
 
     const TypeInfo info = deriveTypeInfo(*expr.type);
     // 尽可能在 elaboration 期把元素选择降级成静态切片，避免生成 kSliceArray。
-    if (std::optional<int64_t> indexConst = evaluateConstantInt(expr.selector())) {
-        if (info.width > 0) {
-            const int64_t baseIndex =
-                translateStaticIndex(expr.value(), *indexConst).value_or(*indexConst);
-            const int64_t sliceStart = baseIndex * info.width;
-            const int64_t sliceEnd = sliceStart + info.width - 1;
-            if (sliceStart >= 0 && sliceEnd >= sliceStart) {
-                return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "array_static");
+    // 仅在 selector 真正为常量选择时才这么做，避免对普通变量的默认值做静态折叠。
+    slang::ast::EvalContext& ctx = ensureEvalContext();
+    bool selectorRuntime = false;
+    if (const auto* namedSel = expr.selector().as_if<slang::ast::NamedValueExpression>()) {
+        if (const auto* sym = namedSel->symbol.as_if<slang::ast::ValueSymbol>()) {
+            const auto kind = sym->kind;
+            if (kind != slang::ast::SymbolKind::Parameter &&
+                kind != slang::ast::SymbolKind::EnumValue) {
+                selectorRuntime = true;
+            }
+        }
+    }
+
+    if (!selectorRuntime && expr.isConstantSelect(ctx)) {
+        if (std::optional<int64_t> indexConst = evaluateConstantInt(expr.selector())) {
+            if (info.width > 0) {
+                const int64_t baseIndex =
+                    translateStaticIndex(expr.value(), *indexConst).value_or(*indexConst);
+                const int64_t sliceStart = baseIndex * info.width;
+                const int64_t sliceEnd = sliceStart + info.width - 1;
+                if (sliceStart >= 0 && sliceEnd >= sliceStart) {
+                    return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "array_static");
+                }
             }
         }
     }
@@ -8384,6 +8598,11 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
             opKind = grh::OperationKind::kRegisterRst;
         }
 
+        if (entry.multiDriver) {
+            // Leave stateOp unbound; multi-driver signals will be split per driving block later.
+            continue;
+        }
+
         std::string opName = makeOperationNameForSymbol(*entry.symbol, "register", graph);
         grh::Operation& op = graph.createOperation(opKind, opName);
         applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
@@ -8638,10 +8857,10 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
     std::unordered_map<const slang::ast::ValueSymbol*, MemoDriverKind> driverKinds;
     driverKinds.reserve(candidates.size());
-    std::unordered_map<const slang::ast::ValueSymbol*, const slang::ast::ProceduralBlockSymbol*>
+    std::unordered_map<const slang::ast::ValueSymbol*,
+                       std::vector<const slang::ast::ProceduralBlockSymbol*>>
         regDriverBlocks;
     regDriverBlocks.reserve(candidates.size());
-    std::unordered_set<const slang::ast::ValueSymbol*> regDriverConflicts;
 
     auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver,
                           const slang::ast::ProceduralBlockSymbol* block = nullptr) {
@@ -8655,18 +8874,14 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
         auto [driverIt, _] = driverKinds.emplace(&symbol, MemoDriverKind::None);
         MemoDriverKind& state = driverIt->second;
-        if (hasDriver(state, driver)) {
-            return;
-        }
-
-        state |= driver;
         if (driver == MemoDriverKind::Reg && block) {
-            auto [ownerIt, inserted] = regDriverBlocks.emplace(&symbol, block);
-            if (!inserted && ownerIt->second != block) {
-                if (regDriverConflicts.insert(&symbol).second && diagnostics_) {
-                    diagnostics_->nyi(symbol, "Signal is driven by multiple sequential blocks; unsupported");
-                }
+            auto& owners = regDriverBlocks[&symbol];
+            if (std::find(owners.begin(), owners.end(), block) == owners.end()) {
+                owners.push_back(block);
             }
+        }
+        if (!hasDriver(state, driver)) {
+            state |= driver;
         }
         if (hasDriver(state, MemoDriverKind::Net) && hasDriver(state, MemoDriverKind::Reg)) {
             if (diagnostics_) {
@@ -8773,13 +8988,19 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
             nets.push_back(entry);
         }
         else if (regOnly) {
-            if (regDriverConflicts.count(symbol) > 0) {
-                continue;
+            if (auto blockIt = regDriverBlocks.find(symbol); blockIt != regDriverBlocks.end() &&
+                !blockIt->second.empty()) {
+                const bool multi = blockIt->second.size() > 1;
+                for (const auto* driverBlock : blockIt->second) {
+                    SignalMemoEntry copy = entry;
+                    copy.drivingBlock = driverBlock;
+                    copy.multiDriver = multi;
+                    regs.push_back(std::move(copy));
+                }
             }
-            if (auto blockIt = regDriverBlocks.find(symbol); blockIt != regDriverBlocks.end()) {
-                entry.drivingBlock = blockIt->second;
+            else {
+                regs.push_back(entry);
             }
-            regs.push_back(entry);
         }
     }
 

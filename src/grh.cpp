@@ -1084,6 +1084,15 @@ namespace wolf_sv::grh
         attributes_.insert_or_assign(std::move(key), std::move(value));
     }
 
+    void Operation::clearAttribute(std::string_view key)
+    {
+        if (key.empty())
+        {
+            return;
+        }
+        attributes_.erase(std::string(key));
+    }
+
     void Operation::rehydrateOperands(Graph &graph)
     {
         operandPtrs_.assign(operands_.size(), nullptr);

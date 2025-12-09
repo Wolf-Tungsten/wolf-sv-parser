@@ -267,6 +267,7 @@ public:
     void replaceOperand(std::size_t index, Value& value);
     void replaceResult(std::size_t index, Value& value);
     void setAttribute(std::string key, AttributeValue value);
+    void clearAttribute(std::string_view key);
     void setKind(OperationKind kind) noexcept { kind_ = kind; }
 
 private:

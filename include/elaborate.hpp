@@ -125,6 +125,7 @@ struct SignalMemoEntry {
     slang::ast::EdgeKind asyncResetEdge = {};
     const slang::ast::ValueSymbol* syncResetSymbol = nullptr;
     bool syncResetActiveHigh = true;
+    bool multiDriver = false;
 };
 
 /// Describes a single DPI import argument lowered during elaboration.
@@ -196,6 +197,16 @@ public:
 
     void recordWrite(const SignalMemoEntry& target, AssignmentKind kind,
                      const slang::ast::Symbol* originSymbol, std::vector<Slice> slices);
+    struct MultiDriverPart {
+        int64_t msb = 0;
+        int64_t lsb = 0;
+        grh::Value* value = nullptr;
+    };
+    struct MultiDriverBucket {
+        const SignalMemoEntry* target = nullptr;
+        std::vector<MultiDriverPart> parts;
+    };
+    void recordMultiDriverPart(const SignalMemoEntry& target, MultiDriverPart part);
     std::span<const Entry> entries() const noexcept { return entries_; }
     std::span<Entry> entriesMutable() noexcept { return entries_; }
     bool empty() const noexcept { return entries_.empty(); }
@@ -219,6 +230,7 @@ private:
                        ElaborateDiagnostics* diagnostics);
 
     std::vector<Entry> entries_;
+    std::unordered_map<grh::Value*, MultiDriverBucket> multiDriverParts_;
     std::size_t nameCounter_ = 0;
     const slang::SourceManager* sourceManager_ = nullptr;
 };
@@ -234,6 +246,7 @@ public:
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
         const slang::SourceManager* sourceManager = nullptr;
+        const slang::ast::ProceduralBlockSymbol* preferredBlock = nullptr;
     };
 
     explicit RHSConverter(Context context);
@@ -308,6 +321,7 @@ private:
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     const slang::SourceManager* sourceManager_ = nullptr;
+    const slang::ast::ProceduralBlockSymbol* preferredBlock_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
@@ -370,6 +384,7 @@ public:
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
         const slang::SourceManager* sourceManager = nullptr;
+        const slang::ast::ProceduralBlockSymbol* preferredBlock = nullptr;
     };
 
     struct WriteResult {
@@ -428,6 +443,7 @@ private:
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     const slang::SourceManager* sourceManager_ = nullptr;
+    const slang::ast::ProceduralBlockSymbol* preferredBlock_ = nullptr;
     std::unordered_map<const SignalMemoEntry*, std::vector<WriteBackMemo::Slice>> pending_;
     std::unique_ptr<slang::ast::EvalContext> evalContext_;
     std::size_t instanceId_ = 0;
@@ -843,6 +859,7 @@ private:
     extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal, bool activeHigh,
                          const WriteBackMemo::Entry& entry);
     std::optional<bool> matchResetCondition(grh::Value& condition, grh::Value& resetSignal);
+    bool valueDependsOnSignal(grh::Value& root, grh::Value& needle) const;
     bool attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
                              grh::Value& resetValue, const WriteBackMemo::Entry& entry);
     grh::Value* resolveAsyncResetSignal(const slang::ast::Expression& expr);
