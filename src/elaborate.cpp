@@ -3783,14 +3783,39 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
 
 std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& condition,
                                                             grh::Value& resetSignal) {
+    const bool debugReset = std::getenv("WOLF_DEBUG_RESET") != nullptr;
     if (&condition == &resetSignal) {
         return /* inverted */ false;
     }
     if (grh::Operation* op = condition.definingOp()) {
-        if (op->kind() == grh::OperationKind::kLogicNot && op->operands().size() == 1 &&
-            op->operands().front() == &resetSignal) {
-            return true;
+        if (debugReset) {
+            std::fprintf(stderr,
+                         "[reset-debug] condition op kind=%d operands=%zu cond_width=%lld "
+                         "reset_width=%lld operand0=%p reset=%p\n",
+                         static_cast<int>(op->kind()), op->operands().size(),
+                         static_cast<long long>(condition.width()),
+                         static_cast<long long>(resetSignal.width()),
+                         op->operands().empty() ? nullptr : op->operands().front(),
+                         &resetSignal);
+            if (!op->operands().empty()) {
+                grh::Operation* child = op->operands().front()->definingOp();
+                std::fprintf(stderr, "[reset-debug] operand0 child kind=%d\n",
+                             child ? static_cast<int>(child->kind()) : -1);
+            }
         }
+        if (op->operands().size() == 1 && op->operands().front() == &resetSignal) {
+            if (op->kind() == grh::OperationKind::kLogicNot) {
+                return true;
+            }
+            // Treat a bitwise inversion of the reset signal as an active-low reset condition when
+            // the widths match (e.g., "~aresetn" on a 1-bit reset).
+            if (op->kind() == grh::OperationKind::kNot && condition.width() == resetSignal.width()) {
+                return true;
+            }
+        }
+    }
+    if (debugReset) {
+        std::fprintf(stderr, "[reset-debug] reset condition did not match expected forms\n");
     }
     return std::nullopt;
 }
