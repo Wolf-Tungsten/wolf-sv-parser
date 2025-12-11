@@ -569,8 +569,11 @@ protected:
 
     struct ShadowState {
         std::vector<WriteBackMemo::Slice> slices;
-        grh::Value* composed = nullptr;
-        bool dirty = false;
+        std::vector<WriteBackMemo::Slice> nbaSlices;
+        grh::Value* composedBlocking = nullptr;
+        grh::Value* composedAll = nullptr;
+        bool dirtyBlocking = false;
+        bool dirtyAll = false;
     };
 
     struct ShadowFrame {
@@ -636,9 +639,12 @@ protected:
     void handleLoopControlRequest(LoopControl kind, const slang::ast::Statement& origin);
     void handleEntryWrite(const SignalMemoEntry& entry, std::vector<WriteBackMemo::Slice> slices);
     const SignalMemoEntry* findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) const;
-    void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice);
+    void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice,
+                           bool nonBlocking);
     grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
     grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
+    grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state,
+                                   bool includeNonBlocking);
     grh::Value* createZeroValue(int64_t width);
     grh::Value* createOneValue(int64_t width);
     std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
@@ -726,6 +732,7 @@ protected:
     std::unique_ptr<AlwaysBlockRHSConverter> rhsConverter_;
     std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
     std::vector<ShadowFrame> shadowStack_;
+    bool currentAssignmentIsNonBlocking_ = false;
     std::unordered_map<int64_t, grh::Value*> zeroCache_;
     std::unordered_map<int64_t, grh::Value*> oneCache_;
     std::size_t shadowNameCounter_ = 0;

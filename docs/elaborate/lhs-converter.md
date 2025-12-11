@@ -70,8 +70,8 @@ AssignmentExpression (lhs) ──> LHSConverter::lower(...)
 - 流程：
   1. `lower` 产生 `WriteResult`。
   2. 将切片交给 `CombAlwaysConverter::handleEntryWrite`，写入 block-level shadow map，而非立即写回 memo。
-  3. `CombAlwaysConverter` 在每次 RHS 读取时优先查询 shadow，确保阻塞赋值“写后即读”语义。
-  4. 过程块遍历完成后，通过 `memo_.recordWrite(... AssignmentKind::Procedural ...)` 将 shadow 内容落入 `WriteBackMemo`，统一生成最终操作。
+3. RHS 读取优先查询 shadow，确保阻塞赋值“写后即读”语义；Seq always 仅在出现阻塞赋值时开启 shadow 视图，避免非阻塞赋值污染同拍读取。
+4. 过程块遍历完成后，通过 `memo_.recordWrite(... AssignmentKind::Procedural ...)` 将 shadow 内容落入 `WriteBackMemo`，统一生成最终操作；顺序 always flush 前会把非阻塞切片叠加到阻塞视图，保证最终写回顺序与 SystemVerilog 语义一致。
 
 ---
 
@@ -84,7 +84,7 @@ AssignmentExpression (lhs) ──> LHSConverter::lower(...)
 3. **切片构建**：
    - 若 RHS 需要截取子区间，使用 `createSliceValue` 生成 `kSliceStatic` operation，并将 `grh::Value*` 附到切片。
 4. **结果输出**：
-   - 所有切片暂存于 `pending_[entry]`，待 LHS 树遍历完毕后在 `flushPending` 中整理为 `WriteResult` 列表，交给派生类处理。
+   - 所有切片暂存于 `pending_[entry]`，待 LHS 树遍历完毕后在 `flushPending` 中整理为 `WriteResult` 列表，交给派生类处理；顺序 always 会将非阻塞切片与阻塞切片分账存放，rebuild 时可选择性叠加。
 
 ---
 

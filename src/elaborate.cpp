@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <functional>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -2297,7 +2298,11 @@ void SeqAlwaysConverter::recordAssignmentKind(bool isNonBlocking) {
 }
 
 bool SeqAlwaysConverter::useSeqShadowValues() const {
-    return seenBlockingAssignments_ && !seenNonBlockingAssignments_;
+    // Even when a sequential block mixes blocking and non-blocking assignments, blocking writes
+    // must be visible to subsequent statements (including RHS of later non-blocking assignments).
+    // Track shadow values whenever blocking assignments are present so we honor intra-block
+    // ordering instead of treating the whole block as non-blocking.
+    return seenBlockingAssignments_;
 }
 
 bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression& call,
@@ -4558,6 +4563,12 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
                                        const slang::ast::Expression& /*originExpr*/) {
     const bool isNonBlocking = expr.isNonBlocking();
     bool effectiveNonBlocking = isNonBlocking;
+    struct FlagGuard {
+        bool& ref;
+        bool saved;
+        FlagGuard(bool& target, bool value) : ref(target), saved(target) { ref = value; }
+        ~FlagGuard() { ref = saved; }
+    } flagGuard(currentAssignmentIsNonBlocking_, isNonBlocking);
     recordAssignmentKind(isNonBlocking);
     if (isNonBlocking && !allowNonBlockingAssignments()) {
         if (diagnostics_) {
@@ -4665,17 +4676,35 @@ AlwaysConverter::findDpiImport(const slang::ast::SubroutineSymbol& symbol) const
     return nullptr;
 }
 
+namespace {
+
+void insertShadowSliceList(std::vector<WriteBackMemo::Slice>& entries,
+                           const WriteBackMemo::Slice& slice,
+                           const std::function<grh::Value*(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting);
+
+} // namespace
+
 void AlwaysConverter::flushProceduralWrites() {
     if (shadowStack_.empty()) {
         return;
     }
     ShadowFrame& root = shadowStack_.front();
     for (auto& [entry, state] : root.map) {
-        if (!entry || state.slices.empty()) {
+        if (!entry) {
+            continue;
+        }
+        std::vector<WriteBackMemo::Slice> merged = std::move(state.slices);
+        auto sliceExisting = [&](const WriteBackMemo::Slice& existing, int64_t msb, int64_t lsb) {
+            return sliceExistingValue(existing, msb, lsb);
+        };
+        for (const auto& nb : state.nbaSlices) {
+            insertShadowSliceList(merged, nb, sliceExisting);
+        }
+        if (merged.empty()) {
             continue;
         }
         memo_.recordWrite(*entry, WriteBackMemo::AssignmentKind::Procedural, &block_,
-                         std::move(state.slices));
+                         std::move(merged));
     }
 }
 
@@ -4895,12 +4924,25 @@ void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
                      static_cast<long long>(s.msb), static_cast<long long>(s.lsb),
                      s.value ? static_cast<long long>(s.value->width()) : -1LL);
     }
+    if (std::getenv("WOLF_DEBUG_SHADOW_WRITE")) {
+        std::fprintf(stderr, "[shadow-write-debug] %s nonblocking=%d\n",
+                     entry.symbol ? std::string(entry.symbol->name).c_str() : "<null>",
+                     currentAssignmentIsNonBlocking_ ? 1 : 0);
+    }
     ShadowState& state = currentFrame().map[&entry];
     for (WriteBackMemo::Slice& slice : slices) {
-        insertShadowSlice(state, slice);
+        insertShadowSlice(state, slice, currentAssignmentIsNonBlocking_);
     }
-    state.dirty = true;
-    state.composed = nullptr;
+    if (currentAssignmentIsNonBlocking_) {
+        state.dirtyAll = true;
+        state.composedAll = nullptr;
+    }
+    else {
+        state.dirtyBlocking = true;
+        state.dirtyAll = true;
+        state.composedBlocking = nullptr;
+        state.composedAll = nullptr;
+    }
     currentFrame().touched.insert(&entry);
 }
 
@@ -4952,10 +4994,12 @@ grh::Value* AlwaysConverter::sliceExistingValue(const WriteBackMemo::Slice& exis
     return &result;
 }
 
-void AlwaysConverter::insertShadowSlice(ShadowState& state,
-                                        const WriteBackMemo::Slice& slice) {
+namespace {
+
+void insertShadowSliceList(std::vector<WriteBackMemo::Slice>& entries,
+                           const WriteBackMemo::Slice& slice,
+                           const std::function<grh::Value*(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting) {
     WriteBackMemo::Slice copy = slice;
-    auto& entries = state.slices;
     std::vector<WriteBackMemo::Slice> preserved;
     preserved.reserve(entries.size() + 2);
 
@@ -4972,7 +5016,7 @@ void AlwaysConverter::insertShadowSlice(ShadowState& state,
             WriteBackMemo::Slice upper = existing;
             upper.msb = existing.msb;
             upper.lsb = segLsb;
-            upper.value = sliceExistingValue(existing, upper.msb, upper.lsb);
+            upper.value = sliceExisting(existing, upper.msb, upper.lsb);
             if (upper.value) {
                 preserved.push_back(std::move(upper));
             }
@@ -4984,7 +5028,7 @@ void AlwaysConverter::insertShadowSlice(ShadowState& state,
             WriteBackMemo::Slice lower = existing;
             lower.msb = segMsb;
             lower.lsb = existing.lsb;
-            lower.value = sliceExistingValue(existing, lower.msb, lower.lsb);
+            lower.value = sliceExisting(existing, lower.msb, lower.lsb);
             if (lower.value) {
                 preserved.push_back(std::move(lower));
             }
@@ -5003,6 +5047,17 @@ void AlwaysConverter::insertShadowSlice(ShadowState& state,
     });
 }
 
+} // namespace
+
+void AlwaysConverter::insertShadowSlice(ShadowState& state,
+                                        const WriteBackMemo::Slice& slice, bool nonBlocking) {
+    auto sliceExisting = [&](const WriteBackMemo::Slice& existing, int64_t msb, int64_t lsb) {
+        return sliceExistingValue(existing, msb, lsb);
+    };
+    auto& entries = nonBlocking ? state.nbaSlices : state.slices;
+    insertShadowSliceList(entries, slice, sliceExisting);
+}
+
 grh::Value* AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
     ShadowFrame& frame = currentFrame();
     auto it = frame.map.find(&entry);
@@ -5010,10 +5065,10 @@ grh::Value* AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
         return nullptr;
     }
     ShadowState& state = it->second;
-    if (!state.dirty && state.composed) {
-        return state.composed;
+    if (!state.dirtyBlocking && state.composedBlocking) {
+        return state.composedBlocking;
     }
-    return rebuildShadowValue(entry, state);
+    return rebuildShadowValue(entry, state, /*includeNonBlocking=*/false);
 }
 
 void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
@@ -5042,16 +5097,47 @@ void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
 
 grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
                                                     ShadowState& state) {
-    if (state.slices.empty()) {
-        state.composed = nullptr;
-        state.dirty = false;
+    return rebuildShadowValue(entry, state, /*includeNonBlocking=*/true);
+}
+
+grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
+                                                    ShadowState& state, bool includeNonBlocking) {
+    auto collectSlices = [&]() {
+        if (!includeNonBlocking || state.nbaSlices.empty()) {
+            return state.slices;
+        }
+        std::vector<WriteBackMemo::Slice> merged = state.slices;
+        auto sliceExisting = [&](const WriteBackMemo::Slice& existing, int64_t msb,
+                                 int64_t lsb) { return sliceExistingValue(existing, msb, lsb); };
+        for (const auto& nb : state.nbaSlices) {
+            insertShadowSliceList(merged, nb, sliceExisting);
+        }
+        return merged;
+    };
+
+    const bool cachedAvailable = includeNonBlocking ? (!state.dirtyAll && state.composedAll)
+                                                    : (!state.dirtyBlocking && state.composedBlocking);
+    if (cachedAvailable) {
+        return includeNonBlocking ? state.composedAll : state.composedBlocking;
+    }
+
+    std::vector<WriteBackMemo::Slice> mergedSlices = collectSlices();
+    if (mergedSlices.empty()) {
+        if (includeNonBlocking) {
+            state.composedAll = nullptr;
+            state.dirtyAll = false;
+        }
+        else {
+            state.composedBlocking = nullptr;
+            state.dirtyBlocking = false;
+        }
         return nullptr;
     }
 
     const int64_t targetWidth = entry.width > 0 ? entry.width : 1;
     int64_t expectedMsb = targetWidth - 1;
     std::vector<grh::Value*> components;
-    components.reserve(state.slices.size() + 2);
+    components.reserve(mergedSlices.size() + 2);
 
     auto appendHoldRange = [&](int64_t msb, int64_t lsb) -> bool {
         if (msb < lsb) {
@@ -5086,15 +5172,21 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
             hold = createZeroValue(msb - lsb + 1);
         }
         if (!hold) {
-            state.composed = nullptr;
-            state.dirty = false;
+            if (includeNonBlocking) {
+                state.composedAll = nullptr;
+                state.dirtyAll = false;
+            }
+            else {
+                state.composedBlocking = nullptr;
+                state.dirtyBlocking = false;
+            }
             return false;
         }
         components.push_back(hold);
         return true;
     };
 
-    for (const WriteBackMemo::Slice& slice : state.slices) {
+    for (const WriteBackMemo::Slice& slice : mergedSlices) {
         const int64_t gapWidth = expectedMsb - slice.msb;
         if (gapWidth > 0) {
             if (!appendHoldRange(expectedMsb, slice.msb + 1)) {
@@ -5132,8 +5224,14 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
         composed = &value;
     }
 
-    state.composed = composed;
-    state.dirty = false;
+    if (includeNonBlocking) {
+        state.composedAll = composed;
+        state.dirtyAll = false;
+    }
+    else {
+        state.composedBlocking = composed;
+        state.dirtyBlocking = false;
+    }
     return composed;
 }
 
@@ -5361,6 +5459,10 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
                     cuts.push_back(s.msb);
                     cuts.push_back(s.lsb - 1);
                 }
+                for (const auto& s : state->nbaSlices) {
+                    cuts.push_back(s.msb);
+                    cuts.push_back(s.lsb - 1);
+                }
             };
             collectCuts(trueIt != trueFrame.map.end() ? &trueIt->second : nullptr);
             collectCuts(falseIt != falseFrame.map.end() ? &falseIt->second : nullptr);
@@ -5396,8 +5498,10 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         else {
             mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
         }
-        mergedState.composed = muxValue;
-        mergedState.dirty = false;
+        mergedState.composedBlocking = muxValue;
+        mergedState.composedAll = muxValue;
+        mergedState.dirtyBlocking = false;
+        mergedState.dirtyAll = false;
         if (falseIt == falseFrame.map.end()) {
             falseFrame.map.emplace(entry, std::move(mergedState));
         }
