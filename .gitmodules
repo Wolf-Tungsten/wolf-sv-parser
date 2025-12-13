@@ -13,3 +13,6 @@
 [submodule "tests/data/hdlbits"]
 	path = tests/data/hdlbits
 	url = git@github.com:Wolf-Tungsten/HDLBits-Verilog-Solutions.git
+[submodule "tests/data/openc910"]
+	path = tests/data/openc910
+	url = git@github.com:Wolf-Tungsten/openc910.git
