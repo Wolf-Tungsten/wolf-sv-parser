@@ -7481,6 +7481,24 @@ grh::Value* RHSConverter::convertCall(const slang::ast::CallExpression& expr) {
         return createConstantValue(*constant, *expr.type, hint);
     }
 
+    if (expr.isSystemCall()) {
+        std::string_view name = expr.getSubroutineName();
+        if (name == "$signed" || name == "$unsigned") {
+            auto args = expr.arguments();
+            if (args.empty() || !args.front()) {
+                reportUnsupported("call expression", expr);
+                return nullptr;
+            }
+            grh::Value* operand = convert(*args.front());
+            if (!operand) {
+                return nullptr;
+            }
+            const TypeInfo info = deriveTypeInfo(*expr.type);
+            return resizeValue(*operand, *expr.type, info, expr,
+                               name == "$signed" ? "signed" : "unsigned");
+        }
+    }
+
     reportUnsupported("call expression", expr);
     return nullptr;
 }
