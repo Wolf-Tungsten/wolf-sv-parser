@@ -67,3 +67,86 @@
 ## KR6：测试与回归
 - 新增 Graph/JSON roundtrip/emit 用例：kLatch（en 高/低）、kLatchArst（rst 高/低 + resetValue）、elaboration latch 推断（缺失 else、`always_latch`）。检查 warning 文本与定位。
 - 更新现有“防 latch”负例预期：从报错改为 warning + latch 节点；回归 `ctest` 或相关目标，确认寄存器/内存路径未被破坏。
+
+# Objective 3
+
+> 目标：落地分层 SymbolTable 与基础句柄，为热路径 IR 提供稳定标识。
+
+## 原则与顺序
+- 新结构与现有 GRH 并行存在，先补齐基础能力，再逐步接入分析/优化流程。
+- 每一步都产出可独立测试的最小功能集，允许回归验证。
+
+## KR1：引入分层 SymbolTable 与 SymbolId
+- 新增 `NetlistSymbolTable` 与 `GraphSymbolTable`，API 包含 `intern/lookup/contains/text/valid`。
+- 约束：Netlist 层仅驻留 Graph 名称，跨图引用统一使用 Netlist 层符号表。
+- 测试：`tests/grh/test_grh.cpp` 增加符号表用例（重复 intern 拒绝、lookup 命中、text/valid 行为）。
+
+## KR2：定义句柄类型
+- 引入 `ValueId/OperationId/GraphId`（含 invalid 与可选 generation）。
+- 测试：句柄 invalid 判定与跨 Graph 误用断言。
+
+# Objective 4
+
+> 目标：落地 GraphView/GraphBuilder 的最小闭环（创建 -> freeze -> 只读访问）。
+
+## KR1：GraphView 最小只读接口
+- `operations/values/opKind/opOperands/opResults/valueWidth/valueDef/valueUsers`。
+- 测试：构建最小 GraphView 并验证遍历顺序与 range 边界。
+
+## KR2：GraphBuilder 与 freeze
+- `addValue/addOp/addOperand/addResult` 与 `freeze()` 压平生成 GraphView。
+- 测试：构建小图，验证 useList 与 valueDef 正确性。
+
+# Objective 5
+
+> 目标：补齐元数据与变更接口（符号/端口/属性/调试 + 修改删除）。
+
+## KR1：符号、端口、属性、调试信息
+- `setOpSymbol/setValueSymbol/clear*Symbol`；允许 op 无符号但 set 不允许 invalid。
+- 端口绑定与排序；`AttrValue` 与 `opAttr` 按 key 访问。
+- `SrcLoc`/debug table 接入 GraphView。
+- 测试：端口顺序、opAttr 查找、符号迁移（clear + set）与 srcLoc 读写。
+
+## KR2：修改与删除 API
+- `replaceOperand/replaceResult/replaceAllUses`。
+- `eraseOperand/eraseResult/eraseOp/eraseValue` 与 `eraseOp(..., replacementResults)`。
+- 删除采用标记 + freeze 压实；不要求拓扑顺序，允许先断环再删。
+- 测试：包含环的案例（如 reg 反馈）通过替换断环后删除成功。
+
+# Objective 6
+
+> 目标：迁移 elaborate 产出热路径 IR，并完成一致性校验。
+
+## KR1：elaborate 迁移与转换
+- 在迁移早期对旧路径做一次性备份（分支或备份文件），仅用于对照验证。
+- 在 elaborate 流程中引入 `GraphBuilder`，以构建期 API 生成图结构。
+- 迁移完成后删除旧路径与兼容分支，仅保留热路径构建与 `freeze()` 产物。
+
+## KR2：一致性校验与测试
+- 校验项：op/value 数量、opKind、operands/results 连接、端口绑定一致。
+- 测试：基于现有 fixtures（或手写小图）做等价性检查；对照验证仅依赖早期备份，迁移完成后移除对比逻辑。
+
+# Objective 7
+
+> 目标：迁移 emit 读入热路径 IR，并保持输出一致。
+
+## KR1：emit 读取 GraphView
+- 为 emit 增加 GraphView 入口（或适配层），从热路径结构读取 op/value/ports。
+- 迁移完成后删除旧 GRH emit 路径与兼容分支，仅保留 GraphView 路径。
+
+## KR2：回归与一致性测试
+- 对比旧/新 emit 结果一致性（SV/JSON）仅依赖早期备份；迁移完成后移除对比逻辑。
+- 回归 `ctest`；若有差异，记录并解释语义不变或修复。
+
+# Objective 8
+
+> 目标：将 GRH 数据结构抽离为独立的 `libgrh`，可单独构建与复用。
+
+## KR1：库化与边界收敛
+- 新增 `libgrh` 构建目标（静态或共享），对外暴露 `GraphView/GraphBuilder/SymbolTable` 接口。
+- 收敛依赖：`libgrh` 不依赖 elaborate/emit，仅保留必要的基础类型与序列化接口。
+- 迁移完成后移除旧 GRH 结构与兼容代码，仅保留 `libgrh` 版本。
+
+## KR2：集成与验证
+- 将 elaborate/emit 链接到 `libgrh`，确保构建链路清晰。
+- 回归 `ctest`，确保跨模块链接与行为一致。
