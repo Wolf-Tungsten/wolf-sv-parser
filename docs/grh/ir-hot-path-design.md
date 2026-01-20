@@ -37,7 +37,7 @@
 - 约束：Netlist 层只驻留 Graph 名称；跨图引用（例如 instance 目标）统一走 NetlistSymbolTable，Graph 层不保存跨图符号。
 - 典型 API 形态（区分申请与查询）：
   - `SymbolId intern(std::string_view text)`：申请新符号；若已存在则返回 invalid 或抛错。
-  - `std::optional<SymbolId> lookup(std::string_view text)`：仅查询，存在则返回 id。
+  - `SymbolId lookup(std::string_view text)`：仅查询，存在则返回 id；缺失返回 invalid。
   - `bool contains(std::string_view text)`：是否已驻留。
   - `std::string_view text(SymbolId id)`：从 id 取回字符串视图。
   - `bool valid(SymbolId id)`：是否为有效符号（例如 `id != 0`）。

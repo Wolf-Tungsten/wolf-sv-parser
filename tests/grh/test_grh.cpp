@@ -337,6 +337,89 @@ int main()
         {
             return fail("Expected object attribute to throw during parse");
         }
+
+        {
+            namespace grh_ir = wolf_sv::grh::ir;
+
+            grh_ir::NetlistSymbolTable netlistSymbols;
+            auto demoSym = netlistSymbols.intern("demo");
+            if (!netlistSymbols.valid(demoSym))
+            {
+                return fail("NetlistSymbolTable did not mark interned symbol as valid");
+            }
+            if (!netlistSymbols.contains("demo"))
+            {
+                return fail("NetlistSymbolTable contains() failed for interned symbol");
+            }
+            auto demoLookup = netlistSymbols.lookup("demo");
+            if (!demoLookup.valid() || demoLookup != demoSym)
+            {
+                return fail("NetlistSymbolTable lookup failed for interned symbol");
+            }
+            if (netlistSymbols.text(demoSym) != "demo")
+            {
+                return fail("NetlistSymbolTable text() mismatch");
+            }
+            if (netlistSymbols.lookup("missing").valid())
+            {
+                return fail("NetlistSymbolTable lookup should miss unknown symbol");
+            }
+            auto dupSym = netlistSymbols.intern("demo");
+            if (dupSym.valid())
+            {
+                return fail("Expected duplicate intern to return invalid SymbolId");
+            }
+            if (netlistSymbols.valid(grh_ir::SymbolId::invalid()))
+            {
+                return fail("Invalid SymbolId reported as valid");
+            }
+            bool threwOnInvalidText = expectThrows([&]
+                                                   { netlistSymbols.text(grh_ir::SymbolId::invalid()); });
+            if (!threwOnInvalidText)
+            {
+                return fail("Expected invalid SymbolId text() to throw");
+            }
+
+            grh_ir::GraphSymbolTable graphSymbols;
+            auto valueSym = graphSymbols.intern("value0");
+            if (!graphSymbols.contains("value0") || graphSymbols.text(valueSym) != "value0")
+            {
+                return fail("GraphSymbolTable did not roundtrip symbol");
+            }
+
+            grh_ir::GraphId graphA{1, 0};
+            grh_ir::GraphId graphB{2, 0};
+            if (!graphA.valid() || grh_ir::GraphId::invalid().valid())
+            {
+                return fail("GraphId valid/invalid check failed");
+            }
+
+            grh_ir::ValueId valueId{1, 0, graphA};
+            if (!valueId.valid())
+            {
+                return fail("ValueId valid check failed");
+            }
+            bool threwOnCrossGraphValue = expectThrows([&]
+                                                       { valueId.assertGraph(graphB); });
+            if (!threwOnCrossGraphValue)
+            {
+                return fail("Expected ValueId cross-graph assertion to throw");
+            }
+            bool threwOnInvalidValue = expectThrows([&]
+                                                    { grh_ir::ValueId::invalid().assertGraph(graphA); });
+            if (!threwOnInvalidValue)
+            {
+                return fail("Expected invalid ValueId to throw on assertGraph");
+            }
+
+            grh_ir::OperationId opId{1, 0, graphA};
+            bool threwOnCrossGraphOp = expectThrows([&]
+                                                    { opId.assertGraph(graphB); });
+            if (!threwOnCrossGraphOp)
+            {
+                return fail("Expected OperationId cross-graph assertion to throw");
+            }
+        }
     }
     catch (const std::exception &ex)
     {

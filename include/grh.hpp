@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -102,6 +103,94 @@ struct SrcLoc
 using DebugInfo = SrcLoc;
 
 [[nodiscard]] bool attributeValueIsJsonSerializable(const AttributeValue &value);
+
+namespace ir {
+
+struct SymbolId {
+    uint32_t value = 0;
+
+    constexpr bool valid() const noexcept { return value != 0; }
+    static constexpr SymbolId invalid() noexcept { return {}; }
+    friend constexpr bool operator==(SymbolId lhs, SymbolId rhs) noexcept { return lhs.value == rhs.value; }
+    friend constexpr bool operator!=(SymbolId lhs, SymbolId rhs) noexcept { return !(lhs == rhs); }
+};
+
+class SymbolTable {
+public:
+    SymbolTable();
+
+    SymbolId intern(std::string_view text);
+    SymbolId lookup(std::string_view text) const;
+    bool contains(std::string_view text) const;
+    std::string_view text(SymbolId id) const;
+    bool valid(SymbolId id) const noexcept;
+
+private:
+    struct StringHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view value) const noexcept;
+        std::size_t operator()(const std::string &value) const noexcept;
+    };
+
+    struct StringEq {
+        using is_transparent = void;
+        bool operator()(const std::string &lhs, const std::string &rhs) const noexcept;
+        bool operator()(std::string_view lhs, std::string_view rhs) const noexcept;
+        bool operator()(const std::string &lhs, std::string_view rhs) const noexcept;
+        bool operator()(std::string_view lhs, const std::string &rhs) const noexcept;
+    };
+
+    std::unordered_map<std::string, SymbolId, StringHash, StringEq> symbolsByText_;
+    std::deque<std::string> textById_;
+};
+
+class NetlistSymbolTable final : public SymbolTable {};
+class GraphSymbolTable final : public SymbolTable {};
+
+struct GraphId {
+    uint32_t index = 0;
+    uint32_t generation = 0;
+
+    constexpr bool valid() const noexcept { return index != 0; }
+    static constexpr GraphId invalid() noexcept { return {}; }
+    friend constexpr bool operator==(GraphId lhs, GraphId rhs) noexcept
+    {
+        return lhs.index == rhs.index && lhs.generation == rhs.generation;
+    }
+    friend constexpr bool operator!=(GraphId lhs, GraphId rhs) noexcept { return !(lhs == rhs); }
+};
+
+struct ValueId {
+    uint32_t index = 0;
+    uint32_t generation = 0;
+    GraphId graph;
+
+    constexpr bool valid() const noexcept { return index != 0; }
+    static constexpr ValueId invalid() noexcept { return {}; }
+    void assertGraph(GraphId expected) const;
+    friend constexpr bool operator==(ValueId lhs, ValueId rhs) noexcept
+    {
+        return lhs.index == rhs.index && lhs.generation == rhs.generation && lhs.graph == rhs.graph;
+    }
+    friend constexpr bool operator!=(ValueId lhs, ValueId rhs) noexcept { return !(lhs == rhs); }
+};
+
+struct OperationId {
+    uint32_t index = 0;
+    uint32_t generation = 0;
+    GraphId graph;
+
+    constexpr bool valid() const noexcept { return index != 0; }
+    static constexpr OperationId invalid() noexcept { return {}; }
+    void assertGraph(GraphId expected) const;
+    friend constexpr bool operator==(OperationId lhs, OperationId rhs) noexcept
+    {
+        return lhs.index == rhs.index && lhs.generation == rhs.generation && lhs.graph == rhs.graph;
+    }
+    friend constexpr bool operator!=(OperationId lhs, OperationId rhs) noexcept { return !(lhs == rhs); }
+};
+
+} // namespace ir
 
 class Graph;
 class Operation;

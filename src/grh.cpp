@@ -4,6 +4,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <functional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,129 @@ namespace wolf_sv::grh
 
         return std::visit(Visitor{}, value);
     }
+
+    namespace ir
+    {
+
+        std::size_t SymbolTable::StringHash::operator()(std::string_view value) const noexcept
+        {
+            return std::hash<std::string_view>{}(value);
+        }
+
+        std::size_t SymbolTable::StringHash::operator()(const std::string &value) const noexcept
+        {
+            return std::hash<std::string_view>{}(value);
+        }
+
+        bool SymbolTable::StringEq::operator()(std::string_view lhs, std::string_view rhs) const noexcept
+        {
+            return lhs == rhs;
+        }
+
+        bool SymbolTable::StringEq::operator()(const std::string &lhs, const std::string &rhs) const noexcept
+        {
+            return lhs == rhs;
+        }
+
+        bool SymbolTable::StringEq::operator()(const std::string &lhs, std::string_view rhs) const noexcept
+        {
+            return lhs == rhs;
+        }
+
+        bool SymbolTable::StringEq::operator()(std::string_view lhs, const std::string &rhs) const noexcept
+        {
+            return lhs == rhs;
+        }
+
+        SymbolTable::SymbolTable()
+        {
+            textById_.emplace_back();
+        }
+
+        SymbolId SymbolTable::intern(std::string_view text)
+        {
+            if (symbolsByText_.find(text) != symbolsByText_.end())
+            {
+                return SymbolId::invalid();
+            }
+
+            SymbolId id;
+            id.value = static_cast<uint32_t>(textById_.size());
+            textById_.emplace_back(text);
+            symbolsByText_.emplace(textById_.back(), id);
+            return id;
+        }
+
+        SymbolId SymbolTable::lookup(std::string_view text) const
+        {
+            auto it = symbolsByText_.find(text);
+            if (it == symbolsByText_.end())
+            {
+                return SymbolId::invalid();
+            }
+            return it->second;
+        }
+
+        bool SymbolTable::contains(std::string_view text) const
+        {
+            return symbolsByText_.find(text) != symbolsByText_.end();
+        }
+
+        std::string_view SymbolTable::text(SymbolId id) const
+        {
+            if (!valid(id))
+            {
+                throw std::runtime_error("Invalid SymbolId");
+            }
+            return textById_[id.value];
+        }
+
+        bool SymbolTable::valid(SymbolId id) const noexcept
+        {
+            return id.value != 0 && id.value < textById_.size();
+        }
+
+        void ValueId::assertGraph(GraphId expected) const
+        {
+            if (!expected.valid())
+            {
+                throw std::runtime_error("Expected GraphId is invalid");
+            }
+            if (!valid())
+            {
+                throw std::runtime_error("ValueId is invalid");
+            }
+            if (!graph.valid())
+            {
+                throw std::runtime_error("ValueId has invalid GraphId");
+            }
+            if (graph != expected)
+            {
+                throw std::runtime_error("ValueId used with mismatched GraphId");
+            }
+        }
+
+        void OperationId::assertGraph(GraphId expected) const
+        {
+            if (!expected.valid())
+            {
+                throw std::runtime_error("Expected GraphId is invalid");
+            }
+            if (!valid())
+            {
+                throw std::runtime_error("OperationId is invalid");
+            }
+            if (!graph.valid())
+            {
+                throw std::runtime_error("OperationId has invalid GraphId");
+            }
+            if (graph != expected)
+            {
+                throw std::runtime_error("OperationId used with mismatched GraphId");
+            }
+        }
+
+    } // namespace ir
 
     Netlist::Netlist(Netlist &&other) noexcept
     {
