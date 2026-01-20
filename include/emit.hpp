@@ -102,6 +102,10 @@ namespace wolf_sv::emit
         using Emit::Emit;
 
         std::optional<std::string> emitToString(const grh::Netlist &netlist, const EmitOptions &options = EmitOptions());
+        EmitResult emitGraphView(const grh::ir::GraphView &view,
+                                 const grh::ir::GraphSymbolTable &symbols,
+                                 std::string_view graphSymbol,
+                                 const EmitOptions &options = EmitOptions());
 
     private:
         EmitResult emitImpl(const grh::Netlist &netlist,
@@ -113,6 +117,10 @@ namespace wolf_sv::emit
     {
     public:
         using Emit::Emit;
+        EmitResult emitGraphView(const grh::ir::GraphView &view,
+                                 const grh::ir::GraphSymbolTable &symbols,
+                                 std::string_view moduleName,
+                                 const EmitOptions &options = EmitOptions());
 
     private:
         EmitResult emitImpl(const grh::Netlist &netlist,

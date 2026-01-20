@@ -128,19 +128,6 @@
 
 # Objective 7
 
-> 目标：迁移 elaborate 产出热路径 IR，并完成一致性校验。
-
-## KR1：elaborate 迁移与转换
-- 在迁移早期对旧路径做一次性备份（分支或备份文件），仅用于对照验证。
-- 在 elaborate 流程中引入 `GraphBuilder`，以构建期 API 生成图结构。
-- 迁移完成后删除旧路径与兼容分支，仅保留热路径构建与 `freeze()` 产物。
-
-## KR2：一致性校验与测试
-- 校验项：op/value 数量、opKind、operands/results 连接、端口绑定一致。
-- 测试：基于现有 fixtures（或手写小图）做等价性检查；对照验证仅依赖早期备份，迁移完成后移除对比逻辑。
-
-# Objective 8
-
 > 目标：迁移 emit 读入热路径 IR，并保持输出一致。
 
 ## KR1：emit 读取 GraphView
@@ -150,6 +137,20 @@
 ## KR2：回归与一致性测试
 - 对比旧/新 emit 结果一致性（SV/JSON）仅依赖早期备份；迁移完成后移除对比逻辑。
 - 回归 `ctest`；若有差异，记录并解释语义不变或修复。
+
+# Objective 8
+
+> 目标：迁移 elaborate 产出热路径 IR，并完成 Netlist 数据结构/API 升级与一致性校验。
+
+## KR1：elaborate 迁移与转换
+- 在迁移早期对旧路径做一次性备份（分支或备份文件），仅用于对照验证。
+- 在 elaborate 流程中引入 `GraphBuilder`，以构建期 API 生成图结构。
+- 同步升级 `Netlist` 数据结构与 API（Graph/alias/top 管理与访问入口），确保热路径 IR 能统一落地与可追踪。
+- 迁移完成后删除旧路径与兼容分支，仅保留热路径构建与 `freeze()` 产物。
+
+## KR2：一致性校验与测试
+- 校验项：op/value 数量、opKind、operands/results 连接、端口绑定一致。
+- 测试：基于现有 fixtures（或手写小图）做等价性检查；对照验证仅依赖早期备份，迁移完成后移除对比逻辑。
 
 # Objective 9
 

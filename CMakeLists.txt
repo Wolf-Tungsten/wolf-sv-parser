@@ -176,6 +176,22 @@ target_compile_definitions(emit-json
 
 register_test_exe(emit-json)
 
+add_executable(emit-json-ir
+    tests/emit/test_emit_json_ir.cpp
+)
+
+target_link_libraries(emit-json-ir
+    PRIVATE
+        emit
+)
+
+target_compile_definitions(emit-json-ir
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-json-ir)
+
 add_executable(emit-sv
     tests/emit/test_emit_sv.cpp
 )
@@ -193,6 +209,22 @@ target_compile_definitions(emit-sv
 )
 
 register_test_exe(emit-sv)
+
+add_executable(emit-sv-ir
+    tests/emit/test_emit_sv_ir.cpp
+)
+
+target_link_libraries(emit-sv-ir
+    PRIVATE
+        emit
+)
+
+target_compile_definitions(emit-sv-ir
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-sv-ir)
 
 # elaborate: smoke
 add_executable(elaborate-smoke
