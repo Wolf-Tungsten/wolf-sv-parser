@@ -82,6 +82,67 @@ namespace wolf_sv::grh
             textById_.emplace_back();
         }
 
+        NetlistSymbolTable::NetlistSymbolTable()
+        {
+            symbolByGraph_.push_back(SymbolId::invalid());
+        }
+
+        GraphId NetlistSymbolTable::allocateGraphId(SymbolId symbol)
+        {
+            if (!symbol.valid())
+            {
+                throw std::runtime_error("Graph symbol is invalid");
+            }
+            if (!valid(symbol))
+            {
+                throw std::runtime_error("Graph symbol is not in the symbol table");
+            }
+            if (graphIndexBySymbol_.contains(symbol.value))
+            {
+                throw std::runtime_error("Graph symbol already has an assigned GraphId");
+            }
+            GraphId graphId;
+            graphId.index = nextGraphIndex_++;
+            graphId.generation = 0;
+            if (symbolByGraph_.size() <= graphId.index)
+            {
+                symbolByGraph_.resize(graphId.index + 1);
+            }
+            symbolByGraph_[graphId.index] = symbol;
+            graphIndexBySymbol_[symbol.value] = graphId.index;
+            return graphId;
+        }
+
+        GraphId NetlistSymbolTable::lookupGraphId(SymbolId symbol) const noexcept
+        {
+            if (!symbol.valid())
+            {
+                return GraphId::invalid();
+            }
+            auto it = graphIndexBySymbol_.find(symbol.value);
+            if (it == graphIndexBySymbol_.end())
+            {
+                return GraphId::invalid();
+            }
+            GraphId graphId;
+            graphId.index = it->second;
+            graphId.generation = 0;
+            return graphId;
+        }
+
+        SymbolId NetlistSymbolTable::symbolForGraph(GraphId graph) const noexcept
+        {
+            if (!graph.valid())
+            {
+                return SymbolId::invalid();
+            }
+            if (graph.index >= symbolByGraph_.size())
+            {
+                return SymbolId::invalid();
+            }
+            return symbolByGraph_[graph.index];
+        }
+
         SymbolId SymbolTable::intern(std::string_view text)
         {
             if (symbolsByText_.find(text) != symbolsByText_.end())
@@ -1398,6 +1459,7 @@ namespace wolf_sv::grh
             graphAliasBySymbol_ = std::move(other.graphAliasBySymbol_);
             graphOrder_ = std::move(other.graphOrder_);
             topGraphs_ = std::move(other.topGraphs_);
+            netlistSymbols_ = std::move(other.netlistSymbols_);
             resetGraphOwners();
 
             other.graphAliasBySymbol_.clear();
@@ -1414,7 +1476,6 @@ namespace wolf_sv::grh
             if (entry.second)
             {
                 entry.second->owner_ = this;
-                entry.second->rehydratePointers();
             }
         }
     }
@@ -2057,14 +2118,6 @@ namespace wolf_sv::grh
             throw std::runtime_error("Unknown attribute kind: " + std::string(text));
         }
 
-        void ensureGraphOwnership(const Graph &graph, const Value &value)
-        {
-            if (&value.graph() != &graph)
-            {
-                throw std::runtime_error("Value belongs to a different graph");
-            }
-        }
-
         void writeSrcLoc(slang::JsonWriter &writer, const std::optional<SrcLoc> &srcLoc)
         {
             if (!srcLoc || srcLoc->file.empty())
@@ -2110,663 +2163,529 @@ namespace wolf_sv::grh
         return std::nullopt;
     }
 
-    Value::Value(Graph &graph, std::string symbol, int64_t width, bool isSigned) : graph_(&graph),
-                                                                                   symbol_(std::move(symbol)),
-                                                                                   width_(width),
-                                                                                   isSigned_(isSigned)
+    Value::Value(ir::ValueId id, ir::SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
+                 bool isInput, bool isOutput, ir::OperationId definingOp,
+                 std::vector<ir::ValueUser> users, std::optional<SrcLoc> srcLoc)
+        : id_(id),
+          symbol_(symbol),
+          symbolText_(std::move(symbolText)),
+          width_(width),
+          isSigned_(isSigned),
+          isInput_(isInput),
+          isOutput_(isOutput),
+          definingOp_(definingOp),
+          users_(std::move(users)),
+          srcLoc_(std::move(srcLoc))
     {
-        if (symbol_.empty())
-        {
-            throw std::invalid_argument("Value symbol must not be empty");
-        }
-        if (width_ <= 0)
-        {
-            throw std::invalid_argument("Value width must be positive");
-        }
     }
 
-    Operation *Value::definingOp() const noexcept
+    Operation::Operation(ir::OperationId id, OperationKind kind, ir::SymbolId symbol, std::string symbolText,
+                         std::vector<ir::ValueId> operands, std::vector<ir::ValueId> results,
+                         std::vector<ir::AttrKV> attrs, std::optional<SrcLoc> srcLoc)
+        : id_(id),
+          kind_(kind),
+          symbol_(symbol),
+          symbolText_(std::move(symbolText)),
+          operands_(std::move(operands)),
+          results_(std::move(results)),
+          attrs_(std::move(attrs)),
+          srcLoc_(std::move(srcLoc))
     {
-        if (definingOpPtr_)
-        {
-            return definingOpPtr_;
-        }
-        if (!definingOpSymbol_)
-        {
-            return nullptr;
-        }
-        definingOpPtr_ = graph_->findOperation(*definingOpSymbol_);
-        return definingOpPtr_;
     }
 
-    void Value::setDefiningOp(Operation &op)
+    std::optional<AttributeValue> Operation::attr(ir::SymbolId key) const
     {
-        if (definingOpSymbol_ && *definingOpSymbol_ != op.symbol())
+        if (!key.valid())
         {
-            throw std::runtime_error("Value already has a defining operation");
+            return std::nullopt;
         }
-        if (isInput_)
+        for (const auto &entry : attrs_)
         {
-            throw std::runtime_error("Input value cannot have a defining operation");
-        }
-        definingOpSymbol_ = op.symbol();
-        definingOpPtr_ = &op;
-    }
-
-    void Value::setDefiningOpSymbol(const OperationId &opSymbol)
-    {
-        if (definingOpSymbol_ && *definingOpSymbol_ != opSymbol)
-        {
-            throw std::runtime_error("Value already has a defining operation");
-        }
-        if (isInput_)
-        {
-            throw std::runtime_error("Input value cannot have a defining operation");
-        }
-        definingOpSymbol_ = opSymbol;
-        definingOpPtr_ = nullptr;
-    }
-
-    void Value::addUser(Operation &op, std::size_t operandIndex)
-    {
-        users_.push_back(ValueUser{.operationSymbol = op.symbol(), .operationPtr = &op, .operandIndex = operandIndex});
-    }
-
-    void Value::addUserSymbol(const OperationId &opSymbol, std::size_t operandIndex)
-    {
-        users_.push_back(ValueUser{.operationSymbol = opSymbol, .operationPtr = nullptr, .operandIndex = operandIndex});
-    }
-
-    void Value::removeUser(Operation &op, std::size_t operandIndex)
-    {
-        auto it = std::find_if(users_.begin(), users_.end(), [&](const ValueUser &user)
-                               { return user.operationSymbol == op.symbol() && user.operandIndex == operandIndex; });
-        if (it == users_.end())
-        {
-            throw std::runtime_error("Value usage entry not found during removal");
-        }
-        users_.erase(it);
-    }
-
-    void Value::clearDefiningOp(Operation &op)
-    {
-        if (!definingOpSymbol_ || *definingOpSymbol_ != op.symbol())
-        {
-            throw std::runtime_error("Defining operation mismatch during clear");
-        }
-        definingOpSymbol_.reset();
-        definingOpPtr_ = nullptr;
-    }
-
-    void Value::clearDefiningOpSymbol(const OperationId &opSymbol)
-    {
-        if (!definingOpSymbol_ || *definingOpSymbol_ != opSymbol)
-        {
-            throw std::runtime_error("Defining operation mismatch during clear");
-        }
-        definingOpSymbol_.reset();
-        definingOpPtr_ = nullptr;
-    }
-
-    void Value::resetDefiningOpPtr(Graph &graph)
-    {
-        definingOpPtr_ = nullptr;
-        if (definingOpSymbol_)
-        {
-            definingOpPtr_ = graph.findOperation(*definingOpSymbol_);
-            if (!definingOpPtr_)
+            if (entry.key == key)
             {
-                throw std::runtime_error("Defining operation not found during rehydrate: " + *definingOpSymbol_);
+                return entry.value;
             }
         }
+        return std::nullopt;
     }
 
-    void Value::resetUserPointers(Graph &graph)
-    {
-        for (auto &user : users_)
-        {
-            user.operationPtr = nullptr;
-            if (!user.operationSymbol.empty())
-            {
-                user.operationPtr = graph.findOperation(user.operationSymbol);
-                if (!user.operationPtr)
-                {
-                    throw std::runtime_error("User operation not found during rehydrate: " + user.operationSymbol);
-                }
-            }
-        }
-    }
-
-    void Value::setAsInput()
-    {
-        if (isOutput_)
-        {
-            throw std::runtime_error("Value cannot be both input and output");
-        }
-        if (definingOpSymbol_)
-        {
-            throw std::runtime_error("Input value cannot have a defining operation");
-        }
-        isInput_ = true;
-    }
-
-    void Value::setAsOutput()
-    {
-        if (isInput_)
-        {
-            throw std::runtime_error("Value cannot be both input and output");
-        }
-        isOutput_ = true;
-    }
-
-    Operation::Operation(Graph &graph, OperationKind kind, std::string symbol) : graph_(&graph),
-                                                                                 kind_(kind),
-                                                                                 symbol_(std::move(symbol))
-    {
-        if (symbol_.empty())
-        {
-            throw std::invalid_argument("Operation symbol must not be empty");
-        }
-    }
-
-    Value *Operation::resolveValueAt(std::size_t index, const std::vector<ValueId> &symbols, std::vector<Value *> &pointers) const
-    {
-        if (index >= symbols.size())
-        {
-            throw std::out_of_range("Operand index out of range");
-        }
-        if (pointers.size() < symbols.size())
-        {
-            pointers.resize(symbols.size(), nullptr);
-        }
-        if (!pointers[index])
-        {
-            Value *resolved = graph_->findValue(symbols[index]);
-            if (!resolved)
-            {
-                throw std::runtime_error("Operation references unknown value: " + symbols[index]);
-            }
-            pointers[index] = resolved;
-        }
-        return pointers[index];
-    }
-
-    Value &Operation::operandValue(std::size_t index) const
-    {
-        Value *ptr = resolveValueAt(index, operands_, operandPtrs_);
-        if (!ptr)
-        {
-            throw std::runtime_error("Operand value not found");
-        }
-        return *ptr;
-    }
-
-    Value &Operation::resultValue(std::size_t index) const
-    {
-        Value *ptr = resolveValueAt(index, results_, resultPtrs_);
-        if (!ptr)
-        {
-            throw std::runtime_error("Result value not found");
-        }
-        return *ptr;
-    }
-
-    Operation::ValueHandleRange::Iterator::value_type Operation::ValueHandleRange::Iterator::operator*() const
-    {
-        return owner_->resolveValueAt(index_, *symbols_, *pointers_);
-    }
-
-    Value *Operation::ValueHandleRange::operator[](std::size_t index) const
-    {
-        return owner_->resolveValueAt(index, *symbols_, *pointers_);
-    }
-
-    Value *Operation::ValueHandleRange::front() const
-    {
-        if (empty())
-        {
-            return nullptr;
-        }
-        return owner_->resolveValueAt(0, *symbols_, *pointers_);
-    }
-
-    Value *Operation::ValueHandleRange::back() const
-    {
-        if (empty())
-        {
-            return nullptr;
-        }
-        return owner_->resolveValueAt(symbols_->size() - 1, *symbols_, *pointers_);
-    }
-
-    void Operation::addOperand(Value &value)
-    {
-        ensureGraphOwnership(*graph_, value);
-        operands_.push_back(value.symbol());
-        operandPtrs_.push_back(&value);
-        value.addUser(*this, operands_.size() - 1);
-    }
-
-    void Operation::addResult(Value &value)
-    {
-        ensureGraphOwnership(*graph_, value);
-        results_.push_back(value.symbol());
-        resultPtrs_.push_back(&value);
-        value.setDefiningOp(*this);
-    }
-
-    void Operation::replaceOperand(std::size_t index, Value &value)
-    {
-        if (index >= operands_.size())
-        {
-            throw std::out_of_range("Operand index out of range");
-        }
-        ensureGraphOwnership(*graph_, value);
-        if (operands_[index] == value.symbol())
-        {
-            if (operandPtrs_.size() < operands_.size())
-            {
-                operandPtrs_.resize(operands_.size(), nullptr);
-            }
-            operandPtrs_[index] = &value;
-            return;
-        }
-        if (operandPtrs_.size() < operands_.size())
-        {
-            operandPtrs_.resize(operands_.size(), nullptr);
-        }
-        value.addUser(*this, index);
-        if (Value *current = operandPtrs_[index] ? operandPtrs_[index] : graph_->findValue(operands_[index]))
-        {
-            current->removeUser(*this, index);
-        }
-        operands_[index] = value.symbol();
-        operandPtrs_[index] = &value;
-    }
-
-    void Operation::replaceResult(std::size_t index, Value &value)
-    {
-        if (index >= results_.size())
-        {
-            throw std::out_of_range("Result index out of range");
-        }
-        ensureGraphOwnership(*graph_, value);
-        if (results_[index] == value.symbol())
-        {
-            if (resultPtrs_.size() < results_.size())
-            {
-                resultPtrs_.resize(results_.size(), nullptr);
-            }
-            resultPtrs_[index] = &value;
-            return;
-        }
-        if (resultPtrs_.size() < results_.size())
-        {
-            resultPtrs_.resize(results_.size(), nullptr);
-        }
-        value.setDefiningOp(*this);
-        if (Value *current = resultPtrs_[index] ? resultPtrs_[index] : graph_->findValue(results_[index]))
-        {
-            current->clearDefiningOp(*this);
-        }
-        results_[index] = value.symbol();
-        resultPtrs_[index] = &value;
-    }
-
-    void Operation::setAttribute(std::string key, AttributeValue value)
-    {
-        if (key.empty())
-        {
-            throw std::invalid_argument("Attribute key must not be empty");
-        }
-        if (!attributeValueIsJsonSerializable(value))
-        {
-            throw std::invalid_argument("Attribute value must be JSON-serializable basic type or array");
-        }
-        attributes_.insert_or_assign(std::move(key), std::move(value));
-    }
-
-    void Operation::clearAttribute(std::string_view key)
-    {
-        if (key.empty())
-        {
-            return;
-        }
-        attributes_.erase(std::string(key));
-    }
-
-    void Operation::rehydrateOperands(Graph &graph)
-    {
-        operandPtrs_.assign(operands_.size(), nullptr);
-        for (std::size_t i = 0; i < operands_.size(); ++i)
-        {
-            Value *value = graph.findValue(operands_[i]);
-            if (!value)
-            {
-                throw std::runtime_error("Operand references unknown value during rehydrate: " + operands_[i]);
-            }
-            operandPtrs_[i] = value;
-        }
-    }
-
-    void Operation::rehydrateResults(Graph &graph)
-    {
-        resultPtrs_.assign(results_.size(), nullptr);
-        for (std::size_t i = 0; i < results_.size(); ++i)
-        {
-            Value *value = graph.findValue(results_[i]);
-            if (!value)
-            {
-                throw std::runtime_error("Result references unknown value during rehydrate: " + results_[i]);
-            }
-            resultPtrs_[i] = value;
-        }
-    }
-
-    Graph::Graph(Netlist &owner, std::string symbol) : owner_(&owner),
-                                                       symbol_(std::move(symbol))
+    Graph::Graph(Netlist &owner, std::string symbol, ir::GraphId graphId)
+        : owner_(&owner),
+          symbol_(std::move(symbol)),
+          graphId_(graphId)
     {
         if (symbol_.empty())
         {
             throw std::invalid_argument("Graph symbol must not be empty");
         }
-    }
-
-    Value &Graph::addValueInternal(std::unique_ptr<Value> value)
-    {
-        auto sym = value->symbol();
-        auto [it, inserted] = values_.emplace(sym, std::move(value));
-        if (!inserted)
+        if (!graphId_.valid())
         {
-            throw std::runtime_error("Duplicated value symbol: " + sym);
+            throw std::invalid_argument("GraphId must be valid");
         }
-        valueOrder_.push_back(sym);
-        return *it->second;
+        ir::GraphBuilder builder(symbols_, graphId_);
+        view_ = builder.freeze();
     }
 
-    Operation &Graph::addOperationInternal(std::unique_ptr<Operation> op)
+    ir::SymbolId Graph::internSymbol(std::string_view text)
     {
-        auto sym = op->symbol();
-        auto [it, inserted] = operations_.emplace(sym, std::move(op));
-        if (!inserted)
+        if (symbols_.contains(text))
         {
-            throw std::runtime_error("Duplicated operation symbol: " + sym);
+            return symbols_.lookup(text);
         }
-        operationOrder_.push_back(sym);
-        return *it->second;
+        return symbols_.intern(text);
     }
 
-    Value &Graph::createValue(std::string symbol, int64_t width, bool isSigned)
+    ir::SymbolId Graph::lookupSymbol(std::string_view text) const
     {
-        auto instance = std::unique_ptr<Value>(new Value(*this, std::move(symbol), width, isSigned));
-        return addValueInternal(std::move(instance));
+        return symbols_.lookup(text);
     }
 
-    Operation &Graph::createOperation(OperationKind kind, std::string symbol)
+    std::string_view Graph::symbolText(ir::SymbolId id) const
     {
-        auto instance = std::unique_ptr<Operation>(new Operation(*this, kind, std::move(symbol)));
-        return addOperationInternal(std::move(instance));
-    }
-
-    void Graph::bindInputPort(std::string portName, Value &value)
-    {
-        ensureGraphOwnership(*this, value);
-        if (inputPorts_.contains(portName))
+        if (!id.valid())
         {
-            throw std::runtime_error("Duplicated input port: " + portName);
+            return std::string_view{};
         }
-        value.setAsInput();
-        inputPorts_.emplace(std::move(portName), value.symbol());
+        return symbols_.text(id);
     }
 
-    void Graph::bindOutputPort(std::string portName, Value &value)
+    const ir::GraphView *Graph::viewIfFrozen() const noexcept
     {
-        ensureGraphOwnership(*this, value);
-        if (outputPorts_.contains(portName))
-        {
-            throw std::runtime_error("Duplicated output port: " + portName);
-        }
-        value.setAsOutput();
-        outputPorts_.emplace(std::move(portName), value.symbol());
-    }
-
-    Value *Graph::findValue(std::string_view symbol) noexcept
-    {
-        auto it = values_.find(std::string(symbol));
-        if (it == values_.end())
+        if (builder_)
         {
             return nullptr;
         }
-        return it->second.get();
+        return view_ ? &*view_ : nullptr;
     }
 
-    const Value *Graph::findValue(std::string_view symbol) const noexcept
+    const ir::GraphView &Graph::freeze()
     {
-        auto it = values_.find(std::string(symbol));
-        if (it == values_.end())
+        if (builder_)
         {
-            return nullptr;
+            view_ = builder_->freeze();
+            builder_.reset();
+            invalidateCaches();
         }
-        return it->second.get();
-    }
-
-    Operation *Graph::findOperation(std::string_view symbol) noexcept
-    {
-        auto it = operations_.find(std::string(symbol));
-        if (it == operations_.end())
+        if (!view_)
         {
-            return nullptr;
+            ir::GraphBuilder builder(symbols_, graphId_);
+            view_ = builder.freeze();
         }
-        return it->second.get();
+        return *view_;
     }
 
-    const Operation *Graph::findOperation(std::string_view symbol) const noexcept
+    std::span<const ir::OperationId> Graph::operations() const
     {
-        auto it = operations_.find(std::string(symbol));
-        if (it == operations_.end())
+        if (!builder_)
         {
-            return nullptr;
-        }
-        return it->second.get();
-    }
-
-    Value &Graph::getValue(std::string_view symbol)
-    {
-        Value *value = findValue(symbol);
-        if (!value)
-        {
-            throw std::runtime_error("Unknown value symbol: " + std::string(symbol));
-        }
-        return *value;
-    }
-
-    const Value &Graph::getValue(std::string_view symbol) const
-    {
-        const Value *value = findValue(symbol);
-        if (!value)
-        {
-            throw std::runtime_error("Unknown value symbol: " + std::string(symbol));
-        }
-        return *value;
-    }
-
-    Operation &Graph::getOperation(std::string_view symbol)
-    {
-        Operation *op = findOperation(symbol);
-        if (!op)
-        {
-            throw std::runtime_error("Unknown operation symbol: " + std::string(symbol));
-        }
-        return *op;
-    }
-
-    const Operation &Graph::getOperation(std::string_view symbol) const
-    {
-        const Operation *op = findOperation(symbol);
-        if (!op)
-        {
-            throw std::runtime_error("Unknown operation symbol: " + std::string(symbol));
-        }
-        return *op;
-    }
-
-    Value *Graph::inputPortValue(std::string_view portName) noexcept
-    {
-        auto it = inputPorts_.find(std::string(portName));
-        if (it == inputPorts_.end())
-        {
-            return nullptr;
-        }
-        return findValue(it->second);
-    }
-
-    const Value *Graph::inputPortValue(std::string_view portName) const noexcept
-    {
-        auto it = inputPorts_.find(std::string(portName));
-        if (it == inputPorts_.end())
-        {
-            return nullptr;
-        }
-        return findValue(it->second);
-    }
-
-    Value *Graph::outputPortValue(std::string_view portName) noexcept
-    {
-        auto it = outputPorts_.find(std::string(portName));
-        if (it == outputPorts_.end())
-        {
-            return nullptr;
-        }
-        return findValue(it->second);
-    }
-
-    const Value *Graph::outputPortValue(std::string_view portName) const noexcept
-    {
-        auto it = outputPorts_.find(std::string(portName));
-        if (it == outputPorts_.end())
-        {
-            return nullptr;
-        }
-        return findValue(it->second);
-    }
-
-    void Graph::replaceOutputValue(Value &oldValue, Value &newValue)
-    {
-        ensureGraphOwnership(*this, oldValue);
-        ensureGraphOwnership(*this, newValue);
-        for (auto &entry : outputPorts_)
-        {
-            if (entry.second == oldValue.symbol())
+            if (view_)
             {
-                entry.second = newValue.symbol();
-                oldValue.isOutput_ = false;
-                newValue.setAsOutput();
+                return view_->operations();
+            }
+            return std::span<const ir::OperationId>();
+        }
+        ensureCaches();
+        return std::span<const ir::OperationId>(operationsCache_.data(), operationsCache_.size());
+    }
+
+    std::span<const ir::ValueId> Graph::values() const
+    {
+        if (!builder_)
+        {
+            if (view_)
+            {
+                return view_->values();
+            }
+            return std::span<const ir::ValueId>();
+        }
+        ensureCaches();
+        return std::span<const ir::ValueId>(valuesCache_.data(), valuesCache_.size());
+    }
+
+    std::span<const ir::Port> Graph::inputPorts() const
+    {
+        if (!builder_)
+        {
+            if (view_)
+            {
+                return view_->inputPorts();
+            }
+            return std::span<const ir::Port>();
+        }
+        ensureCaches();
+        return std::span<const ir::Port>(inputPortsCache_.data(), inputPortsCache_.size());
+    }
+
+    std::span<const ir::Port> Graph::outputPorts() const
+    {
+        if (!builder_)
+        {
+            if (view_)
+            {
+                return view_->outputPorts();
+            }
+            return std::span<const ir::Port>();
+        }
+        ensureCaches();
+        return std::span<const ir::Port>(outputPortsCache_.data(), outputPortsCache_.size());
+    }
+
+    ir::ValueId Graph::createValue(ir::SymbolId symbol, int32_t width, bool isSigned)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.addValue(symbol, width, isSigned);
+    }
+
+    ir::OperationId Graph::createOperation(OperationKind kind, ir::SymbolId symbol)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.addOp(kind, symbol);
+    }
+
+    ir::ValueId Graph::findValue(ir::SymbolId symbol) const noexcept
+    {
+        if (!symbol.valid())
+        {
+            return ir::ValueId::invalid();
+        }
+        if (builder_)
+        {
+            const auto &values = builder_->values_;
+            for (std::size_t i = 0; i < values.size(); ++i)
+            {
+                if (!values[i].alive)
+                {
+                    continue;
+                }
+                if (values[i].symbol == symbol)
+                {
+                    ir::ValueId id;
+                    id.index = static_cast<uint32_t>(i + 1);
+                    id.generation = 0;
+                    id.graph = graphId_;
+                    return id;
+                }
+            }
+            return ir::ValueId::invalid();
+        }
+        if (!view_)
+        {
+            return ir::ValueId::invalid();
+        }
+        for (const auto &id : view_->values())
+        {
+            if (view_->valueSymbol(id) == symbol)
+            {
+                return id;
             }
         }
+        return ir::ValueId::invalid();
     }
 
-    bool Graph::removeOperation(std::string_view symbol)
+    ir::OperationId Graph::findOperation(ir::SymbolId symbol) const noexcept
     {
-        auto it = operations_.find(std::string(symbol));
-        if (it == operations_.end())
+        if (!symbol.valid())
         {
-            return false;
+            return ir::OperationId::invalid();
         }
-
-        Operation &op = *it->second;
-
-        for (std::size_t i = 0; i < op.operands_.size(); ++i)
+        if (builder_)
         {
-            Value *operand = (i < op.operandPtrs_.size()) ? op.operandPtrs_[i] : nullptr;
-            if (!operand)
+            const auto &ops = builder_->operations_;
+            for (std::size_t i = 0; i < ops.size(); ++i)
             {
-                operand = findValue(op.operands_[i]);
+                if (!ops[i].alive)
+                {
+                    continue;
+                }
+                if (ops[i].symbol == symbol)
+                {
+                    ir::OperationId id;
+                    id.index = static_cast<uint32_t>(i + 1);
+                    id.generation = 0;
+                    id.graph = graphId_;
+                    return id;
+                }
             }
-            if (!operand)
-            {
-                continue;
-            }
-            auto &users = operand->users_;
-            users.erase(std::remove_if(users.begin(), users.end(), [&](const ValueUser &user)
-                                       { return user.operationSymbol == op.symbol() && user.operandIndex == i; }),
-                        users.end());
+            return ir::OperationId::invalid();
         }
-
-        for (std::size_t i = 0; i < op.results_.size(); ++i)
+        if (!view_)
         {
-            Value *result = (i < op.resultPtrs_.size()) ? op.resultPtrs_[i] : nullptr;
-            if (!result)
+            return ir::OperationId::invalid();
+        }
+        for (const auto &id : view_->operations())
+        {
+            if (view_->opSymbol(id) == symbol)
             {
-                result = findValue(op.results_[i]);
-            }
-            if (!result)
-            {
-                continue;
-            }
-            if (result->definingOpSymbol_ && *result->definingOpSymbol_ == op.symbol())
-            {
-                result->definingOpSymbol_.reset();
-                result->definingOpPtr_ = nullptr;
+                return id;
             }
         }
-
-        operations_.erase(it);
-        operationOrder_.erase(std::remove(operationOrder_.begin(), operationOrder_.end(), std::string(symbol)), operationOrder_.end());
-        return true;
+        return ir::OperationId::invalid();
     }
 
-    void Graph::rehydratePointers()
+    ir::ValueId Graph::findValue(std::string_view symbol) const
     {
-        for (auto &entry : values_)
+        return findValue(lookupSymbol(symbol));
+    }
+
+    ir::OperationId Graph::findOperation(std::string_view symbol) const
+    {
+        return findOperation(lookupSymbol(symbol));
+    }
+
+    Value Graph::getValue(ir::ValueId id) const
+    {
+        if (builder_)
         {
-            if (entry.second)
+            return valueFromBuilder(id);
+        }
+        return valueFromView(id);
+    }
+
+    Operation Graph::getOperation(ir::OperationId id) const
+    {
+        if (builder_)
+        {
+            return operationFromBuilder(id);
+        }
+        return operationFromView(id);
+    }
+
+    void Graph::bindInputPort(ir::SymbolId name, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.bindInputPort(name, value);
+    }
+
+    void Graph::bindOutputPort(ir::SymbolId name, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.bindOutputPort(name, value);
+    }
+
+    ir::ValueId Graph::inputPortValue(ir::SymbolId name) const noexcept
+    {
+        if (!name.valid())
+        {
+            return ir::ValueId::invalid();
+        }
+        if (builder_)
+        {
+            for (const auto &port : builder_->inputPorts_)
             {
-                entry.second->resetDefiningOpPtr(*this);
+                if (port.name == name)
+                {
+                    return port.value;
+                }
+            }
+            return ir::ValueId::invalid();
+        }
+        if (!view_)
+        {
+            return ir::ValueId::invalid();
+        }
+        for (const auto &port : view_->inputPorts())
+        {
+            if (port.name == name)
+            {
+                return port.value;
             }
         }
-        for (auto &entry : operations_)
+        return ir::ValueId::invalid();
+    }
+
+    ir::ValueId Graph::outputPortValue(ir::SymbolId name) const noexcept
+    {
+        if (!name.valid())
         {
-            if (entry.second)
+            return ir::ValueId::invalid();
+        }
+        if (builder_)
+        {
+            for (const auto &port : builder_->outputPorts_)
             {
-                entry.second->rehydrateOperands(*this);
-                entry.second->rehydrateResults(*this);
+                if (port.name == name)
+                {
+                    return port.value;
+                }
+            }
+            return ir::ValueId::invalid();
+        }
+        if (!view_)
+        {
+            return ir::ValueId::invalid();
+        }
+        for (const auto &port : view_->outputPorts())
+        {
+            if (port.name == name)
+            {
+                return port.value;
             }
         }
-        for (auto &entry : values_)
-        {
-            if (entry.second)
-            {
-                entry.second->resetUserPointers(*this);
-            }
-        }
+        return ir::ValueId::invalid();
+    }
+
+    void Graph::addOperand(ir::OperationId op, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.addOperand(op, value);
+    }
+
+    void Graph::addResult(ir::OperationId op, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.addResult(op, value);
+    }
+
+    void Graph::replaceOperand(ir::OperationId op, std::size_t index, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.replaceOperand(op, index, value);
+    }
+
+    void Graph::replaceResult(ir::OperationId op, std::size_t index, ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.replaceResult(op, index, value);
+    }
+
+    void Graph::replaceAllUses(ir::ValueId from, ir::ValueId to)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.replaceAllUses(from, to);
+    }
+
+    bool Graph::eraseOperand(ir::OperationId op, std::size_t index)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseOperand(op, index);
+    }
+
+    bool Graph::eraseResult(ir::OperationId op, std::size_t index)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseResult(op, index);
+    }
+
+    bool Graph::eraseOp(ir::OperationId op)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseOp(op);
+    }
+
+    bool Graph::eraseOp(ir::OperationId op, std::span<const ir::ValueId> replacementResults)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseOp(op, replacementResults);
+    }
+
+    bool Graph::eraseValue(ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseValue(value);
+    }
+
+    void Graph::setAttr(ir::OperationId op, ir::SymbolId key, AttributeValue value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setAttr(op, key, std::move(value));
+    }
+
+    bool Graph::eraseAttr(ir::OperationId op, ir::SymbolId key)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseAttr(op, key);
+    }
+
+    void Graph::setValueSrcLoc(ir::ValueId value, SrcLoc loc)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setValueSrcLoc(value, std::move(loc));
+    }
+
+    void Graph::setOpSrcLoc(ir::OperationId op, SrcLoc loc)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setOpSrcLoc(op, std::move(loc));
+    }
+
+    void Graph::setOpSymbol(ir::OperationId op, ir::SymbolId sym)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setOpSymbol(op, sym);
+    }
+
+    void Graph::setValueSymbol(ir::ValueId value, ir::SymbolId sym)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setValueSymbol(value, sym);
+    }
+
+    void Graph::clearOpSymbol(ir::OperationId op)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.clearOpSymbol(op);
+    }
+
+    void Graph::clearValueSymbol(ir::ValueId value)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.clearValueSymbol(value);
     }
 
     void Graph::writeJson(slang::JsonWriter &writer) const
     {
+        auto symbolTextOrEmpty = [&](ir::SymbolId sym) -> std::string_view
+        {
+            return sym.valid() ? symbols_.text(sym) : std::string_view{};
+        };
+
         writer.startObject();
         writer.writeProperty("symbol");
         writer.writeValue(symbol_);
 
         writer.writeProperty("vals");
         writer.startArray();
-        for (const auto &sym : valueOrder_)
+        for (const auto &valueId : values())
         {
-            const Value &value = getValue(sym);
+            const Value value = getValue(valueId);
             writer.startObject();
             writer.writeProperty("sym");
-            writer.writeValue(value.symbol());
+            writer.writeValue(symbolTextOrEmpty(value.symbol()));
             writer.writeProperty("w");
-            writer.writeValue(value.width());
+            writer.writeValue(static_cast<int64_t>(value.width()));
             writer.writeProperty("sgn");
             writer.writeValue(value.isSigned());
             writer.writeProperty("in");
             writer.writeValue(value.isInput());
             writer.writeProperty("out");
             writer.writeValue(value.isOutput());
-            if (value.definingOpSymbol())
+            if (value.definingOp().valid())
             {
+                Operation defOp = getOperation(value.definingOp());
                 writer.writeProperty("def");
-                writer.writeValue(*value.definingOpSymbol());
+                writer.writeValue(symbolTextOrEmpty(defOp.symbol()));
             }
 
             writer.writeProperty("users");
@@ -2775,7 +2694,8 @@ namespace wolf_sv::grh
             {
                 writer.startObject();
                 writer.writeProperty("op");
-                writer.writeValue(user.operationSymbol);
+                Operation userOp = getOperation(user.operation);
+                writer.writeValue(symbolTextOrEmpty(userOp.symbol()));
                 writer.writeProperty("idx");
                 writer.writeValue(static_cast<int64_t>(user.operandIndex));
                 writer.endObject();
@@ -2791,26 +2711,28 @@ namespace wolf_sv::grh
 
         writer.writeProperty("in");
         writer.startArray();
-        for (const auto &[name, valueSymbol] : inputPorts_)
+        for (const auto &port : inputPorts())
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(name);
+            writer.writeValue(symbolTextOrEmpty(port.name));
             writer.writeProperty("val");
-            writer.writeValue(valueSymbol);
+            Value value = getValue(port.value);
+            writer.writeValue(symbolTextOrEmpty(value.symbol()));
             writer.endObject();
         }
         writer.endArray();
 
         writer.writeProperty("out");
         writer.startArray();
-        for (const auto &[name, valueSymbol] : outputPorts_)
+        for (const auto &port : outputPorts())
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(name);
+            writer.writeValue(symbolTextOrEmpty(port.name));
             writer.writeProperty("val");
-            writer.writeValue(valueSymbol);
+            Value value = getValue(port.value);
+            writer.writeValue(symbolTextOrEmpty(value.symbol()));
             writer.endObject();
         }
         writer.endArray();
@@ -2819,40 +2741,42 @@ namespace wolf_sv::grh
 
         writer.writeProperty("ops");
         writer.startArray();
-        for (const auto &sym : operationOrder_)
+        for (const auto &opId : operations())
         {
-            const Operation &op = getOperation(sym);
+            const Operation op = getOperation(opId);
             writer.startObject();
             writer.writeProperty("sym");
-            writer.writeValue(op.symbol());
+            writer.writeValue(symbolTextOrEmpty(op.symbol()));
             writer.writeProperty("kind");
             writer.writeValue(toString(op.kind()));
 
             writer.writeProperty("in");
             writer.startArray();
-            for (const auto &operand : op.operandSymbols())
+            for (const auto &operand : op.operands())
             {
-                writer.writeValue(operand);
+                Value value = getValue(operand);
+                writer.writeValue(symbolTextOrEmpty(value.symbol()));
             }
             writer.endArray();
 
             writer.writeProperty("out");
             writer.startArray();
-            for (const auto &result : op.resultSymbols())
+            for (const auto &result : op.results())
             {
-                writer.writeValue(result);
+                Value value = getValue(result);
+                writer.writeValue(symbolTextOrEmpty(value.symbol()));
             }
             writer.endArray();
 
-            if (!op.attributes().empty())
+            if (!op.attrs().empty())
             {
                 writer.writeProperty("attrs");
                 writer.startObject();
-                for (const auto &[key, attrValue] : op.attributes())
+                for (const auto &attr : op.attrs())
                 {
-                    writer.writeProperty(key);
+                    writer.writeProperty(symbolTextOrEmpty(attr.key));
                     writer.startObject();
-                    writeAttributeValue(writer, attrValue);
+                    writeAttributeValue(writer, attr.value);
                     writer.endObject();
                 }
                 writer.endObject();
@@ -2864,6 +2788,206 @@ namespace wolf_sv::grh
         writer.endArray();
 
         writer.endObject();
+    }
+
+    void Graph::invalidateCaches() const
+    {
+        cacheValid_ = false;
+        valuesCache_.clear();
+        operationsCache_.clear();
+        inputPortsCache_.clear();
+        outputPortsCache_.clear();
+    }
+
+    void Graph::ensureCaches() const
+    {
+        if (cacheValid_)
+        {
+            return;
+        }
+        valuesCache_.clear();
+        operationsCache_.clear();
+        inputPortsCache_.clear();
+        outputPortsCache_.clear();
+        if (builder_)
+        {
+            const auto &values = builder_->values_;
+            valuesCache_.reserve(values.size());
+            for (std::size_t i = 0; i < values.size(); ++i)
+            {
+                if (!values[i].alive)
+                {
+                    continue;
+                }
+                ir::ValueId id;
+                id.index = static_cast<uint32_t>(i + 1);
+                id.generation = 0;
+                id.graph = graphId_;
+                valuesCache_.push_back(id);
+            }
+
+            const auto &ops = builder_->operations_;
+            operationsCache_.reserve(ops.size());
+            for (std::size_t i = 0; i < ops.size(); ++i)
+            {
+                if (!ops[i].alive)
+                {
+                    continue;
+                }
+                ir::OperationId id;
+                id.index = static_cast<uint32_t>(i + 1);
+                id.generation = 0;
+                id.graph = graphId_;
+                operationsCache_.push_back(id);
+            }
+            inputPortsCache_ = builder_->inputPorts_;
+            outputPortsCache_ = builder_->outputPorts_;
+        }
+        cacheValid_ = true;
+    }
+
+    ir::GraphBuilder &Graph::ensureBuilder()
+    {
+        if (builder_)
+        {
+            return *builder_;
+        }
+        if (view_)
+        {
+            builder_ = ir::GraphBuilder::fromView(*view_, symbols_);
+            view_.reset();
+        }
+        else
+        {
+            builder_.emplace(symbols_, graphId_);
+        }
+        invalidateCaches();
+        return *builder_;
+    }
+
+    const ir::GraphView &Graph::view() const
+    {
+        if (!view_)
+        {
+            throw std::runtime_error("GraphView is not available; freeze the graph first");
+        }
+        return *view_;
+    }
+
+    Value Graph::valueFromView(ir::ValueId id) const
+    {
+        const ir::GraphView &graphView = view();
+        id.assertGraph(graphId_);
+        ir::SymbolId symbol = graphView.valueSymbol(id);
+        std::string symbolText = symbol.valid() ? std::string(symbols_.text(symbol)) : std::string();
+        return Value(id,
+                     symbol,
+                     std::move(symbolText),
+                     graphView.valueWidth(id),
+                     graphView.valueSigned(id),
+                     graphView.valueIsInput(id),
+                     graphView.valueIsOutput(id),
+                     graphView.valueDef(id),
+                     std::vector<ir::ValueUser>(graphView.valueUsers(id).begin(), graphView.valueUsers(id).end()),
+                     graphView.valueSrcLoc(id));
+    }
+
+    Value Graph::valueFromBuilder(ir::ValueId id) const
+    {
+        if (!builder_)
+        {
+            throw std::runtime_error("GraphBuilder is not available");
+        }
+        id.assertGraph(graphId_);
+        if (id.index == 0 || id.index > builder_->values_.size())
+        {
+            throw std::runtime_error("ValueId out of range");
+        }
+        const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+        const auto &data = builder_->values_[idx];
+        if (!data.alive)
+        {
+            throw std::runtime_error("ValueId refers to erased value");
+        }
+
+        std::vector<ir::ValueUser> users;
+        const auto &ops = builder_->operations_;
+        for (std::size_t opIdx = 0; opIdx < ops.size(); ++opIdx)
+        {
+            if (!ops[opIdx].alive)
+            {
+                continue;
+            }
+            const auto &operands = ops[opIdx].operands;
+            for (std::size_t operandIdx = 0; operandIdx < operands.size(); ++operandIdx)
+            {
+                if (operands[operandIdx] == id)
+                {
+                    ir::OperationId opId;
+                    opId.index = static_cast<uint32_t>(opIdx + 1);
+                    opId.generation = 0;
+                    opId.graph = graphId_;
+                    users.push_back(ir::ValueUser{opId, static_cast<uint32_t>(operandIdx)});
+                }
+            }
+        }
+
+        std::string symbolText = data.symbol.valid() ? std::string(symbols_.text(data.symbol)) : std::string();
+        return Value(id,
+                     data.symbol,
+                     std::move(symbolText),
+                     data.width,
+                     data.isSigned,
+                     data.isInput,
+                     data.isOutput,
+                     data.definingOp,
+                     std::move(users),
+                     data.srcLoc);
+    }
+
+    Operation Graph::operationFromView(ir::OperationId id) const
+    {
+        const ir::GraphView &graphView = view();
+        id.assertGraph(graphId_);
+        ir::SymbolId symbol = graphView.opSymbol(id);
+        std::string symbolText = symbol.valid() ? std::string(symbols_.text(symbol)) : std::string();
+        return Operation(id,
+                         graphView.opKind(id),
+                         symbol,
+                         std::move(symbolText),
+                         std::vector<ir::ValueId>(graphView.opOperands(id).begin(), graphView.opOperands(id).end()),
+                         std::vector<ir::ValueId>(graphView.opResults(id).begin(), graphView.opResults(id).end()),
+                         std::vector<ir::AttrKV>(graphView.opAttrs(id).begin(), graphView.opAttrs(id).end()),
+                         graphView.opSrcLoc(id));
+    }
+
+    Operation Graph::operationFromBuilder(ir::OperationId id) const
+    {
+        if (!builder_)
+        {
+            throw std::runtime_error("GraphBuilder is not available");
+        }
+        id.assertGraph(graphId_);
+        if (id.index == 0 || id.index > builder_->operations_.size())
+        {
+            throw std::runtime_error("OperationId out of range");
+        }
+        const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+        const auto &data = builder_->operations_[idx];
+        if (!data.alive)
+        {
+            throw std::runtime_error("OperationId refers to erased operation");
+        }
+
+        std::string symbolText = data.symbol.valid() ? std::string(symbols_.text(data.symbol)) : std::string();
+        return Operation(id,
+                         data.kind,
+                         data.symbol,
+                         std::move(symbolText),
+                         data.operands,
+                         data.results,
+                         data.attrs,
+                         data.srcLoc);
     }
 
     Graph &Netlist::addGraphInternal(std::unique_ptr<Graph> graph)
@@ -2880,7 +3004,17 @@ namespace wolf_sv::grh
 
     Graph &Netlist::createGraph(std::string symbol)
     {
-        auto instance = std::make_unique<Graph>(*this, std::move(symbol));
+        if (symbol.empty())
+        {
+            throw std::invalid_argument("Graph symbol must not be empty");
+        }
+        if (graphs_.contains(symbol))
+        {
+            throw std::runtime_error("Duplicated graph symbol: " + symbol);
+        }
+        ir::SymbolId graphSymbol = netlistSymbols_.contains(symbol) ? netlistSymbols_.lookup(symbol) : netlistSymbols_.intern(symbol);
+        ir::GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
+        auto instance = std::make_unique<Graph>(*this, std::move(symbol), graphId);
         return addGraphInternal(std::move(instance));
     }
 
@@ -3144,8 +3278,9 @@ namespace wolf_sv::grh
                 throw std::runtime_error("Graph JSON missing vals array");
             }
 
-            std::unordered_set<std::string> declaredInputs;
-            std::unordered_set<std::string> declaredOutputs;
+            std::unordered_map<std::string, ir::ValueId> valueBySymbol;
+            std::unordered_set<uint32_t> declaredInputs;
+            std::unordered_set<uint32_t> declaredOutputs;
 
             const auto &valuesArray = valuesIt->second.asArray("graph.vals");
             for (const auto &valueEntry : valuesArray)
@@ -3154,7 +3289,9 @@ namespace wolf_sv::grh
                 const auto &symbol = valueObj.at("sym").asString("value.sym");
                 int64_t width = valueObj.at("w").asInt("value.w");
                 bool isSigned = valueObj.at("sgn").asBool("value.sgn");
-                Value &value = graph.createValue(symbol, width, isSigned);
+                ir::SymbolId valueSym = graph.internSymbol(symbol);
+                ir::ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
+                valueBySymbol.emplace(symbol, valueId);
 
                 bool isInput = valueObj.at("in").asBool("value.in");
                 bool isOutput = valueObj.at("out").asBool("value.out");
@@ -3165,23 +3302,18 @@ namespace wolf_sv::grh
 
                 if (isInput)
                 {
-                    declaredInputs.insert(symbol);
+                    declaredInputs.insert(valueSym.value);
                 }
                 if (isOutput)
                 {
-                    declaredOutputs.insert(symbol);
-                }
-
-                if (auto defIt = valueObj.find("def"); defIt != valueObj.end())
-                {
-                    value.setDefiningOpSymbol(defIt->second.asString("value.def"));
+                    declaredOutputs.insert(valueSym.value);
                 }
 
                 if (auto dbgIt = valueObj.find("loc"); dbgIt != valueObj.end())
                 {
                     if (auto loc = parseSrcLoc(dbgIt->second, "value.loc"))
                     {
-                        value.setSrcLoc(std::move(*loc));
+                        graph.setValueSrcLoc(valueId, std::move(*loc));
                     }
                 }
             }
@@ -3206,18 +3338,20 @@ namespace wolf_sv::grh
                         {
                             throw std::runtime_error("Port entry missing name or val");
                         }
-                        Value *value = graph.findValue(valField->second.asString("graph.port.val"));
-                        if (!value)
+                        const std::string valueName = valField->second.asString("graph.port.val");
+                        auto valueIt = valueBySymbol.find(valueName);
+                        if (valueIt == valueBySymbol.end())
                         {
-                            throw std::runtime_error("Port references unknown value: " + valField->second.asString("graph.port.val"));
+                            throw std::runtime_error("Port references unknown value: " + valueName);
                         }
+                        ir::SymbolId portName = graph.internSymbol(nameField->second.asString("graph.port.name"));
                         if (isInput)
                         {
-                            graph.bindInputPort(nameField->second.asString("graph.port.name"), *value);
+                            graph.bindInputPort(portName, valueIt->second);
                         }
                         else
                         {
-                            graph.bindOutputPort(nameField->second.asString("graph.port.name"), *value);
+                            graph.bindOutputPort(portName, valueIt->second);
                         }
                     }
                 };
@@ -3229,35 +3363,49 @@ namespace wolf_sv::grh
                 throw std::runtime_error("Graph JSON missing ports object");
             }
 
-            for (const auto &[_, valueSymbol] : graph.inputPorts())
+            for (const auto &port : graph.inputPorts())
             {
-                if (!declaredInputs.contains(valueSymbol))
+                Value value = graph.getValue(port.value);
+                if (!declaredInputs.contains(value.symbol().value))
                 {
-                    throw std::runtime_error("Input port missing isInput=true flag for value: " + valueSymbol);
+                    throw std::runtime_error("Input port missing isInput=true flag for value: " + std::string(graph.symbolText(value.symbol())));
                 }
             }
-            for (const auto &symbol : declaredInputs)
+            for (const auto &symbolValue : declaredInputs)
             {
-                const Value *value = graph.findValue(symbol);
-                if (!value || !value->isInput())
+                ir::SymbolId sym{symbolValue};
+                ir::ValueId valueId = graph.findValue(sym);
+                if (!valueId.valid())
                 {
-                    throw std::runtime_error("Value marked in=true but not bound to input port: " + symbol);
+                    throw std::runtime_error("Value marked in=true but not bound to input port");
+                }
+                Value value = graph.getValue(valueId);
+                if (!value.isInput())
+                {
+                    throw std::runtime_error("Value marked in=true but not bound to input port: " + std::string(graph.symbolText(sym)));
                 }
             }
 
-            for (const auto &[_, valueSymbol] : graph.outputPorts())
+            for (const auto &port : graph.outputPorts())
             {
-                if (!declaredOutputs.contains(valueSymbol))
+                Value value = graph.getValue(port.value);
+                if (!declaredOutputs.contains(value.symbol().value))
                 {
-                    throw std::runtime_error("Output port missing isOutput=true flag for value: " + valueSymbol);
+                    throw std::runtime_error("Output port missing isOutput=true flag for value: " + std::string(graph.symbolText(value.symbol())));
                 }
             }
-            for (const auto &symbol : declaredOutputs)
+            for (const auto &symbolValue : declaredOutputs)
             {
-                const Value *value = graph.findValue(symbol);
-                if (!value || !value->isOutput())
+                ir::SymbolId sym{symbolValue};
+                ir::ValueId valueId = graph.findValue(sym);
+                if (!valueId.valid())
                 {
-                    throw std::runtime_error("Value marked out=true but not bound to output port: " + symbol);
+                    throw std::runtime_error("Value marked out=true but not bound to output port");
+                }
+                Value value = graph.getValue(valueId);
+                if (!value.isOutput())
+                {
+                    throw std::runtime_error("Value marked out=true but not bound to output port: " + std::string(graph.symbolText(sym)));
                 }
             }
 
@@ -3283,7 +3431,9 @@ namespace wolf_sv::grh
                         throw std::runtime_error("Operation missing symbol");
                     }
 
-                    Operation &op = graph.createOperation(*kind, symIt->second.asString("operation.sym"));
+                    const std::string opSymbol = symIt->second.asString("operation.sym");
+                    ir::SymbolId opSym = graph.internSymbol(opSymbol);
+                    ir::OperationId opId = graph.createOperation(*kind, opSym);
 
                     auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>
                     {
@@ -3300,29 +3450,30 @@ namespace wolf_sv::grh
 
                     for (const auto &symbol : parseSymbolList("in", "operation.in"))
                     {
-                        Value *operand = graph.findValue(symbol);
-                        if (!operand)
+                        auto valueIt = valueBySymbol.find(symbol);
+                        if (valueIt == valueBySymbol.end())
                         {
                             throw std::runtime_error("Operand references unknown value: " + symbol);
                         }
-                        op.addOperand(*operand);
+                        graph.addOperand(opId, valueIt->second);
                     }
 
                     for (const auto &symbol : parseSymbolList("out", "operation.out"))
                     {
-                        Value *result = graph.findValue(symbol);
-                        if (!result)
+                        auto valueIt = valueBySymbol.find(symbol);
+                        if (valueIt == valueBySymbol.end())
                         {
                             throw std::runtime_error("Result references unknown value: " + symbol);
                         }
-                        op.addResult(*result);
+                        graph.addResult(opId, valueIt->second);
                     }
 
                     if (auto attrsIt = opObj.find("attrs"); attrsIt != opObj.end())
                     {
                         for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
                         {
-                            op.setAttribute(attrName, parseAttributeValue(attrValue));
+                            ir::SymbolId attrKey = graph.internSymbol(attrName);
+                            graph.setAttr(opId, attrKey, parseAttributeValue(attrValue));
                         }
                     }
 
@@ -3330,7 +3481,7 @@ namespace wolf_sv::grh
                     {
                         if (auto loc = parseSrcLoc(dbgIt->second, "operation.loc"))
                         {
-                            op.setSrcLoc(std::move(*loc));
+                            graph.setOpSrcLoc(opId, std::move(*loc));
                         }
                     }
                 }
@@ -3342,14 +3493,6 @@ namespace wolf_sv::grh
             for (const auto &entry : topIt->second.asArray("netlist.tops"))
             {
                 netlist.markAsTop(entry.asString("netlist.tops[]"));
-            }
-        }
-
-        for (auto &entry : netlist.graphs_)
-        {
-            if (entry.second)
-            {
-                entry.second->rehydratePointers();
             }
         }
 

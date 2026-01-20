@@ -144,7 +144,22 @@ private:
     std::deque<std::string> textById_;
 };
 
-class NetlistSymbolTable final : public SymbolTable {};
+struct GraphId;
+
+class NetlistSymbolTable final : public SymbolTable {
+public:
+    NetlistSymbolTable();
+
+    GraphId allocateGraphId(SymbolId symbol);
+    GraphId lookupGraphId(SymbolId symbol) const noexcept;
+    SymbolId symbolForGraph(GraphId graph) const noexcept;
+
+private:
+    uint32_t nextGraphIndex_ = 1;
+    std::vector<SymbolId> symbolByGraph_;
+    std::unordered_map<uint32_t, uint32_t> graphIndexBySymbol_;
+};
+
 class GraphSymbolTable final : public SymbolTable {};
 
 struct GraphId {
@@ -296,6 +311,8 @@ public:
     GraphView freeze() const;
 
 private:
+    friend class ::wolf_sv::grh::Graph;
+
     struct ValueData {
         SymbolId symbol;
         int32_t width = 0;
@@ -336,189 +353,64 @@ private:
 
 } // namespace ir
 
-class Graph;
-class Operation;
-
-struct ValueUser {
-    OperationId operationSymbol;
-    Operation* operationPtr = nullptr;
-    std::size_t operandIndex = 0;
-};
-
 class Value {
 public:
-    Graph& graph() const noexcept { return *graph_; }
-    const ValueId& symbol() const noexcept { return symbol_; }
-    int64_t width() const noexcept { return width_; }
+    const ir::ValueId& id() const noexcept { return id_; }
+    ir::SymbolId symbol() const noexcept { return symbol_; }
+    std::string_view symbolText() const noexcept { return symbolText_; }
+    int32_t width() const noexcept { return width_; }
     bool isSigned() const noexcept { return isSigned_; }
     bool isInput() const noexcept { return isInput_; }
     bool isOutput() const noexcept { return isOutput_; }
-    Operation* definingOp() const noexcept;
-    const std::optional<OperationId>& definingOpSymbol() const noexcept { return definingOpSymbol_; }
-    const std::vector<ValueUser>& users() const noexcept { return users_; }
-    const std::optional<SrcLoc> &srcLoc() const noexcept { return srcLoc_; }
-    void setSrcLoc(SrcLoc info) { srcLoc_ = std::move(info); }
+    ir::OperationId definingOp() const noexcept { return definingOp_; }
+    std::span<const ir::ValueUser> users() const noexcept { return std::span<const ir::ValueUser>(users_.data(), users_.size()); }
+    const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
 
 private:
     friend class Graph;
-    friend class Operation;
-    friend class Netlist;
 
-    Value(Graph& graph, ValueId symbol, int64_t width, bool isSigned);
+    Value(ir::ValueId id, ir::SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
+          bool isInput, bool isOutput, ir::OperationId definingOp,
+          std::vector<ir::ValueUser> users, std::optional<SrcLoc> srcLoc);
 
-    void setDefiningOp(Operation& op);
-    void setDefiningOpSymbol(const OperationId& opSymbol);
-    void addUser(Operation& op, std::size_t operandIndex);
-    void addUserSymbol(const OperationId& opSymbol, std::size_t operandIndex);
-    void removeUser(Operation& op, std::size_t operandIndex);
-    void clearDefiningOp(Operation& op);
-    void clearDefiningOpSymbol(const OperationId& opSymbol);
-    void resetDefiningOpPtr(Graph& graph);
-    void resetUserPointers(Graph& graph);
-    void setAsInput();
-    void setAsOutput();
-
-    Graph* graph_;
-    std::optional<OperationId> definingOpSymbol_;
-    mutable Operation* definingOpPtr_ = nullptr;
-    ValueId symbol_;
-    int64_t width_;
-    bool isSigned_;
+    ir::ValueId id_{};
+    ir::SymbolId symbol_{};
+    std::string symbolText_;
+    int32_t width_ = 0;
+    bool isSigned_ = false;
     bool isInput_ = false;
     bool isOutput_ = false;
-    std::vector<ValueUser> users_;
+    ir::OperationId definingOp_{};
+    std::vector<ir::ValueUser> users_;
     std::optional<SrcLoc> srcLoc_;
 };
 
 class Operation {
 public:
-    class ValueHandleRange
-    {
-    public:
-        class Iterator
-        {
-        public:
-            using value_type = Value *;
-            using difference_type = std::ptrdiff_t;
-            using iterator_category = std::random_access_iterator_tag;
-
-            Iterator(const Operation *owner, const std::vector<ValueId> *symbols, std::vector<Value *> *pointers, std::size_t index) : owner_(owner), symbols_(symbols), pointers_(pointers), index_(index) {}
-
-            value_type operator*() const;
-            Iterator &operator++()
-            {
-                ++index_;
-                return *this;
-            }
-            Iterator operator++(int)
-            {
-                Iterator tmp = *this;
-                ++(*this);
-                return tmp;
-            }
-            Iterator &operator--()
-            {
-                --index_;
-                return *this;
-            }
-            Iterator operator--(int)
-            {
-                Iterator tmp = *this;
-                --(*this);
-                return tmp;
-            }
-            Iterator &operator+=(difference_type delta)
-            {
-                index_ += static_cast<std::size_t>(delta);
-                return *this;
-            }
-            Iterator &operator-=(difference_type delta)
-            {
-                index_ -= static_cast<std::size_t>(delta);
-                return *this;
-            }
-            friend Iterator operator+(Iterator it, difference_type delta)
-            {
-                it += delta;
-                return it;
-            }
-            friend Iterator operator-(Iterator it, difference_type delta)
-            {
-                it -= delta;
-                return it;
-            }
-            friend difference_type operator-(const Iterator &lhs, const Iterator &rhs)
-            {
-                return static_cast<difference_type>(lhs.index_) - static_cast<difference_type>(rhs.index_);
-            }
-            friend bool operator==(const Iterator &lhs, const Iterator &rhs) { return lhs.index_ == rhs.index_ && lhs.symbols_ == rhs.symbols_; }
-            friend bool operator!=(const Iterator &lhs, const Iterator &rhs) { return !(lhs == rhs); }
-            friend bool operator<(const Iterator &lhs, const Iterator &rhs) { return lhs.index_ < rhs.index_; }
-            friend bool operator>(const Iterator &lhs, const Iterator &rhs) { return rhs < lhs; }
-            friend bool operator<=(const Iterator &lhs, const Iterator &rhs) { return !(rhs < lhs); }
-            friend bool operator>=(const Iterator &lhs, const Iterator &rhs) { return !(lhs < rhs); }
-
-        private:
-            const Operation *owner_;
-            const std::vector<ValueId> *symbols_;
-            mutable std::vector<Value *> *pointers_;
-            std::size_t index_;
-        };
-
-        ValueHandleRange(const Operation *owner, const std::vector<ValueId> &symbols, std::vector<Value *> &pointers) : owner_(owner), symbols_(&symbols), pointers_(&pointers) {}
-
-        Iterator begin() const { return Iterator(owner_, symbols_, pointers_, 0); }
-        Iterator end() const { return Iterator(owner_, symbols_, pointers_, symbols_->size()); }
-        std::size_t size() const noexcept { return symbols_->size(); }
-        bool empty() const noexcept { return symbols_->empty(); }
-        Value *operator[](std::size_t index) const;
-        Value *front() const;
-        Value *back() const;
-
-    private:
-        const Operation *owner_;
-        const std::vector<ValueId> *symbols_;
-        mutable std::vector<Value *> *pointers_;
-    };
-
-    Graph& graph() const noexcept { return *graph_; }
+    const ir::OperationId& id() const noexcept { return id_; }
     OperationKind kind() const noexcept { return kind_; }
-    const OperationId& symbol() const noexcept { return symbol_; }
-    ValueHandleRange operands() const noexcept { return ValueHandleRange(this, operands_, operandPtrs_); }
-    ValueHandleRange results() const noexcept { return ValueHandleRange(this, results_, resultPtrs_); }
-    const std::vector<ValueId>& operandSymbols() const noexcept { return operands_; }
-    const std::vector<ValueId>& resultSymbols() const noexcept { return results_; }
-    const std::map<std::string, AttributeValue>& attributes() const noexcept { return attributes_; }
-    const std::optional<SrcLoc> &srcLoc() const noexcept { return srcLoc_; }
-    void setSrcLoc(SrcLoc info) { srcLoc_ = std::move(info); }
-
-    Value& operandValue(std::size_t index) const;
-    Value& resultValue(std::size_t index) const;
-
-    void addOperand(Value& value);
-    void addResult(Value& value);
-    void replaceOperand(std::size_t index, Value& value);
-    void replaceResult(std::size_t index, Value& value);
-    void setAttribute(std::string key, AttributeValue value);
-    void clearAttribute(std::string_view key);
-    void setKind(OperationKind kind) noexcept { kind_ = kind; }
+    ir::SymbolId symbol() const noexcept { return symbol_; }
+    std::string_view symbolText() const noexcept { return symbolText_; }
+    std::span<const ir::ValueId> operands() const noexcept { return std::span<const ir::ValueId>(operands_.data(), operands_.size()); }
+    std::span<const ir::ValueId> results() const noexcept { return std::span<const ir::ValueId>(results_.data(), results_.size()); }
+    std::span<const ir::AttrKV> attrs() const noexcept { return std::span<const ir::AttrKV>(attrs_.data(), attrs_.size()); }
+    std::optional<AttributeValue> attr(ir::SymbolId key) const;
+    const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
 
 private:
     friend class Graph;
 
-    Operation(Graph& graph, OperationKind kind, OperationId symbol);
-    Value* resolveValueAt(std::size_t index, const std::vector<ValueId>& symbols, std::vector<Value*>& pointers) const;
-    void rehydrateOperands(Graph& graph);
-    void rehydrateResults(Graph& graph);
+    Operation(ir::OperationId id, OperationKind kind, ir::SymbolId symbol, std::string symbolText,
+              std::vector<ir::ValueId> operands, std::vector<ir::ValueId> results,
+              std::vector<ir::AttrKV> attrs, std::optional<SrcLoc> srcLoc);
 
-    Graph* graph_;
-    OperationKind kind_;
-    OperationId symbol_;
-    std::vector<ValueId> operands_;
-    std::vector<ValueId> results_;
-    mutable std::vector<Value*> operandPtrs_;
-    mutable std::vector<Value*> resultPtrs_;
-    std::map<std::string, AttributeValue> attributes_;
+    ir::OperationId id_{};
+    OperationKind kind_{};
+    ir::SymbolId symbol_{};
+    std::string symbolText_;
+    std::vector<ir::ValueId> operands_;
+    std::vector<ir::ValueId> results_;
+    std::vector<ir::AttrKV> attrs_;
     std::optional<SrcLoc> srcLoc_;
 };
 
@@ -526,57 +418,86 @@ class Netlist;
 
 class Graph {
 public:
-    Graph(Netlist& owner, std::string symbol);
+    Graph(Netlist& owner, std::string symbol, ir::GraphId graphId);
 
     const std::string& symbol() const noexcept { return symbol_; }
+    const ir::GraphId& id() const noexcept { return graphId_; }
     Netlist& owner() const noexcept { return *owner_; }
 
-    Value& createValue(ValueId symbol, int64_t width, bool isSigned);
-    Operation& createOperation(OperationKind kind, OperationId symbol);
+    ir::GraphSymbolTable& symbols() noexcept { return symbols_; }
+    const ir::GraphSymbolTable& symbols() const noexcept { return symbols_; }
+    ir::SymbolId internSymbol(std::string_view text);
+    ir::SymbolId lookupSymbol(std::string_view text) const;
+    std::string_view symbolText(ir::SymbolId id) const;
 
-    void bindInputPort(std::string portName, Value& value);
-    void bindOutputPort(std::string portName, Value& value);
+    bool frozen() const noexcept { return !builder_.has_value(); }
+    const ir::GraphView* viewIfFrozen() const noexcept;
+    const ir::GraphView& freeze();
 
-    Value* findValue(std::string_view symbol) noexcept;
-    const Value* findValue(std::string_view symbol) const noexcept;
-    Operation* findOperation(std::string_view symbol) noexcept;
-    const Operation* findOperation(std::string_view symbol) const noexcept;
-    Value& getValue(std::string_view symbol);
-    const Value& getValue(std::string_view symbol) const;
-    Operation& getOperation(std::string_view symbol);
-    const Operation& getOperation(std::string_view symbol) const;
+    std::span<const ir::OperationId> operations() const;
+    std::span<const ir::ValueId> values() const;
+    std::span<const ir::Port> inputPorts() const;
+    std::span<const ir::Port> outputPorts() const;
 
-    const std::unordered_map<ValueId, std::unique_ptr<Value>>& values() const noexcept { return values_; }
-    const std::unordered_map<OperationId, std::unique_ptr<Operation>>& operations() const noexcept { return operations_; }
-    const std::vector<ValueId>& valueOrder() const noexcept { return valueOrder_; }
-    const std::vector<OperationId>& operationOrder() const noexcept { return operationOrder_; }
-    const std::map<std::string, ValueId>& inputPorts() const noexcept { return inputPorts_; }
-    const std::map<std::string, ValueId>& outputPorts() const noexcept { return outputPorts_; }
-    Value* inputPortValue(std::string_view portName) noexcept;
-    const Value* inputPortValue(std::string_view portName) const noexcept;
-    Value* outputPortValue(std::string_view portName) noexcept;
-    const Value* outputPortValue(std::string_view portName) const noexcept;
-    void replaceOutputValue(Value& oldValue, Value& newValue);
+    ir::ValueId createValue(ir::SymbolId symbol, int32_t width, bool isSigned);
+    ir::OperationId createOperation(OperationKind kind, ir::SymbolId symbol);
 
-    bool removeOperation(std::string_view symbol);
+    ir::ValueId findValue(ir::SymbolId symbol) const noexcept;
+    ir::OperationId findOperation(ir::SymbolId symbol) const noexcept;
+    ir::ValueId findValue(std::string_view symbol) const;
+    ir::OperationId findOperation(std::string_view symbol) const;
+    Value getValue(ir::ValueId id) const;
+    Operation getOperation(ir::OperationId id) const;
 
-    void rehydratePointers();
+    void bindInputPort(ir::SymbolId name, ir::ValueId value);
+    void bindOutputPort(ir::SymbolId name, ir::ValueId value);
+    ir::ValueId inputPortValue(ir::SymbolId name) const noexcept;
+    ir::ValueId outputPortValue(ir::SymbolId name) const noexcept;
+
+    void addOperand(ir::OperationId op, ir::ValueId value);
+    void addResult(ir::OperationId op, ir::ValueId value);
+    void replaceOperand(ir::OperationId op, std::size_t index, ir::ValueId value);
+    void replaceResult(ir::OperationId op, std::size_t index, ir::ValueId value);
+    void replaceAllUses(ir::ValueId from, ir::ValueId to);
+    bool eraseOperand(ir::OperationId op, std::size_t index);
+    bool eraseResult(ir::OperationId op, std::size_t index);
+    bool eraseOp(ir::OperationId op);
+    bool eraseOp(ir::OperationId op, std::span<const ir::ValueId> replacementResults);
+    bool eraseValue(ir::ValueId value);
+    void setAttr(ir::OperationId op, ir::SymbolId key, AttributeValue value);
+    bool eraseAttr(ir::OperationId op, ir::SymbolId key);
+    void setValueSrcLoc(ir::ValueId value, SrcLoc loc);
+    void setOpSrcLoc(ir::OperationId op, SrcLoc loc);
+    void setOpSymbol(ir::OperationId op, ir::SymbolId sym);
+    void setValueSymbol(ir::ValueId value, ir::SymbolId sym);
+    void clearOpSymbol(ir::OperationId op);
+    void clearValueSymbol(ir::ValueId value);
+
     void writeJson(slang::JsonWriter& writer) const;
 
 private:
     friend class Netlist;
 
-    Value& addValueInternal(std::unique_ptr<Value> value);
-    Operation& addOperationInternal(std::unique_ptr<Operation> op);
+    void invalidateCaches() const;
+    void ensureCaches() const;
+    ir::GraphBuilder& ensureBuilder();
+    const ir::GraphView& view() const;
+    Value valueFromView(ir::ValueId id) const;
+    Value valueFromBuilder(ir::ValueId id) const;
+    Operation operationFromView(ir::OperationId id) const;
+    Operation operationFromBuilder(ir::OperationId id) const;
 
     Netlist* owner_;
     std::string symbol_;
-    std::unordered_map<ValueId, std::unique_ptr<Value>> values_;
-    std::unordered_map<OperationId, std::unique_ptr<Operation>> operations_;
-    std::vector<ValueId> valueOrder_;
-    std::vector<OperationId> operationOrder_;
-    std::map<std::string, ValueId> inputPorts_;
-    std::map<std::string, ValueId> outputPorts_;
+    ir::GraphId graphId_{};
+    ir::GraphSymbolTable symbols_;
+    std::optional<ir::GraphView> view_;
+    std::optional<ir::GraphBuilder> builder_;
+    mutable std::vector<ir::ValueId> valuesCache_;
+    mutable std::vector<ir::OperationId> operationsCache_;
+    mutable std::vector<ir::Port> inputPortsCache_;
+    mutable std::vector<ir::Port> outputPortsCache_;
+    mutable bool cacheValid_ = false;
 };
 
 class Netlist {
@@ -605,6 +526,7 @@ private:
     Graph& addGraphInternal(std::unique_ptr<Graph> graph);
     void resetGraphOwners();
 
+    ir::NetlistSymbolTable netlistSymbols_;
     std::unordered_map<std::string, std::unique_ptr<Graph>> graphs_;
     std::unordered_map<std::string, std::string> graphAliasBySymbol_;
     std::vector<std::string> graphOrder_;
