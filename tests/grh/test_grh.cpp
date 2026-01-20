@@ -1,6 +1,7 @@
 #include "emit.hpp"
 #include "grh.hpp"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -420,6 +421,327 @@ int main()
                 return fail("Expected OperationId cross-graph assertion to throw");
             }
         }
+
+        {
+            namespace grh_ir = wolf_sv::grh::ir;
+
+            grh_ir::GraphSymbolTable graphSymbols;
+            grh_ir::GraphBuilder builder(graphSymbols);
+
+            auto symA = graphSymbols.intern("a");
+            auto symB = graphSymbols.intern("b");
+            auto symSum = graphSymbols.intern("sum");
+            auto symOut = graphSymbols.intern("out");
+            auto symAdd = graphSymbols.intern("add0");
+            auto symAssign = graphSymbols.intern("assign0");
+
+            auto vA = builder.addValue(symA, 1, false);
+            auto vB = builder.addValue(symB, 1, false);
+            auto vSum = builder.addValue(symSum, 1, false);
+            auto vOut = builder.addValue(symOut, 1, false);
+
+            auto opAdd = builder.addOp(OperationKind::kAdd, symAdd);
+            builder.addOperand(opAdd, vA);
+            builder.addOperand(opAdd, vB);
+            builder.addResult(opAdd, vSum);
+
+            auto opAssign = builder.addOp(OperationKind::kAssign, symAssign);
+            builder.addOperand(opAssign, vSum);
+            builder.addResult(opAssign, vOut);
+
+            grh_ir::GraphView view = builder.freeze();
+
+            auto values = view.values();
+            if (values.size() != 4 || values[0] != vA || values[1] != vB || values[2] != vSum || values[3] != vOut)
+            {
+                return fail("GraphView value order mismatch");
+            }
+
+            auto ops = view.operations();
+            if (ops.size() != 2 || ops[0] != opAdd || ops[1] != opAssign)
+            {
+                return fail("GraphView operation order mismatch");
+            }
+
+            auto addOperands = view.opOperands(opAdd);
+            if (addOperands.size() != 2 || addOperands[0] != vA || addOperands[1] != vB)
+            {
+                return fail("GraphView operand range for add op mismatch");
+            }
+            auto addResults = view.opResults(opAdd);
+            if (addResults.size() != 1 || addResults[0] != vSum)
+            {
+                return fail("GraphView result range for add op mismatch");
+            }
+
+            auto assignOperands = view.opOperands(opAssign);
+            if (assignOperands.size() != 1 || assignOperands[0] != vSum)
+            {
+                return fail("GraphView operand range for assign op mismatch");
+            }
+            auto assignResults = view.opResults(opAssign);
+            if (assignResults.size() != 1 || assignResults[0] != vOut)
+            {
+                return fail("GraphView result range for assign op mismatch");
+            }
+
+            if (view.valueDef(vSum) != opAdd)
+            {
+                return fail("GraphView valueDef mismatch for sum");
+            }
+            if (view.valueDef(vA).valid() || view.valueDef(vB).valid())
+            {
+                return fail("GraphView valueDef should be invalid for non-results");
+            }
+            if (view.valueDef(vOut) != opAssign)
+            {
+                return fail("GraphView valueDef mismatch for output value");
+            }
+            if (view.valueWidth(vSum) != 1 || view.valueWidth(vOut) != 1)
+            {
+                return fail("GraphView valueWidth mismatch");
+            }
+
+            auto usersA = view.valueUsers(vA);
+            if (usersA.size() != 1 || usersA[0].operation != opAdd || usersA[0].operandIndex != 0)
+            {
+                return fail("GraphView useList mismatch for value a");
+            }
+            auto usersB = view.valueUsers(vB);
+            if (usersB.size() != 1 || usersB[0].operation != opAdd || usersB[0].operandIndex != 1)
+            {
+                return fail("GraphView useList mismatch for value b");
+            }
+            auto usersSum = view.valueUsers(vSum);
+            if (usersSum.size() != 1 || usersSum[0].operation != opAssign || usersSum[0].operandIndex != 0)
+            {
+                return fail("GraphView useList mismatch for value sum");
+            }
+            if (!view.valueUsers(vOut).empty())
+            {
+                return fail("GraphView useList should be empty for output value");
+            }
+        }
+
+        {
+            namespace grh_ir = wolf_sv::grh::ir;
+
+            grh_ir::GraphSymbolTable graphSymbols;
+            grh_ir::GraphBuilder builder(graphSymbols);
+
+            auto symPortB = graphSymbols.intern("b");
+            auto symPortA = graphSymbols.intern("a");
+            auto symPortOut = graphSymbols.intern("out");
+            auto symVa = graphSymbols.intern("va");
+            auto symVb = graphSymbols.intern("vb");
+            auto symSum = graphSymbols.intern("sum");
+            auto symOutVal = graphSymbols.intern("out_val");
+            auto symAdd = graphSymbols.intern("add0");
+            auto symAssign = graphSymbols.intern("assign0");
+            auto symDelay = graphSymbols.intern("delay");
+
+            auto vA = builder.addValue(symVa, 1, false);
+            auto vB = builder.addValue(symVb, 1, false);
+            auto vSum = builder.addValue(symSum, 1, false);
+            auto vOut = builder.addValue(symOutVal, 1, false);
+
+            auto opAdd = builder.addOp(OperationKind::kAdd, symAdd);
+            builder.addOperand(opAdd, vA);
+            builder.addOperand(opAdd, vB);
+            builder.addResult(opAdd, vSum);
+
+            auto opAssign = builder.addOp(OperationKind::kAssign, grh_ir::SymbolId::invalid());
+            builder.setOpSymbol(opAssign, symAssign);
+            builder.clearOpSymbol(opAssign);
+            builder.setOpSymbol(opAssign, symAssign);
+            builder.addOperand(opAssign, vSum);
+            builder.addResult(opAssign, vOut);
+
+            builder.clearValueSymbol(vOut);
+            builder.setValueSymbol(vOut, symOutVal);
+
+            builder.bindInputPort(symPortB, vB);
+            builder.bindInputPort(symPortA, vA);
+            builder.bindOutputPort(symPortOut, vOut);
+
+            builder.setAttr(opAdd, symDelay, AttributeValue(int64_t(5)));
+
+            SrcLoc opLoc;
+            opLoc.file = "demo.sv";
+            opLoc.line = 10;
+            builder.setOpSrcLoc(opAdd, opLoc);
+
+            SrcLoc valueLoc;
+            valueLoc.file = "demo.sv";
+            valueLoc.line = 12;
+            builder.setValueSrcLoc(vA, valueLoc);
+
+            grh_ir::GraphView view = builder.freeze();
+
+            auto inPorts = view.inputPorts();
+            if (inPorts.size() != 2 || graphSymbols.text(inPorts[0].name) != "a" || graphSymbols.text(inPorts[1].name) != "b")
+            {
+                return fail("GraphView input port ordering mismatch");
+            }
+            auto outPorts = view.outputPorts();
+            if (outPorts.size() != 1 || graphSymbols.text(outPorts[0].name) != "out")
+            {
+                return fail("GraphView output port ordering mismatch");
+            }
+
+            if (view.opSymbol(opAdd) != symAdd || view.opSymbol(opAssign) != symAssign)
+            {
+                return fail("GraphView opSymbol mismatch");
+            }
+            if (view.valueSymbol(vOut) != symOutVal)
+            {
+                return fail("GraphView valueSymbol mismatch");
+            }
+
+            auto attr = view.opAttr(opAdd, symDelay);
+            if (!attr || std::get<int64_t>(*attr) != 5)
+            {
+                return fail("GraphView opAttr lookup mismatch");
+            }
+            if (view.opAttrs(opAdd).size() != 1)
+            {
+                return fail("GraphView opAttrs size mismatch");
+            }
+
+            auto opSrcLoc = view.opSrcLoc(opAdd);
+            if (!opSrcLoc || opSrcLoc->line != 10)
+            {
+                return fail("GraphView opSrcLoc mismatch");
+            }
+            auto valSrcLoc = view.valueSrcLoc(vA);
+            if (!valSrcLoc || valSrcLoc->line != 12)
+            {
+                return fail("GraphView valueSrcLoc mismatch");
+            }
+
+            if (!view.valueIsInput(vA) || view.valueIsInput(vSum) || !view.valueIsOutput(vOut))
+            {
+                return fail("GraphView port flags mismatch");
+            }
+        }
+
+        {
+            namespace grh_ir = wolf_sv::grh::ir;
+
+            grh_ir::GraphSymbolTable graphSymbols;
+            grh_ir::GraphBuilder builder(graphSymbols);
+
+            auto symX = graphSymbols.intern("x");
+            auto symY = graphSymbols.intern("y");
+            auto symTmp = graphSymbols.intern("tmp");
+            auto symOut = graphSymbols.intern("out");
+            auto symAlt = graphSymbols.intern("alt");
+            auto symAdd = graphSymbols.intern("add0");
+            auto symAssign = graphSymbols.intern("assign0");
+
+            auto vX = builder.addValue(symX, 1, false);
+            auto vY = builder.addValue(symY, 1, false);
+            auto vTmp = builder.addValue(symTmp, 1, false);
+            auto vOut = builder.addValue(symOut, 1, false);
+            auto vAlt = builder.addValue(symAlt, 1, false);
+
+            auto opAdd = builder.addOp(OperationKind::kAdd, symAdd);
+            builder.addOperand(opAdd, vX);
+            builder.addOperand(opAdd, vY);
+            builder.addResult(opAdd, vTmp);
+
+            auto opAssign = builder.addOp(OperationKind::kAssign, symAssign);
+            builder.addOperand(opAssign, vTmp);
+            builder.addResult(opAssign, vOut);
+
+            builder.replaceOperand(opAdd, 1, vX);
+            builder.replaceAllUses(vTmp, vX);
+            builder.replaceResult(opAssign, 0, vAlt);
+
+            grh_ir::GraphView view = builder.freeze();
+            auto addOperands = view.opOperands(opAdd);
+            if (addOperands.size() != 2 || addOperands[0] != vX || addOperands[1] != vX)
+            {
+                return fail("GraphBuilder replaceOperand mismatch");
+            }
+            auto assignOperands = view.opOperands(opAssign);
+            if (assignOperands.size() != 1 || assignOperands[0] != vX)
+            {
+                return fail("GraphBuilder replaceAllUses mismatch");
+            }
+            auto assignResults = view.opResults(opAssign);
+            if (assignResults.size() != 1 || assignResults[0] != vAlt)
+            {
+                return fail("GraphBuilder replaceResult mismatch");
+            }
+            if (view.valueDef(vOut).valid())
+            {
+                return fail("GraphBuilder replaceResult did not clear old definition");
+            }
+        }
+
+        {
+            namespace grh_ir = wolf_sv::grh::ir;
+
+            grh_ir::GraphSymbolTable graphSymbols;
+            grh_ir::GraphBuilder builder(graphSymbols);
+
+            auto symA = graphSymbols.intern("a");
+            auto symB = graphSymbols.intern("b");
+            auto symSum = graphSymbols.intern("sum");
+            auto symOut = graphSymbols.intern("out");
+            auto symDead = graphSymbols.intern("dead");
+            auto symAdd = graphSymbols.intern("add0");
+            auto symAssign = graphSymbols.intern("assign0");
+            auto symDeadOp = graphSymbols.intern("dead_op");
+
+            auto vA = builder.addValue(symA, 1, false);
+            auto vB = builder.addValue(symB, 1, false);
+            auto vSum = builder.addValue(symSum, 1, false);
+            auto vOut = builder.addValue(symOut, 1, false);
+            auto vDead = builder.addValue(symDead, 1, false);
+
+            auto opAdd = builder.addOp(OperationKind::kAdd, symAdd);
+            builder.addOperand(opAdd, vA);
+            builder.addOperand(opAdd, vB);
+            builder.addResult(opAdd, vSum);
+
+            auto opAssign = builder.addOp(OperationKind::kAssign, symAssign);
+            builder.addOperand(opAssign, vSum);
+            builder.addResult(opAssign, vOut);
+
+            auto opDead = builder.addOp(OperationKind::kAssign, symDeadOp);
+            builder.addOperand(opDead, vA);
+            builder.addResult(opDead, vDead);
+
+            if (!builder.eraseOperand(opAdd, 1))
+            {
+                return fail("GraphBuilder eraseOperand failed");
+            }
+
+            if (!builder.eraseResult(opDead, 0))
+            {
+                return fail("GraphBuilder eraseResult failed");
+            }
+            if (!builder.eraseValue(vDead))
+            {
+                return fail("GraphBuilder eraseValue failed");
+            }
+
+            std::array<grh_ir::ValueId, 1> replacements = {vA};
+            if (!builder.eraseOp(opAdd, replacements))
+            {
+                return fail("GraphBuilder eraseOp with replacement failed");
+            }
+
+            grh_ir::GraphView view = builder.freeze();
+            auto assignOperands = view.opOperands(opAssign);
+            if (assignOperands.size() != 1 || assignOperands[0] != vA)
+            {
+                return fail("GraphBuilder eraseOp replacement did not update uses");
+            }
+        }
+
     }
     catch (const std::exception &ex)
     {

@@ -165,6 +165,1224 @@ namespace wolf_sv::grh
             }
         }
 
+        std::span<const OperationId> GraphView::operations() const noexcept
+        {
+            return std::span<const OperationId>(operations_.data(), operations_.size());
+        }
+
+        std::span<const ValueId> GraphView::values() const noexcept
+        {
+            return std::span<const ValueId>(values_.data(), values_.size());
+        }
+
+        std::span<const Port> GraphView::inputPorts() const noexcept
+        {
+            return std::span<const Port>(inputPorts_.data(), inputPorts_.size());
+        }
+
+        std::span<const Port> GraphView::outputPorts() const noexcept
+        {
+            return std::span<const Port>(outputPorts_.data(), outputPorts_.size());
+        }
+
+        OperationKind GraphView::opKind(OperationId op) const
+        {
+            return opKinds_[opIndex(op)];
+        }
+
+        std::span<const ValueId> GraphView::opOperands(OperationId op) const
+        {
+            const Range &range = opOperandRanges_[opIndex(op)];
+            if (range.count == 0)
+            {
+                return {};
+            }
+            return std::span<const ValueId>(operands_.data() + range.offset, range.count);
+        }
+
+        std::span<const ValueId> GraphView::opResults(OperationId op) const
+        {
+            const Range &range = opResultRanges_[opIndex(op)];
+            if (range.count == 0)
+            {
+                return {};
+            }
+            return std::span<const ValueId>(results_.data() + range.offset, range.count);
+        }
+
+        SymbolId GraphView::opSymbol(OperationId op) const
+        {
+            return opSymbols_[opIndex(op)];
+        }
+
+        std::span<const AttrKV> GraphView::opAttrs(OperationId op) const
+        {
+            const Range &range = opAttrRanges_[opIndex(op)];
+            if (range.count == 0)
+            {
+                return {};
+            }
+            return std::span<const AttrKV>(opAttrs_.data() + range.offset, range.count);
+        }
+
+        std::optional<AttributeValue> GraphView::opAttr(OperationId op, SymbolId key) const
+        {
+            if (!key.valid())
+            {
+                return std::nullopt;
+            }
+            const auto attrs = opAttrs(op);
+            for (const auto &attr : attrs)
+            {
+                if (attr.key == key)
+                {
+                    return attr.value;
+                }
+            }
+            return std::nullopt;
+        }
+
+        std::optional<SrcLoc> GraphView::opSrcLoc(OperationId op) const
+        {
+            return opSrcLocs_[opIndex(op)];
+        }
+
+        SymbolId GraphView::valueSymbol(ValueId value) const
+        {
+            return valueSymbols_[valueIndex(value)];
+        }
+
+        int32_t GraphView::valueWidth(ValueId value) const
+        {
+            return valueWidths_[valueIndex(value)];
+        }
+
+        bool GraphView::valueSigned(ValueId value) const
+        {
+            return valueSigned_[valueIndex(value)] != 0;
+        }
+
+        bool GraphView::valueIsInput(ValueId value) const
+        {
+            return valueIsInput_[valueIndex(value)] != 0;
+        }
+
+        bool GraphView::valueIsOutput(ValueId value) const
+        {
+            return valueIsOutput_[valueIndex(value)] != 0;
+        }
+
+        OperationId GraphView::valueDef(ValueId value) const
+        {
+            return valueDefs_[valueIndex(value)];
+        }
+
+        std::span<const ValueUser> GraphView::valueUsers(ValueId value) const
+        {
+            const Range &range = valueUserRanges_[valueIndex(value)];
+            if (range.count == 0)
+            {
+                return {};
+            }
+            return std::span<const ValueUser>(useList_.data() + range.offset, range.count);
+        }
+
+        std::optional<SrcLoc> GraphView::valueSrcLoc(ValueId value) const
+        {
+            return valueSrcLocs_[valueIndex(value)];
+        }
+
+        std::size_t GraphView::opIndex(OperationId op) const
+        {
+            op.assertGraph(graphId_);
+            const std::size_t index = static_cast<std::size_t>(op.index);
+            if (index == 0 || index > opKinds_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            return index - 1;
+        }
+
+        std::size_t GraphView::valueIndex(ValueId value) const
+        {
+            value.assertGraph(graphId_);
+            const std::size_t index = static_cast<std::size_t>(value.index);
+            if (index == 0 || index > valueWidths_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            return index - 1;
+        }
+
+        GraphBuilder::GraphBuilder(GraphId graphId) : graphId_(graphId)
+        {
+            if (!graphId_.valid())
+            {
+                throw std::runtime_error("GraphBuilder requires a valid GraphId");
+            }
+        }
+
+        GraphBuilder::GraphBuilder(GraphSymbolTable &symbols, GraphId graphId) : GraphBuilder(graphId)
+        {
+            symbols_ = &symbols;
+        }
+
+        GraphBuilder GraphBuilder::fromView(const GraphView &view, GraphSymbolTable &symbols)
+        {
+            if (!view.graphId_.valid())
+            {
+                throw std::runtime_error("GraphView has invalid GraphId");
+            }
+
+            GraphBuilder builder(symbols, view.graphId_);
+
+            auto require = [](bool condition, const char *message) {
+                if (!condition)
+                {
+                    throw std::runtime_error(message);
+                }
+            };
+
+            const std::size_t valueCount = view.values_.size();
+            const std::size_t opCount = view.operations_.size();
+
+            require(view.valueSymbols_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueWidths_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueSigned_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueIsInput_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueIsOutput_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueDefs_.size() == valueCount, "GraphView value metadata size mismatch");
+            require(view.valueUserRanges_.size() == valueCount, "GraphView value user range size mismatch");
+            require(view.valueSrcLocs_.size() == valueCount, "GraphView value metadata size mismatch");
+
+            require(view.opKinds_.size() == opCount, "GraphView operation metadata size mismatch");
+            require(view.opSymbols_.size() == opCount, "GraphView operation metadata size mismatch");
+            require(view.opOperandRanges_.size() == opCount, "GraphView operation metadata size mismatch");
+            require(view.opResultRanges_.size() == opCount, "GraphView operation metadata size mismatch");
+            require(view.opAttrRanges_.size() == opCount, "GraphView operation metadata size mismatch");
+            require(view.opSrcLocs_.size() == opCount, "GraphView operation metadata size mismatch");
+
+            auto checkRangeBounds = [&](const Range &range, std::size_t total, const char *label) {
+                if (range.offset > total || range.offset + range.count > total)
+                {
+                    throw std::runtime_error(std::string("GraphView ") + label + " range out of bounds");
+                }
+            };
+
+            std::size_t operandOffset = 0;
+            for (std::size_t i = 0; i < opCount; ++i)
+            {
+                const Range &range = view.opOperandRanges_[i];
+                require(range.offset == operandOffset, "GraphView operand ranges are not contiguous");
+                checkRangeBounds(range, view.operands_.size(), "operand");
+                operandOffset = range.offset + range.count;
+            }
+            require(operandOffset == view.operands_.size(), "GraphView operand range size mismatch");
+
+            std::size_t resultOffset = 0;
+            for (std::size_t i = 0; i < opCount; ++i)
+            {
+                const Range &range = view.opResultRanges_[i];
+                require(range.offset == resultOffset, "GraphView result ranges are not contiguous");
+                checkRangeBounds(range, view.results_.size(), "result");
+                resultOffset = range.offset + range.count;
+            }
+            require(resultOffset == view.results_.size(), "GraphView result range size mismatch");
+
+            std::size_t attrOffset = 0;
+            for (std::size_t i = 0; i < opCount; ++i)
+            {
+                const Range &range = view.opAttrRanges_[i];
+                require(range.offset == attrOffset, "GraphView attribute ranges are not contiguous");
+                checkRangeBounds(range, view.opAttrs_.size(), "attribute");
+                attrOffset = range.offset + range.count;
+            }
+            require(attrOffset == view.opAttrs_.size(), "GraphView attribute range size mismatch");
+
+            std::size_t userOffset = 0;
+            for (std::size_t i = 0; i < valueCount; ++i)
+            {
+                const Range &range = view.valueUserRanges_[i];
+                require(range.offset == userOffset, "GraphView use-list ranges are not contiguous");
+                checkRangeBounds(range, view.useList_.size(), "use-list");
+                userOffset = range.offset + range.count;
+            }
+            require(userOffset == view.useList_.size(), "GraphView use-list size mismatch");
+
+            builder.values_.reserve(valueCount);
+            for (std::size_t i = 0; i < valueCount; ++i)
+            {
+                const ValueId valueId = view.values_[i];
+                valueId.assertGraph(view.graphId_);
+                require(valueId.generation == 0, "GraphView value generation must be zero");
+                require(valueId.index == i + 1, "GraphView values must be contiguous");
+
+                ValueData data;
+                data.symbol = view.valueSymbols_[i];
+                if (data.symbol.valid())
+                {
+                    builder.validateSymbol(data.symbol, "Value");
+                }
+                const int32_t width = view.valueWidths_[i];
+                if (width <= 0)
+                {
+                    throw std::runtime_error("GraphView value width must be positive");
+                }
+                data.width = width;
+                data.isSigned = view.valueSigned_[i] != 0;
+                data.isInput = false;
+                data.isOutput = false;
+                data.definingOp = OperationId::invalid();
+                data.srcLoc = view.valueSrcLocs_[i];
+                data.alive = true;
+                builder.values_.push_back(std::move(data));
+            }
+
+            builder.operations_.reserve(opCount);
+            for (std::size_t i = 0; i < opCount; ++i)
+            {
+                const OperationId opId = view.operations_[i];
+                opId.assertGraph(view.graphId_);
+                require(opId.generation == 0, "GraphView operation generation must be zero");
+                require(opId.index == i + 1, "GraphView operations must be contiguous");
+
+                OperationData opData;
+                opData.kind = view.opKinds_[i];
+                opData.symbol = view.opSymbols_[i];
+                if (opData.symbol.valid())
+                {
+                    builder.validateSymbol(opData.symbol, "Operation");
+                }
+                opData.srcLoc = view.opSrcLocs_[i];
+                opData.alive = true;
+
+                const Range &operandRange = view.opOperandRanges_[i];
+                opData.operands.reserve(operandRange.count);
+                for (std::size_t j = 0; j < operandRange.count; ++j)
+                {
+                    const ValueId operand = view.operands_[operandRange.offset + j];
+                    operand.assertGraph(view.graphId_);
+                    require(operand.generation == 0, "GraphView operand generation must be zero");
+                    if (operand.index == 0 || operand.index > valueCount)
+                    {
+                        throw std::runtime_error("GraphView operand refers to invalid value");
+                    }
+                    opData.operands.push_back(operand);
+                }
+
+                const Range &resultRange = view.opResultRanges_[i];
+                opData.results.reserve(resultRange.count);
+                for (std::size_t j = 0; j < resultRange.count; ++j)
+                {
+                    const ValueId result = view.results_[resultRange.offset + j];
+                    result.assertGraph(view.graphId_);
+                    require(result.generation == 0, "GraphView result generation must be zero");
+                    if (result.index == 0 || result.index > valueCount)
+                    {
+                        throw std::runtime_error("GraphView result refers to invalid value");
+                    }
+                    const std::size_t valIdx = static_cast<std::size_t>(result.index - 1);
+                    if (builder.values_[valIdx].definingOp.valid())
+                    {
+                        throw std::runtime_error("GraphView value has multiple defining operations");
+                    }
+                    builder.values_[valIdx].definingOp = opId;
+                    opData.results.push_back(result);
+                }
+
+                const Range &attrRange = view.opAttrRanges_[i];
+                opData.attrs.reserve(attrRange.count);
+                for (std::size_t j = 0; j < attrRange.count; ++j)
+                {
+                    const AttrKV &attr = view.opAttrs_[attrRange.offset + j];
+                    builder.validateAttrKey(attr.key);
+                    if (!attributeValueIsJsonSerializable(attr.value))
+                    {
+                        throw std::runtime_error("GraphView attribute value must be JSON-serializable");
+                    }
+                    opData.attrs.push_back(attr);
+                }
+
+                builder.operations_.push_back(std::move(opData));
+            }
+
+            for (std::size_t i = 0; i < valueCount; ++i)
+            {
+                OperationId viewDef = view.valueDefs_[i];
+                if (viewDef.valid())
+                {
+                    viewDef.assertGraph(view.graphId_);
+                    require(viewDef.generation == 0, "GraphView value definition generation must be zero");
+                    if (viewDef.index == 0 || viewDef.index > opCount)
+                    {
+                        throw std::runtime_error("GraphView value definition refers to invalid operation");
+                    }
+                }
+                if (builder.values_[i].definingOp != viewDef)
+                {
+                    throw std::runtime_error("GraphView value definition mismatch");
+                }
+            }
+
+            builder.inputPorts_ = view.inputPorts_;
+            builder.outputPorts_ = view.outputPorts_;
+
+            for (const auto &port : builder.inputPorts_)
+            {
+                builder.validateSymbol(port.name, "Input port");
+                port.value.assertGraph(view.graphId_);
+                require(port.value.generation == 0, "GraphView input port value generation must be zero");
+                if (port.value.index == 0 || port.value.index > valueCount)
+                {
+                    throw std::runtime_error("GraphView input port refers to invalid value");
+                }
+            }
+            for (const auto &port : builder.outputPorts_)
+            {
+                builder.validateSymbol(port.name, "Output port");
+                port.value.assertGraph(view.graphId_);
+                require(port.value.generation == 0, "GraphView output port value generation must be zero");
+                if (port.value.index == 0 || port.value.index > valueCount)
+                {
+                    throw std::runtime_error("GraphView output port refers to invalid value");
+                }
+            }
+
+            builder.recomputePortFlags();
+
+            for (std::size_t i = 0; i < valueCount; ++i)
+            {
+                const bool viewInput = view.valueIsInput_[i] != 0;
+                if (builder.values_[i].isInput != viewInput)
+                {
+                    throw std::runtime_error("GraphView input port flag mismatch");
+                }
+                const bool viewOutput = view.valueIsOutput_[i] != 0;
+                if (builder.values_[i].isOutput != viewOutput)
+                {
+                    throw std::runtime_error("GraphView output port flag mismatch");
+                }
+            }
+
+            std::vector<std::vector<ValueUser>> expectedUsers(valueCount);
+            for (std::size_t i = 0; i < opCount; ++i)
+            {
+                const OperationId opId = view.operations_[i];
+                const auto &operands = builder.operations_[i].operands;
+                for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+                {
+                    const ValueId valueId = operands[operandIndex];
+                    expectedUsers[valueId.index - 1].push_back(
+                        ValueUser{opId, static_cast<uint32_t>(operandIndex)});
+                }
+            }
+
+            for (std::size_t i = 0; i < valueCount; ++i)
+            {
+                const ValueId valueId = view.values_[i];
+                auto actualUsers = view.valueUsers(valueId);
+                const auto &expected = expectedUsers[i];
+                if (actualUsers.size() != expected.size())
+                {
+                    throw std::runtime_error("GraphView use-list mismatch");
+                }
+                for (std::size_t j = 0; j < expected.size(); ++j)
+                {
+                    if (actualUsers[j].operation != expected[j].operation ||
+                        actualUsers[j].operandIndex != expected[j].operandIndex)
+                    {
+                        throw std::runtime_error("GraphView use-list mismatch");
+                    }
+                }
+            }
+
+            return builder;
+        }
+
+        ValueId GraphBuilder::addValue(SymbolId sym, int32_t width, bool isSigned)
+        {
+            if (width <= 0)
+            {
+                throw std::runtime_error("Value width must be positive");
+            }
+            validateSymbol(sym, "Value");
+
+            ValueId id;
+            id.index = static_cast<uint32_t>(values_.size() + 1);
+            id.generation = 0;
+            id.graph = graphId_;
+            ValueData data;
+            data.symbol = sym;
+            data.width = width;
+            data.isSigned = isSigned;
+            values_.push_back(std::move(data));
+            return id;
+        }
+
+        OperationId GraphBuilder::addOp(OperationKind kind, SymbolId sym)
+        {
+            if (sym.valid())
+            {
+                validateSymbol(sym, "Operation");
+            }
+
+            OperationId id;
+            id.index = static_cast<uint32_t>(operations_.size() + 1);
+            id.generation = 0;
+            id.graph = graphId_;
+            OperationData data;
+            data.kind = kind;
+            data.symbol = sym;
+            operations_.push_back(std::move(data));
+            return id;
+        }
+
+        void GraphBuilder::addOperand(OperationId op, ValueId value)
+        {
+            const std::size_t opIdx = opIndex(op);
+            valueIndex(value);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            if (!values_[valueIndex(value)].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            operations_[opIdx].operands.push_back(value);
+        }
+
+        void GraphBuilder::addResult(OperationId op, ValueId value)
+        {
+            const std::size_t opIdx = opIndex(op);
+            const std::size_t valIdx = valueIndex(value);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            ValueData &data = values_[valIdx];
+            if (data.definingOp.valid())
+            {
+                throw std::runtime_error("Value already has a defining operation");
+            }
+            data.definingOp = op;
+            operations_[opIdx].results.push_back(value);
+        }
+
+        void GraphBuilder::replaceOperand(OperationId op, std::size_t index, ValueId value)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            if (!values_[valueIndex(value)].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            auto &operands = operations_[opIdx].operands;
+            if (index >= operands.size())
+            {
+                throw std::runtime_error("Operand index out of range");
+            }
+            operands[index] = value;
+        }
+
+        void GraphBuilder::replaceResult(OperationId op, std::size_t index, ValueId value)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+
+            auto &results = operations_[opIdx].results;
+            if (index >= results.size())
+            {
+                throw std::runtime_error("Result index out of range");
+            }
+
+            const ValueId current = results[index];
+            if (current == value)
+            {
+                return;
+            }
+            if (values_[valIdx].definingOp.valid())
+            {
+                throw std::runtime_error("Value already has a defining operation");
+            }
+
+            const std::size_t currentIdx = valueIndex(current);
+            if (values_[currentIdx].definingOp == op)
+            {
+                values_[currentIdx].definingOp = OperationId::invalid();
+            }
+            values_[valIdx].definingOp = op;
+            results[index] = value;
+        }
+
+        void GraphBuilder::replaceAllUses(ValueId from, ValueId to)
+        {
+            if (from == to)
+            {
+                return;
+            }
+            const std::size_t fromIdx = valueIndex(from);
+            const std::size_t toIdx = valueIndex(to);
+            if (!values_[fromIdx].alive || !values_[toIdx].alive)
+            {
+                throw std::runtime_error("replaceAllUses requires live values");
+            }
+
+            for (std::size_t i = 0; i < operations_.size(); ++i)
+            {
+                if (!operations_[i].alive)
+                {
+                    continue;
+                }
+                for (auto &operand : operations_[i].operands)
+                {
+                    if (operand == from)
+                    {
+                        operand = to;
+                    }
+                }
+            }
+        }
+
+        bool GraphBuilder::eraseOperand(OperationId op, std::size_t index)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                return false;
+            }
+            auto &operands = operations_[opIdx].operands;
+            if (index >= operands.size())
+            {
+                return false;
+            }
+            operands.erase(operands.begin() + static_cast<std::ptrdiff_t>(index));
+            return true;
+        }
+
+        bool GraphBuilder::eraseResult(OperationId op, std::size_t index)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                return false;
+            }
+            auto &results = operations_[opIdx].results;
+            if (index >= results.size())
+            {
+                return false;
+            }
+            const ValueId value = results[index];
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                return false;
+            }
+            if (countValueUses(value, std::nullopt) != 0)
+            {
+                return false;
+            }
+            if (values_[valIdx].isInput || values_[valIdx].isOutput)
+            {
+                return false;
+            }
+            values_[valIdx].definingOp = OperationId::invalid();
+            results.erase(results.begin() + static_cast<std::ptrdiff_t>(index));
+            return true;
+        }
+
+        bool GraphBuilder::eraseOp(OperationId op)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                return false;
+            }
+            const auto &results = operations_[opIdx].results;
+            for (const auto &result : results)
+            {
+                if (countValueUses(result, op) != 0)
+                {
+                    return false;
+                }
+            }
+            for (const auto &result : results)
+            {
+                const std::size_t valIdx = valueIndex(result);
+                if (values_[valIdx].definingOp == op)
+                {
+                    values_[valIdx].definingOp = OperationId::invalid();
+                }
+            }
+            operations_[opIdx].alive = false;
+            return true;
+        }
+
+        bool GraphBuilder::eraseOp(OperationId op, std::span<const ValueId> replacementResults)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                return false;
+            }
+            const auto &results = operations_[opIdx].results;
+            if (replacementResults.size() != results.size())
+            {
+                return false;
+            }
+            for (const auto &value : replacementResults)
+            {
+                const std::size_t valIdx = valueIndex(value);
+                if (!values_[valIdx].alive)
+                {
+                    throw std::runtime_error("Replacement value is erased");
+                }
+            }
+            for (std::size_t i = 0; i < results.size(); ++i)
+            {
+                const ValueId from = results[i];
+                const ValueId to = replacementResults[i];
+                if (from == to)
+                {
+                    continue;
+                }
+                for (std::size_t opIdxIter = 0; opIdxIter < operations_.size(); ++opIdxIter)
+                {
+                    if (!operations_[opIdxIter].alive)
+                    {
+                        continue;
+                    }
+                    OperationId iterId;
+                    iterId.index = static_cast<uint32_t>(opIdxIter + 1);
+                    iterId.generation = 0;
+                    iterId.graph = graphId_;
+                    if (iterId == op)
+                    {
+                        continue;
+                    }
+                    for (auto &operand : operations_[opIdxIter].operands)
+                    {
+                        if (operand == from)
+                        {
+                            operand = to;
+                        }
+                    }
+                }
+            }
+            for (const auto &result : results)
+            {
+                const std::size_t valIdx = valueIndex(result);
+                if (values_[valIdx].definingOp == op)
+                {
+                    values_[valIdx].definingOp = OperationId::invalid();
+                }
+            }
+            operations_[opIdx].alive = false;
+            return true;
+        }
+
+        bool GraphBuilder::eraseValue(ValueId value)
+        {
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                return false;
+            }
+            if (countValueUses(value, std::nullopt) != 0)
+            {
+                return false;
+            }
+            if (values_[valIdx].isInput || values_[valIdx].isOutput)
+            {
+                return false;
+            }
+            if (values_[valIdx].definingOp.valid())
+            {
+                return false;
+            }
+            values_[valIdx].alive = false;
+            return true;
+        }
+
+        void GraphBuilder::bindInputPort(SymbolId name, ValueId value)
+        {
+            validateSymbol(name, "Input port");
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            bool updated = false;
+            for (auto &port : inputPorts_)
+            {
+                if (port.name == name)
+                {
+                    port.value = value;
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated)
+            {
+                inputPorts_.push_back(Port{name, value});
+            }
+            recomputePortFlags();
+        }
+
+        void GraphBuilder::bindOutputPort(SymbolId name, ValueId value)
+        {
+            validateSymbol(name, "Output port");
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            bool updated = false;
+            for (auto &port : outputPorts_)
+            {
+                if (port.name == name)
+                {
+                    port.value = value;
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated)
+            {
+                outputPorts_.push_back(Port{name, value});
+            }
+            recomputePortFlags();
+        }
+
+        void GraphBuilder::setAttr(OperationId op, SymbolId key, AttributeValue value)
+        {
+            validateAttrKey(key);
+            if (!attributeValueIsJsonSerializable(value))
+            {
+                throw std::runtime_error("Attribute value must be JSON-serializable");
+            }
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            auto &attrs = operations_[opIdx].attrs;
+            for (auto &attr : attrs)
+            {
+                if (attr.key == key)
+                {
+                    attr.value = std::move(value);
+                    return;
+                }
+            }
+            attrs.push_back(AttrKV{key, std::move(value)});
+        }
+
+        bool GraphBuilder::eraseAttr(OperationId op, SymbolId key)
+        {
+            if (!key.valid())
+            {
+                return false;
+            }
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                return false;
+            }
+            auto &attrs = operations_[opIdx].attrs;
+            for (auto it = attrs.begin(); it != attrs.end(); ++it)
+            {
+                if (it->key == key)
+                {
+                    attrs.erase(it);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void GraphBuilder::setValueSrcLoc(ValueId value, SrcLoc loc)
+        {
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            values_[valIdx].srcLoc = std::move(loc);
+        }
+
+        void GraphBuilder::setOpSrcLoc(OperationId op, SrcLoc loc)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            operations_[opIdx].srcLoc = std::move(loc);
+        }
+
+        void GraphBuilder::setOpSymbol(OperationId op, SymbolId sym)
+        {
+            validateSymbol(sym, "Operation");
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            operations_[opIdx].symbol = sym;
+        }
+
+        void GraphBuilder::setValueSymbol(ValueId value, SymbolId sym)
+        {
+            validateSymbol(sym, "Value");
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            values_[valIdx].symbol = sym;
+        }
+
+        void GraphBuilder::clearOpSymbol(OperationId op)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            operations_[opIdx].symbol = SymbolId::invalid();
+        }
+
+        void GraphBuilder::clearValueSymbol(ValueId value)
+        {
+            const std::size_t valIdx = valueIndex(value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            values_[valIdx].symbol = SymbolId::invalid();
+        }
+
+        GraphView GraphBuilder::freeze() const
+        {
+            GraphView view;
+            view.graphId_ = graphId_;
+
+            std::vector<uint32_t> valueRemap(values_.size() + 1, 0);
+            std::vector<uint32_t> opRemap(operations_.size() + 1, 0);
+            std::size_t valueCount = 0;
+            std::size_t opCount = 0;
+            for (std::size_t i = 0; i < values_.size(); ++i)
+            {
+                if (!values_[i].alive)
+                {
+                    continue;
+                }
+                valueRemap[i + 1] = static_cast<uint32_t>(++valueCount);
+            }
+            for (std::size_t i = 0; i < operations_.size(); ++i)
+            {
+                if (!operations_[i].alive)
+                {
+                    continue;
+                }
+                opRemap[i + 1] = static_cast<uint32_t>(++opCount);
+            }
+
+            auto remapValue = [&](ValueId value) -> ValueId {
+                value.assertGraph(graphId_);
+                if (value.index == 0 || value.index >= valueRemap.size())
+                {
+                    throw std::runtime_error("ValueId out of range during freeze");
+                }
+                uint32_t newIndex = valueRemap[value.index];
+                if (newIndex == 0)
+                {
+                    throw std::runtime_error("ValueId refers to erased value during freeze");
+                }
+                ValueId remapped;
+                remapped.index = newIndex;
+                remapped.generation = 0;
+                remapped.graph = graphId_;
+                return remapped;
+            };
+
+            auto remapOp = [&](OperationId op) -> OperationId {
+                op.assertGraph(graphId_);
+                if (op.index == 0 || op.index >= opRemap.size())
+                {
+                    throw std::runtime_error("OperationId out of range during freeze");
+                }
+                uint32_t newIndex = opRemap[op.index];
+                if (newIndex == 0)
+                {
+                    return OperationId::invalid();
+                }
+                OperationId remapped;
+                remapped.index = newIndex;
+                remapped.generation = 0;
+                remapped.graph = graphId_;
+                return remapped;
+            };
+
+            auto portLess = [&](const Port &lhs, const Port &rhs) {
+                if (symbols_)
+                {
+                    return symbols_->text(lhs.name) < symbols_->text(rhs.name);
+                }
+                return lhs.name.value < rhs.name.value;
+            };
+
+            view.operations_.reserve(opCount);
+            view.opKinds_.reserve(opCount);
+            view.opSymbols_.reserve(opCount);
+            view.opOperandRanges_.reserve(opCount);
+            view.opResultRanges_.reserve(opCount);
+            view.opAttrRanges_.reserve(opCount);
+            view.opSrcLocs_.reserve(opCount);
+
+            std::size_t operandOffset = 0;
+            std::size_t resultOffset = 0;
+            std::size_t attrOffset = 0;
+            for (std::size_t i = 0; i < operations_.size(); ++i)
+            {
+                const OperationData &opData = operations_[i];
+                if (!opData.alive)
+                {
+                    continue;
+                }
+                OperationId opId;
+                opId.index = opRemap[i + 1];
+                opId.generation = 0;
+                opId.graph = graphId_;
+
+                view.operations_.push_back(opId);
+                view.opKinds_.push_back(opData.kind);
+                view.opSymbols_.push_back(opData.symbol);
+                view.opSrcLocs_.push_back(opData.srcLoc);
+
+                view.opOperandRanges_.push_back(Range{operandOffset, opData.operands.size()});
+                for (const auto &operand : opData.operands)
+                {
+                    view.operands_.push_back(remapValue(operand));
+                }
+                operandOffset += opData.operands.size();
+
+                view.opResultRanges_.push_back(Range{resultOffset, opData.results.size()});
+                for (const auto &result : opData.results)
+                {
+                    view.results_.push_back(remapValue(result));
+                }
+                resultOffset += opData.results.size();
+
+                view.opAttrRanges_.push_back(Range{attrOffset, opData.attrs.size()});
+                view.opAttrs_.insert(view.opAttrs_.end(), opData.attrs.begin(), opData.attrs.end());
+                attrOffset += opData.attrs.size();
+            }
+
+            view.values_.reserve(valueCount);
+            view.valueSymbols_.reserve(valueCount);
+            view.valueWidths_.reserve(valueCount);
+            view.valueSigned_.reserve(valueCount);
+            view.valueIsInput_.reserve(valueCount);
+            view.valueIsOutput_.reserve(valueCount);
+            view.valueDefs_.reserve(valueCount);
+            view.valueUserRanges_.reserve(valueCount);
+            view.valueSrcLocs_.reserve(valueCount);
+
+            for (std::size_t i = 0; i < values_.size(); ++i)
+            {
+                const ValueData &valueData = values_[i];
+                if (!valueData.alive)
+                {
+                    continue;
+                }
+                ValueId valueId;
+                valueId.index = valueRemap[i + 1];
+                valueId.generation = 0;
+                valueId.graph = graphId_;
+                view.values_.push_back(valueId);
+                view.valueSymbols_.push_back(valueData.symbol);
+                view.valueWidths_.push_back(valueData.width);
+                view.valueSigned_.push_back(valueData.isSigned ? 1 : 0);
+                view.valueIsInput_.push_back(valueData.isInput ? 1 : 0);
+                view.valueIsOutput_.push_back(valueData.isOutput ? 1 : 0);
+                view.valueSrcLocs_.push_back(valueData.srcLoc);
+
+                OperationId def = OperationId::invalid();
+                if (valueData.definingOp.valid())
+                {
+                    def = remapOp(valueData.definingOp);
+                }
+                view.valueDefs_.push_back(def);
+            }
+
+            view.inputPorts_.reserve(inputPorts_.size());
+            for (const auto &port : inputPorts_)
+            {
+                Port mapped{port.name, remapValue(port.value)};
+                view.inputPorts_.push_back(mapped);
+            }
+            std::sort(view.inputPorts_.begin(), view.inputPorts_.end(), portLess);
+
+            view.outputPorts_.reserve(outputPorts_.size());
+            for (const auto &port : outputPorts_)
+            {
+                Port mapped{port.name, remapValue(port.value)};
+                view.outputPorts_.push_back(mapped);
+            }
+            std::sort(view.outputPorts_.begin(), view.outputPorts_.end(), portLess);
+
+            std::vector<std::vector<ValueUser>> users(valueCount);
+            for (std::size_t i = 0; i < operations_.size(); ++i)
+            {
+                const OperationData &opData = operations_[i];
+                if (!opData.alive)
+                {
+                    continue;
+                }
+                OperationId opId;
+                opId.index = opRemap[i + 1];
+                opId.generation = 0;
+                opId.graph = graphId_;
+                for (std::size_t operandIndex = 0; operandIndex < opData.operands.size(); ++operandIndex)
+                {
+                    const ValueId valueId = remapValue(opData.operands[operandIndex]);
+                    const std::size_t valIdx = static_cast<std::size_t>(valueId.index - 1);
+                    users[valIdx].push_back(ValueUser{opId, static_cast<uint32_t>(operandIndex)});
+                }
+            }
+
+            std::size_t userOffset = 0;
+            for (const auto &bucket : users)
+            {
+                view.valueUserRanges_.push_back(Range{userOffset, bucket.size()});
+                view.useList_.insert(view.useList_.end(), bucket.begin(), bucket.end());
+                userOffset += bucket.size();
+            }
+
+            return view;
+        }
+
+        std::size_t GraphBuilder::valueIndex(ValueId value) const
+        {
+            value.assertGraph(graphId_);
+            const std::size_t index = static_cast<std::size_t>(value.index);
+            if (index == 0 || index > values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            return index - 1;
+        }
+
+        std::size_t GraphBuilder::opIndex(OperationId op) const
+        {
+            op.assertGraph(graphId_);
+            const std::size_t index = static_cast<std::size_t>(op.index);
+            if (index == 0 || index > operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            return index - 1;
+        }
+
+        bool GraphBuilder::valueAlive(ValueId value) const
+        {
+            return values_[valueIndex(value)].alive;
+        }
+
+        bool GraphBuilder::opAlive(OperationId op) const
+        {
+            return operations_[opIndex(op)].alive;
+        }
+
+        std::size_t GraphBuilder::countValueUses(ValueId value, std::optional<OperationId> skipOp) const
+        {
+            std::size_t count = 0;
+            for (std::size_t i = 0; i < operations_.size(); ++i)
+            {
+                if (!operations_[i].alive)
+                {
+                    continue;
+                }
+                OperationId opId;
+                opId.index = static_cast<uint32_t>(i + 1);
+                opId.generation = 0;
+                opId.graph = graphId_;
+                if (skipOp && *skipOp == opId)
+                {
+                    continue;
+                }
+                for (const auto &operand : operations_[i].operands)
+                {
+                    if (operand == value)
+                    {
+                        ++count;
+                    }
+                }
+            }
+            return count;
+        }
+
+        void GraphBuilder::recomputePortFlags()
+        {
+            for (auto &value : values_)
+            {
+                value.isInput = false;
+                value.isOutput = false;
+            }
+            for (const auto &port : inputPorts_)
+            {
+                const std::size_t valIdx = valueIndex(port.value);
+                if (!values_[valIdx].alive)
+                {
+                    throw std::runtime_error("Input port references erased value");
+                }
+                values_[valIdx].isInput = true;
+            }
+            for (const auto &port : outputPorts_)
+            {
+                const std::size_t valIdx = valueIndex(port.value);
+                if (!values_[valIdx].alive)
+                {
+                    throw std::runtime_error("Output port references erased value");
+                }
+                values_[valIdx].isOutput = true;
+            }
+        }
+
+        void GraphBuilder::validateSymbol(SymbolId sym, std::string_view context) const
+        {
+            if (!sym.valid())
+            {
+                throw std::runtime_error(std::string(context) + " symbol is invalid");
+            }
+            if (symbols_ && !symbols_->valid(sym))
+            {
+                throw std::runtime_error(std::string(context) + " symbol is not in the symbol table");
+            }
+        }
+
+        void GraphBuilder::validateAttrKey(SymbolId key) const
+        {
+            validateSymbol(key, "Attribute");
+        }
+
     } // namespace ir
 
     Netlist::Netlist(Netlist &&other) noexcept

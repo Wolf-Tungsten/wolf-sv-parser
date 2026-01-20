@@ -115,6 +115,19 @@
 
 # Objective 6
 
+> 目标：支持从 GraphView 反向构建 GraphBuilder，形成可编辑闭环。
+
+## KR1：反向构建 API
+- 提供 `GraphBuilder::fromView(const GraphView&, GraphSymbolTable&)`（或等价构造函数），支持基于只读视图进行变更再 `freeze()`。
+
+## KR2：元数据与一致性复制
+- 覆盖 ports/attrs/srcLoc/symbol/useList 的拷贝与一致性校验，确保 round-trip 不丢信息。
+
+## KR3：测试与回归
+- 测试：GraphView → Builder → freeze 的结构/def-use/端口/属性一致性检查。
+
+# Objective 7
+
 > 目标：迁移 elaborate 产出热路径 IR，并完成一致性校验。
 
 ## KR1：elaborate 迁移与转换
@@ -126,7 +139,7 @@
 - 校验项：op/value 数量、opKind、operands/results 连接、端口绑定一致。
 - 测试：基于现有 fixtures（或手写小图）做等价性检查；对照验证仅依赖早期备份，迁移完成后移除对比逻辑。
 
-# Objective 7
+# Objective 8
 
 > 目标：迁移 emit 读入热路径 IR，并保持输出一致。
 
@@ -138,7 +151,7 @@
 - 对比旧/新 emit 结果一致性（SV/JSON）仅依赖早期备份；迁移完成后移除对比逻辑。
 - 回归 `ctest`；若有差异，记录并解释语义不变或修复。
 
-# Objective 8
+# Objective 9
 
 > 目标：将 GRH 数据结构抽离为独立的 `libgrh`，可单独构建与复用。
 

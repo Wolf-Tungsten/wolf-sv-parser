@@ -190,6 +190,150 @@ struct OperationId {
     friend constexpr bool operator!=(OperationId lhs, OperationId rhs) noexcept { return !(lhs == rhs); }
 };
 
+struct Range {
+    std::size_t offset = 0;
+    std::size_t count = 0;
+};
+
+struct ValueUser {
+    OperationId operation;
+    uint32_t operandIndex = 0;
+};
+
+struct Port {
+    SymbolId name;
+    ValueId value;
+};
+
+struct AttrKV {
+    SymbolId key;
+    AttributeValue value;
+};
+
+class GraphView {
+public:
+    GraphView() = default;
+
+    std::span<const OperationId> operations() const noexcept;
+    std::span<const ValueId> values() const noexcept;
+    std::span<const Port> inputPorts() const noexcept;
+    std::span<const Port> outputPorts() const noexcept;
+    OperationKind opKind(OperationId op) const;
+    std::span<const ValueId> opOperands(OperationId op) const;
+    std::span<const ValueId> opResults(OperationId op) const;
+    SymbolId opSymbol(OperationId op) const;
+    std::span<const AttrKV> opAttrs(OperationId op) const;
+    std::optional<AttributeValue> opAttr(OperationId op, SymbolId key) const;
+    std::optional<SrcLoc> opSrcLoc(OperationId op) const;
+    SymbolId valueSymbol(ValueId value) const;
+    int32_t valueWidth(ValueId value) const;
+    bool valueSigned(ValueId value) const;
+    bool valueIsInput(ValueId value) const;
+    bool valueIsOutput(ValueId value) const;
+    OperationId valueDef(ValueId value) const;
+    std::span<const ValueUser> valueUsers(ValueId value) const;
+    std::optional<SrcLoc> valueSrcLoc(ValueId value) const;
+
+private:
+    friend class GraphBuilder;
+
+    GraphId graphId_{};
+    std::vector<OperationId> operations_;
+    std::vector<ValueId> values_;
+    std::vector<Port> inputPorts_;
+    std::vector<Port> outputPorts_;
+    std::vector<OperationKind> opKinds_;
+    std::vector<SymbolId> opSymbols_;
+    std::vector<Range> opOperandRanges_;
+    std::vector<Range> opResultRanges_;
+    std::vector<Range> opAttrRanges_;
+    std::vector<ValueId> operands_;
+    std::vector<ValueId> results_;
+    std::vector<AttrKV> opAttrs_;
+    std::vector<std::optional<SrcLoc>> opSrcLocs_;
+    std::vector<SymbolId> valueSymbols_;
+    std::vector<int32_t> valueWidths_;
+    std::vector<uint8_t> valueSigned_;
+    std::vector<uint8_t> valueIsInput_;
+    std::vector<uint8_t> valueIsOutput_;
+    std::vector<OperationId> valueDefs_;
+    std::vector<Range> valueUserRanges_;
+    std::vector<ValueUser> useList_;
+    std::vector<std::optional<SrcLoc>> valueSrcLocs_;
+
+    std::size_t opIndex(OperationId op) const;
+    std::size_t valueIndex(ValueId value) const;
+};
+
+class GraphBuilder {
+public:
+    explicit GraphBuilder(GraphId graphId);
+    GraphBuilder(GraphSymbolTable& symbols, GraphId graphId = GraphId{1, 0});
+    static GraphBuilder fromView(const GraphView& view, GraphSymbolTable& symbols);
+
+    ValueId addValue(SymbolId sym, int32_t width, bool isSigned);
+    OperationId addOp(OperationKind kind, SymbolId sym);
+    void addOperand(OperationId op, ValueId value);
+    void addResult(OperationId op, ValueId value);
+    void replaceOperand(OperationId op, std::size_t index, ValueId value);
+    void replaceResult(OperationId op, std::size_t index, ValueId value);
+    void replaceAllUses(ValueId from, ValueId to);
+    bool eraseOperand(OperationId op, std::size_t index);
+    bool eraseResult(OperationId op, std::size_t index);
+    bool eraseOp(OperationId op);
+    bool eraseOp(OperationId op, std::span<const ValueId> replacementResults);
+    bool eraseValue(ValueId value);
+    void bindInputPort(SymbolId name, ValueId value);
+    void bindOutputPort(SymbolId name, ValueId value);
+    void setAttr(OperationId op, SymbolId key, AttributeValue value);
+    bool eraseAttr(OperationId op, SymbolId key);
+    void setValueSrcLoc(ValueId value, SrcLoc loc);
+    void setOpSrcLoc(OperationId op, SrcLoc loc);
+    void setOpSymbol(OperationId op, SymbolId sym);
+    void setValueSymbol(ValueId value, SymbolId sym);
+    void clearOpSymbol(OperationId op);
+    void clearValueSymbol(ValueId value);
+    GraphView freeze() const;
+
+private:
+    struct ValueData {
+        SymbolId symbol;
+        int32_t width = 0;
+        bool isSigned = false;
+        bool isInput = false;
+        bool isOutput = false;
+        OperationId definingOp = OperationId::invalid();
+        std::optional<SrcLoc> srcLoc;
+        bool alive = true;
+    };
+
+    struct OperationData {
+        OperationKind kind = OperationKind::kConstant;
+        SymbolId symbol;
+        std::vector<ValueId> operands;
+        std::vector<ValueId> results;
+        std::vector<AttrKV> attrs;
+        std::optional<SrcLoc> srcLoc;
+        bool alive = true;
+    };
+
+    std::size_t valueIndex(ValueId value) const;
+    std::size_t opIndex(OperationId op) const;
+    bool valueAlive(ValueId value) const;
+    bool opAlive(OperationId op) const;
+    std::size_t countValueUses(ValueId value, std::optional<OperationId> skipOp) const;
+    void recomputePortFlags();
+    void validateSymbol(SymbolId sym, std::string_view context) const;
+    void validateAttrKey(SymbolId key) const;
+
+    GraphId graphId_;
+    GraphSymbolTable* symbols_ = nullptr;
+    std::vector<ValueData> values_;
+    std::vector<OperationData> operations_;
+    std::vector<Port> inputPorts_;
+    std::vector<Port> outputPorts_;
+};
+
 } // namespace ir
 
 class Graph;

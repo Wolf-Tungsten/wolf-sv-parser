@@ -131,6 +131,18 @@ target_compile_definitions(grh-tests
 
 register_test_exe(grh-tests)
 
+# grh roundtrip tests
+add_executable(grh-roundtrip-tests
+    tests/grh/test_grh_roundtrip.cpp
+)
+
+target_link_libraries(grh-roundtrip-tests
+    PRIVATE
+        grh
+)
+
+register_test_exe(grh-roundtrip-tests)
+
 # emit base
 add_executable(emit-base
     tests/emit/test_emit_base.cpp
