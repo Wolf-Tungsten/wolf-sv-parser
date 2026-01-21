@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WOLF_SV_PASS_GRH_VERIFY_HPP
+#define WOLF_SV_PASS_GRH_VERIFY_HPP
 
 #include "transform.hpp"
 
@@ -23,3 +24,5 @@ namespace wolf_sv::transform
     };
 
 } // namespace wolf_sv::transform
+
+#endif // WOLF_SV_PASS_GRH_VERIFY_HPP

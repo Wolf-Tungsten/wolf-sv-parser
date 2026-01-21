@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WOLF_SV_ELABORATE_HPP
+#define WOLF_SV_ELABORATE_HPP
 
 #include "grh.hpp"
 #include "slang/ast/EvalContext.h"
@@ -1013,3 +1014,5 @@ private:
 };
 
 } // namespace wolf_sv
+
+#endif // WOLF_SV_ELABORATE_HPP

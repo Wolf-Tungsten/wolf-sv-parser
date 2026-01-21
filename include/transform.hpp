@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WOLF_SV_TRANSFORM_HPP
+#define WOLF_SV_TRANSFORM_HPP
 
 #include "grh.hpp"
 
@@ -254,3 +255,5 @@ namespace wolf_sv::transform
     };
 
 } // namespace wolf_sv::transform
+
+#endif // WOLF_SV_TRANSFORM_HPP

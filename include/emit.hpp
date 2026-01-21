@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WOLF_SV_EMIT_HPP
+#define WOLF_SV_EMIT_HPP
 
 #include "grh.hpp"
 
@@ -129,3 +130,5 @@ namespace wolf_sv::emit
     };
 
 } // namespace wolf_sv::emit
+
+#endif // WOLF_SV_EMIT_HPP

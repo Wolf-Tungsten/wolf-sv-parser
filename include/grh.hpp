@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WOLF_SV_GRH_HPP
+#define WOLF_SV_GRH_HPP
 
 #include <cstdint>
 #include <deque>
@@ -584,4 +585,4 @@ private:
 
 } // namespace wolf_sv::grh
 
-#include "load.hpp"
+#endif // WOLF_SV_GRH_HPP
