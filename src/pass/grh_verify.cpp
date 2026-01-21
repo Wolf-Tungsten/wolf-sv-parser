@@ -11,6 +11,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -240,28 +241,68 @@ namespace wolf_sv::transform
             return false;
         }
 
-        grh::Operation *findOperationInNetlist(grh::Netlist &netlist, std::string_view symbol)
+        struct OperationRef
+        {
+            grh::Graph *graph = nullptr;
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
+        };
+
+        struct UserKey
+        {
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
+            uint32_t operandIndex = 0;
+        };
+
+        bool operator==(const UserKey &lhs, const UserKey &rhs)
+        {
+            return lhs.op == rhs.op && lhs.operandIndex == rhs.operandIndex;
+        }
+
+        bool operator<(const UserKey &lhs, const UserKey &rhs)
+        {
+            auto lhsTuple = std::tie(lhs.op.graph.index, lhs.op.graph.generation, lhs.op.index, lhs.op.generation, lhs.operandIndex);
+            auto rhsTuple = std::tie(rhs.op.graph.index, rhs.op.graph.generation, rhs.op.index, rhs.op.generation, rhs.operandIndex);
+            return lhsTuple < rhsTuple;
+        }
+
+        std::optional<OperationRef> findOperationInNetlist(grh::Netlist &netlist, std::string_view symbol)
         {
             for (const auto &graphEntry : netlist.graphs())
             {
-                if (auto *op = graphEntry.second->findOperation(symbol))
+                grh::Graph *graph = graphEntry.second.get();
+                if (!graph)
                 {
-                    return op;
+                    continue;
+                }
+                const grh::ir::OperationId opId = graph->findOperation(symbol);
+                if (opId.valid())
+                {
+                    return OperationRef{graph, opId};
                 }
             }
-            return nullptr;
+            return std::nullopt;
         }
 
-        std::vector<std::pair<std::string, std::size_t>> normalizeUsers(const std::vector<grh::ValueUser> &users)
+        std::vector<UserKey> normalizeUsers(std::span<const grh::ir::ValueUser> users)
         {
-            std::vector<std::pair<std::string, std::size_t>> norm;
+            std::vector<UserKey> norm;
             norm.reserve(users.size());
             for (const auto &user : users)
             {
-                norm.emplace_back(user.operationSymbol, user.operandIndex);
+                norm.push_back(UserKey{user.operation, user.operandIndex});
             }
             std::sort(norm.begin(), norm.end());
             return norm;
+        }
+
+        std::optional<grh::AttributeValue> findAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view name)
+        {
+            const grh::ir::SymbolId key = graph.lookupSymbol(name);
+            if (!key.valid())
+            {
+                return std::nullopt;
+            }
+            return op.attr(key);
         }
 
     } // namespace
@@ -275,8 +316,8 @@ namespace wolf_sv::transform
         grh::Netlist &netlistRef = netlist();
         PassDiagnostics &diagsRef = diags();
 
-        std::unordered_map<grh::Value *, std::vector<grh::ValueUser>> expectedUsers;
-        std::unordered_map<grh::Value *, std::string> expectedDefiningOps;
+        std::unordered_map<grh::ir::ValueId, std::vector<grh::ir::ValueUser>, grh::ir::ValueIdHash> expectedUsers;
+        std::unordered_map<grh::ir::ValueId, grh::ir::OperationId, grh::ir::ValueIdHash> expectedDefiningOps;
 
         for (const auto &graphEntry : netlistRef.graphs())
         {
@@ -284,34 +325,25 @@ namespace wolf_sv::transform
             expectedUsers.clear();
             expectedDefiningOps.clear();
 
-            for (const auto &[sym, valuePtr] : graph.values())
+            for (const auto valueId : graph.values())
             {
-                if (valuePtr)
-                {
-                    expectedUsers[valuePtr.get()] = {};
-                }
+                expectedUsers.emplace(valueId, std::vector<grh::ir::ValueUser>{});
             }
 
-            for (const auto &opSym : graph.operationOrder())
+            for (const auto opId : graph.operations())
             {
-                grh::Operation *op = graph.findOperation(opSym);
-                if (!op)
-                {
-                    error(graph, "Operation symbol missing from graph: " + opSym);
-                    result.failed = true;
-                    continue;
-                }
+                const grh::Operation op = graph.getOperation(opId);
 
-                const auto &specIt = operationSpecs().find(op->kind());
+                const auto &specIt = operationSpecs().find(op.kind());
                 if (specIt == operationSpecs().end())
                 {
-                    error(graph, *op, "Unknown operation kind encountered");
+                    error(graph, op, "Unknown operation kind encountered");
                     result.failed = true;
                 }
 
                 const OperationSpec *spec = specIt == operationSpecs().end() ? nullptr : &specIt->second;
-                const auto operandsCount = op->operandSymbols().size();
-                const auto resultsCount = op->resultSymbols().size();
+                const auto operandsCount = op.operands().size();
+                const auto resultsCount = op.results().size();
 
                 if (spec)
                 {
@@ -319,129 +351,124 @@ namespace wolf_sv::transform
                     {
                         std::ostringstream oss;
                         oss << "Operand count " << operandsCount << " out of range [" << spec->operands.min << ", " << spec->operands.max << "]";
-                        error(graph, *op, oss.str());
+                        error(graph, op, oss.str());
                     }
 
                     if (resultsCount < spec->results.min || resultsCount > spec->results.max)
                     {
                         std::ostringstream oss;
                         oss << "Result count " << resultsCount << " out of range [" << spec->results.min << ", " << spec->results.max << "]";
-                        error(graph, *op, oss.str());
+                        error(graph, op, oss.str());
                     }
 
-                    std::unordered_set<std::string> allowedAttrs;
+                    std::unordered_set<std::string_view> allowedAttrs;
                     for (const auto &rule : spec->required)
                     {
                         allowedAttrs.insert(rule.name);
-                        auto it = op->attributes().find(rule.name);
-                        if (it == op->attributes().end())
+                        auto attr = findAttr(graph, op, rule.name);
+                        if (!attr)
                         {
-                            error(graph, *op, "Missing required attribute: " + rule.name);
+                            error(graph, op, "Missing required attribute: " + rule.name);
                             continue;
                         }
-                        AttrValueKind kind = classifyAttr(it->second);
+                        AttrValueKind kind = classifyAttr(*attr);
                         if (kind != rule.kind)
                         {
-                            error(graph, *op, "Attribute '" + rule.name + "' has incorrect type");
+                            error(graph, op, "Attribute '" + rule.name + "' has incorrect type");
                             continue;
                         }
-                        if (!matchesAllowedStrings(it->second, rule))
+                        if (!matchesAllowedStrings(*attr, rule))
                         {
-                            error(graph, *op, "Attribute '" + rule.name + "' has unsupported value");
+                            error(graph, op, "Attribute '" + rule.name + "' has unsupported value");
                         }
                     }
                     for (const auto &rule : spec->optional)
                     {
                         allowedAttrs.insert(rule.name);
-                        auto it = op->attributes().find(rule.name);
-                        if (it == op->attributes().end())
+                        auto attr = findAttr(graph, op, rule.name);
+                        if (!attr)
                         {
                             continue;
                         }
-                        AttrValueKind kind = classifyAttr(it->second);
+                        AttrValueKind kind = classifyAttr(*attr);
                         if (kind != rule.kind)
                         {
-                            error(graph, *op, "Attribute '" + rule.name + "' has incorrect type");
+                            error(graph, op, "Attribute '" + rule.name + "' has incorrect type");
                             continue;
                         }
-                        if (!matchesAllowedStrings(it->second, rule))
+                        if (!matchesAllowedStrings(*attr, rule))
                         {
-                            error(graph, *op, "Attribute '" + rule.name + "' has unsupported value");
+                            error(graph, op, "Attribute '" + rule.name + "' has unsupported value");
                         }
                     }
 
-                    for (const auto &[attrName, attrVal] : op->attributes())
+                    for (const auto &attr : op.attrs())
                     {
+                        const std::string_view attrName = graph.symbolText(attr.key);
                         if (!allowedAttrs.contains(attrName))
                         {
-                            info(graph, *op, "Unexpected attribute (kept): " + attrName);
+                            info(graph, op, "Unexpected attribute (kept): " + std::string(attrName));
                         }
                     }
                 }
 
-                auto verifyStringAttr = [&](std::string_view name) -> const std::string *
+                auto verifyStringAttr = [&](std::string_view name) -> std::optional<std::string>
                 {
-                    auto it = op->attributes().find(std::string(name));
-                    if (it == op->attributes().end())
+                    auto attr = findAttr(graph, op, name);
+                    if (!attr)
                     {
-                        return nullptr;
+                        return std::nullopt;
                     }
-                    if (!std::holds_alternative<std::string>(it->second))
+                    if (const auto *value = std::get_if<std::string>(&*attr))
                     {
-                        return nullptr;
+                        return *value;
                     }
-                    return &std::get<std::string>(it->second);
+                    return std::nullopt;
                 };
 
                 // Operand/result presence and expected users
                 for (std::size_t i = 0; i < operandsCount; ++i)
                 {
-                    const auto &operandSym = op->operandSymbols()[i];
-                    grh::Value *value = graph.findValue(operandSym);
-                    if (!value)
+                    const auto operandId = op.operands()[i];
+                    if (!operandId.valid())
                     {
-                        error(graph, *op, "Operand references missing value: " + operandSym);
+                        error(graph, op, "Operand references invalid value id");
                         continue;
                     }
-                    expectedUsers[value].push_back(grh::ValueUser{op->symbol(), op, i});
-                    if (options_.autoFixPointers)
+                    try
                     {
-                        try
-                        {
-                            op->operandValue(i);
-                        }
-                        catch (const std::exception &)
-                        {
-                            error(graph, *op, "Failed to resolve operand pointer for: " + operandSym);
-                        }
+                        graph.getValue(operandId);
                     }
+                    catch (const std::exception &)
+                    {
+                        error(graph, op, "Operand references missing value");
+                        continue;
+                    }
+                    expectedUsers[operandId].push_back(grh::ir::ValueUser{opId, static_cast<uint32_t>(i)});
                 }
 
                 for (std::size_t i = 0; i < resultsCount; ++i)
                 {
-                    const auto &resultSym = op->resultSymbols()[i];
-                    grh::Value *value = graph.findValue(resultSym);
-                    if (!value)
+                    const auto resultId = op.results()[i];
+                    if (!resultId.valid())
                     {
-                        error(graph, *op, "Result references missing value: " + resultSym);
+                        error(graph, op, "Result references invalid value id");
                         continue;
                     }
-                    expectedDefiningOps[value] = op->symbol();
-                    if (options_.autoFixPointers)
+                    try
                     {
-                        try
-                        {
-                            op->resultValue(i);
-                        }
-                        catch (const std::exception &)
-                        {
-                            error(graph, *op, "Failed to resolve result pointer for: " + resultSym);
-                        }
+                        graph.getValue(resultId);
                     }
+                    catch (const std::exception &)
+                    {
+                        error(graph, op, "Result references missing value");
+                        continue;
+                    }
+                    expectedDefiningOps[resultId] = opId;
                 }
 
                 // Per-kind referential checks
-                switch (op->kind())
+                switch (op.kind())
                 {
                 case grh::OperationKind::kMemoryAsyncReadPort:
                 case grh::OperationKind::kMemorySyncReadPort:
@@ -454,130 +481,128 @@ namespace wolf_sv::transform
                 case grh::OperationKind::kMemoryMaskWritePortRst:
                 case grh::OperationKind::kMemoryMaskWritePortArst:
                 {
-                    const std::string *memSymbol = verifyStringAttr("memSymbol");
+                    const auto memSymbol = verifyStringAttr("memSymbol");
                     if (!memSymbol)
                     {
                         break;
                     }
-                    grh::Operation *target = graph.findOperation(*memSymbol);
-                    if (!target)
+                    const grh::ir::OperationId targetId = graph.findOperation(*memSymbol);
+                    if (!targetId.valid())
                     {
-                        error(graph, *op, "memSymbol does not resolve to an operation: " + *memSymbol);
+                        error(graph, op, "memSymbol does not resolve to an operation: " + *memSymbol);
                     }
-                    else if (target->kind() != grh::OperationKind::kMemory)
+                    else if (graph.getOperation(targetId).kind() != grh::OperationKind::kMemory)
                     {
-                        error(graph, *op, "memSymbol must point to kMemory, got " + std::string(grh::toString(target->kind())));
+                        error(graph, op, "memSymbol must point to kMemory");
                     }
                     break;
                 }
                 case grh::OperationKind::kInstance:
                 {
-                    const std::string *moduleName = verifyStringAttr("moduleName");
-                    auto inputNames = op->attributes().find("inputPortName");
-                    auto outputNames = op->attributes().find("outputPortName");
+                    const auto moduleName = verifyStringAttr("moduleName");
+                    auto inputNames = findAttr(graph, op, "inputPortName");
+                    auto outputNames = findAttr(graph, op, "outputPortName");
                     if (moduleName && !netlistRef.findGraph(*moduleName))
                     {
-                        error(graph, *op, "Instance moduleName not found in netlist: " + *moduleName);
+                        error(graph, op, "Instance moduleName not found in netlist: " + *moduleName);
                     }
-                    if (inputNames != op->attributes().end() && !lengthEquals<std::string>(inputNames->second, operandsCount))
+                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount))
                     {
-                        error(graph, *op, "inputPortName size must match operand count");
+                        error(graph, op, "inputPortName size must match operand count");
                     }
-                    if (outputNames != op->attributes().end() && !lengthEquals<std::string>(outputNames->second, resultsCount))
+                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount))
                     {
-                        error(graph, *op, "outputPortName size must match result count");
+                        error(graph, op, "outputPortName size must match result count");
                     }
                     break;
                 }
                 case grh::OperationKind::kBlackbox:
                 {
-                    auto inputNames = op->attributes().find("inputPortName");
-                    auto outputNames = op->attributes().find("outputPortName");
-                    auto paramNames = op->attributes().find("parameterNames");
-                    auto paramValues = op->attributes().find("parameterValues");
-                    if (inputNames != op->attributes().end() && !lengthEquals<std::string>(inputNames->second, operandsCount))
+                    auto inputNames = findAttr(graph, op, "inputPortName");
+                    auto outputNames = findAttr(graph, op, "outputPortName");
+                    auto paramNames = findAttr(graph, op, "parameterNames");
+                    auto paramValues = findAttr(graph, op, "parameterValues");
+                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount))
                     {
-                        error(graph, *op, "inputPortName size must match operand count");
+                        error(graph, op, "inputPortName size must match operand count");
                     }
-                    if (outputNames != op->attributes().end() && !lengthEquals<std::string>(outputNames->second, resultsCount))
+                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount))
                     {
-                        error(graph, *op, "outputPortName size must match result count");
+                        error(graph, op, "outputPortName size must match result count");
                     }
-                    if (paramNames != op->attributes().end() && paramValues != op->attributes().end())
+                    if (paramNames && paramValues)
                     {
-                        const auto *namesVec = std::get_if<std::vector<std::string>>(&paramNames->second);
-                        const auto *valuesVec = std::get_if<std::vector<std::string>>(&paramValues->second);
+                        const auto *namesVec = std::get_if<std::vector<std::string>>(&*paramNames);
+                        const auto *valuesVec = std::get_if<std::vector<std::string>>(&*paramValues);
                         if (namesVec && valuesVec)
                         {
                             if (namesVec->size() != valuesVec->size())
                             {
-                                error(graph, *op, "parameterNames size must match parameterValues size");
+                                error(graph, op, "parameterNames size must match parameterValues size");
                             }
                         }
                         else
                         {
-                            error(graph, *op, "parameterNames/parameterValues must both be string arrays");
+                            error(graph, op, "parameterNames/parameterValues must both be string arrays");
                         }
                     }
                     break;
                 }
                 case grh::OperationKind::kDpicImport:
                 {
-                    const auto &attrs = op->attributes();
-                    auto dirIt = attrs.find("argsDirection");
-                    auto widthIt = attrs.find("argsWidth");
-                    auto nameIt = attrs.find("argsName");
-                    if (dirIt != attrs.end() && widthIt != attrs.end() && nameIt != attrs.end())
+                    auto dirIt = findAttr(graph, op, "argsDirection");
+                    auto widthIt = findAttr(graph, op, "argsWidth");
+                    auto nameIt = findAttr(graph, op, "argsName");
+                    if (dirIt && widthIt && nameIt)
                     {
-                        const auto *dirs = std::get_if<std::vector<std::string>>(&dirIt->second);
-                        const auto *widths = std::get_if<std::vector<int64_t>>(&widthIt->second);
-                        const auto *names = std::get_if<std::vector<std::string>>(&nameIt->second);
+                        const auto *dirs = std::get_if<std::vector<std::string>>(&*dirIt);
+                        const auto *widths = std::get_if<std::vector<int64_t>>(&*widthIt);
+                        const auto *names = std::get_if<std::vector<std::string>>(&*nameIt);
                         if (dirs && widths && names)
                         {
                             if (!(dirs->size() == widths->size() && dirs->size() == names->size()))
                             {
-                                error(graph, *op, "argsDirection/argsWidth/argsName sizes must match");
+                                error(graph, op, "argsDirection/argsWidth/argsName sizes must match");
                             }
                         }
                         else
                         {
-                            error(graph, *op, "argsDirection/argsWidth/argsName must all be arrays");
+                            error(graph, op, "argsDirection/argsWidth/argsName must all be arrays");
                         }
                     }
                     break;
                 }
                 case grh::OperationKind::kDpicCall:
                 {
-                    const auto *targetImport = verifyStringAttr("targetImportSymbol");
+                    const auto targetImport = verifyStringAttr("targetImportSymbol");
                     if (targetImport)
                     {
-                        grh::Operation *target = findOperationInNetlist(netlistRef, *targetImport);
+                        auto target = findOperationInNetlist(netlistRef, *targetImport);
                         if (!target)
                         {
-                            error(graph, *op, "targetImportSymbol not found: " + *targetImport);
+                            error(graph, op, "targetImportSymbol not found: " + *targetImport);
                         }
-                        else if (target->kind() != grh::OperationKind::kDpicImport)
+                        else if (target->graph->getOperation(target->op).kind() != grh::OperationKind::kDpicImport)
                         {
-                            error(graph, *op, "targetImportSymbol must reference kDpicImport");
+                            error(graph, op, "targetImportSymbol must reference kDpicImport");
                         }
                     }
 
-                    const auto &attrs = op->attributes();
-                    auto inNamesIt = attrs.find("inArgName");
-                    auto outNamesIt = attrs.find("outArgName");
-                    if (inNamesIt != attrs.end())
+                    auto inNamesIt = findAttr(graph, op, "inArgName");
+                    auto outNamesIt = findAttr(graph, op, "outArgName");
+                    if (inNamesIt)
                     {
                         std::size_t expectedInputs = operandsCount >= 2 ? operandsCount - 2 : 0;
-                        if (!lengthEquals<std::string>(inNamesIt->second, expectedInputs))
+                        if (!lengthEquals<std::string>(*inNamesIt, expectedInputs))
                         {
-                            error(graph, *op, "inArgName size must match input argument count");
+                            error(graph, op, "inArgName size must match input argument count");
                         }
                     }
-                    if (outNamesIt != attrs.end())
+                    if (outNamesIt)
                     {
-                        if (!lengthEquals<std::string>(outNamesIt->second, resultsCount))
+                        if (!lengthEquals<std::string>(*outNamesIt, resultsCount))
                         {
-                            error(graph, *op, "outArgName size must match output argument count");
+                            error(graph, op, "outArgName size must match output argument count");
                         }
                     }
                     break;
@@ -588,74 +613,62 @@ namespace wolf_sv::transform
             }
 
             // Validate value definitions and user lists
-            for (const auto &[sym, valuePtr] : graph.values())
+            for (const auto valueId : graph.values())
             {
-                grh::Value &value = *valuePtr;
-                const auto expectedUserIter = expectedUsers.find(&value);
-                const auto expectedDefIter = expectedDefiningOps.find(&value);
+                grh::Value value = graph.getValue(valueId);
+                const auto expectedUserIter = expectedUsers.find(valueId);
+                const auto expectedDefIter = expectedDefiningOps.find(valueId);
 
-                if (value.definingOpSymbol())
+                if (value.definingOp().valid())
                 {
-                    grh::Operation *defOp = graph.findOperation(*value.definingOpSymbol());
-                    if (!defOp)
+                    try
                     {
-                        error(graph, value, "Value defining operation not found: " + *value.definingOpSymbol());
+                        graph.getOperation(value.definingOp());
                     }
-                    else if (expectedDefIter != expectedDefiningOps.end() && expectedDefIter->second != *value.definingOpSymbol())
+                    catch (const std::exception &)
                     {
-                        error(graph, value, "Value defining op mismatch (symbol vs result owner)");
+                        error(graph, value, "Value defining operation not found");
                     }
-                    else if (options_.autoFixPointers)
+                    if (expectedDefIter != expectedDefiningOps.end() && expectedDefIter->second != value.definingOp())
                     {
-                        value.definingOp();
+                        error(graph, value, "Value defining op mismatch (id vs result owner)");
                     }
                 }
                 else if (expectedDefIter != expectedDefiningOps.end())
                 {
-                    warning(graph, value, "Value is produced by operation but definingOpSymbol is not set");
+                    warning(graph, value, "Value is produced by operation but definingOp is not set");
                 }
 
-                const auto &actualUsers = value.users();
-                std::vector<std::pair<std::string, std::size_t>> actualNorm = normalizeUsers(actualUsers);
-                std::vector<std::pair<std::string, std::size_t>> expectedNorm;
+                std::vector<UserKey> actualNorm = normalizeUsers(value.users());
+                std::vector<UserKey> expectedNorm;
                 if (expectedUserIter != expectedUsers.end())
                 {
-                    expectedNorm = normalizeUsers(expectedUserIter->second);
+                    expectedNorm = normalizeUsers(std::span<const grh::ir::ValueUser>(expectedUserIter->second));
                 }
 
-                bool usersMatch = actualNorm == expectedNorm;
-                if (!usersMatch)
+                if (actualNorm != expectedNorm)
                 {
                     warning(graph, value, "Value users list does not match operand references");
-                    if (options_.autoFixPointers && expectedUserIter != expectedUsers.end())
-                    {
-                        auto &mutableUsers = const_cast<std::vector<grh::ValueUser> &>(value.users());
-                        mutableUsers = expectedUserIter->second;
-                        usersMatch = true;
-                        result.changed = true;
-                        info(graph, value, "Value users list rebuilt from operations");
-                    }
                 }
 
-                auto &mutableUsers = const_cast<std::vector<grh::ValueUser> &>(value.users());
-                for (auto &user : mutableUsers)
+                for (const auto &user : value.users())
                 {
-                    if (user.operationSymbol.empty())
+                    if (!user.operation.valid())
                     {
-                        error(graph, value, "User entry missing operation symbol");
+                        error(graph, value, "User entry missing operation id");
                         continue;
                     }
-                    grh::Operation *op = graph.findOperation(user.operationSymbol);
-                    if (!op)
+                    try
                     {
-                        error(graph, value, "User entry references unknown operation: " + user.operationSymbol);
-                        continue;
+                        grh::Operation userOp = graph.getOperation(user.operation);
+                        if (user.operandIndex >= userOp.operands().size())
+                        {
+                            error(graph, value, "User operand index out of range");
+                        }
                     }
-                    if (options_.autoFixPointers && user.operationPtr != op)
+                    catch (const std::exception &)
                     {
-                        user.operationPtr = op;
-                        result.changed = true;
-                        info(graph, value, "User pointer rehydrated for value");
+                        error(graph, value, "User entry references unknown operation");
                     }
                 }
             }

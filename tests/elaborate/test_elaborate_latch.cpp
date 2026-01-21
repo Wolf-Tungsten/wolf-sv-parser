@@ -60,18 +60,18 @@ const grh::Graph* findGraph(const grh::Netlist& netlist, std::string_view name) 
     return netlist.findGraph(name);
 }
 
-const grh::Value* findValue(const grh::Graph& graph, std::string_view name) {
-    return graph.findValue(std::string(name));
+ValueId findValue(const grh::Graph& graph, std::string_view name) {
+    return graph.findValue(name);
 }
 
-const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
-    for (const auto& sym : graph.operationOrder()) {
-        const grh::Operation& op = graph.getOperation(sym);
+OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+    for (const auto& opId : graph.operations()) {
+        const grh::Operation op = graph.getOperation(opId);
         if (op.kind() == kind) {
-            return &op;
+            return opId;
         }
     }
-    return nullptr;
+    return OperationId::invalid();
 }
 
 } // namespace
@@ -137,13 +137,14 @@ int main() {
             fail("Graph not found: " + std::string(graphName));
             return false;
         }
-        const grh::Operation* latch = findOpByKind(*graph, kind);
-        if (!latch) {
+        OperationId latchId = findOpByKind(*graph, kind);
+        if (!latchId) {
             fail("Latch op missing in graph: " + std::string(graphName));
             return false;
         }
-        const auto& operands = latch->operands();
-        const auto& results = latch->results();
+        const grh::Operation latch = graph->getOperation(latchId);
+        const auto& operands = latch.operands();
+        const auto& results = latch.results();
         if (results.size() != 1) {
             return fail("Latch results size mismatch in graph: " + std::string(graphName));
         }
@@ -158,45 +159,38 @@ int main() {
             }
         }
 
-        const grh::Value* en = operands[0];
-        const grh::Value* d = operands.back();
-        if (!en || en->width() != 1) {
+        const grh::Value enValue = graph->getValue(operands[0]);
+        const grh::Value dValue = graph->getValue(operands.back());
+        if (enValue.width() != 1) {
             fail("Latch enable mismatch");
             return false;
         }
-        if (enName && en->symbol() != *enName) {
+        if (enName && enValue.symbolText() != *enName) {
             fail("Latch enable symbol mismatch");
             return false;
         }
-        if (!d) {
-            fail("Latch data missing");
-            return false;
-        }
-        if (dataName && d->symbol() != *dataName) {
+        if (dataName && dValue.symbolText() != *dataName) {
             fail("Latch data symbol mismatch");
             return false;
         }
         if (rstName) {
-            const grh::Value* rst = operands[1];
-            const grh::Value* resetVal = operands[2];
-            if (!rst || rst->symbol() != *rstName || rst->width() != 1) {
+            const grh::Value rstValue = graph->getValue(operands[1]);
+            const grh::Value resetValue = graph->getValue(operands[2]);
+            if (rstValue.symbolText() != *rstName || rstValue.width() != 1) {
                 fail("Latch reset signal mismatch");
                 return false;
             }
-            if (!resetVal) {
-                fail("Latch resetValue missing");
-                return false;
-            }
-            if (resetValName && resetVal->symbol() != *resetValName) {
+            if (resetValName && resetValue.symbolText() != *resetValName) {
                 fail("Latch resetValue symbol mismatch");
                 return false;
             }
-            if (resetVal->width() != d->width()) {
+            if (resetValue.width() != dValue.width()) {
                 fail("Latch resetValue width mismatch");
                 return false;
             }
-            if (const grh::Operation* def = resetVal->definingOp()) {
-                if (def->kind() != grh::OperationKind::kConstant) {
+            if (resetValue.definingOp()) {
+                const grh::Operation defOp = graph->getOperation(resetValue.definingOp());
+                if (defOp.kind() != grh::OperationKind::kConstant) {
                     fail("Latch resetValue is not driven by constant");
                     return false;
                 }

@@ -34,21 +34,21 @@ namespace
         Netlist netlist;
         Graph &graph = netlist.createGraph("demo");
 
-        Value &in = graph.createValue("in", 8, false);
-        graph.bindInputPort("in", in);
+        ir::ValueId in = graph.createValue(graph.internSymbol("in"), 8, false);
+        graph.bindInputPort(graph.internSymbol("in"), in);
 
-        Value &out = graph.createValue("out", 8, false);
-        graph.bindOutputPort("out", out);
+        ir::ValueId out = graph.createValue(graph.internSymbol("out"), 8, false);
+        graph.bindOutputPort(graph.internSymbol("out"), out);
 
-        Operation &add = graph.createOperation(OperationKind::kAdd, "add0");
-        add.addOperand(in);
-        Value &sum = graph.createValue("sum", 8, false);
-        add.addResult(sum);
-        add.setAttribute("weights", AttributeValue(std::vector<int64_t>{1, 2}));
+        ir::OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
+        graph.addOperand(add, in);
+        ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
+        graph.addResult(add, sum);
+        graph.setAttr(add, graph.internSymbol("weights"), AttributeValue(std::vector<int64_t>{1, 2}));
 
-        Operation &assign = graph.createOperation(OperationKind::kAssign, "assign0");
-        assign.addOperand(sum);
-        assign.addResult(out);
+        ir::OperationId assign = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
+        graph.addOperand(assign, sum);
+        graph.addResult(assign, out);
 
         netlist.markAsTop(graph.symbol());
         return netlist;

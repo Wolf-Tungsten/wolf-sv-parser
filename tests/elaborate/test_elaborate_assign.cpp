@@ -34,20 +34,14 @@ const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo,
     return nullptr;
 }
 
-const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
-    if (isInput) {
-        auto it = graph.inputPorts().find(std::string(name));
-        if (it != graph.inputPorts().end()) {
-            return graph.findValue(it->second);
+ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+    const auto ports = isInput ? graph.inputPorts() : graph.outputPorts();
+    for (const auto& port : ports) {
+        if (graph.symbolText(port.name) == name) {
+            return port.value;
         }
     }
-    else {
-        auto it = graph.outputPorts().find(std::string(name));
-        if (it != graph.outputPorts().end()) {
-            return graph.findValue(it->second);
-        }
-    }
-    return nullptr;
+    return ValueId::invalid();
 }
 
 bool writeArtifact(const grh::Netlist& netlist) {
@@ -150,6 +144,9 @@ int main() {
     if (!graph) {
         return fail("GRH graph assign_stage11_case not found");
     }
+    auto opForValue = [&](ValueId value) -> OperationId {
+        return value ? graph->getValue(value).definingOp() : OperationId::invalid();
+    };
 
     const slang::ast::InstanceBodySymbol* canonicalBody = topInstance->getCanonicalBody();
     const slang::ast::InstanceBodySymbol& body = canonicalBody ? *canonicalBody : topInstance->body;
@@ -158,8 +155,8 @@ int main() {
         return fail("Net memo is empty for assign_stage11_case");
     }
 
-    const grh::Value* portInA = findPort(*graph, "in_a", /* isInput */ true);
-    const grh::Value* portInB = findPort(*graph, "in_b", /* isInput */ true);
+    ValueId portInA = findPort(*graph, "in_a", /* isInput */ true);
+    ValueId portInB = findPort(*graph, "in_b", /* isInput */ true);
     if (!portInA || !portInB) {
         return fail("Input ports in_a/in_b not registered in graph");
     }
@@ -169,11 +166,12 @@ int main() {
     if (!scalarNet || !scalarNet->value) {
         return fail("scalar_net memo entry missing value");
     }
-    const grh::Operation* scalarAssign = scalarNet->value ? scalarNet->value->definingOp() : nullptr;
-    if (!scalarAssign || scalarAssign->kind() != grh::OperationKind::kAssign) {
+    OperationId scalarAssignId = opForValue(scalarNet->value);
+    if (!scalarAssignId || graph->getOperation(scalarAssignId).kind() != grh::OperationKind::kAssign) {
         return fail("scalar_net is not driven by kAssign");
     }
-    if (scalarAssign->operands().size() != 1 || scalarAssign->operands().front() != portInA) {
+    const grh::Operation scalarAssign = graph->getOperation(scalarAssignId);
+    if (scalarAssign.operands().size() != 1 || scalarAssign.operands().front() != portInA) {
         return fail("scalar_net assign operand does not reference in_a");
     }
 
@@ -182,32 +180,41 @@ int main() {
     if (!structNet || !structNet->value) {
         return fail("struct_net memo entry missing value");
     }
-    const grh::Operation* structAssign = structNet->value ? structNet->value->definingOp() : nullptr;
-    if (!structAssign || structAssign->kind() != grh::OperationKind::kAssign) {
+    OperationId structAssignId = opForValue(structNet->value);
+    if (!structAssignId || graph->getOperation(structAssignId).kind() != grh::OperationKind::kAssign) {
         return fail("struct_net is not driven by kAssign");
     }
-    if (structAssign->operands().empty()) {
+    const grh::Operation structAssign = graph->getOperation(structAssignId);
+    if (structAssign.operands().empty()) {
         return fail("struct_net assign has no operand");
     }
-    const grh::Value* structComposite = structAssign->operands().front();
-    const grh::Operation* structConcat = structComposite ? structComposite->definingOp() : nullptr;
-    if (!structConcat || structConcat->kind() != grh::OperationKind::kConcat) {
+    ValueId structComposite = structAssign.operands().front();
+    OperationId structConcatId = opForValue(structComposite);
+    if (!structConcatId || graph->getOperation(structConcatId).kind() != grh::OperationKind::kConcat) {
         return fail("struct_net assign is expected to use kConcat");
     }
-    if (structConcat->operands().size() != 3) {
+    const grh::Operation structConcat = graph->getOperation(structConcatId);
+    if (structConcat.operands().size() != 3) {
         return fail("struct_net concat should have three operands");
     }
-    if (const grh::Operation* hiSlice = structConcat->operands()[0]->definingOp()) {
-        if (hiSlice->kind() != grh::OperationKind::kSliceStatic ||
-            hiSlice->operands().empty() || hiSlice->operands().front() != portInA) {
+    OperationId hiSliceId = opForValue(structConcat.operands()[0]);
+    if (hiSliceId) {
+        const grh::Operation hiSlice = graph->getOperation(hiSliceId);
+        if (hiSlice.kind() != grh::OperationKind::kSliceStatic ||
+            hiSlice.operands().empty() || hiSlice.operands().front() != portInA) {
             return fail("struct_net hi slice does not originate from in_a");
         }
     }
     bool loSlicesFromB = true;
-    for (std::size_t idx = 1; idx < structConcat->operands().size(); ++idx) {
-        const grh::Operation* sliceOp = structConcat->operands()[idx]->definingOp();
-        if (!sliceOp || sliceOp->kind() != grh::OperationKind::kSliceStatic ||
-            sliceOp->operands().empty() || sliceOp->operands().front() != portInB) {
+    for (std::size_t idx = 1; idx < structConcat.operands().size(); ++idx) {
+        OperationId sliceOpId = opForValue(structConcat.operands()[idx]);
+        if (!sliceOpId) {
+            loSlicesFromB = false;
+            break;
+        }
+        const grh::Operation sliceOp = graph->getOperation(sliceOpId);
+        if (sliceOp.kind() != grh::OperationKind::kSliceStatic ||
+            sliceOp.operands().empty() || sliceOp.operands().front() != portInB) {
             loSlicesFromB = false;
             break;
         }
@@ -221,31 +228,35 @@ int main() {
     if (!arrayNet || !arrayNet->value) {
         return fail("array_net memo entry missing value");
     }
-    const grh::Operation* arrayAssign = arrayNet->value ? arrayNet->value->definingOp() : nullptr;
-    if (!arrayAssign || arrayAssign->kind() != grh::OperationKind::kAssign) {
+    OperationId arrayAssignId = opForValue(arrayNet->value);
+    if (!arrayAssignId || graph->getOperation(arrayAssignId).kind() != grh::OperationKind::kAssign) {
         return fail("array_net is not driven by kAssign");
     }
-    const grh::Value* arrayComposite = arrayAssign->operands().front();
-    const grh::Operation* arrayConcat = arrayComposite ? arrayComposite->definingOp() : nullptr;
-    if (!arrayConcat || arrayConcat->kind() != grh::OperationKind::kConcat) {
+    const grh::Operation arrayAssign = graph->getOperation(arrayAssignId);
+    ValueId arrayComposite = arrayAssign.operands().front();
+    OperationId arrayConcatId = opForValue(arrayComposite);
+    if (!arrayConcatId || graph->getOperation(arrayConcatId).kind() != grh::OperationKind::kConcat) {
         return fail("array_net assign should use kConcat");
     }
     bool hasZeroFill = false;
     bool hasSliceFromA = false;
     bool hasSliceFromB = false;
-    for (grh::Value* operand : arrayConcat->operands()) {
+    const grh::Operation arrayConcat = graph->getOperation(arrayConcatId);
+    for (ValueId operand : arrayConcat.operands()) {
         if (!operand) {
             continue;
         }
-        if (const grh::Operation* op = operand->definingOp()) {
-            if (op->kind() == grh::OperationKind::kConstant) {
+        OperationId opId = opForValue(operand);
+        if (opId) {
+            const grh::Operation op = graph->getOperation(opId);
+            if (op.kind() == grh::OperationKind::kConstant) {
                 hasZeroFill = true;
             }
-            else if (op->kind() == grh::OperationKind::kSliceStatic && !op->operands().empty()) {
-                if (op->operands().front() == portInA) {
+            else if (op.kind() == grh::OperationKind::kSliceStatic && !op.operands().empty()) {
+                if (op.operands().front() == portInA) {
                     hasSliceFromA = true;
                 }
-                if (op->operands().front() == portInB) {
+                if (op.operands().front() == portInB) {
                     hasSliceFromB = true;
                 }
             }
@@ -260,20 +271,23 @@ int main() {
     if (!partialNet || !partialNet->value) {
         return fail("partial_net memo entry missing value");
     }
-    const grh::Operation* partialAssign = partialNet->value->definingOp();
-    if (!partialAssign || partialAssign->kind() != grh::OperationKind::kAssign) {
+    OperationId partialAssignId = opForValue(partialNet->value);
+    if (!partialAssignId || graph->getOperation(partialAssignId).kind() != grh::OperationKind::kAssign) {
         return fail("partial_net is not driven by kAssign");
     }
-    const grh::Value* partialComposite = partialAssign->operands().front();
-    const grh::Operation* partialConcat = partialComposite->definingOp();
-    if (!partialConcat || partialConcat->kind() != grh::OperationKind::kConcat) {
+    const grh::Operation partialAssign = graph->getOperation(partialAssignId);
+    ValueId partialComposite = partialAssign.operands().front();
+    OperationId partialConcatId = opForValue(partialComposite);
+    if (!partialConcatId || graph->getOperation(partialConcatId).kind() != grh::OperationKind::kConcat) {
         return fail("partial_net assign should produce kConcat");
     }
     bool sawUnitZero = false;
-    for (grh::Value* operand : partialConcat->operands()) {
-        if (operand && operand->definingOp() &&
-            operand->definingOp()->kind() == grh::OperationKind::kConstant &&
-            operand->width() == 1) {
+    const grh::Operation partialConcat = graph->getOperation(partialConcatId);
+    for (ValueId operand : partialConcat.operands()) {
+        OperationId operandOpId = opForValue(operand);
+        if (operandOpId &&
+            graph->getOperation(operandOpId).kind() == grh::OperationKind::kConstant &&
+            graph->getValue(operand).width() == 1) {
             sawUnitZero = true;
             break;
         }
@@ -287,28 +301,33 @@ int main() {
     if (!concatB || !concatB->value) {
         return fail("concat_b memo entry missing value");
     }
-    const grh::Operation* concatBAssign = concatB->value->definingOp();
-    if (!concatBAssign || concatBAssign->kind() != grh::OperationKind::kAssign) {
+    OperationId concatBAssignId = opForValue(concatB->value);
+    if (!concatBAssignId || graph->getOperation(concatBAssignId).kind() != grh::OperationKind::kAssign) {
         return fail("concat_b is not driven by kAssign");
     }
-    const grh::Operation* concatBConcat = concatBAssign->operands().front()->definingOp();
-    if (!concatBConcat || concatBConcat->kind() != grh::OperationKind::kConcat) {
+    const grh::Operation concatBAssign = graph->getOperation(concatBAssignId);
+    ValueId concatBComposite = concatBAssign.operands().front();
+    OperationId concatBConcatId = opForValue(concatBComposite);
+    if (!concatBConcatId || graph->getOperation(concatBConcatId).kind() != grh::OperationKind::kConcat) {
         return fail("concat_b assign should use kConcat");
     }
-    if (concatBConcat->operands().size() != 2) {
+    const grh::Operation concatBConcat = graph->getOperation(concatBConcatId);
+    if (concatBConcat.operands().size() != 2) {
         return fail("concat_b concat should have two operands (zero-fill + slice)");
     }
-    if (!concatBConcat->operands()[0]->definingOp() ||
-        concatBConcat->operands()[0]->definingOp()->kind() != grh::OperationKind::kConstant ||
-        concatBConcat->operands()[0]->width() != 2) {
+    OperationId concatBZeroOpId = opForValue(concatBConcat.operands()[0]);
+    if (!concatBZeroOpId ||
+        graph->getOperation(concatBZeroOpId).kind() != grh::OperationKind::kConstant ||
+        graph->getValue(concatBConcat.operands()[0]).width() != 2) {
         return fail("concat_b zero-fill operand has unexpected shape");
     }
-    const grh::Value* concatBSliceValue = concatBConcat->operands()[1];
-    if (!concatBSliceValue || concatBSliceValue->width() != 2) {
+    ValueId concatBSliceValue = concatBConcat.operands()[1];
+    if (!concatBSliceValue || graph->getValue(concatBSliceValue).width() != 2) {
         return fail("concat_b slice operand has unexpected width");
     }
-    if (!concatBSliceValue->definingOp() ||
-        concatBSliceValue->definingOp()->kind() != grh::OperationKind::kSliceStatic) {
+    OperationId concatBSliceOpId = opForValue(concatBSliceValue);
+    if (!concatBSliceOpId ||
+        graph->getOperation(concatBSliceOpId).kind() != grh::OperationKind::kSliceStatic) {
         return fail("concat_b slice operand is expected to be created via kSliceStatic");
     }
 

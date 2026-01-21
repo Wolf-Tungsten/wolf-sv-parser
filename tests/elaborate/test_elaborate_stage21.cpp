@@ -37,13 +37,23 @@ findInstanceByName(std::span<const slang::ast::InstanceSymbol* const> instances,
     return nullptr;
 }
 
-const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+ValueId findPortValue(const grh::Graph& graph, std::string_view name, bool isInput) {
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
-    auto it = ports.find(std::string(name));
-    if (it != ports.end()) {
-        return graph.findValue(it->second);
+    for (const auto& port : ports) {
+        if (graph.symbolText(port.name) == name) {
+            return port.value;
+        }
     }
-    return nullptr;
+    return ValueId::invalid();
+}
+
+std::optional<std::string> getStringAttr(const grh::Operation& op, SymbolId key) {
+    if (auto attr = op.attr(key)) {
+        if (const auto* text = std::get_if<std::string>(&*attr)) {
+            return *text;
+        }
+    }
+    return std::nullopt;
 }
 
 const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo, std::string_view name) {
@@ -109,9 +119,9 @@ int main() {
         if (!graph) {
             return fail("Graph seq_stage21_en_reg not found");
         }
-        const grh::Value* clk = findPort(*graph, "clk", /*isInput=*/true);
-        const grh::Value* en  = findPort(*graph, "en",  /*isInput=*/true);
-        const grh::Value* d   = findPort(*graph, "d",   /*isInput=*/true);
+        ValueId clk = findPortValue(*graph, "clk", /*isInput=*/true);
+        ValueId en  = findPortValue(*graph, "en",  /*isInput=*/true);
+        ValueId d   = findPortValue(*graph, "d",   /*isInput=*/true);
         if (!clk || !en || !d) {
             return fail("seq_stage21_en_reg missing ports");
         }
@@ -120,21 +130,21 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage21_en_reg missing reg memo/stateOp");
         }
-        if (r->stateOp->kind() != grh::OperationKind::kRegisterEn) {
+        const grh::Operation op = graph->getOperation(r->stateOp);
+        if (op.kind() != grh::OperationKind::kRegisterEn) {
             return fail("seq_stage21_en_reg expected kRegisterEn");
         }
-        if (r->stateOp->operands().size() != 3) {
+        if (op.operands().size() != 3) {
             return fail("seq_stage21_en_reg operand count mismatch");
         }
-        if (r->stateOp->operands()[0] != clk ||
-            r->stateOp->operands()[1] != en ||
-            r->stateOp->operands()[2] != d) {
+        if (op.operands()[0] != clk ||
+            op.operands()[1] != en ||
+            op.operands()[2] != d) {
             return fail("seq_stage21_en_reg operand binding mismatch");
         }
-        auto enLevel = r->stateOp->attributes().find("enLevel");
-        if (enLevel == r->stateOp->attributes().end() ||
-            !std::holds_alternative<std::string>(enLevel->second) ||
-            std::get<std::string>(enLevel->second) != "high") {
+        const SymbolId enLevelKey = graph->lookupSymbol("enLevel");
+        auto enLevel = getStringAttr(op, enLevelKey);
+        if (!enLevel || *enLevel != "high") {
             return fail("seq_stage21_en_reg enLevel missing or not high");
         }
     } else {
@@ -148,11 +158,11 @@ int main() {
         if (!graph) {
             return fail("Graph seq_stage21_rst_en_reg not found");
         }
-        const grh::Value* clk   = findPort(*graph, "clk",   /*isInput=*/true);
-        const grh::Value* rst_n = findPort(*graph, "rst_n", /*isInput=*/true);
-        const grh::Value* en    = findPort(*graph, "en",    /*isInput=*/true);
-        const grh::Value* d     = findPort(*graph, "d",     /*isInput=*/true);
-        const grh::Value* rv    = findPort(*graph, "rv",    /*isInput=*/true);
+        ValueId clk   = findPortValue(*graph, "clk",   /*isInput=*/true);
+        ValueId rst_n = findPortValue(*graph, "rst_n", /*isInput=*/true);
+        ValueId en    = findPortValue(*graph, "en",    /*isInput=*/true);
+        ValueId d     = findPortValue(*graph, "d",     /*isInput=*/true);
+        ValueId rv    = findPortValue(*graph, "rv",    /*isInput=*/true);
         if (!clk || !rst_n || !en || !d || !rv) {
             return fail("seq_stage21_rst_en_reg missing ports");
         }
@@ -161,34 +171,33 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage21_rst_en_reg missing reg memo/stateOp");
         }
-        if (r->stateOp->kind() != grh::OperationKind::kRegisterEnArst) {
+        const grh::Operation op = graph->getOperation(r->stateOp);
+        if (op.kind() != grh::OperationKind::kRegisterEnArst) {
             return fail("seq_stage21_rst_en_reg expected kRegisterEnArst");
         }
-        if (r->stateOp->operands().size() != 5) {
+        if (op.operands().size() != 5) {
             return fail("seq_stage21_rst_en_reg operand count mismatch");
         }
-        if (r->stateOp->operands()[0] != clk ||
-            r->stateOp->operands()[1] != rst_n) {
+        if (op.operands()[0] != clk ||
+            op.operands()[1] != rst_n) {
             return fail("seq_stage21_rst_en_reg clk/rst binding mismatch");
         }
         // en may be coerced; expect direct port wiring here (1-bit).
-        if (r->stateOp->operands()[2] != en) {
+        if (op.operands()[2] != en) {
             return fail("seq_stage21_rst_en_reg en binding mismatch");
         }
-        if (r->stateOp->operands()[3] != rv ||
-            r->stateOp->operands()[4] != d) {
+        if (op.operands()[3] != rv ||
+            op.operands()[4] != d) {
             return fail("seq_stage21_rst_en_reg reset/data binding mismatch");
         }
-        auto rstPolarity = r->stateOp->attributes().find("rstPolarity");
-        if (rstPolarity == r->stateOp->attributes().end() ||
-            !std::holds_alternative<std::string>(rstPolarity->second) ||
-            std::get<std::string>(rstPolarity->second) != "low") {
+        const SymbolId rstPolarityKey = graph->lookupSymbol("rstPolarity");
+        auto rstPolarity = getStringAttr(op, rstPolarityKey);
+        if (!rstPolarity || *rstPolarity != "low") {
             return fail("seq_stage21_rst_en_reg rstPolarity missing/incorrect");
         }
-        auto enLevel = r->stateOp->attributes().find("enLevel");
-        if (enLevel == r->stateOp->attributes().end() ||
-            !std::holds_alternative<std::string>(enLevel->second) ||
-            std::get<std::string>(enLevel->second) != "high") {
+        const SymbolId enLevelKey = graph->lookupSymbol("enLevel");
+        auto enLevel = getStringAttr(op, enLevelKey);
+        if (!enLevel || *enLevel != "high") {
             return fail("seq_stage21_rst_en_reg enLevel missing/incorrect");
         }
     } else {

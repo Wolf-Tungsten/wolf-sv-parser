@@ -21,23 +21,30 @@ namespace
         return 1;
     }
 
-    grh::Value &makeConst(grh::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
+    grh::ir::ValueId makeConst(grh::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
     {
-        grh::Value &val = graph.createValue(valueName, width, isSigned);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kConstant, opName);
-        op.addResult(val);
-        op.setAttribute("constValue", literal);
+        const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
+        const grh::ir::SymbolId opSym = graph.internSymbol(opName);
+        const grh::ir::ValueId val = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
+        const grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kConstant, opSym);
+        graph.addResult(op, val);
+        graph.setAttr(op, graph.internSymbol("constValue"), literal);
         return val;
     }
 
-    std::optional<slang::SVInt> getConstLiteral(const grh::Operation &op)
+    std::optional<slang::SVInt> getConstLiteral(const grh::Graph &graph, const grh::Operation &op)
     {
-        auto it = op.attributes().find("constValue");
-        if (it == op.attributes().end())
+        const grh::ir::SymbolId key = graph.lookupSymbol("constValue");
+        if (!key.valid())
         {
             return std::nullopt;
         }
-        const auto *val = std::get_if<std::string>(&it->second);
+        auto attr = op.attr(key);
+        if (!attr)
+        {
+            return std::nullopt;
+        }
+        const auto *val = std::get_if<std::string>(&*attr);
         if (!val)
         {
             return std::nullopt;
@@ -60,36 +67,36 @@ int main()
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g");
-        grh::Value &c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
-        grh::Value &c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
+        grh::ir::ValueId c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
+        grh::ir::ValueId c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
 
-        grh::Value &sum = graph.createValue("sum", 4, false);
-        grh::Operation &add = graph.createOperation(grh::OperationKind::kAdd, "add0");
-        add.addOperand(c0);
-        add.addOperand(c1);
-        add.addResult(sum);
+        grh::ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 4, false);
+        grh::ir::OperationId add = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        graph.addOperand(add, c0);
+        graph.addOperand(add, c1);
+        graph.addResult(add, sum);
 
-        grh::Value &pass = graph.createValue("pass", 4, false);
-        grh::Operation &assign = graph.createOperation(grh::OperationKind::kAssign, "assign0");
-        assign.addOperand(sum);
-        assign.addResult(pass);
+        grh::ir::ValueId pass = graph.createValue(graph.internSymbol("pass"), 4, false);
+        grh::ir::OperationId assign = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign0"));
+        graph.addOperand(assign, sum);
+        graph.addResult(assign, pass);
 
-        grh::Value &neg = graph.createValue("neg", 4, false);
-        grh::Operation &invert = graph.createOperation(grh::OperationKind::kNot, "not0");
-        invert.addOperand(pass);
-        invert.addResult(neg);
+        grh::ir::ValueId neg = graph.createValue(graph.internSymbol("neg"), 4, false);
+        grh::ir::OperationId invert = graph.createOperation(grh::OperationKind::kNot, graph.internSymbol("not0"));
+        graph.addOperand(invert, pass);
+        graph.addResult(invert, neg);
 
-        grh::Value &finalSum = graph.createValue("finalSum", 4, false);
-        grh::Operation &add2 = graph.createOperation(grh::OperationKind::kAdd, "add1");
-        add2.addOperand(neg);
-        add2.addOperand(c1);
-        add2.addResult(finalSum);
+        grh::ir::ValueId finalSum = graph.createValue(graph.internSymbol("finalSum"), 4, false);
+        grh::ir::OperationId add2 = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add1"));
+        graph.addOperand(add2, neg);
+        graph.addOperand(add2, c1);
+        graph.addResult(add2, finalSum);
 
-        grh::Value &out = graph.createValue("out", 4, false);
-        graph.bindOutputPort("out", out);
-        grh::Operation &assignOut = graph.createOperation(grh::OperationKind::kAssign, "assign1");
-        assignOut.addOperand(finalSum);
-        assignOut.addResult(graph.getValue("out"));
+        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 4, false);
+        graph.bindOutputPort(graph.internSymbol("out"), out);
+        grh::ir::OperationId assignOut = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign1"));
+        graph.addOperand(assignOut, finalSum);
+        graph.addResult(assignOut, out);
 
         PassManager manager;
         manager.addPass(std::make_unique<ConstantFoldPass>());
@@ -114,22 +121,28 @@ int main()
         }
 
         // Downstream user should be rewired to a constant.
-        if (graph.findOperation("assign1"))
+        if (graph.findOperation("assign1").valid())
         {
             return fail("assign1 should be removed after folding");
         }
-        const grh::Value *outVal = graph.outputPortValue("out");
-        if (!outVal || !outVal->definingOp() || outVal->definingOp()->kind() != grh::OperationKind::kConstant)
+        grh::ir::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        if (!outVal.valid())
         {
             return fail("Output port was not rewired to a constant");
         }
-        auto literal = getConstLiteral(*outVal->definingOp());
+        grh::Value outValue = graph.getValue(outVal);
+        if (!outValue.definingOp().valid() ||
+            graph.getOperation(outValue.definingOp()).kind() != grh::OperationKind::kConstant)
+        {
+            return fail("Output port was not rewired to a constant");
+        }
+        auto literal = getConstLiteral(graph, graph.getOperation(outValue.definingOp()));
         slang::SVInt expected = slang::SVInt::fromString("4'hc").resize(4);
         if (!literal || !static_cast<bool>((*literal == expected)))
         {
             return fail("Final constant value mismatch");
         }
-        if (!neg.users().empty())
+        if (!graph.getValue(neg).users().empty())
         {
             return fail("Expected users of intermediate value to be rewired");
         }
@@ -139,14 +152,14 @@ int main()
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g2");
-        grh::Value &xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
-        grh::Value &one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
+        grh::ir::ValueId xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
+        grh::ir::ValueId one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
 
-        grh::Value &andOut = graph.createValue("andOut", 1, false);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kAnd, "and0");
-        op.addOperand(xval);
-        op.addOperand(one);
-        op.addResult(andOut);
+        grh::ir::ValueId andOut = graph.createValue(graph.internSymbol("andOut"), 1, false);
+        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAnd, graph.internSymbol("and0"));
+        graph.addOperand(op, xval);
+        graph.addOperand(op, one);
+        graph.addResult(op, andOut);
 
         PassManager manager;
         manager.addPass(std::make_unique<ConstantFoldPass>());
@@ -168,7 +181,8 @@ int main()
         {
             return fail("Pass should not change graph when blocked by X");
         }
-        if (op.operands()[0] != &xval || op.operands()[1] != &one)
+        const grh::Operation opView = graph.getOperation(op);
+        if (opView.operands()[0] != xval || opView.operands()[1] != one)
         {
             return fail("Operands should remain unchanged when folding is skipped");
         }
@@ -178,12 +192,12 @@ int main()
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g3");
-        grh::Value &c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
+        grh::ir::ValueId c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
 
-        grh::Value &repOut = graph.createValue("repOut", 4, false);
-        grh::Operation &rep = graph.createOperation(grh::OperationKind::kReplicate, "rep0");
-        rep.addOperand(c);
-        rep.addResult(repOut);
+        grh::ir::ValueId repOut = graph.createValue(graph.internSymbol("repOut"), 4, false);
+        grh::ir::OperationId rep = graph.createOperation(grh::OperationKind::kReplicate, graph.internSymbol("rep0"));
+        graph.addOperand(rep, c);
+        graph.addResult(rep, repOut);
         // Intentionally omit the "rep" attribute.
 
         PassManager manager;

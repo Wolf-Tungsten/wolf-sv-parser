@@ -45,126 +45,130 @@ int main()
         Netlist netlist;
         Graph &graph = netlist.createGraph("demo");
 
-        Value &a = graph.createValue("a", 8, false);
-        Value &b = graph.createValue("b", 8, false);
-        Value &sum = graph.createValue("sum", 8, false);
-        Value &sumCopy = graph.createValue("sum_copy", 8, false);
+        ir::ValueId a = graph.createValue(graph.internSymbol("a"), 8, false);
+        ir::ValueId b = graph.createValue(graph.internSymbol("b"), 8, false);
+        ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
+        ir::ValueId sumCopy = graph.createValue(graph.internSymbol("sum_copy"), 8, false);
 
-        graph.bindInputPort("a", a);
-        graph.bindInputPort("b", b);
-        graph.bindOutputPort("sum", sum);
-        graph.bindOutputPort("sum_copy", sumCopy);
+        graph.bindInputPort(graph.internSymbol("a"), a);
+        graph.bindInputPort(graph.internSymbol("b"), b);
+        graph.bindOutputPort(graph.internSymbol("sum"), sum);
+        graph.bindOutputPort(graph.internSymbol("sum_copy"), sumCopy);
 
-        Operation &op = graph.createOperation(OperationKind::kAdd, "add0");
-        op.addOperand(a);
-        op.addOperand(b);
-        op.addResult(sum);
+        ir::OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
+        graph.addOperand(op, a);
+        graph.addOperand(op, b);
+        graph.addResult(op, sum);
 
         bool threwOnNaNAttribute = expectThrows([&]
-                                                { op.setAttribute("invalid_nan", AttributeValue(std::numeric_limits<double>::quiet_NaN())); });
+                                                { graph.setAttr(op, graph.internSymbol("invalid_nan"),
+                                                                AttributeValue(std::numeric_limits<double>::quiet_NaN())); });
         if (!threwOnNaNAttribute)
         {
             return fail("Expected NaN attribute to throw");
         }
 
         bool threwOnDoubleArrayInfinity = expectThrows([&]
-                                                       { op.setAttribute("invalid_array", AttributeValue(std::vector<double>{0.25, std::numeric_limits<double>::infinity()})); });
+                                                       { graph.setAttr(op, graph.internSymbol("invalid_array"),
+                                                                       AttributeValue(std::vector<double>{0.25, std::numeric_limits<double>::infinity()})); });
         if (!threwOnDoubleArrayInfinity)
         {
             return fail("Expected double array with infinity to throw");
         }
 
-        Operation &assignOp = graph.createOperation(OperationKind::kAssign, "assign0");
-        assignOp.addOperand(sum);
-        assignOp.addResult(sumCopy);
-        if (sumCopy.definingOp() != &assignOp)
+        ir::OperationId assignOp = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
+        graph.addOperand(assignOp, sum);
+        graph.addResult(assignOp, sumCopy);
+        if (graph.getValue(sumCopy).definingOp() != assignOp)
         {
             return fail("Assign result defining operation not set");
         }
 
-        if (a.users().size() != 1 || a.users()[0].operationSymbol != op.symbol())
+        const auto aUsers = graph.getValue(a).users();
+        if (aUsers.size() != 1 || aUsers[0].operation != op)
         {
             return fail("Operand usage tracking failed");
         }
-        if (sum.definingOp() != &op)
+        if (graph.getValue(sum).definingOp() != op)
         {
             return fail("Result defining operation not set");
         }
 
-        Value &c = graph.createValue("c", 8, false);
-        graph.bindInputPort("c", c);
+        ir::ValueId c = graph.createValue(graph.internSymbol("c"), 8, false);
+        graph.bindInputPort(graph.internSymbol("c"), c);
 
-        op.replaceOperand(1, c);
-        if (op.operands()[1] != &c)
+        graph.replaceOperand(op, 1, c);
+        if (graph.getOperation(op).operands()[1] != c)
         {
             return fail("Operand replacement did not update slot");
         }
-        if (!b.users().empty())
+        if (!graph.getValue(b).users().empty())
         {
             return fail("Old operand still listed as user after replacement");
         }
-        if (c.users().size() != 1 || c.users()[0].operationSymbol != op.symbol() || c.users()[0].operandIndex != 1)
+        const auto cUsers = graph.getValue(c).users();
+        if (cUsers.size() != 1 || cUsers[0].operation != op || cUsers[0].operandIndex != 1)
         {
             return fail("New operand usage tracking incorrect after replacement");
         }
 
         Graph &auxGraph = netlist.createGraph("aux");
-        Value &foreignValue = auxGraph.createValue("foreign", 8, false);
+        ir::ValueId foreignValue = auxGraph.createValue(auxGraph.internSymbol("foreign"), 8, false);
         bool threwOnForeignOperand = expectThrows([&]
-                                                  { op.replaceOperand(0, foreignValue); });
+                                                  { graph.replaceOperand(op, 0, foreignValue); });
         if (!threwOnForeignOperand)
         {
             return fail("Expected replacing operand with foreign value to throw");
         }
 
-        Operation &passThrough = graph.createOperation(OperationKind::kAssign, "assign1");
-        passThrough.addOperand(c);
-        Value &passResult = graph.createValue("passthrough", 8, false);
-        passThrough.addResult(passResult);
+        ir::OperationId passThrough = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign1"));
+        graph.addOperand(passThrough, c);
+        ir::ValueId passResult = graph.createValue(graph.internSymbol("passthrough"), 8, false);
+        graph.addResult(passThrough, passResult);
 
-        Value &passResultAlt = graph.createValue("passthrough_alt", 8, false);
-        passThrough.replaceResult(0, passResultAlt);
-        if (passResult.definingOp() != nullptr)
+        ir::ValueId passResultAlt = graph.createValue(graph.internSymbol("passthrough_alt"), 8, false);
+        graph.replaceResult(passThrough, 0, passResultAlt);
+        if (graph.getValue(passResult).definingOp().valid())
         {
             return fail("Old result still records defining operation after replacement");
         }
-        if (passResultAlt.definingOp() != &passThrough)
+        if (graph.getValue(passResultAlt).definingOp() != passThrough)
         {
             return fail("New result defining operation incorrect after replacement");
         }
-        if (passThrough.results()[0] != &passResultAlt)
+        if (graph.getOperation(passThrough).results()[0] != passResultAlt)
         {
             return fail("Result replacement did not update slot");
         }
 
         bool threwOnForeignResult = expectThrows([&]
-                                                 { passThrough.replaceResult(0, foreignValue); });
+                                                 { graph.replaceResult(passThrough, 0, foreignValue); });
         if (!threwOnForeignResult)
         {
             return fail("Expected replacing result with foreign value to throw");
         }
 
-        Value &existingResult = graph.createValue("existing_result", 8, false);
-        Operation &existingProducer = graph.createOperation(OperationKind::kAssign, "assign_existing");
-        existingProducer.addOperand(c);
-        existingProducer.addResult(existingResult);
+        ir::ValueId existingResult = graph.createValue(graph.internSymbol("existing_result"), 8, false);
+        ir::OperationId existingProducer = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign_existing"));
+        graph.addOperand(existingProducer, c);
+        graph.addResult(existingProducer, existingResult);
 
         bool threwOnExistingResult = expectThrows([&]
-                                                  { passThrough.replaceResult(0, existingResult); });
+                                                  { graph.replaceResult(passThrough, 0, existingResult); });
         if (!threwOnExistingResult)
         {
             return fail("Expected replacing result with already-defined value to throw");
         }
 
         bool threwOnDuplicateValue = expectThrows([&]
-                                                  { graph.createValue("a", 1, false); });
+                                                  { graph.createValue(graph.internSymbol("a"), 1, false); });
         if (!threwOnDuplicateValue)
         {
             return fail("Expected duplicate value symbol to throw");
         }
 
         bool threwOnInvalidWidth = expectThrows([&]
-                                                { graph.createValue("invalid", 0, false); });
+                                                { graph.createValue(graph.internSymbol("invalid"), 0, false); });
         if (!threwOnInvalidWidth)
         {
             return fail("Expected zero width to throw");
@@ -224,26 +228,28 @@ int main()
             return fail("Parsed graph missing");
         }
 
-        const Operation *parsedOp = parsedGraph->findOperation("add0");
-        if (!parsedOp)
+        const ir::OperationId parsedOpId = parsedGraph->findOperation("add0");
+        if (!parsedOpId.valid())
         {
             return fail("Parsed operation missing");
         }
-        if (parsedOp->operands().size() != 2 || parsedOp->results().size() != 1)
+        const Operation parsedOp = parsedGraph->getOperation(parsedOpId);
+        if (parsedOp.operands().size() != 2 || parsedOp.results().size() != 1)
         {
             return fail("Parsed operation connectivity mismatch");
         }
 
-        const Operation *parsedAssign = parsedGraph->findOperation("assign0");
-        if (!parsedAssign)
+        const ir::OperationId parsedAssignId = parsedGraph->findOperation("assign0");
+        if (!parsedAssignId.valid())
         {
             return fail("Parsed assign operation missing");
         }
-        if (parsedAssign->kind() != OperationKind::kAssign)
+        const Operation parsedAssign = parsedGraph->getOperation(parsedAssignId);
+        if (parsedAssign.kind() != OperationKind::kAssign)
         {
             return fail("Assign operation kind mismatch");
         }
-        if (parsedAssign->operands().size() != 1 || parsedAssign->results().size() != 1)
+        if (parsedAssign.operands().size() != 1 || parsedAssign.results().size() != 1)
         {
             return fail("Assign operation connectivity mismatch");
         }

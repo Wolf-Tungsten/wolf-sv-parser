@@ -28,17 +28,24 @@ GRH 表示在编译流程中的功能定位如下：
     - 是图的集合
     - 存在一个或多个图作为顶层模块
 
+# 符号表与句柄
+
+- GRH API 以 `SymbolId` 作为符号句柄，通过 `GraphSymbolTable`/`NetlistSymbolTable` 驻留字符串
+- `ValueId/OperationId/GraphId` 为强类型句柄（index + generation + GraphId），用于跨图校验；`invalid` 表示无效
+- `SymbolId`/`ValueId`/`OperationId` 只在各自符号表或 Graph 生命周期内稳定，不保证跨进程持久化
+
 # 顶点 - Operation
 
-- Operation 具有类型：记录在枚举类型的 type 字段，Operation 的类型是有限的、预定义的
-- Operation 可被符号索引：具有一个字符串类型的 symbol 字段，作为 Operation 添加可索引的标签，在 Graph 作用域内保持唯一，symbol 应尽可能沿用输入RTL的命名，提高可读性
-- Operation 接受操作数作为输入：具有一个 operands 数组，包含 Value 指针
-- Operation 输出结果：具有一个 results 数组，包含作为结果的 Value 指针
-- Operation 的属性：具有一个 attributes 字典记录元数据
-    - attributes key：以 string 类型作为 key
-    - attributes value 允许的类型
-        - 基本类型（basic_type）：`bool`、`int64_t`、`double`、`std::string`
-        - 包含基本类型的数组：`vector<basic_type>`
+- Operation 具有类型：由枚举 `OperationKind` 表示，类型有限且预定义
+- Operation 可被符号索引：使用 `SymbolId`（由 `GraphSymbolTable` 驻留的字符串），在 Graph 作用域内建议唯一；允许为空（invalid）
+- Operation 接受操作数作为输入：`operands` 为 `ValueId` 列表
+- Operation 输出结果：`results` 为 `ValueId` 列表
+- Operation 的属性：`attrs` 为 `AttrKV` 列表（`{SymbolId key, AttributeValue value}`）
+    - key 由图内符号表驻留
+    - value 允许的类型
+        - 基本类型：`bool`、`int64_t`、`double`、`std::string`
+        - 包含基本类型的数组：`std::vector<basic_type>`
+- 只读访问通过 `Graph::getOperation(OperationId)` 或 `GraphView` 提供；修改必须经过 `Graph/GraphBuilder` 接口
 
 
 ## Operation 类型概览
@@ -57,8 +64,8 @@ GRH 表示在编译流程中的功能定位如下：
 
 每个 Value 最终都会显式生成为 SystemVerilog 中的 wire 声明，以支持 SSA 特性。
 
-- 具有一个字符串类型的 symbol 字段，用于识别信号，要求在 Graph 作用域内唯一且非空，符合verilog 标识符规范，symbol 应尽可能沿用输入RTL的命名，提高可读性
-- 具有一个 `int64_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
+- 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内建议唯一且非空；`Graph::internSymbol()` 负责驻留字符串
+- 具有一个 `int32_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
 - 具有一个 bool 类型 signed 标记是否为有符号
 - Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
@@ -73,55 +80,60 @@ wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
 - 具有一个标记是否为模块输入的布尔字段 isInput
 - 具有一个标记是否为模块输出的布尔字段 isOutput
 - 以上二者不能同时为真
-- 当 `isInput == true` 时，该 Value 必须存在于所属 Graph 的 `inputPorts` 字典中，键名与端口名一致；同理，`isOutput == true` 的 Value 必须存在于 `outputPorts` 字典中。未出现在端口字典中的 Value 必须同时满足 `isInput == false` 且 `isOutput == false`。
+- 当 `isInput == true` 时，该 Value 必须被绑定在所属 Graph 的 `inputPorts` 中；同理，`isOutput == true` 的 Value 必须被绑定在 `outputPorts` 中
+- 未绑定端口的 Value 必须同时满足 `isInput == false` 且 `isOutput == false`
 
 辅助字段
 
-- 具有一个 graph 指针，指向所属的图
-- 具有一个 defineOp 指针，指向写入 Op，若 Value 是模块的输入参数，则为空指针
-- 具有一个 userOps 数组，元素为 `<Operation*, size_t operandIndex>` 二元组，记录该 Value 在各 Operation 中作为第几个操作数被引用；同一 Operation 多次使用同一个 Value 时会存储多个条目
-- Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 Value。`defineOp` 和 `userOps` 都只能引用同一个 Graph 的 Operation。
+- 具有一个 `ValueId` 句柄（index + generation + GraphId），用于跨 API 传递与跨图校验
+- 具有一个 defineOp 字段，类型为 `OperationId`，指向写入 Op；若 Value 是模块的输入参数，则为 invalid
+- 具有一个 users 数组，元素为 `ValueUser{OperationId operation, uint32_t operandIndex}` 二元组，记录该 Value 在各 Operation 中作为第几个操作数被引用；同一 Operation 多次使用同一个 Value 时会存储多个条目
+- Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 ValueId；`OperationId/ValueId` 内含 GraphId 用于运行时校验
 
 # 图 - Graph
 
 建模一个参数化后的 module：
 
-- 具有一个 moduleName 字段标识模块名称，moduleName 符合 verilog 标识符规范，在网表中唯一
-- 具有一个 inputPorts 字段，类型为 map<std::string，Value*> 的字典，记录所有输入端口，导出时按端口名的字典序遍历
-- 具有一个 outputPorts 字段，类型为 map<std::string，Value*> 的字典，记录所有输出端口，导出时按端口名的字典序遍历
+- 具有一个 graph symbol（module 名称），符合 verilog 标识符规范，在网表中唯一，并由 `NetlistSymbolTable` 分配 `GraphId`
+- 具有一个 `GraphSymbolTable` 管理图内符号，`Graph::internSymbol/lookupSymbol/symbolText` 为主要入口
+- 端口以 `std::vector<Port>` 存储，元素为 `{SymbolId name, ValueId value}`；`bindInputPort/bindOutputPort` 负责绑定
+- Graph 内部采用 `GraphBuilder`（可变）与 `GraphView`（只读快照）双态；`freeze()` 生成只读视图并可能重排 id
+- `ValueId/OperationId` 的 index 仅在同一构建期会话内稳定，跨 `freeze()` 需要重新获取
 - 不支持 inout 类型端口
-- 具有一个 isTopModule bool 字段，标识是否为顶层模块
 
 生成语义
 
 ```
-module ${moduleName} (
+module ${graphSymbol} (
     ${CommaSeparatedList(
-        for (const auto& [name, value] : inputPorts)
-            -> "input "  + (value->signed ? "signed " : "")
-               + "[" + std::to_string(value->width - 1) + ":0] " + name,
-        for (const auto& [name, value] : outputPorts)
-            -> "output " + (value->signed ? "signed " : "")
-               + "[" + std::to_string(value->width - 1) + ":0] " + name
+        for (const auto& port : inputPorts)
+            -> "input "  + (value(port.value).signed ? "signed " : "")
+               + "[" + std::to_string(value(port.value).width - 1) + ":0] " + symbolText(port.name),
+        for (const auto& port : outputPorts)
+            -> "output " + (value(port.value).signed ? "signed " : "")
+               + "[" + std::to_string(value(port.value).width - 1) + ":0] " + symbolText(port.name)
     )}
 );
     由 Graph 内部的 Operation 和 Value 生成的语句
 endmodule
 ```
 
-其中 `CommaSeparatedList` 先按照端口名的字典序枚举全部输入端口，再按照端口名字典序枚举全部输出端口；端口顺序不会保留原始 SystemVerilog 声明顺序。
+其中 `value(...)` 表示通过 Graph 访问 Value 元数据，`symbolText(...)` 用于从 `SymbolId` 取回字符串；`CommaSeparatedList` 先枚举输入端口再枚举输出端口；在冻结后的 `GraphView` 中，端口按端口名的字典序排序（构建期插入顺序不保证保持原始声明顺序）。
 
 Graph 管理 Operation 和 Value 的生命周期：
 
-- 具有一个 values 数组，保存所有 value 的指针。Graph 对 values 拥有所有权，在 Graph 析构时销毁全部 values，并维持插入顺序用于遍历
-- 具有一个 ops 数组，保存所有 operation 的指针。Graph 对 ops 拥有所有权，在 Graph 析构时销毁全部 operation，ops 按插入顺序保存，不保证拓扑顺序
+- Graph 内部存储由 `GraphBuilder/GraphView` 管理，外部仅持有 `ValueId/OperationId` 句柄
+- `Graph::getValue/Graph::getOperation` 返回只读快照，修改必须通过 `Graph` 接口完成
+- `operations()`/`values()` 返回创建顺序的 id 列表（跳过已删除），不保证拓扑顺序
 
 # 网表 - Netlist
 
-- 具有一个可以按照 moduleName 索引全部 Graph 的容器，要求 moduleName 在网表中唯一
-- 通过 Graph 的 isTopModule 字段标记顶层模块，至少存在一个顶层 Graph，且顶层 Graph 不允许被其他 Graph 的 instance 引用
-- instance Operation 的 attributes 中记录被例化模块的 moduleName，运行时通过该索引解析被例化 Graph；禁止跨网表引用
+- 具有一个可按 graph symbol 索引 Graph 的容器，要求 symbol 在网表中唯一，并保留 `graphOrder` 记录创建顺序
+- Graph 名称由 `NetlistSymbolTable` 驻留并分配 `GraphId`；Graph 内符号与 Netlist 符号表相互独立
+- 顶层模块由 `markAsTop()` 维护 `topGraphs` 列表，不再依赖 Graph 内部标记
+- instance Operation 的 attributes 中记录被例化模块的 moduleName，运行时通过 Netlist 解析被例化 Graph；禁止跨网表引用
 - 允许存在未被引用的 Graph（如库模块），但综合或导出流程默认仅从顶层 Graph 开始遍历可达子图
+- 别名通过 `registerGraphAlias(alias, graph)` 维护，`findGraph` 会解析 alias
 - 层次结构由 Graph 内的 instance Operation 建模，网表自身不额外存储层次边
 
 # Operation 分类详解
@@ -210,8 +222,8 @@ assign ${res.symbol} = ${input.symbol};
 生成语义：
 ```
 assign ${res.symbol} = {${CommaSeparatedList(
-        for (Value* operand : operands)
-            -> operand->symbol
+        for (ValueId operand : operands)
+            -> valueSymbol(operand)
     )}};
 ```
 
@@ -996,9 +1008,8 @@ assign ${outArg1.symbol} = ${outArg1.symbol}_intm;
 
 # 编译符号信息
 
-- 所有 Operation/Value/Graph 都携带一组 `srcLoc*` 成员变量，记录和源码的对应关系
-    - 字段`sourceLocfile`：字符串，源文件路径
-    - 字段`srcLocLine`：int64_t，行号
-    - 字段`srcLocColumn`：int64_t，列号
-    - 字段`srcLocHierPath`：字符串，层次路径，使用 `.` 分隔层次（例如 `top.u_sub.u_leaf`）
-- 上述字段为空或负值时表示无效位置
+- Operation/Value 可携带可选 `SrcLoc`，记录和源码的对应关系
+    - 字段 `file`：字符串，源文件路径
+    - 字段 `line` / `column`：起始行列
+    - 字段 `endLine` / `endColumn`：结束行列
+- `file` 为空或 `line == 0` 时视为无效位置

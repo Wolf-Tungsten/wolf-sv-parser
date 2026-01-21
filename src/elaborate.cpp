@@ -67,6 +67,34 @@ std::size_t nextMemoryHelperId() {
     return counter.fetch_add(1, std::memory_order_relaxed);
 }
 
+SymbolId internSymbol(grh::Graph& graph, std::string_view text) {
+    return graph.internSymbol(text);
+}
+
+ValueId createValue(grh::Graph& graph, std::string_view name, int32_t width, bool isSigned) {
+    return graph.createValue(graph.internSymbol(name), width, isSigned);
+}
+
+OperationId createOperation(grh::Graph& graph, grh::OperationKind kind, std::string_view name) {
+    return graph.createOperation(kind, graph.internSymbol(name));
+}
+
+void addOperand(grh::Graph& graph, OperationId op, ValueId value) {
+    graph.addOperand(op, value);
+}
+
+void addResult(grh::Graph& graph, OperationId op, ValueId value) {
+    graph.addResult(op, value);
+}
+
+void setAttr(grh::Graph& graph, OperationId op, std::string_view key, grh::AttributeValue value) {
+    graph.setAttr(op, graph.internSymbol(key), std::move(value));
+}
+
+void clearAttr(grh::Graph& graph, OperationId op, std::string_view key) {
+    graph.eraseAttr(op, graph.internSymbol(key));
+}
+
 std::string sanitizeForGraphName(std::string_view text, bool allowLeadingDigit = false) {
     std::string result;
     result.reserve(text.size());
@@ -212,15 +240,15 @@ std::optional<grh::SrcLoc> makeSrcLoc(const slang::SourceManager* sourceManager,
     return makeSrcLoc(sourceManager, stmt->sourceRange.start(), stmt->sourceRange.end());
 }
 
-void applySrcLoc(grh::Value& value, const std::optional<grh::SrcLoc>& info) {
+void applyValueSrcLoc(grh::Graph& graph, ValueId value, const std::optional<grh::SrcLoc>& info) {
     if (info) {
-        value.setSrcLoc(*info);
+        graph.setValueSrcLoc(value, *info);
     }
 }
 
-void applySrcLoc(grh::Operation& op, const std::optional<grh::SrcLoc>& info) {
+void applyOpSrcLoc(grh::Graph& graph, OperationId op, const std::optional<grh::SrcLoc>& info) {
     if (info) {
-        op.setSrcLoc(*info);
+        graph.setOpSrcLoc(op, *info);
     }
 }
 
@@ -242,11 +270,11 @@ inline std::optional<grh::SrcLoc> makeDebugInfo(const slang::SourceManager* sm,
                                                 const slang::ast::Statement* stmt) {
     return makeSrcLoc(sm, stmt);
 }
-inline void applyDebug(grh::Value& value, const std::optional<grh::SrcLoc>& info) {
-    applySrcLoc(value, info);
+inline void applyDebug(grh::Graph& graph, ValueId value, const std::optional<grh::SrcLoc>& info) {
+    applyValueSrcLoc(graph, value, info);
 }
-inline void applyDebug(grh::Operation& op, const std::optional<grh::SrcLoc>& info) {
-    applySrcLoc(op, info);
+inline void applyDebug(grh::Graph& graph, OperationId op, const std::optional<grh::SrcLoc>& info) {
+    applyOpSrcLoc(graph, op, info);
 }
 
 bool hasBlackboxAttribute(const slang::ast::InstanceBodySymbol& body) {
@@ -991,31 +1019,6 @@ struct AsyncResetEvent {
     slang::ast::EdgeKind edge = {};
 };
 
-std::optional<AsyncResetEvent>
-detectAsyncResetEvent(const slang::ast::ProceduralBlockSymbol& block,
-                      ElaborateDiagnostics* diagnostics) {
-    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
-    if (!timing) {
-        return std::nullopt;
-    }
-    std::vector<const slang::ast::SignalEventControl*> events;
-    collectSignalEvents(*timing, events);
-    if (events.size() <= 1) {
-        return std::nullopt;
-    }
-    if (events.size() > 2) {
-        if (diagnostics) {
-            diagnostics->nyi(block, "Multiple asynchronous reset events are not supported yet");
-        }
-        return std::nullopt;
-    }
-    const auto* resetEvent = events[1];
-    if (!resetEvent) {
-        return std::nullopt;
-    }
-    return AsyncResetEvent{.expr = &resetEvent->expr, .edge = resetEvent->edge};
-}
-
 const slang::ast::ValueSymbol* extractResetSymbol(const slang::ast::Expression& expr,
                                                   bool& activeHigh) {
     if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>()) {
@@ -1064,6 +1067,55 @@ const slang::ast::ConditionalStatement* findConditional(const slang::ast::Statem
     return nullptr;
 }
 
+const slang::ast::Expression* findAssignedRhs(const slang::ast::Statement& stmt,
+                                              const slang::ast::ValueSymbol& target) {
+    if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>()) {
+        if (const auto* assign = exprStmt->expr.as_if<slang::ast::AssignmentExpression>()) {
+            if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(assign->left())) {
+                if (symbol == &target) {
+                    return &assign->right();
+                }
+            }
+        }
+    }
+    if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>()) {
+        if (const auto* assign = procAssign->assignment.as_if<slang::ast::AssignmentExpression>()) {
+            if (const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(assign->left())) {
+                if (symbol == &target) {
+                    return &assign->right();
+                }
+            }
+        }
+    }
+    if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>()) {
+        return findAssignedRhs(timed->stmt, target);
+    }
+    if (const auto* list = stmt.as_if<slang::ast::StatementList>()) {
+        for (const slang::ast::Statement* child : list->list) {
+            if (!child) {
+                continue;
+            }
+            if (const slang::ast::Expression* rhs = findAssignedRhs(*child, target)) {
+                return rhs;
+            }
+        }
+    }
+    if (const auto* block = stmt.as_if<slang::ast::BlockStatement>()) {
+        return findAssignedRhs(block->body, target);
+    }
+    if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>()) {
+        if (const slang::ast::Expression* rhs = findAssignedRhs(conditional->ifTrue, target)) {
+            return rhs;
+        }
+        if (conditional->ifFalse) {
+            if (const slang::ast::Expression* rhs = findAssignedRhs(*conditional->ifFalse, target)) {
+                return rhs;
+            }
+        }
+    }
+    return nullptr;
+}
+
 std::optional<SyncResetInfo> detectSyncReset(const slang::ast::Statement& stmt) {
     const auto* conditional = findConditional(stmt);
     if (!conditional || conditional->conditions.size() != 1 || !conditional->ifFalse) {
@@ -1085,6 +1137,46 @@ std::optional<SyncResetInfo> detectSyncReset(const slang::ast::Statement& stmt) 
 
 std::optional<SyncResetInfo> detectSyncReset(const slang::ast::ProceduralBlockSymbol& block) {
     return detectSyncReset(block.getBody());
+}
+
+std::optional<AsyncResetEvent>
+detectAsyncResetEvent(const slang::ast::ProceduralBlockSymbol& block,
+                      ElaborateDiagnostics* diagnostics) {
+    const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+    if (!timing) {
+        return std::nullopt;
+    }
+    std::vector<const slang::ast::SignalEventControl*> events;
+    collectSignalEvents(*timing, events);
+    if (events.size() <= 1) {
+        return std::nullopt;
+    }
+    if (events.size() > 2) {
+        if (diagnostics) {
+            diagnostics->nyi(block, "Multiple asynchronous reset events are not supported yet");
+        }
+        return std::nullopt;
+    }
+    const auto* resetEvent = events[1];
+    if (auto syncInfo = detectSyncReset(block.getBody())) {
+        for (const slang::ast::SignalEventControl* event : events) {
+            if (!event) {
+                continue;
+            }
+            bool activeHigh = true;
+            if (const slang::ast::ValueSymbol* symbol =
+                    extractResetSymbol(event->expr, activeHigh)) {
+                if (symbol == syncInfo->symbol) {
+                    resetEvent = event;
+                    break;
+                }
+            }
+        }
+    }
+    if (!resetEvent) {
+        return std::nullopt;
+    }
+    return AsyncResetEvent{.expr = &resetEvent->expr, .edge = resetEvent->edge};
 }
 
 MemoDriverKind classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& block) {
@@ -1158,12 +1250,12 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     instanceId_ = nextConverterInstanceId();
 }
 
-bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
+bool LHSConverter::lower(const slang::ast::AssignmentExpression& assignment, ValueId rhsValue,
                          std::vector<LHSConverter::WriteResult>& outResults) {
     return lowerExpression(assignment.left(), rhsValue, outResults);
 }
 
-bool LHSConverter::lowerExpression(const slang::ast::Expression& expr, grh::Value& rhsValue,
+bool LHSConverter::lowerExpression(const slang::ast::Expression& expr, ValueId rhsValue,
                                    std::vector<LHSConverter::WriteResult>& outResults) {
     pending_.clear();
     outResults.clear();
@@ -1179,9 +1271,10 @@ bool LHSConverter::lowerExpression(const slang::ast::Expression& expr, grh::Valu
         report("Assign LHS has zero width");
         return false;
     }
-    if (rhsValue.width() != lhsWidth) {
+    if (graph().getValue(rhsValue).width() != lhsWidth) {
         std::ostringstream oss;
-        oss << "Assign width mismatch; lhs=" << lhsWidth << " rhs=" << rhsValue.width();
+        oss << "Assign width mismatch; lhs=" << lhsWidth
+            << " rhs=" << graph().getValue(rhsValue).width();
         report(oss.str());
         return false;
     }
@@ -1196,7 +1289,7 @@ bool LHSConverter::lowerExpression(const slang::ast::Expression& expr, grh::Valu
     return true;
 }
 
-bool LHSConverter::processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue) {
+bool LHSConverter::processLhs(const slang::ast::Expression& expr, ValueId rhsValue) {
     if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>()) {
         return handleConcatenation(*concat, rhsValue);
     }
@@ -1217,14 +1310,14 @@ bool LHSConverter::processLhs(const slang::ast::Expression& expr, grh::Value& rh
 }
 
 bool LHSConverter::handleConcatenation(const slang::ast::ConcatenationExpression& concat,
-                                       grh::Value& rhsValue) {
+                                       ValueId rhsValue) {
     const auto operands = concat.operands();
     if (operands.empty()) {
         report("Empty concatenation on assign LHS");
         return false;
     }
 
-    int64_t remainingWidth = rhsValue.width();
+    int64_t remainingWidth = graph().getValue(rhsValue).width();
     int64_t currentMsb = remainingWidth - 1;
 
     for (const slang::ast::Expression* operand : operands) {
@@ -1249,11 +1342,11 @@ bool LHSConverter::handleConcatenation(const slang::ast::ConcatenationExpression
         }
 
         const int64_t sliceLsb = currentMsb - operandWidth + 1;
-        grh::Value* sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
-        if (!sliceValue) {
+        ValueId sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
+        if (!sliceValue.valid()) {
             return false;
         }
-        if (!processLhs(*operand, *sliceValue)) {
+        if (!processLhs(*operand, sliceValue)) {
             return false;
         }
         currentMsb = sliceLsb - 1;
@@ -1267,7 +1360,7 @@ bool LHSConverter::handleConcatenation(const slang::ast::ConcatenationExpression
     return true;
 }
 
-bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue) {
+bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, ValueId rhsValue) {
     const SignalMemoEntry* entry = resolveMemoEntry(expr);
     if (!entry) {
         report("Assign LHS is not a memoized signal");
@@ -1281,10 +1374,10 @@ bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, grh::Value& rh
     }
 
     const int64_t expectedWidth = range->msb - range->lsb + 1;
-    if (rhsValue.width() != expectedWidth) {
+    if (graph().getValue(rhsValue).width() != expectedWidth) {
         std::ostringstream oss;
         oss << "Assign slice width mismatch; target=" << expectedWidth
-            << " rhs=" << rhsValue.width();
+            << " rhs=" << graph().getValue(rhsValue).width();
         report(oss.str());
         return false;
     }
@@ -1295,7 +1388,7 @@ bool LHSConverter::handleLeaf(const slang::ast::Expression& expr, grh::Value& rh
                      path;
     slice.msb = range->msb;
     slice.lsb = range->lsb;
-    slice.value = &rhsValue;
+    slice.value = rhsValue;
     slice.originExpr = &expr;
     pending_[entry].push_back(std::move(slice));
     return true;
@@ -1590,14 +1683,15 @@ LHSConverter::lookupRangeByPath(const SignalMemoEntry& entry, std::string_view p
     return std::nullopt;
 }
 
-grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
-                                           const slang::ast::Expression& originExpr) {
-    if (lsb == 0 && msb == source.width() - 1) {
-        return &source;
+ValueId LHSConverter::createSliceValue(ValueId source, int64_t lsb, int64_t msb,
+                                       const slang::ast::Expression& originExpr) {
+    const int32_t sourceWidth = graph().getValue(source).width();
+    if (lsb == 0 && msb == sourceWidth - 1) {
+        return source;
     }
-    if (lsb < 0 || msb < lsb || msb >= source.width()) {
+    if (lsb < 0 || msb < lsb || msb >= sourceWidth) {
         report("Assign RHS slice range is out of bounds");
-        return nullptr;
+        return ValueId::invalid();
     }
 
     std::string opName = "_assign_slice_op_" + std::to_string(instanceId_) + "_" +
@@ -1606,18 +1700,18 @@ grh::Value* LHSConverter::createSliceValue(grh::Value& source, int64_t lsb, int6
                             std::to_string(sliceCounter_);
     ++sliceCounter_;
 
-    grh::Operation& op = graph().createOperation(grh::OperationKind::kSliceStatic, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &originExpr));
-    op.addOperand(source);
-    op.setAttribute("sliceStart", lsb);
-    op.setAttribute("sliceEnd", msb);
+    OperationId op = createOperation(graph(), grh::OperationKind::kSliceStatic, opName);
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &originExpr));
+    graph().addOperand(op, source);
+    graph().setAttr(op, internSymbol(graph(), "sliceStart"), lsb);
+    graph().setAttr(op, internSymbol(graph(), "sliceEnd"), msb);
 
     const int64_t width = msb - lsb + 1;
-    grh::Value& value = graph().createValue(
-        valueName, width, originExpr.type ? originExpr.type->isSigned() : false);
-    applyDebug(value, makeDebugInfo(sourceManager_, &originExpr));
-    op.addResult(value);
-    return &value;
+    ValueId value = createValue(graph(), valueName, width,
+                                originExpr.type ? originExpr.type->isSigned() : false);
+    applyDebug(graph(), value, makeDebugInfo(sourceManager_, &originExpr));
+    graph().addResult(op, value);
+    return value;
 }
 
 void LHSConverter::report(std::string message) {
@@ -1663,7 +1757,7 @@ ContinuousAssignLHSConverter::ContinuousAssignLHSConverter(Context context, Writ
     LHSConverter(context), memo_(memo) {}
 
 bool ContinuousAssignLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
-                                           grh::Value& rhsValue) {
+                                           ValueId rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
     std::vector<WriteResult> results;
     if (!lower(assignment, rhsValue, results)) {
@@ -1685,10 +1779,11 @@ AlwaysBlockRHSConverter::AlwaysBlockRHSConverter(Context context, AlwaysConverte
 AlwaysBlockLHSConverter::AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner) :
     LHSConverter(context), owner_(owner) {}
 
-grh::Value* AlwaysBlockRHSConverter::handleMemoEntry(
+ValueId AlwaysBlockRHSConverter::handleMemoEntry(
     const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry) {
     if (const auto* symbol = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
-        if (grh::Value* loop = owner_.lookupLoopValue(*symbol)) {
+        ValueId loop = owner_.lookupLoopValue(*symbol);
+        if (loop.valid()) {
             return loop;
         }
     }
@@ -1699,48 +1794,52 @@ void AlwaysBlockLHSConverter::seedEvalContextForLHS(slang::ast::EvalContext& ctx
     owner_.seedEvalContextWithLoopValues(ctx);
 }
 
-grh::Value* AlwaysBlockRHSConverter::handleCustomNamedValue(
+ValueId AlwaysBlockRHSConverter::handleCustomNamedValue(
     const slang::ast::NamedValueExpression& expr) {
     if (const auto* symbol = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
-        if (grh::Value* value = owner_.lookupLoopValue(*symbol)) {
+        ValueId value = owner_.lookupLoopValue(*symbol);
+        if (value.valid()) {
             return value;
         }
     }
     return CombRHSConverter::handleCustomNamedValue(expr);
 }
 
-grh::Value* CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+ValueId CombAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                                     const SignalMemoEntry& entry) {
-    if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
+    ValueId shadow = owner_.lookupShadowValue(entry);
+    if (shadow.valid()) {
         return shadow;
     }
     return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
 }
 
-grh::Value* SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+ValueId SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                                    const SignalMemoEntry& entry) {
     auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
     if (seqOwner && seqOwner->useSeqShadowValues()) {
-        if (grh::Value* shadow = owner_.lookupShadowValue(entry)) {
+        ValueId shadow = owner_.lookupShadowValue(entry);
+        if (shadow.valid()) {
             return shadow;
         }
     }
     return AlwaysBlockRHSConverter::handleMemoEntry(expr, entry);
 }
 
-grh::Value* SeqAlwaysRHSConverter::convertElementSelect(
+ValueId SeqAlwaysRHSConverter::convertElementSelect(
     const slang::ast::ElementSelectExpression& expr) {
     auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
     if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
-        if (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory) {
-            grh::Value* addrValue = convert(expr.selector());
-            if (!addrValue) {
-                return nullptr;
+        if (entry->stateOp.valid() &&
+            owner_.graph().getOperation(entry->stateOp).kind() == grh::OperationKind::kMemory) {
+            ValueId addrValue = convert(expr.selector());
+            if (!addrValue.valid()) {
+                return ValueId::invalid();
             }
             if (seqOwner) {
                 // Use current guard as enable for sync read if available.
-                grh::Value* en = owner_.currentGuardValue();
-                return seqOwner->buildMemorySyncRead(*entry, *addrValue, expr, en);
+                ValueId en = owner_.currentGuardValue();
+                return seqOwner->buildMemorySyncRead(*entry, addrValue, expr, en);
             }
         }
     }
@@ -1748,7 +1847,7 @@ grh::Value* SeqAlwaysRHSConverter::convertElementSelect(
 }
 
 bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
-                                     grh::Value& rhsValue) {
+                                     ValueId rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
     std::vector<WriteResult> results;
     if (!lower(assignment, rhsValue, results)) {
@@ -1764,7 +1863,7 @@ bool AlwaysBlockLHSConverter::convert(const slang::ast::AssignmentExpression& as
 }
 
 bool AlwaysBlockLHSConverter::convertExpression(const slang::ast::Expression& expr,
-                                                grh::Value& rhsValue) {
+                                                ValueId rhsValue) {
     using WriteResult = LHSConverter::WriteResult;
     std::vector<WriteResult> results;
     if (!lowerExpression(expr, rhsValue, results)) {
@@ -1795,7 +1894,7 @@ const slang::ast::Expression* skipImplicitConversions(const slang::ast::Expressi
 } // namespace
 
 bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assignment,
-                                    grh::Value& rhsValue) {
+                                    ValueId rhsValue) {
     auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
 
     const slang::ast::Expression* root = skipImplicitConversions(assignment.left());
@@ -1809,8 +1908,9 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
             if (const auto* named = inner->as_if<slang::ast::NamedValueExpression>()) {
                 if (const auto* symbol = named->symbol.as_if<slang::ast::ValueSymbol>()) {
                     const SignalMemoEntry* candidate = findMemoEntry(*symbol);
-                    if (candidate && candidate->stateOp &&
-                        candidate->stateOp->kind() == grh::OperationKind::kMemory) {
+                    if (candidate && candidate->stateOp.valid() &&
+                        owner_.graph().getOperation(candidate->stateOp).kind() ==
+                            grh::OperationKind::kMemory) {
                         memoryEntry = candidate;
                         baseElement = element;
                         break;
@@ -1843,22 +1943,22 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
             return true;
         }
 
-        grh::Value* addrValue = owner_.rhsConverter_->convert(baseElement->selector());
-        if (!addrValue) {
+        ValueId addrValue = owner_.rhsConverter_->convert(baseElement->selector());
+        if (!addrValue.valid()) {
             return true;
         }
 
         const slang::ast::Expression* normalizedRoot = root;
         const bool rootIsBase = normalizedRoot == baseElement;
-        grh::Value* currentEn = owner_.currentGuardValue();
+        ValueId currentEn = owner_.currentGuardValue();
         const int64_t entryWidth = seqOwner->memoryRowWidth(*memoryEntry);
 
         if (rootIsBase) {
-            if (rhsValue.width() != entryWidth) {
+            if (owner_.graph().getValue(rhsValue).width() != entryWidth) {
                 emitUnsupported("Memory word write width mismatch");
                 return true;
             }
-            seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, *addrValue, rhsValue,
+            seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, addrValue, rhsValue,
                                             currentEn);
             return true;
         }
@@ -1874,17 +1974,17 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
             return true;
         }
 
-        if (rhsValue.width() != 1) {
+        if (owner_.graph().getValue(rhsValue).width() != 1) {
             emitUnsupported("Memory single-bit write expects 1-bit RHS");
             return true;
         }
 
-        grh::Value* bitIndexValue = owner_.rhsConverter_->convert(bitSelect->selector());
-        if (!bitIndexValue) {
+        ValueId bitIndexValue = owner_.rhsConverter_->convert(bitSelect->selector());
+        if (!bitIndexValue.valid()) {
             return true;
         }
 
-        seqOwner->recordMemoryBitWrite(*memoryEntry, assignment, *addrValue, *bitIndexValue,
+        seqOwner->recordMemoryBitWrite(*memoryEntry, assignment, addrValue, bitIndexValue,
                                        rhsValue, currentEn);
         return true;
     }
@@ -1902,7 +2002,7 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
 }
 
 bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr,
-                                              grh::Value& rhsValue) {
+                                              ValueId rhsValue) {
     const slang::ast::Expression* root = skipImplicitConversions(expr);
     const slang::ast::Expression* cursor = root;
     while (cursor) {
@@ -1911,8 +2011,9 @@ bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr
             if (const auto* named = inner->as_if<slang::ast::NamedValueExpression>()) {
                 if (const auto* symbol = named->symbol.as_if<slang::ast::ValueSymbol>()) {
                     const SignalMemoEntry* candidate = findMemoEntry(*symbol);
-                    if (candidate && candidate->stateOp &&
-                        candidate->stateOp->kind() == grh::OperationKind::kMemory) {
+                    if (candidate && candidate->stateOp.valid() &&
+                        owner_.graph().getOperation(candidate->stateOp).kind() ==
+                            grh::OperationKind::kMemory) {
                         if (diagnostics()) {
                             diagnostics()->nyi(owner_.block(),
                                                "DPI 输出参数写 memory 暂不支持");
@@ -1948,7 +2049,7 @@ bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr
 }
 
 bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
-    const slang::ast::ElementSelectExpression& element, grh::Value& rhsValue) {
+    const slang::ast::ElementSelectExpression& element, ValueId rhsValue) {
     auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
     if (!seqOwner) {
         return false;
@@ -1956,7 +2057,9 @@ bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
 
     const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(element);
     const SignalMemoEntry* entry = symbol ? findMemoEntry(*symbol) : nullptr;
-    if (!entry || (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory)) {
+    if (!entry || (entry->stateOp.valid() &&
+                   owner_.graph().getOperation(entry->stateOp).kind() ==
+                       grh::OperationKind::kMemory)) {
         return false;
     }
 
@@ -1967,96 +2070,98 @@ bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
         return true;
     }
 
-    grh::Value* indexValue = owner_.rhsConverter_->convert(element.selector());
-    if (!indexValue) {
+    ValueId indexValue = owner_.rhsConverter_->convert(element.selector());
+    if (!indexValue.valid()) {
         return true;
     }
 
     const int64_t targetWidth = entry->width > 0 ? entry->width : 1;
-    if (rhsValue.width() <= 0 || rhsValue.width() > targetWidth) {
+    const int32_t rhsWidth = owner_.graph().getValue(rhsValue).width();
+    if (rhsWidth <= 0 || rhsWidth > targetWidth) {
         if (diagnostics()) {
             diagnostics()->nyi(owner_.block(), "Dynamic bit select RHS width mismatch");
         }
         return true;
     }
 
-    grh::Value* baseValue = owner_.lookupShadowValue(*entry);
-    if (!baseValue) {
+    ValueId baseValue = owner_.lookupShadowValue(*entry);
+    if (!baseValue.valid()) {
         baseValue = entry->value;
     }
-    if (!baseValue) {
+    if (!baseValue.valid()) {
         baseValue = owner_.createZeroValue(targetWidth);
     }
-    if (!baseValue) {
+    if (!baseValue.valid()) {
         return true;
     }
 
-    grh::Value* maskValue =
-        seqOwner->buildShiftedMask(*indexValue, targetWidth, "lhs_dyn_mask");
-    if (!maskValue) {
+    ValueId maskValue =
+        seqOwner->buildShiftedMask(indexValue, targetWidth, "lhs_dyn_mask");
+    if (!maskValue.valid()) {
         return true;
     }
 
     const auto debugInfo = makeDebugInfo(owner_.sourceManager_, &element);
-    grh::Operation& invMaskOp = owner_.graph_.createOperation(
-        grh::OperationKind::kNot, owner_.makeControlOpName("lhs_dyn_inv_mask"));
-    applyDebug(invMaskOp, debugInfo);
-    invMaskOp.addOperand(*maskValue);
-    grh::Value& invMaskVal = owner_.graph_.createValue(
-        owner_.makeControlValueName("lhs_dyn_inv_mask"), targetWidth, /*isSigned=*/false);
-    applyDebug(invMaskVal, debugInfo);
-    invMaskOp.addResult(invMaskVal);
+    OperationId invMaskOp = createOperation(
+        owner_.graph_, grh::OperationKind::kNot, owner_.makeControlOpName("lhs_dyn_inv_mask"));
+    applyDebug(owner_.graph_, invMaskOp, debugInfo);
+    addOperand(owner_.graph_, invMaskOp, maskValue);
+    ValueId invMaskVal = createValue(owner_.graph_, owner_.makeControlValueName("lhs_dyn_inv_mask"),
+                                     targetWidth, /*isSigned=*/false);
+    applyDebug(owner_.graph_, invMaskVal, debugInfo);
+    addResult(owner_.graph_, invMaskOp, invMaskVal);
 
-    grh::Operation& holdOp = owner_.graph_.createOperation(
-        grh::OperationKind::kAnd, owner_.makeControlOpName("lhs_dyn_hold"));
-    applyDebug(holdOp, debugInfo);
-    holdOp.addOperand(*baseValue);
-    holdOp.addOperand(invMaskVal);
-    grh::Value& holdVal = owner_.graph_.createValue(
-        owner_.makeControlValueName("lhs_dyn_hold"), targetWidth, entry->isSigned);
-    applyDebug(holdVal, debugInfo);
-    holdOp.addResult(holdVal);
+    OperationId holdOp = createOperation(
+        owner_.graph_, grh::OperationKind::kAnd, owner_.makeControlOpName("lhs_dyn_hold"));
+    applyDebug(owner_.graph_, holdOp, debugInfo);
+    addOperand(owner_.graph_, holdOp, baseValue);
+    addOperand(owner_.graph_, holdOp, invMaskVal);
+    ValueId holdVal = createValue(owner_.graph_, owner_.makeControlValueName("lhs_dyn_hold"),
+                                  targetWidth, entry->isSigned);
+    applyDebug(owner_.graph_, holdVal, debugInfo);
+    addResult(owner_.graph_, holdOp, holdVal);
 
-    const int64_t padWidth = targetWidth - rhsValue.width();
-    grh::Value* paddedRhs = rhsValue.width() == targetWidth
-                                ? &rhsValue
+    const int64_t padWidth = targetWidth - rhsWidth;
+    ValueId paddedRhs = rhsWidth == targetWidth
+                                ? rhsValue
                                 : seqOwner->createConcatWithZeroPadding(rhsValue, padWidth,
                                                                         "lhs_dyn_rhs_pad");
-    if (!paddedRhs) {
+    if (!paddedRhs.valid()) {
         return true;
     }
 
-    grh::Value* shiftedData =
-        seqOwner->buildShiftedBitValue(*paddedRhs, *indexValue, targetWidth, "lhs_dyn_data");
-    if (!shiftedData) {
+    ValueId shiftedData =
+        seqOwner->buildShiftedBitValue(paddedRhs, indexValue, targetWidth, "lhs_dyn_data");
+    if (!shiftedData.valid()) {
         return true;
     }
 
-    grh::Operation& mergeOp = owner_.graph_.createOperation(
-        grh::OperationKind::kOr, owner_.makeControlOpName("lhs_dyn_merge"));
-    applyDebug(mergeOp, debugInfo);
-    mergeOp.addOperand(holdVal);
-    mergeOp.addOperand(*shiftedData);
-    grh::Value& mergedVal = owner_.graph_.createValue(
-        owner_.makeControlValueName("lhs_dyn_merge"), targetWidth, entry->isSigned);
-    applyDebug(mergedVal, debugInfo);
-    mergeOp.addResult(mergedVal);
+    OperationId mergeOp = createOperation(
+        owner_.graph_, grh::OperationKind::kOr, owner_.makeControlOpName("lhs_dyn_merge"));
+    applyDebug(owner_.graph_, mergeOp, debugInfo);
+    addOperand(owner_.graph_, mergeOp, holdVal);
+    addOperand(owner_.graph_, mergeOp, shiftedData);
+    ValueId mergedVal = createValue(owner_.graph_, owner_.makeControlValueName("lhs_dyn_merge"),
+                                    targetWidth, entry->isSigned);
+    applyDebug(owner_.graph_, mergedVal, debugInfo);
+    addResult(owner_.graph_, mergeOp, mergedVal);
 
-    grh::Value* finalVal = &mergedVal;
-    if (grh::Value* guard = owner_.currentGuardValue()) {
-        grh::Value* guardBit = owner_.coerceToCondition(*guard);
-        if (guardBit) {
-            grh::Operation& muxOp = owner_.graph_.createOperation(
-                grh::OperationKind::kMux, owner_.makeControlOpName("lhs_dyn_guard"));
-            applyDebug(muxOp, debugInfo);
-            muxOp.addOperand(*guardBit);
-            muxOp.addOperand(mergedVal);
-            muxOp.addOperand(*baseValue);
-            grh::Value& muxVal = owner_.graph_.createValue(
-                owner_.makeControlValueName("lhs_dyn_guard"), targetWidth, entry->isSigned);
-            applyDebug(muxVal, debugInfo);
-            muxOp.addResult(muxVal);
-            finalVal = &muxVal;
+    ValueId finalVal = mergedVal;
+    ValueId guard = owner_.currentGuardValue();
+    if (guard.valid()) {
+        ValueId guardBit = owner_.coerceToCondition(guard);
+        if (guardBit.valid()) {
+            OperationId muxOp = createOperation(
+                owner_.graph_, grh::OperationKind::kMux, owner_.makeControlOpName("lhs_dyn_guard"));
+            applyDebug(owner_.graph_, muxOp, debugInfo);
+            addOperand(owner_.graph_, muxOp, guardBit);
+            addOperand(owner_.graph_, muxOp, mergedVal);
+            addOperand(owner_.graph_, muxOp, baseValue);
+            ValueId muxVal = createValue(owner_.graph_, owner_.makeControlValueName("lhs_dyn_guard"),
+                                         targetWidth, entry->isSigned);
+            applyDebug(owner_.graph_, muxVal, debugInfo);
+            addResult(owner_.graph_, muxOp, muxVal);
+            finalVal = muxVal;
         }
     }
 
@@ -2307,22 +2412,23 @@ bool SeqAlwaysConverter::useSeqShadowValues() const {
 
 bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpression& call,
                                                  const slang::ast::ExpressionStatement&) {
-    grh::Value* clkValue = ensureClockValue();
-    if (!clkValue) {
+    ValueId clkValue = ensureClockValue();
+    if (!clkValue.valid()) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Sequential display lacks resolved clock");
         }
         return true;
     }
 
-    grh::Value* enableValue = nullptr;
-    if (grh::Value* guard = currentGuardValue()) {
-        enableValue = coerceToCondition(*guard);
+    ValueId enableValue = ValueId::invalid();
+    ValueId guard = currentGuardValue();
+    if (guard.valid()) {
+        enableValue = coerceToCondition(guard);
     }
     else {
         enableValue = createOneValue(1);
     }
-    if (!enableValue) {
+    if (!enableValue.valid()) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Failed to derive enable for display operation");
         }
@@ -2384,51 +2490,52 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
         }
     }
 
-    std::vector<grh::Value*> valueOperands;
+    std::vector<ValueId> valueOperands;
     valueOperands.reserve(valueExprs.size());
     for (const slang::ast::Expression* expr : valueExprs) {
-        grh::Value* value = rhsConverter_ ? rhsConverter_->convert(*expr) : nullptr;
-        if (!value) {
+        ValueId value = rhsConverter_ ? rhsConverter_->convert(*expr) : ValueId::invalid();
+        if (!value.valid()) {
             return true;
         }
         valueOperands.push_back(value);
     }
 
-    grh::Operation& op =
-        graph().createOperation(grh::OperationKind::kDisplay, makeControlOpName("display"));
-    applyDebug(op, makeDebugInfo(sourceManager_, &call));
-    op.addOperand(*clkValue);
-    op.addOperand(*enableValue);
-    for (grh::Value* operand : valueOperands) {
-        op.addOperand(*operand);
+    OperationId op =
+        createOperation(graph(), grh::OperationKind::kDisplay, makeControlOpName("display"));
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &call));
+    addOperand(graph(), op, clkValue);
+    addOperand(graph(), op, enableValue);
+    for (ValueId operand : valueOperands) {
+        addOperand(graph(), op, operand);
     }
     if (clockPolarityAttr_) {
-        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+        setAttr(graph(), op, "clkPolarity", *clockPolarityAttr_);
     }
-    op.setAttribute("formatString", formatString);
-    op.setAttribute("displayKind", normalizeDisplayKind(call.getSubroutineName()));
+    setAttr(graph(), op, "formatString", formatString);
+    setAttr(graph(), op, "displayKind", normalizeDisplayKind(call.getSubroutineName()));
     return true;
 }
 
 bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
                                        const DpiImportEntry& entry,
                                        const slang::ast::ExpressionStatement&) {
-    grh::Value* clkValue = ensureClockValue();
-    if (!clkValue) {
+    ValueId clkValue = ensureClockValue();
+    if (!clkValue.valid()) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Sequential DPI call lacks resolved clock");
         }
         return true;
     }
 
-    grh::Value* enableValue = nullptr;
-    if (grh::Value* guard = currentGuardValue()) {
-        enableValue = coerceToCondition(*guard);
+    ValueId enableValue = ValueId::invalid();
+    ValueId guard = currentGuardValue();
+    if (guard.valid()) {
+        enableValue = coerceToCondition(guard);
     }
     else {
         enableValue = createOneValue(1);
     }
-    if (!enableValue) {
+    if (!enableValue.valid()) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Sequential DPI call failed to derive enable signal");
         }
@@ -2453,9 +2560,9 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
         return true;
     }
 
-    std::vector<grh::Value*> inputOperands;
+    std::vector<ValueId> inputOperands;
     std::vector<std::string> inputNames;
-    std::vector<grh::Value*> outputValues;
+    std::vector<ValueId> outputValues;
     std::vector<std::string> outputNames;
     inputOperands.reserve(entry.args.size());
     inputNames.reserve(entry.args.size());
@@ -2472,15 +2579,15 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
             return true;
         }
         if (argInfo.direction == slang::ast::ArgumentDirection::In) {
-            grh::Value* value = rhsConverter_->convert(*actual);
-            if (!value) {
+            ValueId value = rhsConverter_->convert(*actual);
+            if (!value.valid()) {
                 return true;
             }
-            if (value->width() != argInfo.width) {
+            if (graph().getValue(value).width() != argInfo.width) {
                 if (diagnostics()) {
                     std::ostringstream oss;
                     oss << "DPI input arg width mismatch: expected " << argInfo.width
-                        << " actual " << value->width();
+                        << " actual " << graph().getValue(value).width();
                     diagnostics()->nyi(block(), oss.str());
                 }
                 return true;
@@ -2490,10 +2597,10 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
         }
         else {
             std::string valueName = makeControlValueName("dpic_out");
-            grh::Value& resultValue =
-                graph().createValue(valueName, argInfo.width > 0 ? argInfo.width : 1,
-                                    argInfo.isSigned);
-            applyDebug(resultValue, makeDebugInfo(sourceManager_, actual));
+            ValueId resultValue =
+                createValue(graph(), valueName, argInfo.width > 0 ? argInfo.width : 1,
+                            argInfo.isSigned);
+            applyDebug(graph(), resultValue, makeDebugInfo(sourceManager_, actual));
             if (!lhsConverter_->convertExpression(*actual, resultValue)) {
                 const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*actual);
                 const SignalMemoEntry* entry =
@@ -2515,30 +2622,31 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
                 slices.push_back(std::move(slice));
                 handleEntryWrite(*entry, std::move(slices));
             }
-            outputValues.push_back(&resultValue);
+            outputValues.push_back(resultValue);
             outputNames.push_back(argInfo.name);
         }
     }
 
-    grh::Operation& op =
-        graph().createOperation(grh::OperationKind::kDpicCall, makeControlOpName("dpic_call"));
-    applyDebug(op, makeDebugInfo(sourceManager_, &call));
-    op.addOperand(*clkValue);
-    op.addOperand(*enableValue);
-    for (grh::Value* operand : inputOperands) {
-        op.addOperand(*operand);
+    OperationId op =
+        createOperation(graph(), grh::OperationKind::kDpicCall, makeControlOpName("dpic_call"));
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &call));
+    addOperand(graph(), op, clkValue);
+    addOperand(graph(), op, enableValue);
+    for (ValueId operand : inputOperands) {
+        addOperand(graph(), op, operand);
     }
-    for (grh::Value* result : outputValues) {
-        op.addResult(*result);
+    for (ValueId result : outputValues) {
+        addResult(graph(), op, result);
     }
     if (clockPolarityAttr_) {
-        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+        setAttr(graph(), op, "clkPolarity", *clockPolarityAttr_);
     }
-    if (entry.importOp) {
-        op.setAttribute("targetImportSymbol", entry.importOp->symbol());
+    if (entry.importOp.valid()) {
+        setAttr(graph(), op, "targetImportSymbol",
+                std::string(graph().getOperation(entry.importOp).symbolText()));
     }
     else if (entry.symbol) {
-        op.setAttribute("targetImportSymbol", std::string(entry.symbol->name));
+        setAttr(graph(), op, "targetImportSymbol", std::string(entry.symbol->name));
         if (diagnostics()) {
             diagnostics()->nyi(block(), "DPI import operation 未在当前 graph 中创建");
         }
@@ -2546,8 +2654,8 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     else if (diagnostics()) {
         diagnostics()->nyi(block(), "DPI import operation metadata缺失");
     }
-    op.setAttribute("inArgName", inputNames);
-    op.setAttribute("outArgName", outputNames);
+    setAttr(graph(), op, "inArgName", inputNames);
+    setAttr(graph(), op, "outArgName", outputNames);
     return true;
 }
 
@@ -2555,81 +2663,78 @@ bool SeqAlwaysConverter::handleAssertionIntent(const slang::ast::Expression* con
                                                const slang::ast::ExpressionStatement* origin,
                                                std::string_view message,
                                                std::string_view severity) {
-    grh::Value* clkValue = ensureClockValue();
-    if (!clkValue) {
+    ValueId clkValue = ensureClockValue();
+    if (!clkValue.valid()) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Sequential assert lacks resolved clock");
         }
         return true;
     }
 
-    grh::Value* guard = currentGuardValue();
-    grh::Value* condBit = nullptr;
+    ValueId guard = currentGuardValue();
+    ValueId condBit = ValueId::invalid();
     if (condition && rhsConverter_) {
-        grh::Value* condValue = rhsConverter_->convert(*condition);
-        if (!condValue) {
+        ValueId condValue = rhsConverter_->convert(*condition);
+        if (!condValue.valid()) {
             if (diagnostics() && origin) {
                 diagnostics()->nyi(block(), "Failed to lower assert condition");
             }
             return true;
         }
-        condBit = coerceToCondition(*condValue);
+        condBit = coerceToCondition(condValue);
     }
-    if (!condBit) {
-        return true;
-    }
-    if (!condBit) {
+    if (!condBit.valid()) {
         return true;
     }
 
-    grh::Value* finalCond = condBit;
-    if (guard) {
-        grh::Value* guardBit = coerceToCondition(*guard);
-        if (!guardBit) {
+    ValueId finalCond = condBit;
+    if (guard.valid()) {
+        ValueId guardBit = coerceToCondition(guard);
+        if (!guardBit.valid()) {
             return true;
         }
         // guard -> cond  === !guard || cond
-        grh::Value* notGuard = buildLogicNot(*guardBit);
-        if (!notGuard) {
+        ValueId notGuard = buildLogicNot(guardBit);
+        if (!notGuard.valid()) {
             return true;
         }
-        finalCond = buildLogicOr(*notGuard, *condBit);
-        if (!finalCond) {
+        finalCond = buildLogicOr(notGuard, condBit);
+        if (!finalCond.valid()) {
             return true;
         }
     }
 
-    grh::Operation& op =
-        graph().createOperation(grh::OperationKind::kAssert, makeControlOpName("assert"));
-    applyDebug(op, origin ? makeDebugInfo(sourceManager_, origin)
-                          : makeDebugInfo(sourceManager_, condition));
-    op.addOperand(*clkValue);
-    op.addOperand(*finalCond);
+    OperationId op =
+        createOperation(graph(), grh::OperationKind::kAssert, makeControlOpName("assert"));
+    applyDebug(graph(), op, origin ? makeDebugInfo(sourceManager_, origin)
+                                   : makeDebugInfo(sourceManager_, condition));
+    addOperand(graph(), op, clkValue);
+    addOperand(graph(), op, finalCond);
     if (clockPolarityAttr_) {
-        op.setAttribute("clkPolarity", *clockPolarityAttr_);
+        setAttr(graph(), op, "clkPolarity", *clockPolarityAttr_);
     }
     if (!message.empty()) {
-        op.setAttribute("message", std::string(message));
+        setAttr(graph(), op, "message", std::string(message));
     }
     if (!severity.empty()) {
-        op.setAttribute("severity", std::string(severity));
+        setAttr(graph(), op, "severity", std::string(severity));
     }
     return true;
 }
 
 void SeqAlwaysConverter::planSequentialFinalize() {
-    grh::Value* clockValue = ensureClockValue();
-    if (!clockValue) {
+    ValueId clockValue = ensureClockValue();
+    if (!clockValue.valid()) {
         return;
     }
 
-    const bool registerWrites = finalizeRegisterWrites(*clockValue);
-    const bool memoryWrites = finalizeMemoryWrites(*clockValue);
+    const bool registerWrites = finalizeRegisterWrites(clockValue);
+    const bool memoryWrites = finalizeMemoryWrites(clockValue);
 
     // If nothing to finalize, stay silent (some blocks may be empty after static pruning).
 }
 
-bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
+bool SeqAlwaysConverter::finalizeRegisterWrites(ValueId clockValue) {
     bool consumedAny = false;
 
     for (WriteBackMemo::Entry& entry : memo().entriesMutable()) {
@@ -2657,54 +2762,60 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                          static_cast<long long>(s.msb),
                          static_cast<long long>(s.lsb),
                          static_cast<long long>(s.msb - s.lsb + 1),
-                         s.value ? static_cast<long long>(s.value->width()) : -1LL);
+                         s.value.valid()
+                             ? static_cast<long long>(graph().getValue(s.value).width())
+                             : -1LL);
         }
 
         if (entry.target->multiDriver) {
             const auto debugInfo =
                 makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
             for (const auto& slice : entry.slices) {
-                if (!slice.value) {
+                if (!slice.value.valid()) {
                     reportFinalizeIssue(entry, "Multi-driver register slice missing RHS value");
                     continue;
                 }
                 const int64_t sliceWidth = slice.msb - slice.lsb + 1;
-                grh::Operation& split =
-                    graph().createOperation(grh::OperationKind::kRegister,
+                OperationId split =
+                    createOperation(graph(), grh::OperationKind::kRegister,
                                             makeFinalizeOpName(*entry.target, "split"));
-                applyDebug(split, debugInfo);
+                applyDebug(graph(), split, debugInfo);
                 if (clockPolarityAttr_) {
-                    split.setAttribute("clkPolarity", *clockPolarityAttr_);
+                    setAttr(graph(), split, "clkPolarity", *clockPolarityAttr_);
                 }
-                split.addOperand(clockValue);
-                grh::Value& regVal = graph().createValue(
+                addOperand(graph(), split, clockValue);
+                ValueId regVal = createValue(graph(), 
                     makeFinalizeValueName(*entry.target, "split"), sliceWidth, entry.target->isSigned);
-                applyDebug(regVal, debugInfo);
-                split.addResult(regVal);
-                if (!attachDataOperand(split, *slice.value, entry)) {
+                applyDebug(graph(), regVal, debugInfo);
+                addResult(graph(), split, regVal);
+                if (!attachDataOperand(split, slice.value, entry)) {
                     continue;
                 }
                 memo().recordMultiDriverPart(*entry.target,
                                              WriteBackMemo::MultiDriverPart{slice.msb, slice.lsb,
-                                                                            &regVal});
+                                                                            regVal});
             }
             entry.consumed = true;
             consumedAny = true;
             continue;
         }
 
-        grh::Operation* stateOp = entry.target->stateOp;
+        OperationId stateOp = entry.target->stateOp;
         if (!stateOp) {
             reportFinalizeIssue(entry, "Sequential write target lacks register metadata");
             entry.consumed = true;
             continue;
         }
-        if (stateOp->kind() == grh::OperationKind::kMemory) {
+        if (graph().getOperation(stateOp).kind() == grh::OperationKind::kMemory) {
             continue;
         }
 
-        grh::Value* dataValue = buildDataOperand(entry);
+        ValueId dataValue = buildDataOperand(entry);
         if (!dataValue) {
+            continue;
+        }
+        if (dataValue.graph != graph().id()) {
+            reportFinalizeIssue(entry, "Sequential write data operand belongs to a different graph");
             continue;
         }
 
@@ -2716,59 +2827,78 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                 reportFinalizeIssue(entry, "Reset signal is unavailable for this register");
                 continue;
             }
-            if (!valueDependsOnSignal(*dataValue, *resetContext->signal)) {
-                resetActive = false;
-                resetContext.reset();
-                switch (stateOp->kind()) {
-                case grh::OperationKind::kRegisterRst:
-                case grh::OperationKind::kRegisterArst:
-                    stateOp->setKind(grh::OperationKind::kRegister);
-                    break;
-                case grh::OperationKind::kRegisterEnRst:
-                case grh::OperationKind::kRegisterEnArst:
-                    stateOp->setKind(grh::OperationKind::kRegisterEn);
-                    break;
-                default:
-                    break;
+            if (resetContext->kind == ResetContext::Kind::Async) {
+                resetExtraction = extractAsyncResetAssignment(*entry.target, *resetContext);
+                if (!resetExtraction) {
+                    resetExtraction =
+                        extractResetBranches(dataValue, resetContext->signal,
+                                             resetContext->activeHigh, entry);
                 }
-                stateOp->clearAttribute("rstPolarity");
-            }
-            else {
-                resetExtraction =
-                    extractResetBranches(*dataValue, *resetContext->signal, resetContext->activeHigh,
-                                         entry);
                 if (!resetExtraction) {
                     continue;
                 }
             }
+            else {
+                if (!valueDependsOnSignal(dataValue, resetContext->signal)) {
+                    resetActive = false;
+                    resetContext.reset();
+                    switch (graph().getOperation(stateOp).kind()) {
+                    case grh::OperationKind::kRegisterRst:
+                    case grh::OperationKind::kRegisterArst:
+                        graph().setOpKind(stateOp, grh::OperationKind::kRegister);
+                        break;
+                    case grh::OperationKind::kRegisterEnRst:
+                    case grh::OperationKind::kRegisterEnArst:
+                        graph().setOpKind(stateOp, grh::OperationKind::kRegisterEn);
+                        break;
+                    default:
+                        break;
+                    }
+                    clearAttr(graph(), stateOp, "rstPolarity");
+                }
+                else {
+                    resetExtraction =
+                        extractResetBranches(dataValue, resetContext->signal,
+                                             resetContext->activeHigh, entry);
+                    if (!resetExtraction) {
+                        continue;
+                    }
+                }
+            }
         }
 
-        if (!attachClockOperand(*stateOp, clockValue, entry)) {
+        if (!attachClockOperand(stateOp, clockValue, entry)) {
             continue;
         }
         if (resetActive) {
             if (!resetExtraction ||
-                !attachResetOperands(*stateOp, *resetContext->signal,
-                                     *resetExtraction->resetValue, entry)) {
+                !attachResetOperands(stateOp, resetContext->signal,
+                                     resetExtraction->resetValue, entry)) {
                 continue;
             }
         }
         // Attempt to extract enable pattern for both plain and reset registers, using peeled data if available.
-        if (entry.target && entry.target->value) {
-            grh::Value* analysisInput =
+        ValueId targetValue = entry.target ? entry.target->value : ValueId::invalid();
+        if (targetValue && targetValue.graph != graph().id()) {
+            if (entry.target && entry.target->symbol && !entry.target->symbol->name.empty()) {
+                targetValue = graph().findValue(entry.target->symbol->name);
+            }
+        }
+        if (targetValue && targetValue.graph == graph().id()) {
+            ValueId analysisInput =
                 (resetExtraction && resetExtraction->dataWithoutReset)
                     ? resetExtraction->dataWithoutReset
                     : dataValue;
-            if (grh::Operation* mux = analysisInput->definingOp();
-                mux && mux->kind() == grh::OperationKind::kMux &&
-                mux->operands().size() == 3) {
-                grh::Value* cond = mux->operands()[0];
-                grh::Value* tVal = mux->operands()[1];
-                grh::Value* fVal = mux->operands()[2];
+            if (OperationId mux = graph().getValue(analysisInput).definingOp();
+                mux && graph().getOperation(mux).kind() == grh::OperationKind::kMux &&
+                graph().getOperation(mux).operands().size() == 3) {
+                ValueId cond = graph().getOperation(mux).operands()[0];
+                ValueId tVal = graph().getOperation(mux).operands()[1];
+                ValueId fVal = graph().getOperation(mux).operands()[2];
 
-                grh::Value* q = entry.target->value;
-                grh::Value* enRaw = nullptr;
-                grh::Value* newData = nullptr;
+                ValueId q = targetValue;
+                ValueId enRaw = ValueId::invalid();
+                ValueId newData = ValueId::invalid();
                 bool activeLow = false;
                 if (fVal == q) {
                     // mux(en, d, Q)
@@ -2780,39 +2910,40 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                     newData = fVal;
                     activeLow = true;
                 }
-                if (enRaw && newData && newData->width() == q->width()) {
-                    grh::Value* enBit = coerceToCondition(*enRaw);
+                if (enRaw && newData &&
+                    graph().getValue(newData).width() == graph().getValue(q).width()) {
+                    ValueId enBit = coerceToCondition(enRaw);
                     if (enBit) {
                         const std::string enLevel = activeLow ? "low" : "high";
-                        switch (stateOp->kind()) {
+                        switch (graph().getOperation(stateOp).kind()) {
                         case grh::OperationKind::kRegister:
-                            stateOp->setKind(grh::OperationKind::kRegisterEn);
-                            stateOp->addOperand(*enBit); // [clk, en]
-                            stateOp->setAttribute("enLevel", enLevel);
+                            graph().setOpKind(stateOp, grh::OperationKind::kRegisterEn);
+                            addOperand(graph(), stateOp, enBit); // [clk, en]
+                            setAttr(graph(), stateOp, "enLevel", enLevel);
                             break;
                         case grh::OperationKind::kRegisterRst:
-                            stateOp->setKind(grh::OperationKind::kRegisterEnRst);
-                            stateOp->addOperand(*enBit); // [clk, rst, resetValue, en]
-                            if (stateOp->operands().size() == 4) {
-                                grh::Value* rstVal = stateOp->operands()[2];
+                            graph().setOpKind(stateOp, grh::OperationKind::kRegisterEnRst);
+                            addOperand(graph(), stateOp, enBit); // [clk, rst, resetValue, en]
+                            if (graph().getOperation(stateOp).operands().size() == 4) {
+                                ValueId rstVal = graph().getOperation(stateOp).operands()[2];
                                 if (rstVal) {
-                                    stateOp->replaceOperand(2, *enBit);
-                                    stateOp->replaceOperand(3, *rstVal);
+                                    graph().replaceOperand(stateOp, 2, enBit);
+                                    graph().replaceOperand(stateOp, 3, rstVal);
                                 }
                             }
-                            stateOp->setAttribute("enLevel", enLevel);
+                            setAttr(graph(), stateOp, "enLevel", enLevel);
                             break;
                         case grh::OperationKind::kRegisterArst:
-                            stateOp->setKind(grh::OperationKind::kRegisterEnArst);
-                            stateOp->addOperand(*enBit);
-                            if (stateOp->operands().size() == 4) {
-                                grh::Value* rstVal = stateOp->operands()[2];
+                            graph().setOpKind(stateOp, grh::OperationKind::kRegisterEnArst);
+                            addOperand(graph(), stateOp, enBit);
+                            if (graph().getOperation(stateOp).operands().size() == 4) {
+                                ValueId rstVal = graph().getOperation(stateOp).operands()[2];
                                 if (rstVal) {
-                                    stateOp->replaceOperand(2, *enBit);
-                                    stateOp->replaceOperand(3, *rstVal);
+                                    graph().replaceOperand(stateOp, 2, enBit);
+                                    graph().replaceOperand(stateOp, 3, rstVal);
                                 }
                             }
-                            stateOp->setAttribute("enLevel", enLevel);
+                            setAttr(graph(), stateOp, "enLevel", enLevel);
                             break;
                         default:
                             break;
@@ -2822,7 +2953,7 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
                 }
             }
         }
-        if (!attachDataOperand(*stateOp, *dataValue, entry)) {
+        if (!attachDataOperand(stateOp, dataValue, entry)) {
             continue;
         }
 
@@ -2833,7 +2964,7 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(grh::Value& clockValue) {
     return consumedAny;
 }
 
-bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
+bool SeqAlwaysConverter::finalizeMemoryWrites(ValueId clockValue) {
     bool emitted = false;
     auto reportMemoryIssue = [&](const SignalMemoEntry* entry, const slang::ast::Expression* /*origin*/,
                                  std::string_view message) {
@@ -2865,17 +2996,18 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         if (!intent.entry || !intent.addr || !intent.data) {
             return;
         }
-        if (!intent.entry->stateOp || intent.entry->stateOp->kind() != grh::OperationKind::kMemory) {
+        if (!intent.entry->stateOp ||
+            graph().getOperation(intent.entry->stateOp).kind() != grh::OperationKind::kMemory) {
             reportMemoryIssue(intent.entry, intent.originExpr, "memory entry lacks kMemory state op");
             return;
         }
         const int64_t rowWidth = memoryRowWidth(*intent.entry);
-        if (intent.data->width() != rowWidth) {
+        if (graph().getValue(intent.data).width() != rowWidth) {
             reportMemoryIssue(intent.entry, intent.originExpr, "memory data width mismatch");
             return;
         }
-        grh::Value* enableValue =
-            intent.enable ? coerceToCondition(*intent.enable) : ensureMemoryEnableValue();
+        ValueId enableValue =
+            intent.enable ? coerceToCondition(intent.enable) : ensureMemoryEnableValue();
         if (!enableValue) {
             reportMemoryIssue(intent.entry, intent.originExpr, "failed to resolve write enable");
             return;
@@ -2887,23 +3019,24 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
                          ? grh::OperationKind::kMemoryWritePortArst
                          : grh::OperationKind::kMemoryWritePortRst;
         }
-        grh::Operation& port =
-            graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_wr"));
-        applyDebug(port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
+        OperationId port =
+            createOperation(graph(), opKind, makeFinalizeOpName(*intent.entry, "mem_wr"));
+        applyDebug(graph(), port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
                                            : makeDebugInfo(sourceManager_, intent.entry->symbol));
-        port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
-        port.setAttribute("enLevel", std::string("high"));
+        setAttr(graph(), port, "memSymbol",
+                std::string(graph().getOperation(intent.entry->stateOp).symbolText()));
+        setAttr(graph(), port, "enLevel", std::string("high"));
         if (resetCtx) {
-            port.setAttribute("rstPolarity", resetPolarityString(*resetCtx));
+            setAttr(graph(), port, "rstPolarity", resetPolarityString(*resetCtx));
         }
         applyClockPolarity(port, "memory write port");
-        port.addOperand(clockValue);
+        addOperand(graph(), port, clockValue);
         if (resetCtx && resetCtx->signal) {
-            port.addOperand(*resetCtx->signal);
+            addOperand(graph(), port, resetCtx->signal);
         }
-        port.addOperand(*intent.addr);
-        port.addOperand(*enableValue);
-        port.addOperand(*intent.data);
+        addOperand(graph(), port, intent.addr);
+        addOperand(graph(), port, enableValue);
+        addOperand(graph(), port, intent.data);
         emitted = true;
     };
 
@@ -2916,22 +3049,23 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
         if (!intent.entry || !intent.addr || !intent.bitValue || !intent.bitIndex) {
             return;
         }
-        if (!intent.entry->stateOp || intent.entry->stateOp->kind() != grh::OperationKind::kMemory) {
+        if (!intent.entry->stateOp ||
+            graph().getOperation(intent.entry->stateOp).kind() != grh::OperationKind::kMemory) {
             reportMemoryIssue(intent.entry, intent.originExpr, "memory entry lacks kMemory state op");
             return;
         }
         const int64_t rowWidth = memoryRowWidth(*intent.entry);
-        grh::Value* dataValue =
-            buildShiftedBitValue(*intent.bitValue, *intent.bitIndex, rowWidth, "mem_bit_data");
-        grh::Value* maskValue =
-            buildShiftedMask(*intent.bitIndex, rowWidth, "mem_bit_mask");
+        ValueId dataValue =
+            buildShiftedBitValue(intent.bitValue, intent.bitIndex, rowWidth, "mem_bit_data");
+        ValueId maskValue =
+            buildShiftedMask(intent.bitIndex, rowWidth, "mem_bit_mask");
         if (!dataValue || !maskValue) {
             reportMemoryIssue(intent.entry, intent.originExpr,
                               "failed to synthesize memory bit intent");
             return;
         }
-        grh::Value* enableValue =
-            intent.enable ? coerceToCondition(*intent.enable) : ensureMemoryEnableValue();
+        ValueId enableValue =
+            intent.enable ? coerceToCondition(intent.enable) : ensureMemoryEnableValue();
         if (!enableValue) {
             reportMemoryIssue(intent.entry, intent.originExpr, "failed to resolve mask write enable");
             return;
@@ -2943,24 +3077,25 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
                          ? grh::OperationKind::kMemoryMaskWritePortArst
                          : grh::OperationKind::kMemoryMaskWritePortRst;
         }
-        grh::Operation& port =
-            graph().createOperation(opKind, makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
-        applyDebug(port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
+        OperationId port =
+            createOperation(graph(), opKind, makeFinalizeOpName(*intent.entry, "mem_mask_wr"));
+        applyDebug(graph(), port, intent.originExpr ? makeDebugInfo(sourceManager_, intent.originExpr)
                                            : makeDebugInfo(sourceManager_, intent.entry->symbol));
-        port.setAttribute("memSymbol", intent.entry->stateOp->symbol());
-        port.setAttribute("enLevel", std::string("high"));
+        setAttr(graph(), port, "memSymbol",
+                std::string(graph().getOperation(intent.entry->stateOp).symbolText()));
+        setAttr(graph(), port, "enLevel", std::string("high"));
         if (resetCtx) {
-            port.setAttribute("rstPolarity", resetPolarityString(*resetCtx));
+            setAttr(graph(), port, "rstPolarity", resetPolarityString(*resetCtx));
         }
         applyClockPolarity(port, "memory mask write port");
-        port.addOperand(clockValue);
+        addOperand(graph(), port, clockValue);
         if (resetCtx && resetCtx->signal) {
-            port.addOperand(*resetCtx->signal);
+            addOperand(graph(), port, resetCtx->signal);
         }
-        port.addOperand(*intent.addr);
-        port.addOperand(*enableValue);
-        port.addOperand(*dataValue);
-        port.addOperand(*maskValue);
+        addOperand(graph(), port, intent.addr);
+        addOperand(graph(), port, enableValue);
+        addOperand(graph(), port, dataValue);
+        addOperand(graph(), port, maskValue);
         emitted = true;
     };
 
@@ -2972,42 +3107,42 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(grh::Value& clockValue) {
     return emitted;
 }
 
-grh::Value* SeqAlwaysConverter::ensureClockValue() {
+ValueId SeqAlwaysConverter::ensureClockValue() {
     if (cachedClockValue_) {
         return cachedClockValue_;
     }
     if (clockDeriveAttempted_) {
-        return nullptr;
+        return ValueId::invalid();
     }
     clockDeriveAttempted_ = true;
-    std::optional<grh::Value*> derived = deriveClockValue();
+    std::optional<ValueId> derived = deriveClockValue();
     if (derived) {
         cachedClockValue_ = *derived;
     }
     return cachedClockValue_;
 }
 
-grh::Value* SeqAlwaysConverter::ensureMemoryEnableValue() {
+ValueId SeqAlwaysConverter::ensureMemoryEnableValue() {
     if (memoryEnableOne_) {
         return memoryEnableOne_;
     }
-    grh::Operation& op =
-        graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName("en"));
-    applyDebug(op, makeDebugInfo(sourceManager_, &block()));
-    grh::Value& value =
-        graph().createValue(makeMemoryHelperValueName("en"), 1, /*isSigned=*/false);
-    applyDebug(value, makeDebugInfo(sourceManager_, &block()));
-    op.addResult(value);
-    op.setAttribute("constValue", "1'h1");
-    memoryEnableOne_ = &value;
+    OperationId op =
+        createOperation(graph(), grh::OperationKind::kConstant, makeMemoryHelperOpName("en"));
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &block()));
+    ValueId value =
+        createValue(graph(), makeMemoryHelperValueName("en"), 1, /*isSigned=*/false);
+    applyDebug(graph(), value, makeDebugInfo(sourceManager_, &block()));
+    addResult(graph(), op, value);
+    setAttr(graph(), op, "constValue", "1'h1");
+    memoryEnableOne_ = value;
     return memoryEnableOne_;
 }
 
 void SeqAlwaysConverter::recordMemoryWordWrite(const SignalMemoEntry& entry,
                                                const slang::ast::Expression& origin,
-                                               grh::Value& addrValue, grh::Value& dataValue,
-                                               grh::Value* enable) {
-    grh::Value* normalizedAddr = normalizeMemoryAddress(entry, addrValue, &origin);
+                                               ValueId addrValue, ValueId dataValue,
+                                               ValueId enable) {
+    ValueId normalizedAddr = normalizeMemoryAddress(entry, addrValue, &origin);
     if (!normalizedAddr) {
         return;
     }
@@ -3015,16 +3150,16 @@ void SeqAlwaysConverter::recordMemoryWordWrite(const SignalMemoEntry& entry,
     intent.entry = &entry;
     intent.originExpr = &origin;
     intent.addr = normalizedAddr;
-    intent.data = &dataValue;
+    intent.data = dataValue;
     intent.enable = enable;
     memoryWrites_.push_back(intent);
 }
 
 void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
                                               const slang::ast::Expression& origin,
-                                              grh::Value& addrValue, grh::Value& bitIndex,
-                                              grh::Value& bitValue, grh::Value* enable) {
-    grh::Value* normalizedAddr = normalizeMemoryAddress(entry, addrValue, &origin);
+                                              ValueId addrValue, ValueId bitIndex,
+                                              ValueId bitValue, ValueId enable) {
+    ValueId normalizedAddr = normalizeMemoryAddress(entry, addrValue, &origin);
     if (!normalizedAddr) {
         return;
     }
@@ -3032,44 +3167,44 @@ void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
     intent.entry = &entry;
     intent.originExpr = &origin;
     intent.addr = normalizedAddr;
-    intent.bitIndex = &bitIndex;
-    intent.bitValue = &bitValue;
+    intent.bitIndex = bitIndex;
+    intent.bitValue = bitValue;
     intent.enable = enable;
     memoryBitWrites_.push_back(intent);
 }
 
-grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
-                                                    grh::Value& addrValue,
+ValueId SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
+                                                    ValueId addrValue,
                                                     const slang::ast::Expression& originExpr,
-                                                    grh::Value* enableOverride) {
-    if (!entry.stateOp || entry.stateOp->kind() != grh::OperationKind::kMemory) {
+                                                    ValueId enableOverride) {
+    if (!entry.stateOp || graph().getOperation(entry.stateOp).kind() != grh::OperationKind::kMemory) {
         if (diagnostics()) {
             diagnostics()->nyi(block(),
                                "Seq always memory read target is not backed by kMemory operation");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* clkValue = ensureClockValue();
+    ValueId clkValue = ensureClockValue();
     if (!clockPolarityAttr_) {
         if (diagnostics()) {
             diagnostics()->nyi(block(),
                                "Seq always memory sync read lacks clock polarity attribute");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
-    grh::Value* enValue = enableOverride ? coerceToCondition(*enableOverride)
-                                         : ensureMemoryEnableValue();
+    ValueId enValue = enableOverride ? coerceToCondition(enableOverride)
+                                     : ensureMemoryEnableValue();
     if (!clkValue || !enValue) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Seq always memory read lacks clock or enable");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* normalizedAddr = normalizeMemoryAddress(entry, addrValue, &originExpr);
+    ValueId normalizedAddr = normalizeMemoryAddress(entry, addrValue, &originExpr);
     if (!normalizedAddr) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const slang::ast::Type* type = originExpr.type;
@@ -3091,37 +3226,39 @@ grh::Value* SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
-    grh::Operation& port =
-        graph().createOperation(kind, makeFinalizeOpName(entry, "mem_sync_rd"));
-    applyDebug(port, debugInfo);
-    port.setAttribute("memSymbol", entry.stateOp->symbol());
-    port.setAttribute("enLevel", std::string("high"));
+    OperationId port =
+        createOperation(graph(), kind, makeFinalizeOpName(entry, "mem_sync_rd"));
+    applyDebug(graph(), port, debugInfo);
+    setAttr(graph(), port, "memSymbol",
+            std::string(graph().getOperation(entry.stateOp).symbolText()));
+    setAttr(graph(), port, "enLevel", std::string("high"));
     if (resetCtx) {
-        port.setAttribute("rstPolarity", resetCtx->activeHigh ? "high" : "low");
+        setAttr(graph(), port, "rstPolarity", resetCtx->activeHigh ? "high" : "low");
     }
     applyClockPolarity(port, "memory sync read port");
-    port.addOperand(*clkValue);
+    addOperand(graph(), port, clkValue);
     if (resetCtx && resetCtx->signal) {
-        port.addOperand(*resetCtx->signal);
+        addOperand(graph(), port, resetCtx->signal);
     }
-    port.addOperand(*normalizedAddr);
-    port.addOperand(*enValue);
+    addOperand(graph(), port, normalizedAddr);
+    addOperand(graph(), port, enValue);
 
-    grh::Value& result =
-        graph().createValue(makeFinalizeValueName(entry, "mem_sync_rd"), width, isSigned);
-    applyDebug(result, debugInfo);
-    port.addResult(result);
-    return &result;
+    ValueId result =
+        createValue(graph(), makeFinalizeValueName(entry, "mem_sync_rd"), width, isSigned);
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), port, result);
+    return result;
 }
 
 int64_t SeqAlwaysConverter::memoryRowWidth(const SignalMemoEntry& entry) const {
     if (entry.stateOp) {
-        const auto& attrs = entry.stateOp->attributes();
-        auto it = attrs.find("width");
-        if (it != attrs.end() && std::holds_alternative<int64_t>(it->second)) {
-            int64_t width = std::get<int64_t>(it->second);
-            if (width > 0) {
-                return width;
+        const grh::ir::SymbolId widthKey = graph().lookupSymbol("width");
+        auto widthAttr =
+            widthKey.valid() ? graph().getOperation(entry.stateOp).attr(widthKey) : std::nullopt;
+        if (widthAttr) {
+            const int64_t* width = std::get_if<int64_t>(&*widthAttr);
+            if (width && *width > 0) {
+                return *width;
             }
         }
     }
@@ -3130,12 +3267,13 @@ int64_t SeqAlwaysConverter::memoryRowWidth(const SignalMemoEntry& entry) const {
 
 std::optional<int64_t> SeqAlwaysConverter::memoryRowCount(const SignalMemoEntry& entry) const {
     if (entry.stateOp) {
-        const auto& attrs = entry.stateOp->attributes();
-        auto it = attrs.find("row");
-        if (it != attrs.end() && std::holds_alternative<int64_t>(it->second)) {
-            int64_t rows = std::get<int64_t>(it->second);
-            if (rows > 0) {
-                return rows;
+        const grh::ir::SymbolId rowKey = graph().lookupSymbol("row");
+        auto rowAttr =
+            rowKey.valid() ? graph().getOperation(entry.stateOp).attr(rowKey) : std::nullopt;
+        if (rowAttr) {
+            const int64_t* rows = std::get_if<int64_t>(&*rowAttr);
+            if (rows && *rows > 0) {
+                return *rows;
             }
         }
     }
@@ -3171,8 +3309,8 @@ int64_t SeqAlwaysConverter::memoryAddrWidth(const SignalMemoEntry& entry) const 
     return width > 0 ? width : 1;
 }
 
-grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& entry,
-                                                       grh::Value& addrValue,
+ValueId SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& entry,
+                                                       ValueId addrValue,
                                                        const slang::ast::Expression* originExpr) {
     (void)originExpr;
     const int64_t targetWidth = memoryAddrWidth(entry);
@@ -3180,70 +3318,70 @@ grh::Value* SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& en
         if (diagnostics()) {
             diagnostics()->nyi(block(), "memory 地址位宽无效");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto debugInfo = originExpr ? makeDebugInfo(sourceManager_, originExpr)
                                       : makeDebugInfo(sourceManager_, entry.symbol);
-    grh::Value* current = &addrValue;
-    const int64_t currentWidth = current->width() > 0 ? current->width() : 1;
+    ValueId current = addrValue;
+    const int64_t currentWidth = graph().getValue(current).width() > 0 ? graph().getValue(current).width() : 1;
 
     if (currentWidth > targetWidth) {
-        grh::Operation& slice =
-            graph().createOperation(grh::OperationKind::kSliceStatic,
+        OperationId slice =
+            createOperation(graph(), grh::OperationKind::kSliceStatic,
                                     makeMemoryHelperOpName("addr_trunc"));
-        applyDebug(slice, debugInfo);
-        slice.addOperand(*current);
-        slice.setAttribute("sliceStart", int64_t(0));
-        slice.setAttribute("sliceEnd", targetWidth - 1);
-        grh::Value& sliced =
-            graph().createValue(makeMemoryHelperValueName("addr_trunc"), targetWidth,
+        applyDebug(graph(), slice, debugInfo);
+        addOperand(graph(), slice, current);
+        setAttr(graph(), slice, "sliceStart", int64_t(0));
+        setAttr(graph(), slice, "sliceEnd", targetWidth - 1);
+        ValueId sliced =
+            createValue(graph(), makeMemoryHelperValueName("addr_trunc"), targetWidth,
                                 /*isSigned=*/false);
-        applyDebug(sliced, debugInfo);
-        slice.addResult(sliced);
-        current = &sliced;
+        applyDebug(graph(), sliced, debugInfo);
+        addResult(graph(), slice, sliced);
+        current = sliced;
     }
     else if (currentWidth < targetWidth) {
         const int64_t padWidth = targetWidth - currentWidth;
-        grh::Value* zero = createZeroValue(padWidth);
+        ValueId zero = createZeroValue(padWidth);
         if (!zero) {
             if (diagnostics()) {
                 diagnostics()->nyi(block(), "memory 地址 zero-extend 失败");
             }
-            return nullptr;
+            return ValueId::invalid();
         }
-        grh::Operation& concat =
-            graph().createOperation(grh::OperationKind::kConcat,
+        OperationId concat =
+            createOperation(graph(), grh::OperationKind::kConcat,
                                     makeMemoryHelperOpName("addr_zext"));
-        applyDebug(concat, debugInfo);
-        concat.addOperand(*zero);
-        concat.addOperand(*current);
-        grh::Value& extended =
-            graph().createValue(makeMemoryHelperValueName("addr_zext"), targetWidth,
+        applyDebug(graph(), concat, debugInfo);
+        addOperand(graph(), concat, zero);
+        addOperand(graph(), concat, current);
+        ValueId extended =
+            createValue(graph(), makeMemoryHelperValueName("addr_zext"), targetWidth,
                                 /*isSigned=*/false);
-        applyDebug(extended, debugInfo);
-        concat.addResult(extended);
-        current = &extended;
+        applyDebug(graph(), extended, debugInfo);
+        addResult(graph(), concat, extended);
+        current = extended;
     }
 
-    if (current->isSigned()) {
-        grh::Operation& assign =
-            graph().createOperation(grh::OperationKind::kAssign,
+    if (graph().getValue(current).isSigned()) {
+        OperationId assign =
+            createOperation(graph(), grh::OperationKind::kAssign,
                                     makeMemoryHelperOpName("addr_cast"));
-        applyDebug(assign, debugInfo);
-        assign.addOperand(*current);
-        grh::Value& casted =
-            graph().createValue(makeMemoryHelperValueName("addr_cast"), current->width(),
+        applyDebug(graph(), assign, debugInfo);
+        addOperand(graph(), assign, current);
+        ValueId casted =
+            createValue(graph(), makeMemoryHelperValueName("addr_cast"), graph().getValue(current).width(),
                                 /*isSigned=*/false);
-        applyDebug(casted, debugInfo);
-        assign.addResult(casted);
-        current = &casted;
+        applyDebug(graph(), casted, debugInfo);
+        addResult(graph(), assign, casted);
+        current = casted;
     }
 
     return current;
 }
 
-bool SeqAlwaysConverter::applyClockPolarity(grh::Operation& op, std::string_view context) {
+bool SeqAlwaysConverter::applyClockPolarity(OperationId op, std::string_view context) {
     if (!clockPolarityAttr_) {
         if (diagnostics()) {
             std::string msg = "Seq always ";
@@ -3253,96 +3391,95 @@ bool SeqAlwaysConverter::applyClockPolarity(grh::Operation& op, std::string_view
         }
         return false;
     }
-    op.setAttribute("clkPolarity", *clockPolarityAttr_);
+    setAttr(graph(), op, "clkPolarity", *clockPolarityAttr_);
     return true;
 }
 
-grh::Value* SeqAlwaysConverter::createConcatWithZeroPadding(grh::Value& value, int64_t padWidth,
+ValueId SeqAlwaysConverter::createConcatWithZeroPadding(ValueId value, int64_t padWidth,
                                                             std::string_view label) {
     if (padWidth < 0) {
         if (diagnostics()) {
             diagnostics()->nyi(block(), "Negative padding requested for memory bit value");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
     if (padWidth == 0) {
-        return &value;
+        return value;
     }
-    grh::Value* zeroPad = createZeroValue(padWidth);
+    ValueId zeroPad = createZeroValue(padWidth);
     if (!zeroPad) {
-        return nullptr;
+        return ValueId::invalid();
     }
     const auto debugInfo = makeDebugInfo(sourceManager_, &block());
-    grh::Operation& concat =
-        graph().createOperation(grh::OperationKind::kConcat, makeMemoryHelperOpName(label));
-    applyDebug(concat, debugInfo);
-    concat.addOperand(*zeroPad);
-    concat.addOperand(value);
+    OperationId concat =
+        createOperation(graph(), grh::OperationKind::kConcat, makeMemoryHelperOpName(label));
+    applyDebug(graph(), concat, debugInfo);
+    addOperand(graph(), concat, zeroPad);
+    addOperand(graph(), concat, value);
 
-    grh::Value& wide =
-        graph().createValue(makeMemoryHelperValueName(label), padWidth + value.width(),
-                            value.isSigned());
-    applyDebug(wide, debugInfo);
-    concat.addResult(wide);
-    return &wide;
+    ValueId wide =
+        createValue(graph(), makeMemoryHelperValueName(label), padWidth + graph().getValue(value).width(),
+                    graph().getValue(value).isSigned());
+    applyDebug(graph(), wide, debugInfo);
+    addResult(graph(), concat, wide);
+    return wide;
 }
 
-grh::Value* SeqAlwaysConverter::buildShiftedBitValue(grh::Value& sourceBit, grh::Value& bitIndex,
+ValueId SeqAlwaysConverter::buildShiftedBitValue(ValueId sourceBit, ValueId bitIndex,
                                                      int64_t targetWidth, std::string_view label) {
     if (targetWidth <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
-    const int64_t padWidth = targetWidth - sourceBit.width();
-    grh::Value* extended = createConcatWithZeroPadding(sourceBit, padWidth, label);
+    const int64_t padWidth = targetWidth - graph().getValue(sourceBit).width();
+    ValueId extended = createConcatWithZeroPadding(sourceBit, padWidth, label);
     if (!extended) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, &block());
-    grh::Operation& shl =
-        graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
-    applyDebug(shl, debugInfo);
-    shl.addOperand(*extended);
-    shl.addOperand(bitIndex);
-    grh::Value& shifted =
-        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
-    applyDebug(shifted, debugInfo);
-    shl.addResult(shifted);
-    return &shifted;
+    OperationId shl =
+        createOperation(graph(), grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    applyDebug(graph(), shl, debugInfo);
+    addOperand(graph(), shl, extended);
+    addOperand(graph(), shl, bitIndex);
+    ValueId shifted =
+        createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(graph(), shifted, debugInfo);
+    addResult(graph(), shl, shifted);
+    return shifted;
 }
 
-grh::Value* SeqAlwaysConverter::buildShiftedMask(grh::Value& bitIndex, int64_t targetWidth,
+ValueId SeqAlwaysConverter::buildShiftedMask(ValueId bitIndex, int64_t targetWidth,
                                                  std::string_view label) {
     if (targetWidth <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
     slang::SVInt literal(static_cast<slang::bitwidth_t>(targetWidth), 1, /*isSigned=*/false);
     const auto debugInfo = makeDebugInfo(sourceManager_, &block());
-    grh::Operation& constOp =
-        graph().createOperation(grh::OperationKind::kConstant, makeMemoryHelperOpName(label));
-    applyDebug(constOp, debugInfo);
-    grh::Value& baseValue =
-        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
-    applyDebug(baseValue, debugInfo);
-    constOp.addResult(baseValue);
-    constOp.setAttribute(
-        "constValue",
-        literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
-    grh::Value* base = &baseValue;
+    OperationId constOp =
+        createOperation(graph(), grh::OperationKind::kConstant, makeMemoryHelperOpName(label));
+    applyDebug(graph(), constOp, debugInfo);
+    ValueId baseValue =
+        createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(graph(), baseValue, debugInfo);
+    addResult(graph(), constOp, baseValue);
+    setAttr(graph(), constOp, "constValue",
+            literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
+    ValueId base = baseValue;
     if (!base) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Operation& shl =
-        graph().createOperation(grh::OperationKind::kShl, makeMemoryHelperOpName(label));
-    applyDebug(shl, debugInfo);
-    shl.addOperand(*base);
-    shl.addOperand(bitIndex);
-    grh::Value& shifted =
-        graph().createValue(makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
-    applyDebug(shifted, debugInfo);
-    shl.addResult(shifted);
-    return &shifted;
+    OperationId shl =
+        createOperation(graph(), grh::OperationKind::kShl, makeMemoryHelperOpName(label));
+    applyDebug(graph(), shl, debugInfo);
+    addOperand(graph(), shl, base);
+    addOperand(graph(), shl, bitIndex);
+    ValueId shifted =
+        createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+    applyDebug(graph(), shifted, debugInfo);
+    addResult(graph(), shl, shifted);
+    return shifted;
 }
 
 std::string SeqAlwaysConverter::makeMemoryHelperOpName(std::string_view suffix) {
@@ -3361,7 +3498,7 @@ std::string SeqAlwaysConverter::makeMemoryHelperValueName(std::string_view suffi
     return name;
 }
 
-std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {
+std::optional<ValueId> SeqAlwaysConverter::deriveClockValue() {
     const slang::ast::TimingControl* timing = findTimingControl(block().getBody());
     clockPolarityAttr_.reset();
     if (!timing) {
@@ -3403,14 +3540,14 @@ std::optional<grh::Value*> SeqAlwaysConverter::deriveClockValue() {
         break;
     }
 
-    grh::Value* clkValue = convertTimingExpr(clockEvent->expr);
+    ValueId clkValue = convertTimingExpr(clockEvent->expr);
     if (!clkValue && diagnostics()) {
         diagnostics()->nyi(block(), "Failed to lower sequential clock expression");
     }
     return clkValue;
 }
 
-grh::Value* SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& expr) {
+ValueId SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& expr) {
     if (auto it = timingValueCache_.find(&expr); it != timingValueCache_.end()) {
         return it->second;
     }
@@ -3419,10 +3556,10 @@ grh::Value* SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& 
         if (diagnostics()) {
             diagnostics()->nyi(block(), "RHS converter unavailable for timing expressions");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* value = rhsConverter_->convert(expr);
+    ValueId value = rhsConverter_->convert(expr);
     if (value) {
         timingValueCache_[&expr] = value;
     }
@@ -3442,7 +3579,8 @@ std::optional<SeqAlwaysConverter::ResetContext> SeqAlwaysConverter::deriveBlockR
     if (auto asyncInfo = detectAsyncResetEvent(block(), diagnostics())) {
         if (asyncInfo->edge == slang::ast::EdgeKind::PosEdge ||
             asyncInfo->edge == slang::ast::EdgeKind::NegEdge) {
-            grh::Value* rstValue = asyncInfo->expr ? resolveAsyncResetSignal(*asyncInfo->expr) : nullptr;
+            ValueId rstValue = asyncInfo->expr ? resolveAsyncResetSignal(*asyncInfo->expr)
+                                               : ValueId::invalid();
             if (rstValue) {
                 blockResetContext_.kind = ResetContext::Kind::Async;
                 blockResetContext_.signal = rstValue;
@@ -3457,7 +3595,7 @@ std::optional<SeqAlwaysConverter::ResetContext> SeqAlwaysConverter::deriveBlockR
 
     if (auto syncInfo = detectSyncReset(block().getBody())) {
         if (syncInfo->symbol) {
-            if (grh::Value* rstValue = resolveSyncResetSignal(*syncInfo->symbol)) {
+            if (ValueId rstValue = resolveSyncResetSignal(*syncInfo->symbol)) {
                 blockResetContext_.kind = ResetContext::Kind::Sync;
                 blockResetContext_.signal = rstValue;
                 blockResetContext_.activeHigh = syncInfo->activeHigh;
@@ -3467,26 +3605,37 @@ std::optional<SeqAlwaysConverter::ResetContext> SeqAlwaysConverter::deriveBlockR
     }
 
     blockResetContext_.kind = ResetContext::Kind::None;
-    blockResetContext_.signal = nullptr;
+    blockResetContext_.signal = ValueId::invalid();
     blockResetContext_.activeHigh = true;
     return std::nullopt;
 }
 
-grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& entry) {
+ValueId SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& entry) {
     if (!entry.target || !entry.target->value) {
         reportFinalizeIssue(entry, "Sequential write target lacks register value handle");
-        return nullptr;
+        return ValueId::invalid();
+    }
+
+    ValueId targetValue = entry.target->value;
+    if (targetValue && targetValue.graph != graph().id()) {
+        if (entry.target->symbol && !entry.target->symbol->name.empty()) {
+            targetValue = graph().findValue(entry.target->symbol->name);
+        }
+        if (!targetValue || targetValue.graph != graph().id()) {
+            reportFinalizeIssue(entry, "Register value belongs to a different graph");
+            return ValueId::invalid();
+        }
     }
 
     const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
-    if (entry.target->value->width() != targetWidth) {
+    if (graph().getValue(targetValue).width() != targetWidth) {
         reportFinalizeIssue(entry, "Register value width mismatch in sequential write");
-        return nullptr;
+        return ValueId::invalid();
     }
 
     if (entry.slices.empty()) {
         reportFinalizeIssue(entry, "Sequential write has no RHS slices to compose");
-        return nullptr;
+        return ValueId::invalid();
     }
 
     std::vector<WriteBackMemo::Slice> slices = entry.slices;
@@ -3498,14 +3647,14 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
         return lhs.lsb > rhs.lsb;
     });
 
-    std::vector<grh::Value*> components;
+    std::vector<ValueId> components;
     components.reserve(slices.size() + 2);
 
     auto appendHoldRange = [&](int64_t msb, int64_t lsb) -> bool {
         if (msb < lsb) {
             return true;
         }
-        grh::Value* hold = createHoldSlice(entry, msb, lsb);
+        ValueId hold = createHoldSlice(entry, targetValue, msb, lsb);
         if (!hold) {
             return false;
         }
@@ -3517,19 +3666,23 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
     for (const WriteBackMemo::Slice& slice : slices) {
         if (!slice.value) {
             reportFinalizeIssue(entry, "Sequential write slice is missing RHS value");
-            return nullptr;
+            return ValueId::invalid();
+        }
+        if (slice.value.graph != graph().id()) {
+            reportFinalizeIssue(entry, "Sequential write slice belongs to a different graph");
+            return ValueId::invalid();
         }
         if (slice.msb < slice.lsb) {
             reportFinalizeIssue(entry, "Sequential write slice has invalid bit range");
-            return nullptr;
+            return ValueId::invalid();
         }
         if (slice.msb > expectedMsb) {
             reportFinalizeIssue(entry, "Sequential write slice exceeds register width");
-            return nullptr;
+            return ValueId::invalid();
         }
         if (slice.msb < expectedMsb) {
             if (!appendHoldRange(expectedMsb, slice.msb + 1)) {
-                return nullptr;
+                return ValueId::invalid();
             }
         }
         components.push_back(slice.value);
@@ -3540,12 +3693,12 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
         makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
     if (expectedMsb >= 0) {
         if (!appendHoldRange(expectedMsb, 0)) {
-            return nullptr;
+            return ValueId::invalid();
         }
     }
 
     if (components.empty()) {
-        return entry.target->value;
+        return targetValue;
     }
 
     if (components.size() == 1) {
@@ -3556,131 +3709,132 @@ grh::Value* SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& ent
     // where compact_lo may itself be a concat tree of the remaining pieces.
     if (components.size() > 2) {
         // Build compact_lo from components[1..end] as a left-assoc concat chain.
-        auto buildChain = [&](std::vector<grh::Value*>::const_iterator begin,
-                              std::vector<grh::Value*>::const_iterator end) -> grh::Value* {
+        auto buildChain = [&](std::vector<ValueId>::const_iterator begin,
+                              std::vector<ValueId>::const_iterator end) -> ValueId {
             if (begin == end) {
-                return nullptr;
+                return ValueId::invalid();
             }
-            grh::Value* acc = *begin;
+            ValueId acc = *begin;
             for (auto it = begin + 1; it != end; ++it) {
-                grh::Operation& c =
-                    graph().createOperation(grh::OperationKind::kConcat,
+                OperationId c =
+                    createOperation(graph(), grh::OperationKind::kConcat,
                                             makeFinalizeOpName(*entry.target, "seq_concat_lo"));
-                applyDebug(c, debugInfo);
-                c.addOperand(*acc);
-                c.addOperand(**it);
-                const int64_t w = acc->width() + (*it)->width();
-                grh::Value& v =
-                    graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat_lo"),
+                applyDebug(graph(), c, debugInfo);
+                addOperand(graph(), c, acc);
+                addOperand(graph(), c, *it);
+                const int64_t w = graph().getValue(acc).width() + graph().getValue(*it).width();
+                ValueId v =
+                    createValue(graph(), makeFinalizeValueName(*entry.target, "seq_concat_lo"),
                                         w, entry.target->isSigned);
-                applyDebug(v, debugInfo);
-                c.addResult(v);
-                acc = &v;
+                applyDebug(graph(), v, debugInfo);
+                addResult(graph(), c, v);
+                acc = v;
             }
             return acc;
         };
 
-        grh::Value* hi = components.front();
-        grh::Value* lo = buildChain(components.begin() + 1, components.end());
+        ValueId hi = components.front();
+        ValueId lo = buildChain(components.begin() + 1, components.end());
         if (!lo) {
             return hi;
         }
 
-        grh::Operation& concatTop =
-            graph().createOperation(grh::OperationKind::kConcat,
+        OperationId concatTop =
+            createOperation(graph(), grh::OperationKind::kConcat,
                                     makeFinalizeOpName(*entry.target, "seq_concat"));
-        applyDebug(concatTop, debugInfo);
-        concatTop.addOperand(*hi);
-        concatTop.addOperand(*lo);
-        grh::Value& composed =
-            graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"),
+        applyDebug(graph(), concatTop, debugInfo);
+        addOperand(graph(), concatTop, hi);
+        addOperand(graph(), concatTop, lo);
+        ValueId composed =
+            createValue(graph(), makeFinalizeValueName(*entry.target, "seq_concat"),
                                 targetWidth, entry.target->isSigned);
-        applyDebug(composed, debugInfo);
-        concatTop.addResult(composed);
-        return &composed;
+        applyDebug(graph(), composed, debugInfo);
+        addResult(graph(), concatTop, composed);
+        return composed;
     }
 
-    grh::Operation& concat =
-        graph().createOperation(grh::OperationKind::kConcat,
+    OperationId concat =
+        createOperation(graph(), grh::OperationKind::kConcat,
                                 makeFinalizeOpName(*entry.target, "seq_concat"));
-    applyDebug(concat, debugInfo);
-    for (grh::Value* component : components) {
-        concat.addOperand(*component);
+    applyDebug(graph(), concat, debugInfo);
+    for (ValueId component : components) {
+        addOperand(graph(), concat, component);
     }
 
-    grh::Value& composed =
-        graph().createValue(makeFinalizeValueName(*entry.target, "seq_concat"), targetWidth,
+    ValueId composed =
+        createValue(graph(), makeFinalizeValueName(*entry.target, "seq_concat"), targetWidth,
                             entry.target->isSigned);
-    applyDebug(composed, debugInfo);
-    concat.addResult(composed);
-    return &composed;
+    applyDebug(graph(), composed, debugInfo);
+    addResult(graph(), concat, composed);
+    return composed;
 }
 
-grh::Value* SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entry, int64_t msb,
-                                                int64_t lsb) {
-    if (!entry.target || !entry.target->value) {
+ValueId SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entry, ValueId source,
+                                                int64_t msb, int64_t lsb) {
+    if (!entry.target || !source) {
         reportFinalizeIssue(entry, "Register hold slice missing target value");
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* source = entry.target->value;
-    if (!source) {
-        reportFinalizeIssue(entry, "Register hold slice has null source value");
-        return nullptr;
+    if (source.graph != graph().id()) {
+        reportFinalizeIssue(entry, "Register hold slice has mismatched graph value");
+        return ValueId::invalid();
     }
 
-    if (lsb < 0 || msb < lsb || msb >= source->width()) {
+    if (lsb < 0 || msb < lsb || msb >= graph().getValue(source).width()) {
         reportFinalizeIssue(entry, "Register hold slice range is out of bounds");
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    if (lsb == 0 && msb == source->width() - 1) {
+    if (lsb == 0 && msb == graph().getValue(source).width() - 1) {
         return source;
     }
 
     const auto debugInfo =
         makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
-    grh::Operation& sliceOp = graph().createOperation(grh::OperationKind::kSliceStatic,
+    OperationId sliceOp = createOperation(graph(), grh::OperationKind::kSliceStatic,
                                                       makeFinalizeOpName(*entry.target, "hold"));
-    applyDebug(sliceOp, debugInfo);
-    sliceOp.addOperand(*source);
-    sliceOp.setAttribute("sliceStart", lsb);
-    sliceOp.setAttribute("sliceEnd", msb);
+    applyDebug(graph(), sliceOp, debugInfo);
+    addOperand(graph(), sliceOp, source);
+    setAttr(graph(), sliceOp, "sliceStart", lsb);
+    setAttr(graph(), sliceOp, "sliceEnd", msb);
 
-    grh::Value& result =
-        graph().createValue(makeFinalizeValueName(*entry.target, "hold"), msb - lsb + 1,
-                            source->isSigned());
-    applyDebug(result, debugInfo);
-    sliceOp.addResult(result);
-    return &result;
+    ValueId result =
+        createValue(graph(), makeFinalizeValueName(*entry.target, "hold"), msb - lsb + 1,
+                    graph().getValue(source).isSigned());
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), sliceOp, result);
+    return result;
 }
 
-bool SeqAlwaysConverter::attachClockOperand(grh::Operation& stateOp, grh::Value& clkValue,
+bool SeqAlwaysConverter::attachClockOperand(OperationId stateOp, ValueId clkValue,
                                             const WriteBackMemo::Entry& entry) {
-    const auto& operands = stateOp.operands();
+    const grh::Operation opView = graph().getOperation(stateOp);
+    auto operands = opView.operands();
     if (operands.empty()) {
-        stateOp.addOperand(clkValue);
+        addOperand(graph(), stateOp, clkValue);
         return true;
     }
 
-    if (operands.front() != &clkValue) {
+    if (operands.front() != clkValue) {
         reportFinalizeIssue(entry, "Register already bound to a different clock operand");
         return false;
     }
     return true;
 }
 
-bool SeqAlwaysConverter::attachDataOperand(grh::Operation& stateOp, grh::Value& dataValue,
+bool SeqAlwaysConverter::attachDataOperand(OperationId stateOp, ValueId dataValue,
                                            const WriteBackMemo::Entry& entry) {
-    const auto& operands = stateOp.operands();
+    const grh::Operation opView = graph().getOperation(stateOp);
+    auto operands = opView.operands();
     std::size_t expected = 1;
-    if (stateOp.kind() == grh::OperationKind::kRegisterEn) {
+    if (opView.kind() == grh::OperationKind::kRegisterEn) {
         expected = 2;
-    } else if (stateOp.kind() == grh::OperationKind::kRegisterRst ||
-               stateOp.kind() == grh::OperationKind::kRegisterArst) {
+    } else if (opView.kind() == grh::OperationKind::kRegisterRst ||
+               opView.kind() == grh::OperationKind::kRegisterArst) {
         expected = 3;
-    } else if (stateOp.kind() == grh::OperationKind::kRegisterEnRst ||
-               stateOp.kind() == grh::OperationKind::kRegisterEnArst) {
+    } else if (opView.kind() == grh::OperationKind::kRegisterEnRst ||
+               opView.kind() == grh::OperationKind::kRegisterEnArst) {
         expected = 4;
     }
     if (operands.size() != expected) {
@@ -3688,16 +3842,22 @@ bool SeqAlwaysConverter::attachDataOperand(grh::Operation& stateOp, grh::Value& 
         return false;
     }
 
-    if (!stateOp.results().empty()) {
-        if (grh::Value* q = stateOp.results().front()) {
-            if (q->width() != dataValue.width()) {
+    auto results = opView.results();
+    if (!results.empty()) {
+        ValueId q = results.front();
+        if (q) {
+            if (q.graph != graph().id()) {
+                reportFinalizeIssue(entry, "Register result belongs to a different graph");
+                return false;
+            }
+            if (graph().getValue(q).width() != graph().getValue(dataValue).width()) {
                 reportFinalizeIssue(entry, "Register data width does not match Q output width");
                 return false;
             }
         }
     }
 
-    stateOp.addOperand(dataValue);
+    addOperand(graph(), stateOp, dataValue);
     return true;
 }
 
@@ -3759,7 +3919,7 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
         return std::nullopt;
     }
     ResetContext context;
-    switch (entry.stateOp->kind()) {
+    switch (graph().getOperation(entry.stateOp).kind()) {
     case grh::OperationKind::kRegisterArst:
         if (!entry.asyncResetExpr) {
             return std::nullopt;
@@ -3786,35 +3946,41 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
     return std::nullopt;
 }
 
-std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& condition,
-                                                            grh::Value& resetSignal) {
+std::optional<bool> SeqAlwaysConverter::matchResetCondition(ValueId condition,
+                                                            ValueId resetSignal) {
     const bool debugReset = std::getenv("WOLF_DEBUG_RESET") != nullptr;
-    if (&condition == &resetSignal) {
+    if (condition == resetSignal) {
         return /* inverted */ false;
     }
-    if (grh::Operation* op = condition.definingOp()) {
+    OperationId op = graph().getValue(condition).definingOp();
+    if (op) {
+        const grh::Operation opView = graph().getOperation(op);
+        auto operands = opView.operands();
         if (debugReset) {
+            const ValueId operand0 = operands.empty() ? ValueId::invalid() : operands.front();
             std::fprintf(stderr,
                          "[reset-debug] condition op kind=%d operands=%zu cond_width=%lld "
-                         "reset_width=%lld operand0=%p reset=%p\n",
-                         static_cast<int>(op->kind()), op->operands().size(),
-                         static_cast<long long>(condition.width()),
-                         static_cast<long long>(resetSignal.width()),
-                         op->operands().empty() ? nullptr : op->operands().front(),
-                         &resetSignal);
-            if (!op->operands().empty()) {
-                grh::Operation* child = op->operands().front()->definingOp();
+                         "reset_width=%lld operand0_valid=%d reset_valid=%d\n",
+                         static_cast<int>(opView.kind()),
+                         operands.size(),
+                         static_cast<long long>(graph().getValue(condition).width()),
+                         static_cast<long long>(graph().getValue(resetSignal).width()),
+                         operand0.valid(),
+                         resetSignal.valid());
+            if (!operands.empty()) {
+                OperationId child = graph().getValue(operands.front()).definingOp();
                 std::fprintf(stderr, "[reset-debug] operand0 child kind=%d\n",
-                             child ? static_cast<int>(child->kind()) : -1);
+                             child ? static_cast<int>(graph().getOperation(child).kind()) : -1);
             }
         }
-        if (op->operands().size() == 1 && op->operands().front() == &resetSignal) {
-            if (op->kind() == grh::OperationKind::kLogicNot) {
+        if (operands.size() == 1 && operands.front() == resetSignal) {
+            if (opView.kind() == grh::OperationKind::kLogicNot) {
                 return true;
             }
             // Treat a bitwise inversion of the reset signal as an active-low reset condition when
             // the widths match (e.g., "~aresetn" on a 1-bit reset).
-            if (op->kind() == grh::OperationKind::kNot && condition.width() == resetSignal.width()) {
+            if (opView.kind() == grh::OperationKind::kNot &&
+                graph().getValue(condition).width() == graph().getValue(resetSignal).width()) {
                 return true;
             }
         }
@@ -3825,24 +3991,27 @@ std::optional<bool> SeqAlwaysConverter::matchResetCondition(grh::Value& conditio
     return std::nullopt;
 }
 
-bool SeqAlwaysConverter::valueDependsOnSignal(grh::Value& root, grh::Value& needle) const {
-    std::vector<grh::Value*> stack;
-    stack.push_back(&root);
-    std::unordered_set<grh::Value*> visited;
+bool SeqAlwaysConverter::valueDependsOnSignal(ValueId root, ValueId needle) const {
+    std::vector<ValueId> stack;
+    stack.push_back(root);
+    std::unordered_set<ValueId, grh::ir::ValueIdHash> visited;
     while (!stack.empty()) {
-        grh::Value* current = stack.back();
+        ValueId current = stack.back();
         stack.pop_back();
         if (!current) {
+            continue;
+        }
+        if (current.graph != graph().id()) {
             continue;
         }
         if (!visited.insert(current).second) {
             continue;
         }
-        if (current == &needle) {
+        if (current == needle) {
             return true;
         }
-        if (grh::Operation* op = current->definingOp()) {
-            for (grh::Value* operand : op->operands()) {
+        if (OperationId op = graph().getValue(current).definingOp()) {
+            for (ValueId operand : graph().getOperation(op).operands()) {
                 if (operand) {
                     stack.push_back(operand);
                 }
@@ -3853,129 +4022,129 @@ bool SeqAlwaysConverter::valueDependsOnSignal(grh::Value& root, grh::Value& need
 }
 
 std::optional<SeqAlwaysConverter::ResetExtraction>
-SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal,
+SeqAlwaysConverter::extractResetBranches(ValueId dataValue, ValueId resetSignal,
                                          bool activeHigh, const WriteBackMemo::Entry& entry) {
     const bool debugReset = std::getenv("WOLF_DEBUG_RESET") != nullptr;
     // Some guarded registers get sliced and re-concatenated during shadow merge. If all slices
     // come from the same mux in natural bit order, peel the concat back to the mux so we can
     // inspect its reset branch.
-    auto tryCollapseConcat = [&](grh::Value& candidate) -> grh::Value* {
+    auto tryCollapseConcat = [&](ValueId candidate) -> ValueId {
         if (!entry.target) {
-            return &candidate;
+            return candidate;
         }
         const int64_t targetWidth = entry.target->width > 0 ? entry.target->width
-                                                            : candidate.width();
-        grh::Operation* concatOp = candidate.definingOp();
-        if (!concatOp || concatOp->kind() != grh::OperationKind::kConcat) {
-            return &candidate;
+                                                            : graph().getValue(candidate).width();
+        OperationId concatOp = graph().getValue(candidate).definingOp();
+        if (!concatOp || graph().getOperation(concatOp).kind() != grh::OperationKind::kConcat) {
+            return candidate;
         }
 
-        std::vector<grh::Value*> parts;
-        auto collectSlices = [&](auto&& self, grh::Value& node) -> bool {
-            grh::Operation* op = node.definingOp();
+        std::vector<ValueId> parts;
+        auto collectSlices = [&](auto&& self, ValueId node) -> bool {
+            OperationId op = graph().getValue(node).definingOp();
             if (!op) {
                 return false;
             }
-            if (op->kind() == grh::OperationKind::kConcat) {
-                for (grh::Value* operand : op->operands()) {
+            if (graph().getOperation(op).kind() == grh::OperationKind::kConcat) {
+                for (ValueId operand : graph().getOperation(op).operands()) {
                     if (!operand) {
                         return false;
                     }
-                    if (!self(self, *operand)) {
+                    if (!self(self, operand)) {
                         return false;
                     }
                 }
                 return true;
             }
-            if (op->kind() == grh::OperationKind::kSliceStatic && op->operands().size() == 1) {
-                parts.push_back(&node);
+            if (graph().getOperation(op).kind() == grh::OperationKind::kSliceStatic && graph().getOperation(op).operands().size() == 1) {
+                parts.push_back(node);
                 return true;
             }
             return false;
         };
 
         if (!collectSlices(collectSlices, candidate)) {
-            return &candidate;
+            return candidate;
         }
 
-        grh::Value* commonBase = nullptr;
+        ValueId commonBase = ValueId::invalid();
         int64_t expectedMsb = targetWidth - 1;
-        for (grh::Value* part : parts) {
+        for (ValueId part : parts) {
             if (!part) {
-                return &candidate;
+                return candidate;
             }
-            grh::Operation* sliceOp = part->definingOp();
-            if (!sliceOp || sliceOp->kind() != grh::OperationKind::kSliceStatic ||
-                sliceOp->operands().size() != 1) {
-                return &candidate;
+            OperationId sliceOp = graph().getValue(part).definingOp();
+            if (!sliceOp || graph().getOperation(sliceOp).kind() != grh::OperationKind::kSliceStatic ||
+                graph().getOperation(sliceOp).operands().size() != 1) {
+                return candidate;
             }
-            grh::Value* base = sliceOp->operands().front();
+            ValueId base = graph().getOperation(sliceOp).operands().front();
             if (!base) {
-                return &candidate;
+                return candidate;
             }
 
-            const auto& attrs = sliceOp->attributes();
-            auto itStart = attrs.find("sliceStart");
-            auto itEnd = attrs.find("sliceEnd");
-            const int64_t* start = itStart != attrs.end() ? std::get_if<int64_t>(&itStart->second)
-                                                          : nullptr;
-            const int64_t* end = itEnd != attrs.end() ? std::get_if<int64_t>(&itEnd->second)
-                                                      : nullptr;
+            const grh::Operation sliceView = graph().getOperation(sliceOp);
+            const grh::ir::SymbolId startKey = graph().lookupSymbol("sliceStart");
+            const grh::ir::SymbolId endKey = graph().lookupSymbol("sliceEnd");
+            auto startAttr = startKey.valid() ? sliceView.attr(startKey) : std::nullopt;
+            auto endAttr = endKey.valid() ? sliceView.attr(endKey) : std::nullopt;
+            const int64_t* start = startAttr ? std::get_if<int64_t>(&*startAttr) : nullptr;
+            const int64_t* end = endAttr ? std::get_if<int64_t>(&*endAttr) : nullptr;
             if (!start || !end) {
-                return &candidate;
+                return candidate;
             }
-            if ((*end - *start + 1) != part->width()) {
-                return &candidate;
+            if ((*end - *start + 1) != graph().getValue(part).width()) {
+                return candidate;
             }
             if (*end != expectedMsb) {
-                return &candidate;
+                return candidate;
             }
             expectedMsb = *start - 1;
 
             if (!commonBase) {
                 commonBase = base;
             } else if (commonBase != base) {
-                return &candidate;
+                return candidate;
             }
         }
 
         if (expectedMsb != -1) {
-            return &candidate;
+            return candidate;
         }
-        if (!commonBase || commonBase->width() != targetWidth) {
-            return &candidate;
+        if (!commonBase || graph().getValue(commonBase).width() != targetWidth) {
+            return candidate;
         }
         return commonBase;
     };
 
-    grh::Value* muxValue = tryCollapseConcat(dataValue);
-    grh::Operation* muxOp = muxValue ? muxValue->definingOp() : nullptr;
-    if (!muxOp || muxOp->kind() != grh::OperationKind::kMux || muxOp->operands().size() != 3) {
+    ValueId muxValue = tryCollapseConcat(dataValue);
+    OperationId muxOp = muxValue ? graph().getValue(muxValue).definingOp() : OperationId::invalid();
+    if (!muxOp || graph().getOperation(muxOp).kind() != grh::OperationKind::kMux || graph().getOperation(muxOp).operands().size() != 3) {
         if (debugReset) {
-            auto logOp = [](const char* label, grh::Operation* op) {
+            auto logOp = [&](const char* label, OperationId op) {
                 if (!op) {
                     std::fprintf(stderr, "[reset-debug] %s: <null>\n", label);
                     return;
                 }
                 std::fprintf(stderr, "[reset-debug] %s: kind=%d operands=%zu\n", label,
-                             static_cast<int>(op->kind()), op->operands().size());
+                             static_cast<int>(graph().getOperation(op).kind()), graph().getOperation(op).operands().size());
                 std::size_t idx = 0;
-                for (grh::Value* operand : op->operands()) {
-                    grh::Operation* child = operand ? operand->definingOp() : nullptr;
+                for (ValueId operand : graph().getOperation(op).operands()) {
+                    OperationId child = operand ? graph().getValue(operand).definingOp() : OperationId::invalid();
                     std::fprintf(stderr, "  operand[%zu]: value_width=%lld child_kind=%d\n", idx,
-                                 operand ? static_cast<long long>(operand->width()) : -1LL,
-                                 child ? static_cast<int>(child->kind()) : -1);
+                                 operand ? static_cast<long long>(graph().getValue(operand).width()) : -1LL,
+                                 child ? static_cast<int>(graph().getOperation(child).kind()) : -1);
                     ++idx;
                 }
             };
-            logOp("dataOp", dataValue.definingOp());
+            logOp("dataOp", graph().getValue(dataValue).definingOp());
             logOp("collapsedOp", muxOp);
         }
         reportFinalizeIssue(entry, "Expected mux structure to derive reset value");
         return std::nullopt;
     }
-    grh::Value* condition = muxOp->operands().front();
-    auto match = matchResetCondition(*condition, resetSignal);
+    ValueId condition = graph().getOperation(muxOp).operands().front();
+    auto match = matchResetCondition(condition, resetSignal);
     if (!match) {
         reportFinalizeIssue(entry, "Reset mux condition does not reference reset signal");
         return std::nullopt;
@@ -3984,27 +4153,81 @@ SeqAlwaysConverter::extractResetBranches(grh::Value& dataValue, grh::Value& rese
     const bool conditionTrueWhenSignalHigh = !*match;
     const bool resetWhenSignalHigh = activeHigh;
     const bool resetBranchIsTrue = conditionTrueWhenSignalHigh == resetWhenSignalHigh;
-    grh::Value* resetValue = muxOp->operands()[resetBranchIsTrue ? 1 : 2];
-    grh::Value* dataWithoutReset = muxOp->operands()[resetBranchIsTrue ? 2 : 1];
+    ValueId resetValue = graph().getOperation(muxOp).operands()[resetBranchIsTrue ? 1 : 2];
+    ValueId dataWithoutReset = graph().getOperation(muxOp).operands()[resetBranchIsTrue ? 2 : 1];
     if (!resetValue) {
         reportFinalizeIssue(entry, "Reset branch value is missing");
         return std::nullopt;
     }
-    if (resetValue->width() != dataValue.width()) {
+    if (graph().getValue(resetValue).width() != graph().getValue(dataValue).width()) {
         reportFinalizeIssue(entry, "Reset branch width mismatch");
         return std::nullopt;
     }
     return ResetExtraction{resetValue, dataWithoutReset};
 }
 
-bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
-                                             grh::Value& resetValue,
+std::optional<SeqAlwaysConverter::ResetExtraction>
+SeqAlwaysConverter::extractAsyncResetAssignment(const SignalMemoEntry& entry,
+                                                const ResetContext& context) {
+    if (!entry.symbol || !rhsConverter_) {
+        return std::nullopt;
+    }
+    const auto* conditional = findConditional(block().getBody());
+    if (!conditional || conditional->conditions.size() != 1 || !conditional->ifFalse) {
+        return std::nullopt;
+    }
+    const slang::ast::Expression* condExpr = conditional->conditions.front().expr;
+    if (!condExpr) {
+        return std::nullopt;
+    }
+
+    bool condActiveHigh = true;
+    const slang::ast::ValueSymbol* condSymbol = extractResetSymbol(*condExpr, condActiveHigh);
+    if (!condSymbol) {
+        return std::nullopt;
+    }
+    if (entry.asyncResetExpr) {
+        bool resetActiveHigh = true;
+        if (const slang::ast::ValueSymbol* resetSymbol =
+                extractResetSymbol(*entry.asyncResetExpr, resetActiveHigh)) {
+            if (resetSymbol != condSymbol) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    const bool resetBranchIsTrue = condActiveHigh == context.activeHigh;
+    const slang::ast::Statement& resetStmt =
+        resetBranchIsTrue ? conditional->ifTrue : *conditional->ifFalse;
+    const slang::ast::Statement& dataStmt =
+        resetBranchIsTrue ? *conditional->ifFalse : conditional->ifTrue;
+
+    const slang::ast::Expression* resetRhs = findAssignedRhs(resetStmt, *entry.symbol);
+    const slang::ast::Expression* dataRhs = findAssignedRhs(dataStmt, *entry.symbol);
+    if (!resetRhs || !dataRhs) {
+        return std::nullopt;
+    }
+
+    ValueId resetValue = rhsConverter_->convert(*resetRhs);
+    ValueId dataWithoutReset = rhsConverter_->convert(*dataRhs);
+    if (!resetValue || !dataWithoutReset) {
+        return std::nullopt;
+    }
+    if (graph().getValue(resetValue).width() != graph().getValue(dataWithoutReset).width()) {
+        return std::nullopt;
+    }
+    return ResetExtraction{resetValue, dataWithoutReset};
+}
+
+bool SeqAlwaysConverter::attachResetOperands(OperationId stateOp, ValueId rstSignal,
+                                             ValueId resetValue,
                                              const WriteBackMemo::Entry& entry) {
-    auto operands = stateOp.operands();
-    if (stateOp.kind() != grh::OperationKind::kRegisterRst &&
-        stateOp.kind() != grh::OperationKind::kRegisterArst &&
-        stateOp.kind() != grh::OperationKind::kRegisterEnRst &&
-        stateOp.kind() != grh::OperationKind::kRegisterEnArst) {
+    const grh::Operation opView = graph().getOperation(stateOp);
+    auto operands = opView.operands();
+    if (opView.kind() != grh::OperationKind::kRegisterRst &&
+        opView.kind() != grh::OperationKind::kRegisterArst &&
+        opView.kind() != grh::OperationKind::kRegisterEnRst &&
+        opView.kind() != grh::OperationKind::kRegisterEnArst) {
         reportFinalizeIssue(entry, "Register does not expect reset operands");
         return false;
     }
@@ -4018,31 +4241,31 @@ bool SeqAlwaysConverter::attachResetOperands(grh::Operation& stateOp, grh::Value
         }
         return false;
     }
-    if (resetValue.width() != entry.target->width) {
+    if (graph().getValue(resetValue).width() != entry.target->width) {
         reportFinalizeIssue(entry, "Reset value width mismatch");
         return false;
     }
-    stateOp.addOperand(rstSignal);
-    stateOp.addOperand(resetValue);
+    addOperand(graph(), stateOp, rstSignal);
+    addOperand(graph(), stateOp, resetValue);
     return true;
 }
 
-grh::Value* SeqAlwaysConverter::resolveAsyncResetSignal(const slang::ast::Expression& expr) {
+ValueId SeqAlwaysConverter::resolveAsyncResetSignal(const slang::ast::Expression& expr) {
     if (auto it = timingValueCache_.find(&expr); it != timingValueCache_.end()) {
         return it->second;
     }
-    grh::Value* value = convertTimingExpr(expr);
+    ValueId value = convertTimingExpr(expr);
     if (value) {
         timingValueCache_[&expr] = value;
     }
     return value;
 }
 
-grh::Value* SeqAlwaysConverter::resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol) {
+ValueId SeqAlwaysConverter::resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol) {
     if (auto it = syncResetCache_.find(&symbol); it != syncResetCache_.end()) {
         return it->second;
     }
-    grh::Value* value = graph().findValue(symbol.name);
+    ValueId value = graph().findValue(symbol.name);
     if (value) {
         syncResetCache_[&symbol] = value;
     }
@@ -4396,7 +4619,8 @@ void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& s
         return;
     }
 
-    grh::Value* rawCondition = rhsConverter_ ? rhsConverter_->convert(conditionExpr) : nullptr;
+    ValueId rawCondition = rhsConverter_ ? rhsConverter_->convert(conditionExpr)
+                                         : ValueId::invalid();
     if (!rawCondition) {
         return;
     }
@@ -4410,7 +4634,7 @@ void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& s
                                                           /*isStaticContext=*/false)
                                      : baseSnapshot;
 
-        auto merged = mergeShadowFrames(*rawCondition, std::move(trueFrame), std::move(falseFrame),
+        auto merged = mergeShadowFrames(rawCondition, std::move(trueFrame), std::move(falseFrame),
                                         stmt, "if");
         if (!merged) {
             return;
@@ -4421,11 +4645,11 @@ void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& s
 
     // Sequential: push guards for true/false branches, accumulate writes in child frames,
     // and merge with hold semantics.
-    grh::Value* condBit = coerceToCondition(*rawCondition);
+    ValueId condBit = coerceToCondition(rawCondition);
     if (!condBit) {
         return;
     }
-    grh::Value* notCond = buildLogicNot(*condBit);
+    ValueId notCond = buildLogicNot(condBit);
     if (!notCond) {
         return;
     }
@@ -4447,7 +4671,7 @@ void AlwaysConverter::visitConditional(const slang::ast::ConditionalStatement& s
     }
 
     auto merged =
-        mergeShadowFrames(*condBit, std::move(trueFrame), std::move(falseFrame), stmt, "if");
+        mergeShadowFrames(condBit, std::move(trueFrame), std::move(falseFrame), stmt, "if");
     if (!merged) {
         return;
     }
@@ -4479,7 +4703,8 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
         return;
     }
 
-    grh::Value* controlValue = rhsConverter_ ? rhsConverter_->convert(stmt.expr) : nullptr;
+    ValueId controlValue = rhsConverter_ ? rhsConverter_->convert(stmt.expr)
+                                         : ValueId::invalid();
     if (!controlValue) {
         return;
     }
@@ -4489,9 +4714,9 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
     std::vector<CaseBranch> branches;
     branches.reserve(stmt.items.size());
 
-    grh::Value* anyMatch = nullptr;
+    ValueId anyMatch = ValueId::invalid();
     for (const auto& item : stmt.items) {
-        grh::Value* match = buildCaseMatch(item, *controlValue, stmt.condition);
+        ValueId match = buildCaseMatch(item, controlValue, stmt.condition);
         if (!match) {
             return;
         }
@@ -4511,14 +4736,14 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
             anyMatch = match;
         }
         else if (isSequential()) {
-            anyMatch = buildLogicOr(*anyMatch, *match);
+            anyMatch = buildLogicOr(anyMatch, match);
         }
     }
 
     ShadowFrame accumulator;
     if (stmt.defaultCase) {
         if (isSequential() && anyMatch) {
-            grh::Value* notAny = buildLogicNot(*anyMatch);
+            ValueId notAny = buildLogicNot(anyMatch);
             pushGuard(notAny);
             accumulator = runWithShadowFrame(baseSnapshot, *stmt.defaultCase,
                                              /*isStaticContext=*/false);
@@ -4548,7 +4773,7 @@ void AlwaysConverter::visitCase(const slang::ast::CaseStatement& stmt) {
 
     for (auto it = branches.rbegin(); it != branches.rend(); ++it) {
         auto merged =
-            mergeShadowFrames(*it->match, std::move(it->frame), std::move(accumulator), stmt,
+            mergeShadowFrames(it->match, std::move(it->frame), std::move(accumulator), stmt,
                               "case");
         if (!merged) {
             return;
@@ -4612,12 +4837,12 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
         return;
     }
 
-    grh::Value* rhsValue = rhsConverter_->convert(expr.right());
+    ValueId rhsValue = rhsConverter_->convert(expr.right());
     if (!rhsValue) {
         return;
     }
 
-    lhsConverter_->convert(expr, *rhsValue);
+    lhsConverter_->convert(expr, rhsValue);
 }
 
 bool AlwaysConverter::handleSystemCall(const slang::ast::CallExpression& call,
@@ -4680,7 +4905,7 @@ namespace {
 
 void insertShadowSliceList(std::vector<WriteBackMemo::Slice>& entries,
                            const WriteBackMemo::Slice& slice,
-                           const std::function<grh::Value*(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting);
+                           const std::function<ValueId(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting);
 
 } // namespace
 
@@ -4922,7 +5147,7 @@ void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     for (const auto& s : slices) {
         std::fprintf(stderr, "  slice %lld:%lld valw=%lld\n",
                      static_cast<long long>(s.msb), static_cast<long long>(s.lsb),
-                     s.value ? static_cast<long long>(s.value->width()) : -1LL);
+                     s.value ? static_cast<long long>(graph().getValue(s.value).width()) : -1LL);
     }
     if (std::getenv("WOLF_DEBUG_SHADOW_WRITE")) {
         std::fprintf(stderr, "[shadow-write-debug] %s nonblocking=%d\n",
@@ -4935,13 +5160,13 @@ void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
     }
     if (currentAssignmentIsNonBlocking_) {
         state.dirtyAll = true;
-        state.composedAll = nullptr;
+        state.composedAll = ValueId::invalid();
     }
     else {
         state.dirtyBlocking = true;
         state.dirtyAll = true;
-        state.composedBlocking = nullptr;
-        state.composedAll = nullptr;
+        state.composedBlocking = ValueId::invalid();
+        state.composedAll = ValueId::invalid();
     }
     currentFrame().touched.insert(&entry);
 }
@@ -4965,40 +5190,41 @@ AlwaysConverter::findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) c
     return findIn(regMemo_);
 }
 
-grh::Value* AlwaysConverter::sliceExistingValue(const WriteBackMemo::Slice& existing,
+ValueId AlwaysConverter::sliceExistingValue(const WriteBackMemo::Slice& existing,
                                                 int64_t segMsb, int64_t segLsb) {
     if (!existing.value) {
-        return nullptr;
+        return ValueId::invalid();
     }
     if (segLsb == existing.lsb && segMsb == existing.msb) {
         return existing.value;
     }
     if (segLsb < existing.lsb || segMsb > existing.msb || segMsb < segLsb) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const int64_t relStart = segLsb - existing.lsb;
     const int64_t relEnd = segMsb - existing.lsb;
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kSliceStatic, makeControlOpName("shadow_slice"));
-    applyDebug(op, debugInfo);
-    op.addOperand(*existing.value);
-    op.setAttribute("sliceStart", relStart);
-    op.setAttribute("sliceEnd", relEnd);
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kSliceStatic, makeControlOpName("shadow_slice"));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, existing.value);
+    setAttr(graph(), op, "sliceStart", relStart);
+    setAttr(graph(), op, "sliceEnd", relEnd);
 
-    grh::Value& result = graph_.createValue(makeControlValueName("shadow_slice"),
-                                            segMsb - segLsb + 1, existing.value->isSigned());
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    ValueId result = createValue(graph_, makeControlValueName("shadow_slice"),
+                                 segMsb - segLsb + 1,
+                                 graph().getValue(existing.value).isSigned());
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
 namespace {
 
 void insertShadowSliceList(std::vector<WriteBackMemo::Slice>& entries,
                            const WriteBackMemo::Slice& slice,
-                           const std::function<grh::Value*(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting) {
+                           const std::function<ValueId(const WriteBackMemo::Slice&, int64_t, int64_t)>& sliceExisting) {
     WriteBackMemo::Slice copy = slice;
     std::vector<WriteBackMemo::Slice> preserved;
     preserved.reserve(entries.size() + 2);
@@ -5058,11 +5284,11 @@ void AlwaysConverter::insertShadowSlice(ShadowState& state,
     insertShadowSliceList(entries, slice, sliceExisting);
 }
 
-grh::Value* AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
+ValueId AlwaysConverter::lookupShadowValue(const SignalMemoEntry& entry) {
     ShadowFrame& frame = currentFrame();
     auto it = frame.map.find(&entry);
     if (it == frame.map.end()) {
-        return nullptr;
+        return ValueId::invalid();
     }
     ShadowState& state = it->second;
     if (!state.dirtyBlocking && state.composedBlocking) {
@@ -5095,12 +5321,12 @@ void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
     pendingLoopDepth_ = loopContextStack_.size();
 }
 
-grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
+ValueId AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
                                                     ShadowState& state) {
     return rebuildShadowValue(entry, state, /*includeNonBlocking=*/true);
 }
 
-grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
+ValueId AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
                                                     ShadowState& state, bool includeNonBlocking) {
     auto collectSlices = [&]() {
         if (!includeNonBlocking || state.nbaSlices.empty()) {
@@ -5124,45 +5350,45 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
     std::vector<WriteBackMemo::Slice> mergedSlices = collectSlices();
     if (mergedSlices.empty()) {
         if (includeNonBlocking) {
-            state.composedAll = nullptr;
+            state.composedAll = ValueId::invalid();
             state.dirtyAll = false;
         }
         else {
-            state.composedBlocking = nullptr;
+            state.composedBlocking = ValueId::invalid();
             state.dirtyBlocking = false;
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const int64_t targetWidth = entry.width > 0 ? entry.width : 1;
     int64_t expectedMsb = targetWidth - 1;
-    std::vector<grh::Value*> components;
+    std::vector<ValueId> components;
     components.reserve(mergedSlices.size() + 2);
 
     auto appendHoldRange = [&](int64_t msb, int64_t lsb) -> bool {
         if (msb < lsb) {
             return true;
         }
-        grh::Value* hold = nullptr;
+        ValueId hold = ValueId::invalid();
         if (entry.value) {
-            if (lsb == 0 && msb == entry.value->width() - 1) {
+            if (lsb == 0 && msb == graph().getValue(entry.value).width() - 1) {
                 hold = entry.value;
             }
             else {
                 const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
-                grh::Operation& sliceOp =
-                    graph_.createOperation(grh::OperationKind::kSliceStatic,
-                                            makeShadowOpName(entry, "hold"));
-                applyDebug(sliceOp, debugInfo);
-                sliceOp.addOperand(*entry.value);
-                sliceOp.setAttribute("sliceStart", lsb);
-                sliceOp.setAttribute("sliceEnd", msb);
+                OperationId sliceOp =
+                    createOperation(graph_, grh::OperationKind::kSliceStatic,
+                                    makeShadowOpName(entry, "hold"));
+                applyDebug(graph(), sliceOp, debugInfo);
+                addOperand(graph(), sliceOp, entry.value);
+                setAttr(graph(), sliceOp, "sliceStart", lsb);
+                setAttr(graph(), sliceOp, "sliceEnd", msb);
 
-                grh::Value& result = graph_.createValue(
+                ValueId result = createValue(graph_,
                     makeShadowValueName(entry, "hold"), msb - lsb + 1, entry.isSigned);
-                applyDebug(result, debugInfo);
-                sliceOp.addResult(result);
-                hold = &result;
+                applyDebug(graph(), result, debugInfo);
+                addResult(graph(), sliceOp, result);
+                hold = result;
             }
         }
         else {
@@ -5173,11 +5399,11 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
         }
         if (!hold) {
             if (includeNonBlocking) {
-                state.composedAll = nullptr;
+                state.composedAll = ValueId::invalid();
                 state.dirtyAll = false;
             }
             else {
-                state.composedBlocking = nullptr;
+                state.composedBlocking = ValueId::invalid();
                 state.dirtyBlocking = false;
             }
             return false;
@@ -5190,7 +5416,7 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
         const int64_t gapWidth = expectedMsb - slice.msb;
         if (gapWidth > 0) {
             if (!appendHoldRange(expectedMsb, slice.msb + 1)) {
-                return nullptr;
+                return ValueId::invalid();
             }
             expectedMsb -= gapWidth;
         }
@@ -5200,28 +5426,28 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
 
     if (expectedMsb >= 0) {
         if (!appendHoldRange(expectedMsb, 0)) {
-            return nullptr;
+            return ValueId::invalid();
         }
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
-    grh::Value* composed = nullptr;
+    ValueId composed = ValueId::invalid();
     if (components.size() == 1) {
         composed = components.front();
     }
     else {
-        grh::Operation& concat =
-            graph_.createOperation(grh::OperationKind::kConcat,
+        OperationId concat =
+            createOperation(graph_, grh::OperationKind::kConcat,
                                    makeShadowOpName(entry, "shadow_concat"));
-        applyDebug(concat, debugInfo);
-        for (grh::Value* operand : components) {
-            concat.addOperand(*operand);
+        applyDebug(graph(), concat, debugInfo);
+        for (ValueId operand : components) {
+            addOperand(graph(), concat, operand);
         }
-        grh::Value& value =
-            graph_.createValue(makeShadowValueName(entry, "shadow"), targetWidth, entry.isSigned);
-        applyDebug(value, debugInfo);
-        concat.addResult(value);
-        composed = &value;
+        ValueId value =
+            createValue(graph_, makeShadowValueName(entry, "shadow"), targetWidth, entry.isSigned);
+        applyDebug(graph(), value, debugInfo);
+        addResult(graph(), concat, value);
+        composed = value;
     }
 
     if (includeNonBlocking) {
@@ -5235,9 +5461,9 @@ grh::Value* AlwaysConverter::rebuildShadowValue(const SignalMemoEntry& entry,
     return composed;
 }
 
-grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
+ValueId AlwaysConverter::createZeroValue(int64_t width) {
     if (width <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
     if (auto it = zeroCache_.find(width); it != zeroCache_.end()) {
         return it->second;
@@ -5252,21 +5478,21 @@ grh::Value* AlwaysConverter::createZeroValue(int64_t width) {
     valueName.push_back('_');
     valueName.append(std::to_string(shadowNameCounter_++));
 
-    grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &block_));
-    grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
-    applyDebug(value, makeDebugInfo(sourceManager_, &block_));
-    op.addResult(value);
+    OperationId op = createOperation(graph_, grh::OperationKind::kConstant, opName);
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &block_));
+    ValueId value = createValue(graph_, valueName, width, /*isSigned=*/false);
+    applyDebug(graph(), value, makeDebugInfo(sourceManager_, &block_));
+    addResult(graph(), op, value);
     std::ostringstream oss;
     oss << width << "'h0";
-    op.setAttribute("constValue", oss.str());
-    zeroCache_[width] = &value;
-    return &value;
+    setAttr(graph(), op, "constValue", oss.str());
+    zeroCache_[width] = value;
+    return value;
 }
 
-grh::Value* AlwaysConverter::createOneValue(int64_t width) {
+ValueId AlwaysConverter::createOneValue(int64_t width) {
     if (width <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
     if (auto it = oneCache_.find(width); it != oneCache_.end()) {
         return it->second;
@@ -5279,11 +5505,11 @@ grh::Value* AlwaysConverter::createOneValue(int64_t width) {
     valueName.append(std::to_string(controlInstanceId_));
     valueName.push_back('_');
     valueName.append(std::to_string(shadowNameCounter_++));
-    grh::Operation& op = graph_.createOperation(grh::OperationKind::kConstant, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &block_));
-    grh::Value& value = graph_.createValue(valueName, width, /*isSigned=*/false);
-    applyDebug(value, makeDebugInfo(sourceManager_, &block_));
-    op.addResult(value);
+    OperationId op = createOperation(graph_, grh::OperationKind::kConstant, opName);
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, &block_));
+    ValueId value = createValue(graph_, valueName, width, /*isSigned=*/false);
+    applyDebug(graph(), value, makeDebugInfo(sourceManager_, &block_));
+    addResult(graph(), op, value);
     std::ostringstream oss;
     // Fill with ones: e.g. 8'hff
     oss << width << "'h";
@@ -5291,9 +5517,9 @@ grh::Value* AlwaysConverter::createOneValue(int64_t width) {
     for (int64_t i = 0; i < hexDigits; ++i) {
         oss << 'f';
     }
-    op.setAttribute("constValue", oss.str());
-    oneCache_[width] = &value;
-    return &value;
+    setAttr(graph(), op, "constValue", oss.str());
+    oneCache_[width] = value;
+    return value;
 }
 
 std::string AlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
@@ -5361,7 +5587,7 @@ AlwaysConverter::runWithShadowFrame(const ShadowFrame& seed,
 }
 
 std::optional<AlwaysConverter::ShadowFrame>
-AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+AlwaysConverter::mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
                                        ShadowFrame&& falseFrame,
                                        const slang::ast::Statement& /*originStmt*/,
                                        std::string_view label) {
@@ -5373,7 +5599,7 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
         return std::move(falseFrame);
     }
 
-    grh::Value* condBit = coerceToCondition(condition);
+    ValueId condBit = coerceToCondition(condition);
     if (!condBit) {
         return std::nullopt;
     }
@@ -5386,12 +5612,12 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
 
         auto trueIt = trueFrame.map.find(entry);
         auto falseIt = falseFrame.map.find(entry);
-        grh::Value* trueValue = nullptr;
-        grh::Value* falseValue = nullptr;
+        ValueId trueValue = ValueId::invalid();
+        ValueId falseValue = ValueId::invalid();
         bool inferredLatch = false;
 
         if (!isSequential()) {
-            grh::Value* holdValue = entry->value;
+            ValueId holdValue = entry->value;
             if ((trueIt == trueFrame.map.end() || falseIt == falseFrame.map.end()) && !holdValue) {
                 reportLatchIssue("comb always branch coverage incomplete but missing hold value",
                                  entry);
@@ -5437,7 +5663,7 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
             return std::nullopt;
         }
 
-        grh::Value* muxValue = createMuxForEntry(*entry, *condBit, *trueValue, *falseValue, label);
+        ValueId muxValue = createMuxForEntry(*entry, condBit, trueValue, falseValue, label);
         if (!muxValue) {
             return std::nullopt;
         }
@@ -5492,11 +5718,11 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
                 }
             }
             if (mergedState.slices.empty()) {
-                mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+                mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
             }
         }
         else {
-            mergedState.slices.push_back(buildFullSlice(*entry, *muxValue));
+            mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
         }
         mergedState.composedBlocking = muxValue;
         mergedState.composedAll = muxValue;
@@ -5515,7 +5741,7 @@ AlwaysConverter::mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFram
 }
 
 WriteBackMemo::Slice AlwaysConverter::buildFullSlice(const SignalMemoEntry& entry,
-                                                         grh::Value& value) {
+                                                         ValueId value) {
     WriteBackMemo::Slice slice;
     if (entry.symbol && !entry.symbol->name.empty()) {
         slice.path = std::string(entry.symbol->name);
@@ -5523,125 +5749,125 @@ WriteBackMemo::Slice AlwaysConverter::buildFullSlice(const SignalMemoEntry& entr
     const int64_t width = entry.width > 0 ? entry.width : 1;
     slice.msb = width - 1;
     slice.lsb = 0;
-    slice.value = &value;
+    slice.value = value;
     slice.originExpr = nullptr;
     return slice;
 }
 
-grh::Value* AlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
-                                                   grh::Value& condition, grh::Value& onTrue,
-                                                   grh::Value& onFalse, std::string_view label) {
+ValueId AlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
+                                                   ValueId condition, ValueId onTrue,
+                                                   ValueId onFalse, std::string_view label) {
     const int64_t width = entry.width > 0 ? entry.width : 1;
-    if (onTrue.width() != width || onFalse.width() != width) {
+    if (graph().getValue(onTrue).width() != width || graph().getValue(onFalse).width() != width) {
         reportLatchIssue("comb always mux width mismatch", &entry);
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, entry.symbol);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kMux, makeShadowOpName(entry, label));
-    applyDebug(op, debugInfo);
-    op.addOperand(condition);
-    op.addOperand(onTrue);
-    op.addOperand(onFalse);
-    grh::Value& result =
-        graph_.createValue(makeShadowValueName(entry, label), width, entry.isSigned);
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kMux, makeShadowOpName(entry, label));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, condition);
+    addOperand(graph(), op, onTrue);
+    addOperand(graph(), op, onFalse);
+    ValueId result =
+        createValue(graph_, makeShadowValueName(entry, label), width, entry.isSigned);
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* AlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
-                                                grh::Value& controlValue,
+ValueId AlwaysConverter::buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+                                                ValueId controlValue,
                                                 slang::ast::CaseStatementCondition condition) {
-    std::vector<grh::Value*> terms;
+    std::vector<ValueId> terms;
     terms.reserve(item.expressions.size());
 
     for (const slang::ast::Expression* expr : item.expressions) {
         if (!expr) {
             continue;
         }
-        grh::Value* rhsVal = rhsConverter_->convert(*expr);
+        ValueId rhsVal = rhsConverter_->convert(*expr);
         if (!rhsVal) {
-            return nullptr;
+            return ValueId::invalid();
         }
-        grh::Value* term = nullptr;
+        ValueId term = ValueId::invalid();
         if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ ||
             condition == slang::ast::CaseStatementCondition::WildcardJustZ) {
-            term = buildWildcardEquality(controlValue, *rhsVal, *expr, condition);
+            term = buildWildcardEquality(controlValue, rhsVal, *expr, condition);
         }
         if (!term) {
-            term = buildEquality(controlValue, *rhsVal, "case_eq");
+            term = buildEquality(controlValue, rhsVal, "case_eq");
         }
         if (!term) {
-            return nullptr;
+            return ValueId::invalid();
         }
         terms.push_back(term);
     }
 
     if (terms.empty()) {
         reportLatchIssue("comb always case item lacks expressions");
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* match = terms.front();
+    ValueId match = terms.front();
     for (std::size_t idx = 1; idx < terms.size(); ++idx) {
-        grh::Value* combined = buildLogicOr(*match, *terms[idx]);
+        ValueId combined = buildLogicOr(match, terms[idx]);
         if (!combined) {
-            return nullptr;
+            return ValueId::invalid();
         }
         match = combined;
     }
     return match;
 }
 
-grh::Value* AlwaysConverter::buildEquality(grh::Value& lhs, grh::Value& rhs,
+ValueId AlwaysConverter::buildEquality(ValueId lhs, ValueId rhs,
                                                std::string_view hint) {
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kEq, makeControlOpName(hint));
-    applyDebug(op, debugInfo);
-    op.addOperand(lhs);
-    op.addOperand(rhs);
-    grh::Value& result = graph_.createValue(makeControlValueName(hint), 1, /*isSigned=*/false);
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kEq, makeControlOpName(hint));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, lhs);
+    addOperand(graph(), op, rhs);
+    ValueId result = createValue(graph_, makeControlValueName(hint), 1, /*isSigned=*/false);
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* AlwaysConverter::buildLogicOr(grh::Value& lhs, grh::Value& rhs) {
+ValueId AlwaysConverter::buildLogicOr(ValueId lhs, ValueId rhs) {
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kOr, makeControlOpName("case_or"));
-    applyDebug(op, debugInfo);
-    op.addOperand(lhs);
-    op.addOperand(rhs);
-    grh::Value& result = graph_.createValue(makeControlValueName("case_or"), 1,
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kOr, makeControlOpName("case_or"));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, lhs);
+    addOperand(graph(), op, rhs);
+    ValueId result = createValue(graph_, makeControlValueName("case_or"), 1,
                                             /*isSigned=*/false);
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* AlwaysConverter::buildLogicAnd(grh::Value& lhs, grh::Value& rhs) {
+ValueId AlwaysConverter::buildLogicAnd(ValueId lhs, ValueId rhs) {
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("and"));
-    applyDebug(op, debugInfo);
-    op.addOperand(lhs);
-    op.addOperand(rhs);
-    grh::Value& result =
-        graph_.createValue(makeControlValueName("and"), 1, /*isSigned=*/false);
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kAnd, makeControlOpName("and"));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, lhs);
+    addOperand(graph(), op, rhs);
+    ValueId result =
+        createValue(graph_, makeControlValueName("and"), 1, /*isSigned=*/false);
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* AlwaysConverter::currentGuardValue() const {
-    return guardStack_.empty() ? nullptr : guardStack_.back();
+ValueId AlwaysConverter::currentGuardValue() const {
+    return guardStack_.empty() ? ValueId::invalid() : guardStack_.back();
 }
 
-void AlwaysConverter::pushGuard(grh::Value* guard) {
+void AlwaysConverter::pushGuard(ValueId guard) {
     if (!guard) {
         return;
     }
@@ -5649,8 +5875,8 @@ void AlwaysConverter::pushGuard(grh::Value* guard) {
         guardStack_.push_back(guard);
         return;
     }
-    grh::Value* prev = guardStack_.back();
-    grh::Value* combined = buildLogicAnd(*prev, *guard);
+    ValueId prev = guardStack_.back();
+    ValueId combined = buildLogicAnd(prev, guard);
     guardStack_.push_back(combined ? combined : guard);
 }
 
@@ -5660,46 +5886,46 @@ void AlwaysConverter::popGuard() {
     }
 }
 
-grh::Value* AlwaysConverter::buildLogicNot(grh::Value& v) {
+ValueId AlwaysConverter::buildLogicNot(ValueId v) {
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kLogicNot, makeControlOpName("not"));
-    applyDebug(op, debugInfo);
-    op.addOperand(v);
-    grh::Value& result =
-        graph_.createValue(makeControlValueName("not"), 1, /*isSigned=*/false);
-    applyDebug(result, debugInfo);
-    op.addResult(result);
-    return &result;
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kLogicNot, makeControlOpName("not"));
+    applyDebug(graph(), op, debugInfo);
+    addOperand(graph(), op, v);
+    ValueId result =
+        createValue(graph_, makeControlValueName("not"), 1, /*isSigned=*/false);
+    applyDebug(graph(), result, debugInfo);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* AlwaysConverter::coerceToCondition(grh::Value& v) {
-    if (v.width() == 1) {
-        return &v;
+ValueId AlwaysConverter::coerceToCondition(ValueId v) {
+    if (graph().getValue(v).width() == 1) {
+        return v;
     }
-    grh::Value* zero = createZeroValue(v.width());
+    ValueId zero = createZeroValue(graph().getValue(v).width());
     if (!zero) {
-        return nullptr;
+        return ValueId::invalid();
     }
-    grh::Value* eqZero = buildEquality(v, *zero, "eq0");
+    ValueId eqZero = buildEquality(v, zero, "eq0");
     if (!eqZero) {
-        return nullptr;
+        return ValueId::invalid();
     }
-    return buildLogicNot(*eqZero);
+    return buildLogicNot(eqZero);
 }
 
-grh::Value* AlwaysConverter::buildWildcardEquality(
-    grh::Value& controlValue, grh::Value& rhsValue, const slang::ast::Expression& rhsExpr,
+ValueId AlwaysConverter::buildWildcardEquality(
+    ValueId controlValue, ValueId rhsValue, const slang::ast::Expression& rhsExpr,
     slang::ast::CaseStatementCondition condition) {
-    const int64_t width = controlValue.width();
+    const int64_t width = graph().getValue(controlValue).width();
     if (width <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto debugInfo = makeDebugInfo(sourceManager_, &rhsExpr);
     std::optional<slang::SVInt> literalOpt = evaluateConstantInt(rhsExpr, /*allowUnknown=*/true);
     if (!literalOpt) {
-        return nullptr;
+        return ValueId::invalid();
     }
     slang::SVInt literal = literalOpt->resize(static_cast<slang::bitwidth_t>(width));
 
@@ -5725,56 +5951,56 @@ grh::Value* AlwaysConverter::buildWildcardEquality(
     }
 
     if (!hasWildcard) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     slang::SVInt maskValue = slang::SVInt::fromString(maskLiteral);
-    grh::Operation& xorOp =
-        graph_.createOperation(grh::OperationKind::kXor, makeControlOpName("case_wild_xor"));
-    applyDebug(xorOp, debugInfo);
-    xorOp.addOperand(controlValue);
-    xorOp.addOperand(rhsValue);
-    grh::Value& xorResult =
-        graph_.createValue(makeControlValueName("case_wild_xor"), width, /*isSigned=*/false);
-    applyDebug(xorResult, debugInfo);
-    xorOp.addResult(xorResult);
+    OperationId xorOp =
+        createOperation(graph_, grh::OperationKind::kXor, makeControlOpName("case_wild_xor"));
+    applyDebug(graph(), xorOp, debugInfo);
+    addOperand(graph(), xorOp, controlValue);
+    addOperand(graph(), xorOp, rhsValue);
+    ValueId xorResult =
+        createValue(graph_, makeControlValueName("case_wild_xor"), width, /*isSigned=*/false);
+    applyDebug(graph(), xorResult, debugInfo);
+    addResult(graph(), xorOp, xorResult);
 
-    grh::Value* maskConst = createLiteralValue(maskValue, /*isSigned=*/false, "case_wild_mask");
+    ValueId maskConst = createLiteralValue(maskValue, /*isSigned=*/false, "case_wild_mask");
     if (!maskConst) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Operation& andOp =
-        graph_.createOperation(grh::OperationKind::kAnd, makeControlOpName("case_wild_and"));
-    applyDebug(andOp, debugInfo);
-    andOp.addOperand(xorResult);
-    andOp.addOperand(*maskConst);
-    grh::Value& masked =
-        graph_.createValue(makeControlValueName("case_wild_and"), width, /*isSigned=*/false);
-    applyDebug(masked, debugInfo);
-    andOp.addResult(masked);
+    OperationId andOp =
+        createOperation(graph_, grh::OperationKind::kAnd, makeControlOpName("case_wild_and"));
+    applyDebug(graph(), andOp, debugInfo);
+    addOperand(graph(), andOp, xorResult);
+    addOperand(graph(), andOp, maskConst);
+    ValueId masked =
+        createValue(graph_, makeControlValueName("case_wild_and"), width, /*isSigned=*/false);
+    applyDebug(graph(), masked, debugInfo);
+    addResult(graph(), andOp, masked);
 
-    grh::Value* zero = createZeroValue(width);
+    ValueId zero = createZeroValue(width);
     if (!zero) {
-        return nullptr;
+        return ValueId::invalid();
     }
-    return buildEquality(masked, *zero, "case_wild_eq0");
+    return buildEquality(masked, zero, "case_wild_eq0");
 }
 
-grh::Value* AlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
+ValueId AlwaysConverter::createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                                     std::string_view hint) {
     const auto debugInfo = makeDebugInfo(sourceManager_, &block_);
-    grh::Operation& op =
-        graph_.createOperation(grh::OperationKind::kConstant, makeControlOpName(hint));
-    applyDebug(op, debugInfo);
-    grh::Value& value = graph_.createValue(makeControlValueName(hint),
+    OperationId op =
+        createOperation(graph_, grh::OperationKind::kConstant, makeControlOpName(hint));
+    applyDebug(graph(), op, debugInfo);
+    ValueId value = createValue(graph_, makeControlValueName(hint),
                                            static_cast<int64_t>(literal.getBitWidth()),
                                            isSigned);
-    applyDebug(value, debugInfo);
-    op.addResult(value);
-    op.setAttribute("constValue",
+    applyDebug(graph(), value, debugInfo);
+    addResult(graph(), op, value);
+    setAttr(graph(), op, "constValue",
                     literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
-    return &value;
+    return value;
 }
 
 std::string AlwaysConverter::makeControlOpName(std::string_view suffix) {
@@ -6209,7 +6435,7 @@ bool AlwaysConverter::assignLoopValue(const slang::ast::ValueSymbol& symbol,
 
     std::string hint =
         symbol.name.empty() ? std::string("loop_idx") : sanitizeForGraphName(symbol.name);
-    grh::Value* literal = createLiteralValue(resized, type.isSigned(), hint);
+    ValueId literal = createLiteralValue(resized, type.isSigned(), hint);
     if (!literal) {
         return false;
     }
@@ -6294,10 +6520,10 @@ void AlwaysConverter::popLoopScope() {
     loopScopeStack_.pop_back();
 }
 
-grh::Value* AlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& symbol) const {
+ValueId AlwaysConverter::lookupLoopValue(const slang::ast::ValueSymbol& symbol) const {
     auto it = loopValueMap_.find(&symbol);
     if (it == loopValueMap_.end()) {
-        return nullptr;
+        return ValueId::invalid();
     }
     return it->second.value;
 }
@@ -6424,15 +6650,15 @@ void WriteBackMemo::reportIssue(const Entry& entry, std::string message,
     }
 }
 
-grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
+ValueId WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
                                          ElaborateDiagnostics* diagnostics) {
     if (!entry.target) {
         reportIssue(entry, "Write-back target is missing memo metadata", diagnostics);
-        return nullptr;
+        return ValueId::invalid();
     }
     if (entry.slices.empty()) {
         reportIssue(entry, "Write-back entry has no slices to compose", diagnostics);
-        return nullptr;
+        return ValueId::invalid();
     }
 
     std::sort(entry.slices.begin(), entry.slices.end(),
@@ -6446,17 +6672,17 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
     const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
     int64_t expectedMsb = targetWidth - 1;
     const auto debugInfo = srcLocForEntry(entry);
-    std::vector<grh::Value*> components;
+    std::vector<ValueId> components;
     components.reserve(entry.slices.size() + 2);
 
     for (const Slice& slice : entry.slices) {
         if (!slice.value) {
             reportIssue(entry, "Write-back slice is missing RHS value", diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
         if (slice.msb < slice.lsb) {
             reportIssue(entry, "Write-back slice has invalid bit range", diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         if (slice.msb > expectedMsb) {
@@ -6464,16 +6690,16 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
             oss << "Write-back slice exceeds target width; slice msb=" << slice.msb
                 << " expected at most " << expectedMsb;
             reportIssue(entry, oss.str(), diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         const int64_t gapWidth = expectedMsb - slice.msb;
         if (gapWidth > 0) {
-            grh::Value* zero = createZeroValue(entry, gapWidth, graph);
+            ValueId zero = createZeroValue(entry, gapWidth, graph);
             if (!zero) {
                 reportIssue(entry, "Failed to create zero-fill value for write-back gap",
                             diagnostics);
-                return nullptr;
+                return ValueId::invalid();
             }
             components.push_back(zero);
             expectedMsb -= gapWidth;
@@ -6484,16 +6710,16 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
             oss << "Write-back bookkeeping error; slice msb=" << slice.msb
                 << " but expected " << expectedMsb;
             reportIssue(entry, oss.str(), diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         const int64_t sliceWidth = slice.msb - slice.lsb + 1;
-        if (slice.value->width() != sliceWidth) {
+        if (graph.getValue(slice.value).width() != sliceWidth) {
             std::ostringstream oss;
             oss << "Write-back slice width mismatch; slice covers " << sliceWidth
-                << " bits but RHS value width is " << slice.value->width();
+                << " bits but RHS value width is " << graph.getValue(slice.value).width();
             reportIssue(entry, oss.str(), diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         components.push_back(slice.value);
@@ -6501,10 +6727,10 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
     }
 
     if (expectedMsb >= 0) {
-        grh::Value* zero = createZeroValue(entry, expectedMsb + 1, graph);
+        ValueId zero = createZeroValue(entry, expectedMsb + 1, graph);
         if (!zero) {
             reportIssue(entry, "Failed to create zero-fill value for trailing gap", diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
         components.push_back(zero);
         expectedMsb = -1;
@@ -6512,28 +6738,28 @@ grh::Value* WriteBackMemo::composeSlices(Entry& entry, grh::Graph& graph,
 
     if (components.empty()) {
         reportIssue(entry, "Write-back entry produced no value components", diagnostics);
-        return nullptr;
+        return ValueId::invalid();
     }
 
     if (components.size() == 1) {
         return components.front();
     }
 
-    grh::Operation& concat =
-        graph.createOperation(grh::OperationKind::kConcat, makeOperationName(entry, "concat"));
-    applyDebug(concat, debugInfo);
-    for (grh::Value* component : components) {
-        concat.addOperand(*component);
+    OperationId concat =
+        createOperation(graph, grh::OperationKind::kConcat, makeOperationName(entry, "concat"));
+    applyDebug(graph, concat, debugInfo);
+    for (ValueId component : components) {
+        addOperand(graph, concat, component);
     }
 
-    grh::Value& composed =
-        graph.createValue(makeValueName(entry, "concat"), targetWidth, entry.target->isSigned);
-    applyDebug(composed, debugInfo);
-    concat.addResult(composed);
-    return &composed;
+    ValueId composed =
+        createValue(graph, makeValueName(entry, "concat"), targetWidth, entry.target->isSigned);
+    applyDebug(graph, composed, debugInfo);
+    addResult(graph, concat, composed);
+    return composed;
 }
 
-void WriteBackMemo::attachToTarget(const Entry& entry, grh::Value& composedValue,
+void WriteBackMemo::attachToTarget(const Entry& entry, ValueId composedValue,
                                    grh::Graph& graph, ElaborateDiagnostics* diagnostics) {
     if (!entry.target) {
         reportIssue(entry, "Missing target when attaching write-back value", diagnostics);
@@ -6541,75 +6767,75 @@ void WriteBackMemo::attachToTarget(const Entry& entry, grh::Value& composedValue
     }
 
     if (!entry.target->stateOp) {
-        grh::Value* targetValue = entry.target->value;
+        ValueId targetValue = entry.target->value;
         if (!targetValue) {
             reportIssue(entry, "Net write-back lacks GRH value handle", diagnostics);
             return;
         }
-        if (targetValue->width() != composedValue.width()) {
+        if (graph.getValue(targetValue).width() != graph.getValue(composedValue).width()) {
             std::ostringstream oss;
-            oss << "Net write-back width mismatch; target width=" << targetValue->width()
-                << " source width=" << composedValue.width();
+            oss << "Net write-back width mismatch; target width=" << graph.getValue(targetValue).width()
+                << " source width=" << graph.getValue(composedValue).width();
             reportIssue(entry, oss.str(), diagnostics);
             return;
         }
-        grh::Operation& assign =
-            graph.createOperation(grh::OperationKind::kAssign, makeOperationName(entry, "assign"));
-        applyDebug(assign, srcLocForEntry(entry));
-        assign.addOperand(composedValue);
-        assign.addResult(*targetValue);
+        OperationId assign =
+            createOperation(graph, grh::OperationKind::kAssign, makeOperationName(entry, "assign"));
+        applyDebug(graph, assign, srcLocForEntry(entry));
+        addOperand(graph, assign, composedValue);
+        addResult(graph, assign, targetValue);
         return;
     }
 
-    grh::Operation* stateOp = entry.target->stateOp;
+    OperationId stateOp = entry.target->stateOp;
     if (!stateOp) {
         reportIssue(entry, "Sequential write-back missing state operation", diagnostics);
         return;
     }
 
-    if (stateOp->kind() == grh::OperationKind::kMemory) {
+    if (graph.getOperation(stateOp).kind() == grh::OperationKind::kMemory) {
         reportIssue(entry, "Memory write-back is not implemented yet", diagnostics);
         return;
     }
 
-    if (!stateOp->operands().empty()) {
+    if (!graph.getOperation(stateOp).operands().empty()) {
         reportIssue(entry, "State operation already has a data operand", diagnostics);
         return;
     }
 
-    if (!stateOp->results().empty()) {
-        grh::Value* stateValue = stateOp->results().front();
-        if (stateValue && stateValue->width() != composedValue.width()) {
+    if (!graph.getOperation(stateOp).results().empty()) {
+        ValueId stateValue = graph.getOperation(stateOp).results().front();
+        if (stateValue && graph.getValue(stateValue).width() != graph.getValue(composedValue).width()) {
             std::ostringstream oss;
-            oss << "Register write-back width mismatch; state width=" << stateValue->width()
-                << " source width=" << composedValue.width();
+            oss << "Register write-back width mismatch; state width=" << graph.getValue(stateValue).width()
+                << " source width=" << graph.getValue(composedValue).width();
             reportIssue(entry, oss.str(), diagnostics);
             return;
         }
     }
 
-    stateOp->addOperand(composedValue);
+    addOperand(graph, stateOp, composedValue);
 }
 
-grh::Value* WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph) {
+ValueId WriteBackMemo::createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph) {
     if (width <= 0) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto info = srcLocForEntry(entry);
-    grh::Operation& op =
-        graph.createOperation(grh::OperationKind::kConstant, makeOperationName(entry, "zero"));
-    applyDebug(op, info);
-    grh::Value& value = graph.createValue(makeValueName(entry, "zero"), width, /*isSigned=*/false);
-    applyDebug(value, info);
-    op.addResult(value);
+    OperationId op =
+        createOperation(graph, grh::OperationKind::kConstant, makeOperationName(entry, "zero"));
+    applyDebug(graph, op, info);
+    ValueId value = createValue(graph, makeValueName(entry, "zero"), width, /*isSigned=*/false);
+    applyDebug(graph, value, info);
+    addResult(graph, op, value);
     std::ostringstream oss;
     oss << width << "'h0";
-    op.setAttribute("constValue", oss.str());
-    return &value;
+    setAttr(graph, op, "constValue", oss.str());
+    return value;
 }
 
-bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Graph& graph,
+bool WriteBackMemo::tryLowerLatch(Entry& entry, ValueId dataValue, grh::Graph& graph,
                                   ElaborateDiagnostics* diagnostics) {
     const auto* block = entry.originSymbol ? entry.originSymbol->as_if<slang::ast::ProceduralBlockSymbol>()
                                            : nullptr;
@@ -6633,111 +6859,111 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         return false;
     }
 
-    grh::Value* q = entry.target->value;
-    const int64_t targetWidth = q->width();
-    auto ensureOneBit = [&](grh::Value* cond, std::string_view label) -> grh::Value* {
+    ValueId q = entry.target->value;
+    const int64_t targetWidth = graph.getValue(q).width();
+    auto ensureOneBit = [&](ValueId cond, std::string_view label) -> ValueId {
         if (!cond) {
-            return nullptr;
+            return ValueId::invalid();
         }
-        if (cond->width() != 1) {
+        if (graph.getValue(cond).width() != 1) {
             std::ostringstream oss;
-            oss << "Latch " << label << " must be 1 bit (got " << cond->width() << ")";
+            oss << "Latch " << label << " must be 1 bit (got " << graph.getValue(cond).width() << ")";
             reportIssue(entry, oss.str(), diagnostics);
-            return nullptr;
+            return ValueId::invalid();
         }
         return cond;
     };
 
     struct LatchInfo {
-        grh::Value* enable = nullptr;
+        ValueId enable = ValueId::invalid();
         bool enableActiveLow = false;
-        grh::Value* data = nullptr;
-        grh::Value* resetSignal = nullptr;
+        ValueId data = ValueId::invalid();
+        ValueId resetSignal = ValueId::invalid();
         bool resetActiveHigh = true;
-        grh::Value* resetValue = nullptr;
-        std::vector<grh::Value*> muxValues;
+        ValueId resetValue = ValueId::invalid();
+        std::vector<ValueId> muxValues;
     };
 
-    auto parseEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
-        grh::Operation* op = candidate.definingOp();
-        if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+    auto parseEnableMux = [&](ValueId candidate) -> std::optional<LatchInfo> {
+        OperationId op = graph.getValue(candidate).definingOp();
+        if (!op || graph.getOperation(op).kind() != grh::OperationKind::kMux || graph.getOperation(op).operands().size() != 3) {
             return std::nullopt;
         }
-        grh::Value* cond = ensureOneBit(op->operands()[0], "enable condition");
+        ValueId cond = ensureOneBit(graph.getOperation(op).operands()[0], "enable condition");
         if (!cond) {
             return std::nullopt;
         }
-        grh::Value* tVal = op->operands()[1];
-        grh::Value* fVal = op->operands()[2];
+        ValueId tVal = graph.getOperation(op).operands()[1];
+        ValueId fVal = graph.getOperation(op).operands()[2];
 
-        if (tVal && fVal && tVal == q && fVal->width() == targetWidth) {
+        if (tVal && fVal && tVal == q && graph.getValue(fVal).width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = true,
                              .data = fVal,
-                             .muxValues = {&candidate}};
+                             .muxValues = {candidate}};
         }
-        if (fVal && tVal && fVal == q && tVal->width() == targetWidth) {
+        if (fVal && tVal && fVal == q && graph.getValue(tVal).width() == targetWidth) {
             return LatchInfo{.enable = cond,
                              .enableActiveLow = false,
                              .data = tVal,
-                             .muxValues = {&candidate}};
+                             .muxValues = {candidate}};
         }
         return std::nullopt;
     };
 
-    auto makeLogicNot = [&](grh::Value& input, std::string_view label) -> grh::Value* {
+    auto makeLogicNot = [&](ValueId input, std::string_view label) -> ValueId {
         const auto info = srcLocForEntry(entry);
-        grh::Operation& op = graph.createOperation(grh::OperationKind::kLogicNot,
+        OperationId op = createOperation(graph, grh::OperationKind::kLogicNot,
                                                    makeOperationName(entry, label));
-        applyDebug(op, info);
-        op.addOperand(input);
-        grh::Value& result =
-            graph.createValue(makeValueName(entry, label), 1, /*isSigned=*/false);
-        applyDebug(result, info);
-        op.addResult(result);
-        return &result;
+        applyDebug(graph, op, info);
+        addOperand(graph, op, input);
+        ValueId result =
+            createValue(graph, makeValueName(entry, label), 1, /*isSigned=*/false);
+        applyDebug(graph, result, info);
+        addResult(graph, op, result);
+        return result;
     };
 
-    auto makeLogicOr = [&](grh::Value& lhs, grh::Value& rhs, std::string_view label)
-                           -> grh::Value* {
+    auto makeLogicOr = [&](ValueId lhs, ValueId rhs, std::string_view label)
+                           -> ValueId {
         const auto info = srcLocForEntry(entry);
-        grh::Operation& op = graph.createOperation(grh::OperationKind::kLogicOr,
+        OperationId op = createOperation(graph, grh::OperationKind::kLogicOr,
                                                    makeOperationName(entry, label));
-        applyDebug(op, info);
-        op.addOperand(lhs);
-        op.addOperand(rhs);
-        grh::Value& result =
-            graph.createValue(makeValueName(entry, label), 1, /*isSigned=*/false);
-        applyDebug(result, info);
-        op.addResult(result);
-        return &result;
+        applyDebug(graph, op, info);
+        addOperand(graph, op, lhs);
+        addOperand(graph, op, rhs);
+        ValueId result =
+            createValue(graph, makeValueName(entry, label), 1, /*isSigned=*/false);
+        applyDebug(graph, result, info);
+        addResult(graph, op, result);
+        return result;
     };
 
-    auto parseResetEnableMux = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
-        grh::Operation* op = candidate.definingOp();
-        if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+    auto parseResetEnableMux = [&](ValueId candidate) -> std::optional<LatchInfo> {
+        OperationId op = graph.getValue(candidate).definingOp();
+        if (!op || graph.getOperation(op).kind() != grh::OperationKind::kMux || graph.getOperation(op).operands().size() != 3) {
             return std::nullopt;
         }
-        grh::Value* cond = ensureOneBit(op->operands()[0], "reset condition");
+        ValueId cond = ensureOneBit(graph.getOperation(op).operands()[0], "reset condition");
         if (!cond) {
             return std::nullopt;
         }
-        grh::Value* tVal = op->operands()[1];
-        grh::Value* fVal = op->operands()[2];
+        ValueId tVal = graph.getOperation(op).operands()[1];
+        ValueId fVal = graph.getOperation(op).operands()[2];
 
-        auto tryBranch = [&](grh::Value* resetBranch, grh::Value* dataBranch,
+        auto tryBranch = [&](ValueId resetBranch, ValueId dataBranch,
                              bool resetActiveHigh) -> std::optional<LatchInfo> {
-            if (!resetBranch || resetBranch->width() != targetWidth) {
+            if (!resetBranch || graph.getValue(resetBranch).width() != targetWidth) {
                 return std::nullopt;
             }
             if (!dataBranch) {
                 return std::nullopt;
             }
-            if (auto info = parseEnableMux(*dataBranch)) {
+            if (auto info = parseEnableMux(dataBranch)) {
                 info->resetSignal = cond;
                 info->resetActiveHigh = resetActiveHigh;
                 info->resetValue = resetBranch;
-                info->muxValues.push_back(&candidate);
+                info->muxValues.push_back(candidate);
                 return info;
             }
             return std::nullopt;
@@ -6752,20 +6978,20 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
         return std::nullopt;
     };
 
-    auto parseMuxChainLatch = [&](grh::Value& candidate) -> std::optional<LatchInfo> {
+    auto parseMuxChainLatch = [&](ValueId candidate) -> std::optional<LatchInfo> {
         if (!entry.target || !entry.target->value) {
             return std::nullopt;
         }
         struct ChainStep {
-            grh::Value* muxValue = nullptr;
-            grh::Value* cond = nullptr;
-            grh::Value* dataBranch = nullptr;
+            ValueId muxValue = ValueId::invalid();
+            ValueId cond = ValueId::invalid();
+            ValueId dataBranch = ValueId::invalid();
             bool holdOnTrue = false;
         };
 
-        grh::Value* q = entry.target->value;
-        auto reachesHold = [&](grh::Value* value, auto&& self,
-                               std::unordered_set<const grh::Value*>& visited) -> bool {
+        ValueId q = entry.target->value;
+        auto reachesHold = [&](ValueId value, auto&& self,
+                               std::unordered_set<ValueId, grh::ir::ValueIdHash>& visited) -> bool {
             if (!value) {
                 return false;
             }
@@ -6775,16 +7001,17 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
             if (value == q) {
                 return true;
             }
-            grh::Operation* op = value->definingOp();
-            if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+            OperationId op = graph.getValue(value).definingOp();
+            if (!op || graph.getOperation(op).kind() != grh::OperationKind::kMux || graph.getOperation(op).operands().size() != 3) {
                 return false;
             }
-            return self(op->operands()[1], self, visited) || self(op->operands()[2], self, visited);
+            return self(graph.getOperation(op).operands()[1], self, visited) ||
+                   self(graph.getOperation(op).operands()[2], self, visited);
         };
 
         std::vector<ChainStep> chain;
-        std::unordered_set<const grh::Value*> visited;
-        grh::Value* cursor = &candidate;
+        std::unordered_set<ValueId, grh::ir::ValueIdHash> visited;
+        ValueId cursor = candidate;
         while (true) {
             if (cursor == q) {
                 break;
@@ -6792,19 +7019,19 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
             if (!visited.insert(cursor).second) {
                 return std::nullopt;
             }
-            grh::Operation* op = cursor->definingOp();
-            if (!op || op->kind() != grh::OperationKind::kMux || op->operands().size() != 3) {
+            OperationId op = graph.getValue(cursor).definingOp();
+            if (!op || graph.getOperation(op).kind() != grh::OperationKind::kMux || graph.getOperation(op).operands().size() != 3) {
                 return std::nullopt;
             }
-            grh::Value* cond = ensureOneBit(op->operands()[0], "mux condition");
+            ValueId cond = ensureOneBit(graph.getOperation(op).operands()[0], "mux condition");
             if (!cond) {
                 return std::nullopt;
             }
-            grh::Value* tVal = op->operands()[1];
-            grh::Value* fVal = op->operands()[2];
-            std::unordered_set<const grh::Value*> seenTrue;
+            ValueId tVal = graph.getOperation(op).operands()[1];
+            ValueId fVal = graph.getOperation(op).operands()[2];
+            std::unordered_set<ValueId, grh::ir::ValueIdHash> seenTrue;
             const bool trueHolds = reachesHold(tVal, reachesHold, seenTrue);
-            std::unordered_set<const grh::Value*> seenFalse;
+            std::unordered_set<ValueId, grh::ir::ValueIdHash> seenFalse;
             const bool falseHolds = reachesHold(fVal, reachesHold, seenFalse);
             if (trueHolds == falseHolds) {
                 return std::nullopt;
@@ -6822,10 +7049,10 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
             return std::nullopt;
         }
 
-        grh::Value* enable = nullptr;
+        ValueId enable = ValueId::invalid();
         for (const ChainStep& step : chain) {
-            grh::Value* clause =
-                step.holdOnTrue ? makeLogicNot(*step.cond, "latch_hold_not") : step.cond;
+            ValueId clause =
+                step.holdOnTrue ? makeLogicNot(step.cond, "latch_hold_not") : step.cond;
             if (!clause) {
                 return std::nullopt;
             }
@@ -6833,7 +7060,7 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
                 enable = clause;
             }
             else {
-                grh::Value* combined = makeLogicOr(*enable, *clause, "latch_hold_or");
+                ValueId combined = makeLogicOr(enable, clause, "latch_hold_or");
                 if (!combined) {
                     return std::nullopt;
                 }
@@ -6841,31 +7068,31 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
             }
         }
 
-        grh::Value* replacement = createZeroValue(entry, targetWidth, graph);
+        ValueId replacement = createZeroValue(entry, targetWidth, graph);
         if (!replacement) {
             reportIssue(entry, "Latch reconstruction failed to create hold replacement", diagnostics);
             return std::nullopt;
         }
-        grh::Value* dataExpr = replacement;
+        ValueId dataExpr = replacement;
         const auto info = srcLocForEntry(entry);
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-            if (!it->dataBranch || it->dataBranch->width() != targetWidth) {
+            if (!it->dataBranch || graph.getValue(it->dataBranch).width() != targetWidth) {
                 reportIssue(entry, "Latch mux data width mismatch", diagnostics);
                 return std::nullopt;
             }
-            grh::Value* trueVal = it->holdOnTrue ? dataExpr : it->dataBranch;
-            grh::Value* falseVal = it->holdOnTrue ? it->dataBranch : dataExpr;
-            grh::Operation& mux =
-                graph.createOperation(grh::OperationKind::kMux, makeOperationName(entry, "latch_mux"));
-            applyDebug(mux, info);
-            mux.addOperand(*it->cond);
-            mux.addOperand(*trueVal);
-            mux.addOperand(*falseVal);
-            grh::Value& muxResult =
-                graph.createValue(makeValueName(entry, "latch_mux"), targetWidth, entry.target->isSigned);
-            applyDebug(muxResult, info);
-            mux.addResult(muxResult);
-            dataExpr = &muxResult;
+            ValueId trueVal = it->holdOnTrue ? dataExpr : it->dataBranch;
+            ValueId falseVal = it->holdOnTrue ? it->dataBranch : dataExpr;
+            OperationId mux =
+                createOperation(graph, grh::OperationKind::kMux, makeOperationName(entry, "latch_mux"));
+            applyDebug(graph, mux, info);
+            addOperand(graph, mux, it->cond);
+            addOperand(graph, mux, trueVal);
+            addOperand(graph, mux, falseVal);
+            ValueId muxResult =
+                createValue(graph, makeValueName(entry, "latch_mux"), targetWidth, entry.target->isSigned);
+            applyDebug(graph, muxResult, info);
+            addResult(graph, mux, muxResult);
+            dataExpr = muxResult;
         }
 
         LatchInfo infoStruct;
@@ -6892,42 +7119,41 @@ bool WriteBackMemo::tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Grap
     const auto debugInfo = srcLocForEntry(entry);
     grh::OperationKind opKind =
         latch->resetSignal ? grh::OperationKind::kLatchArst : grh::OperationKind::kLatch;
-    grh::Operation& op = graph.createOperation(opKind, makeOperationName(entry, "latch"));
-    applyDebug(op, debugInfo);
-    op.addOperand(*latch->enable);
+    OperationId op = createOperation(graph, opKind, makeOperationName(entry, "latch"));
+    applyDebug(graph, op, debugInfo);
+    addOperand(graph, op, latch->enable);
     if (latch->resetSignal && latch->resetValue) {
-        op.addOperand(*latch->resetSignal);
-        op.addOperand(*latch->resetValue);
+        addOperand(graph, op, latch->resetSignal);
+        addOperand(graph, op, latch->resetValue);
     }
     if (latch->data) {
-        op.addOperand(*latch->data);
+        addOperand(graph, op, latch->data);
     }
-    op.addResult(*q);
-    op.setAttribute("enLevel", latch->enableActiveLow ? std::string("low")
+    addResult(graph, op, q);
+    setAttr(graph, op, "enLevel", latch->enableActiveLow ? std::string("low")
                                                       : std::string("high"));
     if (latch->resetSignal) {
-        op.setAttribute("rstPolarity",
+        setAttr(graph, op, "rstPolarity",
                         latch->resetActiveHigh ? std::string("high") : std::string("low"));
     }
 
-    auto pruneMuxValue = [&](grh::Value* value) {
+    auto pruneMuxValue = [&](ValueId value) {
         if (!value) {
             return;
         }
-        if (!value->users().empty()) {
+        if (!graph.getValue(value).users().empty()) {
             return;
         }
-        grh::Operation* op = value->definingOp();
-        if (!op || op->kind() != grh::OperationKind::kMux) {
+        OperationId op = graph.getValue(value).definingOp();
+        if (!op || graph.getOperation(op).kind() != grh::OperationKind::kMux) {
             return;
         }
-        if (op->results().size() != 1 || op->results().front() != value) {
+        if (graph.getOperation(op).results().size() != 1 || graph.getOperation(op).results().front() != value) {
             return;
         }
-        const std::string opSymbol = op->symbol();
-        graph.removeOperation(opSymbol);
+        graph.eraseOp(op);
     };
-    for (grh::Value* muxVal : latch->muxValues) {
+    for (ValueId muxVal : latch->muxValues) {
         pruneMuxValue(muxVal);
     }
 
@@ -6951,7 +7177,7 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
         if (!target || !target->value || bucket.parts.empty()) {
             continue;
         }
-        if (target->value->definingOp()) {
+        if (graph.getValue(valueHandle).definingOp()) {
             continue;
         }
         auto& parts = bucket.parts;
@@ -6961,7 +7187,7 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
         });
         const int64_t targetWidth = target->width > 0 ? target->width : 1;
         int64_t expectedMsb = targetWidth - 1;
-        std::vector<grh::Value*> components;
+        std::vector<ValueId> components;
         components.reserve(parts.size() + 2);
         Entry temp;
         temp.target = target;
@@ -6969,7 +7195,7 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
             if (msb < lsb) {
                 return true;
             }
-            grh::Value* zero = createZeroValue(temp, msb - lsb + 1, graph);
+            ValueId zero = createZeroValue(temp, msb - lsb + 1, graph);
             if (!zero) {
                 return false;
             }
@@ -6994,22 +7220,22 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
             continue;
         }
         if (components.size() == 1) {
-            grh::Operation& assign =
-                graph.createOperation(grh::OperationKind::kAssign,
+            OperationId assign =
+                createOperation(graph, grh::OperationKind::kAssign,
                                       makeOperationName(temp, "split_assign"));
-            applyDebug(assign, makeDebugInfo(sourceManager_, target->symbol));
-            assign.addOperand(*components.front());
-            assign.addResult(*target->value);
+            applyDebug(graph, assign, makeDebugInfo(sourceManager_, target->symbol));
+            addOperand(graph, assign, components.front());
+            addResult(graph, assign, target->value);
             continue;
         }
-        grh::Operation& concat =
-            graph.createOperation(grh::OperationKind::kConcat,
+        OperationId concat =
+            createOperation(graph, grh::OperationKind::kConcat,
                                   makeOperationName(temp, "split_concat"));
-        applyDebug(concat, makeDebugInfo(sourceManager_, target->symbol));
-        for (grh::Value* component : components) {
-            concat.addOperand(*component);
+        applyDebug(graph, concat, makeDebugInfo(sourceManager_, target->symbol));
+        for (ValueId component : components) {
+            addOperand(graph, concat, component);
         }
-        concat.addResult(*target->value);
+        addResult(graph, concat, target->value);
     }
 
     for (Entry& entry : entries_) {
@@ -7027,16 +7253,16 @@ void WriteBackMemo::finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostic
                          static_cast<long long>(s.msb),
                          static_cast<long long>(s.lsb),
                          static_cast<long long>(s.msb - s.lsb + 1),
-                         s.value ? static_cast<long long>(s.value->width()) : -1LL);
+                         s.value ? static_cast<long long>(graph.getValue(s.value).width()) : -1LL);
         }
-        grh::Value* composed = composeSlices(entry, graph, diagnostics);
+        ValueId composed = composeSlices(entry, graph, diagnostics);
         if (!composed) {
             continue;
         }
-        if (tryLowerLatch(entry, *composed, graph, diagnostics)) {
+        if (tryLowerLatch(entry, composed, graph, diagnostics)) {
             continue;
         }
-        attachToTarget(entry, *composed, graph, diagnostics);
+        attachToTarget(entry, composed, graph, diagnostics);
     }
     entries_.clear();
     multiDriverParts_.clear();
@@ -7055,9 +7281,9 @@ RHSConverter::RHSConverter(Context context) : graph_(context.graph), origin_(con
     instanceId_ = nextConverterInstanceId();
 }
 
-grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
+ValueId RHSConverter::convert(const slang::ast::Expression& expr) {
     if (!graph_) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     if (auto it = cache_.find(&expr); it != cache_.end()) {
@@ -7066,7 +7292,7 @@ grh::Value* RHSConverter::convert(const slang::ast::Expression& expr) {
 
     const slang::ast::Expression* previous = currentExpr_;
     currentExpr_ = &expr;
-    grh::Value* value = convertExpression(expr);
+    ValueId value = convertExpression(expr);
     currentExpr_ = previous;
     if (value && !suppressCache_) {
         cache_[&expr] = value;
@@ -7106,7 +7332,7 @@ std::string RHSConverter::makeOperationName(std::string_view hint, std::size_t i
     return base;
 }
 
-grh::Value* RHSConverter::convertExpression(const slang::ast::Expression& expr) {
+ValueId RHSConverter::convertExpression(const slang::ast::Expression& expr) {
     using slang::ast::ExpressionKind;
     switch (expr.kind) {
     case ExpressionKind::NamedValue:
@@ -7136,45 +7362,45 @@ grh::Value* RHSConverter::convertExpression(const slang::ast::Expression& expr) 
         return convertCall(expr.as<slang::ast::CallExpression>());
     default:
         reportUnsupported("expression kind", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 }
 
-grh::Value* RHSConverter::convertNamedValue(const slang::ast::Expression& expr) {
+ValueId RHSConverter::convertNamedValue(const slang::ast::Expression& expr) {
     if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
         const auto& named = expr.as<slang::ast::NamedValueExpression>();
 
         if (const SignalMemoEntry* entry = findMemoEntry(named.symbol)) {
-            if (grh::Value* memoHandler = handleMemoEntry(named, *entry)) {
+            if (ValueId memoHandler = handleMemoEntry(named, *entry)) {
                 return memoHandler;
             }
-            if (grh::Value* value = resolveMemoValue(*entry)) {
+            if (ValueId value = resolveMemoValue(*entry)) {
                 return value;
             }
         }
 
-        if (grh::Value* custom = handleCustomNamedValue(named)) {
+        if (ValueId custom = handleCustomNamedValue(named)) {
             suppressCache_ = true;
             return custom;
         }
 
-        if (grh::Value* fallback = resolveGraphValue(named.symbol)) {
+        if (ValueId fallback = resolveGraphValue(named.symbol)) {
             return fallback;
         }
 
-        if (grh::Value* paramValue = materializeParameterValue(named)) {
+        if (ValueId paramValue = materializeParameterValue(named)) {
             return paramValue;
         }
     }
 
     reportUnsupported("named value", expr);
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::materializeParameterValue(const slang::ast::NamedValueExpression& expr) {
+ValueId RHSConverter::materializeParameterValue(const slang::ast::NamedValueExpression& expr) {
     const auto* param = expr.symbol.as_if<slang::ast::ParameterSymbol>();
     if (!param) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const slang::ConstantValue& constValue = param->getValue(expr.sourceRange);
@@ -7185,7 +7411,7 @@ grh::Value* RHSConverter::materializeParameterValue(const slang::ast::NamedValue
             message.append(" has unsupported value type for RHS conversion");
             diagnostics_->nyi(*origin_, std::move(message));
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const slang::ast::Type* type = expr.type;
@@ -7199,7 +7425,7 @@ grh::Value* RHSConverter::materializeParameterValue(const slang::ast::NamedValue
             message.append(" lacks resolved type information");
             diagnostics_->nyi(*origin_, std::move(message));
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const slang::SVInt& literal = constValue.integer();
@@ -7207,7 +7433,7 @@ grh::Value* RHSConverter::materializeParameterValue(const slang::ast::NamedValue
     return createConstantValue(literal, *type, hint);
 }
 
-grh::Value* RHSConverter::convertLiteral(const slang::ast::Expression& expr) {
+ValueId RHSConverter::convertLiteral(const slang::ast::Expression& expr) {
     switch (expr.kind) {
     case slang::ast::ExpressionKind::IntegerLiteral: {
         const auto& literal = expr.as<slang::ast::IntegerLiteral>();
@@ -7219,14 +7445,14 @@ grh::Value* RHSConverter::convertLiteral(const slang::ast::Expression& expr) {
     }
     default:
         reportUnsupported("literal", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 }
 
-grh::Value* RHSConverter::convertUnary(const slang::ast::UnaryExpression& expr) {
-    grh::Value* operand = convert(expr.operand());
+ValueId RHSConverter::convertUnary(const slang::ast::UnaryExpression& expr) {
+    ValueId operand = convert(expr.operand());
     if (!operand) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     using slang::ast::UnaryOperator;
@@ -7234,43 +7460,43 @@ grh::Value* RHSConverter::convertUnary(const slang::ast::UnaryExpression& expr) 
     case UnaryOperator::Plus:
         return operand;
     case UnaryOperator::Minus: {
-        grh::Value* zero = createZeroValue(*expr.type, "neg_zero");
+        ValueId zero = createZeroValue(*expr.type, "neg_zero");
         if (!zero) {
-            return nullptr;
+            return ValueId::invalid();
         }
-        return buildBinaryOp(grh::OperationKind::kSub, *zero, *operand, expr, "neg");
+        return buildBinaryOp(grh::OperationKind::kSub, zero, operand, expr, "neg");
     }
     case UnaryOperator::BitwiseNot:
-        return buildUnaryOp(grh::OperationKind::kNot, *operand, expr, "not");
+        return buildUnaryOp(grh::OperationKind::kNot, operand, expr, "not");
     case UnaryOperator::LogicalNot: {
-        grh::Value* logicOperand = reduceToLogicValue(*operand, expr);
-        return logicOperand ? buildUnaryOp(grh::OperationKind::kLogicNot, *logicOperand, expr,
+        ValueId logicOperand = reduceToLogicValue(operand, expr);
+        return logicOperand ? buildUnaryOp(grh::OperationKind::kLogicNot, logicOperand, expr,
                                            "lnot")
-                            : nullptr;
+                            : ValueId::invalid();
     }
     case UnaryOperator::BitwiseAnd:
-        return buildUnaryOp(grh::OperationKind::kReduceAnd, *operand, expr, "red_and");
+        return buildUnaryOp(grh::OperationKind::kReduceAnd, operand, expr, "red_and");
     case UnaryOperator::BitwiseOr:
-        return buildUnaryOp(grh::OperationKind::kReduceOr, *operand, expr, "red_or");
+        return buildUnaryOp(grh::OperationKind::kReduceOr, operand, expr, "red_or");
     case UnaryOperator::BitwiseXor:
-        return buildUnaryOp(grh::OperationKind::kReduceXor, *operand, expr, "red_xor");
+        return buildUnaryOp(grh::OperationKind::kReduceXor, operand, expr, "red_xor");
     case UnaryOperator::BitwiseNand:
-        return buildUnaryOp(grh::OperationKind::kReduceNand, *operand, expr, "red_nand");
+        return buildUnaryOp(grh::OperationKind::kReduceNand, operand, expr, "red_nand");
     case UnaryOperator::BitwiseNor:
-        return buildUnaryOp(grh::OperationKind::kReduceNor, *operand, expr, "red_nor");
+        return buildUnaryOp(grh::OperationKind::kReduceNor, operand, expr, "red_nor");
     case UnaryOperator::BitwiseXnor:
-        return buildUnaryOp(grh::OperationKind::kReduceXnor, *operand, expr, "red_xnor");
+        return buildUnaryOp(grh::OperationKind::kReduceXnor, operand, expr, "red_xnor");
     default:
         reportUnsupported("unary operator", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 }
 
-grh::Value* RHSConverter::convertBinary(const slang::ast::BinaryExpression& expr) {
-    grh::Value* lhs = convert(expr.left());
-    grh::Value* rhs = convert(expr.right());
+ValueId RHSConverter::convertBinary(const slang::ast::BinaryExpression& expr) {
+    ValueId lhs = convert(expr.left());
+    ValueId rhs = convert(expr.right());
     if (!lhs || !rhs) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     using slang::ast::BinaryOperator;
@@ -7354,121 +7580,121 @@ grh::Value* RHSConverter::convertBinary(const slang::ast::BinaryExpression& expr
 
     if (!supported) {
         reportUnsupported("binary operator", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
     if (opKind == grh::OperationKind::kLogicAnd || opKind == grh::OperationKind::kLogicOr) {
-        lhs = reduceToLogicValue(*lhs, expr);
-        rhs = reduceToLogicValue(*rhs, expr);
+        lhs = reduceToLogicValue(lhs, expr);
+        rhs = reduceToLogicValue(rhs, expr);
         if (!lhs || !rhs) {
-            return nullptr;
+            return ValueId::invalid();
         }
     }
 
-    return buildBinaryOp(opKind, *lhs, *rhs, expr, "bin");
+    return buildBinaryOp(opKind, lhs, rhs, expr, "bin");
 }
 
-grh::Value* RHSConverter::reduceToLogicValue(grh::Value& input,
+ValueId RHSConverter::reduceToLogicValue(ValueId input,
                                              const slang::ast::Expression& originExpr) {
-    if (input.width() <= 1) {
-        return &input;
+    if (graph().getValue(input).width() <= 1) {
+        return input;
     }
-    grh::Operation& op = createOperation(grh::OperationKind::kReduceOr, "logic_truth");
-    op.addOperand(input);
-    grh::Value& reduced = createTemporaryValue(*originExpr.type, "logic_truth");
-    op.addResult(reduced);
-    return &reduced;
+    OperationId op = createOperation(grh::OperationKind::kReduceOr, "logic_truth");
+    addOperand(graph(), op, input);
+    ValueId reduced = createTemporaryValue(*originExpr.type, "logic_truth");
+    addResult(graph(), op, reduced);
+    return reduced;
 }
 
-grh::Value* RHSConverter::convertConditional(const slang::ast::ConditionalExpression& expr) {
+ValueId RHSConverter::convertConditional(const slang::ast::ConditionalExpression& expr) {
     if (expr.conditions.empty()) {
         reportUnsupported("conditional (missing condition)", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const auto& condition = expr.conditions.front();
     if (condition.pattern) {
         reportUnsupported("patterned conditional", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* condValue = convert(*condition.expr);
-    grh::Value* trueValue = convert(expr.left());
-    grh::Value* falseValue = convert(expr.right());
+    ValueId condValue = convert(*condition.expr);
+    ValueId trueValue = convert(expr.left());
+    ValueId falseValue = convert(expr.right());
     if (!condValue || !trueValue || !falseValue) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    return buildMux(*condValue, *trueValue, *falseValue, expr);
+    return buildMux(condValue, trueValue, falseValue, expr);
 }
 
-grh::Value* RHSConverter::convertConcatenation(
+ValueId RHSConverter::convertConcatenation(
     const slang::ast::ConcatenationExpression& expr) {
-    std::vector<grh::Value*> operands;
+    std::vector<ValueId> operands;
     for (const slang::ast::Expression* operandExpr : expr.operands()) {
         if (!operandExpr) {
             continue;
         }
-        grh::Value* operandValue = convert(*operandExpr);
+        ValueId operandValue = convert(*operandExpr);
         if (!operandValue) {
-            return nullptr;
+            return ValueId::invalid();
         }
         operands.push_back(operandValue);
     }
 
     if (operands.empty()) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     if (operands.size() == 1) {
         const TypeInfo info = deriveTypeInfo(*expr.type);
-        return resizeValue(*operands.front(), *expr.type, info, expr, "concat");
+        return resizeValue(operands.front(), *expr.type, info, expr, "concat");
     }
 
-    grh::Operation& op = createOperation(grh::OperationKind::kConcat, "concat");
-    for (grh::Value* operand : operands) {
-        op.addOperand(*operand);
+    OperationId op = createOperation(grh::OperationKind::kConcat, "concat");
+    for (ValueId operand : operands) {
+        addOperand(graph(), op, operand);
     }
-    grh::Value& result = createTemporaryValue(*expr.type, "concat");
-    op.addResult(result);
-    return &result;
+    ValueId result = createTemporaryValue(*expr.type, "concat");
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::convertReplication(const slang::ast::ReplicationExpression& expr) {
+ValueId RHSConverter::convertReplication(const slang::ast::ReplicationExpression& expr) {
     std::optional<int64_t> replicateCount = evaluateConstantInt(expr.count());
     if (!replicateCount || *replicateCount <= 0) {
         reportUnsupported("replication count", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* operand = convert(expr.concat());
+    ValueId operand = convert(expr.concat());
     if (!operand) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Operation& op = createOperation(grh::OperationKind::kReplicate, "replicate");
-    op.addOperand(*operand);
-    op.setAttribute("rep", static_cast<int64_t>(*replicateCount));
-    grh::Value& result = createTemporaryValue(*expr.type, "replicate");
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kReplicate, "replicate");
+    addOperand(graph(), op, operand);
+    setAttr(graph(), op, "rep", static_cast<int64_t>(*replicateCount));
+    ValueId result = createTemporaryValue(*expr.type, "replicate");
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::convertConversion(const slang::ast::ConversionExpression& expr) {
+ValueId RHSConverter::convertConversion(const slang::ast::ConversionExpression& expr) {
     const TypeInfo info = deriveTypeInfo(*expr.type);
     if (std::optional<slang::SVInt> constant = evaluateConstantSvInt(expr)) {
         return createConstantValue(*constant, *expr.type, "convert");
     }
 
-    grh::Value* operand = convert(expr.operand());
+    ValueId operand = convert(expr.operand());
     if (!operand) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    return resizeValue(*operand, *expr.type, info, expr, "convert");
+    return resizeValue(operand, *expr.type, info, expr, "convert");
 }
 
-grh::Value* RHSConverter::convertCall(const slang::ast::CallExpression& expr) {
+ValueId RHSConverter::convertCall(const slang::ast::CallExpression& expr) {
     if (std::optional<slang::SVInt> constant = evaluateConstantSvInt(expr)) {
         std::string hint =
             sanitizeForGraphName(expr.getSubroutineName(), /* allowLeadingDigit */ false);
@@ -7487,134 +7713,135 @@ grh::Value* RHSConverter::convertCall(const slang::ast::CallExpression& expr) {
             auto args = expr.arguments();
             if (args.empty() || !args.front()) {
                 reportUnsupported("call expression", expr);
-                return nullptr;
+                return ValueId::invalid();
             }
-            grh::Value* operand = convert(*args.front());
+            ValueId operand = convert(*args.front());
             if (!operand) {
-                return nullptr;
+                return ValueId::invalid();
             }
             const TypeInfo info = deriveTypeInfo(*expr.type);
-            return resizeValue(*operand, *expr.type, info, expr,
+            return resizeValue(operand, *expr.type, info, expr,
                                name == "$signed" ? "signed" : "unsigned");
         }
     }
 
     reportUnsupported("call expression", expr);
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
+ValueId RHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
     reportUnsupported("array select", expr);
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& expr) {
+ValueId RHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& expr) {
     reportUnsupported("range select", expr);
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::convertMemberAccess(const slang::ast::MemberAccessExpression& expr) {
+ValueId RHSConverter::convertMemberAccess(const slang::ast::MemberAccessExpression& expr) {
     reportUnsupported("member access", expr);
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression&,
+ValueId RHSConverter::handleMemoEntry(const slang::ast::NamedValueExpression&,
                                           const SignalMemoEntry&) {
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::handleCustomNamedValue(const slang::ast::NamedValueExpression&) {
-    return nullptr;
+ValueId RHSConverter::handleCustomNamedValue(const slang::ast::NamedValueExpression&) {
+    return ValueId::invalid();
 }
 
-grh::Value& RHSConverter::createTemporaryValue(const slang::ast::Type& type,
+ValueId RHSConverter::createTemporaryValue(const slang::ast::Type& type,
                                                std::string_view hint) {
     const TypeInfo info = deriveTypeInfo(type);
     std::string name = makeValueName(hint, valueCounter_++);
-    grh::Value& value =
-        graph_->createValue(name, info.width > 0 ? info.width : 1, info.isSigned);
-    applyDebug(value, makeDebugInfo(sourceManager_, currentExpr_));
+    ValueId value =
+        createValue(graph(), name, info.width > 0 ? info.width : 1, info.isSigned);
+    applyDebug(graph(), value, makeDebugInfo(sourceManager_, currentExpr_));
     return value;
 }
 
-grh::Operation& RHSConverter::createOperation(grh::OperationKind kind, std::string_view hint) {
+OperationId RHSConverter::createOperation(grh::OperationKind kind, std::string_view hint) {
     std::string name = makeOperationName(hint, operationCounter_++);
-    grh::Operation& op = graph_->createOperation(kind, name);
-    applyDebug(op, makeDebugInfo(sourceManager_, currentExpr_));
+    OperationId op = ::wolf_sv::createOperation(graph(), kind, name);
+    applyDebug(graph(), op, makeDebugInfo(sourceManager_, currentExpr_));
     return op;
 }
 
-grh::Value* RHSConverter::createConstantValue(const slang::SVInt& value,
+ValueId RHSConverter::createConstantValue(const slang::SVInt& value,
                                               const slang::ast::Type& type,
                                               std::string_view hint) {
-    grh::Operation& op = createOperation(grh::OperationKind::kConstant, hint);
-    grh::Value& result = createTemporaryValue(type, hint);
-    op.addResult(result);
-    op.setAttribute("constValue", formatConstantLiteral(value, type));
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kConstant, hint);
+    ValueId result = createTemporaryValue(type, hint);
+    addResult(graph(), op, result);
+    setAttr(graph(), op, "constValue", formatConstantLiteral(value, type));
+    return result;
 }
 
-grh::Value* RHSConverter::createZeroValue(const slang::ast::Type& type,
+ValueId RHSConverter::createZeroValue(const slang::ast::Type& type,
                                           std::string_view hint) {
     const TypeInfo info = deriveTypeInfo(type);
     slang::SVInt literal(static_cast<slang::bitwidth_t>(info.width), uint64_t(0), info.isSigned);
     return createConstantValue(literal, type, hint);
 }
 
-grh::Value* RHSConverter::buildUnaryOp(grh::OperationKind kind, grh::Value& operand,
+ValueId RHSConverter::buildUnaryOp(grh::OperationKind kind, ValueId operand,
                                        const slang::ast::Expression& originExpr,
                                        std::string_view hint) {
-    grh::Operation& op = createOperation(kind, hint);
-    op.addOperand(operand);
-    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(kind, hint);
+    addOperand(graph(), op, operand);
+    ValueId result = createTemporaryValue(*originExpr.type, hint);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::buildBinaryOp(grh::OperationKind kind, grh::Value& lhs, grh::Value& rhs,
+ValueId RHSConverter::buildBinaryOp(grh::OperationKind kind, ValueId lhs, ValueId rhs,
                                         const slang::ast::Expression& originExpr,
                                         std::string_view hint) {
-    grh::Operation& op = createOperation(kind, hint);
-    op.addOperand(lhs);
-    op.addOperand(rhs);
-    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(kind, hint);
+    addOperand(graph(), op, lhs);
+    addOperand(graph(), op, rhs);
+    ValueId result = createTemporaryValue(*originExpr.type, hint);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::buildMux(grh::Value& cond, grh::Value& onTrue, grh::Value& onFalse,
+ValueId RHSConverter::buildMux(ValueId cond, ValueId onTrue, ValueId onFalse,
                                    const slang::ast::Expression& originExpr) {
-    grh::Operation& op = createOperation(grh::OperationKind::kMux, "mux");
-    op.addOperand(cond);
-    op.addOperand(onTrue);
-    op.addOperand(onFalse);
-    grh::Value& result = createTemporaryValue(*originExpr.type, "mux");
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kMux, "mux");
+    addOperand(graph(), op, cond);
+    addOperand(graph(), op, onTrue);
+    addOperand(graph(), op, onFalse);
+    ValueId result = createTemporaryValue(*originExpr.type, "mux");
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::buildAssign(grh::Value& input, const slang::ast::Expression& originExpr,
+ValueId RHSConverter::buildAssign(ValueId input, const slang::ast::Expression& originExpr,
                                       std::string_view hint) {
-    grh::Operation& op = createOperation(grh::OperationKind::kAssign, hint);
-    op.addOperand(input);
-    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kAssign, hint);
+    addOperand(graph(), op, input);
+    ValueId result = createTemporaryValue(*originExpr.type, hint);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type& targetType,
+ValueId RHSConverter::resizeValue(ValueId input, const slang::ast::Type& targetType,
                                       const TypeInfo& targetInfo,
                                       const slang::ast::Expression& originExpr,
                                       std::string_view hint) {
     if (!graph_) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const int64_t targetWidth = targetInfo.width > 0 ? targetInfo.width : 1;
-    const int64_t inputWidth = input.width() > 0 ? input.width() : 1;
+    const int64_t inputWidth = graph().getValue(input).width() > 0 ? graph().getValue(input).width() : 1;
 
-    if (inputWidth == targetWidth && input.isSigned() == targetInfo.isSigned) {
-        return &input;
+    if (inputWidth == targetWidth &&
+        graph().getValue(input).isSigned() == targetInfo.isSigned) {
+        return input;
     }
 
     if (inputWidth == targetWidth) {
@@ -7622,57 +7849,57 @@ grh::Value* RHSConverter::resizeValue(grh::Value& input, const slang::ast::Type&
     }
 
     if (inputWidth > targetWidth) {
-        grh::Operation& slice = createOperation(grh::OperationKind::kSliceStatic, hint);
-        slice.addOperand(input);
-        slice.setAttribute("sliceStart", int64_t(0));
-        slice.setAttribute("sliceEnd", targetWidth - 1);
-        grh::Value& result = createTemporaryValue(targetType, hint);
-        slice.addResult(result);
-        return &result;
+        OperationId slice = createOperation(grh::OperationKind::kSliceStatic, hint);
+        addOperand(graph(), slice, input);
+        setAttr(graph(), slice, "sliceStart", int64_t(0));
+        setAttr(graph(), slice, "sliceEnd", targetWidth - 1);
+        ValueId result = createTemporaryValue(targetType, hint);
+        addResult(graph(), slice, result);
+        return result;
     }
 
     const int64_t extendWidth = targetWidth - inputWidth;
-    grh::Operation& concat = createOperation(grh::OperationKind::kConcat, hint);
+    OperationId concat = createOperation(grh::OperationKind::kConcat, hint);
 
-    grh::Value* extendValue = nullptr;
-    if (input.isSigned()) {
+    ValueId extendValue = ValueId::invalid();
+    if (graph().getValue(input).isSigned()) {
         // Sign extend using the operand's MSB.
-        grh::Operation& signSlice = createOperation(grh::OperationKind::kSliceStatic, "sign");
-        signSlice.addOperand(input);
-        signSlice.setAttribute("sliceStart", inputWidth - 1);
-        signSlice.setAttribute("sliceEnd", inputWidth - 1);
+        OperationId signSlice = createOperation(grh::OperationKind::kSliceStatic, "sign");
+        addOperand(graph(), signSlice, input);
+        setAttr(graph(), signSlice, "sliceStart", inputWidth - 1);
+        setAttr(graph(), signSlice, "sliceEnd", inputWidth - 1);
 
         std::string signName = makeValueName("sign", valueCounter_++);
-        grh::Value& signBit = graph_->createValue(signName, 1, input.isSigned());
-        applyDebug(signBit, makeDebugInfo(sourceManager_, currentExpr_));
-        signSlice.addResult(signBit);
+        ValueId signBit = createValue(graph(), signName, 1, graph().getValue(input).isSigned());
+        applyDebug(graph(), signBit, makeDebugInfo(sourceManager_, currentExpr_));
+        addResult(graph(), signSlice, signBit);
 
-        grh::Operation& rep = createOperation(grh::OperationKind::kReplicate, "signext");
-        rep.addOperand(signBit);
-        rep.setAttribute("rep", extendWidth);
+        OperationId rep = createOperation(grh::OperationKind::kReplicate, "signext");
+        addOperand(graph(), rep, signBit);
+        setAttr(graph(), rep, "rep", extendWidth);
         std::string repName = makeValueName("signext", valueCounter_++);
-        grh::Value& extBits = graph_->createValue(repName, extendWidth, targetInfo.isSigned);
-        applyDebug(extBits, makeDebugInfo(sourceManager_, currentExpr_));
-        rep.addResult(extBits);
-        extendValue = &extBits;
+        ValueId extBits = createValue(graph(), repName, extendWidth, targetInfo.isSigned);
+        applyDebug(graph(), extBits, makeDebugInfo(sourceManager_, currentExpr_));
+        addResult(graph(), rep, extBits);
+        extendValue = extBits;
     }
     else {
-        grh::Operation& zeroOp = createOperation(grh::OperationKind::kConstant, "zext");
+        OperationId zeroOp = createOperation(grh::OperationKind::kConstant, "zext");
         std::string valName = makeValueName("zext", valueCounter_++);
-        grh::Value& zeros = graph_->createValue(valName, extendWidth, /*isSigned=*/false);
-        applyDebug(zeros, makeDebugInfo(sourceManager_, currentExpr_));
-        zeroOp.addResult(zeros);
+        ValueId zeros = createValue(graph(), valName, extendWidth, /*isSigned=*/false);
+        applyDebug(graph(), zeros, makeDebugInfo(sourceManager_, currentExpr_));
+        addResult(graph(), zeroOp, zeros);
         std::ostringstream oss;
         oss << extendWidth << "'h0";
-        zeroOp.setAttribute("constValue", oss.str());
-        extendValue = &zeros;
+        setAttr(graph(), zeroOp, "constValue", oss.str());
+        extendValue = zeros;
     }
 
-    concat.addOperand(*extendValue);
-    concat.addOperand(input);
-    grh::Value& result = createTemporaryValue(targetType, hint);
-    concat.addResult(result);
-    return &result;
+    addOperand(graph(), concat, extendValue);
+    addOperand(graph(), concat, input);
+    ValueId result = createTemporaryValue(targetType, hint);
+    addResult(graph(), concat, result);
+    return result;
 }
 
 const SignalMemoEntry* RHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
@@ -7702,16 +7929,17 @@ const SignalMemoEntry* RHSConverter::findMemoEntry(const slang::ast::ValueSymbol
     return finder(regMemo_);
 }
 
-grh::Value* RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
+ValueId RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
     if (entry.value) {
         return entry.value;
     }
 
     if (entry.stateOp) {
-        const grh::OperationKind kind = entry.stateOp->kind();
+        const grh::Operation opView = graph().getOperation(entry.stateOp);
+        const grh::OperationKind kind = opView.kind();
         if (kind == grh::OperationKind::kRegister || kind == grh::OperationKind::kRegisterRst ||
             kind == grh::OperationKind::kRegisterArst) {
-            auto results = entry.stateOp->results();
+            auto results = opView.results();
             if (!results.empty() && results.front()) {
                 return results.front();
             }
@@ -7723,17 +7951,17 @@ grh::Value* RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
         diagnostics_->nyi(*origin_,
                           "Memo entry missing GRH value for symbol " + symbolName);
     }
-    return nullptr;
+    return ValueId::invalid();
 }
 
-grh::Value* RHSConverter::resolveGraphValue(const slang::ast::ValueSymbol& symbol) {
+ValueId RHSConverter::resolveGraphValue(const slang::ast::ValueSymbol& symbol) {
     if (!graph_) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const std::string_view symbolName = symbol.name;
     if (symbolName.empty()) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     return graph_->findValue(symbolName);
@@ -7892,78 +8120,79 @@ CombRHSConverter::deriveStructFieldSlice(const slang::ast::MemberAccessExpressio
     return std::nullopt;
 }
 
-grh::Value* CombRHSConverter::buildStaticSlice(grh::Value& input, int64_t sliceStart,
+ValueId CombRHSConverter::buildStaticSlice(ValueId input, int64_t sliceStart,
                                                int64_t sliceEnd,
                                                const slang::ast::Expression& originExpr,
                                                std::string_view hint) {
     if (sliceStart < 0 || sliceEnd < sliceStart) {
         reportUnsupported("static slice range", originExpr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Operation& op = createOperation(grh::OperationKind::kSliceStatic, hint);
-    op.addOperand(input);
-    op.setAttribute("sliceStart", sliceStart);
-    op.setAttribute("sliceEnd", sliceEnd);
-    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kSliceStatic, hint);
+    addOperand(graph(), op, input);
+    setAttr(graph(), op, "sliceStart", sliceStart);
+    setAttr(graph(), op, "sliceEnd", sliceEnd);
+    ValueId result = createTemporaryValue(*originExpr.type, hint);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* CombRHSConverter::buildDynamicSlice(grh::Value& input, grh::Value& offset,
+ValueId CombRHSConverter::buildDynamicSlice(ValueId input, ValueId offset,
                                                 int64_t sliceWidth,
                                                 const slang::ast::Expression& originExpr,
                                                 std::string_view hint) {
     if (sliceWidth <= 0) {
         reportUnsupported("dynamic slice width", originExpr);
-        return nullptr;
+        return ValueId::invalid();
     }
-    grh::Operation& op = createOperation(grh::OperationKind::kSliceDynamic, hint);
-    op.addOperand(input);
-    op.addOperand(offset);
-    op.setAttribute("sliceWidth", sliceWidth);
-    grh::Value& result = createTemporaryValue(*originExpr.type, hint);
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kSliceDynamic, hint);
+    addOperand(graph(), op, input);
+    addOperand(graph(), op, offset);
+    setAttr(graph(), op, "sliceWidth", sliceWidth);
+    ValueId result = createTemporaryValue(*originExpr.type, hint);
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* CombRHSConverter::buildArraySlice(grh::Value& input, grh::Value& index,
+ValueId CombRHSConverter::buildArraySlice(ValueId input, ValueId index,
                                               int64_t sliceWidth,
                                               const slang::ast::Expression& originExpr) {
     if (sliceWidth <= 0) {
         reportUnsupported("array slice width", originExpr);
-        return nullptr;
+        return ValueId::invalid();
     }
-    grh::Operation& op = createOperation(grh::OperationKind::kSliceArray, "array_slice");
-    op.addOperand(input);
-    op.addOperand(index);
-    op.setAttribute("sliceWidth", sliceWidth);
-    grh::Value& result = createTemporaryValue(*originExpr.type, "array_slice");
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kSliceArray, "array_slice");
+    addOperand(graph(), op, input);
+    addOperand(graph(), op, index);
+    setAttr(graph(), op, "sliceWidth", sliceWidth);
+    ValueId result = createTemporaryValue(*originExpr.type, "array_slice");
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* CombRHSConverter::buildMemoryRead(const SignalMemoEntry& entry,
-                                              const slang::ast::ElementSelectExpression& expr) {
-    if (!entry.stateOp || entry.stateOp->kind() != grh::OperationKind::kMemory) {
+ValueId CombRHSConverter::buildMemoryRead(const SignalMemoEntry& entry,
+                                          const slang::ast::ElementSelectExpression& expr) {
+    if (!entry.stateOp || graph().getOperation(entry.stateOp).kind() != grh::OperationKind::kMemory) {
         reportUnsupported("memory read target", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* addr = convert(expr.selector());
+    ValueId addr = convert(expr.selector());
     if (!addr) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Operation& op = createOperation(grh::OperationKind::kMemoryAsyncReadPort, "mem_read");
-    op.addOperand(*addr);
-    op.setAttribute("memSymbol", entry.stateOp->symbol());
-    grh::Value& result = createTemporaryValue(*expr.type, "mem_read");
-    op.addResult(result);
-    return &result;
+    OperationId op = createOperation(grh::OperationKind::kMemoryAsyncReadPort, "mem_read");
+    addOperand(graph(), op, addr);
+    setAttr(graph(), op, "memSymbol",
+            std::string(graph().getOperation(entry.stateOp).symbolText()));
+    ValueId result = createTemporaryValue(*expr.type, "mem_read");
+    addResult(graph(), op, result);
+    return result;
 }
 
-grh::Value* CombRHSConverter::createIntConstant(int64_t value, const slang::ast::Type& type,
+ValueId CombRHSConverter::createIntConstant(int64_t value, const slang::ast::Type& type,
                                                 std::string_view hint) {
     uint64_t bitWidth = 32;
     if (type.isBitstreamType() && type.isFixedSize()) {
@@ -7996,48 +8225,49 @@ CombRHSConverter::translateStaticIndex(const slang::ast::Expression& valueExpr,
     return static_cast<int64_t>(range.translateIndex(static_cast<int32_t>(rawIndex)));
 }
 
-grh::Value* CombRHSConverter::translateDynamicIndex(const slang::ast::Expression& valueExpr,
-                                                    grh::Value& rawIndex,
+ValueId CombRHSConverter::translateDynamicIndex(const slang::ast::Expression& valueExpr,
+                                                    ValueId rawIndex,
                                                     const slang::ast::Expression& originExpr,
                                                     std::string_view hint) {
     if (valueExpr.type && valueExpr.type->isUnpackedArray()) {
-        return &rawIndex;
+        return rawIndex;
     }
     if (!valueExpr.type || !valueExpr.type->isFixedSize()) {
-        return &rawIndex;
+        return rawIndex;
     }
     const slang::ConstantRange range = valueExpr.type->getFixedRange();
     if (range.isLittleEndian()) {
         const int64_t lower = range.lower();
         if (lower == 0) {
-            return &rawIndex;
+            return rawIndex;
         }
-        grh::Value* lowerConst = createIntConstant(lower, *originExpr.type, hint);
+        ValueId lowerConst = createIntConstant(lower, *originExpr.type, hint);
         if (!lowerConst) {
-            return nullptr;
+            return ValueId::invalid();
         }
-        return buildBinaryOp(grh::OperationKind::kSub, rawIndex, *lowerConst, originExpr,
+        return buildBinaryOp(grh::OperationKind::kSub, rawIndex, lowerConst, originExpr,
                              hint);
     }
 
-    grh::Value* upperConst = createIntConstant(range.upper(), *originExpr.type, hint);
+    ValueId upperConst = createIntConstant(range.upper(), *originExpr.type, hint);
     if (!upperConst) {
-        return nullptr;
+        return ValueId::invalid();
     }
-    return buildBinaryOp(grh::OperationKind::kSub, *upperConst, rawIndex, originExpr, hint);
+    return buildBinaryOp(grh::OperationKind::kSub, upperConst, rawIndex, originExpr, hint);
 }
 
-grh::Value*
+ValueId
 CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression& expr) {
     if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
-        if (entry->stateOp && entry->stateOp->kind() == grh::OperationKind::kMemory) {
+        if (entry->stateOp &&
+            graph().getOperation(entry->stateOp).kind() == grh::OperationKind::kMemory) {
             return buildMemoryRead(*entry, expr);
         }
     }
 
-    grh::Value* input = convert(expr.value());
+    ValueId input = convert(expr.value());
     if (!input) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const TypeInfo info = deriveTypeInfo(*expr.type);
@@ -8063,31 +8293,31 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
                 const int64_t sliceStart = baseIndex * info.width;
                 const int64_t sliceEnd = sliceStart + info.width - 1;
                 if (sliceStart >= 0 && sliceEnd >= sliceStart) {
-                    return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "array_static");
+                    return buildStaticSlice(input, sliceStart, sliceEnd, expr, "array_static");
                 }
             }
         }
     }
 
-    grh::Value* index = convert(expr.selector());
+    ValueId index = convert(expr.selector());
     if (!index) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* normalizedIndex =
-        translateDynamicIndex(expr.value(), *index, expr.selector(), "array_index");
+    ValueId normalizedIndex =
+        translateDynamicIndex(expr.value(), index, expr.selector(), "array_index");
     if (!normalizedIndex) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    return buildArraySlice(*input, *normalizedIndex, info.width, expr);
+    return buildArraySlice(input, normalizedIndex, info.width, expr);
 }
 
-grh::Value*
+ValueId
 CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& expr) {
-    grh::Value* input = convert(expr.value());
+    ValueId input = convert(expr.value());
     if (!input) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     std::optional<slang::ConstantRange> valueRange;
@@ -8102,7 +8332,7 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
         std::optional<int64_t> right = evaluateConstantInt(expr.right());
         if (!left || !right) {
             reportUnsupported("static range bounds", expr);
-            return nullptr;
+            return ValueId::invalid();
         }
         const int64_t normLeft =
             translateStaticIndex(expr.value(), *left).value_or(*left);
@@ -8110,13 +8340,13 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
             translateStaticIndex(expr.value(), *right).value_or(*right);
         const int64_t sliceStart = std::min(normLeft, normRight);
         const int64_t sliceEnd = std::max(normLeft, normRight);
-        return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_slice");
+        return buildStaticSlice(input, sliceStart, sliceEnd, expr, "range_slice");
     }
     case RangeSelectionKind::IndexedUp: {
         std::optional<int64_t> width = evaluateConstantInt(expr.right());
         if (!width || *width <= 0) {
             reportUnsupported("indexed range width", expr);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         if (std::optional<int64_t> baseConst = evaluateConstantInt(expr.left())) {
@@ -8128,47 +8358,47 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
                 translateStaticIndex(expr.value(), lsbIndex).value_or(lsbIndex);
             const int64_t sliceStart = std::min(normLsb, normMsb);
             const int64_t sliceEnd = std::max(normLsb, normMsb);
-            return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_up");
+            return buildStaticSlice(input, sliceStart, sliceEnd, expr, "range_up");
         }
 
         if (!expr.left().type) {
             reportUnsupported("indexed range base type", expr);
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        grh::Value* base = convert(expr.left());
+        ValueId base = convert(expr.left());
         if (!base) {
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        grh::Value* lsbIndex = base;
+        ValueId lsbIndex = base;
         if (*width > 1 && valueRange && !valueRange->isLittleEndian()) {
-            grh::Value* widthValue =
+            ValueId widthValue =
                 createIntConstant(*width - 1, *expr.left().type, "range_up_width");
             if (!widthValue) {
-                return nullptr;
+                return ValueId::invalid();
             }
             lsbIndex =
-                buildBinaryOp(grh::OperationKind::kAdd, *base, *widthValue, expr.left(),
+                buildBinaryOp(grh::OperationKind::kAdd, base, widthValue, expr.left(),
                               "range_up_base");
             if (!lsbIndex) {
-                return nullptr;
+                return ValueId::invalid();
             }
         }
 
-        grh::Value* offset =
-            translateDynamicIndex(expr.value(), *lsbIndex, expr.left(), "range_up_index");
+        ValueId offset =
+            translateDynamicIndex(expr.value(), lsbIndex, expr.left(), "range_up_index");
         if (!offset) {
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        return buildDynamicSlice(*input, *offset, *width, expr, "range_up");
+        return buildDynamicSlice(input, offset, *width, expr, "range_up");
     }
     case RangeSelectionKind::IndexedDown: {
         std::optional<int64_t> width = evaluateConstantInt(expr.right());
         if (!width || *width <= 0) {
             reportUnsupported("indexed range width", expr);
-            return nullptr;
+            return ValueId::invalid();
         }
 
         if (std::optional<int64_t> baseConst = evaluateConstantInt(expr.left())) {
@@ -8180,63 +8410,63 @@ CombRHSConverter::convertRangeSelect(const slang::ast::RangeSelectExpression& ex
                 translateStaticIndex(expr.value(), lsbIndex).value_or(lsbIndex);
             const int64_t sliceStart = std::min(normLsb, normMsb);
             const int64_t sliceEnd = std::max(normLsb, normMsb);
-            return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "range_down");
+            return buildStaticSlice(input, sliceStart, sliceEnd, expr, "range_down");
         }
 
         if (!expr.left().type) {
             reportUnsupported("indexed range base type", expr);
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        grh::Value* base = convert(expr.left());
+        ValueId base = convert(expr.left());
         if (!base) {
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        grh::Value* lsbIndex = base;
+        ValueId lsbIndex = base;
         if (*width > 1) {
-            grh::Value* widthValue =
+            ValueId widthValue =
                 createIntConstant(*width - 1, *expr.left().type, "range_down_width");
             if (!widthValue) {
-                return nullptr;
+                return ValueId::invalid();
             }
-            lsbIndex = buildBinaryOp(grh::OperationKind::kSub, *base, *widthValue, expr.left(),
+            lsbIndex = buildBinaryOp(grh::OperationKind::kSub, base, widthValue, expr.left(),
                                      "range_down_base");
             if (!lsbIndex) {
-                return nullptr;
+                return ValueId::invalid();
             }
         }
 
-        grh::Value* offset =
-            translateDynamicIndex(expr.value(), *lsbIndex, expr.left(), "range_down_index");
+        ValueId offset =
+            translateDynamicIndex(expr.value(), lsbIndex, expr.left(), "range_down_index");
         if (!offset) {
-            return nullptr;
+            return ValueId::invalid();
         }
 
-        return buildDynamicSlice(*input, *offset, *width, expr, "range_down");
+        return buildDynamicSlice(input, offset, *width, expr, "range_down");
     }
     default:
         reportUnsupported("range select kind", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 }
 
-grh::Value*
+ValueId
 CombRHSConverter::convertMemberAccess(const slang::ast::MemberAccessExpression& expr) {
     std::optional<SliceRange> slice = deriveStructFieldSlice(expr);
     if (!slice) {
         reportUnsupported("struct member access", expr);
-        return nullptr;
+        return ValueId::invalid();
     }
 
-    grh::Value* input = convert(expr.value());
+    ValueId input = convert(expr.value());
     if (!input) {
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const int64_t sliceStart = std::min(slice->lsb, slice->msb);
     const int64_t sliceEnd = std::max(slice->lsb, slice->msb);
-    return buildStaticSlice(*input, sliceStart, sliceEnd, expr, "member_slice");
+    return buildStaticSlice(input, sliceStart, sliceEnd, expr, "member_slice");
 }
 
 void ElaborateDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message) {
@@ -8418,8 +8648,8 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
             const bool isSigned = typeInfo.isSigned;
 
             std::string portName(port->name);
-            grh::Value& value = graph.createValue(portName, width, isSigned);
-            applyDebug(value, makeDebugInfo(sourceManager_, port));
+            ValueId value = createValue(graph, portName, width, isSigned);
+            applyDebug(graph, value, makeDebugInfo(sourceManager_, port));
             registerValueForSymbol(*port, value);
             if (const auto* internal = port->internalSymbol ?
                                            port->internalSymbol->as_if<slang::ast::ValueSymbol>()
@@ -8427,12 +8657,13 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
                 registerValueForSymbol(*internal, value);
             }
 
+            grh::ir::SymbolId portSym = graph.internSymbol(portName);
             switch (port->direction) {
             case slang::ast::ArgumentDirection::In:
-                graph.bindInputPort(portName, value);
+                graph.bindInputPort(portSym, value);
                 break;
             case slang::ast::ArgumentDirection::Out:
-                graph.bindOutputPort(portName, value);
+                graph.bindOutputPort(portSym, value);
                 break;
             case slang::ast::ArgumentDirection::InOut:
             case slang::ast::ArgumentDirection::Ref:
@@ -8476,8 +8707,8 @@ void Elaborate::emitModulePlaceholder(const slang::ast::InstanceSymbol& instance
     }
     ++placeholderCounter_;
 
-    grh::Operation& op = graph.createOperation(grh::OperationKind::kBlackbox, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &instance));
+    OperationId op = createOperation(graph, grh::OperationKind::kBlackbox, opName);
+    applyDebug(graph, op, makeDebugInfo(sourceManager_, &instance));
 
     const auto& definition = instance.body.getDefinition();
     std::string moduleName = !definition.name.empty() ? std::string(definition.name)
@@ -8486,8 +8717,8 @@ void Elaborate::emitModulePlaceholder(const slang::ast::InstanceSymbol& instance
         moduleName = "anonymous_module";
     }
 
-    op.setAttribute("module_name", moduleName);
-    op.setAttribute("status", std::string("TODO: module body elaboration pending"));
+    setAttr(graph, op, "module_name", moduleName);
+    setAttr(graph, op, "status", std::string("TODO: module body elaboration pending"));
 
     if (diagnostics_) {
         diagnostics_->todo(instance, "Module body elaboration pending");
@@ -8688,7 +8919,7 @@ void Elaborate::processNetInitializers(const slang::ast::InstanceBodySymbol& bod
             .sourceManager = sourceManager_,
         };
         CombRHSConverter converter(context);
-        grh::Value* rhsValue = converter.convert(*init);
+        ValueId rhsValue = converter.convert(*init);
         if (!rhsValue) {
             continue;
         }
@@ -8731,7 +8962,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .diagnostics = diagnostics_,
         .sourceManager = sourceManager_};
     CombRHSConverter converter(context);
-    grh::Value* rhsValue = converter.convert(assignment->right());
+    ValueId rhsValue = converter.convert(assignment->right());
     if (!rhsValue) {
         return;
     }
@@ -8745,7 +8976,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .diagnostics = diagnostics_,
         .sourceManager = sourceManager_};
     ContinuousAssignLHSConverter lhsConverter(lhsContext, memo);
-    lhsConverter.convert(*assignment, *rhsValue);
+    lhsConverter.convert(*assignment, rhsValue);
 }
 
 void Elaborate::processCombAlways(const slang::ast::ProceduralBlockSymbol& block,
@@ -8808,8 +9039,8 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
     std::string baseName =
         childInstance.name.empty() ? std::string("inst") : std::string(childInstance.name);
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
-    grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kInstance, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &childInstance));
+    OperationId op = createOperation(parentGraph, grh::OperationKind::kInstance, opName);
+    applyDebug(parentGraph, op, makeDebugInfo(sourceManager_, &childInstance));
 
     // Prefer本地实例名，若缺失再回退层级路径，避免在 emit 时打印带前缀的层次化名字。
     std::string instanceName =
@@ -8847,13 +9078,13 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
     class PortLHSConverter : public LHSConverter {
     public:
         using LHSConverter::LHSConverter;
-        bool convert(const slang::ast::Expression& expr, grh::Value& rhsValue,
+        bool convert(const slang::ast::Expression& expr, ValueId rhsValue,
                      std::vector<WriteResult>& outResults) {
             return lowerExpression(expr, rhsValue, outResults);
         }
     };
 
-    auto makePortValue = [&](const slang::ast::PortSymbol& port) -> grh::Value* {
+    auto makePortValue = [&](const slang::ast::PortSymbol& port) -> ValueId {
         TypeHelper::Info info = TypeHelper::analyze(port.getType(), port, diagnostics_);
         std::string base =
             instanceName.empty() || port.name.empty()
@@ -8870,9 +9101,9 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             candidate.append(std::to_string(++suffix));
         }
         const int64_t width = info.width > 0 ? info.width : 1;
-        grh::Value& value = parentGraph.createValue(candidate, width, info.isSigned);
-        applyDebug(value, makeDebugInfo(sourceManager_, &port));
-        return &value;
+        ValueId value = createValue(parentGraph, candidate, width, info.isSigned);
+        applyDebug(parentGraph, value, makeDebugInfo(sourceManager_, &port));
+        return value;
     };
 
     std::vector<std::string> inputPortNames;
@@ -8899,28 +9130,28 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                 if (!expr) {
                     break;
                 }
-                grh::Value* value = resolveConnectionValue(*expr, parentGraph, port);
+                ValueId value = resolveConnectionValue(*expr, parentGraph, port);
                 if (!value) {
                     break;
                 }
-                op.addOperand(*value);
+                addOperand(parentGraph, op, value);
                 inputPortNames.emplace_back(port->name);
                 break;
             }
             case slang::ast::ArgumentDirection::Out: {
-                grh::Value* resolved = expr ? resolveConnectionValue(*expr, parentGraph, port)
-                                            : nullptr;
-                if (resolved && !resolved->definingOp()) {
-                    op.addResult(*resolved);
+                ValueId resolved = expr ? resolveConnectionValue(*expr, parentGraph, port)
+                                            : ValueId::invalid();
+                if (resolved && !parentGraph.getValue(resolved).definingOp()) {
+                    addResult(parentGraph, op, resolved);
                     outputPortNames.emplace_back(port->name);
                     break;
                 }
 
-                grh::Value* resultValue = makePortValue(*port);
+                ValueId resultValue = makePortValue(*port);
                 if (!resultValue) {
                     break;
                 }
-                op.addResult(*resultValue);
+                addResult(parentGraph, op, resultValue);
                 outputPortNames.emplace_back(port->name);
 
                 const slang::ast::Expression* targetExpr = expr;
@@ -8941,7 +9172,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                         .sourceManager = sourceManager_};
                     PortLHSConverter lhsConverter(lhsContext);
                     std::vector<LHSConverter::WriteResult> writeResults;
-                    if (lhsConverter.convert(*targetExpr, *resultValue, writeResults)) {
+                    if (lhsConverter.convert(*targetExpr, resultValue, writeResults)) {
                         for (LHSConverter::WriteResult& result : writeResults) {
                             if (!result.target) {
                                 continue;
@@ -8984,10 +9215,10 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
         }
     }
 
-    op.setAttribute("moduleName", targetGraph.symbol());
-    op.setAttribute("instanceName", instanceName);
-    op.setAttribute("inputPortName", inputPortNames);
-    op.setAttribute("outputPortName", outputPortNames);
+    setAttr(parentGraph, op, "moduleName", targetGraph.symbol());
+    setAttr(parentGraph, op, "instanceName", instanceName);
+    setAttr(parentGraph, op, "inputPortName", inputPortNames);
+    setAttr(parentGraph, op, "outputPortName", outputPortNames);
 }
 
 void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
@@ -8995,8 +9226,8 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
     std::string baseName =
         childInstance.name.empty() ? std::string("inst") : std::string(childInstance.name);
     std::string opName = makeUniqueOperationName(parentGraph, baseName);
-    grh::Operation& op = parentGraph.createOperation(grh::OperationKind::kBlackbox, opName);
-    applyDebug(op, makeDebugInfo(sourceManager_, &childInstance));
+    OperationId op = createOperation(parentGraph, grh::OperationKind::kBlackbox, opName);
+    applyDebug(parentGraph, op, makeDebugInfo(sourceManager_, &childInstance));
 
     std::string instanceName =
         childInstance.name.empty() ? std::string() : sanitizeForGraphName(childInstance.name);
@@ -9039,25 +9270,25 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
             continue;
         }
 
-        grh::Value* value = resolveConnectionValue(*expr, parentGraph, port);
+        ValueId value = resolveConnectionValue(*expr, parentGraph, port);
         if (!value) {
             continue;
         }
 
-        if (diagnostics_ && portMeta.width > 0 && value->width() != portMeta.width) {
+        if (diagnostics_ && portMeta.width > 0 && parentGraph.getValue(value).width() != portMeta.width) {
             std::ostringstream oss;
             oss << "Port width mismatch for " << portMeta.name << " (expected " << portMeta.width
-                << ", got " << value->width() << ")";
+                << ", got " << parentGraph.getValue(value).width() << ")";
             diagnostics_->nyi(*port, oss.str());
         }
 
         switch (portMeta.direction) {
         case slang::ast::ArgumentDirection::In:
-            op.addOperand(*value);
+            addOperand(parentGraph, op, value);
             inputPortNames.emplace_back(portMeta.name);
             break;
         case slang::ast::ArgumentDirection::Out:
-            op.addResult(*value);
+            addResult(parentGraph, op, value);
             outputPortNames.emplace_back(portMeta.name);
             break;
         default:
@@ -9078,18 +9309,23 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         parameterValues.push_back(param.value);
     }
 
-    op.setAttribute("moduleName", memo.moduleName);
-    op.setAttribute("instanceName", instanceName);
-    op.setAttribute("inputPortName", inputPortNames);
-    op.setAttribute("outputPortName", outputPortNames);
-    op.setAttribute("parameterNames", parameterNames);
-    op.setAttribute("parameterValues", parameterValues);
+    setAttr(parentGraph, op, "moduleName", memo.moduleName);
+    setAttr(parentGraph, op, "instanceName", instanceName);
+    setAttr(parentGraph, op, "inputPortName", inputPortNames);
+    setAttr(parentGraph, op, "outputPortName", outputPortNames);
+    setAttr(parentGraph, op, "parameterNames", parameterNames);
+    setAttr(parentGraph, op, "parameterValues", parameterValues);
 }
 
-grh::Value* Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbol,
+ValueId Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbol,
                                             grh::Graph& graph) {
     if (auto it = valueCache_.find(&symbol); it != valueCache_.end()) {
-        return it->second;
+        const grh::ir::GraphId graphId = graph.id();
+        for (const ValueId& cached : it->second) {
+            if (cached.graph == graphId) {
+                return cached;
+            }
+        }
     }
 
     const slang::ast::Type& type = symbol.getType();
@@ -9103,14 +9339,14 @@ grh::Value* Elaborate::ensureValueForSymbol(const slang::ast::ValueSymbol& symbo
         candidate.append(std::to_string(++attempt));
     }
 
-    grh::Value& value = graph.createValue(candidate, info.width > 0 ? info.width : 1,
+    ValueId value = createValue(graph, candidate, info.width > 0 ? info.width : 1,
                                           info.isSigned);
-    applyDebug(value, makeDebugInfo(sourceManager_, &symbol));
+    applyDebug(graph, value, makeDebugInfo(sourceManager_, &symbol));
     registerValueForSymbol(symbol, value);
-    return &value;
+    return value;
 }
 
-grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr,
+ValueId Elaborate::resolveConnectionValue(const slang::ast::Expression& expr,
                                               grh::Graph& graph,
                                               const slang::ast::Symbol* origin) {
     const slang::ast::Expression* targetExpr = &expr;
@@ -9123,7 +9359,7 @@ grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr
             if (diagnostics_ && origin) {
                 diagnostics_->nyi(*origin, "Assignment port connections are not supported yet");
             }
-            return nullptr;
+            return ValueId::invalid();
         }
     }
 
@@ -9131,7 +9367,7 @@ grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr
         if (diagnostics_ && origin) {
             diagnostics_->nyi(*origin, "Hierarchical port connections are not supported yet");
         }
-        return nullptr;
+        return ValueId::invalid();
     }
 
     const slang::ast::InstanceBodySymbol* contextBody = nullptr;
@@ -9160,7 +9396,7 @@ grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr
         .diagnostics = diagnostics_,
         .sourceManager = sourceManager_};
     CombRHSConverter converter(context);
-    if (grh::Value* value = converter.convert(*targetExpr)) {
+    if (ValueId value = converter.convert(*targetExpr)) {
         return value;
     }
 
@@ -9169,7 +9405,7 @@ grh::Value* Elaborate::resolveConnectionValue(const slang::ast::Expression& expr
         return ensureValueForSymbol(named.symbol, graph);
     }
 
-    return nullptr;
+    return ValueId::invalid();
 }
 
 std::string Elaborate::makeUniqueOperationName(grh::Graph& graph, std::string baseName) {
@@ -9187,8 +9423,15 @@ std::string Elaborate::makeUniqueOperationName(grh::Graph& graph, std::string ba
     return candidate;
 }
 
-void Elaborate::registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value) {
-    valueCache_[&symbol] = &value;
+void Elaborate::registerValueForSymbol(const slang::ast::Symbol& symbol, ValueId value) {
+    auto& bucket = valueCache_[&symbol];
+    for (ValueId& cached : bucket) {
+        if (cached.graph == value.graph) {
+            cached = value;
+            return;
+        }
+    }
+    bucket.push_back(value);
 }
 
 void Elaborate::materializeSignalMemos(const slang::ast::InstanceBodySymbol& body,
@@ -9208,7 +9451,7 @@ void Elaborate::ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh:
         if (!entry.symbol) {
             continue;
         }
-        grh::Value* value = ensureValueForSymbol(*entry.symbol, graph);
+        ValueId value = ensureValueForSymbol(*entry.symbol, graph);
         entry.value = value;
     }
 }
@@ -9236,7 +9479,7 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
             continue;
         }
 
-        grh::Value* value = ensureValueForSymbol(*entry.symbol, graph);
+        ValueId value = ensureValueForSymbol(*entry.symbol, graph);
         entry.value = value;
         if (!value) {
             continue;
@@ -9315,14 +9558,14 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         }
 
         std::string opName = makeOperationNameForSymbol(*entry.symbol, "register", graph);
-        grh::Operation& op = graph.createOperation(opKind, opName);
-        applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
-        op.addResult(*value);
-        op.setAttribute("clkPolarity", *clkPolarity);
+        OperationId op = createOperation(graph, opKind, opName);
+        applyDebug(graph, op, makeDebugInfo(sourceManager_, entry.symbol));
+        addResult(graph, op, value);
+        setAttr(graph, op, "clkPolarity", *clkPolarity);
         if (rstPolarity) {
-            op.setAttribute("rstPolarity", *rstPolarity);
+            setAttr(graph, op, "rstPolarity", *rstPolarity);
         }
-        entry.stateOp = &op;
+        entry.stateOp = op;
     }
 }
 
@@ -9340,17 +9583,17 @@ void Elaborate::ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::
         }
         if (const auto layout = deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
             std::string opName = makeOperationNameForSymbol(*entry.symbol, "memory", graph);
-            grh::Operation& op = graph.createOperation(grh::OperationKind::kMemory, opName);
-            applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
-            op.setAttribute("width", layout->rowWidth);
-            op.setAttribute("row", layout->rowCount);
-            op.setAttribute("isSigned", layout->isSigned);
-            entry.stateOp = &op;
+            OperationId op = createOperation(graph, grh::OperationKind::kMemory, opName);
+            applyDebug(graph, op, makeDebugInfo(sourceManager_, entry.symbol));
+            setAttr(graph, op, "width", layout->rowWidth);
+            setAttr(graph, op, "row", layout->rowCount);
+            setAttr(graph, op, "isSigned", layout->isSigned);
+            entry.stateOp = op;
             // 将同名 symbol 在 regMemo 里的视图一并更新 stateOp，方便测试从 regMemo 访问到 memory。
             if (auto regIt = regMemo_.find(&body); regIt != regMemo_.end()) {
                 for (SignalMemoEntry& regEntry : regIt->second) {
                     if (regEntry.symbol == entry.symbol) {
-                        regEntry.stateOp = &op;
+                        regEntry.stateOp = op;
                     }
                 }
             }
@@ -9847,9 +10090,9 @@ void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body
             baseName = "dpic_import";
         }
         std::string opName = makeUniqueOperationName(graph, baseName);
-        grh::Operation& op = graph.createOperation(grh::OperationKind::kDpicImport, opName);
-        applyDebug(op, makeDebugInfo(sourceManager_, entry.symbol));
-        entry.importOp = &op;
+        OperationId op = createOperation(graph, grh::OperationKind::kDpicImport, opName);
+        applyDebug(graph, op, makeDebugInfo(sourceManager_, entry.symbol));
+        entry.importOp = op;
 
         std::vector<std::string> directions;
         std::vector<int64_t> widths;
@@ -9865,11 +10108,11 @@ void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body
             names.push_back(arg.name);
         }
 
-        op.setAttribute("argsDirection", std::move(directions));
-        op.setAttribute("argsWidth", std::move(widths));
-        op.setAttribute("argsName", std::move(names));
+        setAttr(graph, op, "argsDirection", std::move(directions));
+        setAttr(graph, op, "argsWidth", std::move(widths));
+        setAttr(graph, op, "argsName", std::move(names));
         if (!entry.cIdentifier.empty()) {
-            op.setAttribute("cIdentifier", entry.cIdentifier);
+            setAttr(graph, op, "cIdentifier", entry.cIdentifier);
         }
     }
 }

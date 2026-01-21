@@ -26,9 +26,9 @@ int main()
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g");
-        grh::Value &val = graph.createValue("v0", 1, false);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kConstant, "c0");
-        op.addResult(val); // Missing constValue on purpose
+        grh::ir::ValueId val = graph.createValue(graph.internSymbol("v0"), 1, false);
+        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kConstant, graph.internSymbol("c0"));
+        graph.addResult(op, val); // Missing constValue on purpose
 
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
@@ -41,20 +41,15 @@ int main()
         }
     }
 
-    // Case 2: operand symbol that cannot be resolved triggers error
+    // Case 2: operand count mismatch triggers error
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g");
-        grh::Value &lhs = graph.createValue("a", 1, false);
-        grh::Value &rhs = graph.createValue("b", 1, false);
-        grh::Value &out = graph.createValue("out", 1, false);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kAdd, "add0");
-        op.addOperand(lhs);
-        op.addOperand(rhs);
-        op.addResult(out);
-
-        auto &operandSymbols = const_cast<std::vector<grh::ValueId> &>(op.operandSymbols());
-        operandSymbols[1] = "missing_b";
+        grh::ir::ValueId lhs = graph.createValue(graph.internSymbol("a"), 1, false);
+        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
+        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        graph.addOperand(op, lhs); // Missing second operand on purpose
+        graph.addResult(op, out);
 
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
@@ -62,24 +57,21 @@ int main()
         PassManagerResult result = manager.run(netlist, diags);
         if (result.success || !diags.hasError())
         {
-            return fail("Unresolvable operand symbol should be reported as error");
+            return fail("Operand count mismatch should be reported as error");
         }
     }
 
-    // Case 3: user lists are rebuilt from operand references when missing
+    // Case 3: well-formed graph passes verification
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g");
-        grh::Value &lhs = graph.createValue("a", 1, false);
-        grh::Value &rhs = graph.createValue("b", 1, false);
-        grh::Value &out = graph.createValue("out", 1, false);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kAdd, "add0");
-        op.addOperand(lhs);
-        op.addOperand(rhs);
-        op.addResult(out);
-
-        const_cast<std::vector<grh::ValueUser> &>(lhs.users()).clear();
-        const_cast<std::vector<grh::ValueUser> &>(rhs.users()).clear();
+        grh::ir::ValueId lhs = graph.createValue(graph.internSymbol("a"), 1, false);
+        grh::ir::ValueId rhs = graph.createValue(graph.internSymbol("b"), 1, false);
+        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
+        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        graph.addOperand(op, lhs);
+        graph.addOperand(op, rhs);
+        graph.addResult(op, out);
 
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());
@@ -89,13 +81,9 @@ int main()
         {
             return fail("User list rebuild should succeed without errors");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("Expected pass to mark changes after rebuilding users");
-        }
-        if (lhs.users().size() != 1 || rhs.users().size() != 1)
-        {
-            return fail("User lists were not rebuilt as expected");
+            return fail("Well-formed graph should not report changes");
         }
     }
 
@@ -103,12 +91,12 @@ int main()
     {
         grh::Netlist netlist;
         grh::Graph &graph = netlist.createGraph("g");
-        grh::Value &in = graph.createValue("in", 1, false);
-        grh::Value &out = graph.createValue("out", 1, false);
-        grh::Operation &op = graph.createOperation(grh::OperationKind::kAssign, "assign0");
-        op.addOperand(in);
-        op.addResult(out);
-        op.setAttribute("extra", 42);
+        grh::ir::ValueId in = graph.createValue(graph.internSymbol("in"), 1, false);
+        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
+        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign0"));
+        graph.addOperand(op, in);
+        graph.addResult(op, out);
+        graph.setAttr(op, graph.internSymbol("extra"), int64_t{42});
 
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());

@@ -17,6 +17,30 @@ int fail(const std::string& context, const std::string& message) {
     return 1;
 }
 
+std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Operation& op,
+                                         std::string_view key) {
+    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
+    if (!keyId.valid()) {
+        return std::nullopt;
+    }
+    auto attr = op.attr(keyId);
+    const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
+    }
+    return *value;
+}
+
+const std::vector<std::string>* getStringVecAttr(const grh::Graph* graph, const grh::Operation& op,
+                                                 std::string_view key) {
+    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
+    if (!keyId.valid()) {
+        return nullptr;
+    }
+    auto attr = op.attr(keyId);
+    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+}
+
 bool buildNetlist(const std::filesystem::path& sourcePath, grh::Netlist& netlist,
                   ElaborateDiagnostics& diagnostics) {
     if (!std::filesystem::exists(sourcePath)) {
@@ -91,7 +115,7 @@ int validateBlackbox(const grh::Netlist& netlist) {
         }
         if (symbol.rfind("blackbox_leaf", 0) == 0) {
             ++leafGraphCount;
-            if (!graphPtr->operationOrder().empty()) {
+            if (!graphPtr->operations().empty()) {
                 return fail("netlist", "blackbox_leaf graph unexpectedly contains operations");
             }
         }
@@ -100,92 +124,84 @@ int validateBlackbox(const grh::Netlist& netlist) {
         return fail("netlist", "Expected two parameterized blackbox_leaf graphs");
     }
 
-    std::vector<const grh::Operation*> blackboxes;
-    for (const auto& opSymbol : topGraph->operationOrder()) {
-        const grh::Operation& op = topGraph->getOperation(opSymbol);
+    std::vector<OperationId> blackboxes;
+    for (const auto& opId : topGraph->operations()) {
+        const grh::Operation op = topGraph->getOperation(opId);
         if (op.kind() != grh::OperationKind::kBlackbox) {
             continue;
         }
-        if (op.attributes().count("moduleName") == 0) {
+        if (!getStringAttr(topGraph, op, "moduleName")) {
             continue; // Skip placeholder TODO nodes.
         }
-        blackboxes.push_back(&op);
+        blackboxes.push_back(opId);
     }
 
     if (blackboxes.size() != 2) {
         return fail("ops", "Expected two kBlackbox operations in top graph");
     }
 
-    auto checkPortNames = [](const grh::Operation& op) -> bool {
-        const auto& attrs = op.attributes();
-        auto inputNamesIt = attrs.find("inputPortName");
-        auto outputNamesIt = attrs.find("outputPortName");
-        if (inputNamesIt == attrs.end() || outputNamesIt == attrs.end()) {
-            return false;
-        }
-        const auto& inputNames = std::get<std::vector<std::string>>(inputNamesIt->second);
-        const auto& outputNames = std::get<std::vector<std::string>>(outputNamesIt->second);
-        return inputNames == std::vector<std::string>{"clk", "in0", "in1"} &&
-               outputNames == std::vector<std::string>{"out0"};
+    auto checkPortNames = [&](const grh::Operation& op) -> bool {
+        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+        return inputNames &&
+               outputNames &&
+               *inputNames == std::vector<std::string>{"clk", "in0", "in1"} &&
+               *outputNames == std::vector<std::string>{"out0"};
     };
 
-    auto checkParams = [](const grh::Operation& op, const std::string& expectedDepth) -> bool {
-        const auto& attrs = op.attributes();
-        auto paramNamesIt = attrs.find("parameterNames");
-        auto paramValuesIt = attrs.find("parameterValues");
-        if (paramNamesIt == attrs.end() || paramValuesIt == attrs.end()) {
+    auto checkParams = [&](const grh::Operation& op, const std::string& expectedDepth) -> bool {
+        const auto* paramNames = getStringVecAttr(topGraph, op, "parameterNames");
+        const auto* paramValues = getStringVecAttr(topGraph, op, "parameterValues");
+        if (!paramNames || !paramValues) {
             return false;
         }
-        const auto& paramNames = std::get<std::vector<std::string>>(paramNamesIt->second);
-        const auto& paramValues = std::get<std::vector<std::string>>(paramValuesIt->second);
-        if (paramNames.size() != 2 || paramValues.size() != 2) {
+        if (paramNames->size() != 2 || paramValues->size() != 2) {
             return false;
         }
-        if (paramNames[0] != "WIDTH" || paramNames[1] != "DEPTH") {
+        if ((*paramNames)[0] != "WIDTH" || (*paramNames)[1] != "DEPTH") {
             return false;
         }
-        if (paramValues[0] != "6") {
+        if ((*paramValues)[0] != "6") {
             return false;
         }
-        return paramValues[1] == expectedDepth;
+        return (*paramValues)[1] == expectedDepth;
     };
 
     bool foundDirect = false;
     bool foundGen = false;
 
-    for (const grh::Operation* op : blackboxes) {
-        if (!op) {
-            continue;
-        }
-        const auto& attrs = op->attributes();
-        auto moduleNameIt = attrs.find("moduleName");
-        auto instanceNameIt = attrs.find("instanceName");
-        if (moduleNameIt == attrs.end() || instanceNameIt == attrs.end()) {
+    for (OperationId opId : blackboxes) {
+        const grh::Operation op = topGraph->getOperation(opId);
+        auto moduleNameOpt = getStringAttr(topGraph, op, "moduleName");
+        auto instanceNameOpt = getStringAttr(topGraph, op, "instanceName");
+        if (!moduleNameOpt || !instanceNameOpt) {
             return fail("ops", "Blackbox operation missing moduleName or instanceName");
         }
 
-        if (std::get<std::string>(moduleNameIt->second) != "blackbox_leaf") {
+        if (*moduleNameOpt != "blackbox_leaf") {
             return fail("ops", "Unexpected moduleName on blackbox op");
         }
 
-        if (!checkPortNames(*op)) {
+        if (!checkPortNames(op)) {
             return fail("ops", "Port names on blackbox op do not match interface");
         }
 
-        if (op->operands().size() != 3 || op->results().size() != 1) {
+        if (op.operands().size() != 3 || op.results().size() != 1) {
             return fail("ops", "Unexpected operand/result count on blackbox op");
         }
 
-        const std::string& instanceName = std::get<std::string>(instanceNameIt->second);
-        if (checkParams(*op, "8")) {
+        const std::string& instanceName = *instanceNameOpt;
+        if (checkParams(op, "8")) {
             foundDirect = true;
-            if (op->results().front()->symbol() != "y_direct") {
+            ValueId result = op.results().front();
+            if (!result || topGraph->getValue(result).symbolText() != "y_direct") {
                 return fail("ops", "Direct blackbox output is not wired to y_direct");
             }
         }
-        else if (checkParams(*op, "4")) {
+        else if (checkParams(op, "4")) {
             foundGen = true;
-            if (op->results().front()->symbol() != "y_gen") {
+            ValueId result = op.results().front();
+            if (!result || topGraph->getValue(result).symbolText() != "y_gen") {
                 return fail("ops", "Generated blackbox output is not wired to y_gen");
             }
         }

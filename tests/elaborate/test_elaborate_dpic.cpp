@@ -22,23 +22,59 @@ int fail(const std::string& message) {
     return 1;
 }
 
-const grh::Operation* findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
-    for (const auto& opSymbol : graph.operationOrder()) {
-        const grh::Operation& op = graph.getOperation(opSymbol);
-        if (op.kind() == kind) {
-            return &op;
-        }
+std::optional<std::string> getStringAttr(const grh::Graph& graph, const grh::Operation& op,
+                                         std::string_view key) {
+    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+    if (!keyId.valid()) {
+        return std::nullopt;
     }
-    return nullptr;
+    auto attr = op.attr(keyId);
+    const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
+    }
+    return *value;
 }
 
-const grh::Value* findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
-    const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
-    auto it = ports.find(std::string(name));
-    if (it != ports.end()) {
-        return graph.findValue(it->second);
+const std::vector<std::string>* getStringVecAttr(const grh::Graph& graph,
+                                                 const grh::Operation& op,
+                                                 std::string_view key) {
+    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+    if (!keyId.valid()) {
+        return nullptr;
     }
-    return nullptr;
+    auto attr = op.attr(keyId);
+    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+}
+
+const std::vector<int64_t>* getIntVecAttr(const grh::Graph& graph, const grh::Operation& op,
+                                          std::string_view key) {
+    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+    if (!keyId.valid()) {
+        return nullptr;
+    }
+    auto attr = op.attr(keyId);
+    return attr ? std::get_if<std::vector<int64_t>>(&*attr) : nullptr;
+}
+
+OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+    for (const auto& opId : graph.operations()) {
+        const grh::Operation op = graph.getOperation(opId);
+        if (op.kind() == kind) {
+            return opId;
+        }
+    }
+    return OperationId::invalid();
+}
+
+ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+    const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
+    for (const auto& port : ports) {
+        if (graph.symbolText(port.name) == name) {
+            return port.value;
+        }
+    }
+    return ValueId::invalid();
 }
 
 const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo, std::string_view name) {
@@ -143,45 +179,43 @@ int main() {
         return fail("Expected exactly one DPI import entry");
     }
 
-    const grh::Operation* importOp = findOpByKind(*graph, grh::OperationKind::kDpicImport);
-    if (!importOp) {
+    OperationId importOpId = findOpByKind(*graph, grh::OperationKind::kDpicImport);
+    if (!importOpId) {
         return fail("kDpicImport operation missing");
     }
+    const grh::Operation importOp = graph->getOperation(importOpId);
 
-    auto dirIt = importOp->attributes().find("argsDirection");
-    if (dirIt == importOp->attributes().end()) {
+    const auto* directions = getStringVecAttr(*graph, importOp, "argsDirection");
+    if (!directions) {
         return fail("kDpicImport missing argsDirection attribute");
     }
-    if (std::get<std::vector<std::string>>(dirIt->second) !=
-        std::vector<std::string>{"input", "input", "output"}) {
+    if (*directions != std::vector<std::string>{"input", "input", "output"}) {
         return fail("kDpicImport argsDirection mismatch");
     }
 
-    auto widthIt = importOp->attributes().find("argsWidth");
-    if (widthIt == importOp->attributes().end()) {
+    const auto* widths = getIntVecAttr(*graph, importOp, "argsWidth");
+    if (!widths) {
         return fail("kDpicImport missing argsWidth attribute");
     }
-    if (std::get<std::vector<int64_t>>(widthIt->second) !=
-        std::vector<int64_t>{16, 8, 16}) {
+    if (*widths != std::vector<int64_t>{16, 8, 16}) {
         return fail("kDpicImport argsWidth mismatch");
     }
 
-    auto nameIt = importOp->attributes().find("argsName");
-    if (nameIt == importOp->attributes().end()) {
+    const auto* names = getStringVecAttr(*graph, importOp, "argsName");
+    if (!names) {
         return fail("kDpicImport missing argsName attribute");
     }
-    if (std::get<std::vector<std::string>>(nameIt->second) !=
-        std::vector<std::string>{"lhs_vec", "rhs_scalar", "result_vec"}) {
+    if (*names != std::vector<std::string>{"lhs_vec", "rhs_scalar", "result_vec"}) {
         return fail("kDpicImport argsName mismatch");
     }
 
     std::span<const SignalMemoEntry> regMemo = elaborator.peekRegMemo(body);
 
-    const grh::Operation* callOp = findOpByKind(*graph, grh::OperationKind::kDpicCall);
-    if (!callOp) {
+    OperationId callOpId = findOpByKind(*graph, grh::OperationKind::kDpicCall);
+    if (!callOpId) {
         std::cerr << "[elaborate_dpic] Existing operations:\n";
-        for (const auto& opSymbol : graph->operationOrder()) {
-            const grh::Operation& op = graph->getOperation(opSymbol);
+        for (const auto& opId : graph->operations()) {
+            const grh::Operation op = graph->getOperation(opId);
             std::cerr << "  - " << std::string(grh::toString(op.kind())) << '\n';
         }
         std::cerr << "[elaborate_dpic] Reg memo entries: " << regMemo.size() << '\n';
@@ -197,48 +231,46 @@ int main() {
         }
         return fail("kDpicCall operation missing");
     }
-    if (callOp->operands().size() != 4) {
+    const grh::Operation callOp = graph->getOperation(callOpId);
+    if (callOp.operands().size() != 4) {
         return fail("kDpicCall operand count mismatch");
     }
-    if (callOp->results().size() != 1) {
+    if (callOp.results().size() != 1) {
         return fail("kDpicCall result count mismatch");
     }
 
-    const grh::Value* clkPort = findPort(*graph, "clk", /*isInput=*/true);
-    const grh::Value* enPort = findPort(*graph, "en", /*isInput=*/true);
-    const grh::Value* lhsPort = findPort(*graph, "lhs_vec", /*isInput=*/true);
-    const grh::Value* rhsPort = findPort(*graph, "rhs_scalar", /*isInput=*/true);
+    ValueId clkPort = findPort(*graph, "clk", /*isInput=*/true);
+    ValueId enPort = findPort(*graph, "en", /*isInput=*/true);
+    ValueId lhsPort = findPort(*graph, "lhs_vec", /*isInput=*/true);
+    ValueId rhsPort = findPort(*graph, "rhs_scalar", /*isInput=*/true);
     if (!clkPort || !enPort || !lhsPort || !rhsPort) {
         return fail("Module ports missing");
     }
-    if (callOp->operands()[0] != clkPort || callOp->operands()[1] != enPort ||
-        callOp->operands()[2] != lhsPort || callOp->operands()[3] != rhsPort) {
+    if (callOp.operands()[0] != clkPort || callOp.operands()[1] != enPort ||
+        callOp.operands()[2] != lhsPort || callOp.operands()[3] != rhsPort) {
         return fail("kDpicCall operand wiring mismatch");
     }
 
-    auto inNameIt = callOp->attributes().find("inArgName");
-    if (inNameIt == callOp->attributes().end()) {
+    const auto* inNames = getStringVecAttr(*graph, callOp, "inArgName");
+    if (!inNames) {
         return fail("kDpicCall missing inArgName attribute");
     }
-    if (std::get<std::vector<std::string>>(inNameIt->second) !=
-        std::vector<std::string>{"lhs_vec", "rhs_scalar"}) {
+    if (*inNames != std::vector<std::string>{"lhs_vec", "rhs_scalar"}) {
         return fail("kDpicCall inArgName mismatch");
     }
-    auto outNameIt = callOp->attributes().find("outArgName");
-    if (outNameIt == callOp->attributes().end()) {
+    const auto* outNames = getStringVecAttr(*graph, callOp, "outArgName");
+    if (!outNames) {
         return fail("kDpicCall missing outArgName attribute");
     }
-    if (std::get<std::vector<std::string>>(outNameIt->second) !=
-        std::vector<std::string>{"result_vec"}) {
+    if (*outNames != std::vector<std::string>{"result_vec"}) {
         return fail("kDpicCall outArgName mismatch");
     }
 
-    auto targetIt = callOp->attributes().find("targetImportSymbol");
-    if (targetIt == callOp->attributes().end()) {
+    auto targetSymbolOpt = getStringAttr(*graph, callOp, "targetImportSymbol");
+    if (!targetSymbolOpt) {
         return fail("kDpicCall missing targetImportSymbol attribute");
     }
-    if (!std::holds_alternative<std::string>(targetIt->second) ||
-        std::get<std::string>(targetIt->second) != importOp->symbol()) {
+    if (*targetSymbolOpt != std::string(importOp.symbolText())) {
         return fail("kDpicCall targetImportSymbol does not reference kDpicImport");
     }
 
@@ -246,16 +278,17 @@ int main() {
     if (!sumEntry || !sumEntry->stateOp) {
         return fail("sum_storage memo/state op missing");
     }
-    if (sumEntry->stateOp->operands().size() < 2) {
+    const grh::Operation sumOp = graph->getOperation(sumEntry->stateOp);
+    if (sumOp.operands().size() < 2) {
         return fail("sum state op missing data operand");
     }
-    const grh::Value* callResult = callOp->results().front();
-    const grh::Value* dataOperand = sumEntry->stateOp->operands().back();
+    ValueId callResult = callOp.results().front();
+    ValueId dataOperand = sumOp.operands().back();
     bool connectsToCall = dataOperand == callResult;
     if (!connectsToCall && dataOperand) {
-        if (const grh::Operation* dataOp = dataOperand->definingOp();
-            dataOp && dataOp->kind() == grh::OperationKind::kMux) {
-            for (const grh::Value* operand : dataOp->operands()) {
+        OperationId dataOpId = graph->getValue(dataOperand).definingOp();
+        if (dataOpId && graph->getOperation(dataOpId).kind() == grh::OperationKind::kMux) {
+            for (ValueId operand : graph->getOperation(dataOpId).operands()) {
                 if (operand == callResult) {
                     connectsToCall = true;
                     break;

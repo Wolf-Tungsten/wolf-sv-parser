@@ -184,10 +184,10 @@ int main() {
         .diagnostics = &diagnostics};
     CombRHSConverter converter(context);
 
-    auto convertByName = [&](std::string_view name) -> grh::Value* {
+    auto convertByName = [&](std::string_view name) -> ValueId {
         auto it = rhsMap.find(std::string(name));
         if (it == rhsMap.end()) {
-            return nullptr;
+            return ValueId::invalid();
         }
         return converter.convert(*it->second);
     };
@@ -199,193 +199,250 @@ int main() {
         return fail("Missing memo entries for required signals");
     }
 
-    grh::Value* addValue = convertByName("add_res");
+    ValueId addValue = convertByName("add_res");
     if (!addValue) {
         return fail("Failed to convert add_res RHS");
     }
-    const grh::Operation* addOp = addValue->definingOp();
-    if (!addOp || addOp->kind() != grh::OperationKind::kAdd || addOp->operands().size() != 2) {
+    OperationId addOpId = graph->getValue(addValue).definingOp();
+    if (!addOpId) {
         return fail("add_res did not create kAdd operation");
     }
-    if (addOp->operands()[0] != netA->value || addOp->operands()[1] != netB->value) {
+    const grh::Operation addOp = graph->getOperation(addOpId);
+    if (addOp.kind() != grh::OperationKind::kAdd || addOp.operands().size() != 2) {
+        return fail("add_res did not create kAdd operation");
+    }
+    if (addOp.operands()[0] != netA->value || addOp.operands()[1] != netB->value) {
         return fail("kAdd operands do not map to memoized values");
     }
 
-    grh::Value* flagValue = convertByName("flag_res");
+    ValueId flagValue = convertByName("flag_res");
     if (!flagValue) {
         return fail("Failed to convert flag_res RHS");
     }
-    const grh::Operation* flagOp = flagValue->definingOp();
-    if (!flagOp || flagOp->kind() != grh::OperationKind::kLogicAnd ||
-        flagOp->operands().size() != 2) {
+    OperationId flagOpId = graph->getValue(flagValue).definingOp();
+    if (!flagOpId) {
         return fail("flag_res did not generate kLogicAnd");
     }
-    const grh::Operation* eqOp = flagOp->operands()[0]->definingOp();
-    if (!eqOp || eqOp->kind() != grh::OperationKind::kEq) {
+    const grh::Operation flagOp = graph->getOperation(flagOpId);
+    if (flagOp.kind() != grh::OperationKind::kLogicAnd || flagOp.operands().size() != 2) {
+        return fail("flag_res did not generate kLogicAnd");
+    }
+    OperationId eqOpId = graph->getValue(flagOp.operands()[0]).definingOp();
+    if (!eqOpId) {
         return fail("flag_res equality operand missing");
     }
-    if (eqOp->operands().size() != 2 || eqOp->operands()[0] != netA->value ||
-        eqOp->operands()[1] != netB->value) {
+    const grh::Operation eqOp = graph->getOperation(eqOpId);
+    if (eqOp.kind() != grh::OperationKind::kEq) {
+        return fail("flag_res equality operand missing");
+    }
+    if (eqOp.operands().size() != 2 || eqOp.operands()[0] != netA->value ||
+        eqOp.operands()[1] != netB->value) {
         return fail("Equality operands not tied to memo entries");
     }
-    grh::Value* ctrlSelValue = graph->findValue("ctrl_sel");
-    if (!ctrlSelValue || flagOp->operands()[1] != ctrlSelValue) {
+    ValueId ctrlSelValue = graph->findValue("ctrl_sel");
+    if (!ctrlSelValue || flagOp.operands()[1] != ctrlSelValue) {
         return fail("flag_res control operand mismatch");
     }
 
-    grh::Value* muxValue = convertByName("mux_res");
+    ValueId muxValue = convertByName("mux_res");
     if (!muxValue) {
         return fail("Failed to convert mux_res RHS");
     }
-    const grh::Operation* muxOp = muxValue->definingOp();
-    if (!muxOp || muxOp->kind() != grh::OperationKind::kMux || muxOp->operands().size() != 3) {
+    OperationId muxOpId = graph->getValue(muxValue).definingOp();
+    if (!muxOpId) {
         return fail("mux_res did not create kMux");
     }
-    if (muxOp->operands()[0] != ctrlSelValue || muxOp->operands()[1] != netA->value ||
-        muxOp->operands()[2] != netB->value) {
+    const grh::Operation muxOp = graph->getOperation(muxOpId);
+    if (muxOp.kind() != grh::OperationKind::kMux || muxOp.operands().size() != 3) {
+        return fail("mux_res did not create kMux");
+    }
+    if (muxOp.operands()[0] != ctrlSelValue || muxOp.operands()[1] != netA->value ||
+        muxOp.operands()[2] != netB->value) {
         return fail("kMux operands mismatch");
     }
 
-    grh::Value* concatValue = convertByName("concat_res");
+    ValueId concatValue = convertByName("concat_res");
     if (!concatValue) {
         return fail("Failed to convert concat_res RHS");
     }
-    const grh::Operation* concatOp = concatValue->definingOp();
-    if (!concatOp || concatOp->kind() != grh::OperationKind::kConcat ||
-        concatOp->operands().size() != 2) {
+    OperationId concatOpId = graph->getValue(concatValue).definingOp();
+    if (!concatOpId) {
         return fail("concat_res did not create kConcat");
     }
-    if (concatValue->width() != 16 || concatOp->operands()[0] != netA->value ||
-        concatOp->operands()[1] != netB->value) {
+    const grh::Operation concatOp = graph->getOperation(concatOpId);
+    if (concatOp.kind() != grh::OperationKind::kConcat || concatOp.operands().size() != 2) {
+        return fail("concat_res did not create kConcat");
+    }
+    if (graph->getValue(concatValue).width() != 16 ||
+        concatOp.operands()[0] != netA->value ||
+        concatOp.operands()[1] != netB->value) {
         return fail("kConcat result width/operands unexpected");
     }
 
-    grh::Value* replicateValue = convertByName("replicate_res");
+    ValueId replicateValue = convertByName("replicate_res");
     if (!replicateValue) {
         return fail("Failed to convert replicate_res RHS");
     }
-    auto findReplicateOp = [](const grh::Value* value) -> const grh::Operation* {
+    auto findReplicateOp = [&](ValueId value) -> OperationId {
         if (!value) {
-            return nullptr;
+            return OperationId::invalid();
         }
-        std::vector<const grh::Operation*> stack;
-        if (const grh::Operation* root = value->definingOp()) {
-            stack.push_back(root);
+        std::vector<OperationId> stack;
+        OperationId rootId = graph->getValue(value).definingOp();
+        if (rootId) {
+            stack.push_back(rootId);
         }
         while (!stack.empty()) {
-            const grh::Operation* op = stack.back();
+            OperationId opId = stack.back();
             stack.pop_back();
-            if (!op) {
-                continue;
+            const grh::Operation op = graph->getOperation(opId);
+            if (op.kind() == grh::OperationKind::kReplicate) {
+                return opId;
             }
-            if (op->kind() == grh::OperationKind::kReplicate) {
-                return op;
-            }
-            for (const grh::Value* operand : op->operands()) {
-                if (operand && operand->definingOp()) {
-                    stack.push_back(operand->definingOp());
+            for (ValueId operand : op.operands()) {
+                OperationId def = operand ? graph->getValue(operand).definingOp()
+                                          : OperationId::invalid();
+                if (def) {
+                    stack.push_back(def);
                 }
             }
         }
-        return nullptr;
+        return OperationId::invalid();
     };
 
-    const grh::Operation* replicateOp = findReplicateOp(replicateValue);
-    if (!replicateOp || replicateOp->kind() != grh::OperationKind::kReplicate ||
-        replicateOp->operands().size() != 1) {
+    OperationId replicateOpId = findReplicateOp(replicateValue);
+    if (!replicateOpId) {
         return fail("replicate_res missing kReplicate");
     }
-    auto attrIt = replicateOp->attributes().find("rep");
-    if (attrIt == replicateOp->attributes().end() ||
-        !std::holds_alternative<int64_t>(attrIt->second) ||
-        std::get<int64_t>(attrIt->second) != 4) {
+    const grh::Operation replicateOp = graph->getOperation(replicateOpId);
+    if (replicateOp.kind() != grh::OperationKind::kReplicate ||
+        replicateOp.operands().size() != 1) {
+        return fail("replicate_res missing kReplicate");
+    }
+    const grh::ir::SymbolId repKey = graph->lookupSymbol("rep");
+    auto repAttr = repKey.valid() ? replicateOp.attr(repKey) : std::nullopt;
+    const int64_t* repValue = repAttr ? std::get_if<int64_t>(&*repAttr) : nullptr;
+    if (!repValue || *repValue != 4) {
         return fail("kReplicate missing rep=4 attribute");
     }
-    grh::Value* replicateOperand = replicateOp->operands()[0];
+    ValueId replicateOperand = replicateOp.operands()[0];
     if (replicateOperand != ctrlSelValue) {
-        const grh::Operation* concatOperand = replicateOperand ? replicateOperand->definingOp() : nullptr;
-        if (!concatOperand || concatOperand->kind() != grh::OperationKind::kConcat ||
-            concatOperand->operands().size() != 1 ||
-            concatOperand->operands()[0] != ctrlSelValue) {
+        OperationId concatId =
+            replicateOperand ? graph->getValue(replicateOperand).definingOp()
+                             : OperationId::invalid();
+        if (!concatId) {
+            return fail("kReplicate operand mismatch");
+        }
+        const grh::Operation concatOperand = graph->getOperation(concatId);
+        if (concatOperand.kind() != grh::OperationKind::kConcat ||
+            concatOperand.operands().size() != 1 ||
+            concatOperand.operands()[0] != ctrlSelValue) {
             return fail("kReplicate operand mismatch");
         }
     }
 
-    grh::Value* reduceValue = convertByName("reduce_res");
+    ValueId reduceValue = convertByName("reduce_res");
     if (!reduceValue) {
         return fail("Failed to convert reduce_res RHS");
     }
-    const grh::Operation* reduceOp = reduceValue->definingOp();
-    if (!reduceOp || reduceOp->kind() != grh::OperationKind::kReduceAnd ||
-        reduceOp->operands().size() != 1 || reduceOp->operands()[0] != netA->value) {
+    OperationId reduceOpId = graph->getValue(reduceValue).definingOp();
+    if (!reduceOpId) {
         return fail("reduce_res not modeled as kReduceAnd");
     }
-    if (reduceValue->width() != 1) {
+    const grh::Operation reduceOp = graph->getOperation(reduceOpId);
+    if (reduceOp.kind() != grh::OperationKind::kReduceAnd ||
+        reduceOp.operands().size() != 1 || reduceOp.operands()[0] != netA->value) {
+        return fail("reduce_res not modeled as kReduceAnd");
+    }
+    if (graph->getValue(reduceValue).width() != 1) {
         return fail("Reduction result width is not 1");
     }
 
-    grh::Value* constValue = convertByName("const_res");
+    ValueId constValue = convertByName("const_res");
     if (!constValue) {
         return fail("Failed to convert const_res RHS");
     }
-    const grh::Operation* constOp = constValue->definingOp();
-    if (!constOp || constOp->kind() != grh::OperationKind::kConstant) {
+    OperationId constOpId = graph->getValue(constValue).definingOp();
+    if (!constOpId) {
         return fail("const_res did not materialize kConstant");
     }
-    auto constAttr = constOp->attributes().find("constValue");
-    if (constAttr == constOp->attributes().end() ||
-        !std::holds_alternative<std::string>(constAttr->second)) {
+    const grh::Operation constOp = graph->getOperation(constOpId);
+    if (constOp.kind() != grh::OperationKind::kConstant) {
+        return fail("const_res did not materialize kConstant");
+    }
+    const grh::ir::SymbolId constKey = graph->lookupSymbol("constValue");
+    auto constAttr = constKey.valid() ? constOp.attr(constKey) : std::nullopt;
+    const std::string* literalPtr = constAttr ? std::get_if<std::string>(&*constAttr) : nullptr;
+    if (!literalPtr) {
         return fail("kConstant attribute mismatch");
     }
-    const std::string& literalAttr = std::get<std::string>(constAttr->second);
+    const std::string& literalAttr = *literalPtr;
     if (literalAttr != "8'haa") {
         std::cerr << "[rhs_converter] const literal=" << literalAttr << '\n';
         return fail("kConstant attribute mismatch");
     }
 
-    grh::Value* mixValue = convertByName("mix_res");
+    ValueId mixValue = convertByName("mix_res");
     if (!mixValue) {
         return fail("Failed to convert mix_res RHS");
     }
-    const grh::Operation* xorOp = mixValue->definingOp();
-    if (!xorOp || xorOp->kind() != grh::OperationKind::kXor || xorOp->operands().size() != 2) {
+    OperationId xorOpId = graph->getValue(mixValue).definingOp();
+    if (!xorOpId) {
         return fail("mix_res missing final kXor");
     }
-    const grh::Operation* subOp = xorOp->operands()[0]->definingOp();
-    const grh::Operation* notOp = xorOp->operands()[1]->definingOp();
-    if (!subOp || subOp->kind() != grh::OperationKind::kSub || subOp->operands().size() != 2) {
+    const grh::Operation xorOp = graph->getOperation(xorOpId);
+    if (xorOp.kind() != grh::OperationKind::kXor || xorOp.operands().size() != 2) {
+        return fail("mix_res missing final kXor");
+    }
+    OperationId subOpId = graph->getValue(xorOp.operands()[0]).definingOp();
+    OperationId notOpId = graph->getValue(xorOp.operands()[1]).definingOp();
+    if (!subOpId) {
         return fail("mix_res subtraction not created");
     }
-    if (subOp->operands()[0] != netA->value || subOp->operands()[1] != netB->value) {
+    const grh::Operation subOp = graph->getOperation(subOpId);
+    if (subOp.kind() != grh::OperationKind::kSub || subOp.operands().size() != 2) {
+        return fail("mix_res subtraction not created");
+    }
+    if (subOp.operands()[0] != netA->value || subOp.operands()[1] != netB->value) {
         return fail("mix_res subtraction operands mismatch");
     }
-    if (!notOp || notOp->kind() != grh::OperationKind::kNot) {
+    if (!notOpId) {
+        return fail("mix_res missing bitwise not");
+    }
+    const grh::Operation notOp = graph->getOperation(notOpId);
+    if (notOp.kind() != grh::OperationKind::kNot) {
         return fail("mix_res missing bitwise not");
     }
 
-    grh::Value* regUseValue = convertByName("reg_use");
+    ValueId regUseValue = convertByName("reg_use");
     if (!regUseValue) {
         return fail("Failed to convert reg_use RHS");
     }
-    const grh::Operation* regAddOp = regUseValue->definingOp();
-    if (!regAddOp || regAddOp->kind() != grh::OperationKind::kAdd ||
-        regAddOp->operands().size() != 2) {
+    OperationId regAddOpId = graph->getValue(regUseValue).definingOp();
+    if (!regAddOpId) {
         return fail("reg_use did not create kAdd");
     }
-    grh::Value* seqRegValue = seqReg->value;
-    if (!seqRegValue && seqReg->stateOp && !seqReg->stateOp->results().empty()) {
-        seqRegValue = seqReg->stateOp->results().front();
+    const grh::Operation regAddOp = graph->getOperation(regAddOpId);
+    if (regAddOp.kind() != grh::OperationKind::kAdd || regAddOp.operands().size() != 2) {
+        return fail("reg_use did not create kAdd");
+    }
+    ValueId seqRegValue = seqReg->value;
+    if (!seqRegValue && seqReg->stateOp) {
+        const grh::Operation seqRegOp = graph->getOperation(seqReg->stateOp);
+        if (!seqRegOp.results().empty()) {
+            seqRegValue = seqRegOp.results().front();
+        }
     }
     if (!seqRegValue) {
         return fail("seq_reg memo missing accessible value");
     }
-    bool regOperandMatch = (regAddOp->operands()[0] == seqRegValue) ||
-                           (regAddOp->operands()[1] == seqRegValue);
+    bool regOperandMatch = (regAddOp.operands()[0] == seqRegValue) ||
+                           (regAddOp.operands()[1] == seqRegValue);
     if (!regOperandMatch) {
         return fail("reg_use kAdd missing register operand");
     }
 
-    grh::Value* structSlice = convertByName("struct_hi_slice");
+    ValueId structSlice = convertByName("struct_hi_slice");
     if (!structSlice) {
         return fail("Failed to convert struct_hi_slice RHS");
     }
@@ -393,64 +450,73 @@ int main() {
     if (!structEntry || !structEntry->value) {
         return fail("struct_bus memo missing");
     }
-    const grh::Operation* structSliceOp = structSlice->definingOp();
-    if (!structSliceOp || structSliceOp->kind() != grh::OperationKind::kSliceStatic ||
-        structSliceOp->operands().size() != 1 ||
-        structSliceOp->operands()[0] != structEntry->value) {
+    OperationId structSliceOpId = graph->getValue(structSlice).definingOp();
+    if (!structSliceOpId) {
         return fail("struct_hi_slice not modeled via kSliceStatic");
     }
-    auto structStart = structSliceOp->attributes().find("sliceStart");
-    auto structEnd = structSliceOp->attributes().find("sliceEnd");
-    if (structStart == structSliceOp->attributes().end() ||
-        structEnd == structSliceOp->attributes().end() ||
-        !std::holds_alternative<int64_t>(structStart->second) ||
-        !std::holds_alternative<int64_t>(structEnd->second) ||
-        std::get<int64_t>(structStart->second) != 4 ||
-        std::get<int64_t>(structEnd->second) != 7) {
+    const grh::Operation structSliceOp = graph->getOperation(structSliceOpId);
+    if (structSliceOp.kind() != grh::OperationKind::kSliceStatic ||
+        structSliceOp.operands().size() != 1 ||
+        structSliceOp.operands()[0] != structEntry->value) {
+        return fail("struct_hi_slice not modeled via kSliceStatic");
+    }
+    const grh::ir::SymbolId sliceStartKey = graph->lookupSymbol("sliceStart");
+    const grh::ir::SymbolId sliceEndKey = graph->lookupSymbol("sliceEnd");
+    auto structStart = sliceStartKey.valid() ? structSliceOp.attr(sliceStartKey) : std::nullopt;
+    auto structEnd = sliceEndKey.valid() ? structSliceOp.attr(sliceEndKey) : std::nullopt;
+    const int64_t* startVal = structStart ? std::get_if<int64_t>(&*structStart) : nullptr;
+    const int64_t* endVal = structEnd ? std::get_if<int64_t>(&*structEnd) : nullptr;
+    if (!startVal || !endVal || *startVal != 4 || *endVal != 7) {
         return fail("struct_hi_slice slice range mismatch");
     }
 
-    grh::Value* staticSlice = convertByName("static_slice_res");
+    ValueId staticSlice = convertByName("static_slice_res");
     if (!staticSlice) {
         return fail("Failed to convert static_slice_res RHS");
     }
-    grh::Value* rangeBus = graph->findValue("range_bus");
+    ValueId rangeBus = graph->findValue("range_bus");
     if (!rangeBus) {
         return fail("range_bus value missing");
     }
-    const grh::Operation* staticOp = staticSlice->definingOp();
-    if (!staticOp || staticOp->kind() != grh::OperationKind::kSliceStatic ||
-        staticOp->operands().size() != 1 || staticOp->operands()[0] != rangeBus) {
+    OperationId staticOpId = graph->getValue(staticSlice).definingOp();
+    if (!staticOpId) {
         return fail("static_slice_res missing kSliceStatic");
     }
-    auto staticWidthStart = staticOp->attributes().find("sliceStart");
-    auto staticWidthEnd = staticOp->attributes().find("sliceEnd");
-    if (staticWidthStart == staticOp->attributes().end() ||
-        staticWidthEnd == staticOp->attributes().end() ||
-        !std::holds_alternative<int64_t>(staticWidthStart->second) ||
-        !std::holds_alternative<int64_t>(staticWidthEnd->second) ||
-        std::get<int64_t>(staticWidthStart->second) != 4 ||
-        std::get<int64_t>(staticWidthEnd->second) != 11) {
+    const grh::Operation staticOp = graph->getOperation(staticOpId);
+    if (staticOp.kind() != grh::OperationKind::kSliceStatic ||
+        staticOp.operands().size() != 1 || staticOp.operands()[0] != rangeBus) {
+        return fail("static_slice_res missing kSliceStatic");
+    }
+    auto staticWidthStart = sliceStartKey.valid() ? staticOp.attr(sliceStartKey) : std::nullopt;
+    auto staticWidthEnd = sliceEndKey.valid() ? staticOp.attr(sliceEndKey) : std::nullopt;
+    const int64_t* staticStart = staticWidthStart ? std::get_if<int64_t>(&*staticWidthStart)
+                                                  : nullptr;
+    const int64_t* staticEnd = staticWidthEnd ? std::get_if<int64_t>(&*staticWidthEnd) : nullptr;
+    if (!staticStart || !staticEnd || *staticStart != 4 || *staticEnd != 11) {
         return fail("static_slice_res slice bounds mismatch");
     }
 
-    grh::Value* dynSlice = convertByName("dynamic_slice_res");
+    ValueId dynSlice = convertByName("dynamic_slice_res");
     if (!dynSlice) {
         return fail("Failed to convert dynamic_slice_res RHS");
     }
-    const grh::Operation* dynOp = dynSlice->definingOp();
-    if (!dynOp || dynOp->kind() != grh::OperationKind::kSliceDynamic ||
-        dynOp->operands().size() != 2 || dynOp->operands()[0] != rangeBus) {
+    OperationId dynOpId = graph->getValue(dynSlice).definingOp();
+    if (!dynOpId) {
         return fail("dynamic_slice_res missing kSliceDynamic");
     }
-    auto dynAttr = dynOp->attributes().find("sliceWidth");
-    if (dynAttr == dynOp->attributes().end() ||
-        !std::holds_alternative<int64_t>(dynAttr->second) ||
-        std::get<int64_t>(dynAttr->second) != 8) {
+    const grh::Operation dynOp = graph->getOperation(dynOpId);
+    if (dynOp.kind() != grh::OperationKind::kSliceDynamic ||
+        dynOp.operands().size() != 2 || dynOp.operands()[0] != rangeBus) {
+        return fail("dynamic_slice_res missing kSliceDynamic");
+    }
+    const grh::ir::SymbolId sliceWidthKey = graph->lookupSymbol("sliceWidth");
+    auto dynAttr = sliceWidthKey.valid() ? dynOp.attr(sliceWidthKey) : std::nullopt;
+    const int64_t* dynWidth = dynAttr ? std::get_if<int64_t>(&*dynAttr) : nullptr;
+    if (!dynWidth || *dynWidth != 8) {
         return fail("dynamic_slice_res sliceWidth mismatch");
     }
 
-    grh::Value* arraySlice = convertByName("array_slice_res");
+    ValueId arraySlice = convertByName("array_slice_res");
     if (!arraySlice) {
         std::cerr << "[rhs_converter] array_slice_res not converted (skipping check)\n";
     } else {
@@ -458,58 +524,67 @@ int main() {
     if (!arrayEntry || !arrayEntry->value) {
         return fail("net_array memo missing");
     }
-    grh::Value* arrayIndexValue = graph->findValue("array_index");
+    ValueId arrayIndexValue = graph->findValue("array_index");
     if (!arrayIndexValue) {
         return fail("array_index value missing");
     }
-    const grh::Operation* arrayOp = arraySlice->definingOp();
-    if (!arrayOp || arrayOp->kind() != grh::OperationKind::kSliceArray ||
-        arrayOp->operands().size() != 2 || arrayOp->operands()[0] != arrayEntry->value ||
-        arrayOp->operands()[1] != arrayIndexValue) {
+    OperationId arrayOpId = graph->getValue(arraySlice).definingOp();
+    if (!arrayOpId) {
+        return fail("array_slice_res missing kSliceArray");
+    }
+    const grh::Operation arrayOp = graph->getOperation(arrayOpId);
+    if (arrayOp.kind() != grh::OperationKind::kSliceArray ||
+        arrayOp.operands().size() != 2 || arrayOp.operands()[0] != arrayEntry->value ||
+        arrayOp.operands()[1] != arrayIndexValue) {
         std::cerr << "[rhs_converter] array_slice_res debug: op=";
-        if (!arrayOp) {
-            std::cerr << "<null>";
-        } else {
-            std::cerr << grh::toString(arrayOp->kind());
-            std::cerr << " operand_count=" << arrayOp->operands().size();
-            std::cerr << " op0=" << (arrayOp->operands().size() > 0 &&
-                                      arrayOp->operands()[0] ? arrayOp->operands()[0]->symbol() : std::string("<null>"));
-            std::cerr << " op1=" << (arrayOp->operands().size() > 1 &&
-                                      arrayOp->operands()[1] ? arrayOp->operands()[1]->symbol() : std::string("<null>"));
-        }
+        std::cerr << grh::toString(arrayOp.kind());
+        std::cerr << " operand_count=" << arrayOp.operands().size();
+        std::cerr << " op0=" << (arrayOp.operands().size() > 0
+                                     ? std::string(graph->getValue(arrayOp.operands()[0]).symbolText())
+                                     : std::string("<null>"));
+        std::cerr << " op1=" << (arrayOp.operands().size() > 1
+                                     ? std::string(graph->getValue(arrayOp.operands()[1]).symbolText())
+                                     : std::string("<null>"));
         std::cerr << '\n';
         return fail("array_slice_res missing kSliceArray");
     }
-    auto arrayAttr = arrayOp->attributes().find("sliceWidth");
-    if (arrayAttr == arrayOp->attributes().end() ||
-        !std::holds_alternative<int64_t>(arrayAttr->second) ||
-        std::get<int64_t>(arrayAttr->second) != 8) {
+    const grh::ir::SymbolId sliceWidthKey = graph->lookupSymbol("sliceWidth");
+    auto arrayAttr = sliceWidthKey.valid() ? arrayOp.attr(sliceWidthKey) : std::nullopt;
+    const int64_t* arrayWidth = arrayAttr ? std::get_if<int64_t>(&*arrayAttr) : nullptr;
+    if (!arrayWidth || *arrayWidth != 8) {
         return fail("array_slice_res sliceWidth mismatch");
     }
     }
 
-    grh::Value* memRead = convertByName("mem_read_res");
+    ValueId memRead = convertByName("mem_read_res");
     if (!memRead) {
         return fail("Failed to convert mem_read_res RHS");
     }
     const SignalMemoEntry* memEntry = findMemoEntry(memMemo, "reg_mem");
-    if (!memEntry || !memEntry->stateOp ||
-        memEntry->stateOp->kind() != grh::OperationKind::kMemory) {
+    if (!memEntry || !memEntry->stateOp) {
         return fail("reg_mem memo missing kMemory placeholder");
     }
-    grh::Value* memAddrValue = graph->findValue("mem_addr");
+    const grh::Operation memOp = graph->getOperation(memEntry->stateOp);
+    if (memOp.kind() != grh::OperationKind::kMemory) {
+        return fail("reg_mem memo missing kMemory placeholder");
+    }
+    ValueId memAddrValue = graph->findValue("mem_addr");
     if (!memAddrValue) {
         return fail("mem_addr value missing");
     }
-    const grh::Operation* memOp = memRead->definingOp();
-    if (!memOp || memOp->kind() != grh::OperationKind::kMemoryAsyncReadPort ||
-        memOp->operands().size() != 1 || memOp->operands()[0] != memAddrValue) {
+    OperationId memReadOpId = graph->getValue(memRead).definingOp();
+    if (!memReadOpId) {
         return fail("mem_read_res missing kMemoryAsyncReadPort");
     }
-    auto memAttr = memOp->attributes().find("memSymbol");
-    if (memAttr == memOp->attributes().end() ||
-        !std::holds_alternative<std::string>(memAttr->second) ||
-        std::get<std::string>(memAttr->second) != memEntry->stateOp->symbol()) {
+    const grh::Operation memReadOp = graph->getOperation(memReadOpId);
+    if (memReadOp.kind() != grh::OperationKind::kMemoryAsyncReadPort ||
+        memReadOp.operands().size() != 1 || memReadOp.operands()[0] != memAddrValue) {
+        return fail("mem_read_res missing kMemoryAsyncReadPort");
+    }
+    const grh::ir::SymbolId memKey = graph->lookupSymbol("memSymbol");
+    auto memAttr = memKey.valid() ? memReadOp.attr(memKey) : std::nullopt;
+    const std::string* memSym = memAttr ? std::get_if<std::string>(&*memAttr) : nullptr;
+    if (!memSym || *memSym != memOp.symbolText()) {
         return fail("mem_read_res memSymbol attribute mismatch");
     }
 

@@ -319,9 +319,9 @@ int main()
     {
         grh::Netlist netlistStats;
         grh::Graph &graph = netlistStats.createGraph("g");
-        graph.createValue("v0", 1, false);
-        graph.createValue("v1", 1, false);
-        graph.createOperation(grh::OperationKind::kAssign, "op0");
+        graph.createValue(graph.internSymbol("v0"), 1, false);
+        graph.createValue(graph.internSymbol("v1"), 1, false);
+        graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("op0"));
 
         PassManager manager;
         manager.addPass(std::make_unique<StatsPass>());

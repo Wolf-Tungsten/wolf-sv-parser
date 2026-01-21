@@ -23,6 +23,40 @@ int fail(const std::string& context, const std::string& message) {
 
 const std::filesystem::path kArtifactDir = std::filesystem::path(WOLF_SV_ELAB_ARTIFACT_DIR);
 
+std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Operation& op,
+                                         std::string_view key) {
+    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
+    if (!keyId.valid()) {
+        return std::nullopt;
+    }
+    auto attr = op.attr(keyId);
+    const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
+    }
+    return *value;
+}
+
+const std::vector<std::string>* getStringVecAttr(const grh::Graph* graph, const grh::Operation& op,
+                                                 std::string_view key) {
+    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
+    if (!keyId.valid()) {
+        return nullptr;
+    }
+    auto attr = op.attr(keyId);
+    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+}
+
+ValueId findPortValue(const grh::Graph* graph, std::string_view name, bool isInput) {
+    const auto ports = isInput ? graph->inputPorts() : graph->outputPorts();
+    for (const auto& port : ports) {
+        if (graph->symbolText(port.name) == name) {
+            return port.value;
+        }
+    }
+    return ValueId::invalid();
+}
+
 bool buildNetlist(const std::string& context, const std::filesystem::path& sourcePath,
                   grh::Netlist& netlist, ElaborateDiagnostics& diagnostics) {
     if (!std::filesystem::exists(sourcePath)) {
@@ -119,48 +153,44 @@ int validateNested(const grh::Netlist& netlist) {
     }
 
     bool foundMidInstance = false;
-    for (const auto& opSymbol : midGraph->operationOrder()) {
-        const grh::Operation& op = midGraph->getOperation(opSymbol);
+    for (const auto& opId : midGraph->operations()) {
+        const grh::Operation op = midGraph->getOperation(opId);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
         foundMidInstance = true;
 
-        const auto& attrs = op.attributes();
-        auto moduleNameIt = attrs.find("moduleName");
-        if (moduleNameIt == attrs.end()) {
+        auto moduleNameOpt = getStringAttr(midGraph, op, "moduleName");
+        if (!moduleNameOpt) {
             return fail("nested", "Instance operation missing moduleName attribute");
         }
-        const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName != leafGraph->symbol()) {
-            return fail("nested", "Instance moduleName mismatch: " + moduleName);
+        if (*moduleNameOpt != leafGraph->symbol()) {
+            return fail("nested", "Instance moduleName mismatch: " + *moduleNameOpt);
         }
 
         if (op.operands().size() != 1 || op.results().size() != 1) {
             return fail("nested", "Instance operand/result count mismatch");
         }
 
-        const grh::Value* inputValue = op.operands().front();
-        const grh::Value* outputValue = op.results().front();
-        if (!inputValue || inputValue->symbol() != "mid_in") {
+        ValueId inputValue = op.operands().front();
+        ValueId outputValue = op.results().front();
+        if (!inputValue || midGraph->getValue(inputValue).symbolText() != "mid_in") {
             return fail("nested", "Instance input wiring incorrect");
         }
-        if (!outputValue || outputValue->symbol() != "mid_out") {
+        if (!outputValue || midGraph->getValue(outputValue).symbolText() != "mid_out") {
             return fail("nested", "Instance output wiring incorrect");
         }
 
-        auto inputNamesIt = attrs.find("inputPortName");
-        auto outputNamesIt = attrs.find("outputPortName");
-        if (inputNamesIt == attrs.end() || outputNamesIt == attrs.end()) {
+        const auto* inputNames = getStringVecAttr(midGraph, op, "inputPortName");
+        const auto* outputNames = getStringVecAttr(midGraph, op, "outputPortName");
+        if (!inputNames || !outputNames) {
             return fail("nested", "Instance missing port name attributes");
         }
 
-        const auto& inputNames = std::get<std::vector<std::string>>(inputNamesIt->second);
-        const auto& outputNames = std::get<std::vector<std::string>>(outputNamesIt->second);
-        if (inputNames.size() != 1 || inputNames.front() != "leaf_in") {
+        if (inputNames->size() != 1 || inputNames->front() != "leaf_in") {
             return fail("nested", "Input port name attribute mismatch");
         }
-        if (outputNames.size() != 1 || outputNames.front() != "leaf_out") {
+        if (outputNames->size() != 1 || outputNames->front() != "leaf_out") {
             return fail("nested", "Output port name attribute mismatch");
         }
     }
@@ -171,8 +201,8 @@ int validateNested(const grh::Netlist& netlist) {
 
     // Ensure the top graph references the mid graph via instance.
     bool foundTopInstance = false;
-    for (const auto& opSymbol : topGraph->operationOrder()) {
-        if (topGraph->getOperation(opSymbol).kind() == grh::OperationKind::kInstance) {
+    for (const auto& opId : topGraph->operations()) {
+        if (topGraph->getOperation(opId).kind() == grh::OperationKind::kInstance) {
             foundTopInstance = true;
             break;
         }
@@ -201,48 +231,44 @@ int validateParameterized(const grh::Netlist& netlist) {
     }
 
     bool foundInstance = false;
-    for (const auto& opSymbol : topGraph->operationOrder()) {
-        const grh::Operation& op = topGraph->getOperation(opSymbol);
+    for (const auto& opId : topGraph->operations()) {
+        const grh::Operation op = topGraph->getOperation(opId);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
         foundInstance = true;
 
-        const auto& attrs = op.attributes();
-        auto moduleNameIt = attrs.find("moduleName");
-        if (moduleNameIt == attrs.end()) {
+        auto moduleNameOpt = getStringAttr(topGraph, op, "moduleName");
+        if (!moduleNameOpt) {
             return fail("param", "Instance missing moduleName attribute");
         }
-        const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName != leafGraph->symbol()) {
-            return fail("param", "Instance moduleName mismatch: " + moduleName);
+        if (*moduleNameOpt != leafGraph->symbol()) {
+            return fail("param", "Instance moduleName mismatch: " + *moduleNameOpt);
         }
 
         if (op.operands().size() != 1 || op.results().size() != 1) {
             return fail("param", "Unexpected operand/result count for parameterized instance");
         }
 
-        const grh::Value* operand = op.operands().front();
-        const grh::Value* result = op.results().front();
-        if (!operand || operand->symbol() != "top_in") {
+        ValueId operand = op.operands().front();
+        ValueId result = op.results().front();
+        if (!operand || topGraph->getValue(operand).symbolText() != "top_in") {
             return fail("param", "Instance input wiring incorrect");
         }
-        if (!result || result->symbol() != "top_out") {
+        if (!result || topGraph->getValue(result).symbolText() != "top_out") {
             return fail("param", "Instance output wiring incorrect");
         }
 
-        auto inputNamesIt = attrs.find("inputPortName");
-        auto outputNamesIt = attrs.find("outputPortName");
-        if (inputNamesIt == attrs.end() || outputNamesIt == attrs.end()) {
+        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+        if (!inputNames || !outputNames) {
             return fail("param", "Missing port name attributes on parameterized instance");
         }
 
-        const auto& inputNames = std::get<std::vector<std::string>>(inputNamesIt->second);
-        const auto& outputNames = std::get<std::vector<std::string>>(outputNamesIt->second);
-        if (inputNames.size() != 1 || inputNames.front() != "leaf_in") {
+        if (inputNames->size() != 1 || inputNames->front() != "leaf_in") {
             return fail("param", "Input port name mismatch on parameterized instance");
         }
-        if (outputNames.size() != 1 || outputNames.front() != "leaf_out") {
+        if (outputNames->size() != 1 || outputNames->front() != "leaf_out") {
             return fail("param", "Output port name mismatch on parameterized instance");
         }
 
@@ -254,15 +280,13 @@ int validateParameterized(const grh::Netlist& netlist) {
     }
 
     // Validate the leaf graph's port widths respect parameter defaults.
-    const auto leafInputIt = leafGraph->inputPorts().find("leaf_in");
-    const auto leafOutputIt = leafGraph->outputPorts().find("leaf_out");
-    if (leafInputIt == leafGraph->inputPorts().end() ||
-        leafOutputIt == leafGraph->outputPorts().end()) {
+    const ValueId leafInVal = findPortValue(leafGraph, "leaf_in", true);
+    const ValueId leafOutVal = findPortValue(leafGraph, "leaf_out", false);
+    if (!leafInVal || !leafOutVal) {
         return fail("param", "Leaf graph missing expected ports");
     }
-    const grh::Value* leafInVal = leafGraph->findValue(leafInputIt->second);
-    const grh::Value* leafOutVal = leafGraph->findValue(leafOutputIt->second);
-    if (!leafInVal || !leafOutVal || leafInVal->width() != 4 || leafOutVal->width() != 4) {
+    if (leafGraph->getValue(leafInVal).width() != 4 ||
+        leafGraph->getValue(leafOutVal).width() != 4) {
         return fail("param", "Leaf port widths do not match expected parameterization");
     }
 
@@ -282,13 +306,8 @@ int validateStructArray(const grh::Netlist& netlist) {
 
     auto checkPort = [&](const grh::Graph* graph, std::string_view name, int64_t expectedWidth,
                          bool isInput) -> bool {
-        const auto& ports = isInput ? graph->inputPorts() : graph->outputPorts();
-        auto it = ports.find(std::string(name));
-        if (it == ports.end()) {
-            return false;
-        }
-        const grh::Value* value = graph->findValue(it->second);
-        return value && value->width() == expectedWidth;
+        ValueId value = findPortValue(graph, name, isInput);
+        return value && graph->getValue(value).width() == expectedWidth;
     };
 
     if (!checkPort(topGraph, "top_struct_in", 6, true) ||
@@ -301,8 +320,8 @@ int validateStructArray(const grh::Netlist& netlist) {
     }
 
     bool foundInstance = false;
-    for (const auto& opSymbol : topGraph->operationOrder()) {
-        const grh::Operation& op = topGraph->getOperation(opSymbol);
+    for (const auto& opId : topGraph->operations()) {
+        const grh::Operation op = topGraph->getOperation(opId);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
@@ -312,22 +331,20 @@ int validateStructArray(const grh::Netlist& netlist) {
             return fail("struct", "Instance port fan-in/out mismatch");
         }
 
-        auto moduleNameIt = op.attributes().find("moduleName");
-        if (moduleNameIt == op.attributes().end()) {
+        auto moduleNameOpt = getStringAttr(topGraph, op, "moduleName");
+        if (!moduleNameOpt) {
             return fail("struct", "Missing moduleName attribute on struct instance");
         }
-        if (std::get<std::string>(moduleNameIt->second) != leafGraph->symbol()) {
+        if (*moduleNameOpt != leafGraph->symbol()) {
             return fail("struct", "moduleName on struct instance mismatches target graph");
         }
 
-        auto inputNamesIt = op.attributes().find("inputPortName");
-        auto outputNamesIt = op.attributes().find("outputPortName");
-        if (inputNamesIt == op.attributes().end() || outputNamesIt == op.attributes().end()) {
+        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+        if (!inputNames || !outputNames) {
             return fail("struct", "Missing port name attributes on struct instance");
         }
-        const auto inputNames = std::get<std::vector<std::string>>(inputNamesIt->second);
-        const auto outputNames = std::get<std::vector<std::string>>(outputNamesIt->second);
-        if (inputNames.size() != 2 || outputNames.size() != 2) {
+        if (inputNames->size() != 2 || outputNames->size() != 2) {
             return fail("struct", "Port name attribute counts mismatch");
         }
     }
@@ -361,15 +378,10 @@ int validateParamGenerate(const grh::Netlist& netlist) {
     }
 
     auto checkPortWidth = [](const grh::Graph* graph, int64_t expected) {
-        auto inputIt = graph->inputPorts().find("in");
-        auto outputIt = graph->outputPorts().find("out");
-        if (inputIt == graph->inputPorts().end() || outputIt == graph->outputPorts().end()) {
-            return false;
-        }
-        const grh::Value* inputValue = graph->findValue(inputIt->second);
-        const grh::Value* outputValue = graph->findValue(outputIt->second);
-        return inputValue && outputValue && inputValue->width() == expected &&
-               outputValue->width() == expected;
+        ValueId inputValue = findPortValue(graph, "in", true);
+        ValueId outputValue = findPortValue(graph, "out", false);
+        return inputValue && outputValue && graph->getValue(inputValue).width() == expected &&
+               graph->getValue(outputValue).width() == expected;
     };
 
     if (!checkPortWidth(leaf4Graph, 4)) {
@@ -382,27 +394,27 @@ int validateParamGenerate(const grh::Netlist& netlist) {
     std::size_t totalInstances = 0;
     std::size_t width4Instances = 0;
     std::size_t width8Instances = 0;
-    for (const auto& opSymbol : topGraph->operationOrder()) {
-        const grh::Operation& op = topGraph->getOperation(opSymbol);
+    for (const auto& opId : topGraph->operations()) {
+        const grh::Operation op = topGraph->getOperation(opId);
         if (op.kind() != grh::OperationKind::kInstance) {
             continue;
         }
 
         totalInstances++;
-        auto moduleNameIt = op.attributes().find("moduleName");
-        if (moduleNameIt == op.attributes().end()) {
+        auto moduleNameOpt = getStringAttr(topGraph, op, "moduleName");
+        if (!moduleNameOpt) {
             return fail("param_generate", "Instance missing moduleName attribute");
         }
 
-        const std::string& moduleName = std::get<std::string>(moduleNameIt->second);
-        if (moduleName == leaf4Graph->symbol()) {
+        if (*moduleNameOpt == leaf4Graph->symbol()) {
             width4Instances++;
         }
-        else if (moduleName == leaf8Graph->symbol()) {
+        else if (*moduleNameOpt == leaf8Graph->symbol()) {
             width8Instances++;
         }
         else {
-            return fail("param_generate", "Instance references unexpected module graph: " + moduleName);
+            return fail("param_generate",
+                        "Instance references unexpected module graph: " + *moduleNameOpt);
         }
     }
 

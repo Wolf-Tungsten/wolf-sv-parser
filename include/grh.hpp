@@ -104,6 +104,8 @@ using DebugInfo = SrcLoc;
 
 [[nodiscard]] bool attributeValueIsJsonSerializable(const AttributeValue &value);
 
+class Graph;
+
 namespace ir {
 
 struct SymbolId {
@@ -183,6 +185,7 @@ struct ValueId {
     constexpr bool valid() const noexcept { return index != 0; }
     static constexpr ValueId invalid() noexcept { return {}; }
     void assertGraph(GraphId expected) const;
+    explicit constexpr operator bool() const noexcept { return valid(); }
     friend constexpr bool operator==(ValueId lhs, ValueId rhs) noexcept
     {
         return lhs.index == rhs.index && lhs.generation == rhs.generation && lhs.graph == rhs.graph;
@@ -198,11 +201,34 @@ struct OperationId {
     constexpr bool valid() const noexcept { return index != 0; }
     static constexpr OperationId invalid() noexcept { return {}; }
     void assertGraph(GraphId expected) const;
+    explicit constexpr operator bool() const noexcept { return valid(); }
     friend constexpr bool operator==(OperationId lhs, OperationId rhs) noexcept
     {
         return lhs.index == rhs.index && lhs.generation == rhs.generation && lhs.graph == rhs.graph;
     }
     friend constexpr bool operator!=(OperationId lhs, OperationId rhs) noexcept { return !(lhs == rhs); }
+};
+
+struct ValueIdHash {
+    std::size_t operator()(const ValueId& id) const noexcept
+    {
+        std::size_t seed = static_cast<std::size_t>(id.index);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.generation);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.graph.index);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.graph.generation);
+        return seed;
+    }
+};
+
+struct OperationIdHash {
+    std::size_t operator()(const OperationId& id) const noexcept
+    {
+        std::size_t seed = static_cast<std::size_t>(id.index);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.generation);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.graph.index);
+        seed = seed * 1315423911u + static_cast<std::size_t>(id.graph.generation);
+        return seed;
+    }
 };
 
 struct Range {
@@ -301,6 +327,7 @@ public:
     void bindInputPort(SymbolId name, ValueId value);
     void bindOutputPort(SymbolId name, ValueId value);
     void setAttr(OperationId op, SymbolId key, AttributeValue value);
+    void setOpKind(OperationId op, OperationKind kind);
     bool eraseAttr(OperationId op, SymbolId key);
     void setValueSrcLoc(ValueId value, SrcLoc loc);
     void setOpSrcLoc(OperationId op, SrcLoc loc);
@@ -465,6 +492,7 @@ public:
     bool eraseOp(ir::OperationId op, std::span<const ir::ValueId> replacementResults);
     bool eraseValue(ir::ValueId value);
     void setAttr(ir::OperationId op, ir::SymbolId key, AttributeValue value);
+    void setOpKind(ir::OperationId op, OperationKind kind);
     bool eraseAttr(ir::OperationId op, ir::SymbolId key);
     void setValueSrcLoc(ir::ValueId value, SrcLoc loc);
     void setOpSrcLoc(ir::OperationId op, SrcLoc loc);

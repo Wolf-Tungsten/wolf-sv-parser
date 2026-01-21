@@ -33,7 +33,7 @@ namespace wolf_sv::transform
             bool allowXPropagation = false;
         };
 
-        using ConstantStore = std::unordered_map<const grh::Value *, ConstantValue>;
+        using ConstantStore = std::unordered_map<grh::ir::ValueId, ConstantValue, grh::ir::ValueIdHash>;
 
         bool isFoldable(grh::OperationKind kind)
         {
@@ -80,30 +80,38 @@ namespace wolf_sv::transform
             }
         }
 
-        std::optional<std::string> getStringAttr(const grh::Operation &op, std::string_view key)
+        std::optional<std::string> getStringAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
         {
-            const auto &attrs = op.attributes();
-            auto it = attrs.find(std::string(key));
-            if (it == attrs.end())
+            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+            if (!keyId.valid())
             {
                 return std::nullopt;
             }
-            if (const auto *value = std::get_if<std::string>(&it->second))
+            auto attr = op.attr(keyId);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<std::string>(&*attr))
             {
                 return *value;
             }
             return std::nullopt;
         }
 
-        std::optional<int64_t> getIntAttr(const grh::Operation &op, std::string_view key)
+        std::optional<int64_t> getIntAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
         {
-            const auto &attrs = op.attributes();
-            auto it = attrs.find(std::string(key));
-            if (it == attrs.end())
+            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+            if (!keyId.valid())
             {
                 return std::nullopt;
             }
-            if (const auto *value = std::get_if<int64_t>(&it->second))
+            auto attr = op.attr(keyId);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<int64_t>(&*attr))
             {
                 return *value;
             }
@@ -117,7 +125,7 @@ namespace wolf_sv::transform
                 slang::SVInt parsed = slang::SVInt::fromString(literal);
                 if (value.width() <= 0)
                 {
-                    onError("Value width must be positive for constant propagation: " + value.symbol());
+                    onError("Value width must be positive for constant propagation: " + std::string(value.symbolText()));
                     return std::nullopt;
                 }
                 parsed.setSigned(value.isSigned());
@@ -136,7 +144,7 @@ namespace wolf_sv::transform
 
         std::optional<ConstantValue> parseConstValue(const grh::Graph &graph, const grh::Operation &op, const grh::Value &value, const std::function<void(std::string)> &onError)
         {
-            auto literalOpt = getStringAttr(op, "constValue");
+            auto literalOpt = getStringAttr(graph, op, "constValue");
             if (!literalOpt)
             {
                 onError("kConstant missing constValue attribute");
@@ -150,12 +158,12 @@ namespace wolf_sv::transform
             const auto operands = op.operands();
             for (std::size_t i = 0; i < operands.size(); ++i)
             {
-                const grh::Value *val = operands[i];
-                if (!val)
+                const auto valId = operands[i];
+                if (!valId.valid())
                 {
                     return false;
                 }
-                if (store.find(val) == store.end())
+                if (store.find(valId) == store.end())
                 {
                     return false;
                 }
@@ -262,13 +270,13 @@ namespace wolf_sv::transform
             bool hasUnknown = false;
             for (std::size_t i = 0; i < op.operands().size(); ++i)
             {
-                const grh::Value *val = op.operands()[i];
-                if (!val)
+                const auto valId = op.operands()[i];
+                if (!valId.valid())
                 {
                     onError("Operand missing during constant propagation");
                     return std::nullopt;
                 }
-                auto it = store.find(val);
+                auto it = store.find(valId);
                 if (it == store.end())
                 {
                     return std::nullopt;
@@ -326,7 +334,7 @@ namespace wolf_sv::transform
                 break;
             case grh::OperationKind::kReplicate:
             {
-                auto repOpt = getIntAttr(op, "rep");
+                auto repOpt = getIntAttr(graph, op, "rep");
                 if (!repOpt)
                 {
                     onError("kReplicate missing required 'rep' attribute");
@@ -346,8 +354,8 @@ namespace wolf_sv::transform
                 break;
             case grh::OperationKind::kSliceStatic:
             {
-                auto startOpt = getIntAttr(op, "sliceStart");
-                auto endOpt = getIntAttr(op, "sliceEnd");
+                auto startOpt = getIntAttr(graph, op, "sliceStart");
+                auto endOpt = getIntAttr(graph, op, "sliceEnd");
                 if (!startOpt || !endOpt)
                 {
                     onError("kSliceStatic missing sliceStart/sliceEnd attributes");
@@ -367,7 +375,7 @@ namespace wolf_sv::transform
             case grh::OperationKind::kSliceDynamic:
             case grh::OperationKind::kSliceArray:
             {
-                auto widthOpt = getIntAttr(op, "sliceWidth");
+                auto widthOpt = getIntAttr(graph, op, "sliceWidth");
                 if (!widthOpt)
                 {
                     onError("Slice operation missing sliceWidth attribute");
@@ -398,13 +406,13 @@ namespace wolf_sv::transform
             results.reserve(op.results().size());
             for (std::size_t i = 0; i < op.results().size(); ++i)
             {
-                const grh::Value *res = op.results()[i];
-                if (!res)
+                const auto resId = op.results()[i];
+                if (!resId.valid())
                 {
                     onError("Result missing during constant propagation");
                     return std::nullopt;
                 }
-                results.push_back(normalizeToValue(*res, *folded));
+                results.push_back(normalizeToValue(graph.getValue(resId), *folded));
             }
             return results;
         }
@@ -415,7 +423,7 @@ namespace wolf_sv::transform
             int counter = 0;
             const auto exists = [&](const std::string &symbol)
             {
-                return isOperation ? graph.findOperation(symbol) != nullptr : graph.findValue(symbol) != nullptr;
+                return isOperation ? graph.findOperation(symbol).valid() : graph.findValue(symbol).valid();
             };
             while (exists(candidate))
             {
@@ -431,49 +439,54 @@ namespace wolf_sv::transform
             return value.toString(slang::LiteralBase::Hex, true, width);
         }
 
-        grh::Value &createConstant(grh::Graph &graph, const grh::Operation &sourceOp, std::size_t resultIndex, const slang::SVInt &value)
+        grh::ir::ValueId createConstant(grh::Graph &graph, const grh::Operation &sourceOp, std::size_t resultIndex, const slang::SVInt &value)
         {
             std::ostringstream base;
-            base << "__constfold_" << sourceOp.symbol() << "_" << resultIndex;
+            base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
             std::string valueName = makeUniqueSymbol(graph, base.str(), /*isOperation=*/false);
 
             std::ostringstream opBase;
-            opBase << "__constfold_op_" << sourceOp.symbol() << "_" << resultIndex;
+            opBase << "__constfold_op_" << sourceOp.symbolText() << "_" << resultIndex;
             std::string opName = makeUniqueSymbol(graph, opBase.str(), /*isOperation=*/true);
 
-            grh::Value &newValue = graph.createValue(valueName, static_cast<int64_t>(value.getBitWidth()), value.isSigned());
-            grh::Operation &constOp = graph.createOperation(grh::OperationKind::kConstant, opName);
-            constOp.addResult(newValue);
-            constOp.setAttribute("constValue", formatConstLiteral(value));
+            const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
+            const grh::ir::SymbolId opSym = graph.internSymbol(opName);
+            const grh::ir::ValueId newValue = graph.createValue(valueSym, static_cast<int32_t>(value.getBitWidth()), value.isSigned());
+            const grh::ir::OperationId constOp = graph.createOperation(grh::OperationKind::kConstant, opSym);
+            graph.addResult(constOp, newValue);
+            graph.setAttr(constOp, graph.internSymbol("constValue"), formatConstLiteral(value));
             return newValue;
         }
 
-        void replaceUsers(grh::Graph &graph, grh::Value &oldValue, grh::Value &newValue, const std::function<void(std::string)> &onError)
+        void replaceUsers(grh::Graph &graph, grh::ir::ValueId oldValue, grh::ir::ValueId newValue, const std::function<void(std::string)> &onError)
         {
-            std::vector<grh::ValueUser> users = oldValue.users();
-            for (const auto &user : users)
+            try
             {
-                grh::Operation *op = user.operationPtr ? user.operationPtr : graph.findOperation(user.operationSymbol);
-                if (!op)
+                graph.replaceAllUses(oldValue, newValue);
+            }
+            catch (const std::exception &ex)
+            {
+                onError(std::string("Failed to replace operands for constant folding: ") + ex.what());
+            }
+
+            std::vector<grh::ir::SymbolId> outputPortsToUpdate;
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == oldValue)
                 {
-                    continue;
+                    outputPortsToUpdate.push_back(port.name);
                 }
-                if (user.operandIndex >= op->operands().size())
-                {
-                    std::ostringstream oss;
-                    oss << "Operand index " << user.operandIndex << " out of range for op " << op->symbol();
-                    onError(oss.str());
-                    continue;
-                }
+            }
+
+            for (const auto portName : outputPortsToUpdate)
+            {
                 try
                 {
-                    op->replaceOperand(user.operandIndex, newValue);
+                    graph.bindOutputPort(portName, newValue);
                 }
                 catch (const std::exception &ex)
                 {
-                    std::ostringstream oss;
-                    oss << "Failed to replace operand " << user.operandIndex << " in op " << op->symbol() << ": " << ex.what();
-                    onError(oss.str());
+                    onError(std::string("Failed to rebind output port during constant folding: ") + ex.what());
                 }
             }
         }
@@ -509,39 +522,39 @@ namespace wolf_sv::transform
         for (const auto &graphEntry : netlist().graphs())
         {
             const grh::Graph &graph = *graphEntry.second;
-            for (const auto &opSymbol : graph.operationOrder())
+            for (const auto opId : graph.operations())
             {
-                const grh::Operation &op = graph.getOperation(opSymbol);
+                const grh::Operation op = graph.getOperation(opId);
                 if (op.kind() != grh::OperationKind::kConstant)
                 {
                     continue;
                 }
-                for (std::size_t i = 0; i < op.results().size(); ++i)
+                for (const auto resId : op.results())
                 {
-                    const grh::Value *res = op.results()[i];
-                    if (!res)
+                    if (!resId.valid())
                     {
                         error(graph, op, "kConstant missing result");
                         failed = true;
                         continue;
                     }
-                    if (constants.find(res) != constants.end())
+                    if (constants.find(resId) != constants.end())
                     {
                         continue;
                     }
                     auto reportError = [&](const std::string &msg)
                     { this->error(graph, op, msg); failed = true; };
-                    auto parsed = parseConstValue(graph, op, *res, reportError);
+                    grh::Value res = graph.getValue(resId);
+                    auto parsed = parseConstValue(graph, op, res, reportError);
                     if (!parsed)
                     {
                         continue;
                     }
-                    constants.emplace(res, *parsed);
+                    constants.emplace(resId, *parsed);
                 }
             }
         }
 
-        std::unordered_set<std::string> foldedOps;
+        std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;
         FoldOptions foldOpts{options_.allowXPropagation};
 
         for (int iter = 0; iter < options_.maxIterations; ++iter)
@@ -551,16 +564,16 @@ namespace wolf_sv::transform
             for (const auto &graphEntry : netlist().graphs())
             {
                 grh::Graph &graph = *graphEntry.second;
-                std::vector<std::string> opOrder = graph.operationOrder();
-                std::vector<std::string> opsToErase;
-                for (const auto &opSymbol : opOrder)
+                std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(), graph.operations().end());
+                std::vector<grh::ir::OperationId> opsToErase;
+                for (const auto opId : opOrder)
                 {
-                    grh::Operation &op = graph.getOperation(opSymbol);
+                    const grh::Operation op = graph.getOperation(opId);
                     if (op.kind() == grh::OperationKind::kConstant || !isFoldable(op.kind()))
                     {
                         continue;
                     }
-                    if (foldedOps.find(op.symbol()) != foldedOps.end())
+                    if (foldedOps.find(opId) != foldedOps.end())
                     {
                         continue;
                     }
@@ -582,32 +595,36 @@ namespace wolf_sv::transform
                     for (std::size_t idx = 0; idx < folded->size(); ++idx)
                     {
                         const slang::SVInt &sv = (*folded)[idx];
-                        grh::Value *res = op.results()[idx];
-                        if (!res)
+                        const auto resId = op.results()[idx];
+                        if (!resId.valid())
                         {
                             error(graph, op, "Result missing during folding");
                             failed = true;
                             createdAllResults = false;
                             continue;
                         }
-                        grh::Value &newValue = createConstant(graph, op, idx, sv);
-                        replaceUsers(graph, *res, newValue, [&](const std::string &msg)
+                        const grh::ir::ValueId newValue = createConstant(graph, op, idx, sv);
+                        replaceUsers(graph, resId, newValue, [&](const std::string &msg)
                                      { this->error(graph, op, msg); failed = true; });
-                        graph.replaceOutputValue(*res, newValue);
-                        constants[&newValue] = ConstantValue{sv, sv.hasUnknown()};
+                        constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
                         iterationChanged = true;
                     }
 
                     if (createdAllResults)
                     {
-                        foldedOps.insert(op.symbol());
-                        opsToErase.push_back(op.symbol());
+                        foldedOps.insert(opId);
+                        opsToErase.push_back(opId);
                     }
                 }
 
-                for (const auto &symbol : opsToErase)
+                for (const auto opId : opsToErase)
                 {
-                    graph.removeOperation(symbol);
+                    if (!graph.eraseOp(opId))
+                    {
+                        const grh::Operation op = graph.getOperation(opId);
+                        error(graph, op, "Failed to erase folded operation");
+                        failed = true;
+                    }
                 }
             }
 

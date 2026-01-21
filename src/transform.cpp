@@ -20,7 +20,7 @@ namespace wolf_sv::transform
                 {
                     ctx += "::";
                 }
-                ctx += op->symbol();
+                ctx.append(op->symbolText());
             }
             if (value)
             {
@@ -28,7 +28,7 @@ namespace wolf_sv::transform
                 {
                     ctx += "::";
                 }
-                ctx += value->symbol();
+                ctx.append(value->symbolText());
             }
             return ctx;
         }

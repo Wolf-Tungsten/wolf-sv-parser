@@ -107,6 +107,11 @@ int main() {
     Elaborate elaborator(&diagnostics);
     grh::Netlist netlist = elaborator.convert(compilation->getRoot());
 
+    const grh::Graph* graph = netlist.findGraph("memo_child");
+    if (!graph) {
+        return fail("Graph memo_child not found");
+    }
+
     const slang::ast::InstanceSymbol* memoTop = nullptr;
     for (const slang::ast::InstanceSymbol* top : compilation->getRoot().topInstances) {
         if (top && top->name == "memo_top") {
@@ -225,11 +230,11 @@ int main() {
             return fail(std::string("net memo entry ") + std::string(name) + " is missing GRH value");
         }
         std::cout << "[memo] net " << name << " entryWidth=" << entry->width
-                  << " valueWidth=" << entry->value->width() << '\n';
-        if (entry->value->width() != entry->width) {
+                  << " valueWidth=" << graph->getValue(entry->value).width() << '\n';
+        if (graph->getValue(entry->value).width() != entry->width) {
             return fail(std::string("value width mismatch for net ") + std::string(name));
         }
-        std::cout << "        value symbol=" << entry->value->symbol() << '\n';
+        std::cout << "        value symbol=" << graph->getValue(entry->value).symbolText() << '\n';
         return true;
     };
     if (!expectNetValue("w_assign")) {
@@ -248,7 +253,7 @@ int main() {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is missing state operation");
         }
-        if (entry->stateOp->kind() != grh::OperationKind::kRegister) {
+        if (graph->getOperation(entry->stateOp).kind() != grh::OperationKind::kRegister) {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is not bound to kRegister");
         }
@@ -256,27 +261,28 @@ int main() {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is missing GRH value");
         }
-        if (entry->stateOp->results().empty() ||
-            entry->stateOp->results().front() != entry->value) {
+        const grh::Operation op = graph->getOperation(entry->stateOp);
+        if (op.results().empty() || op.results().front() != entry->value) {
             return fail(std::string("register operation result mismatch for ") +
                         std::string(name));
         }
-        const auto attrIt = entry->stateOp->attributes().find("clkPolarity");
-        if (attrIt == entry->stateOp->attributes().end()) {
+        const grh::ir::SymbolId clkKey = graph->lookupSymbol("clkPolarity");
+        auto clkAttr = clkKey.valid() ? op.attr(clkKey) : std::nullopt;
+        if (!clkAttr) {
             return fail(std::string("register operation missing clkPolarity attribute for ") +
                         std::string(name));
         }
-        if (!std::holds_alternative<std::string>(attrIt->second)) {
+        const std::string* attrValue = std::get_if<std::string>(&*clkAttr);
+        if (!attrValue) {
             return fail(std::string("register clkPolarity attribute type mismatch for ") +
                         std::string(name));
         }
-        const std::string& attrValue = std::get<std::string>(attrIt->second);
-        if (attrValue != clkPolarity) {
+        if (*attrValue != clkPolarity) {
             return fail(std::string("register clkPolarity mismatch for ") + std::string(name));
         }
-        std::cout << "[memo] register " << name << " clk=" << attrValue
-                  << " op=" << entry->stateOp->symbol() << '\n';
-        std::cout << "        value=" << entry->value->symbol() << '\n';
+        std::cout << "[memo] register " << name << " clk=" << *attrValue
+                  << " op=" << graph->getOperation(entry->stateOp).symbolText() << '\n';
+        std::cout << "        value=" << graph->getValue(entry->value).symbolText() << '\n';
         return true;
     };
 
@@ -297,27 +303,30 @@ int main() {
         return fail("reg_unpacked_bus should not materialize a flat value");
     }
     if (!memoryEntry->stateOp ||
-        memoryEntry->stateOp->kind() != grh::OperationKind::kMemory) {
+        graph->getOperation(memoryEntry->stateOp).kind() != grh::OperationKind::kMemory) {
         return fail("reg_unpacked_bus expected kMemory placeholder");
     }
-    const auto& memAttrs = memoryEntry->stateOp->attributes();
-    auto widthIt = memAttrs.find("width");
-    auto rowIt = memAttrs.find("row");
-    auto signedIt = memAttrs.find("isSigned");
-    if (widthIt == memAttrs.end() || rowIt == memAttrs.end() || signedIt == memAttrs.end()) {
+    const grh::Operation memOp = graph->getOperation(memoryEntry->stateOp);
+    const grh::ir::SymbolId widthKey = graph->lookupSymbol("width");
+    const grh::ir::SymbolId rowKey = graph->lookupSymbol("row");
+    const grh::ir::SymbolId signedKey = graph->lookupSymbol("isSigned");
+    auto widthAttr = widthKey.valid() ? memOp.attr(widthKey) : std::nullopt;
+    auto rowAttr = rowKey.valid() ? memOp.attr(rowKey) : std::nullopt;
+    auto signedAttr = signedKey.valid() ? memOp.attr(signedKey) : std::nullopt;
+    if (!widthAttr || !rowAttr || !signedAttr) {
         return fail("reg_unpacked_bus memory attributes incomplete");
     }
-    if (!std::holds_alternative<int64_t>(widthIt->second) ||
-        !std::holds_alternative<int64_t>(rowIt->second) ||
-        !std::holds_alternative<bool>(signedIt->second)) {
+    const int64_t* widthVal = std::get_if<int64_t>(&*widthAttr);
+    const int64_t* rowVal = std::get_if<int64_t>(&*rowAttr);
+    const bool* signedVal = std::get_if<bool>(&*signedAttr);
+    if (!widthVal || !rowVal || !signedVal) {
         return fail("reg_unpacked_bus memory attributes have unexpected types");
     }
-    if (std::get<int64_t>(widthIt->second) != 3 || std::get<int64_t>(rowIt->second) != 2 ||
-        std::get<bool>(signedIt->second)) {
+    if (*widthVal != 3 || *rowVal != 2 || *signedVal) {
         return fail("reg_unpacked_bus memory attributes mismatch");
     }
-    std::cout << "[memo] memory reg_unpacked_bus width=" << std::get<int64_t>(widthIt->second)
-              << " rows=" << std::get<int64_t>(rowIt->second) << '\n';
+    std::cout << "[memo] memory reg_unpacked_bus width=" << *widthVal
+              << " rows=" << *rowVal << '\n';
 
     std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
     for (const ElaborateDiagnostic& diag : diagnostics.messages()) {

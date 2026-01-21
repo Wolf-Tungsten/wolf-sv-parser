@@ -63,6 +63,10 @@ class ContinuousAssignSymbol;
 } // namespace slang::ast
 
 namespace wolf_sv {
+using ValueId = grh::ir::ValueId;
+using OperationId = grh::ir::OperationId;
+using SymbolId = grh::ir::SymbolId;
+
 
 /// Diagnostic categories emitted by the elaboration pipeline.
 enum class ElaborateDiagnosticKind {
@@ -118,8 +122,8 @@ struct SignalMemoEntry {
     int64_t width = 0;
     bool isSigned = false;
     std::vector<SignalMemoField> fields;
-    grh::Value* value = nullptr;
-    grh::Operation* stateOp = nullptr;
+    ValueId value = ValueId::invalid();
+    OperationId stateOp = OperationId::invalid();
     const slang::ast::ProceduralBlockSymbol* drivingBlock = nullptr;
     const slang::ast::Expression* asyncResetExpr = nullptr;
     slang::ast::EdgeKind asyncResetEdge = {};
@@ -142,7 +146,7 @@ struct DpiImportEntry {
     const slang::ast::SubroutineSymbol* symbol = nullptr;
     std::string cIdentifier;
     std::vector<DpiImportArg> args;
-    grh::Operation* importOp = nullptr;
+    OperationId importOp = OperationId::invalid();
 };
 
 /// Captures a port entry for a blackbox module.
@@ -183,7 +187,7 @@ public:
         std::string path;
         int64_t msb = 0;
         int64_t lsb = 0;
-        grh::Value* value = nullptr;
+        ValueId value = ValueId::invalid();
         const slang::ast::Expression* originExpr = nullptr;
     };
 
@@ -200,7 +204,7 @@ public:
     struct MultiDriverPart {
         int64_t msb = 0;
         int64_t lsb = 0;
-        grh::Value* value = nullptr;
+        ValueId value = ValueId::invalid();
     };
     struct MultiDriverBucket {
         const SignalMemoEntry* target = nullptr;
@@ -221,16 +225,16 @@ private:
     std::optional<grh::SrcLoc> srcLocForEntry(const Entry& entry) const;
     void reportIssue(const Entry& entry, std::string message,
                      ElaborateDiagnostics* diagnostics) const;
-    grh::Value* composeSlices(Entry& entry, grh::Graph& graph,
-                              ElaborateDiagnostics* diagnostics);
-    void attachToTarget(const Entry& entry, grh::Value& composedValue, grh::Graph& graph,
+    ValueId composeSlices(Entry& entry, grh::Graph& graph,
+                          ElaborateDiagnostics* diagnostics);
+    void attachToTarget(const Entry& entry, ValueId composedValue, grh::Graph& graph,
                         ElaborateDiagnostics* diagnostics);
-    grh::Value* createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph);
-    bool tryLowerLatch(Entry& entry, grh::Value& dataValue, grh::Graph& graph,
+    ValueId createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph);
+    bool tryLowerLatch(Entry& entry, ValueId dataValue, grh::Graph& graph,
                        ElaborateDiagnostics* diagnostics);
 
     std::vector<Entry> entries_;
-    std::unordered_map<grh::Value*, MultiDriverBucket> multiDriverParts_;
+    std::unordered_map<ValueId, MultiDriverBucket, grh::ir::ValueIdHash> multiDriverParts_;
     std::size_t nameCounter_ = 0;
     const slang::SourceManager* sourceManager_ = nullptr;
 };
@@ -253,7 +257,7 @@ public:
     virtual ~RHSConverter() = default;
 
     /// Lowers the provided expression into the GRH graph, returning the resulting value.
-    grh::Value* convert(const slang::ast::Expression& expr);
+    ValueId convert(const slang::ast::Expression& expr);
     void clearCache();
 
 protected:
@@ -268,33 +272,33 @@ protected:
 
     virtual std::string makeValueName(std::string_view hint, std::size_t index) const;
     virtual std::string makeOperationName(std::string_view hint, std::size_t index) const;
-    virtual grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr);
-    virtual grh::Value* convertRangeSelect(const slang::ast::RangeSelectExpression& expr);
-    virtual grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr);
-    virtual grh::Value*
+    virtual ValueId convertElementSelect(const slang::ast::ElementSelectExpression& expr);
+    virtual ValueId convertRangeSelect(const slang::ast::RangeSelectExpression& expr);
+    virtual ValueId convertMemberAccess(const slang::ast::MemberAccessExpression& expr);
+    virtual ValueId
     handleMemoEntry(const slang::ast::NamedValueExpression& expr, const SignalMemoEntry& entry);
-    virtual grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr);
+    virtual ValueId handleCustomNamedValue(const slang::ast::NamedValueExpression& expr);
 
-    grh::Value& createTemporaryValue(const slang::ast::Type& type, std::string_view hint);
-    grh::Operation& createOperation(grh::OperationKind kind, std::string_view hint);
-    grh::Value* createConstantValue(const slang::SVInt& value, const slang::ast::Type& type,
+    ValueId createTemporaryValue(const slang::ast::Type& type, std::string_view hint);
+    OperationId createOperation(grh::OperationKind kind, std::string_view hint);
+    ValueId createConstantValue(const slang::SVInt& value, const slang::ast::Type& type,
                                     std::string_view literalHint);
-    grh::Value* createZeroValue(const slang::ast::Type& type, std::string_view hint);
-    grh::Value* buildUnaryOp(grh::OperationKind kind, grh::Value& operand,
+    ValueId createZeroValue(const slang::ast::Type& type, std::string_view hint);
+    ValueId buildUnaryOp(grh::OperationKind kind, ValueId operand,
                              const slang::ast::Expression& originExpr, std::string_view hint);
-    grh::Value* buildBinaryOp(grh::OperationKind kind, grh::Value& lhs, grh::Value& rhs,
+    ValueId buildBinaryOp(grh::OperationKind kind, ValueId lhs, ValueId rhs,
                               const slang::ast::Expression& originExpr, std::string_view hint);
-    grh::Value* buildMux(grh::Value& cond, grh::Value& onTrue, grh::Value& onFalse,
+    ValueId buildMux(ValueId cond, ValueId onTrue, ValueId onFalse,
                          const slang::ast::Expression& originExpr);
-    grh::Value* buildAssign(grh::Value& input, const slang::ast::Expression& originExpr,
+    ValueId buildAssign(ValueId input, const slang::ast::Expression& originExpr,
                             std::string_view hint);
-    grh::Value* resizeValue(grh::Value& input, const slang::ast::Type& targetType,
+    ValueId resizeValue(ValueId input, const slang::ast::Type& targetType,
                             const TypeInfo& targetInfo, const slang::ast::Expression& originExpr,
                             std::string_view hint);
 
     const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
-    grh::Value* resolveMemoValue(const SignalMemoEntry& entry);
-    grh::Value* resolveGraphValue(const slang::ast::ValueSymbol& symbol);
+    ValueId resolveMemoValue(const SignalMemoEntry& entry);
+    ValueId resolveGraphValue(const slang::ast::ValueSymbol& symbol);
     TypeInfo deriveTypeInfo(const slang::ast::Type& type) const;
     void reportUnsupported(std::string_view what, const slang::ast::Expression& expr);
     slang::ast::EvalContext& ensureEvalContext();
@@ -302,18 +306,18 @@ protected:
     std::optional<slang::SVInt> evaluateConstantSvInt(const slang::ast::Expression& expr);
 
 private:
-    grh::Value* convertExpression(const slang::ast::Expression& expr);
-    grh::Value* convertNamedValue(const slang::ast::Expression& expr);
-    grh::Value* convertLiteral(const slang::ast::Expression& expr);
-    grh::Value* convertUnary(const slang::ast::UnaryExpression& expr);
-    grh::Value* convertBinary(const slang::ast::BinaryExpression& expr);
-    grh::Value* convertConditional(const slang::ast::ConditionalExpression& expr);
-    grh::Value* convertConcatenation(const slang::ast::ConcatenationExpression& expr);
-    grh::Value* convertReplication(const slang::ast::ReplicationExpression& expr);
-    grh::Value* convertConversion(const slang::ast::ConversionExpression& expr);
-    grh::Value* convertCall(const slang::ast::CallExpression& expr);
-    grh::Value* reduceToLogicValue(grh::Value& input, const slang::ast::Expression& originExpr);
-    grh::Value* materializeParameterValue(const slang::ast::NamedValueExpression& expr);
+    ValueId convertExpression(const slang::ast::Expression& expr);
+    ValueId convertNamedValue(const slang::ast::Expression& expr);
+    ValueId convertLiteral(const slang::ast::Expression& expr);
+    ValueId convertUnary(const slang::ast::UnaryExpression& expr);
+    ValueId convertBinary(const slang::ast::BinaryExpression& expr);
+    ValueId convertConditional(const slang::ast::ConditionalExpression& expr);
+    ValueId convertConcatenation(const slang::ast::ConcatenationExpression& expr);
+    ValueId convertReplication(const slang::ast::ReplicationExpression& expr);
+    ValueId convertConversion(const slang::ast::ConversionExpression& expr);
+    ValueId convertCall(const slang::ast::CallExpression& expr);
+    ValueId reduceToLogicValue(ValueId input, const slang::ast::Expression& originExpr);
+    ValueId materializeParameterValue(const slang::ast::NamedValueExpression& expr);
     std::string formatConstantLiteral(const slang::SVInt& value,
                                       const slang::ast::Type& type) const;
 
@@ -325,7 +329,7 @@ private:
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
-    std::unordered_map<const slang::ast::Expression*, grh::Value*> cache_;
+    std::unordered_map<const slang::ast::Expression*, ValueId> cache_;
     bool suppressCache_ = false;
     std::size_t valueCounter_ = 0;
     std::size_t operationCounter_ = 0;
@@ -340,9 +344,9 @@ public:
     explicit CombRHSConverter(Context context);
 
 protected:
-    grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
-    grh::Value* convertRangeSelect(const slang::ast::RangeSelectExpression& expr) override;
-    grh::Value* convertMemberAccess(const slang::ast::MemberAccessExpression& expr) override;
+    ValueId convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
+    ValueId convertRangeSelect(const slang::ast::RangeSelectExpression& expr) override;
+    ValueId convertMemberAccess(const slang::ast::MemberAccessExpression& expr) override;
     const SignalMemoEntry* findMemoEntryFromExpression(const slang::ast::Expression& expr) const;
 
 private:
@@ -355,21 +359,21 @@ private:
     deriveStructFieldSlice(const slang::ast::MemberAccessExpression& expr) const;
     std::optional<int64_t> translateStaticIndex(const slang::ast::Expression& valueExpr,
                                                 int64_t rawIndex) const;
-    grh::Value* translateDynamicIndex(const slang::ast::Expression& valueExpr,
-                                      grh::Value& rawIndex,
+    ValueId translateDynamicIndex(const slang::ast::Expression& valueExpr,
+                                      ValueId rawIndex,
                                       const slang::ast::Expression& originExpr,
                                       std::string_view hint);
-    grh::Value* buildStaticSlice(grh::Value& input, int64_t sliceStart, int64_t sliceEnd,
+    ValueId buildStaticSlice(ValueId input, int64_t sliceStart, int64_t sliceEnd,
                                  const slang::ast::Expression& originExpr,
                                  std::string_view hint);
-    grh::Value* buildDynamicSlice(grh::Value& input, grh::Value& offset, int64_t sliceWidth,
+    ValueId buildDynamicSlice(ValueId input, ValueId offset, int64_t sliceWidth,
                                   const slang::ast::Expression& originExpr,
                                   std::string_view hint);
-    grh::Value* buildArraySlice(grh::Value& input, grh::Value& index, int64_t sliceWidth,
+    ValueId buildArraySlice(ValueId input, ValueId index, int64_t sliceWidth,
                                 const slang::ast::Expression& originExpr);
-    grh::Value* buildMemoryRead(const SignalMemoEntry& entry,
+    ValueId buildMemoryRead(const SignalMemoEntry& entry,
                                 const slang::ast::ElementSelectExpression& expr);
-    grh::Value* createIntConstant(int64_t value, const slang::ast::Type& type,
+    ValueId createIntConstant(int64_t value, const slang::ast::Type& type,
                                   std::string_view hint);
 };
 
@@ -396,9 +400,9 @@ public:
     virtual ~LHSConverter() = default;
 
 protected:
-    bool lower(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue,
+    bool lower(const slang::ast::AssignmentExpression& assignment, ValueId rhsValue,
                std::vector<WriteResult>& outResults);
-    bool lowerExpression(const slang::ast::Expression& expr, grh::Value& rhsValue,
+    bool lowerExpression(const slang::ast::Expression& expr, ValueId rhsValue,
                          std::vector<WriteResult>& outResults);
     virtual bool allowReplication() const { return false; }
     // Hook to feed contextual constants (e.g., foreach loop indices) into LHS eval.
@@ -416,10 +420,10 @@ private:
         int64_t lsb = 0;
     };
 
-    bool processLhs(const slang::ast::Expression& expr, grh::Value& rhsValue);
+    bool processLhs(const slang::ast::Expression& expr, ValueId rhsValue);
     bool handleConcatenation(const slang::ast::ConcatenationExpression& concat,
-                             grh::Value& rhsValue);
-    bool handleLeaf(const slang::ast::Expression& expr, grh::Value& rhsValue);
+                             ValueId rhsValue);
+    bool handleLeaf(const slang::ast::Expression& expr, ValueId rhsValue);
     const SignalMemoEntry* resolveMemoEntry(const slang::ast::Expression& expr) const;
     std::optional<BitRange> resolveBitRange(const SignalMemoEntry& entry,
                                             const slang::ast::Expression& expr,
@@ -432,7 +436,7 @@ private:
 private:
     std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
                                               std::string_view path) const;
-    grh::Value* createSliceValue(grh::Value& source, int64_t lsb, int64_t msb,
+    ValueId createSliceValue(ValueId source, int64_t lsb, int64_t msb,
                                  const slang::ast::Expression& originExpr);
     void report(std::string message);
     static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
@@ -457,7 +461,7 @@ class ContinuousAssignLHSConverter : public LHSConverter {
 public:
     ContinuousAssignLHSConverter(Context context, WriteBackMemo& memo);
 
-    bool convert(const slang::ast::AssignmentExpression& assignment, grh::Value& rhsValue);
+    bool convert(const slang::ast::AssignmentExpression& assignment, ValueId rhsValue);
 
 private:
     WriteBackMemo& memo_;
@@ -471,8 +475,8 @@ public:
     AlwaysBlockLHSConverter(Context context, AlwaysConverter& owner);
 
     virtual bool convert(const slang::ast::AssignmentExpression& assignment,
-                         grh::Value& rhsValue);
-    virtual bool convertExpression(const slang::ast::Expression& expr, grh::Value& rhsValue);
+                         ValueId rhsValue);
+    virtual bool convertExpression(const slang::ast::Expression& expr, ValueId rhsValue);
 
 protected:
     void seedEvalContextForLHS(slang::ast::EvalContext& ctx) override;
@@ -491,12 +495,12 @@ public:
     using AlwaysBlockLHSConverter::AlwaysBlockLHSConverter;
 
     bool convert(const slang::ast::AssignmentExpression& assignment,
-                 grh::Value& rhsValue) override;
-    bool convertExpression(const slang::ast::Expression& expr, grh::Value& rhsValue) override;
+                 ValueId rhsValue) override;
+    bool convertExpression(const slang::ast::Expression& expr, ValueId rhsValue) override;
 
 private:
     bool handleDynamicElementAssign(const slang::ast::ElementSelectExpression& element,
-                                    grh::Value& rhsValue);
+                                    ValueId rhsValue);
 };
 
 /// RHS converter used by procedural always blocks.
@@ -505,9 +509,9 @@ public:
     AlwaysBlockRHSConverter(Context context, AlwaysConverter& owner);
 
 protected:
-    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+    ValueId handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
-    grh::Value* handleCustomNamedValue(const slang::ast::NamedValueExpression& expr) override;
+    ValueId handleCustomNamedValue(const slang::ast::NamedValueExpression& expr) override;
 
     AlwaysConverter& owner_;
 };
@@ -518,7 +522,7 @@ public:
     using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
 
 protected:
-    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+    ValueId handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
 };
 
@@ -528,9 +532,9 @@ public:
     using AlwaysBlockRHSConverter::AlwaysBlockRHSConverter;
 
 protected:
-    grh::Value* handleMemoEntry(const slang::ast::NamedValueExpression& expr,
+    ValueId handleMemoEntry(const slang::ast::NamedValueExpression& expr,
                                 const SignalMemoEntry& entry) override;
-    grh::Value* convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
+    ValueId convertElementSelect(const slang::ast::ElementSelectExpression& expr) override;
 };
 
 /// Shared control logic for procedural always blocks.
@@ -570,8 +574,8 @@ protected:
     struct ShadowState {
         std::vector<WriteBackMemo::Slice> slices;
         std::vector<WriteBackMemo::Slice> nbaSlices;
-        grh::Value* composedBlocking = nullptr;
-        grh::Value* composedAll = nullptr;
+        ValueId composedBlocking = ValueId::invalid();
+        ValueId composedAll = ValueId::invalid();
         bool dirtyBlocking = false;
         bool dirtyAll = false;
     };
@@ -582,7 +586,7 @@ protected:
     };
 
     struct CaseBranch {
-        grh::Value* match = nullptr;
+        ValueId match = ValueId::invalid();
         ShadowFrame frame;
     };
 
@@ -641,12 +645,12 @@ protected:
     const SignalMemoEntry* findMemoEntryForSymbol(const slang::ast::ValueSymbol& symbol) const;
     void insertShadowSlice(ShadowState& state, const WriteBackMemo::Slice& slice,
                            bool nonBlocking);
-    grh::Value* lookupShadowValue(const SignalMemoEntry& entry);
-    grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
-    grh::Value* rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state,
+    ValueId lookupShadowValue(const SignalMemoEntry& entry);
+    ValueId rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state);
+    ValueId rebuildShadowValue(const SignalMemoEntry& entry, ShadowState& state,
                                    bool includeNonBlocking);
-    grh::Value* createZeroValue(int64_t width);
-    grh::Value* createOneValue(int64_t width);
+    ValueId createZeroValue(int64_t width);
+    ValueId createOneValue(int64_t width);
     std::string makeShadowOpName(const SignalMemoEntry& entry, std::string_view suffix);
     std::string makeShadowValueName(const SignalMemoEntry& entry, std::string_view suffix);
     ShadowFrame& currentFrame();
@@ -654,23 +658,23 @@ protected:
     ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt);
     ShadowFrame runWithShadowFrame(const ShadowFrame& seed, const slang::ast::Statement& stmt,
                                    bool isStaticContext);
-    std::optional<ShadowFrame> mergeShadowFrames(grh::Value& condition, ShadowFrame&& trueFrame,
+    std::optional<ShadowFrame> mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
                                                  ShadowFrame&& falseFrame,
                                                  const slang::ast::Statement& originStmt,
                                                  std::string_view label);
-    WriteBackMemo::Slice buildFullSlice(const SignalMemoEntry& entry, grh::Value& value);
-    grh::Value* sliceExistingValue(const WriteBackMemo::Slice& existing, int64_t segMsb,
+    WriteBackMemo::Slice buildFullSlice(const SignalMemoEntry& entry, ValueId value);
+    ValueId sliceExistingValue(const WriteBackMemo::Slice& existing, int64_t segMsb,
                                    int64_t segLsb);
-    grh::Value* createMuxForEntry(const SignalMemoEntry& entry, grh::Value& condition,
-                                  grh::Value& onTrue, grh::Value& onFalse, std::string_view label);
-    grh::Value* buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
-                               grh::Value& controlValue,
+    ValueId createMuxForEntry(const SignalMemoEntry& entry, ValueId condition,
+                                  ValueId onTrue, ValueId onFalse, std::string_view label);
+    ValueId buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
+                               ValueId controlValue,
                                slang::ast::CaseStatementCondition condition);
-    grh::Value* buildEquality(grh::Value& lhs, grh::Value& rhs, std::string_view hint);
-    grh::Value* buildLogicOr(grh::Value& lhs, grh::Value& rhs);
-    grh::Value* buildLogicAnd(grh::Value& lhs, grh::Value& rhs);
-    grh::Value* buildLogicNot(grh::Value& v);
-    grh::Value* coerceToCondition(grh::Value& v);
+    ValueId buildEquality(ValueId lhs, ValueId rhs, std::string_view hint);
+    ValueId buildLogicOr(ValueId lhs, ValueId rhs);
+    ValueId buildLogicAnd(ValueId lhs, ValueId rhs);
+    ValueId buildLogicNot(ValueId v);
+    ValueId coerceToCondition(ValueId v);
     std::string makeControlOpName(std::string_view suffix);
     std::string makeControlValueName(std::string_view suffix);
     bool isCombinationalFullCase(const slang::ast::CaseStatement& stmt);
@@ -680,10 +684,10 @@ protected:
                                                     bool allowUnknown);
     slang::ast::EvalContext& ensureEvalContext();
     slang::ast::EvalContext& ensureLoopEvalContext();
-    grh::Value* buildWildcardEquality(grh::Value& controlValue, grh::Value& rhsValue,
+    ValueId buildWildcardEquality(ValueId controlValue, ValueId rhsValue,
                                       const slang::ast::Expression& rhsExpr,
                                       slang::ast::CaseStatementCondition condition);
-    grh::Value* createLiteralValue(const slang::SVInt& literal, bool isSigned,
+    ValueId createLiteralValue(const slang::SVInt& literal, bool isSigned,
                                    std::string_view hint);
     std::optional<bool> evaluateStaticCondition(const slang::ast::Expression& expr);
     bool currentContextStatic() const;
@@ -703,7 +707,7 @@ protected:
                              std::size_t& iterationCount);
     void pushLoopScope(std::vector<const slang::ast::ValueSymbol*> symbols);
     void popLoopScope();
-    grh::Value* lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
+    ValueId lookupLoopValue(const slang::ast::ValueSymbol& symbol) const;
     bool handleSystemCall(const slang::ast::CallExpression& call,
                           const slang::ast::ExpressionStatement& stmt);
     virtual bool handleDisplaySystemTask(const slang::ast::CallExpression& call,
@@ -716,6 +720,7 @@ protected:
                                        std::string_view message,
                                        std::string_view severity);
     grh::Graph& graph() noexcept { return graph_; }
+    const grh::Graph& graph() const noexcept { return graph_; }
     const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     WriteBackMemo& memo() noexcept { return memo_; }
@@ -733,8 +738,8 @@ protected:
     std::unique_ptr<AlwaysBlockLHSConverter> lhsConverter_;
     std::vector<ShadowFrame> shadowStack_;
     bool currentAssignmentIsNonBlocking_ = false;
-    std::unordered_map<int64_t, grh::Value*> zeroCache_;
-    std::unordered_map<int64_t, grh::Value*> oneCache_;
+    std::unordered_map<int64_t, ValueId> zeroCache_;
+    std::unordered_map<int64_t, ValueId> oneCache_;
     std::size_t shadowNameCounter_ = 0;
     std::size_t controlNameCounter_ = 0;
     std::size_t controlInstanceId_ = 0;
@@ -744,13 +749,13 @@ protected:
     std::vector<int> loopContextStack_;
     LoopControl pendingLoopControl_ = LoopControl::None;
     std::size_t pendingLoopDepth_ = 0;
-    std::vector<grh::Value*> guardStack_;
-    grh::Value* currentGuardValue() const;
-    void pushGuard(grh::Value* guard);
+    std::vector<ValueId> guardStack_;
+    ValueId currentGuardValue() const;
+    void pushGuard(ValueId guard);
     void popGuard();
     struct LoopValueInfo {
         slang::SVInt literal;
-        grh::Value* value = nullptr;
+        ValueId value = ValueId::invalid();
     };
     std::unordered_map<const slang::ast::ValueSymbol*, LoopValueInfo> loopValueMap_;
     std::vector<std::vector<const slang::ast::ValueSymbol*>> loopScopeStack_;
@@ -822,91 +827,94 @@ private:
 
     struct ResetContext;
     void planSequentialFinalize();
-    bool finalizeRegisterWrites(grh::Value& clockValue);
-    bool finalizeMemoryWrites(grh::Value& clockValue);
-    grh::Value* ensureClockValue();
-    grh::Value* ensureMemoryEnableValue();
-    grh::Value* buildMemorySyncRead(const SignalMemoEntry& entry, grh::Value& addrValue,
+    bool finalizeRegisterWrites(ValueId clockValue);
+    bool finalizeMemoryWrites(ValueId clockValue);
+    ValueId ensureClockValue();
+    ValueId ensureMemoryEnableValue();
+    ValueId buildMemorySyncRead(const SignalMemoEntry& entry, ValueId addrValue,
                                     const slang::ast::Expression& originExpr,
-                                    grh::Value* enableOverride = nullptr);
+                                    ValueId enableOverride = ValueId::invalid());
     int64_t memoryRowWidth(const SignalMemoEntry& entry) const;
     std::optional<int64_t> memoryRowCount(const SignalMemoEntry& entry) const;
     int64_t memoryAddrWidth(const SignalMemoEntry& entry) const;
-    grh::Value* normalizeMemoryAddress(const SignalMemoEntry& entry, grh::Value& addrValue,
+    ValueId normalizeMemoryAddress(const SignalMemoEntry& entry, ValueId addrValue,
                                        const slang::ast::Expression* originExpr);
-    bool applyClockPolarity(grh::Operation& op, std::string_view context);
+    bool applyClockPolarity(OperationId op, std::string_view context);
     std::optional<ResetContext> deriveBlockResetContext();
     void recordMemoryWordWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
-                               grh::Value& addrValue, grh::Value& dataValue, grh::Value* enable);
+                               ValueId addrValue, ValueId dataValue, ValueId enable);
     void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
-                              grh::Value& addrValue, grh::Value& bitIndex, grh::Value& bitValue,
-                              grh::Value* enable);
-    grh::Value* buildShiftedBitValue(grh::Value& sourceBit, grh::Value& bitIndex,
+                              ValueId addrValue, ValueId bitIndex, ValueId bitValue,
+                              ValueId enable);
+    ValueId buildShiftedBitValue(ValueId sourceBit, ValueId bitIndex,
                                      int64_t targetWidth, std::string_view label);
-    grh::Value* buildShiftedMask(grh::Value& bitIndex, int64_t targetWidth,
+    ValueId buildShiftedMask(ValueId bitIndex, int64_t targetWidth,
                                  std::string_view label);
-    grh::Value* createConcatWithZeroPadding(grh::Value& value, int64_t padWidth,
+    ValueId createConcatWithZeroPadding(ValueId value, int64_t padWidth,
                                             std::string_view label);
     std::string makeMemoryHelperOpName(std::string_view suffix);
     std::string makeMemoryHelperValueName(std::string_view suffix);
-    std::optional<grh::Value*> deriveClockValue();
-    grh::Value* convertTimingExpr(const slang::ast::Expression& expr);
-    grh::Value* buildDataOperand(const WriteBackMemo::Entry& entry);
-    grh::Value* createHoldSlice(const WriteBackMemo::Entry& entry, int64_t msb, int64_t lsb);
-    bool attachClockOperand(grh::Operation& stateOp, grh::Value& clkValue,
+    std::optional<ValueId> deriveClockValue();
+    ValueId convertTimingExpr(const slang::ast::Expression& expr);
+    ValueId buildDataOperand(const WriteBackMemo::Entry& entry);
+    ValueId createHoldSlice(const WriteBackMemo::Entry& entry, ValueId source,
+                            int64_t msb, int64_t lsb);
+    bool attachClockOperand(OperationId stateOp, ValueId clkValue,
                             const WriteBackMemo::Entry& entry);
-    bool attachDataOperand(grh::Operation& stateOp, grh::Value& dataValue,
+    bool attachDataOperand(OperationId stateOp, ValueId dataValue,
                            const WriteBackMemo::Entry& entry);
     void reportFinalizeIssue(const WriteBackMemo::Entry& entry, std::string_view message);
     std::string makeFinalizeOpName(const SignalMemoEntry& entry, std::string_view suffix);
     std::string makeFinalizeValueName(const SignalMemoEntry& entry, std::string_view suffix);
     struct ResetContext {
         enum class Kind { None, Sync, Async } kind = Kind::None;
-        grh::Value* signal = nullptr;
+        ValueId signal = ValueId::invalid();
         bool activeHigh = true;
     };
     struct ResetExtraction {
-        grh::Value* resetValue = nullptr;
-        grh::Value* dataWithoutReset = nullptr;
+        ValueId resetValue = ValueId::invalid();
+        ValueId dataWithoutReset = ValueId::invalid();
     };
     std::optional<ResetContext> buildResetContext(const SignalMemoEntry& entry);
     std::optional<ResetExtraction>
-    extractResetBranches(grh::Value& dataValue, grh::Value& resetSignal, bool activeHigh,
+    extractResetBranches(ValueId dataValue, ValueId resetSignal, bool activeHigh,
                          const WriteBackMemo::Entry& entry);
-    std::optional<bool> matchResetCondition(grh::Value& condition, grh::Value& resetSignal);
-    bool valueDependsOnSignal(grh::Value& root, grh::Value& needle) const;
+    std::optional<ResetExtraction>
+    extractAsyncResetAssignment(const SignalMemoEntry& entry, const ResetContext& context);
+    std::optional<bool> matchResetCondition(ValueId condition, ValueId resetSignal);
+    bool valueDependsOnSignal(ValueId root, ValueId needle) const;
     void recordAssignmentKind(bool isNonBlocking) override;
-    bool attachResetOperands(grh::Operation& stateOp, grh::Value& rstSignal,
-                             grh::Value& resetValue, const WriteBackMemo::Entry& entry);
-    grh::Value* resolveAsyncResetSignal(const slang::ast::Expression& expr);
-    grh::Value* resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol);
+    bool attachResetOperands(OperationId stateOp, ValueId rstSignal,
+                             ValueId resetValue, const WriteBackMemo::Entry& entry);
+    ValueId resolveAsyncResetSignal(const slang::ast::Expression& expr);
+    ValueId resolveSyncResetSignal(const slang::ast::ValueSymbol& symbol);
     bool useSeqShadowValues() const;
 
     struct MemoryWriteIntent {
         const SignalMemoEntry* entry = nullptr;
         const slang::ast::Expression* originExpr = nullptr;
-        grh::Value* addr = nullptr;
-        grh::Value* data = nullptr;
-        grh::Value* enable = nullptr;
+        ValueId addr = ValueId::invalid();
+        ValueId data = ValueId::invalid();
+        ValueId enable = ValueId::invalid();
     };
 
     struct MemoryBitWriteIntent {
         const SignalMemoEntry* entry = nullptr;
         const slang::ast::Expression* originExpr = nullptr;
-        grh::Value* addr = nullptr;
-        grh::Value* bitIndex = nullptr;
-        grh::Value* bitValue = nullptr;
-        grh::Value* enable = nullptr;
+        ValueId addr = ValueId::invalid();
+        ValueId bitIndex = ValueId::invalid();
+        ValueId bitValue = ValueId::invalid();
+        ValueId enable = ValueId::invalid();
     };
 
-    std::unordered_map<const slang::ast::Expression*, grh::Value*> timingValueCache_;
-    std::unordered_map<const slang::ast::ValueSymbol*, grh::Value*> syncResetCache_;
+    std::unordered_map<const slang::ast::Expression*, ValueId> timingValueCache_;
+    std::unordered_map<const slang::ast::ValueSymbol*, ValueId> syncResetCache_;
     std::size_t finalizeNameCounter_ = 0;
     std::vector<MemoryWriteIntent> memoryWrites_;
     std::vector<MemoryBitWriteIntent> memoryBitWrites_;
-    grh::Value* cachedClockValue_ = nullptr;
+    ValueId cachedClockValue_ = ValueId::invalid();
     bool clockDeriveAttempted_ = false;
-    grh::Value* memoryEnableOne_ = nullptr;
+    ValueId memoryEnableOne_ = ValueId::invalid();
     std::optional<std::string> clockPolarityAttr_;
     bool blockResetDerived_ = false;
     ResetContext blockResetContext_{};
@@ -964,13 +972,13 @@ private:
                                  grh::Graph& parentGraph, grh::Graph& targetGraph);
     void createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
                                  grh::Graph& parentGraph, const BlackboxMemoEntry& memo);
-    grh::Value* ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);
-    grh::Value* resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
+    ValueId ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);
+    ValueId resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
                                        const slang::ast::Symbol* origin);
     std::string makeUniqueOperationName(grh::Graph& graph, std::string baseName);
     std::string makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
                                            std::string_view fallback, grh::Graph& graph);
-    void registerValueForSymbol(const slang::ast::Symbol& symbol, grh::Value& value);
+    void registerValueForSymbol(const slang::ast::Symbol& symbol, ValueId value);
     void collectSignalMemos(const slang::ast::InstanceBodySymbol& body);
     void collectDpiImports(const slang::ast::InstanceBodySymbol& body);
     void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
@@ -990,7 +998,7 @@ private:
     const slang::SourceManager* sourceManager_ = nullptr;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, grh::Graph*> graphByBody_;
     std::unordered_set<const slang::ast::InstanceBodySymbol*> processedBodies_;
-    std::unordered_map<const slang::ast::Symbol*, grh::Value*> valueCache_;
+    std::unordered_map<const slang::ast::Symbol*, std::vector<ValueId>> valueCache_;
     std::unordered_map<std::string, std::size_t> graphNameUsage_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<SignalMemoEntry>>
         netMemo_;

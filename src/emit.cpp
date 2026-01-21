@@ -207,7 +207,7 @@ namespace wolf_sv::emit
             return oss.str();
         }
 
-        void writeUsersInline(std::string &out, std::span<const grh::ValueUser> users, JsonPrintMode mode)
+        void writeUsersInline(std::string &out, const grh::Graph &graph, std::span<const grh::ir::ValueUser> users, JsonPrintMode mode)
         {
             const char *comma = commaToken(mode);
             out.push_back('[');
@@ -221,7 +221,16 @@ namespace wolf_sv::emit
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
                                       prop("op", [&]
-                                           { appendQuotedString(out, user.operationSymbol); });
+                                           {
+                                               if (user.operation.valid())
+                                               {
+                                                   appendQuotedString(out, graph.getOperation(user.operation).symbolText());
+                                               }
+                                               else
+                                               {
+                                                   appendQuotedString(out, "");
+                                               }
+                                           });
                                       prop("idx", [&]
                                            { out.append(std::to_string(static_cast<int64_t>(user.operandIndex))); });
                                   });
@@ -230,18 +239,18 @@ namespace wolf_sv::emit
             out.push_back(']');
         }
 
-        void writeAttrsInline(std::string &out, const std::map<std::string, grh::AttributeValue> &attrs, JsonPrintMode mode)
+        void writeAttrsInline(std::string &out, const grh::Graph &graph, std::span<const grh::ir::AttrKV> attrs, JsonPrintMode mode)
         {
             out.push_back('{');
             bool firstAttr = true;
             const char *comma = commaToken(mode);
-            for (const auto &[key, value] : attrs)
+            for (const auto &attr : attrs)
             {
                 if (!firstAttr)
                 {
                     out.append(comma);
                 }
-                appendQuotedString(out, key);
+                appendQuotedString(out, graph.symbolText(attr.key));
                 out.append(colonToken(mode));
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
@@ -355,19 +364,19 @@ namespace wolf_sv::emit
                                                            out.push_back(']');
                                                        });
                                               }},
-                                          value);
+                                          attr.value);
                                   });
                 firstAttr = false;
             }
             out.push_back('}');
         }
 
-        void writeValueInline(std::string &out, const grh::Value &value, JsonPrintMode mode)
+        void writeValueInline(std::string &out, const grh::Graph &graph, const grh::Value &value, JsonPrintMode mode)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, value.symbol()); });
+                                       { appendQuotedString(out, value.symbolText()); });
                                   prop("w", [&]
                                        { out.append(std::to_string(value.width())); });
                                   prop("sgn", [&]
@@ -379,10 +388,10 @@ namespace wolf_sv::emit
                                   if (value.definingOp())
                                   {
                                       prop("def", [&]
-                                           { appendQuotedString(out, value.definingOp()->symbol()); });
+                                           { appendQuotedString(out, graph.getOperation(value.definingOp()).symbolText()); });
                                   }
                                   prop("users", [&]
-                                       { writeUsersInline(out, value.users(), mode); });
+                                       { writeUsersInline(out, graph, value.users(), mode); });
                                   if (value.srcLoc())
                                   {
                                       prop("loc", [&]
@@ -402,12 +411,12 @@ namespace wolf_sv::emit
                               });
         }
 
-        void writeOperationInline(std::string &out, const grh::Operation &op, JsonPrintMode mode)
+        void writeOperationInline(std::string &out, const grh::Graph &graph, const grh::Operation &op, JsonPrintMode mode)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, op.symbol()); });
+                                       { appendQuotedString(out, op.symbolText()); });
                                   prop("kind", [&]
                                        { appendQuotedString(out, grh::toString(op.kind())); });
                                   prop("in", [&]
@@ -415,14 +424,13 @@ namespace wolf_sv::emit
                                            out.push_back('[');
                                            bool first = true;
                                            const char *comma = commaToken(mode);
-                                           for (const grh::Value *operandPtr : op.operands())
+                                           for (const auto operandId : op.operands())
                                            {
-                                               const grh::Value &operand = *operandPtr;
                                                if (!first)
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, operand.symbol());
+                                               appendQuotedString(out, graph.getValue(operandId).symbolText());
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -432,22 +440,21 @@ namespace wolf_sv::emit
                                            out.push_back('[');
                                            bool first = true;
                                            const char *comma = commaToken(mode);
-                                           for (const grh::Value *resultPtr : op.results())
+                                           for (const auto resultId : op.results())
                                            {
-                                               const grh::Value &result = *resultPtr;
                                                if (!first)
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, result.symbol());
+                                               appendQuotedString(out, graph.getValue(resultId).symbolText());
                                                first = false;
                                            }
                                            out.push_back(']');
                                        });
-                                  if (!op.attributes().empty())
+                                  if (!op.attrs().empty())
                                   {
                                       prop("attrs", [&]
-                                           { writeAttrsInline(out, op.attributes(), mode); });
+                                           { writeAttrsInline(out, graph, op.attrs(), mode); });
                                   }
                                   if (op.srcLoc())
                                   {
@@ -481,21 +488,25 @@ namespace wolf_sv::emit
         }
 
         void writePortsPrettyCompact(std::string &out,
-                                     const std::map<std::string, grh::ValueId> &ports,
+                                     const grh::Graph &graph,
+                                     std::span<const grh::ir::Port> ports,
                                      JsonPrintMode mode,
                                      int indent)
         {
             (void)mode;
             out.push_back('[');
             bool first = true;
-            for (const auto &[name, valueSymbol] : ports)
+            for (const auto &port : ports)
             {
                 if (!first)
                 {
                     out.push_back(',');
                 }
                 appendNewlineAndIndent(out, indent);
-                writePortInline(out, name, valueSymbol, mode);
+                writePortInline(out,
+                                graph.symbolText(port.name),
+                                graph.getValue(port.value).symbolText(),
+                                mode);
                 first = false;
             }
             if (!ports.empty())
@@ -519,9 +530,9 @@ namespace wolf_sv::emit
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "vals");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.valueOrder(),
-                             [&](const grh::ValueId &valueSymbol)
-                             { writeValueInline(out, graph.getValue(valueSymbol), JsonPrintMode::PrettyCompact); });
+            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.values(),
+                             [&](const grh::ir::ValueId valueId)
+                             { writeValueInline(out, graph, graph.getValue(valueId), JsonPrintMode::PrettyCompact); });
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
@@ -533,13 +544,13 @@ namespace wolf_sv::emit
             appendNewlineAndIndent(out, portsIndent);
             appendQuotedString(out, "in");
             out.append(": ");
-            writePortsPrettyCompact(out, graph.inputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            writePortsPrettyCompact(out, graph, graph.inputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
             out.push_back(',');
 
             appendNewlineAndIndent(out, portsIndent);
             appendQuotedString(out, "out");
             out.append(": ");
-            writePortsPrettyCompact(out, graph.outputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            writePortsPrettyCompact(out, graph, graph.outputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
 
             appendNewlineAndIndent(out, indent);
             out.push_back('}');
@@ -548,9 +559,9 @@ namespace wolf_sv::emit
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "ops");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.operationOrder(),
-                             [&](const grh::OperationId &opSymbol)
-                             { writeOperationInline(out, graph.getOperation(opSymbol), JsonPrintMode::PrettyCompact); });
+            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.operations(),
+                             [&](const grh::ir::OperationId opId)
+                             { writeOperationInline(out, graph, graph.getOperation(opId), JsonPrintMode::PrettyCompact); });
 
             appendNewlineAndIndent(out, baseIndent);
             out.push_back('}');
@@ -1611,11 +1622,11 @@ namespace wolf_sv::emit
 
         struct SeqKey
         {
-            const grh::Value *clk = nullptr;
+            grh::ir::ValueId clk = grh::ir::ValueId::invalid();
             std::string clkEdge;
-            const grh::Value *asyncRst = nullptr;
+            grh::ir::ValueId asyncRst = grh::ir::ValueId::invalid();
             std::string asyncEdge;
-            const grh::Value *syncRst = nullptr;
+            grh::ir::ValueId syncRst = grh::ir::ValueId::invalid();
             std::string syncPolarity;
         };
 
@@ -1623,8 +1634,14 @@ namespace wolf_sv::emit
         {
             bool operator()(const SeqKey &lhs, const SeqKey &rhs) const
             {
-                auto lhsTuple = std::make_tuple(lhs.clk, lhs.clkEdge, lhs.asyncRst, lhs.asyncEdge, lhs.syncRst, lhs.syncPolarity);
-                auto rhsTuple = std::make_tuple(rhs.clk, rhs.clkEdge, rhs.asyncRst, rhs.asyncEdge, rhs.syncRst, rhs.syncPolarity);
+                auto idKey = [](const grh::ir::ValueId &id)
+                {
+                    return std::make_tuple(id.graph.index, id.graph.generation, id.index, id.generation);
+                };
+                auto lhsTuple = std::make_tuple(idKey(lhs.clk), lhs.clkEdge, idKey(lhs.asyncRst), lhs.asyncEdge,
+                                                idKey(lhs.syncRst), lhs.syncPolarity);
+                auto rhsTuple = std::make_tuple(idKey(rhs.clk), rhs.clkEdge, idKey(rhs.asyncRst), rhs.asyncEdge,
+                                                idKey(rhs.syncRst), rhs.syncPolarity);
                 return lhsTuple < rhsTuple;
             }
         };
@@ -1633,7 +1650,7 @@ namespace wolf_sv::emit
         {
             SeqKey key{};
             std::vector<std::string> stmts;
-            const grh::Operation *op = nullptr;
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
 
         void appendIndented(std::ostringstream &out, int indent, const std::string &text)
@@ -1656,14 +1673,19 @@ namespace wolf_sv::emit
         }
 
         template <typename T>
-        std::optional<T> getAttribute(const grh::Operation &op, std::string_view key)
+        std::optional<T> getAttribute(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
         {
-            auto it = op.attributes().find(std::string(key));
-            if (it == op.attributes().end())
+            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
+            if (!keyId.valid())
             {
                 return std::nullopt;
             }
-            if (const auto *ptr = std::get_if<T>(&it->second))
+            auto attr = op.attr(keyId);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *ptr = std::get_if<T>(&*attr))
             {
                 return *ptr;
             }
@@ -1797,19 +1819,19 @@ namespace wolf_sv::emit
             return -1;
         }
 
-        std::string sensitivityList(const SeqKey &key)
+        std::string sensitivityList(const grh::Graph &graph, const SeqKey &key)
         {
-            if (key.clk == nullptr || key.clkEdge.empty())
+            if (!key.clk.valid() || key.clkEdge.empty())
             {
                 return {};
             }
-            std::string out = "@(" + key.clkEdge + " " + key.clk->symbol();
-            if (key.asyncRst && !key.asyncEdge.empty())
+            std::string out = "@(" + key.clkEdge + " " + std::string(graph.getValue(key.clk).symbolText());
+            if (key.asyncRst.valid() && !key.asyncEdge.empty())
             {
                 out.append(" or ");
                 out.append(key.asyncEdge);
                 out.push_back(' ');
-                out.append(key.asyncRst->symbol());
+                out.append(graph.getValue(key.asyncRst).symbolText());
             }
             out.push_back(')');
             return out;
@@ -1824,7 +1846,12 @@ namespace wolf_sv::emit
         (void)topGraphs;
 
         // Index DPI imports across the netlist for later resolution.
-        std::unordered_map<std::string, const grh::Operation *> dpicImports;
+        struct DpiImportRef
+        {
+            const grh::Graph *graph = nullptr;
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
+        };
+        std::unordered_map<std::string, DpiImportRef> dpicImports;
         for (const auto &graphSymbol : netlist.graphOrder())
         {
             auto graphIt = netlist.graphs().find(graphSymbol);
@@ -1833,12 +1860,12 @@ namespace wolf_sv::emit
                 continue;
             }
             const grh::Graph &graph = *graphIt->second;
-            for (const auto &opSymbol : graph.operationOrder())
+            for (const auto opId : graph.operations())
             {
-                const grh::Operation &op = graph.getOperation(opSymbol);
+                const grh::Operation op = graph.getOperation(opId);
                 if (op.kind() == grh::OperationKind::kDpicImport)
                 {
-                    dpicImports.emplace(op.symbol(), &op);
+                    dpicImports.emplace(std::string(op.symbolText()), DpiImportRef{&graph, opId});
                 }
             }
         }
@@ -1879,29 +1906,42 @@ namespace wolf_sv::emit
             const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
             const std::string &moduleName = moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : graph->symbol();
 
+            auto valueName = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                grh::Value value = graph->getValue(valueId);
+                return std::string(value.symbolText());
+            };
+            auto opName = [&](grh::ir::OperationId opId) -> std::string
+            {
+                grh::Operation op = graph->getOperation(opId);
+                return std::string(op.symbolText());
+            };
+
             // -------------------------
             // Ports
             // -------------------------
             std::map<std::string, PortDecl, std::less<>> portDecls;
-            for (const auto &[name, valueSymbol] : graph->inputPorts())
+            for (const auto &port : graph->inputPorts())
             {
-                const grh::Value *value = graph->findValue(valueSymbol);
-                if (!value)
+                if (!port.name.valid())
                 {
                     continue;
                 }
-                portDecls[name] = PortDecl{PortDir::Input, value->width(), value->isSigned(), false,
-                                           value->srcLoc()};
+                const std::string name = std::string(graph->symbolText(port.name));
+                grh::Value value = graph->getValue(port.value);
+                portDecls[name] = PortDecl{PortDir::Input, value.width(), value.isSigned(), false,
+                                           value.srcLoc()};
             }
-            for (const auto &[name, valueSymbol] : graph->outputPorts())
+            for (const auto &port : graph->outputPorts())
             {
-                const grh::Value *value = graph->findValue(valueSymbol);
-                if (!value)
+                if (!port.name.valid())
                 {
                     continue;
                 }
-                portDecls[name] = PortDecl{PortDir::Output, value->width(), value->isSigned(), false,
-                                           value->srcLoc()};
+                const std::string name = std::string(graph->symbolText(port.name));
+                grh::Value value = graph->getValue(port.value);
+                portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
+                                           value.srcLoc()};
             }
 
             // Book-keeping for declarations.
@@ -1914,12 +1954,12 @@ namespace wolf_sv::emit
             // Storage for various sections.
             std::map<std::string, NetDecl, std::less<>> regDecls;
             std::map<std::string, NetDecl, std::less<>> wireDecls;
-            std::vector<std::pair<std::string, const grh::Operation *>> memoryDecls;
-            std::vector<std::pair<std::string, const grh::Operation *>> instanceDecls;
-            std::vector<std::pair<std::string, const grh::Operation *>> dpiImportDecls;
-            std::vector<std::pair<std::string, const grh::Operation *>> assignStmts;
-            std::vector<std::pair<std::string, const grh::Operation *>> portBindingStmts;
-            std::vector<std::pair<std::string, const grh::Operation *>> latchBlocks;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> memoryDecls;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> instanceDecls;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> dpiImportDecls;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> assignStmts;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> portBindingStmts;
+            std::vector<std::pair<std::string, grh::ir::OperationId>> latchBlocks;
             std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
 
@@ -1939,9 +1979,10 @@ namespace wolf_sv::emit
                 declaredNames.insert(name);
             };
 
-            auto ensureWireDecl = [&](const grh::Value &value)
+            auto ensureWireDecl = [&](grh::ir::ValueId valueId)
             {
-                const std::string &name = value.symbol();
+                grh::Value value = graph->getValue(valueId);
+                const std::string name = std::string(value.symbolText());
                 if (declaredNames.find(name) != declaredNames.end())
                 {
                     auto it = wireDecls.find(name);
@@ -1955,25 +1996,26 @@ namespace wolf_sv::emit
                 declaredNames.insert(name);
             };
 
-            auto addAssign = [&](std::string stmt, const grh::Operation *sourceOp)
+            auto addAssign = [&](std::string stmt, grh::ir::OperationId sourceOp)
             {
                 assignStmts.emplace_back(std::move(stmt), sourceOp);
             };
 
             auto addSequentialStmt = [&](const SeqKey &key, std::string stmt,
-                                         const grh::Operation *sourceOp)
+                                         grh::ir::OperationId sourceOp)
             {
                 seqBlocks.push_back(SeqBlock{key, std::vector<std::string>{std::move(stmt)}, sourceOp});
             };
 
-            auto addLatchBlock = [&](std::string stmt, const grh::Operation *sourceOp)
+            auto addLatchBlock = [&](std::string stmt, grh::ir::OperationId sourceOp)
             {
                 latchBlocks.emplace_back(std::move(stmt), sourceOp);
             };
 
-            auto markPortAsRegIfNeeded = [&](const grh::Value &value)
+            auto markPortAsRegIfNeeded = [&](grh::ir::ValueId valueId)
             {
-                auto itPort = portDecls.find(value.symbol());
+                const std::string name = valueName(valueId);
+                auto itPort = portDecls.find(name);
                 if (itPort != portDecls.end() && itPort->second.dir == PortDir::Output)
                 {
                     itPort->second.isReg = true;
@@ -1982,23 +2024,23 @@ namespace wolf_sv::emit
 
             auto resolveMemorySymbol = [&](const grh::Operation &userOp) -> std::optional<std::string>
             {
-                auto attr = getAttribute<std::string>(userOp, "memSymbol");
+                auto attr = getAttribute<std::string>(*graph, userOp, "memSymbol");
                 if (attr)
                 {
                     return attr;
                 }
 
                 std::optional<std::string> candidate;
-                for (const auto &maybeSym : graph->operationOrder())
+                for (const auto maybeId : graph->operations())
                 {
-                    const auto &maybeOp = graph->getOperation(maybeSym);
+                    const grh::Operation maybeOp = graph->getOperation(maybeId);
                     if (maybeOp.kind() == grh::OperationKind::kMemory)
                     {
                         if (candidate)
                         {
                             return std::nullopt;
                         }
-                        candidate = maybeOp.symbol();
+                        candidate = std::string(maybeOp.symbolText());
                     }
                 }
                 return candidate;
@@ -2007,47 +2049,55 @@ namespace wolf_sv::emit
             // -------------------------
             // Port bindings (handle ports mapped to internal nets with different names)
             // -------------------------
-            auto bindInputPort = [&](const std::string &portName, const std::string &valueSymbol)
+            auto bindInputPort = [&](const std::string &portName, grh::ir::ValueId valueId)
             {
+                const std::string valueSymbol = valueName(valueId);
                 if (portName == valueSymbol)
                 {
                     return;
                 }
-                if (const grh::Value *val = graph->findValue(valueSymbol))
-                {
-                    ensureWireDecl(*val);
-                }
+                ensureWireDecl(valueId);
                 portBindingStmts.emplace_back(
-                    "assign " + valueSymbol + " = " + portName + ";", nullptr);
+                    "assign " + valueSymbol + " = " + portName + ";", grh::ir::OperationId::invalid());
             };
 
-            auto bindOutputPort = [&](const std::string &portName, const std::string &valueSymbol)
+            auto bindOutputPort = [&](const std::string &portName, grh::ir::ValueId valueId)
             {
+                const std::string valueSymbol = valueName(valueId);
                 if (portName == valueSymbol)
                 {
                     return;
                 }
                 portBindingStmts.emplace_back(
-                    "assign " + portName + " = " + valueSymbol + ";", nullptr);
+                    "assign " + portName + " = " + valueSymbol + ";", grh::ir::OperationId::invalid());
             };
 
-            for (const auto &[name, valueSymbol] : graph->inputPorts())
+            for (const auto &port : graph->inputPorts())
             {
-                bindInputPort(name, valueSymbol);
+                if (!port.name.valid())
+                {
+                    continue;
+                }
+                bindInputPort(std::string(graph->symbolText(port.name)), port.value);
             }
-            for (const auto &[name, valueSymbol] : graph->outputPorts())
+            for (const auto &port : graph->outputPorts())
             {
-                bindOutputPort(name, valueSymbol);
+                if (!port.name.valid())
+                {
+                    continue;
+                }
+                bindOutputPort(std::string(graph->symbolText(port.name)), port.value);
             }
 
             // -------------------------
             // Operation traversal
             // -------------------------
-            for (const auto &opSymbol : graph->operationOrder())
+            for (const auto opId : graph->operations())
             {
-                const grh::Operation &op = graph->getOperation(opSymbol);
+                const grh::Operation op = graph->getOperation(opId);
                 const auto &operands = op.operands();
                 const auto &results = op.results();
+                const std::string opContext = std::string(op.symbolText());
                 auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string>
                 {
                     if (!attr)
@@ -2065,7 +2115,7 @@ namespace wolf_sv::emit
                     auto norm = normalizeLower(attr);
                     if (!norm)
                     {
-                        reportError(std::string(name) + " missing", op.symbol());
+                        reportError(std::string(name) + " missing", std::string(op.symbolText()));
                         return std::nullopt;
                     }
                     if (*norm == "high" || *norm == "1'b1")
@@ -2076,24 +2126,24 @@ namespace wolf_sv::emit
                     {
                         return false;
                     }
-                    reportError("Unknown " + std::string(name) + " value: " + *attr, op.symbol());
+                    reportError("Unknown " + std::string(name) + " value: " + *attr, std::string(op.symbolText()));
                     return std::nullopt;
                 };
-                auto formatEnableExpr = [&](const grh::Value *enVal, std::string_view enLevel) -> std::optional<std::string>
+                auto formatEnableExpr = [&](grh::ir::ValueId enVal, std::string_view enLevel) -> std::optional<std::string>
                 {
-                    if (!enVal)
+                    if (!enVal.valid())
                     {
                         return std::nullopt;
                     }
                     if (enLevel == "high")
                     {
-                        return enVal->symbol();
+                        return valueName(enVal);
                     }
                     if (enLevel == "low")
                     {
-                        return "!(" + enVal->symbol() + ")";
+                        return "!(" + valueName(enVal) + ")";
                     }
-                    reportError("Unknown enLevel: " + std::string(enLevel), op.symbol());
+                    reportError("Unknown enLevel: " + std::string(enLevel), std::string(op.symbolText()));
                     return std::nullopt;
                 };
 
@@ -2103,17 +2153,17 @@ namespace wolf_sv::emit
                 {
                     if (results.empty())
                     {
-                        reportError("kConstant missing result", op.symbol());
+                        reportError("kConstant missing result", opContext);
                         break;
                     }
-                    auto constValue = getAttribute<std::string>(op, "constValue");
+                    auto constValue = getAttribute<std::string>(*graph, op, "constValue");
                     if (!constValue)
                     {
-                        reportError("kConstant missing constValue attribute", op.symbol());
+                        reportError("kConstant missing constValue attribute", opContext);
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + *constValue + ";", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + *constValue + ";", opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kAdd:
@@ -2139,12 +2189,14 @@ namespace wolf_sv::emit
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("Binary operation missing operands or results", op.symbol());
+                        reportError("Binary operation missing operands or results", opContext);
                         break;
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " " + tok + " " + operands[1]->symbol() + ";", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + " " + tok + " " +
+                                  valueName(operands[1]) + ";",
+                              opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kNot:
@@ -2158,93 +2210,95 @@ namespace wolf_sv::emit
                 {
                     if (operands.empty() || results.empty())
                     {
-                        reportError("Unary operation missing operands or results", op.symbol());
+                        reportError("Unary operation missing operands or results", opContext);
                         break;
                     }
                     const std::string tok = unaryOpToken(op.kind());
-                    addAssign("assign " + results[0]->symbol() + " = " + tok + operands[0]->symbol() + ";", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + tok + valueName(operands[0]) + ";", opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kMux:
                 {
                     if (operands.size() < 3 || results.empty())
                     {
-                        reportError("kMux missing operands or results", op.symbol());
+                        reportError("kMux missing operands or results", opContext);
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + " ? " + operands[1]->symbol() + " : " + operands[2]->symbol() + ";", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + " ? " +
+                                  valueName(operands[1]) + " : " + valueName(operands[2]) + ";",
+                              opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kAssign:
                 {
                     if (operands.empty() || results.empty())
                     {
-                        reportError("kAssign missing operands or results", op.symbol());
+                        reportError("kAssign missing operands or results", opContext);
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + operands[0]->symbol() + ";", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kConcat:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("kConcat missing operands or results", op.symbol());
+                        reportError("kConcat missing operands or results", opContext);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = {";
+                    expr << "assign " << valueName(results[0]) << " = {";
                     for (std::size_t i = 0; i < operands.size(); ++i)
                     {
                         if (i != 0)
                         {
                             expr << ", ";
                         }
-                        expr << operands[i]->symbol();
+                        expr << valueName(operands[i]);
                     }
                     expr << "};";
-                    addAssign(expr.str(), &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign(expr.str(), opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kReplicate:
                 {
                     if (operands.empty() || results.empty())
                     {
-                        reportError("kReplicate missing operands or results", op.symbol());
+                        reportError("kReplicate missing operands or results", opContext);
                         break;
                     }
-                    auto rep = getAttribute<int64_t>(op, "rep");
+                    auto rep = getAttribute<int64_t>(*graph, op, "rep");
                     if (!rep)
                     {
-                        reportError("kReplicate missing rep attribute", op.symbol());
+                        reportError("kReplicate missing rep attribute", opContext);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = {" << *rep << "{" << operands[0]->symbol() << "}};";
-                    addAssign(expr.str(), &op);
-                    ensureWireDecl(*results[0]);
+                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueName(operands[0]) << "}};";
+                    addAssign(expr.str(), opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kSliceStatic:
                 {
                     if (operands.empty() || results.empty())
                     {
-                        reportError("kSliceStatic missing operands or results", op.symbol());
+                        reportError("kSliceStatic missing operands or results", opContext);
                         break;
                     }
-                    auto sliceStart = getAttribute<int64_t>(op, "sliceStart");
-                    auto sliceEnd = getAttribute<int64_t>(op, "sliceEnd");
+                    auto sliceStart = getAttribute<int64_t>(*graph, op, "sliceStart");
+                    auto sliceEnd = getAttribute<int64_t>(*graph, op, "sliceEnd");
                     if (!sliceStart || !sliceEnd)
                     {
-                        reportError("kSliceStatic missing sliceStart or sliceEnd", op.symbol());
+                        reportError("kSliceStatic missing sliceStart or sliceEnd", opContext);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[";
+                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
                     if (*sliceStart == *sliceEnd)
                     {
                         expr << *sliceStart;
@@ -2254,55 +2308,55 @@ namespace wolf_sv::emit
                         expr << *sliceEnd << ":" << *sliceStart;
                     }
                     expr << "];";
-                    addAssign(expr.str(), &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign(expr.str(), opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kSliceDynamic:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("kSliceDynamic missing operands or results", op.symbol());
+                        reportError("kSliceDynamic missing operands or results", opContext);
                         break;
                     }
-                    auto width = getAttribute<int64_t>(op, "sliceWidth");
+                    auto width = getAttribute<int64_t>(*graph, op, "sliceWidth");
                     if (!width)
                     {
-                        reportError("kSliceDynamic missing sliceWidth", op.symbol());
+                        reportError("kSliceDynamic missing sliceWidth", opContext);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[" << operands[1]->symbol() << " +: " << *width << "];";
-                    addAssign(expr.str(), &op);
-                    ensureWireDecl(*results[0]);
+                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "];";
+                    addAssign(expr.str(), opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kSliceArray:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("kSliceArray missing operands or results", op.symbol());
+                        reportError("kSliceArray missing operands or results", opContext);
                         break;
                     }
-                    auto width = getAttribute<int64_t>(op, "sliceWidth");
+                    auto width = getAttribute<int64_t>(*graph, op, "sliceWidth");
                     if (!width)
                     {
-                        reportError("kSliceArray missing sliceWidth", op.symbol());
+                        reportError("kSliceArray missing sliceWidth", opContext);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << results[0]->symbol() << " = " << operands[0]->symbol() << "[";
+                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
                     if (*width == 1)
                     {
-                        expr << operands[1]->symbol();
+                        expr << valueName(operands[1]);
                     }
                     else
                     {
-                        expr << operands[1]->symbol() << " * " << *width << " +: " << *width;
+                        expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
                     }
                     expr << "];";
-                    addAssign(expr.str(), &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign(expr.str(), opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kLatch:
@@ -2310,13 +2364,13 @@ namespace wolf_sv::emit
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("Latch operation missing operands or results", op.symbol());
+                        reportError("Latch operation missing operands or results", opContext);
                         break;
                     }
-                    const grh::Value *en = operands[0];
-                    const grh::Value *rst = nullptr;
-                    const grh::Value *resetVal = nullptr;
-                    const grh::Value *d = nullptr;
+                    const grh::ir::ValueId en = operands[0];
+                    grh::ir::ValueId rst = grh::ir::ValueId::invalid();
+                    grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
+                    grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
                     if (op.kind() == grh::OperationKind::kLatch)
                     {
@@ -2335,31 +2389,31 @@ namespace wolf_sv::emit
                         }
                     }
 
-                    if (!en || !d)
+                    if (!en.valid() || !d.valid())
                     {
-                        reportError("Latch operation missing enable or data operand", op.symbol());
+                        reportError("Latch operation missing enable or data operand", opContext);
                         break;
                     }
-                    if (en->width() != 1)
+                    if (graph->getValue(en).width() != 1)
                     {
-                        reportError("Latch enable must be 1 bit", op.symbol());
+                        reportError("Latch enable must be 1 bit", opContext);
                         break;
                     }
                     if (op.kind() == grh::OperationKind::kLatchArst)
                     {
-                        if (!rst || !resetVal)
+                        if (!rst.valid() || !resetVal.valid())
                         {
-                            reportError("kLatchArst missing reset operands", op.symbol());
+                            reportError("kLatchArst missing reset operands", opContext);
                             break;
                         }
-                        if (rst->width() != 1)
+                        if (graph->getValue(rst).width() != 1)
                         {
-                            reportError("Latch reset must be 1 bit", op.symbol());
+                            reportError("Latch reset must be 1 bit", opContext);
                             break;
                         }
                     }
 
-                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2371,7 +2425,7 @@ namespace wolf_sv::emit
                     std::optional<bool> rstActiveHigh;
                     if (op.kind() == grh::OperationKind::kLatchArst)
                     {
-                        auto rstPolarityAttr = getAttribute<std::string>(op, "rstPolarity");
+                        auto rstPolarityAttr = getAttribute<std::string>(*graph, op, "rstPolarity");
                         rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity");
                         if (!rstActiveHigh)
                         {
@@ -2379,52 +2433,53 @@ namespace wolf_sv::emit
                         }
                     }
 
-                    const std::string &regName = op.symbol();
-                    const grh::Value *q = results[0];
-                    if (q->width() != d->width())
+                    const std::string &regName = opContext;
+                    const grh::ir::ValueId q = results[0];
+                    const grh::Value dValue = graph->getValue(d);
+                    if (graph->getValue(q).width() != dValue.width())
                     {
-                        reportError("Latch data/output width mismatch", op.symbol());
+                        reportError("Latch data/output width mismatch", opContext);
                         break;
                     }
-                    if (op.kind() == grh::OperationKind::kLatchArst && resetVal &&
-                        resetVal->width() != d->width())
+                    if (op.kind() == grh::OperationKind::kLatchArst && resetVal.valid() &&
+                        graph->getValue(resetVal).width() != dValue.width())
                     {
-                        reportError("Latch resetValue width mismatch", op.symbol());
+                        reportError("Latch resetValue width mismatch", opContext);
                         break;
                     }
-                    ensureRegDecl(regName, d->width(), d->isSigned(), op.srcLoc());
-                    const bool directDrive = q->symbol() == regName;
+                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
+                    const bool directDrive = valueName(q) == regName;
                     if (directDrive)
                     {
-                        markPortAsRegIfNeeded(*q);
+                        markPortAsRegIfNeeded(q);
                     }
                     else
                     {
-                        ensureWireDecl(*q);
-                        addAssign("assign " + q->symbol() + " = " + regName + ";", &op);
+                        ensureWireDecl(q);
+                        addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                     }
 
                     std::ostringstream stmt;
                     const int baseIndent = 2;
                     if (op.kind() == grh::OperationKind::kLatchArst)
                     {
-                        if (!rst || !resetVal || !rstActiveHigh)
+                        if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                         {
-                            reportError("Latch with reset missing operands or polarity", op.symbol());
+                            reportError("Latch with reset missing operands or polarity", opContext);
                             break;
                         }
                         const std::string rstCond =
-                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
                         appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + resetVal->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(resetVal) + ";");
                         appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                     }
                     else
                     {
                         appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                     }
 
@@ -2432,7 +2487,7 @@ namespace wolf_sv::emit
                     block << "  always_latch begin\n";
                     block << stmt.str();
                     block << "  end";
-                    addLatchBlock(block.str(), &op);
+                    addLatchBlock(block.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kRegister:
@@ -2444,23 +2499,23 @@ namespace wolf_sv::emit
                 {
                     if (operands.empty() || results.empty())
                     {
-                        reportError("Register operation missing operands or results", op.symbol());
+                        reportError("Register operation missing operands or results", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportError("Register operation missing clkPolarity", op.symbol());
+                        reportError("Register operation missing clkPolarity", opContext);
                         break;
                     }
 
-                    const std::string &regName = op.symbol();
-                    const grh::Value *q = results[0];
-                    const grh::Value *clk = operands[0];
-                    const grh::Value *rst = nullptr;
-                    const grh::Value *en = nullptr;
-                    const grh::Value *resetVal = nullptr;
-                    const grh::Value *d = nullptr;
+                    const std::string &regName = opContext;
+                    const grh::ir::ValueId q = results[0];
+                    const grh::ir::ValueId clk = operands[0];
+                    grh::ir::ValueId rst = grh::ir::ValueId::invalid();
+                    grh::ir::ValueId en = grh::ir::ValueId::invalid();
+                    grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
+                    grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
                     if (op.kind() == grh::OperationKind::kRegister)
                     {
@@ -2497,14 +2552,14 @@ namespace wolf_sv::emit
                         }
                     }
 
-                    if (!d)
+                    if (!d.valid())
                     {
-                        reportError("Register operation missing data operand", op.symbol());
+                        reportError("Register operation missing data operand", opContext);
                         break;
                     }
 
-                    auto rstPolarityAttr = getAttribute<std::string>(op, "rstPolarity");
-                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto rstPolarityAttr = getAttribute<std::string>(*graph, op, "rstPolarity");
+                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
                     const auto enExpr = formatEnableExpr(en, enLevel);
@@ -2512,28 +2567,33 @@ namespace wolf_sv::emit
                     std::string asyncEdge;
                     if (op.kind() == grh::OperationKind::kRegisterArst ||
                         op.kind() == grh::OperationKind::kRegisterEnArst) {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
-                        if (!rstActiveHigh) {
-                            break;
+                        if (rst.valid())
+                        {
+                            rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
+                            if (!rstActiveHigh)
+                            {
+                                break;
+                            }
+                            asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                         }
-                        asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                    } else if (rst) {
+                    } else if (rst.valid()) {
                         rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
                         if (!rstActiveHigh) {
                             break;
                         }
                     }
 
-                    const bool directDrive = q->symbol() == regName;
-                    ensureRegDecl(regName, d->width(), d->isSigned(), op.srcLoc());
+                    const bool directDrive = valueName(q) == regName;
+                    const grh::Value dValue = graph->getValue(d);
+                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
                     if (directDrive)
                     {
-                        markPortAsRegIfNeeded(*q);
+                        markPortAsRegIfNeeded(q);
                     }
                     else
                     {
-                        ensureWireDecl(*q);
-                        addAssign("assign " + q->symbol() + " = " + regName + ";", &op);
+                        ensureWireDecl(q);
+                        addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                     }
 
                     SeqKey key;
@@ -2544,7 +2604,7 @@ namespace wolf_sv::emit
                         key.asyncRst = rst;
                         key.asyncEdge = asyncEdge;
                     }
-                    else if (rst && rstActiveHigh)
+                    else if (rst.valid() && rstActiveHigh)
                     {
                         key.syncRst = rst;
                         key.syncPolarity = *rstActiveHigh ? "high" : "low";
@@ -2556,12 +2616,12 @@ namespace wolf_sv::emit
                     switch (op.kind())
                     {
                     case grh::OperationKind::kRegister:
-                        appendIndented(stmt, baseIndent, regName + " <= " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent, regName + " <= " + valueName(d) + ";");
                         break;
                     case grh::OperationKind::kRegisterEn:
-                        if (!en)
+                        if (!en.valid())
                         {
-                            reportError("kRegisterEn missing enable operand", op.symbol());
+                            reportError("kRegisterEn missing enable operand", opContext);
                             emitted = false;
                             break;
                         }
@@ -2571,31 +2631,31 @@ namespace wolf_sv::emit
                             break;
                         }
                         appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
                     case grh::OperationKind::kRegisterRst:
                     case grh::OperationKind::kRegisterArst: {
-                        if (!rst || !rstActiveHigh || !resetVal)
+                        if (!rst.valid() || !rstActiveHigh || !resetVal.valid())
                         {
-                            reportError("Register with reset missing operand or rstPolarity", op.symbol());
+                            reportError("Register with reset missing operand or rstPolarity", opContext);
                             emitted = false;
                             break;
                         }
                         const std::string rstCond =
-                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
                         appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + resetVal->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
                         appendIndented(stmt, baseIndent, "end else begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
                     }
                     case grh::OperationKind::kRegisterEnRst:
                     case grh::OperationKind::kRegisterEnArst: {
-                        if (!rst || !rstActiveHigh || !resetVal || !en)
+                        if (!rst.valid() || !rstActiveHigh || !resetVal.valid() || !en.valid())
                         {
-                            reportError("kRegisterEnRst missing operands", op.symbol());
+                            reportError("kRegisterEnRst missing operands", opContext);
                             emitted = false;
                             break;
                         }
@@ -2605,11 +2665,11 @@ namespace wolf_sv::emit
                             break;
                         }
                         const std::string rstCond =
-                            *rstActiveHigh ? rst->symbol() : "!" + rst->symbol();
+                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
                         appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + resetVal->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
                         appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + d->symbol() + ";");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
                     }
@@ -2620,41 +2680,41 @@ namespace wolf_sv::emit
 
                     if (emitted)
                     {
-                        addSequentialStmt(key, stmt.str(), &op);
+                        addSequentialStmt(key, stmt.str(), opId);
                     }
                     break;
                 }
                 case grh::OperationKind::kMemory:
                 {
-                    auto widthAttr = getAttribute<int64_t>(op, "width");
-                    auto rowAttr = getAttribute<int64_t>(op, "row");
-                    auto isSignedAttr = getAttribute<bool>(op, "isSigned");
+                    auto widthAttr = getAttribute<int64_t>(*graph, op, "width");
+                    auto rowAttr = getAttribute<int64_t>(*graph, op, "row");
+                    auto isSignedAttr = getAttribute<bool>(*graph, op, "isSigned");
                     if (!widthAttr || !rowAttr || !isSignedAttr)
                     {
-                        reportError("kMemory missing width/row/isSigned", op.symbol());
+                        reportError("kMemory missing width/row/isSigned", opContext);
                         break;
                     }
                     std::ostringstream decl;
-                    decl << "reg " << (*isSignedAttr ? "signed " : "") << "[" << (*widthAttr - 1) << ":0] " << op.symbol() << " [0:" << (*rowAttr - 1) << "];";
-                    memoryDecls.emplace_back(decl.str(), &op);
-                    declaredNames.insert(op.symbol());
+                    decl << "reg " << (*isSignedAttr ? "signed " : "") << "[" << (*widthAttr - 1) << ":0] " << opContext << " [0:" << (*rowAttr - 1) << "];";
+                    memoryDecls.emplace_back(decl.str(), opId);
+                    declaredNames.insert(opContext);
                     break;
                 }
                 case grh::OperationKind::kMemoryAsyncReadPort:
                 {
                     if (operands.size() < 1 || results.empty())
                     {
-                        reportError("kMemoryAsyncReadPort missing operands or results", op.symbol());
+                        reportError("kMemoryAsyncReadPort missing operands or results", opContext);
                         break;
                     }
-                    auto memSymbol = getAttribute<std::string>(op, "memSymbol");
+                    auto memSymbol = getAttribute<std::string>(*graph, op, "memSymbol");
                     if (!memSymbol)
                     {
-                        reportError("kMemoryAsyncReadPort missing memSymbol", op.symbol());
+                        reportError("kMemoryAsyncReadPort missing memSymbol", opContext);
                         break;
                     }
-                    addAssign("assign " + results[0]->symbol() + " = " + *memSymbol + "[" + operands[0]->symbol() + "];", &op);
-                    ensureWireDecl(*results[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + *memSymbol + "[" + valueName(operands[0]) + "];", opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::OperationKind::kMemorySyncReadPort:
@@ -2668,28 +2728,28 @@ namespace wolf_sv::emit
                     const std::size_t expectedOperands = hasReset ? 4 : 3;
                     if (operands.size() < expectedOperands || results.empty())
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
                                                     : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::Value *clk = operands[0];
-                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
-                    const grh::Value *addr = operands[hasReset ? 2 : 1];
-                    const grh::Value *en = operands[hasReset ? 3 : 2];
-                    if (!clk || !addr || !en || (hasReset && !rst))
+                    const grh::ir::ValueId clk = operands[0];
+                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
+                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
+                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
+                    if (!clk.valid() || !addr.valid() || !en.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2708,28 +2768,29 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
 
-                    const grh::Operation *memOp = graph->findOperation(memSymbol);
+                    const grh::ir::OperationId memOpId = graph->findOperation(memSymbol);
                     int64_t memWidth = 1;
                     bool memSigned = false;
-                    if (memOp)
+                    if (memOpId.valid())
                     {
-                        memWidth = getAttribute<int64_t>(*memOp, "width").value_or(1);
-                        memSigned = getAttribute<bool>(*memOp, "isSigned").value_or(false);
+                        const grh::Operation memOp = graph->getOperation(memOpId);
+                        memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
+                        memSigned = getAttribute<bool>(*graph, memOp, "isSigned").value_or(false);
                     }
-                    ensureRegDecl(op.symbol(), memWidth, memSigned, op.srcLoc());
+                    ensureRegDecl(opContext, memWidth, memSigned, op.srcLoc());
 
-                    SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
-                    if (asyncReset && rst && rstActiveHigh)
+                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    if (asyncReset && rst.valid() && rstActiveHigh)
                     {
                         key.asyncRst = rst;
                         key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                     }
-                    else if (hasReset && rst && rstActiveHigh)
+                    else if (hasReset && rst.valid() && rstActiveHigh)
                     {
                         key.syncRst = rst;
                         key.syncPolarity = *rstActiveHigh ? "high" : "low";
@@ -2737,19 +2798,19 @@ namespace wolf_sv::emit
 
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, 3, op.symbol() + " <= " + memSymbol + "[" + addr->symbol() + "];");
+                    appendIndented(stmt, 3, opContext + " <= " + memSymbol + "[" + valueName(addr) + "];");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
 
-                    const grh::Value *data = results[0];
-                    if (data->symbol() != op.symbol())
+                    const grh::ir::ValueId data = results[0];
+                    if (valueName(data) != opContext)
                     {
-                        ensureWireDecl(*data);
-                        addAssign("assign " + data->symbol() + " = " + op.symbol() + ";", &op);
+                        ensureWireDecl(data);
+                        addAssign("assign " + valueName(data) + " = " + opContext + ";", opId);
                     }
                     else
                     {
-                        markPortAsRegIfNeeded(*data);
+                        markPortAsRegIfNeeded(data);
                     }
                     break;
                 }
@@ -2764,29 +2825,29 @@ namespace wolf_sv::emit
                     const std::size_t expectedOperands = hasReset ? 5 : 4;
                     if (operands.size() < expectedOperands)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
                                                     : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::Value *clk = operands[0];
-                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
-                    const grh::Value *addr = operands[hasReset ? 2 : 1];
-                    const grh::Value *en = operands[hasReset ? 3 : 2];
-                    const grh::Value *data = operands[hasReset ? 4 : 3];
-                    if (!clk || !addr || !en || !data || (hasReset && !rst))
+                    const grh::ir::ValueId clk = operands[0];
+                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
+                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
+                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
+                    const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
+                    if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2805,18 +2866,18 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
 
-                    SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
-                    if (asyncReset && rst && rstActiveHigh)
+                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    if (asyncReset && rst.valid() && rstActiveHigh)
                     {
                         key.asyncRst = rst;
                         key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                     }
-                    else if (hasReset && rst && rstActiveHigh)
+                    else if (hasReset && rst.valid() && rstActiveHigh)
                     {
                         key.syncRst = rst;
                         key.syncPolarity = *rstActiveHigh ? "high" : "low";
@@ -2824,9 +2885,9 @@ namespace wolf_sv::emit
 
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, 3, memSymbol + "[" + addr->symbol() + "] <= " + data->symbol() + ";");
+                    appendIndented(stmt, 3, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kMemoryMaskWritePort:
@@ -2840,30 +2901,30 @@ namespace wolf_sv::emit
                     const std::size_t expectedOperands = hasReset ? 6 : 5;
                     if (operands.size() < expectedOperands)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", op.symbol());
+                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(op, "rstPolarity")
+                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
                                                     : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(op, "enLevel");
+                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
                     const std::string enLevel =
                         normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::Value *clk = operands[0];
-                    const grh::Value *rst = hasReset ? operands[1] : nullptr;
-                    const grh::Value *addr = operands[hasReset ? 2 : 1];
-                    const grh::Value *en = operands[hasReset ? 3 : 2];
-                    const grh::Value *data = operands[hasReset ? 4 : 3];
-                    const grh::Value *mask = operands[hasReset ? 5 : 4];
-                    if (!clk || !addr || !en || !data || !mask || (hasReset && !rst))
+                    const grh::ir::ValueId clk = operands[0];
+                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
+                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
+                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
+                    const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
+                    const grh::ir::ValueId mask = operands[hasReset ? 5 : 4];
+                    if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || !mask.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2882,20 +2943,25 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", op.symbol());
+                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
-                    const grh::Operation *memOp = graph->findOperation(memSymbol);
-                    int64_t memWidth = memOp ? getAttribute<int64_t>(*memOp, "width").value_or(1) : 1;
+                    const grh::ir::OperationId memOpId = graph->findOperation(memSymbol);
+                    int64_t memWidth = 1;
+                    if (memOpId.valid())
+                    {
+                        const grh::Operation memOp = graph->getOperation(memOpId);
+                        memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
+                    }
 
-                    SeqKey key{clk, *clkPolarity, nullptr, {}, nullptr, {}};
-                    if (asyncReset && rst && rstActiveHigh)
+                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    if (asyncReset && rst.valid() && rstActiveHigh)
                     {
                         key.asyncRst = rst;
                         key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                     }
-                    else if (hasReset && rst && rstActiveHigh)
+                    else if (hasReset && rst.valid() && rstActiveHigh)
                     {
                         key.syncRst = rst;
                         key.syncPolarity = *rstActiveHigh ? "high" : "low";
@@ -2903,27 +2969,27 @@ namespace wolf_sv::emit
 
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, 3, "if (" + mask->symbol() + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                    appendIndented(stmt, 4, memSymbol + "[" + addr->symbol() + "] <= " + data->symbol() + ";");
+                    appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
+                    appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                     appendIndented(stmt, 3, "end else begin");
                     appendIndented(stmt, 4, "integer i;");
                     appendIndented(stmt, 4, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
-                    appendIndented(stmt, 5, "if (" + mask->symbol() + "[i]) begin");
-                    appendIndented(stmt, 6, memSymbol + "[" + addr->symbol() + "][i] <= " + data->symbol() + "[i];");
+                    appendIndented(stmt, 5, "if (" + valueName(mask) + "[i]) begin");
+                    appendIndented(stmt, 6, memSymbol + "[" + valueName(addr) + "][i] <= " + valueName(data) + "[i];");
                     appendIndented(stmt, 5, "end");
                     appendIndented(stmt, 4, "end");
                     appendIndented(stmt, 3, "end");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kInstance:
                 case grh::OperationKind::kBlackbox:
                 {
-                    auto moduleName = getAttribute<std::string>(op, "moduleName");
-                    auto inputNames = getAttribute<std::vector<std::string>>(op, "inputPortName");
-                    auto outputNames = getAttribute<std::vector<std::string>>(op, "outputPortName");
-                    auto instanceNameBase = getAttribute<std::string>(op, "instanceName").value_or(op.symbol());
+                    auto moduleName = getAttribute<std::string>(*graph, op, "moduleName");
+                    auto inputNames = getAttribute<std::vector<std::string>>(*graph, op, "inputPortName");
+                    auto outputNames = getAttribute<std::vector<std::string>>(*graph, op, "outputPortName");
+                    auto instanceNameBase = getAttribute<std::string>(*graph, op, "instanceName").value_or(opContext);
                     std::string instanceName = instanceNameBase;
                     int instSuffix = 1;
                     while (!instanceNamesUsed.insert(instanceName).second)
@@ -2932,7 +2998,7 @@ namespace wolf_sv::emit
                     }
                     if (!moduleName || !inputNames || !outputNames)
                     {
-                        reportError("Instance missing module or port names", op.symbol());
+                        reportError("Instance missing module or port names", opContext);
                         break;
                     }
                     const auto moduleNameIt = emittedModuleNames.find(*moduleName);
@@ -2942,8 +3008,8 @@ namespace wolf_sv::emit
                     std::ostringstream decl;
                     if (op.kind() == grh::OperationKind::kBlackbox)
                     {
-                        auto paramNames = getAttribute<std::vector<std::string>>(op, "parameterNames");
-                        auto paramValues = getAttribute<std::vector<std::string>>(op, "parameterValues");
+                        auto paramNames = getAttribute<std::vector<std::string>>(*graph, op, "parameterNames");
+                        auto paramValues = getAttribute<std::vector<std::string>>(*graph, op, "parameterValues");
                         if (paramNames && paramValues && !paramNames->empty() && paramNames->size() == paramValues->size())
                         {
                             decl << targetModuleName << " #(" << '\n';
@@ -2969,14 +3035,14 @@ namespace wolf_sv::emit
                     {
                         if (i < operands.size())
                         {
-                            connections.emplace_back((*inputNames)[i], operands[i]->symbol());
+                            connections.emplace_back((*inputNames)[i], valueName(operands[i]));
                         }
                     }
                     for (std::size_t i = 0; i < outputNames->size(); ++i)
                     {
                         if (i < results.size())
                         {
-                            connections.emplace_back((*outputNames)[i], results[i]->symbol());
+                            connections.emplace_back((*outputNames)[i], valueName(results[i]));
                         }
                     }
 
@@ -2988,11 +3054,11 @@ namespace wolf_sv::emit
                         decl << (i + 1 == connections.size() ? "\n" : ",\n");
                     }
                     decl << "  );";
-                    instanceDecls.emplace_back(decl.str(), &op);
+                    instanceDecls.emplace_back(decl.str(), opId);
 
-                    for (const grh::Value *res : results)
+                    for (const auto res : results)
                     {
-                        ensureWireDecl(*res);
+                        ensureWireDecl(res);
                     }
                     break;
                 }
@@ -3000,63 +3066,63 @@ namespace wolf_sv::emit
                 {
                     if (operands.size() < 2)
                     {
-                        reportError("kDisplay missing operands", op.symbol());
+                        reportError("kDisplay missing operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
-                    auto format = getAttribute<std::string>(op, "formatString");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
+                    auto format = getAttribute<std::string>(*graph, op, "formatString");
                     if (!clkPolarity || !format)
                     {
-                        reportError("kDisplay missing clkPolarity or formatString", op.symbol());
+                        reportError("kDisplay missing clkPolarity or formatString", opContext);
                         break;
                     }
-                    SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
+                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + operands[1]->symbol() + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
                     stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
                     for (std::size_t i = 2; i < operands.size(); ++i)
                     {
-                        stmt << ", " << operands[i]->symbol();
+                        stmt << ", " << valueName(operands[i]);
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kAssert:
                 {
                     if (operands.size() < 2)
                     {
-                        reportError("kAssert missing operands", op.symbol());
+                        reportError("kAssert missing operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportError("kAssert missing clkPolarity", op.symbol());
+                        reportError("kAssert missing clkPolarity", opContext);
                         break;
                     }
-                    auto message = getAttribute<std::string>(op, "message").value_or(std::string("Assertion failed"));
-                    SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
+                    auto message = getAttribute<std::string>(*graph, op, "message").value_or(std::string("Assertion failed"));
+                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (!" + operands[1]->symbol() + ") begin");
+                    appendIndented(stmt, 2, "if (!" + valueName(operands[1]) + ") begin");
                     appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kDpicImport:
                 {
-                    auto argsDir = getAttribute<std::vector<std::string>>(op, "argsDirection");
-                    auto argsWidth = getAttribute<std::vector<int64_t>>(op, "argsWidth");
-                    auto argsName = getAttribute<std::vector<std::string>>(op, "argsName");
+                    auto argsDir = getAttribute<std::vector<std::string>>(*graph, op, "argsDirection");
+                    auto argsWidth = getAttribute<std::vector<int64_t>>(*graph, op, "argsWidth");
+                    auto argsName = getAttribute<std::vector<std::string>>(*graph, op, "argsName");
                     if (!argsDir || !argsWidth || !argsName || argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                     {
-                        reportError("kDpicImport missing or inconsistent arg metadata", op.symbol());
+                        reportError("kDpicImport missing or inconsistent arg metadata", opContext);
                         break;
                     }
                     std::ostringstream decl;
-                    decl << "import \"DPI-C\" function void " << op.symbol() << " (\n";
+                    decl << "import \"DPI-C\" function void " << opContext << " (\n";
                     for (std::size_t i = 0; i < argsDir->size(); ++i)
                     {
                         decl << "  " << (*argsDir)[i] << " logic ";
@@ -3068,33 +3134,35 @@ namespace wolf_sv::emit
                         decl << (i + 1 == argsDir->size() ? "\n" : ",\n");
                     }
                     decl << ");";
-                    dpiImportDecls.emplace_back(decl.str(), &op);
+                    dpiImportDecls.emplace_back(decl.str(), opId);
                     break;
                 }
                 case grh::OperationKind::kDpicCall:
                 {
                     if (operands.size() < 2)
                     {
-                        reportError("kDpicCall missing clk/enable operands", op.symbol());
+                        reportError("kDpicCall missing clk/enable operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(op, "clkPolarity");
-                    auto targetImport = getAttribute<std::string>(op, "targetImportSymbol");
-                    auto inArgName = getAttribute<std::vector<std::string>>(op, "inArgName");
-                    auto outArgName = getAttribute<std::vector<std::string>>(op, "outArgName");
+                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
+                    auto targetImport = getAttribute<std::string>(*graph, op, "targetImportSymbol");
+                    auto inArgName = getAttribute<std::vector<std::string>>(*graph, op, "inArgName");
+                    auto outArgName = getAttribute<std::vector<std::string>>(*graph, op, "outArgName");
                     if (!clkPolarity || !targetImport || !inArgName || !outArgName)
                     {
-                        reportError("kDpicCall missing metadata", op.symbol());
+                        reportError("kDpicCall missing metadata", opContext);
                         break;
                     }
                     auto itImport = dpicImports.find(*targetImport);
-                    if (itImport == dpicImports.end() || !itImport->second)
+                    if (itImport == dpicImports.end() || itImport->second.graph == nullptr)
                     {
                         reportError("kDpicCall cannot resolve import symbol", *targetImport);
                         break;
                     }
-                    auto importArgs = getAttribute<std::vector<std::string>>(*itImport->second, "argsName");
-                    auto importDirs = getAttribute<std::vector<std::string>>(*itImport->second, "argsDirection");
+                    const DpiImportRef &importRef = itImport->second;
+                    const grh::Operation importOp = importRef.graph->getOperation(importRef.op);
+                    auto importArgs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsName");
+                    auto importDirs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsDirection");
                     if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
                     {
                         reportError("kDpicCall found malformed import signature", *targetImport);
@@ -3102,20 +3170,17 @@ namespace wolf_sv::emit
                     }
 
                     // Declare intermediate regs for outputs and connect them back.
-                    for (const grh::Value *res : results)
+                    for (const auto res : results)
                     {
-                        if (!res)
-                        {
-                            continue;
-                        }
-                        const std::string tempName = res->symbol() + "_intm";
-                        ensureRegDecl(tempName, res->width(), res->isSigned(), op.srcLoc());
-                        addAssign("assign " + res->symbol() + " = " + tempName + ";", &op);
+                        const grh::Value resValue = graph->getValue(res);
+                        const std::string tempName = std::string(resValue.symbolText()) + "_intm";
+                        ensureRegDecl(tempName, resValue.width(), resValue.isSigned(), op.srcLoc());
+                        addAssign("assign " + std::string(resValue.symbolText()) + " = " + tempName + ";", opId);
                     }
 
-                    SeqKey key{operands[0], *clkPolarity, nullptr, {}, nullptr, {}};
+                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + operands[1]->symbol() + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
                     stmt << std::string(kIndentSizeSv * 3, ' ') << *targetImport << "(";
                     bool firstArg = true;
                     bool callOk = true;
@@ -3133,22 +3198,22 @@ namespace wolf_sv::emit
                             int idx = findNameIndex(*inArgName, formal);
                             if (idx < 0 || static_cast<std::size_t>(idx + 2) >= operands.size())
                             {
-                                reportError("kDpicCall missing matching input arg " + formal, op.symbol());
+                                reportError("kDpicCall missing matching input arg " + formal, opContext);
                                 callOk = false;
                                 break;
                             }
-                            stmt << operands[static_cast<std::size_t>(idx + 2)]->symbol();
+                            stmt << valueName(operands[static_cast<std::size_t>(idx + 2)]);
                         }
                         else
                         {
                             int idx = findNameIndex(*outArgName, formal);
                             if (idx < 0 || static_cast<std::size_t>(idx) >= results.size())
                             {
-                                reportError("kDpicCall missing matching output arg " + formal, op.symbol());
+                                reportError("kDpicCall missing matching output arg " + formal, opContext);
                                 callOk = false;
                                 break;
                             }
-                            stmt << results[static_cast<std::size_t>(idx)]->symbol() << "_intm";
+                            stmt << valueName(results[static_cast<std::size_t>(idx)]) << "_intm";
                         }
                     }
                     if (!callOk)
@@ -3157,24 +3222,24 @@ namespace wolf_sv::emit
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), &op);
+                    addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
                 default:
-                    reportWarning("Unsupported operation for SystemVerilog emission", op.symbol());
+                    reportWarning("Unsupported operation for SystemVerilog emission", opContext);
                     break;
                 }
             }
 
             // Declare remaining wires for non-port values not defined above.
-            for (const auto &valueSymbol : graph->valueOrder())
+            for (const auto valueId : graph->values())
             {
-                const grh::Value &val = graph->getValue(valueSymbol);
+                const grh::Value val = graph->getValue(valueId);
                 if (val.isInput() || val.isOutput())
                 {
                     continue;
                 }
-                ensureWireDecl(val);
+                ensureWireDecl(valueId);
             }
 
             // -------------------------
@@ -3211,13 +3276,21 @@ namespace wolf_sv::emit
                     moduleBuffer << name;
                 };
 
-                for (const auto &[name, _] : graph->inputPorts())
+                for (const auto &port : graph->inputPorts())
                 {
-                    emitPortLine(name);
+                    if (!port.name.valid())
+                    {
+                        continue;
+                    }
+                    emitPortLine(std::string(graph->symbolText(port.name)));
                 }
-                for (const auto &[name, _] : graph->outputPorts())
+                for (const auto &port : graph->outputPorts())
                 {
-                    emitPortLine(name);
+                    if (!port.name.valid())
+                    {
+                        continue;
+                    }
+                    emitPortLine(std::string(graph->symbolText(port.name)));
                 }
                 moduleBuffer << "\n);\n";
             }
@@ -3243,10 +3316,18 @@ namespace wolf_sv::emit
             if (!memoryDecls.empty())
             {
                 moduleBuffer << '\n';
+                auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::SrcLoc>
+                {
+                    if (!opId.valid())
+                    {
+                        return std::nullopt;
+                    }
+                    return graph->getOperation(opId).srcLoc();
+                };
                 for (const auto &[decl, opPtr] : memoryDecls)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opSrcLoc(opPtr));
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3261,7 +3342,7 @@ namespace wolf_sv::emit
                 for (const auto &[inst, opPtr] : instanceDecls)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3276,7 +3357,7 @@ namespace wolf_sv::emit
                 for (const auto &[decl, opPtr] : dpiImportDecls)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3291,7 +3372,7 @@ namespace wolf_sv::emit
                 for (const auto &[stmt, opPtr] : portBindingStmts)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3306,7 +3387,7 @@ namespace wolf_sv::emit
                 for (const auto &[stmt, opPtr] : assignStmts)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3321,7 +3402,7 @@ namespace wolf_sv::emit
                 for (const auto &[block, opPtr] : latchBlocks)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr ? opPtr->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << '\n';
@@ -3335,14 +3416,14 @@ namespace wolf_sv::emit
                 moduleBuffer << '\n';
                 for (const auto &seq : seqBlocks)
                 {
-                    const std::string sens = sensitivityList(seq.key);
+                    const std::string sens = sensitivityList(*graph, seq.key);
                     if (sens.empty())
                     {
                         reportError("Sequential block missing sensitivity list", graph->symbol());
                         continue;
                     }
                     const std::string attr =
-                        formatSrcAttribute(seq.op ? seq.op->srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(seq.op.valid() ? graph->getOperation(seq.op).srcLoc() : std::optional<grh::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";

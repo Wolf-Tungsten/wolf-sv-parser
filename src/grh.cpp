@@ -4,6 +4,8 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <span>
 #include <stdexcept>
@@ -202,6 +204,13 @@ namespace wolf_sv::grh
             }
             if (graph != expected)
             {
+                if (std::getenv("WOLF_DEBUG_GRAPH_ID"))
+                {
+                    std::fprintf(stderr,
+                                 "[graph-id] value index=%u gen=%u graph=%u/%u expected=%u/%u\n",
+                                 index, generation, graph.index, graph.generation,
+                                 expected.index, expected.generation);
+                }
                 throw std::runtime_error("ValueId used with mismatched GraphId");
             }
         }
@@ -1052,6 +1061,16 @@ namespace wolf_sv::grh
                 }
             }
             attrs.push_back(AttrKV{key, std::move(value)});
+        }
+
+        void GraphBuilder::setOpKind(OperationId op, OperationKind kind)
+        {
+            const std::size_t opIdx = opIndex(op);
+            if (!operations_[opIdx].alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            operations_[opIdx].kind = kind;
         }
 
         bool GraphBuilder::eraseAttr(OperationId op, SymbolId key)
@@ -2603,6 +2622,13 @@ namespace wolf_sv::grh
         ir::GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setAttr(op, key, std::move(value));
+    }
+
+    void Graph::setOpKind(ir::OperationId op, OperationKind kind)
+    {
+        ir::GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.setOpKind(op, kind);
     }
 
     bool Graph::eraseAttr(ir::OperationId op, ir::SymbolId key)
