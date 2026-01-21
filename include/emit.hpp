@@ -71,12 +71,12 @@ namespace wolf_sv::emit
         explicit Emit(EmitDiagnostics *diagnostics = nullptr);
         virtual ~Emit() = default;
 
-        EmitResult emit(const grh::Netlist &netlist, const EmitOptions &options = EmitOptions());
+        EmitResult emit(const grh::ir::Netlist &netlist, const EmitOptions &options = EmitOptions());
 
     protected:
         EmitDiagnostics *diagnostics() const noexcept { return diagnostics_; }
 
-        std::vector<const grh::Graph *> resolveTopGraphs(const grh::Netlist &netlist,
+        std::vector<const grh::ir::Graph *> resolveTopGraphs(const grh::ir::Netlist &netlist,
                                                          const EmitOptions &options) const;
         std::filesystem::path resolveOutputDir(const EmitOptions &options) const;
         bool ensureParentDirectory(const std::filesystem::path &path) const;
@@ -86,11 +86,11 @@ namespace wolf_sv::emit
         void reportWarning(std::string message, std::string context = {}) const;
 
     protected:
-        virtual EmitResult emitImpl(const grh::Netlist &netlist,
-                                    std::span<const grh::Graph *const> topGraphs,
+        virtual EmitResult emitImpl(const grh::ir::Netlist &netlist,
+                                    std::span<const grh::ir::Graph *const> topGraphs,
                                     const EmitOptions &options) = 0;
 
-        bool validateTopGraphs(const std::vector<const grh::Graph *> &topGraphs) const;
+        bool validateTopGraphs(const std::vector<const grh::ir::Graph *> &topGraphs) const;
 
     private:
         EmitDiagnostics *diagnostics_ = nullptr;
@@ -101,15 +101,15 @@ namespace wolf_sv::emit
     public:
         using Emit::Emit;
 
-        std::optional<std::string> emitToString(const grh::Netlist &netlist, const EmitOptions &options = EmitOptions());
+        std::optional<std::string> emitToString(const grh::ir::Netlist &netlist, const EmitOptions &options = EmitOptions());
         EmitResult emitGraphView(const grh::ir::GraphView &view,
                                  const grh::ir::GraphSymbolTable &symbols,
                                  std::string_view graphSymbol,
                                  const EmitOptions &options = EmitOptions());
 
     private:
-        EmitResult emitImpl(const grh::Netlist &netlist,
-                            std::span<const grh::Graph *const> topGraphs,
+        EmitResult emitImpl(const grh::ir::Netlist &netlist,
+                            std::span<const grh::ir::Graph *const> topGraphs,
                             const EmitOptions &options) override;
     };
 
@@ -123,8 +123,8 @@ namespace wolf_sv::emit
                                  const EmitOptions &options = EmitOptions());
 
     private:
-        EmitResult emitImpl(const grh::Netlist &netlist,
-                            std::span<const grh::Graph *const> topGraphs,
+        EmitResult emitImpl(const grh::ir::Netlist &netlist,
+                            std::span<const grh::ir::Graph *const> topGraphs,
                             const EmitOptions &options) override;
     };
 

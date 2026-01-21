@@ -105,9 +105,9 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
-    const grh::Graph* graph = netlist.findGraph("memo_child");
+    const grh::ir::Graph* graph = netlist.findGraph("memo_child");
     if (!graph) {
         return fail("Graph memo_child not found");
     }
@@ -253,7 +253,7 @@ int main() {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is missing state operation");
         }
-        if (graph->getOperation(entry->stateOp).kind() != grh::OperationKind::kRegister) {
+        if (graph->getOperation(entry->stateOp).kind() != grh::ir::OperationKind::kRegister) {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is not bound to kRegister");
         }
@@ -261,13 +261,12 @@ int main() {
             return fail(std::string("reg memo entry ") + std::string(name) +
                         " is missing GRH value");
         }
-        const grh::Operation op = graph->getOperation(entry->stateOp);
+        const grh::ir::Operation op = graph->getOperation(entry->stateOp);
         if (op.results().empty() || op.results().front() != entry->value) {
             return fail(std::string("register operation result mismatch for ") +
                         std::string(name));
         }
-        const grh::ir::SymbolId clkKey = graph->lookupSymbol("clkPolarity");
-        auto clkAttr = clkKey.valid() ? op.attr(clkKey) : std::nullopt;
+        auto clkAttr = op.attr("clkPolarity");
         if (!clkAttr) {
             return fail(std::string("register operation missing clkPolarity attribute for ") +
                         std::string(name));
@@ -303,16 +302,13 @@ int main() {
         return fail("reg_unpacked_bus should not materialize a flat value");
     }
     if (!memoryEntry->stateOp ||
-        graph->getOperation(memoryEntry->stateOp).kind() != grh::OperationKind::kMemory) {
+        graph->getOperation(memoryEntry->stateOp).kind() != grh::ir::OperationKind::kMemory) {
         return fail("reg_unpacked_bus expected kMemory placeholder");
     }
-    const grh::Operation memOp = graph->getOperation(memoryEntry->stateOp);
-    const grh::ir::SymbolId widthKey = graph->lookupSymbol("width");
-    const grh::ir::SymbolId rowKey = graph->lookupSymbol("row");
-    const grh::ir::SymbolId signedKey = graph->lookupSymbol("isSigned");
-    auto widthAttr = widthKey.valid() ? memOp.attr(widthKey) : std::nullopt;
-    auto rowAttr = rowKey.valid() ? memOp.attr(rowKey) : std::nullopt;
-    auto signedAttr = signedKey.valid() ? memOp.attr(signedKey) : std::nullopt;
+    const grh::ir::Operation memOp = graph->getOperation(memoryEntry->stateOp);
+    auto widthAttr = memOp.attr("width");
+    auto rowAttr = memOp.attr("row");
+    auto signedAttr = memOp.attr("isSigned");
     if (!widthAttr || !rowAttr || !signedAttr) {
         return fail("reg_unpacked_bus memory attributes incomplete");
     }

@@ -22,13 +22,10 @@ int fail(const std::string& message) {
     return 1;
 }
 
-std::optional<std::string> getStringAttr(const grh::Graph& graph, const grh::Operation& op,
+std::optional<std::string> getStringAttr(const grh::ir::Graph& graph, const grh::ir::Operation& op,
                                          std::string_view key) {
-    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-    if (!keyId.valid()) {
-        return std::nullopt;
-    }
-    auto attr = op.attr(keyId);
+    (void)graph;
+    auto attr = op.attr(key);
     const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
     if (!value) {
         return std::nullopt;
@@ -36,30 +33,33 @@ std::optional<std::string> getStringAttr(const grh::Graph& graph, const grh::Ope
     return *value;
 }
 
-const std::vector<std::string>* getStringVecAttr(const grh::Graph& graph,
-                                                 const grh::Operation& op,
-                                                 std::string_view key) {
-    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-    if (!keyId.valid()) {
-        return nullptr;
+std::optional<std::vector<std::string>> getStringVecAttr(const grh::ir::Graph& graph,
+                                                         const grh::ir::Operation& op,
+                                                         std::string_view key) {
+    (void)graph;
+    auto attr = op.attr(key);
+    const auto* value = attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
     }
-    auto attr = op.attr(keyId);
-    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    return *value;
 }
 
-const std::vector<int64_t>* getIntVecAttr(const grh::Graph& graph, const grh::Operation& op,
-                                          std::string_view key) {
-    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-    if (!keyId.valid()) {
-        return nullptr;
+std::optional<std::vector<int64_t>> getIntVecAttr(const grh::ir::Graph& graph,
+                                                  const grh::ir::Operation& op,
+                                                  std::string_view key) {
+    (void)graph;
+    auto attr = op.attr(key);
+    const auto* value = attr ? std::get_if<std::vector<int64_t>>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
     }
-    auto attr = op.attr(keyId);
-    return attr ? std::get_if<std::vector<int64_t>>(&*attr) : nullptr;
+    return *value;
 }
 
-OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+OperationId findOpByKind(const grh::ir::Graph& graph, grh::ir::OperationKind kind) {
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() == kind) {
             return opId;
         }
@@ -67,7 +67,7 @@ OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
     return OperationId::invalid();
 }
 
-ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+ValueId findPort(const grh::ir::Graph& graph, std::string_view name, bool isInput) {
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
     for (const auto& port : ports) {
         if (graph.symbolText(port.name) == name) {
@@ -131,7 +131,7 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
     if (!diagnostics.empty()) {
         bool unexpected = false;
         for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
@@ -165,7 +165,7 @@ int main() {
         return fail("Top instance dpic_stage24 not found");
     }
 
-    grh::Graph* graph = netlist.findGraph("dpic_stage24");
+    grh::ir::Graph* graph = netlist.findGraph("dpic_stage24");
     if (!graph) {
         return fail("GRH graph dpic_stage24 not found");
     }
@@ -179,13 +179,13 @@ int main() {
         return fail("Expected exactly one DPI import entry");
     }
 
-    OperationId importOpId = findOpByKind(*graph, grh::OperationKind::kDpicImport);
+    OperationId importOpId = findOpByKind(*graph, grh::ir::OperationKind::kDpicImport);
     if (!importOpId) {
         return fail("kDpicImport operation missing");
     }
-    const grh::Operation importOp = graph->getOperation(importOpId);
+    const grh::ir::Operation importOp = graph->getOperation(importOpId);
 
-    const auto* directions = getStringVecAttr(*graph, importOp, "argsDirection");
+    auto directions = getStringVecAttr(*graph, importOp, "argsDirection");
     if (!directions) {
         return fail("kDpicImport missing argsDirection attribute");
     }
@@ -193,7 +193,7 @@ int main() {
         return fail("kDpicImport argsDirection mismatch");
     }
 
-    const auto* widths = getIntVecAttr(*graph, importOp, "argsWidth");
+    auto widths = getIntVecAttr(*graph, importOp, "argsWidth");
     if (!widths) {
         return fail("kDpicImport missing argsWidth attribute");
     }
@@ -201,7 +201,7 @@ int main() {
         return fail("kDpicImport argsWidth mismatch");
     }
 
-    const auto* names = getStringVecAttr(*graph, importOp, "argsName");
+    auto names = getStringVecAttr(*graph, importOp, "argsName");
     if (!names) {
         return fail("kDpicImport missing argsName attribute");
     }
@@ -211,12 +211,12 @@ int main() {
 
     std::span<const SignalMemoEntry> regMemo = elaborator.peekRegMemo(body);
 
-    OperationId callOpId = findOpByKind(*graph, grh::OperationKind::kDpicCall);
+    OperationId callOpId = findOpByKind(*graph, grh::ir::OperationKind::kDpicCall);
     if (!callOpId) {
         std::cerr << "[elaborate_dpic] Existing operations:\n";
         for (const auto& opId : graph->operations()) {
-            const grh::Operation op = graph->getOperation(opId);
-            std::cerr << "  - " << std::string(grh::toString(op.kind())) << '\n';
+            const grh::ir::Operation op = graph->getOperation(opId);
+            std::cerr << "  - " << std::string(grh::ir::toString(op.kind())) << '\n';
         }
         std::cerr << "[elaborate_dpic] Reg memo entries: " << regMemo.size() << '\n';
         if (regMemo.empty()) {
@@ -231,7 +231,7 @@ int main() {
         }
         return fail("kDpicCall operation missing");
     }
-    const grh::Operation callOp = graph->getOperation(callOpId);
+    const grh::ir::Operation callOp = graph->getOperation(callOpId);
     if (callOp.operands().size() != 4) {
         return fail("kDpicCall operand count mismatch");
     }
@@ -251,14 +251,14 @@ int main() {
         return fail("kDpicCall operand wiring mismatch");
     }
 
-    const auto* inNames = getStringVecAttr(*graph, callOp, "inArgName");
+    auto inNames = getStringVecAttr(*graph, callOp, "inArgName");
     if (!inNames) {
         return fail("kDpicCall missing inArgName attribute");
     }
     if (*inNames != std::vector<std::string>{"lhs_vec", "rhs_scalar"}) {
         return fail("kDpicCall inArgName mismatch");
     }
-    const auto* outNames = getStringVecAttr(*graph, callOp, "outArgName");
+    auto outNames = getStringVecAttr(*graph, callOp, "outArgName");
     if (!outNames) {
         return fail("kDpicCall missing outArgName attribute");
     }
@@ -278,7 +278,7 @@ int main() {
     if (!sumEntry || !sumEntry->stateOp) {
         return fail("sum_storage memo/state op missing");
     }
-    const grh::Operation sumOp = graph->getOperation(sumEntry->stateOp);
+    const grh::ir::Operation sumOp = graph->getOperation(sumEntry->stateOp);
     if (sumOp.operands().size() < 2) {
         return fail("sum state op missing data operand");
     }
@@ -287,7 +287,7 @@ int main() {
     bool connectsToCall = dataOperand == callResult;
     if (!connectsToCall && dataOperand) {
         OperationId dataOpId = graph->getValue(dataOperand).definingOp();
-        if (dataOpId && graph->getOperation(dataOpId).kind() == grh::OperationKind::kMux) {
+        if (dataOpId && graph->getOperation(dataOpId).kind() == grh::ir::OperationKind::kMux) {
             for (ValueId operand : graph->getOperation(dataOpId).operands()) {
                 if (operand == callResult) {
                     connectsToCall = true;

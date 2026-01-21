@@ -44,7 +44,7 @@ int main()
     const auto symClk = symbols.intern("clk");
     const auto symDout = symbols.intern("dout");
     const auto symAdd0 = symbols.intern("add0");
-    const auto symClkPolarity = symbols.intern("clkPolarity");
+    const auto symDoutReg = symbols.intern("dout_reg");
 
     grh_ir::GraphBuilder builder(symbols);
     const auto vA = builder.addValue(symA, 8, false);
@@ -59,16 +59,16 @@ int main()
     builder.bindOutputPort(symSum, vSum);
     builder.bindOutputPort(symDout, vDout);
 
-    const auto opAdd = builder.addOp(grh::OperationKind::kAdd, symAdd0);
+    const auto opAdd = builder.addOp(grh::ir::OperationKind::kAdd, symAdd0);
     builder.addOperand(opAdd, vA);
     builder.addOperand(opAdd, vB);
     builder.addResult(opAdd, vSum);
 
-    const auto opReg = builder.addOp(grh::OperationKind::kRegister, symDout);
+    const auto opReg = builder.addOp(grh::ir::OperationKind::kRegister, symDoutReg);
     builder.addOperand(opReg, vClk);
     builder.addOperand(opReg, vSum);
     builder.addResult(opReg, vDout);
-    builder.setAttr(opReg, symClkPolarity, std::string("posedge"));
+    builder.setAttr(opReg, "clkPolarity", std::string("posedge"));
 
     const grh_ir::GraphView view = builder.freeze();
 

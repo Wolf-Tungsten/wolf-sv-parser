@@ -24,10 +24,10 @@ int main()
 {
     // Case 1: schema validation catches missing required attribute
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g");
         grh::ir::ValueId val = graph.createValue(graph.internSymbol("v0"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kConstant, graph.internSymbol("c0"));
+        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kConstant, graph.internSymbol("c0"));
         graph.addResult(op, val); // Missing constValue on purpose
 
         PassManager manager;
@@ -43,11 +43,11 @@ int main()
 
     // Case 2: operand count mismatch triggers error
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g");
         grh::ir::ValueId lhs = graph.createValue(graph.internSymbol("a"), 1, false);
         grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(op, lhs); // Missing second operand on purpose
         graph.addResult(op, out);
 
@@ -63,12 +63,12 @@ int main()
 
     // Case 3: well-formed graph passes verification
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g");
         grh::ir::ValueId lhs = graph.createValue(graph.internSymbol("a"), 1, false);
         grh::ir::ValueId rhs = graph.createValue(graph.internSymbol("b"), 1, false);
         grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(op, lhs);
         graph.addOperand(op, rhs);
         graph.addResult(op, out);
@@ -89,14 +89,14 @@ int main()
 
     // Case 4: unexpected attribute is surfaced as info, not error
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g");
         grh::ir::ValueId in = graph.createValue(graph.internSymbol("in"), 1, false);
         grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign0"));
+        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("assign0"));
         graph.addOperand(op, in);
         graph.addResult(op, out);
-        graph.setAttr(op, graph.internSymbol("extra"), int64_t{42});
+        graph.setAttr(op, "extra", int64_t{42});
 
         PassManager manager;
         manager.addPass(std::make_unique<GRHVerifyPass>());

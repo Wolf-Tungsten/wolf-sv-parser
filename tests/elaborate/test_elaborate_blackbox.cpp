@@ -17,13 +17,10 @@ int fail(const std::string& context, const std::string& message) {
     return 1;
 }
 
-std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Operation& op,
+std::optional<std::string> getStringAttr(const grh::ir::Graph* graph, const grh::ir::Operation& op,
                                          std::string_view key) {
-    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
-    if (!keyId.valid()) {
-        return std::nullopt;
-    }
-    auto attr = op.attr(keyId);
+    (void)graph;
+    auto attr = op.attr(key);
     const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
     if (!value) {
         return std::nullopt;
@@ -31,17 +28,19 @@ std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Ope
     return *value;
 }
 
-const std::vector<std::string>* getStringVecAttr(const grh::Graph* graph, const grh::Operation& op,
-                                                 std::string_view key) {
-    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
-    if (!keyId.valid()) {
-        return nullptr;
+std::optional<std::vector<std::string>> getStringVecAttr(const grh::ir::Graph* graph,
+                                                         const grh::ir::Operation& op,
+                                                         std::string_view key) {
+    (void)graph;
+    auto attr = op.attr(key);
+    const auto* value = attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
     }
-    auto attr = op.attr(keyId);
-    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    return *value;
 }
 
-bool buildNetlist(const std::filesystem::path& sourcePath, grh::Netlist& netlist,
+bool buildNetlist(const std::filesystem::path& sourcePath, grh::ir::Netlist& netlist,
                   ElaborateDiagnostics& diagnostics) {
     if (!std::filesystem::exists(sourcePath)) {
         std::cerr << "[elaborate_blackbox] Missing testcase file: " << sourcePath << '\n';
@@ -92,7 +91,7 @@ bool buildNetlist(const std::filesystem::path& sourcePath, grh::Netlist& netlist
     return true;
 }
 
-int validateBlackbox(const grh::Netlist& netlist) {
+int validateBlackbox(const grh::ir::Netlist& netlist) {
     if (netlist.topGraphs().empty()) {
         return fail("netlist", "No top graphs produced");
     }
@@ -102,7 +101,7 @@ int validateBlackbox(const grh::Netlist& netlist) {
         return fail("netlist", "Unexpected top graph name: " + topName);
     }
 
-    const grh::Graph* topGraph = netlist.findGraph(topName);
+    const grh::ir::Graph* topGraph = netlist.findGraph(topName);
     if (!topGraph) {
         return fail("netlist", "Top graph lookup failed");
     }
@@ -126,8 +125,8 @@ int validateBlackbox(const grh::Netlist& netlist) {
 
     std::vector<OperationId> blackboxes;
     for (const auto& opId : topGraph->operations()) {
-        const grh::Operation op = topGraph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kBlackbox) {
+        const grh::ir::Operation op = topGraph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kBlackbox) {
             continue;
         }
         if (!getStringAttr(topGraph, op, "moduleName")) {
@@ -140,18 +139,18 @@ int validateBlackbox(const grh::Netlist& netlist) {
         return fail("ops", "Expected two kBlackbox operations in top graph");
     }
 
-    auto checkPortNames = [&](const grh::Operation& op) -> bool {
-        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
-        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+    auto checkPortNames = [&](const grh::ir::Operation& op) -> bool {
+        auto inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        auto outputNames = getStringVecAttr(topGraph, op, "outputPortName");
         return inputNames &&
                outputNames &&
                *inputNames == std::vector<std::string>{"clk", "in0", "in1"} &&
                *outputNames == std::vector<std::string>{"out0"};
     };
 
-    auto checkParams = [&](const grh::Operation& op, const std::string& expectedDepth) -> bool {
-        const auto* paramNames = getStringVecAttr(topGraph, op, "parameterNames");
-        const auto* paramValues = getStringVecAttr(topGraph, op, "parameterValues");
+    auto checkParams = [&](const grh::ir::Operation& op, const std::string& expectedDepth) -> bool {
+        auto paramNames = getStringVecAttr(topGraph, op, "parameterNames");
+        auto paramValues = getStringVecAttr(topGraph, op, "parameterValues");
         if (!paramNames || !paramValues) {
             return false;
         }
@@ -171,7 +170,7 @@ int validateBlackbox(const grh::Netlist& netlist) {
     bool foundGen = false;
 
     for (OperationId opId : blackboxes) {
-        const grh::Operation op = topGraph->getOperation(opId);
+        const grh::ir::Operation op = topGraph->getOperation(opId);
         auto moduleNameOpt = getStringAttr(topGraph, op, "moduleName");
         auto instanceNameOpt = getStringAttr(topGraph, op, "instanceName");
         if (!moduleNameOpt || !instanceNameOpt) {
@@ -223,7 +222,7 @@ int main() {
     const std::filesystem::path dataPath = std::filesystem::path(WOLF_SV_ELAB_BLACKBOX_DATA_PATH);
 
     ElaborateDiagnostics diagnostics;
-    grh::Netlist netlist;
+    grh::ir::Netlist netlist;
     if (!buildNetlist(dataPath, netlist, diagnostics)) {
         return 1;
     }

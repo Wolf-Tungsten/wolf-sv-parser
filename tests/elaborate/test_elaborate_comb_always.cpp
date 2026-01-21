@@ -37,7 +37,7 @@ const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo,
     return nullptr;
 }
 
-ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+ValueId findPort(const grh::ir::Graph& graph, std::string_view name, bool isInput) {
     const auto ports = isInput ? graph.inputPorts() : graph.outputPorts();
     for (const auto& port : ports) {
         if (graph.symbolText(port.name) == name) {
@@ -47,7 +47,7 @@ ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
     return ValueId::invalid();
 }
 
-bool writeArtifact(const grh::Netlist& netlist) {
+bool writeArtifact(const grh::ir::Netlist& netlist) {
     const std::filesystem::path artifactPath(WOLF_SV_ELAB_COMB_ALWAYS_ARTIFACT_PATH);
     if (artifactPath.empty()) {
         return true;
@@ -131,7 +131,7 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     if (!writeArtifact(netlist)) {
         return fail("Failed to write comb always artifact");
@@ -155,11 +155,11 @@ int main() {
         return elaborator.peekNetMemo(fetchBody(inst));
     };
 
-    auto fetchGraphByName = [&](std::string_view name) -> grh::Graph* {
+    auto fetchGraphByName = [&](std::string_view name) -> grh::ir::Graph* {
         return netlist.findGraph(name);
     };
 
-    auto getAssignSource = [](const grh::Graph& graph, const SignalMemoEntry& entry) -> ValueId {
+    auto getAssignSource = [](const grh::ir::Graph& graph, const SignalMemoEntry& entry) -> ValueId {
         if (!entry.value) {
             return ValueId::invalid();
         }
@@ -167,8 +167,8 @@ int main() {
         if (!assignId) {
             return ValueId::invalid();
         }
-        const grh::Operation assign = graph.getOperation(assignId);
-        if (assign.kind() != grh::OperationKind::kAssign || assign.operands().size() != 1) {
+        const grh::ir::Operation assign = graph.getOperation(assignId);
+        if (assign.kind() != grh::ir::OperationKind::kAssign || assign.operands().size() != 1) {
             return ValueId::invalid();
         }
         return assign.operands().front();
@@ -179,7 +179,7 @@ int main() {
         return fail("comb_always_stage12_case top instance not found");
     }
 
-    grh::Graph* graph = fetchGraphByName("comb_always_stage12_case");
+    grh::ir::Graph* graph = fetchGraphByName("comb_always_stage12_case");
     if (!graph) {
         return fail("GRH graph comb_always_stage12_case not found");
     }
@@ -202,7 +202,7 @@ int main() {
         return fail("Failed to locate capture_a/capture_b/or_value memo entries");
     }
 
-    auto verifyAssignOperand = [&](const grh::Graph& graphRef, const SignalMemoEntry& entry,
+    auto verifyAssignOperand = [&](const grh::ir::Graph& graphRef, const SignalMemoEntry& entry,
                                    ValueId expected) -> bool {
         if (!entry.value) {
             fail(std::string(entry.symbol->name) + " memo missing GRH value");
@@ -213,8 +213,8 @@ int main() {
             fail(std::string(entry.symbol->name) + " is not driven by kAssign");
             return false;
         }
-        const grh::Operation assign = graphRef.getOperation(assignId);
-        if (assign.kind() != grh::OperationKind::kAssign) {
+        const grh::ir::Operation assign = graphRef.getOperation(assignId);
+        if (assign.kind() != grh::ir::OperationKind::kAssign) {
             fail(std::string(entry.symbol->name) + " is not driven by kAssign");
             return false;
         }
@@ -239,8 +239,8 @@ int main() {
     if (!orAssignId) {
         return fail("or_value is not driven by assign as expected");
     }
-    const grh::Operation orAssign = graph->getOperation(orAssignId);
-    if (orAssign.kind() != grh::OperationKind::kAssign ||
+    const grh::ir::Operation orAssign = graph->getOperation(orAssignId);
+    if (orAssign.kind() != grh::ir::OperationKind::kAssign ||
         orAssign.operands().empty()) {
         return fail("or_value is not driven by assign as expected");
     }
@@ -249,8 +249,8 @@ int main() {
     if (!orOpId) {
         return fail("or_value assign is expected to originate from kOr");
     }
-    const grh::Operation orOp = graph->getOperation(orOpId);
-    if (orOp.kind() != grh::OperationKind::kOr || orOp.operands().size() != 2) {
+    const grh::ir::Operation orOp = graph->getOperation(orOpId);
+    if (orOp.kind() != grh::ir::OperationKind::kOr || orOp.operands().size() != 2) {
         return fail("or_value assign is expected to originate from kOr");
     }
     if ((orOp.operands()[0] != portInA || orOp.operands()[1] != portInB) &&
@@ -263,7 +263,7 @@ int main() {
     if (!instIf) {
         return fail("comb_always_stage13_if top instance not found");
     }
-    grh::Graph* graphIf = fetchGraphByName("comb_always_stage13_if");
+    grh::ir::Graph* graphIf = fetchGraphByName("comb_always_stage13_if");
     if (!graphIf) {
         return fail("GRH graph comb_always_stage13_if not found");
     }
@@ -277,7 +277,7 @@ int main() {
     if (!outIf || !outNested) {
         return fail("Failed to locate out_if/out_nested memo entries");
     }
-    auto verifyDrivenByMux = [&](const grh::Graph& graphRef, const SignalMemoEntry& entry,
+    auto verifyDrivenByMux = [&](const grh::ir::Graph& graphRef, const SignalMemoEntry& entry,
                                  std::string_view label) -> bool {
         ValueId driver = getAssignSource(graphRef, entry);
         if (!driver) {
@@ -289,14 +289,14 @@ int main() {
             std::cerr << "[elaborate_comb_always] " << label << " missing mux op\n";
             return false;
         }
-        const grh::Operation mux = graphRef.getOperation(muxId);
-        if (mux.kind() != grh::OperationKind::kMux) {
+        const grh::ir::Operation mux = graphRef.getOperation(muxId);
+        if (mux.kind() != grh::ir::OperationKind::kMux) {
             std::cerr << "[elaborate_comb_always] " << label << " is not driven by kMux\n";
             return false;
         }
         return true;
     };
-    auto verifyDirectWithoutMux = [&](const grh::Graph& graphRef, const SignalMemoEntry& entry,
+    auto verifyDirectWithoutMux = [&](const grh::ir::Graph& graphRef, const SignalMemoEntry& entry,
                                       ValueId expected, std::string_view label) -> bool {
         if (!verifyAssignOperand(graphRef, entry, expected)) {
             return false;
@@ -308,8 +308,8 @@ int main() {
         }
         OperationId opId = graphRef.getValue(driver).definingOp();
         if (opId) {
-            const grh::Operation op = graphRef.getOperation(opId);
-            if (op.kind() == grh::OperationKind::kMux) {
+            const grh::ir::Operation op = graphRef.getOperation(opId);
+            if (op.kind() == grh::ir::OperationKind::kMux) {
                 std::cerr << "[elaborate_comb_always] " << label
                           << " unexpectedly driven by kMux under static condition\n";
                 return false;
@@ -329,7 +329,7 @@ int main() {
     if (!instCase) {
         return fail("comb_always_stage13_case top instance not found");
     }
-    grh::Graph* graphCase = fetchGraphByName("comb_always_stage13_case");
+    grh::ir::Graph* graphCase = fetchGraphByName("comb_always_stage13_case");
     if (!graphCase) {
         return fail("GRH graph comb_always_stage13_case not found");
     }
@@ -349,8 +349,8 @@ int main() {
     if (!caseMuxId) {
         return fail("out_case missing mux op");
     }
-    const grh::Operation caseMux = graphCase->getOperation(caseMuxId);
-    if (caseMux.kind() != grh::OperationKind::kMux) {
+    const grh::ir::Operation caseMux = graphCase->getOperation(caseMuxId);
+    if (caseMux.kind() != grh::ir::OperationKind::kMux) {
         return fail("out_case is not driven by outer kMux");
     }
     bool hasNestedMux = false;
@@ -360,8 +360,8 @@ int main() {
             OperationId branchOpId = branch ? graphCase->getValue(branch).definingOp()
                                             : OperationId::invalid();
             if (branchOpId) {
-                const grh::Operation branchOp = graphCase->getOperation(branchOpId);
-                if (branchOp.kind() == grh::OperationKind::kMux) {
+                const grh::ir::Operation branchOp = graphCase->getOperation(branchOpId);
+                if (branchOp.kind() == grh::ir::OperationKind::kMux) {
                     hasNestedMux = true;
                     break;
                 }
@@ -378,7 +378,7 @@ int main() {
     if (!instDefault) {
         return fail("comb_always_stage13_default_if top instance not found");
     }
-    grh::Graph* graphDefault = fetchGraphByName("comb_always_stage13_default_if");
+    grh::ir::Graph* graphDefault = fetchGraphByName("comb_always_stage13_default_if");
     if (!graphDefault) {
         return fail("GRH graph comb_always_stage13_default_if not found");
     }
@@ -398,8 +398,8 @@ int main() {
     if (!defaultMuxId) {
         return fail("out_default missing mux op");
     }
-    const grh::Operation defaultMux = graphDefault->getOperation(defaultMuxId);
-    if (defaultMux.kind() != grh::OperationKind::kMux ||
+    const grh::ir::Operation defaultMux = graphDefault->getOperation(defaultMuxId);
+    if (defaultMux.kind() != grh::ir::OperationKind::kMux ||
         defaultMux.operands().size() != 3) {
         return fail("out_default is expected to be driven by a 2-way kMux");
     }
@@ -429,7 +429,7 @@ int main() {
             fail(std::string(instanceName) + " top instance not found");
             return false;
         }
-        grh::Graph* g = fetchGraphByName(instanceName);
+        grh::ir::Graph* g = fetchGraphByName(instanceName);
         if (!g) {
             fail(std::string("GRH graph ") + std::string(instanceName) + " not found");
             return false;
@@ -450,8 +450,8 @@ int main() {
         return true;
     };
 
-    auto collectLeavesForOp = [&](const grh::Graph& graph, ValueId root,
-                                  grh::OperationKind foldKind,
+    auto collectLeavesForOp = [&](const grh::ir::Graph& graph, ValueId root,
+                                  grh::ir::OperationKind foldKind,
                                   std::unordered_set<ValueId, grh::ir::ValueIdHash>& leaves) {
         if (!root) {
             return;
@@ -466,7 +466,7 @@ int main() {
                 leaves.insert(node);
                 continue;
             }
-            const grh::Operation op = graph.getOperation(opId);
+            const grh::ir::Operation op = graph.getOperation(opId);
             if (op.kind() != foldKind) {
                 leaves.insert(node);
                 continue;
@@ -493,7 +493,7 @@ int main() {
     if (!instStaticIf) {
         return fail("comb_always_stage14_static_if top instance not found");
     }
-    grh::Graph* graphStaticIf = fetchGraphByName("comb_always_stage14_static_if");
+    grh::ir::Graph* graphStaticIf = fetchGraphByName("comb_always_stage14_static_if");
     if (!graphStaticIf) {
         return fail("GRH graph comb_always_stage14_static_if not found");
     }
@@ -533,7 +533,7 @@ int main() {
     if (!mixedMuxId) {
         return fail("out_mixed missing mux op");
     }
-    const grh::Operation mixedMux = graphStaticIf->getOperation(mixedMuxId);
+    const grh::ir::Operation mixedMux = graphStaticIf->getOperation(mixedMuxId);
     if (mixedMux.operands().size() != 3) {
         return fail("out_mixed mux expected to have 3 operands");
     }
@@ -553,7 +553,7 @@ int main() {
     if (!instStaticCase) {
         return fail("comb_always_stage14_static_case top instance not found");
     }
-    grh::Graph* graphStaticCase = fetchGraphByName("comb_always_stage14_static_case");
+    grh::ir::Graph* graphStaticCase = fetchGraphByName("comb_always_stage14_static_case");
     if (!graphStaticCase) {
         return fail("GRH graph comb_always_stage14_static_case not found");
     }
@@ -599,7 +599,7 @@ int main() {
     if (!nestedMuxId) {
         return fail("out_case_nested missing mux op");
     }
-    const grh::Operation nestedMux = graphStaticCase->getOperation(nestedMuxId);
+    const grh::ir::Operation nestedMux = graphStaticCase->getOperation(nestedMuxId);
     if (nestedMux.operands().size() != 3) {
         return fail("out_case_nested mux expected to have 3 operands");
     }
@@ -620,7 +620,7 @@ int main() {
         if (!instStage15For) {
             return fail("comb_always_stage15_for top instance not found");
         }
-        grh::Graph* graphStage15For = fetchGraphByName("comb_always_stage15_for");
+        grh::ir::Graph* graphStage15For = fetchGraphByName("comb_always_stage15_for");
         if (!graphStage15For) {
             return fail("GRH graph comb_always_stage15_for not found");
         }
@@ -640,7 +640,7 @@ int main() {
             return fail("out_for missing assign driver");
         }
         std::unordered_set<ValueId, grh::ir::ValueIdHash> orLeaves;
-        collectLeavesForOp(*graphStage15For, forDriver, grh::OperationKind::kOr, orLeaves);
+        collectLeavesForOp(*graphStage15For, forDriver, grh::ir::OperationKind::kOr, orLeaves);
         if (!orLeaves.count(portEven) || !orLeaves.count(portOdd)) {
             return fail("out_for kOr tree does not reference both data_even and data_odd inputs");
         }
@@ -653,7 +653,7 @@ int main() {
         if (!instStage15Foreach) {
             return fail("comb_always_stage15_foreach top instance not found");
         }
-        grh::Graph* graphStage15Foreach = fetchGraphByName("comb_always_stage15_foreach");
+        grh::ir::Graph* graphStage15Foreach = fetchGraphByName("comb_always_stage15_foreach");
         if (!graphStage15Foreach) {
             return fail("GRH graph comb_always_stage15_foreach not found");
         }
@@ -674,7 +674,7 @@ int main() {
             return fail("out_foreach missing assign driver");
         }
         std::unordered_set<ValueId, grh::ir::ValueIdHash> xorLeaves;
-        collectLeavesForOp(*graphStage15Foreach, foreachDriver, grh::OperationKind::kXor,
+        collectLeavesForOp(*graphStage15Foreach, foreachDriver, grh::ir::OperationKind::kXor,
                            xorLeaves);
         if (!xorLeaves.count(portSrc0) || !xorLeaves.count(portSrc1)) {
             return fail("out_foreach kXor tree does not reference src0/src1 inputs");
@@ -688,7 +688,7 @@ int main() {
         if (!instStage15Break) {
             return fail("comb_always_stage15_break top instance not found");
         }
-        grh::Graph* graphStage15Break = fetchGraphByName("comb_always_stage15_break");
+        grh::ir::Graph* graphStage15Break = fetchGraphByName("comb_always_stage15_break");
         if (!graphStage15Break) {
             return fail("GRH graph comb_always_stage15_break not found");
         }
@@ -713,7 +713,7 @@ int main() {
         if (!instStage15Continue) {
             return fail("comb_always_stage15_continue top instance not found");
         }
-        grh::Graph* graphStage15Continue = fetchGraphByName("comb_always_stage15_continue");
+        grh::ir::Graph* graphStage15Continue = fetchGraphByName("comb_always_stage15_continue");
         if (!graphStage15Continue) {
             return fail("GRH graph comb_always_stage15_continue not found");
         }

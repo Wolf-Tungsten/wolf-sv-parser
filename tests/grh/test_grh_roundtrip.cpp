@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-using namespace wolf_sv::grh;
+using namespace wolf_sv::grh::ir;
 
 namespace
 {
@@ -32,7 +32,7 @@ namespace
                lhs->endColumn == rhs->endColumn;
     }
 
-    std::string compareViews(const ir::GraphView &lhs, const ir::GraphView &rhs)
+    std::string compareViews(const GraphView &lhs, const GraphView &rhs)
     {
         auto lhsValues = lhs.values();
         auto rhsValues = rhs.values();
@@ -220,8 +220,6 @@ int main()
         auto symOutVal = graphSymbols.intern("out_val");
         auto symAdd = graphSymbols.intern("add0");
         auto symAssign = graphSymbols.intern("assign0");
-        auto symDelay = graphSymbols.intern("delay");
-        auto symLabel = graphSymbols.intern("label");
 
         auto vA = builder.addValue(symA, 8, false);
         auto vB = builder.addValue(symB, 8, false);
@@ -241,8 +239,8 @@ int main()
         builder.bindInputPort(symPortB, vB);
         builder.bindOutputPort(symPortOut, vOut);
 
-        builder.setAttr(opAdd, symDelay, AttributeValue(int64_t(3)));
-        builder.setAttr(opAdd, symLabel, AttributeValue(std::string("fast")));
+        builder.setAttr(opAdd, "delay", AttributeValue(int64_t(3)));
+        builder.setAttr(opAdd, "label", AttributeValue(std::string("fast")));
 
         SrcLoc opLoc;
         opLoc.file = "roundtrip.sv";

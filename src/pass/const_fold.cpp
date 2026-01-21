@@ -35,59 +35,55 @@ namespace wolf_sv::transform
 
         using ConstantStore = std::unordered_map<grh::ir::ValueId, ConstantValue, grh::ir::ValueIdHash>;
 
-        bool isFoldable(grh::OperationKind kind)
+        bool isFoldable(grh::ir::OperationKind kind)
         {
             switch (kind)
             {
-            case grh::OperationKind::kAdd:
-            case grh::OperationKind::kSub:
-            case grh::OperationKind::kMul:
-            case grh::OperationKind::kDiv:
-            case grh::OperationKind::kMod:
-            case grh::OperationKind::kEq:
-            case grh::OperationKind::kNe:
-            case grh::OperationKind::kLt:
-            case grh::OperationKind::kLe:
-            case grh::OperationKind::kGt:
-            case grh::OperationKind::kGe:
-            case grh::OperationKind::kAnd:
-            case grh::OperationKind::kOr:
-            case grh::OperationKind::kXor:
-            case grh::OperationKind::kXnor:
-            case grh::OperationKind::kNot:
-            case grh::OperationKind::kLogicAnd:
-            case grh::OperationKind::kLogicOr:
-            case grh::OperationKind::kLogicNot:
-            case grh::OperationKind::kReduceAnd:
-            case grh::OperationKind::kReduceOr:
-            case grh::OperationKind::kReduceXor:
-            case grh::OperationKind::kReduceNor:
-            case grh::OperationKind::kReduceNand:
-            case grh::OperationKind::kReduceXnor:
-            case grh::OperationKind::kShl:
-            case grh::OperationKind::kLShr:
-            case grh::OperationKind::kAShr:
-            case grh::OperationKind::kMux:
-            case grh::OperationKind::kAssign:
-            case grh::OperationKind::kConcat:
-            case grh::OperationKind::kReplicate:
-            case grh::OperationKind::kSliceStatic:
-            case grh::OperationKind::kSliceDynamic:
-            case grh::OperationKind::kSliceArray:
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+            case grh::ir::OperationKind::kAnd:
+            case grh::ir::OperationKind::kOr:
+            case grh::ir::OperationKind::kXor:
+            case grh::ir::OperationKind::kXnor:
+            case grh::ir::OperationKind::kNot:
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
+            case grh::ir::OperationKind::kMux:
+            case grh::ir::OperationKind::kAssign:
+            case grh::ir::OperationKind::kConcat:
+            case grh::ir::OperationKind::kReplicate:
+            case grh::ir::OperationKind::kSliceStatic:
+            case grh::ir::OperationKind::kSliceDynamic:
+            case grh::ir::OperationKind::kSliceArray:
                 return true;
             default:
                 return false;
             }
         }
 
-        std::optional<std::string> getStringAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
+        std::optional<std::string> getStringAttr(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
         {
-            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-            if (!keyId.valid())
-            {
-                return std::nullopt;
-            }
-            auto attr = op.attr(keyId);
+            (void)graph;
+            auto attr = op.attr(key);
             if (!attr)
             {
                 return std::nullopt;
@@ -99,14 +95,10 @@ namespace wolf_sv::transform
             return std::nullopt;
         }
 
-        std::optional<int64_t> getIntAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
+        std::optional<int64_t> getIntAttr(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
         {
-            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-            if (!keyId.valid())
-            {
-                return std::nullopt;
-            }
-            auto attr = op.attr(keyId);
+            (void)graph;
+            auto attr = op.attr(key);
             if (!attr)
             {
                 return std::nullopt;
@@ -118,7 +110,7 @@ namespace wolf_sv::transform
             return std::nullopt;
         }
 
-        std::optional<ConstantValue> parseConstLiteral(const grh::Graph &graph, const grh::Operation &op, const grh::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
+        std::optional<ConstantValue> parseConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op, const grh::ir::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
         {
             try
             {
@@ -142,7 +134,7 @@ namespace wolf_sv::transform
             }
         }
 
-        std::optional<ConstantValue> parseConstValue(const grh::Graph &graph, const grh::Operation &op, const grh::Value &value, const std::function<void(std::string)> &onError)
+        std::optional<ConstantValue> parseConstValue(const grh::ir::Graph &graph, const grh::ir::Operation &op, const grh::ir::Value &value, const std::function<void(std::string)> &onError)
         {
             auto literalOpt = getStringAttr(graph, op, "constValue");
             if (!literalOpt)
@@ -153,7 +145,7 @@ namespace wolf_sv::transform
             return parseConstLiteral(graph, op, value, *literalOpt, onError);
         }
 
-        bool operandsAreConstant(const grh::Operation &op, const ConstantStore &store)
+        bool operandsAreConstant(const grh::ir::Operation &op, const ConstantStore &store)
         {
             const auto operands = op.operands();
             for (std::size_t i = 0; i < operands.size(); ++i)
@@ -171,7 +163,7 @@ namespace wolf_sv::transform
             return true;
         }
 
-        slang::SVInt normalizeToValue(const grh::Value &value, const slang::SVInt &raw)
+        slang::SVInt normalizeToValue(const grh::ir::Value &value, const slang::SVInt &raw)
         {
             slang::SVInt adjusted = raw;
             adjusted.setSigned(value.isSigned());
@@ -180,51 +172,51 @@ namespace wolf_sv::transform
             return adjusted;
         }
 
-        std::optional<slang::SVInt> foldBinary(const grh::Operation &op, grh::OperationKind kind, const std::vector<slang::SVInt> &operands)
+        std::optional<slang::SVInt> foldBinary(const grh::ir::Operation &op, grh::ir::OperationKind kind, const std::vector<slang::SVInt> &operands)
         {
             const slang::SVInt &lhs = operands[0];
             const slang::SVInt &rhs = operands[1];
             switch (kind)
             {
-            case grh::OperationKind::kAdd:
+            case grh::ir::OperationKind::kAdd:
                 return lhs + rhs;
-            case grh::OperationKind::kSub:
+            case grh::ir::OperationKind::kSub:
                 return lhs - rhs;
-            case grh::OperationKind::kMul:
+            case grh::ir::OperationKind::kMul:
                 return lhs * rhs;
-            case grh::OperationKind::kDiv:
+            case grh::ir::OperationKind::kDiv:
                 return lhs / rhs;
-            case grh::OperationKind::kMod:
+            case grh::ir::OperationKind::kMod:
                 return lhs % rhs;
-            case grh::OperationKind::kAnd:
+            case grh::ir::OperationKind::kAnd:
                 return lhs & rhs;
-            case grh::OperationKind::kOr:
+            case grh::ir::OperationKind::kOr:
                 return lhs | rhs;
-            case grh::OperationKind::kXor:
+            case grh::ir::OperationKind::kXor:
                 return lhs ^ rhs;
-            case grh::OperationKind::kXnor:
+            case grh::ir::OperationKind::kXnor:
                 return ~(lhs ^ rhs);
-            case grh::OperationKind::kEq:
+            case grh::ir::OperationKind::kEq:
                 return slang::SVInt(lhs == rhs);
-            case grh::OperationKind::kNe:
+            case grh::ir::OperationKind::kNe:
                 return slang::SVInt(lhs != rhs);
-            case grh::OperationKind::kLt:
+            case grh::ir::OperationKind::kLt:
                 return slang::SVInt(lhs < rhs);
-            case grh::OperationKind::kLe:
+            case grh::ir::OperationKind::kLe:
                 return slang::SVInt(lhs <= rhs);
-            case grh::OperationKind::kGt:
+            case grh::ir::OperationKind::kGt:
                 return slang::SVInt(lhs > rhs);
-            case grh::OperationKind::kGe:
+            case grh::ir::OperationKind::kGe:
                 return slang::SVInt(lhs >= rhs);
-            case grh::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicAnd:
                 return slang::SVInt(lhs && rhs);
-            case grh::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kLogicOr:
                 return slang::SVInt(lhs || rhs);
-            case grh::OperationKind::kShl:
+            case grh::ir::OperationKind::kShl:
                 return lhs.shl(rhs);
-            case grh::OperationKind::kLShr:
+            case grh::ir::OperationKind::kLShr:
                 return lhs.lshr(rhs);
-            case grh::OperationKind::kAShr:
+            case grh::ir::OperationKind::kAShr:
                 return lhs.ashr(rhs);
             default:
                 (void)op;
@@ -232,25 +224,25 @@ namespace wolf_sv::transform
             }
         }
 
-        std::optional<slang::SVInt> foldUnary(const grh::Operation &op, grh::OperationKind kind, const slang::SVInt &operand)
+        std::optional<slang::SVInt> foldUnary(const grh::ir::Operation &op, grh::ir::OperationKind kind, const slang::SVInt &operand)
         {
             switch (kind)
             {
-            case grh::OperationKind::kNot:
+            case grh::ir::OperationKind::kNot:
                 return ~operand;
-            case grh::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kLogicNot:
                 return slang::SVInt(!operand);
-            case grh::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceAnd:
                 return slang::SVInt(operand.reductionAnd());
-            case grh::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceOr:
                 return slang::SVInt(operand.reductionOr());
-            case grh::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceXor:
                 return slang::SVInt(operand.reductionXor());
-            case grh::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNor:
                 return slang::SVInt(!operand.reductionOr());
-            case grh::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceNand:
                 return slang::SVInt(!operand.reductionAnd());
-            case grh::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kReduceXnor:
                 return slang::SVInt(!operand.reductionXor());
             default:
                 (void)op;
@@ -258,7 +250,7 @@ namespace wolf_sv::transform
             }
         }
 
-        std::optional<std::vector<slang::SVInt>> foldOperation(const grh::Graph &graph, const grh::Operation &op, const ConstantStore &store, const FoldOptions options, const std::function<void(std::string)> &onError, const std::function<void(std::string)> &onWarning)
+        std::optional<std::vector<slang::SVInt>> foldOperation(const grh::ir::Graph &graph, const grh::ir::Operation &op, const ConstantStore &store, const FoldOptions options, const std::function<void(std::string)> &onError, const std::function<void(std::string)> &onWarning)
         {
             if (op.results().empty())
             {
@@ -294,45 +286,45 @@ namespace wolf_sv::transform
             std::optional<slang::SVInt> folded;
             switch (op.kind())
             {
-            case grh::OperationKind::kAdd:
-            case grh::OperationKind::kSub:
-            case grh::OperationKind::kMul:
-            case grh::OperationKind::kDiv:
-            case grh::OperationKind::kMod:
-            case grh::OperationKind::kEq:
-            case grh::OperationKind::kNe:
-            case grh::OperationKind::kLt:
-            case grh::OperationKind::kLe:
-            case grh::OperationKind::kGt:
-            case grh::OperationKind::kGe:
-            case grh::OperationKind::kAnd:
-            case grh::OperationKind::kOr:
-            case grh::OperationKind::kXor:
-            case grh::OperationKind::kXnor:
-            case grh::OperationKind::kLogicAnd:
-            case grh::OperationKind::kLogicOr:
-            case grh::OperationKind::kShl:
-            case grh::OperationKind::kLShr:
-            case grh::OperationKind::kAShr:
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+            case grh::ir::OperationKind::kAnd:
+            case grh::ir::OperationKind::kOr:
+            case grh::ir::OperationKind::kXor:
+            case grh::ir::OperationKind::kXnor:
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
                 folded = foldBinary(op, op.kind(), operands);
                 break;
-            case grh::OperationKind::kNot:
-            case grh::OperationKind::kLogicNot:
-            case grh::OperationKind::kReduceAnd:
-            case grh::OperationKind::kReduceOr:
-            case grh::OperationKind::kReduceXor:
-            case grh::OperationKind::kReduceNor:
-            case grh::OperationKind::kReduceNand:
-            case grh::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kNot:
+            case grh::ir::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceXnor:
                 folded = foldUnary(op, op.kind(), operands[0]);
                 break;
-            case grh::OperationKind::kAssign:
+            case grh::ir::OperationKind::kAssign:
                 folded = operands[0];
                 break;
-            case grh::OperationKind::kConcat:
+            case grh::ir::OperationKind::kConcat:
                 folded = slang::SVInt::concat(operands);
                 break;
-            case grh::OperationKind::kReplicate:
+            case grh::ir::OperationKind::kReplicate:
             {
                 auto repOpt = getIntAttr(graph, op, "rep");
                 if (!repOpt)
@@ -349,10 +341,10 @@ namespace wolf_sv::transform
                 folded = operands[0].replicate(times);
                 break;
             }
-            case grh::OperationKind::kMux:
+            case grh::ir::OperationKind::kMux:
                 folded = slang::SVInt::conditional(operands[0], operands[1], operands[2]);
                 break;
-            case grh::OperationKind::kSliceStatic:
+            case grh::ir::OperationKind::kSliceStatic:
             {
                 auto startOpt = getIntAttr(graph, op, "sliceStart");
                 auto endOpt = getIntAttr(graph, op, "sliceEnd");
@@ -372,8 +364,8 @@ namespace wolf_sv::transform
                 folded = operands[0].lshr(static_cast<slang::bitwidth_t>(start)).trunc(static_cast<slang::bitwidth_t>(width));
                 break;
             }
-            case grh::OperationKind::kSliceDynamic:
-            case grh::OperationKind::kSliceArray:
+            case grh::ir::OperationKind::kSliceDynamic:
+            case grh::ir::OperationKind::kSliceArray:
             {
                 auto widthOpt = getIntAttr(graph, op, "sliceWidth");
                 if (!widthOpt)
@@ -417,7 +409,7 @@ namespace wolf_sv::transform
             return results;
         }
 
-        std::string makeUniqueSymbol(const grh::Graph &graph, std::string base, bool isOperation)
+        std::string makeUniqueSymbol(const grh::ir::Graph &graph, std::string base, bool isOperation)
         {
             std::string candidate = std::move(base);
             int counter = 0;
@@ -439,7 +431,7 @@ namespace wolf_sv::transform
             return value.toString(slang::LiteralBase::Hex, true, width);
         }
 
-        grh::ir::ValueId createConstant(grh::Graph &graph, const grh::Operation &sourceOp, std::size_t resultIndex, const slang::SVInt &value)
+        grh::ir::ValueId createConstant(grh::ir::Graph &graph, const grh::ir::Operation &sourceOp, std::size_t resultIndex, const slang::SVInt &value)
         {
             std::ostringstream base;
             base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
@@ -452,13 +444,13 @@ namespace wolf_sv::transform
             const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
             const grh::ir::SymbolId opSym = graph.internSymbol(opName);
             const grh::ir::ValueId newValue = graph.createValue(valueSym, static_cast<int32_t>(value.getBitWidth()), value.isSigned());
-            const grh::ir::OperationId constOp = graph.createOperation(grh::OperationKind::kConstant, opSym);
+            const grh::ir::OperationId constOp = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(constOp, newValue);
-            graph.setAttr(constOp, graph.internSymbol("constValue"), formatConstLiteral(value));
+            graph.setAttr(constOp, "constValue", formatConstLiteral(value));
             return newValue;
         }
 
-        void replaceUsers(grh::Graph &graph, grh::ir::ValueId oldValue, grh::ir::ValueId newValue, const std::function<void(std::string)> &onError)
+        void replaceUsers(grh::ir::Graph &graph, grh::ir::ValueId oldValue, grh::ir::ValueId newValue, const std::function<void(std::string)> &onError)
         {
             try
             {
@@ -521,11 +513,11 @@ namespace wolf_sv::transform
         // Seed constant table from existing kConstant ops.
         for (const auto &graphEntry : netlist().graphs())
         {
-            const grh::Graph &graph = *graphEntry.second;
+            const grh::ir::Graph &graph = *graphEntry.second;
             for (const auto opId : graph.operations())
             {
-                const grh::Operation op = graph.getOperation(opId);
-                if (op.kind() != grh::OperationKind::kConstant)
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kConstant)
                 {
                     continue;
                 }
@@ -543,7 +535,7 @@ namespace wolf_sv::transform
                     }
                     auto reportError = [&](const std::string &msg)
                     { this->error(graph, op, msg); failed = true; };
-                    grh::Value res = graph.getValue(resId);
+                    grh::ir::Value res = graph.getValue(resId);
                     auto parsed = parseConstValue(graph, op, res, reportError);
                     if (!parsed)
                     {
@@ -563,13 +555,13 @@ namespace wolf_sv::transform
 
             for (const auto &graphEntry : netlist().graphs())
             {
-                grh::Graph &graph = *graphEntry.second;
+                grh::ir::Graph &graph = *graphEntry.second;
                 std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(), graph.operations().end());
                 std::vector<grh::ir::OperationId> opsToErase;
                 for (const auto opId : opOrder)
                 {
-                    const grh::Operation op = graph.getOperation(opId);
-                    if (op.kind() == grh::OperationKind::kConstant || !isFoldable(op.kind()))
+                    const grh::ir::Operation op = graph.getOperation(opId);
+                    if (op.kind() == grh::ir::OperationKind::kConstant || !isFoldable(op.kind()))
                     {
                         continue;
                     }
@@ -621,7 +613,7 @@ namespace wolf_sv::transform
                 {
                     if (!graph.eraseOp(opId))
                     {
-                        const grh::Operation op = graph.getOperation(opId);
+                        const grh::ir::Operation op = graph.getOperation(opId);
                         error(graph, op, "Failed to erase folded operation");
                         failed = true;
                     }

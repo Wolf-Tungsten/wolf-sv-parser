@@ -23,7 +23,7 @@ int fail(const std::string& message) {
     return 1;
 }
 
-bool writeArtifact(const grh::Netlist& netlist) {
+bool writeArtifact(const grh::ir::Netlist& netlist) {
     const std::filesystem::path artifactPath(WOLF_SV_ELAB_LATCH_ARTIFACT_PATH);
     if (artifactPath.empty()) {
         return true;
@@ -56,17 +56,17 @@ bool writeArtifact(const grh::Netlist& netlist) {
     return true;
 }
 
-const grh::Graph* findGraph(const grh::Netlist& netlist, std::string_view name) {
+const grh::ir::Graph* findGraph(const grh::ir::Netlist& netlist, std::string_view name) {
     return netlist.findGraph(name);
 }
 
-ValueId findValue(const grh::Graph& graph, std::string_view name) {
+ValueId findValue(const grh::ir::Graph& graph, std::string_view name) {
     return graph.findValue(name);
 }
 
-OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+OperationId findOpByKind(const grh::ir::Graph& graph, grh::ir::OperationKind kind) {
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() == kind) {
             return opId;
         }
@@ -121,18 +121,18 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     if (!writeArtifact(netlist)) {
         return fail("Failed to write latch artifact JSON");
     }
 
-    auto expectLatchOp = [&](std::string_view graphName, grh::OperationKind kind,
+    auto expectLatchOp = [&](std::string_view graphName, grh::ir::OperationKind kind,
                              std::optional<std::string_view> enName,
                              std::optional<std::string_view> dataName,
                              std::optional<std::string_view> rstName,
                              std::optional<std::string_view> resetValName) -> bool {
-        const grh::Graph* graph = findGraph(netlist, graphName);
+        const grh::ir::Graph* graph = findGraph(netlist, graphName);
         if (!graph) {
             fail("Graph not found: " + std::string(graphName));
             return false;
@@ -142,13 +142,13 @@ int main() {
             fail("Latch op missing in graph: " + std::string(graphName));
             return false;
         }
-        const grh::Operation latch = graph->getOperation(latchId);
+        const grh::ir::Operation latch = graph->getOperation(latchId);
         const auto& operands = latch.operands();
         const auto& results = latch.results();
         if (results.size() != 1) {
             return fail("Latch results size mismatch in graph: " + std::string(graphName));
         }
-        if (kind == grh::OperationKind::kLatch) {
+        if (kind == grh::ir::OperationKind::kLatch) {
             if (operands.size() != 2) {
                 return fail("kLatch operand count mismatch");
             }
@@ -159,8 +159,8 @@ int main() {
             }
         }
 
-        const grh::Value enValue = graph->getValue(operands[0]);
-        const grh::Value dValue = graph->getValue(operands.back());
+        const grh::ir::Value enValue = graph->getValue(operands[0]);
+        const grh::ir::Value dValue = graph->getValue(operands.back());
         if (enValue.width() != 1) {
             fail("Latch enable mismatch");
             return false;
@@ -174,8 +174,8 @@ int main() {
             return false;
         }
         if (rstName) {
-            const grh::Value rstValue = graph->getValue(operands[1]);
-            const grh::Value resetValue = graph->getValue(operands[2]);
+            const grh::ir::Value rstValue = graph->getValue(operands[1]);
+            const grh::ir::Value resetValue = graph->getValue(operands[2]);
             if (rstValue.symbolText() != *rstName || rstValue.width() != 1) {
                 fail("Latch reset signal mismatch");
                 return false;
@@ -189,8 +189,8 @@ int main() {
                 return false;
             }
             if (resetValue.definingOp()) {
-                const grh::Operation defOp = graph->getOperation(resetValue.definingOp());
-                if (defOp.kind() != grh::OperationKind::kConstant) {
+                const grh::ir::Operation defOp = graph->getOperation(resetValue.definingOp());
+                if (defOp.kind() != grh::ir::OperationKind::kConstant) {
                     fail("Latch resetValue is not driven by constant");
                     return false;
                 }
@@ -199,23 +199,23 @@ int main() {
         return true;
     };
 
-    if (!expectLatchOp("latch_always_latch", grh::OperationKind::kLatch,
+    if (!expectLatchOp("latch_always_latch", grh::ir::OperationKind::kLatch,
                        std::optional<std::string_view>("en"),
                        std::optional<std::string_view>("d"), std::nullopt, std::nullopt)) {
         return 1;
     }
-    if (!expectLatchOp("latch_inferred", grh::OperationKind::kLatch,
+    if (!expectLatchOp("latch_inferred", grh::ir::OperationKind::kLatch,
                        std::optional<std::string_view>("en"),
                        std::optional<std::string_view>("d"), std::nullopt, std::nullopt)) {
         return 1;
     }
-    if (!expectLatchOp("latch_inferred_arst", grh::OperationKind::kLatchArst,
+    if (!expectLatchOp("latch_inferred_arst", grh::ir::OperationKind::kLatchArst,
                        std::optional<std::string_view>("en"),
                        std::optional<std::string_view>("d"),
                        std::optional<std::string_view>("rst"), std::nullopt)) {
         return 1;
     }
-    if (!expectLatchOp("latch_inferred_case", grh::OperationKind::kLatch, std::nullopt,
+    if (!expectLatchOp("latch_inferred_case", grh::ir::OperationKind::kLatch, std::nullopt,
                        std::optional<std::string_view>("a"), std::nullopt, std::nullopt)) {
         return 1;
     }

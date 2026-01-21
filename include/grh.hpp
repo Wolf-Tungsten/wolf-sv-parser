@@ -18,6 +18,8 @@ class JsonWriter;
 
 namespace wolf_sv::grh {
 
+namespace ir {
+
 enum class OperationKind {
     kConstant,
     kAdd,
@@ -85,10 +87,6 @@ enum class OperationKind {
 std::string_view toString(OperationKind kind) noexcept;
 std::optional<OperationKind> parseOperationKind(std::string_view text) noexcept;
 
-using Symbol = std::string;
-using ValueId = std::string;
-using OperationId = std::string;
-
 using AttributeValue = std::variant<bool, int64_t, double, std::string, std::vector<bool>, std::vector<int64_t>, std::vector<double>, std::vector<std::string>>;
 
 struct SrcLoc
@@ -105,8 +103,6 @@ using DebugInfo = SrcLoc;
 [[nodiscard]] bool attributeValueIsJsonSerializable(const AttributeValue &value);
 
 class Graph;
-
-namespace ir {
 
 struct SymbolId {
     uint32_t value = 0;
@@ -247,7 +243,7 @@ struct Port {
 };
 
 struct AttrKV {
-    SymbolId key;
+    std::string key;
     AttributeValue value;
 };
 
@@ -264,7 +260,7 @@ public:
     std::span<const ValueId> opResults(OperationId op) const;
     SymbolId opSymbol(OperationId op) const;
     std::span<const AttrKV> opAttrs(OperationId op) const;
-    std::optional<AttributeValue> opAttr(OperationId op, SymbolId key) const;
+    std::optional<AttributeValue> opAttr(OperationId op, std::string_view key) const;
     std::optional<SrcLoc> opSrcLoc(OperationId op) const;
     SymbolId valueSymbol(ValueId value) const;
     int32_t valueWidth(ValueId value) const;
@@ -274,9 +270,21 @@ public:
     OperationId valueDef(ValueId value) const;
     std::span<const ValueUser> valueUsers(ValueId value) const;
     std::optional<SrcLoc> valueSrcLoc(ValueId value) const;
+    ValueId findValue(SymbolId symbol) const noexcept;
+    OperationId findOperation(SymbolId symbol) const noexcept;
 
 private:
     friend class GraphBuilder;
+
+    enum class SymbolKind {
+        kValue,
+        kOperation
+    };
+
+    struct SymbolBinding {
+        SymbolKind kind;
+        uint32_t index = 0;
+    };
 
     GraphId graphId_{};
     std::vector<OperationId> operations_;
@@ -292,6 +300,7 @@ private:
     std::vector<ValueId> results_;
     std::vector<AttrKV> opAttrs_;
     std::vector<std::optional<SrcLoc>> opSrcLocs_;
+    std::unordered_map<uint32_t, SymbolBinding> symbolIndex_;
     std::vector<SymbolId> valueSymbols_;
     std::vector<int32_t> valueWidths_;
     std::vector<uint8_t> valueSigned_;
@@ -326,9 +335,9 @@ public:
     bool eraseValue(ValueId value);
     void bindInputPort(SymbolId name, ValueId value);
     void bindOutputPort(SymbolId name, ValueId value);
-    void setAttr(OperationId op, SymbolId key, AttributeValue value);
+    void setAttr(OperationId op, std::string_view key, AttributeValue value);
     void setOpKind(OperationId op, OperationKind kind);
-    bool eraseAttr(OperationId op, SymbolId key);
+    bool eraseAttr(OperationId op, std::string_view key);
     void setValueSrcLoc(ValueId value, SrcLoc loc);
     void setOpSrcLoc(OperationId op, SrcLoc loc);
     void setOpSymbol(OperationId op, SymbolId sym);
@@ -338,7 +347,7 @@ public:
     GraphView freeze() const;
 
 private:
-    friend class ::wolf_sv::grh::Graph;
+    friend class Graph;
 
     struct ValueData {
         SymbolId symbol;
@@ -361,6 +370,16 @@ private:
         bool alive = true;
     };
 
+    enum class SymbolKind {
+        kValue,
+        kOperation
+    };
+
+    struct SymbolBinding {
+        SymbolKind kind;
+        uint32_t index = 0;
+    };
+
     std::size_t valueIndex(ValueId value) const;
     std::size_t opIndex(OperationId op) const;
     bool valueAlive(ValueId value) const;
@@ -368,7 +387,8 @@ private:
     std::size_t countValueUses(ValueId value, std::optional<OperationId> skipOp) const;
     void recomputePortFlags();
     void validateSymbol(SymbolId sym, std::string_view context) const;
-    void validateAttrKey(SymbolId key) const;
+    void bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context);
+    void unbindSymbol(SymbolId sym, SymbolKind kind, uint32_t index);
 
     GraphId graphId_;
     GraphSymbolTable* symbols_ = nullptr;
@@ -376,68 +396,67 @@ private:
     std::vector<OperationData> operations_;
     std::vector<Port> inputPorts_;
     std::vector<Port> outputPorts_;
+    std::unordered_map<uint32_t, SymbolBinding> symbolIndex_;
 };
-
-} // namespace ir
 
 class Value {
 public:
-    const ir::ValueId& id() const noexcept { return id_; }
-    ir::SymbolId symbol() const noexcept { return symbol_; }
+    const ValueId& id() const noexcept { return id_; }
+    SymbolId symbol() const noexcept { return symbol_; }
     std::string_view symbolText() const noexcept { return symbolText_; }
     int32_t width() const noexcept { return width_; }
     bool isSigned() const noexcept { return isSigned_; }
     bool isInput() const noexcept { return isInput_; }
     bool isOutput() const noexcept { return isOutput_; }
-    ir::OperationId definingOp() const noexcept { return definingOp_; }
-    std::span<const ir::ValueUser> users() const noexcept { return std::span<const ir::ValueUser>(users_.data(), users_.size()); }
+    OperationId definingOp() const noexcept { return definingOp_; }
+    std::span<const ValueUser> users() const noexcept { return std::span<const ValueUser>(users_.data(), users_.size()); }
     const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
 
 private:
     friend class Graph;
 
-    Value(ir::ValueId id, ir::SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-          bool isInput, bool isOutput, ir::OperationId definingOp,
-          std::vector<ir::ValueUser> users, std::optional<SrcLoc> srcLoc);
+    Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
+          bool isInput, bool isOutput, OperationId definingOp,
+          std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc);
 
-    ir::ValueId id_{};
-    ir::SymbolId symbol_{};
+    ValueId id_{};
+    SymbolId symbol_{};
     std::string symbolText_;
     int32_t width_ = 0;
     bool isSigned_ = false;
     bool isInput_ = false;
     bool isOutput_ = false;
-    ir::OperationId definingOp_{};
-    std::vector<ir::ValueUser> users_;
+    OperationId definingOp_{};
+    std::vector<ValueUser> users_;
     std::optional<SrcLoc> srcLoc_;
 };
 
 class Operation {
 public:
-    const ir::OperationId& id() const noexcept { return id_; }
+    const OperationId& id() const noexcept { return id_; }
     OperationKind kind() const noexcept { return kind_; }
-    ir::SymbolId symbol() const noexcept { return symbol_; }
+    SymbolId symbol() const noexcept { return symbol_; }
     std::string_view symbolText() const noexcept { return symbolText_; }
-    std::span<const ir::ValueId> operands() const noexcept { return std::span<const ir::ValueId>(operands_.data(), operands_.size()); }
-    std::span<const ir::ValueId> results() const noexcept { return std::span<const ir::ValueId>(results_.data(), results_.size()); }
-    std::span<const ir::AttrKV> attrs() const noexcept { return std::span<const ir::AttrKV>(attrs_.data(), attrs_.size()); }
-    std::optional<AttributeValue> attr(ir::SymbolId key) const;
+    std::span<const ValueId> operands() const noexcept { return std::span<const ValueId>(operands_.data(), operands_.size()); }
+    std::span<const ValueId> results() const noexcept { return std::span<const ValueId>(results_.data(), results_.size()); }
+    std::span<const AttrKV> attrs() const noexcept { return std::span<const AttrKV>(attrs_.data(), attrs_.size()); }
+    std::optional<AttributeValue> attr(std::string_view key) const;
     const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
 
 private:
     friend class Graph;
 
-    Operation(ir::OperationId id, OperationKind kind, ir::SymbolId symbol, std::string symbolText,
-              std::vector<ir::ValueId> operands, std::vector<ir::ValueId> results,
-              std::vector<ir::AttrKV> attrs, std::optional<SrcLoc> srcLoc);
+    Operation(OperationId id, OperationKind kind, SymbolId symbol, std::string symbolText,
+              std::vector<ValueId> operands, std::vector<ValueId> results,
+              std::vector<AttrKV> attrs, std::optional<SrcLoc> srcLoc);
 
-    ir::OperationId id_{};
+    OperationId id_{};
     OperationKind kind_{};
-    ir::SymbolId symbol_{};
+    SymbolId symbol_{};
     std::string symbolText_;
-    std::vector<ir::ValueId> operands_;
-    std::vector<ir::ValueId> results_;
-    std::vector<ir::AttrKV> attrs_;
+    std::vector<ValueId> operands_;
+    std::vector<ValueId> results_;
+    std::vector<AttrKV> attrs_;
     std::optional<SrcLoc> srcLoc_;
 };
 
@@ -445,61 +464,61 @@ class Netlist;
 
 class Graph {
 public:
-    Graph(Netlist& owner, std::string symbol, ir::GraphId graphId);
+    Graph(Netlist& owner, std::string symbol, GraphId graphId);
 
     const std::string& symbol() const noexcept { return symbol_; }
-    const ir::GraphId& id() const noexcept { return graphId_; }
+    const GraphId& id() const noexcept { return graphId_; }
     Netlist& owner() const noexcept { return *owner_; }
 
-    ir::GraphSymbolTable& symbols() noexcept { return symbols_; }
-    const ir::GraphSymbolTable& symbols() const noexcept { return symbols_; }
-    ir::SymbolId internSymbol(std::string_view text);
-    ir::SymbolId lookupSymbol(std::string_view text) const;
-    std::string_view symbolText(ir::SymbolId id) const;
+    GraphSymbolTable& symbols() noexcept { return symbols_; }
+    const GraphSymbolTable& symbols() const noexcept { return symbols_; }
+    SymbolId internSymbol(std::string_view text);
+    SymbolId lookupSymbol(std::string_view text) const;
+    std::string_view symbolText(SymbolId id) const;
 
     bool frozen() const noexcept { return !builder_.has_value(); }
-    const ir::GraphView* viewIfFrozen() const noexcept;
-    const ir::GraphView& freeze();
+    const GraphView* viewIfFrozen() const noexcept;
+    const GraphView& freeze();
 
-    std::span<const ir::OperationId> operations() const;
-    std::span<const ir::ValueId> values() const;
-    std::span<const ir::Port> inputPorts() const;
-    std::span<const ir::Port> outputPorts() const;
+    std::span<const OperationId> operations() const;
+    std::span<const ValueId> values() const;
+    std::span<const Port> inputPorts() const;
+    std::span<const Port> outputPorts() const;
 
-    ir::ValueId createValue(ir::SymbolId symbol, int32_t width, bool isSigned);
-    ir::OperationId createOperation(OperationKind kind, ir::SymbolId symbol);
+    ValueId createValue(SymbolId symbol, int32_t width, bool isSigned);
+    OperationId createOperation(OperationKind kind, SymbolId symbol);
 
-    ir::ValueId findValue(ir::SymbolId symbol) const noexcept;
-    ir::OperationId findOperation(ir::SymbolId symbol) const noexcept;
-    ir::ValueId findValue(std::string_view symbol) const;
-    ir::OperationId findOperation(std::string_view symbol) const;
-    Value getValue(ir::ValueId id) const;
-    Operation getOperation(ir::OperationId id) const;
+    ValueId findValue(SymbolId symbol) const noexcept;
+    OperationId findOperation(SymbolId symbol) const noexcept;
+    ValueId findValue(std::string_view symbol) const;
+    OperationId findOperation(std::string_view symbol) const;
+    Value getValue(ValueId id) const;
+    Operation getOperation(OperationId id) const;
 
-    void bindInputPort(ir::SymbolId name, ir::ValueId value);
-    void bindOutputPort(ir::SymbolId name, ir::ValueId value);
-    ir::ValueId inputPortValue(ir::SymbolId name) const noexcept;
-    ir::ValueId outputPortValue(ir::SymbolId name) const noexcept;
+    void bindInputPort(SymbolId name, ValueId value);
+    void bindOutputPort(SymbolId name, ValueId value);
+    ValueId inputPortValue(SymbolId name) const noexcept;
+    ValueId outputPortValue(SymbolId name) const noexcept;
 
-    void addOperand(ir::OperationId op, ir::ValueId value);
-    void addResult(ir::OperationId op, ir::ValueId value);
-    void replaceOperand(ir::OperationId op, std::size_t index, ir::ValueId value);
-    void replaceResult(ir::OperationId op, std::size_t index, ir::ValueId value);
-    void replaceAllUses(ir::ValueId from, ir::ValueId to);
-    bool eraseOperand(ir::OperationId op, std::size_t index);
-    bool eraseResult(ir::OperationId op, std::size_t index);
-    bool eraseOp(ir::OperationId op);
-    bool eraseOp(ir::OperationId op, std::span<const ir::ValueId> replacementResults);
-    bool eraseValue(ir::ValueId value);
-    void setAttr(ir::OperationId op, ir::SymbolId key, AttributeValue value);
-    void setOpKind(ir::OperationId op, OperationKind kind);
-    bool eraseAttr(ir::OperationId op, ir::SymbolId key);
-    void setValueSrcLoc(ir::ValueId value, SrcLoc loc);
-    void setOpSrcLoc(ir::OperationId op, SrcLoc loc);
-    void setOpSymbol(ir::OperationId op, ir::SymbolId sym);
-    void setValueSymbol(ir::ValueId value, ir::SymbolId sym);
-    void clearOpSymbol(ir::OperationId op);
-    void clearValueSymbol(ir::ValueId value);
+    void addOperand(OperationId op, ValueId value);
+    void addResult(OperationId op, ValueId value);
+    void replaceOperand(OperationId op, std::size_t index, ValueId value);
+    void replaceResult(OperationId op, std::size_t index, ValueId value);
+    void replaceAllUses(ValueId from, ValueId to);
+    bool eraseOperand(OperationId op, std::size_t index);
+    bool eraseResult(OperationId op, std::size_t index);
+    bool eraseOp(OperationId op);
+    bool eraseOp(OperationId op, std::span<const ValueId> replacementResults);
+    bool eraseValue(ValueId value);
+    void setAttr(OperationId op, std::string_view key, AttributeValue value);
+    void setOpKind(OperationId op, OperationKind kind);
+    bool eraseAttr(OperationId op, std::string_view key);
+    void setValueSrcLoc(ValueId value, SrcLoc loc);
+    void setOpSrcLoc(OperationId op, SrcLoc loc);
+    void setOpSymbol(OperationId op, SymbolId sym);
+    void setValueSymbol(ValueId value, SymbolId sym);
+    void clearOpSymbol(OperationId op);
+    void clearValueSymbol(ValueId value);
 
     void writeJson(slang::JsonWriter& writer) const;
 
@@ -508,23 +527,23 @@ private:
 
     void invalidateCaches() const;
     void ensureCaches() const;
-    ir::GraphBuilder& ensureBuilder();
-    const ir::GraphView& view() const;
-    Value valueFromView(ir::ValueId id) const;
-    Value valueFromBuilder(ir::ValueId id) const;
-    Operation operationFromView(ir::OperationId id) const;
-    Operation operationFromBuilder(ir::OperationId id) const;
+    GraphBuilder& ensureBuilder();
+    const GraphView& view() const;
+    Value valueFromView(ValueId id) const;
+    Value valueFromBuilder(ValueId id) const;
+    Operation operationFromView(OperationId id) const;
+    Operation operationFromBuilder(OperationId id) const;
 
     Netlist* owner_;
     std::string symbol_;
-    ir::GraphId graphId_{};
-    ir::GraphSymbolTable symbols_;
-    std::optional<ir::GraphView> view_;
-    std::optional<ir::GraphBuilder> builder_;
-    mutable std::vector<ir::ValueId> valuesCache_;
-    mutable std::vector<ir::OperationId> operationsCache_;
-    mutable std::vector<ir::Port> inputPortsCache_;
-    mutable std::vector<ir::Port> outputPortsCache_;
+    GraphId graphId_{};
+    GraphSymbolTable symbols_;
+    std::optional<GraphView> view_;
+    std::optional<GraphBuilder> builder_;
+    mutable std::vector<ValueId> valuesCache_;
+    mutable std::vector<OperationId> operationsCache_;
+    mutable std::vector<Port> inputPortsCache_;
+    mutable std::vector<Port> outputPortsCache_;
     mutable bool cacheValid_ = false;
 };
 
@@ -554,11 +573,15 @@ private:
     Graph& addGraphInternal(std::unique_ptr<Graph> graph);
     void resetGraphOwners();
 
-    ir::NetlistSymbolTable netlistSymbols_;
+    NetlistSymbolTable netlistSymbols_;
     std::unordered_map<std::string, std::unique_ptr<Graph>> graphs_;
     std::unordered_map<std::string, std::string> graphAliasBySymbol_;
     std::vector<std::string> graphOrder_;
     std::vector<std::string> topGraphs_;
 };
 
+} // namespace ir
+
 } // namespace wolf_sv::grh
+
+#include "load.hpp"

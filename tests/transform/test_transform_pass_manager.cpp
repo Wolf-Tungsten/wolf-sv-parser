@@ -135,7 +135,7 @@ namespace
 
 int main()
 {
-    grh::Netlist netlist;
+    grh::ir::Netlist netlist;
     netlist.createGraph("top");
 
     // Case 1: pipeline order and aggregated changed flag
@@ -317,11 +317,11 @@ int main()
 
     // Case 6: built-in stats pass reports counts
     {
-        grh::Netlist netlistStats;
-        grh::Graph &graph = netlistStats.createGraph("g");
+        grh::ir::Netlist netlistStats;
+        grh::ir::Graph &graph = netlistStats.createGraph("g");
         graph.createValue(graph.internSymbol("v0"), 1, false);
         graph.createValue(graph.internSymbol("v1"), 1, false);
-        graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("op0"));
+        graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("op0"));
 
         PassManager manager;
         manager.addPass(std::make_unique<StatsPass>());

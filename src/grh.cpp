@@ -16,7 +16,7 @@
 
 #include "slang/text/Json.h"
 
-namespace wolf_sv::grh
+namespace wolf_sv::grh::ir
 {
 
     bool attributeValueIsJsonSerializable(const AttributeValue &value)
@@ -45,9 +45,6 @@ namespace wolf_sv::grh
 
         return std::visit(Visitor{}, value);
     }
-
-    namespace ir
-    {
 
         std::size_t SymbolTable::StringHash::operator()(std::string_view value) const noexcept
         {
@@ -295,12 +292,8 @@ namespace wolf_sv::grh
             return std::span<const AttrKV>(opAttrs_.data() + range.offset, range.count);
         }
 
-        std::optional<AttributeValue> GraphView::opAttr(OperationId op, SymbolId key) const
+        std::optional<AttributeValue> GraphView::opAttr(OperationId op, std::string_view key) const
         {
-            if (!key.valid())
-            {
-                return std::nullopt;
-            }
             const auto attrs = opAttrs(op);
             for (const auto &attr : attrs)
             {
@@ -360,6 +353,42 @@ namespace wolf_sv::grh
         std::optional<SrcLoc> GraphView::valueSrcLoc(ValueId value) const
         {
             return valueSrcLocs_[valueIndex(value)];
+        }
+
+        ValueId GraphView::findValue(SymbolId symbol) const noexcept
+        {
+            if (!symbol.valid())
+            {
+                return ValueId::invalid();
+            }
+            auto it = symbolIndex_.find(symbol.value);
+            if (it == symbolIndex_.end() || it->second.kind != SymbolKind::kValue)
+            {
+                return ValueId::invalid();
+            }
+            ValueId id;
+            id.index = it->second.index;
+            id.generation = 0;
+            id.graph = graphId_;
+            return id;
+        }
+
+        OperationId GraphView::findOperation(SymbolId symbol) const noexcept
+        {
+            if (!symbol.valid())
+            {
+                return OperationId::invalid();
+            }
+            auto it = symbolIndex_.find(symbol.value);
+            if (it == symbolIndex_.end() || it->second.kind != SymbolKind::kOperation)
+            {
+                return OperationId::invalid();
+            }
+            OperationId id;
+            id.index = it->second.index;
+            id.generation = 0;
+            id.graph = graphId_;
+            return id;
         }
 
         std::size_t GraphView::opIndex(OperationId op) const
@@ -506,6 +535,10 @@ namespace wolf_sv::grh
                 data.srcLoc = view.valueSrcLocs_[i];
                 data.alive = true;
                 builder.values_.push_back(std::move(data));
+                builder.bindSymbol(builder.values_.back().symbol,
+                                   GraphBuilder::SymbolKind::kValue,
+                                   static_cast<uint32_t>(i + 1),
+                                   "Value");
             }
 
             builder.operations_.reserve(opCount);
@@ -525,6 +558,10 @@ namespace wolf_sv::grh
                 }
                 opData.srcLoc = view.opSrcLocs_[i];
                 opData.alive = true;
+                builder.bindSymbol(opData.symbol,
+                                   GraphBuilder::SymbolKind::kOperation,
+                                   static_cast<uint32_t>(i + 1),
+                                   "Operation");
 
                 const Range &operandRange = view.opOperandRanges_[i];
                 opData.operands.reserve(operandRange.count);
@@ -565,7 +602,6 @@ namespace wolf_sv::grh
                 for (std::size_t j = 0; j < attrRange.count; ++j)
                 {
                     const AttrKV &attr = view.opAttrs_[attrRange.offset + j];
-                    builder.validateAttrKey(attr.key);
                     if (!attributeValueIsJsonSerializable(attr.value))
                     {
                         throw std::runtime_error("GraphView attribute value must be JSON-serializable");
@@ -681,6 +717,7 @@ namespace wolf_sv::grh
             id.index = static_cast<uint32_t>(values_.size() + 1);
             id.generation = 0;
             id.graph = graphId_;
+            bindSymbol(sym, SymbolKind::kValue, id.index, "Value");
             ValueData data;
             data.symbol = sym;
             data.width = width;
@@ -700,6 +737,7 @@ namespace wolf_sv::grh
             id.index = static_cast<uint32_t>(operations_.size() + 1);
             id.generation = 0;
             id.graph = graphId_;
+            bindSymbol(sym, SymbolKind::kOperation, id.index, "Operation");
             OperationData data;
             data.kind = kind;
             data.symbol = sym;
@@ -899,6 +937,11 @@ namespace wolf_sv::grh
                     values_[valIdx].definingOp = OperationId::invalid();
                 }
             }
+            const SymbolId symbol = operations_[opIdx].symbol;
+            if (symbol.valid())
+            {
+                unbindSymbol(symbol, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
+            }
             operations_[opIdx].alive = false;
             return true;
         }
@@ -962,6 +1005,11 @@ namespace wolf_sv::grh
                     values_[valIdx].definingOp = OperationId::invalid();
                 }
             }
+            const SymbolId symbol = operations_[opIdx].symbol;
+            if (symbol.valid())
+            {
+                unbindSymbol(symbol, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
+            }
             operations_[opIdx].alive = false;
             return true;
         }
@@ -984,6 +1032,11 @@ namespace wolf_sv::grh
             if (values_[valIdx].definingOp.valid())
             {
                 return false;
+            }
+            const SymbolId symbol = values_[valIdx].symbol;
+            if (symbol.valid())
+            {
+                unbindSymbol(symbol, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
             }
             values_[valIdx].alive = false;
             return true;
@@ -1039,9 +1092,8 @@ namespace wolf_sv::grh
             recomputePortFlags();
         }
 
-        void GraphBuilder::setAttr(OperationId op, SymbolId key, AttributeValue value)
+        void GraphBuilder::setAttr(OperationId op, std::string_view key, AttributeValue value)
         {
-            validateAttrKey(key);
             if (!attributeValueIsJsonSerializable(value))
             {
                 throw std::runtime_error("Attribute value must be JSON-serializable");
@@ -1060,7 +1112,7 @@ namespace wolf_sv::grh
                     return;
                 }
             }
-            attrs.push_back(AttrKV{key, std::move(value)});
+            attrs.push_back(AttrKV{std::string(key), std::move(value)});
         }
 
         void GraphBuilder::setOpKind(OperationId op, OperationKind kind)
@@ -1073,12 +1125,8 @@ namespace wolf_sv::grh
             operations_[opIdx].kind = kind;
         }
 
-        bool GraphBuilder::eraseAttr(OperationId op, SymbolId key)
+        bool GraphBuilder::eraseAttr(OperationId op, std::string_view key)
         {
-            if (!key.valid())
-            {
-                return false;
-            }
             const std::size_t opIdx = opIndex(op);
             if (!operations_[opIdx].alive)
             {
@@ -1124,6 +1172,20 @@ namespace wolf_sv::grh
             {
                 throw std::runtime_error("OperationId refers to erased operation");
             }
+            const SymbolId old = operations_[opIdx].symbol;
+            if (old == sym)
+            {
+                return;
+            }
+            if (symbolIndex_.find(sym.value) != symbolIndex_.end())
+            {
+                throw std::runtime_error("Operation symbol already bound to value or operation");
+            }
+            if (old.valid())
+            {
+                unbindSymbol(old, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
+            }
+            bindSymbol(sym, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1), "Operation");
             operations_[opIdx].symbol = sym;
         }
 
@@ -1135,6 +1197,20 @@ namespace wolf_sv::grh
             {
                 throw std::runtime_error("ValueId refers to erased value");
             }
+            const SymbolId old = values_[valIdx].symbol;
+            if (old == sym)
+            {
+                return;
+            }
+            if (symbolIndex_.find(sym.value) != symbolIndex_.end())
+            {
+                throw std::runtime_error("Value symbol already bound to value or operation");
+            }
+            if (old.valid())
+            {
+                unbindSymbol(old, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
+            }
+            bindSymbol(sym, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1), "Value");
             values_[valIdx].symbol = sym;
         }
 
@@ -1145,7 +1221,12 @@ namespace wolf_sv::grh
             {
                 throw std::runtime_error("OperationId refers to erased operation");
             }
-            operations_[opIdx].symbol = SymbolId::invalid();
+            const SymbolId old = operations_[opIdx].symbol;
+            if (old.valid())
+            {
+                unbindSymbol(old, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
+                operations_[opIdx].symbol = SymbolId::invalid();
+            }
         }
 
         void GraphBuilder::clearValueSymbol(ValueId value)
@@ -1155,7 +1236,12 @@ namespace wolf_sv::grh
             {
                 throw std::runtime_error("ValueId refers to erased value");
             }
-            values_[valIdx].symbol = SymbolId::invalid();
+            const SymbolId old = values_[valIdx].symbol;
+            if (old.valid())
+            {
+                unbindSymbol(old, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
+                values_[valIdx].symbol = SymbolId::invalid();
+            }
         }
 
         GraphView GraphBuilder::freeze() const
@@ -1228,6 +1314,19 @@ namespace wolf_sv::grh
                 return lhs.name.value < rhs.name.value;
             };
 
+            auto bindViewSymbol = [&](SymbolId sym, GraphView::SymbolKind kind, uint32_t index, std::string_view context) {
+                if (!sym.valid())
+                {
+                    return;
+                }
+                auto [it, inserted] = view.symbolIndex_.emplace(sym.value, GraphView::SymbolBinding{kind, index});
+                if (!inserted)
+                {
+                    const char *owner = it->second.kind == GraphView::SymbolKind::kValue ? "value" : "operation";
+                    throw std::runtime_error(std::string(context) + " symbol already bound to " + owner);
+                }
+            };
+
             view.operations_.reserve(opCount);
             view.opKinds_.reserve(opCount);
             view.opSymbols_.reserve(opCount);
@@ -1255,6 +1354,7 @@ namespace wolf_sv::grh
                 view.opKinds_.push_back(opData.kind);
                 view.opSymbols_.push_back(opData.symbol);
                 view.opSrcLocs_.push_back(opData.srcLoc);
+                bindViewSymbol(opData.symbol, GraphView::SymbolKind::kOperation, opId.index, "Operation");
 
                 view.opOperandRanges_.push_back(Range{operandOffset, opData.operands.size()});
                 for (const auto &operand : opData.operands)
@@ -1303,6 +1403,7 @@ namespace wolf_sv::grh
                 view.valueIsInput_.push_back(valueData.isInput ? 1 : 0);
                 view.valueIsOutput_.push_back(valueData.isOutput ? 1 : 0);
                 view.valueSrcLocs_.push_back(valueData.srcLoc);
+                bindViewSymbol(valueData.symbol, GraphView::SymbolKind::kValue, valueId.index, "Value");
 
                 OperationId def = OperationId::invalid();
                 if (valueData.definingOp.valid())
@@ -1458,12 +1559,51 @@ namespace wolf_sv::grh
             }
         }
 
-        void GraphBuilder::validateAttrKey(SymbolId key) const
+        void GraphBuilder::bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context)
         {
-            validateSymbol(key, "Attribute");
+            if (!sym.valid())
+            {
+                return;
+            }
+            auto [it, inserted] = symbolIndex_.emplace(sym.value, SymbolBinding{kind, index});
+            if (!inserted)
+            {
+                if (it->second.kind == kind && it->second.index == index)
+                {
+                    return;
+                }
+                const char *owner = it->second.kind == SymbolKind::kValue ? "value" : "operation";
+                std::string message = std::string(context) + " symbol already bound to " + owner;
+                if (symbols_ && symbols_->valid(sym))
+                {
+                    std::string_view symbolText = symbols_->text(sym);
+                    if (!symbolText.empty())
+                    {
+                        message.append(": ");
+                        message.append(symbolText);
+                    }
+                }
+                throw std::runtime_error(message);
+            }
         }
 
-    } // namespace ir
+        void GraphBuilder::unbindSymbol(SymbolId sym, SymbolKind kind, uint32_t index)
+        {
+            if (!sym.valid())
+            {
+                return;
+            }
+            auto it = symbolIndex_.find(sym.value);
+            if (it == symbolIndex_.end())
+            {
+                throw std::runtime_error("Symbol binding missing during unbind");
+            }
+            if (it->second.kind != kind || it->second.index != index)
+            {
+                throw std::runtime_error("Symbol binding mismatch during unbind");
+            }
+            symbolIndex_.erase(it);
+        }
 
     Netlist::Netlist(Netlist &&other) noexcept
     {
@@ -1573,446 +1713,6 @@ namespace wolf_sv::grh
             "kDpicImport",
             "kDpicCall"};
 
-        enum class AttributeKind
-        {
-            Bool,
-            Int,
-            Double,
-            String,
-            BoolArray,
-            IntArray,
-            DoubleArray,
-            StringArray
-        };
-
-        struct JsonValue
-        {
-            using Array = std::vector<JsonValue>;
-            using Object = std::map<std::string, JsonValue, std::less<>>;
-
-            std::variant<std::nullptr_t, bool, int64_t, double, std::string, Array, Object> value;
-
-            bool isNull() const { return std::holds_alternative<std::nullptr_t>(value); }
-            bool isBool() const { return std::holds_alternative<bool>(value); }
-            bool isInt() const { return std::holds_alternative<int64_t>(value); }
-            bool isDouble() const { return std::holds_alternative<double>(value); }
-            bool isString() const { return std::holds_alternative<std::string>(value); }
-            bool isArray() const { return std::holds_alternative<Array>(value); }
-            bool isObject() const { return std::holds_alternative<Object>(value); }
-
-            bool asBool(std::string_view ctx) const
-            {
-                if (!isBool())
-                {
-                    throw std::runtime_error(std::string(ctx) + ": expected bool");
-                }
-                return std::get<bool>(value);
-            }
-
-            int64_t asInt(std::string_view ctx) const
-            {
-                if (isInt())
-                {
-                    return std::get<int64_t>(value);
-                }
-                if (isDouble())
-                {
-                    double v = std::get<double>(value);
-                    if (std::trunc(v) != v)
-                    {
-                        throw std::runtime_error(std::string(ctx) + ": expected integer number");
-                    }
-                    return static_cast<int64_t>(v);
-                }
-                throw std::runtime_error(std::string(ctx) + ": expected integer");
-            }
-
-            double asDouble(std::string_view ctx) const
-            {
-                if (isDouble())
-                {
-                    return std::get<double>(value);
-                }
-                if (isInt())
-                {
-                    return static_cast<double>(std::get<int64_t>(value));
-                }
-                throw std::runtime_error(std::string(ctx) + ": expected number");
-            }
-
-            const std::string &asString(std::string_view ctx) const
-            {
-                if (!isString())
-                {
-                    throw std::runtime_error(std::string(ctx) + ": expected string");
-                }
-                return std::get<std::string>(value);
-            }
-
-            const Array &asArray(std::string_view ctx) const
-            {
-                if (!isArray())
-                {
-                    throw std::runtime_error(std::string(ctx) + ": expected array");
-                }
-                return std::get<Array>(value);
-            }
-
-            const Object &asObject(std::string_view ctx) const
-            {
-                if (!isObject())
-                {
-                    throw std::runtime_error(std::string(ctx) + ": expected object");
-                }
-                return std::get<Object>(value);
-            }
-        };
-
-        class JsonParser
-        {
-        public:
-            explicit JsonParser(std::string_view text) : text_(text), current_(text_.data()), end_(text_.data() + text_.size()) {}
-
-            JsonValue parse()
-            {
-                skipWhitespace();
-                JsonValue value = parseValue();
-                skipWhitespace();
-                if (current_ != end_)
-                {
-                    throw std::runtime_error("Trailing characters after JSON document");
-                }
-                return value;
-            }
-
-        private:
-            JsonValue parseValue()
-            {
-                if (current_ == end_)
-                {
-                    throw std::runtime_error("Unexpected end of JSON input");
-                }
-
-                switch (*current_)
-                {
-                case '{':
-                    return parseObject();
-                case '[':
-                    return parseArray();
-                case '"':
-                    return JsonValue{parseString()};
-                case 't':
-                    return JsonValue{parseLiteral("true", true)};
-                case 'f':
-                    return JsonValue{parseLiteral("false", false)};
-                case 'n':
-                    parseLiteral("null");
-                    return JsonValue{std::nullptr_t{}};
-                default:
-                    if (*current_ == '-' || std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        return parseNumber();
-                    }
-                    break;
-                }
-
-                throw std::runtime_error("Invalid JSON value");
-            }
-
-            JsonValue parseObject()
-            {
-                JsonValue::Object obj;
-                expect('{');
-                skipWhitespace();
-                if (consume('}'))
-                {
-                    return JsonValue{std::move(obj)};
-                }
-
-                while (true)
-                {
-                    skipWhitespace();
-                    std::string key = parseString();
-                    skipWhitespace();
-                    expect(':');
-                    skipWhitespace();
-                    obj.emplace(std::move(key), parseValue());
-                    skipWhitespace();
-                    if (consume('}'))
-                    {
-                        break;
-                    }
-                    expect(',');
-                }
-
-                return JsonValue{std::move(obj)};
-            }
-
-            JsonValue parseArray()
-            {
-                JsonValue::Array arr;
-                expect('[');
-                skipWhitespace();
-                if (consume(']'))
-                {
-                    return JsonValue{std::move(arr)};
-                }
-
-                while (true)
-                {
-                    skipWhitespace();
-                    arr.push_back(parseValue());
-                    skipWhitespace();
-                    if (consume(']'))
-                    {
-                        break;
-                    }
-                    expect(',');
-                }
-
-                return JsonValue{std::move(arr)};
-            }
-
-            JsonValue parseNumber()
-            {
-                const char *start = current_;
-                if (*current_ == '-')
-                {
-                    ++current_;
-                }
-                if (current_ == end_)
-                {
-                    throw std::runtime_error("Invalid JSON number");
-                }
-                if (*current_ == '0')
-                {
-                    ++current_;
-                }
-                else
-                {
-                    if (!std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        throw std::runtime_error("Invalid JSON number");
-                    }
-                    while (current_ != end_ && std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        ++current_;
-                    }
-                }
-
-                bool isFloat = false;
-                if (current_ != end_ && *current_ == '.')
-                {
-                    isFloat = true;
-                    ++current_;
-                    if (current_ == end_ || !std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        throw std::runtime_error("Invalid JSON number");
-                    }
-                    while (current_ != end_ && std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        ++current_;
-                    }
-                }
-
-                if (current_ != end_ && (*current_ == 'e' || *current_ == 'E'))
-                {
-                    isFloat = true;
-                    ++current_;
-                    if (current_ != end_ && (*current_ == '+' || *current_ == '-'))
-                    {
-                        ++current_;
-                    }
-                    if (current_ == end_ || !std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        throw std::runtime_error("Invalid JSON number");
-                    }
-                    while (current_ != end_ && std::isdigit(static_cast<unsigned char>(*current_)))
-                    {
-                        ++current_;
-                    }
-                }
-
-                std::string_view numberView(start, static_cast<std::size_t>(current_ - start));
-                if (isFloat)
-                {
-                    double value = 0.0;
-                    auto [ptr, ec] = std::from_chars(numberView.data(), numberView.data() + numberView.size(), value);
-                    if (ec != std::errc())
-                    {
-                        value = std::stod(std::string(numberView));
-                    }
-                    return JsonValue{value};
-                }
-
-                int64_t intValue = 0;
-                auto [ptr, ec] = std::from_chars(numberView.data(), numberView.data() + numberView.size(), intValue);
-                if (ec != std::errc())
-                {
-                    intValue = std::stoll(std::string(numberView));
-                }
-                return JsonValue{intValue};
-            }
-
-            std::string parseString()
-            {
-                expect('"');
-                std::string result;
-                while (current_ != end_)
-                {
-                    char ch = *current_++;
-                    if (ch == '"')
-                    {
-                        break;
-                    }
-                    if (ch == '\\')
-                    {
-                        if (current_ == end_)
-                        {
-                            throw std::runtime_error("Invalid escape sequence");
-                        }
-
-                        char esc = *current_++;
-                        switch (esc)
-                        {
-                        case '"':
-                        case '\\':
-                        case '/':
-                            result.push_back(esc);
-                            break;
-                        case 'b':
-                            result.push_back('\b');
-                            break;
-                        case 'f':
-                            result.push_back('\f');
-                            break;
-                        case 'n':
-                            result.push_back('\n');
-                            break;
-                        case 'r':
-                            result.push_back('\r');
-                            break;
-                        case 't':
-                            result.push_back('\t');
-                            break;
-                        case 'u':
-                        {
-                            if (end_ - current_ < 4)
-                            {
-                                throw std::runtime_error("Invalid unicode escape");
-                            }
-                            unsigned value = 0;
-                            for (int i = 0; i < 4; ++i)
-                            {
-                                char hex = *current_++;
-                                value <<= 4;
-                                if (hex >= '0' && hex <= '9')
-                                {
-                                    value |= static_cast<unsigned>(hex - '0');
-                                }
-                                else if (hex >= 'a' && hex <= 'f')
-                                {
-                                    value |= static_cast<unsigned>(hex - 'a' + 10);
-                                }
-                                else if (hex >= 'A' && hex <= 'F')
-                                {
-                                    value |= static_cast<unsigned>(hex - 'A' + 10);
-                                }
-                                else
-                                {
-                                    throw std::runtime_error("Invalid unicode escape");
-                                }
-                            }
-                            if (value <= 0x7F)
-                            {
-                                result.push_back(static_cast<char>(value));
-                            }
-                            else if (value <= 0x7FF)
-                            {
-                                result.push_back(static_cast<char>(0xC0 | ((value >> 6) & 0x1F)));
-                                result.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-                            }
-                            else
-                            {
-                                result.push_back(static_cast<char>(0xE0 | ((value >> 12) & 0x0F)));
-                                result.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
-                                result.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-                            }
-                            break;
-                        }
-                        default:
-                            throw std::runtime_error("Invalid escape sequence");
-                        }
-                    }
-                    else
-                    {
-                        result.push_back(ch);
-                    }
-                }
-                return result;
-            }
-
-            JsonValue parseLiteral(std::string_view literal, bool value)
-            {
-                for (char expected : literal)
-                {
-                    if (current_ == end_ || *current_++ != expected)
-                    {
-                        throw std::runtime_error("Invalid JSON literal");
-                    }
-                }
-                return JsonValue{value};
-            }
-
-            void parseLiteral(std::string_view literal)
-            {
-                for (char expected : literal)
-                {
-                    if (current_ == end_ || *current_++ != expected)
-                    {
-                        throw std::runtime_error("Invalid JSON literal");
-                    }
-                }
-            }
-
-            void skipWhitespace()
-            {
-                while (current_ != end_ && std::isspace(static_cast<unsigned char>(*current_)))
-                {
-                    ++current_;
-                }
-            }
-
-            bool consume(char ch)
-            {
-                if (current_ != end_ && *current_ == ch)
-                {
-                    ++current_;
-                    return true;
-                }
-                return false;
-            }
-
-            void expect(char ch)
-            {
-                if (current_ == end_ || *current_ != ch)
-                {
-                    throw std::runtime_error("Unexpected character in JSON stream");
-                }
-                ++current_;
-            }
-
-            std::string_view text_;
-            const char *current_;
-            const char *end_;
-        };
-
-        JsonValue parseJson(std::string_view json)
-        {
-            JsonParser parser(json);
-            return parser.parse();
-        }
-
         void writeAttributeValue(slang::JsonWriter &writer, const AttributeValue &value)
         {
             if (!attributeValueIsJsonSerializable(value))
@@ -2100,43 +1800,6 @@ namespace wolf_sv::grh
                 value);
         }
 
-        AttributeKind parseAttributeKind(std::string_view text)
-        {
-            if (text == "bool")
-            {
-                return AttributeKind::Bool;
-            }
-            if (text == "int")
-            {
-                return AttributeKind::Int;
-            }
-            if (text == "double")
-            {
-                return AttributeKind::Double;
-            }
-            if (text == "string" || text == "str")
-            {
-                return AttributeKind::String;
-            }
-            if (text == "bool_array" || text == "bool[]")
-            {
-                return AttributeKind::BoolArray;
-            }
-            if (text == "int_array" || text == "int[]")
-            {
-                return AttributeKind::IntArray;
-            }
-            if (text == "double_array" || text == "double[]")
-            {
-                return AttributeKind::DoubleArray;
-            }
-            if (text == "string_array" || text == "string[]")
-            {
-                return AttributeKind::StringArray;
-            }
-            throw std::runtime_error("Unknown attribute kind: " + std::string(text));
-        }
-
         void writeSrcLoc(slang::JsonWriter &writer, const std::optional<SrcLoc> &srcLoc)
         {
             if (!srcLoc || srcLoc->file.empty())
@@ -2182,9 +1845,9 @@ namespace wolf_sv::grh
         return std::nullopt;
     }
 
-    Value::Value(ir::ValueId id, ir::SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-                 bool isInput, bool isOutput, ir::OperationId definingOp,
-                 std::vector<ir::ValueUser> users, std::optional<SrcLoc> srcLoc)
+    Value::Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
+                 bool isInput, bool isOutput, OperationId definingOp,
+                 std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc)
         : id_(id),
           symbol_(symbol),
           symbolText_(std::move(symbolText)),
@@ -2198,9 +1861,9 @@ namespace wolf_sv::grh
     {
     }
 
-    Operation::Operation(ir::OperationId id, OperationKind kind, ir::SymbolId symbol, std::string symbolText,
-                         std::vector<ir::ValueId> operands, std::vector<ir::ValueId> results,
-                         std::vector<ir::AttrKV> attrs, std::optional<SrcLoc> srcLoc)
+    Operation::Operation(OperationId id, OperationKind kind, SymbolId symbol, std::string symbolText,
+                         std::vector<ValueId> operands, std::vector<ValueId> results,
+                         std::vector<AttrKV> attrs, std::optional<SrcLoc> srcLoc)
         : id_(id),
           kind_(kind),
           symbol_(symbol),
@@ -2212,12 +1875,8 @@ namespace wolf_sv::grh
     {
     }
 
-    std::optional<AttributeValue> Operation::attr(ir::SymbolId key) const
+    std::optional<AttributeValue> Operation::attr(std::string_view key) const
     {
-        if (!key.valid())
-        {
-            return std::nullopt;
-        }
         for (const auto &entry : attrs_)
         {
             if (entry.key == key)
@@ -2228,7 +1887,7 @@ namespace wolf_sv::grh
         return std::nullopt;
     }
 
-    Graph::Graph(Netlist &owner, std::string symbol, ir::GraphId graphId)
+    Graph::Graph(Netlist &owner, std::string symbol, GraphId graphId)
         : owner_(&owner),
           symbol_(std::move(symbol)),
           graphId_(graphId)
@@ -2241,11 +1900,11 @@ namespace wolf_sv::grh
         {
             throw std::invalid_argument("GraphId must be valid");
         }
-        ir::GraphBuilder builder(symbols_, graphId_);
+        GraphBuilder builder(symbols_, graphId_);
         view_ = builder.freeze();
     }
 
-    ir::SymbolId Graph::internSymbol(std::string_view text)
+    SymbolId Graph::internSymbol(std::string_view text)
     {
         if (symbols_.contains(text))
         {
@@ -2254,12 +1913,12 @@ namespace wolf_sv::grh
         return symbols_.intern(text);
     }
 
-    ir::SymbolId Graph::lookupSymbol(std::string_view text) const
+    SymbolId Graph::lookupSymbol(std::string_view text) const
     {
         return symbols_.lookup(text);
     }
 
-    std::string_view Graph::symbolText(ir::SymbolId id) const
+    std::string_view Graph::symbolText(SymbolId id) const
     {
         if (!id.valid())
         {
@@ -2268,7 +1927,7 @@ namespace wolf_sv::grh
         return symbols_.text(id);
     }
 
-    const ir::GraphView *Graph::viewIfFrozen() const noexcept
+    const GraphView *Graph::viewIfFrozen() const noexcept
     {
         if (builder_)
         {
@@ -2277,7 +1936,7 @@ namespace wolf_sv::grh
         return view_ ? &*view_ : nullptr;
     }
 
-    const ir::GraphView &Graph::freeze()
+    const GraphView &Graph::freeze()
     {
         if (builder_)
         {
@@ -2287,13 +1946,13 @@ namespace wolf_sv::grh
         }
         if (!view_)
         {
-            ir::GraphBuilder builder(symbols_, graphId_);
+            GraphBuilder builder(symbols_, graphId_);
             view_ = builder.freeze();
         }
         return *view_;
     }
 
-    std::span<const ir::OperationId> Graph::operations() const
+    std::span<const OperationId> Graph::operations() const
     {
         if (!builder_)
         {
@@ -2301,13 +1960,13 @@ namespace wolf_sv::grh
             {
                 return view_->operations();
             }
-            return std::span<const ir::OperationId>();
+            return std::span<const OperationId>();
         }
         ensureCaches();
-        return std::span<const ir::OperationId>(operationsCache_.data(), operationsCache_.size());
+        return std::span<const OperationId>(operationsCache_.data(), operationsCache_.size());
     }
 
-    std::span<const ir::ValueId> Graph::values() const
+    std::span<const ValueId> Graph::values() const
     {
         if (!builder_)
         {
@@ -2315,13 +1974,13 @@ namespace wolf_sv::grh
             {
                 return view_->values();
             }
-            return std::span<const ir::ValueId>();
+            return std::span<const ValueId>();
         }
         ensureCaches();
-        return std::span<const ir::ValueId>(valuesCache_.data(), valuesCache_.size());
+        return std::span<const ValueId>(valuesCache_.data(), valuesCache_.size());
     }
 
-    std::span<const ir::Port> Graph::inputPorts() const
+    std::span<const Port> Graph::inputPorts() const
     {
         if (!builder_)
         {
@@ -2329,13 +1988,13 @@ namespace wolf_sv::grh
             {
                 return view_->inputPorts();
             }
-            return std::span<const ir::Port>();
+            return std::span<const Port>();
         }
         ensureCaches();
-        return std::span<const ir::Port>(inputPortsCache_.data(), inputPortsCache_.size());
+        return std::span<const Port>(inputPortsCache_.data(), inputPortsCache_.size());
     }
 
-    std::span<const ir::Port> Graph::outputPorts() const
+    std::span<const Port> Graph::outputPorts() const
     {
         if (!builder_)
         {
@@ -2343,117 +2002,89 @@ namespace wolf_sv::grh
             {
                 return view_->outputPorts();
             }
-            return std::span<const ir::Port>();
+            return std::span<const Port>();
         }
         ensureCaches();
-        return std::span<const ir::Port>(outputPortsCache_.data(), outputPortsCache_.size());
+        return std::span<const Port>(outputPortsCache_.data(), outputPortsCache_.size());
     }
 
-    ir::ValueId Graph::createValue(ir::SymbolId symbol, int32_t width, bool isSigned)
+    ValueId Graph::createValue(SymbolId symbol, int32_t width, bool isSigned)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.addValue(symbol, width, isSigned);
     }
 
-    ir::OperationId Graph::createOperation(OperationKind kind, ir::SymbolId symbol)
+    OperationId Graph::createOperation(OperationKind kind, SymbolId symbol)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.addOp(kind, symbol);
     }
 
-    ir::ValueId Graph::findValue(ir::SymbolId symbol) const noexcept
+    ValueId Graph::findValue(SymbolId symbol) const noexcept
     {
         if (!symbol.valid())
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         if (builder_)
         {
-            const auto &values = builder_->values_;
-            for (std::size_t i = 0; i < values.size(); ++i)
+            auto it = builder_->symbolIndex_.find(symbol.value);
+            if (it == builder_->symbolIndex_.end() || it->second.kind != GraphBuilder::SymbolKind::kValue)
             {
-                if (!values[i].alive)
-                {
-                    continue;
-                }
-                if (values[i].symbol == symbol)
-                {
-                    ir::ValueId id;
-                    id.index = static_cast<uint32_t>(i + 1);
-                    id.generation = 0;
-                    id.graph = graphId_;
-                    return id;
-                }
+                return ValueId::invalid();
             }
-            return ir::ValueId::invalid();
+            ValueId id;
+            id.index = it->second.index;
+            id.generation = 0;
+            id.graph = graphId_;
+            return id;
         }
         if (!view_)
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
-        for (const auto &id : view_->values())
-        {
-            if (view_->valueSymbol(id) == symbol)
-            {
-                return id;
-            }
-        }
-        return ir::ValueId::invalid();
+        return view_->findValue(symbol);
     }
 
-    ir::OperationId Graph::findOperation(ir::SymbolId symbol) const noexcept
+    OperationId Graph::findOperation(SymbolId symbol) const noexcept
     {
         if (!symbol.valid())
         {
-            return ir::OperationId::invalid();
+            return OperationId::invalid();
         }
         if (builder_)
         {
-            const auto &ops = builder_->operations_;
-            for (std::size_t i = 0; i < ops.size(); ++i)
+            auto it = builder_->symbolIndex_.find(symbol.value);
+            if (it == builder_->symbolIndex_.end() || it->second.kind != GraphBuilder::SymbolKind::kOperation)
             {
-                if (!ops[i].alive)
-                {
-                    continue;
-                }
-                if (ops[i].symbol == symbol)
-                {
-                    ir::OperationId id;
-                    id.index = static_cast<uint32_t>(i + 1);
-                    id.generation = 0;
-                    id.graph = graphId_;
-                    return id;
-                }
+                return OperationId::invalid();
             }
-            return ir::OperationId::invalid();
+            OperationId id;
+            id.index = it->second.index;
+            id.generation = 0;
+            id.graph = graphId_;
+            return id;
         }
         if (!view_)
         {
-            return ir::OperationId::invalid();
+            return OperationId::invalid();
         }
-        for (const auto &id : view_->operations())
-        {
-            if (view_->opSymbol(id) == symbol)
-            {
-                return id;
-            }
-        }
-        return ir::OperationId::invalid();
+        return view_->findOperation(symbol);
     }
 
-    ir::ValueId Graph::findValue(std::string_view symbol) const
+    ValueId Graph::findValue(std::string_view symbol) const
     {
         return findValue(lookupSymbol(symbol));
     }
 
-    ir::OperationId Graph::findOperation(std::string_view symbol) const
+    OperationId Graph::findOperation(std::string_view symbol) const
     {
         return findOperation(lookupSymbol(symbol));
     }
 
-    Value Graph::getValue(ir::ValueId id) const
+    Value Graph::getValue(ValueId id) const
     {
         if (builder_)
         {
@@ -2462,7 +2093,7 @@ namespace wolf_sv::grh
         return valueFromView(id);
     }
 
-    Operation Graph::getOperation(ir::OperationId id) const
+    Operation Graph::getOperation(OperationId id) const
     {
         if (builder_)
         {
@@ -2471,25 +2102,25 @@ namespace wolf_sv::grh
         return operationFromView(id);
     }
 
-    void Graph::bindInputPort(ir::SymbolId name, ir::ValueId value)
+    void Graph::bindInputPort(SymbolId name, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.bindInputPort(name, value);
     }
 
-    void Graph::bindOutputPort(ir::SymbolId name, ir::ValueId value)
+    void Graph::bindOutputPort(SymbolId name, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.bindOutputPort(name, value);
     }
 
-    ir::ValueId Graph::inputPortValue(ir::SymbolId name) const noexcept
+    ValueId Graph::inputPortValue(SymbolId name) const noexcept
     {
         if (!name.valid())
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         if (builder_)
         {
@@ -2500,11 +2131,11 @@ namespace wolf_sv::grh
                     return port.value;
                 }
             }
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         if (!view_)
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         for (const auto &port : view_->inputPorts())
         {
@@ -2513,14 +2144,14 @@ namespace wolf_sv::grh
                 return port.value;
             }
         }
-        return ir::ValueId::invalid();
+        return ValueId::invalid();
     }
 
-    ir::ValueId Graph::outputPortValue(ir::SymbolId name) const noexcept
+    ValueId Graph::outputPortValue(SymbolId name) const noexcept
     {
         if (!name.valid())
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         if (builder_)
         {
@@ -2531,11 +2162,11 @@ namespace wolf_sv::grh
                     return port.value;
                 }
             }
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         if (!view_)
         {
-            return ir::ValueId::invalid();
+            return ValueId::invalid();
         }
         for (const auto &port : view_->outputPorts())
         {
@@ -2544,145 +2175,145 @@ namespace wolf_sv::grh
                 return port.value;
             }
         }
-        return ir::ValueId::invalid();
+        return ValueId::invalid();
     }
 
-    void Graph::addOperand(ir::OperationId op, ir::ValueId value)
+    void Graph::addOperand(OperationId op, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.addOperand(op, value);
     }
 
-    void Graph::addResult(ir::OperationId op, ir::ValueId value)
+    void Graph::addResult(OperationId op, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.addResult(op, value);
     }
 
-    void Graph::replaceOperand(ir::OperationId op, std::size_t index, ir::ValueId value)
+    void Graph::replaceOperand(OperationId op, std::size_t index, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.replaceOperand(op, index, value);
     }
 
-    void Graph::replaceResult(ir::OperationId op, std::size_t index, ir::ValueId value)
+    void Graph::replaceResult(OperationId op, std::size_t index, ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.replaceResult(op, index, value);
     }
 
-    void Graph::replaceAllUses(ir::ValueId from, ir::ValueId to)
+    void Graph::replaceAllUses(ValueId from, ValueId to)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.replaceAllUses(from, to);
     }
 
-    bool Graph::eraseOperand(ir::OperationId op, std::size_t index)
+    bool Graph::eraseOperand(OperationId op, std::size_t index)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseOperand(op, index);
     }
 
-    bool Graph::eraseResult(ir::OperationId op, std::size_t index)
+    bool Graph::eraseResult(OperationId op, std::size_t index)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseResult(op, index);
     }
 
-    bool Graph::eraseOp(ir::OperationId op)
+    bool Graph::eraseOp(OperationId op)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseOp(op);
     }
 
-    bool Graph::eraseOp(ir::OperationId op, std::span<const ir::ValueId> replacementResults)
+    bool Graph::eraseOp(OperationId op, std::span<const ValueId> replacementResults)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseOp(op, replacementResults);
     }
 
-    bool Graph::eraseValue(ir::ValueId value)
+    bool Graph::eraseValue(ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseValue(value);
     }
 
-    void Graph::setAttr(ir::OperationId op, ir::SymbolId key, AttributeValue value)
+    void Graph::setAttr(OperationId op, std::string_view key, AttributeValue value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setAttr(op, key, std::move(value));
     }
 
-    void Graph::setOpKind(ir::OperationId op, OperationKind kind)
+    void Graph::setOpKind(OperationId op, OperationKind kind)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setOpKind(op, kind);
     }
 
-    bool Graph::eraseAttr(ir::OperationId op, ir::SymbolId key)
+    bool Graph::eraseAttr(OperationId op, std::string_view key)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseAttr(op, key);
     }
 
-    void Graph::setValueSrcLoc(ir::ValueId value, SrcLoc loc)
+    void Graph::setValueSrcLoc(ValueId value, SrcLoc loc)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setValueSrcLoc(value, std::move(loc));
     }
 
-    void Graph::setOpSrcLoc(ir::OperationId op, SrcLoc loc)
+    void Graph::setOpSrcLoc(OperationId op, SrcLoc loc)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setOpSrcLoc(op, std::move(loc));
     }
 
-    void Graph::setOpSymbol(ir::OperationId op, ir::SymbolId sym)
+    void Graph::setOpSymbol(OperationId op, SymbolId sym)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setOpSymbol(op, sym);
     }
 
-    void Graph::setValueSymbol(ir::ValueId value, ir::SymbolId sym)
+    void Graph::setValueSymbol(ValueId value, SymbolId sym)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.setValueSymbol(value, sym);
     }
 
-    void Graph::clearOpSymbol(ir::OperationId op)
+    void Graph::clearOpSymbol(OperationId op)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.clearOpSymbol(op);
     }
 
-    void Graph::clearValueSymbol(ir::ValueId value)
+    void Graph::clearValueSymbol(ValueId value)
     {
-        ir::GraphBuilder &builder = ensureBuilder();
+        GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.clearValueSymbol(value);
     }
 
     void Graph::writeJson(slang::JsonWriter &writer) const
     {
-        auto symbolTextOrEmpty = [&](ir::SymbolId sym) -> std::string_view
+        auto symbolTextOrEmpty = [&](SymbolId sym) -> std::string_view
         {
             return sym.valid() ? symbols_.text(sym) : std::string_view{};
         };
@@ -2800,7 +2431,7 @@ namespace wolf_sv::grh
                 writer.startObject();
                 for (const auto &attr : op.attrs())
                 {
-                    writer.writeProperty(symbolTextOrEmpty(attr.key));
+                    writer.writeProperty(attr.key);
                     writer.startObject();
                     writeAttributeValue(writer, attr.value);
                     writer.endObject();
@@ -2845,7 +2476,7 @@ namespace wolf_sv::grh
                 {
                     continue;
                 }
-                ir::ValueId id;
+                ValueId id;
                 id.index = static_cast<uint32_t>(i + 1);
                 id.generation = 0;
                 id.graph = graphId_;
@@ -2860,7 +2491,7 @@ namespace wolf_sv::grh
                 {
                     continue;
                 }
-                ir::OperationId id;
+                OperationId id;
                 id.index = static_cast<uint32_t>(i + 1);
                 id.generation = 0;
                 id.graph = graphId_;
@@ -2872,7 +2503,7 @@ namespace wolf_sv::grh
         cacheValid_ = true;
     }
 
-    ir::GraphBuilder &Graph::ensureBuilder()
+    GraphBuilder &Graph::ensureBuilder()
     {
         if (builder_)
         {
@@ -2880,7 +2511,7 @@ namespace wolf_sv::grh
         }
         if (view_)
         {
-            builder_ = ir::GraphBuilder::fromView(*view_, symbols_);
+            builder_ = GraphBuilder::fromView(*view_, symbols_);
             view_.reset();
         }
         else
@@ -2891,7 +2522,7 @@ namespace wolf_sv::grh
         return *builder_;
     }
 
-    const ir::GraphView &Graph::view() const
+    const GraphView &Graph::view() const
     {
         if (!view_)
         {
@@ -2900,11 +2531,11 @@ namespace wolf_sv::grh
         return *view_;
     }
 
-    Value Graph::valueFromView(ir::ValueId id) const
+    Value Graph::valueFromView(ValueId id) const
     {
-        const ir::GraphView &graphView = view();
+        const GraphView &graphView = view();
         id.assertGraph(graphId_);
-        ir::SymbolId symbol = graphView.valueSymbol(id);
+        SymbolId symbol = graphView.valueSymbol(id);
         std::string symbolText = symbol.valid() ? std::string(symbols_.text(symbol)) : std::string();
         return Value(id,
                      symbol,
@@ -2914,11 +2545,11 @@ namespace wolf_sv::grh
                      graphView.valueIsInput(id),
                      graphView.valueIsOutput(id),
                      graphView.valueDef(id),
-                     std::vector<ir::ValueUser>(graphView.valueUsers(id).begin(), graphView.valueUsers(id).end()),
+                     std::vector<ValueUser>(graphView.valueUsers(id).begin(), graphView.valueUsers(id).end()),
                      graphView.valueSrcLoc(id));
     }
 
-    Value Graph::valueFromBuilder(ir::ValueId id) const
+    Value Graph::valueFromBuilder(ValueId id) const
     {
         if (!builder_)
         {
@@ -2936,7 +2567,7 @@ namespace wolf_sv::grh
             throw std::runtime_error("ValueId refers to erased value");
         }
 
-        std::vector<ir::ValueUser> users;
+        std::vector<ValueUser> users;
         const auto &ops = builder_->operations_;
         for (std::size_t opIdx = 0; opIdx < ops.size(); ++opIdx)
         {
@@ -2949,11 +2580,11 @@ namespace wolf_sv::grh
             {
                 if (operands[operandIdx] == id)
                 {
-                    ir::OperationId opId;
+                    OperationId opId;
                     opId.index = static_cast<uint32_t>(opIdx + 1);
                     opId.generation = 0;
                     opId.graph = graphId_;
-                    users.push_back(ir::ValueUser{opId, static_cast<uint32_t>(operandIdx)});
+                    users.push_back(ValueUser{opId, static_cast<uint32_t>(operandIdx)});
                 }
             }
         }
@@ -2971,23 +2602,23 @@ namespace wolf_sv::grh
                      data.srcLoc);
     }
 
-    Operation Graph::operationFromView(ir::OperationId id) const
+    Operation Graph::operationFromView(OperationId id) const
     {
-        const ir::GraphView &graphView = view();
+        const GraphView &graphView = view();
         id.assertGraph(graphId_);
-        ir::SymbolId symbol = graphView.opSymbol(id);
+        SymbolId symbol = graphView.opSymbol(id);
         std::string symbolText = symbol.valid() ? std::string(symbols_.text(symbol)) : std::string();
         return Operation(id,
                          graphView.opKind(id),
                          symbol,
                          std::move(symbolText),
-                         std::vector<ir::ValueId>(graphView.opOperands(id).begin(), graphView.opOperands(id).end()),
-                         std::vector<ir::ValueId>(graphView.opResults(id).begin(), graphView.opResults(id).end()),
-                         std::vector<ir::AttrKV>(graphView.opAttrs(id).begin(), graphView.opAttrs(id).end()),
+                         std::vector<ValueId>(graphView.opOperands(id).begin(), graphView.opOperands(id).end()),
+                         std::vector<ValueId>(graphView.opResults(id).begin(), graphView.opResults(id).end()),
+                         std::vector<AttrKV>(graphView.opAttrs(id).begin(), graphView.opAttrs(id).end()),
                          graphView.opSrcLoc(id));
     }
 
-    Operation Graph::operationFromBuilder(ir::OperationId id) const
+    Operation Graph::operationFromBuilder(OperationId id) const
     {
         if (!builder_)
         {
@@ -3038,8 +2669,8 @@ namespace wolf_sv::grh
         {
             throw std::runtime_error("Duplicated graph symbol: " + symbol);
         }
-        ir::SymbolId graphSymbol = netlistSymbols_.contains(symbol) ? netlistSymbols_.lookup(symbol) : netlistSymbols_.intern(symbol);
-        ir::GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
+        SymbolId graphSymbol = netlistSymbols_.contains(symbol) ? netlistSymbols_.lookup(symbol) : netlistSymbols_.intern(symbol);
+        GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
         auto instance = std::make_unique<Graph>(*this, std::move(symbol), graphId);
         return addGraphInternal(std::move(instance));
     }
@@ -3115,414 +2746,4 @@ namespace wolf_sv::grh
         }
     }
 
-    AttributeValue parseAttributeValue(const JsonValue &jsonAttr)
-    {
-        const auto &object = jsonAttr.asObject("attribute");
-        auto kindIt = object.find("t");
-        if (kindIt == object.end())
-        {
-            kindIt = object.find("k");
-        }
-        if (kindIt == object.end())
-        {
-            kindIt = object.find("kind");
-        }
-        if (kindIt == object.end())
-        {
-            throw std::runtime_error("Attribute object missing kind");
-        }
-        const char *kindContext = kindIt->first == "t"   ? "attribute.t"
-                                 : kindIt->first == "k" ? "attribute.k"
-                                                        : "attribute.kind";
-        AttributeKind kind = parseAttributeKind(kindIt->second.asString(kindContext));
-
-        auto valueIt = object.find("v");
-        if (valueIt == object.end())
-        {
-            valueIt = object.find("value");
-        }
-
-        auto valuesIt = object.find("vs");
-        if (valuesIt == object.end())
-        {
-            valuesIt = object.find("values");
-        }
-
-        auto validateAndReturn = [](AttributeValue attr) -> AttributeValue
-        {
-            if (!attributeValueIsJsonSerializable(attr))
-            {
-                throw std::runtime_error("Attribute value is not JSON serializable");
-            }
-            return attr;
-        };
-
-        switch (kind)
-        {
-        case AttributeKind::Bool:
-            if (valueIt == object.end())
-            {
-                throw std::runtime_error("Bool attribute missing value");
-            }
-            return validateAndReturn(AttributeValue{valueIt->second.asBool("attribute.v")});
-        case AttributeKind::Int:
-            if (valueIt == object.end())
-            {
-                throw std::runtime_error("Int attribute missing value");
-            }
-            return validateAndReturn(AttributeValue{valueIt->second.asInt("attribute.v")});
-        case AttributeKind::Double:
-            if (valueIt == object.end())
-            {
-                throw std::runtime_error("Double attribute missing value");
-            }
-            return validateAndReturn(AttributeValue{valueIt->second.asDouble("attribute.v")});
-        case AttributeKind::String:
-            if (valueIt == object.end())
-            {
-                throw std::runtime_error("String attribute missing value");
-            }
-            return validateAndReturn(AttributeValue{valueIt->second.asString("attribute.v")});
-        case AttributeKind::BoolArray:
-        {
-            if (valuesIt == object.end())
-            {
-                throw std::runtime_error("Bool array attribute missing values");
-            }
-            std::vector<bool> arr;
-            for (const auto &entry : valuesIt->second.asArray("attribute.vs"))
-            {
-                arr.push_back(entry.asBool("attribute.vs[]"));
-            }
-            return validateAndReturn(AttributeValue{arr});
-        }
-        case AttributeKind::IntArray:
-        {
-            if (valuesIt == object.end())
-            {
-                throw std::runtime_error("Int array attribute missing values");
-            }
-            std::vector<int64_t> arr;
-            for (const auto &entry : valuesIt->second.asArray("attribute.vs"))
-            {
-                arr.push_back(entry.asInt("attribute.vs[]"));
-            }
-            return validateAndReturn(AttributeValue{arr});
-        }
-        case AttributeKind::DoubleArray:
-        {
-            if (valuesIt == object.end())
-            {
-                throw std::runtime_error("Double array attribute missing values");
-            }
-            std::vector<double> arr;
-            for (const auto &entry : valuesIt->second.asArray("attribute.vs"))
-            {
-                arr.push_back(entry.asDouble("attribute.vs[]"));
-            }
-            return validateAndReturn(AttributeValue{arr});
-        }
-        case AttributeKind::StringArray:
-        {
-            if (valuesIt == object.end())
-            {
-                throw std::runtime_error("String array attribute missing values");
-            }
-            std::vector<std::string> arr;
-            for (const auto &entry : valuesIt->second.asArray("attribute.vs"))
-            {
-                arr.push_back(entry.asString("attribute.vs[]"));
-            }
-            return validateAndReturn(AttributeValue{arr});
-        }
-        }
-        throw std::runtime_error("Unhandled attribute kind");
-    }
-
-    std::optional<SrcLoc> parseSrcLoc(const JsonValue &json, std::string_view context)
-    {
-        const auto &object = json.asObject(context);
-        SrcLoc info{};
-
-        if (auto fileIt = object.find("file"); fileIt != object.end())
-        {
-            info.file = fileIt->second.asString(std::string(context) + ".file");
-        }
-
-        if (auto lineIt = object.find("line"); lineIt != object.end())
-        {
-            info.line = static_cast<uint32_t>(lineIt->second.asInt(std::string(context) + ".line"));
-        }
-
-        if (auto colIt = object.find("col"); colIt != object.end())
-        {
-            info.column = static_cast<uint32_t>(colIt->second.asInt(std::string(context) + ".col"));
-        }
-
-        if (auto endLineIt = object.find("endLine"); endLineIt != object.end())
-        {
-            info.endLine = static_cast<uint32_t>(endLineIt->second.asInt(std::string(context) + ".endLine"));
-        }
-
-        if (auto endColIt = object.find("endCol"); endColIt != object.end())
-        {
-            info.endColumn = static_cast<uint32_t>(endColIt->second.asInt(std::string(context) + ".endCol"));
-        }
-
-        if (info.file.empty() && info.line == 0)
-        {
-            return std::nullopt;
-        }
-        return info;
-    }
-
-    Netlist Netlist::fromJsonString(std::string_view json)
-    {
-        JsonValue root = parseJson(json);
-        const auto &rootObj = root.asObject("netlist");
-
-        Netlist netlist;
-        auto graphsIt = rootObj.find("graphs");
-        if (graphsIt == rootObj.end())
-        {
-            throw std::runtime_error("Netlist JSON missing graphs field");
-        }
-        const auto &graphsArray = graphsIt->second.asArray("graphs");
-        for (const auto &graphValue : graphsArray)
-        {
-            const auto &graphObj = graphValue.asObject("graph");
-            auto symbolIt = graphObj.find("symbol");
-            if (symbolIt == graphObj.end())
-            {
-                throw std::runtime_error("Graph JSON missing symbol");
-            }
-            Graph &graph = netlist.createGraph(symbolIt->second.asString("graph.symbol"));
-
-            const auto valuesIt = graphObj.find("vals");
-            if (valuesIt == graphObj.end())
-            {
-                throw std::runtime_error("Graph JSON missing vals array");
-            }
-
-            std::unordered_map<std::string, ir::ValueId> valueBySymbol;
-            std::unordered_set<uint32_t> declaredInputs;
-            std::unordered_set<uint32_t> declaredOutputs;
-
-            const auto &valuesArray = valuesIt->second.asArray("graph.vals");
-            for (const auto &valueEntry : valuesArray)
-            {
-                const auto &valueObj = valueEntry.asObject("value");
-                const auto &symbol = valueObj.at("sym").asString("value.sym");
-                int64_t width = valueObj.at("w").asInt("value.w");
-                bool isSigned = valueObj.at("sgn").asBool("value.sgn");
-                ir::SymbolId valueSym = graph.internSymbol(symbol);
-                ir::ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
-                valueBySymbol.emplace(symbol, valueId);
-
-                bool isInput = valueObj.at("in").asBool("value.in");
-                bool isOutput = valueObj.at("out").asBool("value.out");
-                if (isInput && isOutput)
-                {
-                    throw std::runtime_error("Value cannot be both input and output in JSON");
-                }
-
-                if (isInput)
-                {
-                    declaredInputs.insert(valueSym.value);
-                }
-                if (isOutput)
-                {
-                    declaredOutputs.insert(valueSym.value);
-                }
-
-                if (auto dbgIt = valueObj.find("loc"); dbgIt != valueObj.end())
-                {
-                    if (auto loc = parseSrcLoc(dbgIt->second, "value.loc"))
-                    {
-                        graph.setValueSrcLoc(valueId, std::move(*loc));
-                    }
-                }
-            }
-
-            if (auto portsIt = graphObj.find("ports"); portsIt != graphObj.end())
-            {
-                const auto &portsObj = portsIt->second.asObject("graph.ports");
-                auto parsePortArray = [&](std::string_view key, bool isInput)
-                {
-                    auto arrayIt = portsObj.find(std::string(key));
-                    if (arrayIt == portsObj.end())
-                    {
-                        return;
-                    }
-                    const auto &portArray = arrayIt->second.asArray(std::string("graph.ports.") + std::string(key));
-                    for (const auto &entry : portArray)
-                    {
-                        const auto &portObj = entry.asObject("graph.port");
-                        auto nameField = portObj.find("name");
-                        auto valField = portObj.find("val");
-                        if (nameField == portObj.end() || valField == portObj.end())
-                        {
-                            throw std::runtime_error("Port entry missing name or val");
-                        }
-                        const std::string valueName = valField->second.asString("graph.port.val");
-                        auto valueIt = valueBySymbol.find(valueName);
-                        if (valueIt == valueBySymbol.end())
-                        {
-                            throw std::runtime_error("Port references unknown value: " + valueName);
-                        }
-                        ir::SymbolId portName = graph.internSymbol(nameField->second.asString("graph.port.name"));
-                        if (isInput)
-                        {
-                            graph.bindInputPort(portName, valueIt->second);
-                        }
-                        else
-                        {
-                            graph.bindOutputPort(portName, valueIt->second);
-                        }
-                    }
-                };
-                parsePortArray("in", true);
-                parsePortArray("out", false);
-            }
-            else
-            {
-                throw std::runtime_error("Graph JSON missing ports object");
-            }
-
-            for (const auto &port : graph.inputPorts())
-            {
-                Value value = graph.getValue(port.value);
-                if (!declaredInputs.contains(value.symbol().value))
-                {
-                    throw std::runtime_error("Input port missing isInput=true flag for value: " + std::string(graph.symbolText(value.symbol())));
-                }
-            }
-            for (const auto &symbolValue : declaredInputs)
-            {
-                ir::SymbolId sym{symbolValue};
-                ir::ValueId valueId = graph.findValue(sym);
-                if (!valueId.valid())
-                {
-                    throw std::runtime_error("Value marked in=true but not bound to input port");
-                }
-                Value value = graph.getValue(valueId);
-                if (!value.isInput())
-                {
-                    throw std::runtime_error("Value marked in=true but not bound to input port: " + std::string(graph.symbolText(sym)));
-                }
-            }
-
-            for (const auto &port : graph.outputPorts())
-            {
-                Value value = graph.getValue(port.value);
-                if (!declaredOutputs.contains(value.symbol().value))
-                {
-                    throw std::runtime_error("Output port missing isOutput=true flag for value: " + std::string(graph.symbolText(value.symbol())));
-                }
-            }
-            for (const auto &symbolValue : declaredOutputs)
-            {
-                ir::SymbolId sym{symbolValue};
-                ir::ValueId valueId = graph.findValue(sym);
-                if (!valueId.valid())
-                {
-                    throw std::runtime_error("Value marked out=true but not bound to output port");
-                }
-                Value value = graph.getValue(valueId);
-                if (!value.isOutput())
-                {
-                    throw std::runtime_error("Value marked out=true but not bound to output port: " + std::string(graph.symbolText(sym)));
-                }
-            }
-
-            if (auto opsIt = graphObj.find("ops"); opsIt != graphObj.end())
-            {
-                for (const auto &opEntry : opsIt->second.asArray("graph.ops"))
-                {
-                    const auto &opObj = opEntry.asObject("operation");
-                    auto kindIt = opObj.find("kind");
-                    if (kindIt == opObj.end())
-                    {
-                        throw std::runtime_error("Operation missing kind");
-                    }
-                    auto kind = parseOperationKind(kindIt->second.asString("operation.kind"));
-                    if (!kind)
-                    {
-                        throw std::runtime_error("Unknown operation kind: " + kindIt->second.asString("operation.kind"));
-                    }
-
-                    auto symIt = opObj.find("sym");
-                    if (symIt == opObj.end())
-                    {
-                        throw std::runtime_error("Operation missing symbol");
-                    }
-
-                    const std::string opSymbol = symIt->second.asString("operation.sym");
-                    ir::SymbolId opSym = graph.internSymbol(opSymbol);
-                    ir::OperationId opId = graph.createOperation(*kind, opSym);
-
-                    auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>
-                    {
-                        std::vector<std::string> entries;
-                        if (auto it = opObj.find(std::string(key)); it != opObj.end())
-                        {
-                            for (const auto &entry : it->second.asArray(std::string(context)))
-                            {
-                                entries.push_back(entry.asString(std::string(context) + "[]"));
-                            }
-                        }
-                        return entries;
-                    };
-
-                    for (const auto &symbol : parseSymbolList("in", "operation.in"))
-                    {
-                        auto valueIt = valueBySymbol.find(symbol);
-                        if (valueIt == valueBySymbol.end())
-                        {
-                            throw std::runtime_error("Operand references unknown value: " + symbol);
-                        }
-                        graph.addOperand(opId, valueIt->second);
-                    }
-
-                    for (const auto &symbol : parseSymbolList("out", "operation.out"))
-                    {
-                        auto valueIt = valueBySymbol.find(symbol);
-                        if (valueIt == valueBySymbol.end())
-                        {
-                            throw std::runtime_error("Result references unknown value: " + symbol);
-                        }
-                        graph.addResult(opId, valueIt->second);
-                    }
-
-                    if (auto attrsIt = opObj.find("attrs"); attrsIt != opObj.end())
-                    {
-                        for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
-                        {
-                            ir::SymbolId attrKey = graph.internSymbol(attrName);
-                            graph.setAttr(opId, attrKey, parseAttributeValue(attrValue));
-                        }
-                    }
-
-                    if (auto dbgIt = opObj.find("loc"); dbgIt != opObj.end())
-                    {
-                        if (auto loc = parseSrcLoc(dbgIt->second, "operation.loc"))
-                        {
-                            graph.setOpSrcLoc(opId, std::move(*loc));
-                        }
-                    }
-                }
-            }
-        }
-
-        if (auto topIt = rootObj.find("tops"); topIt != rootObj.end())
-        {
-            for (const auto &entry : topIt->second.asArray("netlist.tops"))
-            {
-                netlist.markAsTop(entry.asString("netlist.tops[]"));
-            }
-        }
-
-        return netlist;
-    }
-
-} // namespace wolf_sv::grh
+} // namespace wolf_sv::grh::ir

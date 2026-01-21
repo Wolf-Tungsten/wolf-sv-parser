@@ -8,7 +8,7 @@
 
 using namespace wolf_sv;
 using namespace wolf_sv::emit;
-using namespace wolf_sv::grh;
+using namespace wolf_sv::grh::ir;
 namespace grh_ir = wolf_sv::grh::ir;
 
 namespace
@@ -45,7 +45,6 @@ int main()
     const auto symOut = symbols.intern("out");
     const auto symAdd = symbols.intern("add0");
     const auto symAssign = symbols.intern("assign0");
-    const auto symWeights = symbols.intern("weights");
 
     grh_ir::GraphBuilder builder(symbols);
     const auto vA = builder.addValue(symA, 8, false);
@@ -57,13 +56,13 @@ int main()
     builder.bindInputPort(symB, vB);
     builder.bindOutputPort(symOut, vOut);
 
-    const auto opAdd = builder.addOp(grh::OperationKind::kAdd, symAdd);
+    const auto opAdd = builder.addOp(grh::ir::OperationKind::kAdd, symAdd);
     builder.addOperand(opAdd, vA);
     builder.addOperand(opAdd, vB);
     builder.addResult(opAdd, vSum);
-    builder.setAttr(opAdd, symWeights, AttributeValue(std::vector<int64_t>{1, 2}));
+    builder.setAttr(opAdd, "weights", AttributeValue(std::vector<int64_t>{1, 2}));
 
-    const auto opAssign = builder.addOp(grh::OperationKind::kAssign, symAssign);
+    const auto opAssign = builder.addOp(grh::ir::OperationKind::kAssign, symAssign);
     builder.addOperand(opAssign, vSum);
     builder.addResult(opAssign, vOut);
 
@@ -100,7 +99,7 @@ int main()
         return fail("Missing attribute payload in JSON output");
     }
 
-    grh::Netlist parsed = grh::Netlist::fromJsonString(jsonText);
+    grh::ir::Netlist parsed = grh::ir::Netlist::fromJsonString(jsonText);
     if (!parsed.findGraph("demo_ir"))
     {
         return fail("Parsed netlist missing demo_ir graph");

@@ -59,7 +59,7 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     if (netlist.topGraphs().size() != 1) {
         return fail("Expected exactly one top graph");
@@ -70,7 +70,7 @@ int main() {
         return fail("Unexpected top graph name: " + topName);
     }
 
-    const grh::Graph* graph = netlist.findGraph(topName);
+    const grh::ir::Graph* graph = netlist.findGraph(topName);
     if (!graph) {
         return fail("Top graph lookup failed");
     }
@@ -96,16 +96,12 @@ int main() {
     }
 
     bool hasPlaceholder = false;
-    const grh::ir::SymbolId statusKey = graph->lookupSymbol("status");
     for (const auto& opId : graph->operations()) {
-        const grh::Operation op = graph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kBlackbox) {
+        const grh::ir::Operation op = graph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kBlackbox) {
             continue;
         }
-        if (!statusKey.valid()) {
-            continue;
-        }
-        auto statusAttr = op.attr(statusKey);
+        auto statusAttr = op.attr("status");
         const std::string* status = statusAttr ? std::get_if<std::string>(&*statusAttr) : nullptr;
         if (status && status->find("Module body elaboration pending") != std::string::npos) {
             hasPlaceholder = true;

@@ -215,22 +215,22 @@ public:
     std::span<Entry> entriesMutable() noexcept { return entries_; }
     bool empty() const noexcept { return entries_.empty(); }
     void clear();
-    void finalize(grh::Graph& graph, ElaborateDiagnostics* diagnostics);
+    void finalize(grh::ir::Graph& graph, ElaborateDiagnostics* diagnostics);
     void setSourceManager(const slang::SourceManager* sourceManager) { sourceManager_ = sourceManager; }
 
 private:
     std::string makeOperationName(const Entry& entry, std::string_view suffix);
     std::string makeValueName(const Entry& entry, std::string_view suffix);
     const slang::ast::Symbol* originFor(const Entry& entry) const;
-    std::optional<grh::SrcLoc> srcLocForEntry(const Entry& entry) const;
+    std::optional<grh::ir::SrcLoc> srcLocForEntry(const Entry& entry) const;
     void reportIssue(const Entry& entry, std::string message,
                      ElaborateDiagnostics* diagnostics) const;
-    ValueId composeSlices(Entry& entry, grh::Graph& graph,
+    ValueId composeSlices(Entry& entry, grh::ir::Graph& graph,
                           ElaborateDiagnostics* diagnostics);
-    void attachToTarget(const Entry& entry, ValueId composedValue, grh::Graph& graph,
+    void attachToTarget(const Entry& entry, ValueId composedValue, grh::ir::Graph& graph,
                         ElaborateDiagnostics* diagnostics);
-    ValueId createZeroValue(const Entry& entry, int64_t width, grh::Graph& graph);
-    bool tryLowerLatch(Entry& entry, ValueId dataValue, grh::Graph& graph,
+    ValueId createZeroValue(const Entry& entry, int64_t width, grh::ir::Graph& graph);
+    bool tryLowerLatch(Entry& entry, ValueId dataValue, grh::ir::Graph& graph,
                        ElaborateDiagnostics* diagnostics);
 
     std::vector<Entry> entries_;
@@ -243,7 +243,7 @@ private:
 class RHSConverter {
 public:
     struct Context {
-        grh::Graph* graph = nullptr;
+        grh::ir::Graph* graph = nullptr;
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
         std::span<const SignalMemoEntry> memMemo;
@@ -266,7 +266,7 @@ protected:
         bool isSigned = false;
     };
 
-    grh::Graph& graph() const noexcept { return *graph_; }
+    grh::ir::Graph& graph() const noexcept { return *graph_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
 
@@ -280,13 +280,13 @@ protected:
     virtual ValueId handleCustomNamedValue(const slang::ast::NamedValueExpression& expr);
 
     ValueId createTemporaryValue(const slang::ast::Type& type, std::string_view hint);
-    OperationId createOperation(grh::OperationKind kind, std::string_view hint);
+    OperationId createOperation(grh::ir::OperationKind kind, std::string_view hint);
     ValueId createConstantValue(const slang::SVInt& value, const slang::ast::Type& type,
                                     std::string_view literalHint);
     ValueId createZeroValue(const slang::ast::Type& type, std::string_view hint);
-    ValueId buildUnaryOp(grh::OperationKind kind, ValueId operand,
+    ValueId buildUnaryOp(grh::ir::OperationKind kind, ValueId operand,
                              const slang::ast::Expression& originExpr, std::string_view hint);
-    ValueId buildBinaryOp(grh::OperationKind kind, ValueId lhs, ValueId rhs,
+    ValueId buildBinaryOp(grh::ir::OperationKind kind, ValueId lhs, ValueId rhs,
                               const slang::ast::Expression& originExpr, std::string_view hint);
     ValueId buildMux(ValueId cond, ValueId onTrue, ValueId onFalse,
                          const slang::ast::Expression& originExpr);
@@ -321,7 +321,7 @@ private:
     std::string formatConstantLiteral(const slang::SVInt& value,
                                       const slang::ast::Type& type) const;
 
-    grh::Graph* graph_ = nullptr;
+    grh::ir::Graph* graph_ = nullptr;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     const slang::SourceManager* sourceManager_ = nullptr;
@@ -381,7 +381,7 @@ private:
 class LHSConverter {
 public:
     struct Context {
-        grh::Graph* graph = nullptr;
+        grh::ir::Graph* graph = nullptr;
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
         std::span<const SignalMemoEntry> memMemo;
@@ -407,7 +407,7 @@ protected:
     virtual bool allowReplication() const { return false; }
     // Hook to feed contextual constants (e.g., foreach loop indices) into LHS eval.
     virtual void seedEvalContextForLHS(slang::ast::EvalContext&) {}
-    grh::Graph& graph() const noexcept { return *graph_; }
+    grh::ir::Graph& graph() const noexcept { return *graph_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     const slang::ast::Symbol* origin() const noexcept { return origin_; }
     const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
@@ -442,7 +442,7 @@ private:
     static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
     void flushPending(std::vector<WriteResult>& outResults);
 
-    grh::Graph* graph_ = nullptr;
+    grh::ir::Graph* graph_ = nullptr;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
@@ -540,7 +540,7 @@ protected:
 /// Shared control logic for procedural always blocks.
 class AlwaysConverter {
 public:
-    AlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+    AlwaysConverter(grh::ir::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                     std::span<const SignalMemoEntry> regMemo,
                     std::span<const SignalMemoEntry> memMemo,
                     std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
@@ -719,13 +719,13 @@ protected:
                                        const slang::ast::ExpressionStatement* origin,
                                        std::string_view message,
                                        std::string_view severity);
-    grh::Graph& graph() noexcept { return graph_; }
-    const grh::Graph& graph() const noexcept { return graph_; }
+    grh::ir::Graph& graph() noexcept { return graph_; }
+    const grh::ir::Graph& graph() const noexcept { return graph_; }
     const slang::ast::ProceduralBlockSymbol& block() const noexcept { return block_; }
     ElaborateDiagnostics* diagnostics() const noexcept { return diagnostics_; }
     WriteBackMemo& memo() noexcept { return memo_; }
 
-    grh::Graph& graph_;
+    grh::ir::Graph& graph_;
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
@@ -767,7 +767,7 @@ protected:
 /// Comb always converter entry point.
 class CombAlwaysConverter : public AlwaysConverter {
 public:
-    CombAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+    CombAlwaysConverter(grh::ir::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                         std::span<const SignalMemoEntry> regMemo,
                         std::span<const SignalMemoEntry> memMemo,
                         std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
@@ -796,7 +796,7 @@ protected:
 /// Sequential always converter entry point.
 class SeqAlwaysConverter : public AlwaysConverter {
 public:
-    SeqAlwaysConverter(grh::Graph& graph, std::span<const SignalMemoEntry> netMemo,
+    SeqAlwaysConverter(grh::ir::Graph& graph, std::span<const SignalMemoEntry> netMemo,
                        std::span<const SignalMemoEntry> regMemo,
                        std::span<const SignalMemoEntry> memMemo,
                        std::span<const DpiImportEntry> dpiImports, WriteBackMemo& memo,
@@ -929,7 +929,7 @@ public:
                        ElaborateOptions options = {});
 
     /// Convert the provided slang AST root symbol into a GRH netlist.
-    grh::Netlist convert(const slang::ast::RootSymbol& root);
+    grh::ir::Netlist convert(const slang::ast::RootSymbol& root);
 
     /// Returns memoized net declarations for the provided module body.
     std::span<const SignalMemoEntry>
@@ -946,48 +946,48 @@ public:
     peekDpiImports(const slang::ast::InstanceBodySymbol& body) const;
 
 private:
-    grh::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
-                                 grh::Netlist& netlist, bool& wasCreated);
+    grh::ir::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
+                                 grh::ir::Netlist& netlist, bool& wasCreated);
     void populatePorts(const slang::ast::InstanceSymbol& instance,
-                       const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void emitModulePlaceholder(const slang::ast::InstanceSymbol& instance, grh::Graph& graph);
-    void convertInstanceBody(const slang::ast::InstanceSymbol& instance, grh::Graph& graph,
-                             grh::Netlist& netlist);
-    void processInstanceArray(const slang::ast::InstanceArraySymbol& array, grh::Graph& graph,
-                              grh::Netlist& netlist);
-    void processGenerateBlock(const slang::ast::GenerateBlockSymbol& block, grh::Graph& graph,
-                              grh::Netlist& netlist);
+                       const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void emitModulePlaceholder(const slang::ast::InstanceSymbol& instance, grh::ir::Graph& graph);
+    void convertInstanceBody(const slang::ast::InstanceSymbol& instance, grh::ir::Graph& graph,
+                             grh::ir::Netlist& netlist);
+    void processInstanceArray(const slang::ast::InstanceArraySymbol& array, grh::ir::Graph& graph,
+                              grh::ir::Netlist& netlist);
+    void processGenerateBlock(const slang::ast::GenerateBlockSymbol& block, grh::ir::Graph& graph,
+                              grh::ir::Netlist& netlist);
     void processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
-                                   grh::Graph& graph, grh::Netlist& netlist);
-    void processNetInitializers(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+                                   grh::ir::Graph& graph, grh::ir::Netlist& netlist);
+    void processNetInitializers(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     void processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
-                                 const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+                                 const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     void processCombAlways(const slang::ast::ProceduralBlockSymbol& block,
-                           const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+                           const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     void processSeqAlways(const slang::ast::ProceduralBlockSymbol& block,
-                          const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::Graph& parentGraph,
-                         grh::Netlist& netlist);
+                          const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void processInstance(const slang::ast::InstanceSymbol& childInstance, grh::ir::Graph& parentGraph,
+                         grh::ir::Netlist& netlist);
     void createInstanceOperation(const slang::ast::InstanceSymbol& childInstance,
-                                 grh::Graph& parentGraph, grh::Graph& targetGraph);
+                                 grh::ir::Graph& parentGraph, grh::ir::Graph& targetGraph);
     void createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
-                                 grh::Graph& parentGraph, const BlackboxMemoEntry& memo);
-    ValueId ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::Graph& graph);
-    ValueId resolveConnectionValue(const slang::ast::Expression& expr, grh::Graph& graph,
+                                 grh::ir::Graph& parentGraph, const BlackboxMemoEntry& memo);
+    ValueId ensureValueForSymbol(const slang::ast::ValueSymbol& symbol, grh::ir::Graph& graph);
+    ValueId resolveConnectionValue(const slang::ast::Expression& expr, grh::ir::Graph& graph,
                                        const slang::ast::Symbol* origin);
-    std::string makeUniqueOperationName(grh::Graph& graph, std::string baseName);
+    std::string makeUniqueOperationName(grh::ir::Graph& graph, std::string baseName);
     std::string makeOperationNameForSymbol(const slang::ast::ValueSymbol& symbol,
-                                           std::string_view fallback, grh::Graph& graph);
+                                           std::string_view fallback, grh::ir::Graph& graph);
     void registerValueForSymbol(const slang::ast::Symbol& symbol, ValueId value);
     void collectSignalMemos(const slang::ast::InstanceBodySymbol& body);
     void collectDpiImports(const slang::ast::InstanceBodySymbol& body);
-    void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void materializeDpiImports(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
-    void ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void materializeSignalMemos(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void materializeDpiImports(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void ensureNetValues(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
+    void ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     WriteBackMemo& ensureWriteBackMemo(const slang::ast::InstanceBodySymbol& body);
-    void finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body, grh::Graph& graph);
+    void finalizeWriteBackMemo(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     const BlackboxMemoEntry* ensureBlackboxMemo(const slang::ast::InstanceBodySymbol& body);
     const BlackboxMemoEntry* peekBlackboxMemo(const slang::ast::InstanceBodySymbol& body) const;
 
@@ -996,7 +996,7 @@ private:
     std::size_t placeholderCounter_ = 0;
     std::size_t instanceCounter_ = 0;
     const slang::SourceManager* sourceManager_ = nullptr;
-    std::unordered_map<const slang::ast::InstanceBodySymbol*, grh::Graph*> graphByBody_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*, grh::ir::Graph*> graphByBody_;
     std::unordered_set<const slang::ast::InstanceBodySymbol*> processedBodies_;
     std::unordered_map<const slang::ast::Symbol*, std::vector<ValueId>> valueCache_;
     std::unordered_map<std::string, std::size_t> graphNameUsage_;

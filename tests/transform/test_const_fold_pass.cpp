@@ -21,25 +21,21 @@ namespace
         return 1;
     }
 
-    grh::ir::ValueId makeConst(grh::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
+    grh::ir::ValueId makeConst(grh::ir::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
     {
         const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
         const grh::ir::SymbolId opSym = graph.internSymbol(opName);
         const grh::ir::ValueId val = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
-        const grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kConstant, opSym);
+        const grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
         graph.addResult(op, val);
-        graph.setAttr(op, graph.internSymbol("constValue"), literal);
+        graph.setAttr(op, "constValue", literal);
         return val;
     }
 
-    std::optional<slang::SVInt> getConstLiteral(const grh::Graph &graph, const grh::Operation &op)
+    std::optional<slang::SVInt> getConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op)
     {
-        const grh::ir::SymbolId key = graph.lookupSymbol("constValue");
-        if (!key.valid())
-        {
-            return std::nullopt;
-        }
-        auto attr = op.attr(key);
+        (void)graph;
+        auto attr = op.attr("constValue");
         if (!attr)
         {
             return std::nullopt;
@@ -65,36 +61,36 @@ int main()
 {
     // Case 1: multi-iteration folding rewires downstream users
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g");
         grh::ir::ValueId c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
         grh::ir::ValueId c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
 
         grh::ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 4, false);
-        grh::ir::OperationId add = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add0"));
+        grh::ir::OperationId add = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(add, c0);
         graph.addOperand(add, c1);
         graph.addResult(add, sum);
 
         grh::ir::ValueId pass = graph.createValue(graph.internSymbol("pass"), 4, false);
-        grh::ir::OperationId assign = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign0"));
+        grh::ir::OperationId assign = graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("assign0"));
         graph.addOperand(assign, sum);
         graph.addResult(assign, pass);
 
         grh::ir::ValueId neg = graph.createValue(graph.internSymbol("neg"), 4, false);
-        grh::ir::OperationId invert = graph.createOperation(grh::OperationKind::kNot, graph.internSymbol("not0"));
+        grh::ir::OperationId invert = graph.createOperation(grh::ir::OperationKind::kNot, graph.internSymbol("not0"));
         graph.addOperand(invert, pass);
         graph.addResult(invert, neg);
 
         grh::ir::ValueId finalSum = graph.createValue(graph.internSymbol("finalSum"), 4, false);
-        grh::ir::OperationId add2 = graph.createOperation(grh::OperationKind::kAdd, graph.internSymbol("add1"));
+        grh::ir::OperationId add2 = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add1"));
         graph.addOperand(add2, neg);
         graph.addOperand(add2, c1);
         graph.addResult(add2, finalSum);
 
         grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 4, false);
         graph.bindOutputPort(graph.internSymbol("out"), out);
-        grh::ir::OperationId assignOut = graph.createOperation(grh::OperationKind::kAssign, graph.internSymbol("assign1"));
+        grh::ir::OperationId assignOut = graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("assign1"));
         graph.addOperand(assignOut, finalSum);
         graph.addResult(assignOut, out);
 
@@ -130,9 +126,9 @@ int main()
         {
             return fail("Output port was not rewired to a constant");
         }
-        grh::Value outValue = graph.getValue(outVal);
+        grh::ir::Value outValue = graph.getValue(outVal);
         if (!outValue.definingOp().valid() ||
-            graph.getOperation(outValue.definingOp()).kind() != grh::OperationKind::kConstant)
+            graph.getOperation(outValue.definingOp()).kind() != grh::ir::OperationKind::kConstant)
         {
             return fail("Output port was not rewired to a constant");
         }
@@ -150,13 +146,13 @@ int main()
 
     // Case 2: X operand blocks folding when allowXPropagation=false
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g2");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g2");
         grh::ir::ValueId xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
         grh::ir::ValueId one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
 
         grh::ir::ValueId andOut = graph.createValue(graph.internSymbol("andOut"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::OperationKind::kAnd, graph.internSymbol("and0"));
+        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kAnd, graph.internSymbol("and0"));
         graph.addOperand(op, xval);
         graph.addOperand(op, one);
         graph.addResult(op, andOut);
@@ -181,7 +177,7 @@ int main()
         {
             return fail("Pass should not change graph when blocked by X");
         }
-        const grh::Operation opView = graph.getOperation(op);
+        const grh::ir::Operation opView = graph.getOperation(op);
         if (opView.operands()[0] != xval || opView.operands()[1] != one)
         {
             return fail("Operands should remain unchanged when folding is skipped");
@@ -190,12 +186,12 @@ int main()
 
     // Case 3: missing attribute triggers failure
     {
-        grh::Netlist netlist;
-        grh::Graph &graph = netlist.createGraph("g3");
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g3");
         grh::ir::ValueId c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
 
         grh::ir::ValueId repOut = graph.createValue(graph.internSymbol("repOut"), 4, false);
-        grh::ir::OperationId rep = graph.createOperation(grh::OperationKind::kReplicate, graph.internSymbol("rep0"));
+        grh::ir::OperationId rep = graph.createOperation(grh::ir::OperationKind::kReplicate, graph.internSymbol("rep0"));
         graph.addOperand(rep, c);
         graph.addResult(rep, repOut);
         // Intentionally omit the "rep" attribute.

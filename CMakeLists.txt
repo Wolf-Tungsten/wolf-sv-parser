@@ -19,6 +19,7 @@ add_subdirectory(src/pass)
 ## grh
 add_library(grh STATIC
     src/grh.cpp
+    src/load.cpp
 )
 
 target_include_directories(grh

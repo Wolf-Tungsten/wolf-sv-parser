@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-using namespace wolf_sv::grh;
+using namespace wolf_sv::grh::ir;
 using namespace wolf_sv::emit;
 
 namespace
@@ -45,23 +45,23 @@ int main()
         Netlist netlist;
         Graph &graph = netlist.createGraph("demo");
 
-        ir::ValueId a = graph.createValue(graph.internSymbol("a"), 8, false);
-        ir::ValueId b = graph.createValue(graph.internSymbol("b"), 8, false);
-        ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
-        ir::ValueId sumCopy = graph.createValue(graph.internSymbol("sum_copy"), 8, false);
+        ValueId a = graph.createValue(graph.internSymbol("a"), 8, false);
+        ValueId b = graph.createValue(graph.internSymbol("b"), 8, false);
+        ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
+        ValueId sumCopy = graph.createValue(graph.internSymbol("sum_copy"), 8, false);
 
         graph.bindInputPort(graph.internSymbol("a"), a);
         graph.bindInputPort(graph.internSymbol("b"), b);
         graph.bindOutputPort(graph.internSymbol("sum"), sum);
         graph.bindOutputPort(graph.internSymbol("sum_copy"), sumCopy);
 
-        ir::OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
+        OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(op, a);
         graph.addOperand(op, b);
         graph.addResult(op, sum);
 
         bool threwOnNaNAttribute = expectThrows([&]
-                                                { graph.setAttr(op, graph.internSymbol("invalid_nan"),
+                                                { graph.setAttr(op, "invalid_nan",
                                                                 AttributeValue(std::numeric_limits<double>::quiet_NaN())); });
         if (!threwOnNaNAttribute)
         {
@@ -69,14 +69,14 @@ int main()
         }
 
         bool threwOnDoubleArrayInfinity = expectThrows([&]
-                                                       { graph.setAttr(op, graph.internSymbol("invalid_array"),
+                                                       { graph.setAttr(op, "invalid_array",
                                                                        AttributeValue(std::vector<double>{0.25, std::numeric_limits<double>::infinity()})); });
         if (!threwOnDoubleArrayInfinity)
         {
             return fail("Expected double array with infinity to throw");
         }
 
-        ir::OperationId assignOp = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
+        OperationId assignOp = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
         graph.addOperand(assignOp, sum);
         graph.addResult(assignOp, sumCopy);
         if (graph.getValue(sumCopy).definingOp() != assignOp)
@@ -84,7 +84,8 @@ int main()
             return fail("Assign result defining operation not set");
         }
 
-        const auto aUsers = graph.getValue(a).users();
+        const Value aValue = graph.getValue(a);
+        const auto aUsers = aValue.users();
         if (aUsers.size() != 1 || aUsers[0].operation != op)
         {
             return fail("Operand usage tracking failed");
@@ -94,7 +95,7 @@ int main()
             return fail("Result defining operation not set");
         }
 
-        ir::ValueId c = graph.createValue(graph.internSymbol("c"), 8, false);
+        ValueId c = graph.createValue(graph.internSymbol("c"), 8, false);
         graph.bindInputPort(graph.internSymbol("c"), c);
 
         graph.replaceOperand(op, 1, c);
@@ -106,14 +107,15 @@ int main()
         {
             return fail("Old operand still listed as user after replacement");
         }
-        const auto cUsers = graph.getValue(c).users();
+        const Value cValue = graph.getValue(c);
+        const auto cUsers = cValue.users();
         if (cUsers.size() != 1 || cUsers[0].operation != op || cUsers[0].operandIndex != 1)
         {
             return fail("New operand usage tracking incorrect after replacement");
         }
 
         Graph &auxGraph = netlist.createGraph("aux");
-        ir::ValueId foreignValue = auxGraph.createValue(auxGraph.internSymbol("foreign"), 8, false);
+        ValueId foreignValue = auxGraph.createValue(auxGraph.internSymbol("foreign"), 8, false);
         bool threwOnForeignOperand = expectThrows([&]
                                                   { graph.replaceOperand(op, 0, foreignValue); });
         if (!threwOnForeignOperand)
@@ -121,12 +123,12 @@ int main()
             return fail("Expected replacing operand with foreign value to throw");
         }
 
-        ir::OperationId passThrough = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign1"));
+        OperationId passThrough = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign1"));
         graph.addOperand(passThrough, c);
-        ir::ValueId passResult = graph.createValue(graph.internSymbol("passthrough"), 8, false);
+        ValueId passResult = graph.createValue(graph.internSymbol("passthrough"), 8, false);
         graph.addResult(passThrough, passResult);
 
-        ir::ValueId passResultAlt = graph.createValue(graph.internSymbol("passthrough_alt"), 8, false);
+        ValueId passResultAlt = graph.createValue(graph.internSymbol("passthrough_alt"), 8, false);
         graph.replaceResult(passThrough, 0, passResultAlt);
         if (graph.getValue(passResult).definingOp().valid())
         {
@@ -148,8 +150,8 @@ int main()
             return fail("Expected replacing result with foreign value to throw");
         }
 
-        ir::ValueId existingResult = graph.createValue(graph.internSymbol("existing_result"), 8, false);
-        ir::OperationId existingProducer = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign_existing"));
+        ValueId existingResult = graph.createValue(graph.internSymbol("existing_result"), 8, false);
+        OperationId existingProducer = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign_existing"));
         graph.addOperand(existingProducer, c);
         graph.addResult(existingProducer, existingResult);
 
@@ -228,7 +230,7 @@ int main()
             return fail("Parsed graph missing");
         }
 
-        const ir::OperationId parsedOpId = parsedGraph->findOperation("add0");
+        const OperationId parsedOpId = parsedGraph->findOperation("add0");
         if (!parsedOpId.valid())
         {
             return fail("Parsed operation missing");
@@ -239,7 +241,7 @@ int main()
             return fail("Parsed operation connectivity mismatch");
         }
 
-        const ir::OperationId parsedAssignId = parsedGraph->findOperation("assign0");
+        const OperationId parsedAssignId = parsedGraph->findOperation("assign0");
         if (!parsedAssignId.valid())
         {
             return fail("Parsed assign operation missing");
@@ -544,8 +546,6 @@ int main()
             auto symOutVal = graphSymbols.intern("out_val");
             auto symAdd = graphSymbols.intern("add0");
             auto symAssign = graphSymbols.intern("assign0");
-            auto symDelay = graphSymbols.intern("delay");
-
             auto vA = builder.addValue(symVa, 1, false);
             auto vB = builder.addValue(symVb, 1, false);
             auto vSum = builder.addValue(symSum, 1, false);
@@ -570,7 +570,7 @@ int main()
             builder.bindInputPort(symPortA, vA);
             builder.bindOutputPort(symPortOut, vOut);
 
-            builder.setAttr(opAdd, symDelay, AttributeValue(int64_t(5)));
+            builder.setAttr(opAdd, "delay", AttributeValue(int64_t(5)));
 
             SrcLoc opLoc;
             opLoc.file = "demo.sv";
@@ -604,7 +604,7 @@ int main()
                 return fail("GraphView valueSymbol mismatch");
             }
 
-            auto attr = view.opAttr(opAdd, symDelay);
+            auto attr = view.opAttr(opAdd, "delay");
             if (!attr || std::get<int64_t>(*attr) != 5)
             {
                 return fail("GraphView opAttr lookup mismatch");

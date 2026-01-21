@@ -89,7 +89,7 @@ namespace wolf_sv::transform
 
     struct PassContext
     {
-        grh::Netlist &netlist;
+        grh::ir::Netlist &netlist;
         PassDiagnostics &diags;
         PassVerbosity verbosity = PassVerbosity::Info;
         std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>> scratchpad;
@@ -116,7 +116,7 @@ namespace wolf_sv::transform
         void setName(std::string name) { name_ = std::move(name); }
 
     protected:
-        grh::Netlist &netlist() { return context_->netlist; }
+        grh::ir::Netlist &netlist() { return context_->netlist; }
         PassDiagnostics &diags() { return context_->diags; }
         PassVerbosity verbosity() const noexcept { return context_ ? context_->verbosity : PassVerbosity::Error; }
         bool hasScratchpad(std::string_view key) const noexcept
@@ -192,18 +192,18 @@ namespace wolf_sv::transform
         void error(std::string message, std::string context = {});
         void warning(std::string message, std::string context = {});
         void info(std::string message, std::string context = {});
-        void error(const grh::Graph &graph, const grh::Operation &op, std::string message);
-        void warning(const grh::Graph &graph, const grh::Operation &op, std::string message);
-        void info(const grh::Graph &graph, const grh::Operation &op, std::string message);
-        void debug(const grh::Graph &graph, const grh::Operation &op, std::string message);
-        void error(const grh::Graph &graph, const grh::Value &value, std::string message);
-        void warning(const grh::Graph &graph, const grh::Value &value, std::string message);
-        void info(const grh::Graph &graph, const grh::Value &value, std::string message);
-        void debug(const grh::Graph &graph, const grh::Value &value, std::string message);
-        void error(const grh::Graph &graph, std::string message);
-        void warning(const grh::Graph &graph, std::string message);
-        void info(const grh::Graph &graph, std::string message);
-        void debug(const grh::Graph &graph, std::string message);
+        void error(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message);
+        void warning(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message);
+        void info(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message);
+        void debug(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message);
+        void error(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message);
+        void warning(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message);
+        void info(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message);
+        void debug(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message);
+        void error(const grh::ir::Graph &graph, std::string message);
+        void warning(const grh::ir::Graph &graph, std::string message);
+        void info(const grh::ir::Graph &graph, std::string message);
+        void debug(const grh::ir::Graph &graph, std::string message);
 
     private:
         friend class PassManager;
@@ -238,7 +238,7 @@ namespace wolf_sv::transform
         void addPass(std::unique_ptr<Pass> pass, std::string instanceName = {});
         void clear();
 
-        PassManagerResult run(grh::Netlist &netlist, PassDiagnostics &diags);
+        PassManagerResult run(grh::ir::Netlist &netlist, PassDiagnostics &diags);
 
         PassManagerOptions &options() noexcept { return options_; }
         const PassManagerOptions &options() const noexcept { return options_; }

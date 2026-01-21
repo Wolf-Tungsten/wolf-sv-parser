@@ -37,7 +37,7 @@ findInstanceByName(std::span<const slang::ast::InstanceSymbol* const> instances,
     return nullptr;
 }
 
-ValueId findPortValue(const grh::Graph& graph, std::string_view name, bool isInput) {
+ValueId findPortValue(const grh::ir::Graph& graph, std::string_view name, bool isInput) {
     const auto& ports = isInput ? graph.inputPorts() : graph.outputPorts();
     for (const auto& port : ports) {
         if (graph.symbolText(port.name) == name) {
@@ -47,7 +47,7 @@ ValueId findPortValue(const grh::Graph& graph, std::string_view name, bool isInp
     return ValueId::invalid();
 }
 
-std::optional<std::string> getStringAttr(const grh::Operation& op, SymbolId key) {
+std::optional<std::string> getStringAttr(const grh::ir::Operation& op, std::string_view key) {
     if (auto attr = op.attr(key)) {
         if (const auto* text = std::get_if<std::string>(&*attr)) {
             return *text;
@@ -110,12 +110,12 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     // Case 1: seq_stage21_en_reg => kRegisterEn with [clk, en, data]
     if (const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
                                               "seq_stage21_en_reg")) {
-        const grh::Graph* graph = netlist.findGraph("seq_stage21_en_reg");
+        const grh::ir::Graph* graph = netlist.findGraph("seq_stage21_en_reg");
         if (!graph) {
             return fail("Graph seq_stage21_en_reg not found");
         }
@@ -130,9 +130,10 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage21_en_reg missing reg memo/stateOp");
         }
-        const grh::Operation op = graph->getOperation(r->stateOp);
-        if (op.kind() != grh::OperationKind::kRegisterEn) {
-            return fail("seq_stage21_en_reg expected kRegisterEn");
+        const grh::ir::Operation op = graph->getOperation(r->stateOp);
+        if (op.kind() != grh::ir::OperationKind::kRegisterEn) {
+            return fail("seq_stage21_en_reg expected kRegisterEn got " +
+                        std::string(grh::ir::toString(op.kind())));
         }
         if (op.operands().size() != 3) {
             return fail("seq_stage21_en_reg operand count mismatch");
@@ -142,8 +143,7 @@ int main() {
             op.operands()[2] != d) {
             return fail("seq_stage21_en_reg operand binding mismatch");
         }
-        const SymbolId enLevelKey = graph->lookupSymbol("enLevel");
-        auto enLevel = getStringAttr(op, enLevelKey);
+        auto enLevel = getStringAttr(op, "enLevel");
         if (!enLevel || *enLevel != "high") {
             return fail("seq_stage21_en_reg enLevel missing or not high");
         }
@@ -154,7 +154,7 @@ int main() {
     // Case 2: seq_stage21_rst_en_reg => kRegisterEnArst with [clk, rst, en, resetValue, data]
     if (const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
                                               "seq_stage21_rst_en_reg")) {
-        const grh::Graph* graph = netlist.findGraph("seq_stage21_rst_en_reg");
+        const grh::ir::Graph* graph = netlist.findGraph("seq_stage21_rst_en_reg");
         if (!graph) {
             return fail("Graph seq_stage21_rst_en_reg not found");
         }
@@ -171,9 +171,10 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage21_rst_en_reg missing reg memo/stateOp");
         }
-        const grh::Operation op = graph->getOperation(r->stateOp);
-        if (op.kind() != grh::OperationKind::kRegisterEnArst) {
-            return fail("seq_stage21_rst_en_reg expected kRegisterEnArst");
+        const grh::ir::Operation op = graph->getOperation(r->stateOp);
+        if (op.kind() != grh::ir::OperationKind::kRegisterEnArst) {
+            return fail("seq_stage21_rst_en_reg expected kRegisterEnArst got " +
+                        std::string(grh::ir::toString(op.kind())));
         }
         if (op.operands().size() != 5) {
             return fail("seq_stage21_rst_en_reg operand count mismatch");
@@ -190,13 +191,11 @@ int main() {
             op.operands()[4] != d) {
             return fail("seq_stage21_rst_en_reg reset/data binding mismatch");
         }
-        const SymbolId rstPolarityKey = graph->lookupSymbol("rstPolarity");
-        auto rstPolarity = getStringAttr(op, rstPolarityKey);
+        auto rstPolarity = getStringAttr(op, "rstPolarity");
         if (!rstPolarity || *rstPolarity != "low") {
             return fail("seq_stage21_rst_en_reg rstPolarity missing/incorrect");
         }
-        const SymbolId enLevelKey = graph->lookupSymbol("enLevel");
-        auto enLevel = getStringAttr(op, enLevelKey);
+        auto enLevel = getStringAttr(op, "enLevel");
         if (!enLevel || *enLevel != "high") {
             return fail("seq_stage21_rst_en_reg enLevel missing/incorrect");
         }

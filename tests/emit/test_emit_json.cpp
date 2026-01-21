@@ -8,7 +8,7 @@
 
 using namespace wolf_sv;
 using namespace wolf_sv::emit;
-using namespace wolf_sv::grh;
+using namespace wolf_sv::grh::ir;
 
 namespace
 {
@@ -34,19 +34,19 @@ namespace
         Netlist netlist;
         Graph &graph = netlist.createGraph("demo");
 
-        ir::ValueId in = graph.createValue(graph.internSymbol("in"), 8, false);
+        ValueId in = graph.createValue(graph.internSymbol("in"), 8, false);
         graph.bindInputPort(graph.internSymbol("in"), in);
 
-        ir::ValueId out = graph.createValue(graph.internSymbol("out"), 8, false);
+        ValueId out = graph.createValue(graph.internSymbol("out"), 8, false);
         graph.bindOutputPort(graph.internSymbol("out"), out);
 
-        ir::OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
+        OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(add, in);
-        ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
+        ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
         graph.addResult(add, sum);
-        graph.setAttr(add, graph.internSymbol("weights"), AttributeValue(std::vector<int64_t>{1, 2}));
+        graph.setAttr(add, "weights", AttributeValue(std::vector<int64_t>{1, 2}));
 
-        ir::OperationId assign = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
+        OperationId assign = graph.createOperation(OperationKind::kAssign, graph.internSymbol("assign0"));
         graph.addOperand(assign, sum);
         graph.addResult(assign, out);
 

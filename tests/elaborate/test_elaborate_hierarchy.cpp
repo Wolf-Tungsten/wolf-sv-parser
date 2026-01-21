@@ -23,13 +23,10 @@ int fail(const std::string& context, const std::string& message) {
 
 const std::filesystem::path kArtifactDir = std::filesystem::path(WOLF_SV_ELAB_ARTIFACT_DIR);
 
-std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Operation& op,
+std::optional<std::string> getStringAttr(const grh::ir::Graph* graph, const grh::ir::Operation& op,
                                          std::string_view key) {
-    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
-    if (!keyId.valid()) {
-        return std::nullopt;
-    }
-    auto attr = op.attr(keyId);
+    (void)graph;
+    auto attr = op.attr(key);
     const std::string* value = attr ? std::get_if<std::string>(&*attr) : nullptr;
     if (!value) {
         return std::nullopt;
@@ -37,17 +34,19 @@ std::optional<std::string> getStringAttr(const grh::Graph* graph, const grh::Ope
     return *value;
 }
 
-const std::vector<std::string>* getStringVecAttr(const grh::Graph* graph, const grh::Operation& op,
-                                                 std::string_view key) {
-    const grh::ir::SymbolId keyId = graph->lookupSymbol(key);
-    if (!keyId.valid()) {
-        return nullptr;
+std::optional<std::vector<std::string>> getStringVecAttr(const grh::ir::Graph* graph,
+                                                         const grh::ir::Operation& op,
+                                                         std::string_view key) {
+    (void)graph;
+    auto attr = op.attr(key);
+    const auto* value = attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    if (!value) {
+        return std::nullopt;
     }
-    auto attr = op.attr(keyId);
-    return attr ? std::get_if<std::vector<std::string>>(&*attr) : nullptr;
+    return *value;
 }
 
-ValueId findPortValue(const grh::Graph* graph, std::string_view name, bool isInput) {
+ValueId findPortValue(const grh::ir::Graph* graph, std::string_view name, bool isInput) {
     const auto ports = isInput ? graph->inputPorts() : graph->outputPorts();
     for (const auto& port : ports) {
         if (graph->symbolText(port.name) == name) {
@@ -58,7 +57,7 @@ ValueId findPortValue(const grh::Graph* graph, std::string_view name, bool isInp
 }
 
 bool buildNetlist(const std::string& context, const std::filesystem::path& sourcePath,
-                  grh::Netlist& netlist, ElaborateDiagnostics& diagnostics) {
+                  grh::ir::Netlist& netlist, ElaborateDiagnostics& diagnostics) {
     if (!std::filesystem::exists(sourcePath)) {
         std::cerr << "[elaborate_hierarchy:" << context << "] Missing testcase file: "
                   << sourcePath << '\n';
@@ -110,7 +109,7 @@ bool buildNetlist(const std::string& context, const std::filesystem::path& sourc
     return true;
 }
 
-bool writeArtifact(const std::string& context, const grh::Netlist& netlist) {
+bool writeArtifact(const std::string& context, const grh::ir::Netlist& netlist) {
     if (!std::filesystem::exists(kArtifactDir)) {
         std::error_code ec;
         if (!std::filesystem::create_directories(kArtifactDir, ec) && ec) {
@@ -139,14 +138,14 @@ bool writeArtifact(const std::string& context, const grh::Netlist& netlist) {
     return true;
 }
 
-int validateNested(const grh::Netlist& netlist) {
+int validateNested(const grh::ir::Netlist& netlist) {
     if (netlist.topGraphs().size() != 1 || netlist.topGraphs().front() != "nested_top") {
         return fail("nested", "Unexpected top graph layout");
     }
 
-    const grh::Graph* topGraph = netlist.findGraph("nested_top");
-    const grh::Graph* midGraph = netlist.findGraph("nested_mid");
-    const grh::Graph* leafGraph = netlist.findGraph("nested_leaf");
+    const grh::ir::Graph* topGraph = netlist.findGraph("nested_top");
+    const grh::ir::Graph* midGraph = netlist.findGraph("nested_mid");
+    const grh::ir::Graph* leafGraph = netlist.findGraph("nested_leaf");
 
     if (!topGraph || !midGraph || !leafGraph) {
         return fail("nested", "Missing expected graphs for nested hierarchy");
@@ -154,8 +153,8 @@ int validateNested(const grh::Netlist& netlist) {
 
     bool foundMidInstance = false;
     for (const auto& opId : midGraph->operations()) {
-        const grh::Operation op = midGraph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kInstance) {
+        const grh::ir::Operation op = midGraph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kInstance) {
             continue;
         }
         foundMidInstance = true;
@@ -181,8 +180,8 @@ int validateNested(const grh::Netlist& netlist) {
             return fail("nested", "Instance output wiring incorrect");
         }
 
-        const auto* inputNames = getStringVecAttr(midGraph, op, "inputPortName");
-        const auto* outputNames = getStringVecAttr(midGraph, op, "outputPortName");
+        auto inputNames = getStringVecAttr(midGraph, op, "inputPortName");
+        auto outputNames = getStringVecAttr(midGraph, op, "outputPortName");
         if (!inputNames || !outputNames) {
             return fail("nested", "Instance missing port name attributes");
         }
@@ -202,7 +201,7 @@ int validateNested(const grh::Netlist& netlist) {
     // Ensure the top graph references the mid graph via instance.
     bool foundTopInstance = false;
     for (const auto& opId : topGraph->operations()) {
-        if (topGraph->getOperation(opId).kind() == grh::OperationKind::kInstance) {
+        if (topGraph->getOperation(opId).kind() == grh::ir::OperationKind::kInstance) {
             foundTopInstance = true;
             break;
         }
@@ -214,7 +213,7 @@ int validateNested(const grh::Netlist& netlist) {
     return 0;
 }
 
-int validateParameterized(const grh::Netlist& netlist) {
+int validateParameterized(const grh::ir::Netlist& netlist) {
     if (netlist.topGraphs().size() != 1) {
         return fail("param", "Unexpected number of top graphs");
     }
@@ -224,16 +223,16 @@ int validateParameterized(const grh::Netlist& netlist) {
         return fail("param", "Unexpected top graph layout");
     }
 
-    const grh::Graph* topGraph = netlist.findGraph(topName);
-    const grh::Graph* leafGraph = netlist.findGraph("p_leaf$WIDTH_4");
+    const grh::ir::Graph* topGraph = netlist.findGraph(topName);
+    const grh::ir::Graph* leafGraph = netlist.findGraph("p_leaf$WIDTH_4");
     if (!topGraph || !leafGraph) {
         return fail("param", "Missing expected graphs for parameterized hierarchy");
     }
 
     bool foundInstance = false;
     for (const auto& opId : topGraph->operations()) {
-        const grh::Operation op = topGraph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kInstance) {
+        const grh::ir::Operation op = topGraph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kInstance) {
             continue;
         }
         foundInstance = true;
@@ -259,8 +258,8 @@ int validateParameterized(const grh::Netlist& netlist) {
             return fail("param", "Instance output wiring incorrect");
         }
 
-        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
-        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+        auto inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        auto outputNames = getStringVecAttr(topGraph, op, "outputPortName");
         if (!inputNames || !outputNames) {
             return fail("param", "Missing port name attributes on parameterized instance");
         }
@@ -293,18 +292,18 @@ int validateParameterized(const grh::Netlist& netlist) {
     return 0;
 }
 
-int validateStructArray(const grh::Netlist& netlist) {
+int validateStructArray(const grh::ir::Netlist& netlist) {
     if (netlist.topGraphs().size() != 1 || netlist.topGraphs().front() != "struct_top") {
         return fail("struct", "Unexpected top graph layout");
     }
 
-    const grh::Graph* topGraph = netlist.findGraph("struct_top");
-    const grh::Graph* leafGraph = netlist.findGraph("struct_leaf");
+    const grh::ir::Graph* topGraph = netlist.findGraph("struct_top");
+    const grh::ir::Graph* leafGraph = netlist.findGraph("struct_leaf");
     if (!topGraph || !leafGraph) {
         return fail("struct", "Missing graphs for struct/array hierarchy");
     }
 
-    auto checkPort = [&](const grh::Graph* graph, std::string_view name, int64_t expectedWidth,
+    auto checkPort = [&](const grh::ir::Graph* graph, std::string_view name, int64_t expectedWidth,
                          bool isInput) -> bool {
         ValueId value = findPortValue(graph, name, isInput);
         return value && graph->getValue(value).width() == expectedWidth;
@@ -321,8 +320,8 @@ int validateStructArray(const grh::Netlist& netlist) {
 
     bool foundInstance = false;
     for (const auto& opId : topGraph->operations()) {
-        const grh::Operation op = topGraph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kInstance) {
+        const grh::ir::Operation op = topGraph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kInstance) {
             continue;
         }
         foundInstance = true;
@@ -339,8 +338,8 @@ int validateStructArray(const grh::Netlist& netlist) {
             return fail("struct", "moduleName on struct instance mismatches target graph");
         }
 
-        const auto* inputNames = getStringVecAttr(topGraph, op, "inputPortName");
-        const auto* outputNames = getStringVecAttr(topGraph, op, "outputPortName");
+        auto inputNames = getStringVecAttr(topGraph, op, "inputPortName");
+        auto outputNames = getStringVecAttr(topGraph, op, "outputPortName");
         if (!inputNames || !outputNames) {
             return fail("struct", "Missing port name attributes on struct instance");
         }
@@ -361,7 +360,7 @@ int validateStructArray(const grh::Netlist& netlist) {
     return 0;
 }
 
-int validateParamGenerate(const grh::Netlist& netlist) {
+int validateParamGenerate(const grh::ir::Netlist& netlist) {
     if (netlist.topGraphs().size() != 1 || netlist.topGraphs().front() != "pg_top") {
         return fail("param_generate", "Unexpected top graph layout");
     }
@@ -370,14 +369,14 @@ int validateParamGenerate(const grh::Netlist& netlist) {
         return fail("param_generate", "Expected exactly three graphs (top + two leaf specializations)");
     }
 
-    const grh::Graph* topGraph = netlist.findGraph("pg_top");
-    const grh::Graph* leaf4Graph = netlist.findGraph("pg_leaf$WIDTH_4");
-    const grh::Graph* leaf8Graph = netlist.findGraph("pg_leaf$WIDTH_8");
+    const grh::ir::Graph* topGraph = netlist.findGraph("pg_top");
+    const grh::ir::Graph* leaf4Graph = netlist.findGraph("pg_leaf$WIDTH_4");
+    const grh::ir::Graph* leaf8Graph = netlist.findGraph("pg_leaf$WIDTH_8");
     if (!topGraph || !leaf4Graph || !leaf8Graph) {
         return fail("param_generate", "Missing expected graphs for parameterized generate test");
     }
 
-    auto checkPortWidth = [](const grh::Graph* graph, int64_t expected) {
+    auto checkPortWidth = [](const grh::ir::Graph* graph, int64_t expected) {
         ValueId inputValue = findPortValue(graph, "in", true);
         ValueId outputValue = findPortValue(graph, "out", false);
         return inputValue && outputValue && graph->getValue(inputValue).width() == expected &&
@@ -395,8 +394,8 @@ int validateParamGenerate(const grh::Netlist& netlist) {
     std::size_t width4Instances = 0;
     std::size_t width8Instances = 0;
     for (const auto& opId : topGraph->operations()) {
-        const grh::Operation op = topGraph->getOperation(opId);
-        if (op.kind() != grh::OperationKind::kInstance) {
+        const grh::ir::Operation op = topGraph->getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kInstance) {
             continue;
         }
 
@@ -434,7 +433,7 @@ int main() {
     const std::filesystem::path dataDir = std::filesystem::path(WOLF_SV_ELAB_DATA_DIR);
 
     {
-        grh::Netlist netlist;
+        grh::ir::Netlist netlist;
         ElaborateDiagnostics diagnostics;
         if (!buildNetlist("nested", dataDir / "hierarchy_nested.sv", netlist, diagnostics)) {
             return 1;
@@ -448,7 +447,7 @@ int main() {
     }
 
     {
-        grh::Netlist netlist;
+        grh::ir::Netlist netlist;
         ElaborateDiagnostics diagnostics;
         if (!buildNetlist("param", dataDir / "param_instance.sv", netlist, diagnostics)) {
             return 1;
@@ -462,7 +461,7 @@ int main() {
     }
 
     {
-        grh::Netlist netlist;
+        grh::ir::Netlist netlist;
         ElaborateDiagnostics diagnostics;
         if (!buildNetlist("struct", dataDir / "struct_array.sv", netlist, diagnostics)) {
             return 1;
@@ -476,7 +475,7 @@ int main() {
     }
 
     {
-        grh::Netlist netlist;
+        grh::ir::Netlist netlist;
         ElaborateDiagnostics diagnostics;
         if (!buildNetlist("param_generate", dataDir / "param_generate.sv", netlist, diagnostics)) {
             return 1;

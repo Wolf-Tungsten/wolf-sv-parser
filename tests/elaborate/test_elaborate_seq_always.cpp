@@ -36,7 +36,7 @@ const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo, std::str
     return nullptr;
 }
 
-ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
+ValueId findPort(const grh::ir::Graph& graph, std::string_view name, bool isInput) {
     const auto ports = isInput ? graph.inputPorts() : graph.outputPorts();
     for (const auto& port : ports) {
         if (graph.symbolText(port.name) == name) {
@@ -46,18 +46,14 @@ ValueId findPort(const grh::Graph& graph, std::string_view name, bool isInput) {
     return ValueId::invalid();
 }
 
-OperationId findMemoryOp(const grh::Graph& graph, grh::OperationKind kind,
+OperationId findMemoryOp(const grh::ir::Graph& graph, grh::ir::OperationKind kind,
                          std::string_view memSymbol) {
-    const grh::ir::SymbolId memKey = graph.lookupSymbol("memSymbol");
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() != kind) {
             continue;
         }
-        if (!memKey.valid()) {
-            continue;
-        }
-        auto attr = op.attr(memKey);
+        auto attr = op.attr("memSymbol");
         const std::string* symbol = attr ? std::get_if<std::string>(&*attr) : nullptr;
         if (symbol && *symbol == memSymbol) {
             return opId;
@@ -66,20 +62,16 @@ OperationId findMemoryOp(const grh::Graph& graph, grh::OperationKind kind,
     return OperationId::invalid();
 }
 
-std::vector<OperationId> collectMemoryOps(const grh::Graph& graph,
-                                          grh::OperationKind kind,
+std::vector<OperationId> collectMemoryOps(const grh::ir::Graph& graph,
+                                          grh::ir::OperationKind kind,
                                           std::string_view memSymbol) {
     std::vector<OperationId> ops;
-    const grh::ir::SymbolId memKey = graph.lookupSymbol("memSymbol");
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() != kind) {
             continue;
         }
-        if (!memKey.valid()) {
-            continue;
-        }
-        auto attr = op.attr(memKey);
+        auto attr = op.attr("memSymbol");
         const std::string* symbol = attr ? std::get_if<std::string>(&*attr) : nullptr;
         if (symbol && *symbol == memSymbol) {
             ops.push_back(opId);
@@ -88,7 +80,7 @@ std::vector<OperationId> collectMemoryOps(const grh::Graph& graph,
     return ops;
 }
 
-bool writeArtifact(const grh::Netlist& netlist) {
+bool writeArtifact(const grh::ir::Netlist& netlist) {
     const std::filesystem::path artifactPath(WOLF_SV_ELAB_SEQ_ALWAYS_ARTIFACT_PATH);
     if (artifactPath.empty()) {
         return true;
@@ -140,13 +132,10 @@ findInstanceByName(std::span<const slang::ast::InstanceSymbol* const> instances,
     return nullptr;
 }
 
-bool expectAttrs(const grh::Graph& graph, const grh::Operation& op, std::string_view key,
+bool expectAttrs(const grh::ir::Graph& graph, const grh::ir::Operation& op, std::string_view key,
                  int64_t value) {
-    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-    if (!keyId.valid()) {
-        return false;
-    }
-    auto attr = op.attr(keyId);
+    (void)graph;
+    auto attr = op.attr(key);
     if (!attr) {
         return false;
     }
@@ -154,9 +143,9 @@ bool expectAttrs(const grh::Graph& graph, const grh::Operation& op, std::string_
     return attrValue && *attrValue == value;
 }
 
-OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
+OperationId findOpByKind(const grh::ir::Graph& graph, grh::ir::OperationKind kind) {
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() == kind) {
             return opId;
         }
@@ -164,10 +153,10 @@ OperationId findOpByKind(const grh::Graph& graph, grh::OperationKind kind) {
     return OperationId::invalid();
 }
 
-std::vector<OperationId> collectOpsByKind(const grh::Graph& graph, grh::OperationKind kind) {
+std::vector<OperationId> collectOpsByKind(const grh::ir::Graph& graph, grh::ir::OperationKind kind) {
     std::vector<OperationId> result;
     for (const auto& opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         if (op.kind() == kind) {
             result.push_back(opId);
         }
@@ -175,13 +164,10 @@ std::vector<OperationId> collectOpsByKind(const grh::Graph& graph, grh::Operatio
     return result;
 }
 
-bool expectStringAttr(const grh::Graph& graph, const grh::Operation& op, std::string_view key,
+bool expectStringAttr(const grh::ir::Graph& graph, const grh::ir::Operation& op, std::string_view key,
                       std::string_view expect) {
-    const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-    if (!keyId.valid()) {
-        return false;
-    }
-    auto attr = op.attr(keyId);
+    (void)graph;
+    auto attr = op.attr(key);
     if (!attr) {
         return false;
     }
@@ -237,7 +223,7 @@ int main() {
 
     ElaborateDiagnostics diagnostics;
     Elaborate elaborator(&diagnostics);
-    grh::Netlist netlist = elaborator.convert(compilation->getRoot());
+    grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     if (!writeArtifact(netlist)) {
         return fail("Failed to write seq always artifact");
@@ -248,7 +234,7 @@ int main() {
         return fail("Top instance seq_stage17 not found");
     }
 
-    const grh::Graph* graph = netlist.findGraph("seq_stage17");
+    const grh::ir::Graph* graph = netlist.findGraph("seq_stage17");
     if (!graph) {
         return fail("GRH graph seq_stage17 not found");
     }
@@ -276,16 +262,17 @@ int main() {
         return fail("Missing register memo entries");
     }
 
-    auto expectRegisterKind = [&](const SignalMemoEntry& entry, grh::OperationKind kind,
+    auto expectRegisterKind = [&](const SignalMemoEntry& entry, grh::ir::OperationKind kind,
                                   std::size_t operandCount) -> bool {
+        const std::string name = entry.symbol ? std::string(entry.symbol->name) : std::string("<unknown>");
         if (!entry.stateOp) {
-            fail("Register state operation missing or has wrong kind");
-            return false;
+            return fail("Register state operation missing or has wrong kind (" + name + ")");
         }
-        const grh::Operation op = graph->getOperation(entry.stateOp);
+        const grh::ir::Operation op = graph->getOperation(entry.stateOp);
         if (op.kind() != kind) {
-            fail("Register state operation missing or has wrong kind");
-            return false;
+            return fail("Register state operation missing or has wrong kind (" + name +
+                        " expected=" + std::string(grh::ir::toString(kind)) +
+                        " got=" + std::string(grh::ir::toString(op.kind())) + ")");
         }
         if (op.results().size() != 1 || op.results().front() != entry.value) {
             fail("Register state op result does not match memo value");
@@ -307,25 +294,25 @@ int main() {
         return true;
     };
 
-    if (!expectRegisterKind(*regFull, grh::OperationKind::kRegister, 2) ||
-        !expectRegisterKind(*regPartial, grh::OperationKind::kRegister, 2) ||
-        !expectRegisterKind(*regMulti, grh::OperationKind::kRegister, 2) ||
-        !expectRegisterKind(*regSync, grh::OperationKind::kRegisterRst, 4) ||
-        !expectRegisterKind(*regAsync, grh::OperationKind::kRegisterArst, 4)) {
+    if (!expectRegisterKind(*regFull, grh::ir::OperationKind::kRegister, 2) ||
+        !expectRegisterKind(*regPartial, grh::ir::OperationKind::kRegister, 2) ||
+        !expectRegisterKind(*regMulti, grh::ir::OperationKind::kRegister, 2) ||
+        !expectRegisterKind(*regSync, grh::ir::OperationKind::kRegisterRst, 4) ||
+        !expectRegisterKind(*regAsync, grh::ir::OperationKind::kRegisterArst, 4)) {
         return 1;
     }
 
     auto verifyConcat = [&](const SignalMemoEntry& entry, ValueId expectedHi,
                             ValueId expectedLo) -> bool {
-        const grh::Operation op = graph->getOperation(entry.stateOp);
+        const grh::ir::Operation op = graph->getOperation(entry.stateOp);
         ValueId dataValue = op.operands().back();
         OperationId concatId = dataValue ? graph->getValue(dataValue).definingOp()
                                          : OperationId::invalid();
         if (!concatId) {
             return fail("Expected register data to be driven by kConcat");
         }
-        const grh::Operation concatOp = graph->getOperation(concatId);
-        if (concatOp.kind() != grh::OperationKind::kConcat) {
+        const grh::ir::Operation concatOp = graph->getOperation(concatId);
+        if (concatOp.kind() != grh::ir::OperationKind::kConcat) {
             return fail("Expected register data to be driven by kConcat");
         }
         if (concatOp.operands().size() != 2) {
@@ -346,15 +333,15 @@ int main() {
     }
 
     // reg_partial should keep upper bits from previous Q via kSlice and append new low nibble.
-    const grh::Operation partialOp = graph->getOperation(regPartial->stateOp);
+    const grh::ir::Operation partialOp = graph->getOperation(regPartial->stateOp);
     ValueId partialData = partialOp.operands().back();
     OperationId partialConcatId = partialData ? graph->getValue(partialData).definingOp()
                                               : OperationId::invalid();
     if (!partialConcatId) {
         return fail("reg_partial data is not driven by kConcat");
     }
-    const grh::Operation partialConcat = graph->getOperation(partialConcatId);
-    if (partialConcat.kind() != grh::OperationKind::kConcat) {
+    const grh::ir::Operation partialConcat = graph->getOperation(partialConcatId);
+    if (partialConcat.kind() != grh::ir::OperationKind::kConcat) {
         return fail("reg_partial data is not driven by kConcat");
     }
     if (partialConcat.operands().size() != 2) {
@@ -372,8 +359,8 @@ int main() {
     if (!holdSliceId) {
         return fail("reg_partial high bits are not provided by a kSliceStatic over Q");
     }
-    const grh::Operation holdSlice = graph->getOperation(holdSliceId);
-    if (holdSlice.kind() != grh::OperationKind::kSliceStatic) {
+    const grh::ir::Operation holdSlice = graph->getOperation(holdSliceId);
+    if (holdSlice.kind() != grh::ir::OperationKind::kSliceStatic) {
         return fail("reg_partial high bits are not provided by a kSliceStatic over Q");
     }
     if (holdSlice.operands().size() != 1 ||
@@ -385,8 +372,8 @@ int main() {
         return fail("reg_partial slice attributes are incorrect");
     }
 
-    std::function<bool(const grh::Graph&, ValueId, ValueId)> mentionsPort =
-        [&](const grh::Graph& g, ValueId node, ValueId port) -> bool {
+    std::function<bool(const grh::ir::Graph&, ValueId, ValueId)> mentionsPort =
+        [&](const grh::ir::Graph& g, ValueId node, ValueId port) -> bool {
         if (!node) {
             return false;
         }
@@ -397,7 +384,7 @@ int main() {
         if (!opId) {
             return false;
         }
-        const grh::Operation op = g.getOperation(opId);
+        const grh::ir::Operation op = g.getOperation(opId);
         for (ValueId operand : op.operands()) {
             if (mentionsPort(g, operand, port)) {
                 return true;
@@ -406,7 +393,7 @@ int main() {
         return false;
     };
 
-    auto isZeroConstant = [&](const grh::Graph& g, ValueId value) -> bool {
+    auto isZeroConstant = [&](const grh::ir::Graph& g, ValueId value) -> bool {
         if (!value) {
             return false;
         }
@@ -414,15 +401,11 @@ int main() {
         if (!opId) {
             return false;
         }
-        const grh::Operation op = g.getOperation(opId);
-        if (op.kind() != grh::OperationKind::kConstant) {
+        const grh::ir::Operation op = g.getOperation(opId);
+        if (op.kind() != grh::ir::OperationKind::kConstant) {
             return false;
         }
-        const grh::ir::SymbolId constValueKey = g.lookupSymbol("constValue");
-        if (!constValueKey.valid()) {
-            return false;
-        }
-        auto attr = op.attr(constValueKey);
+        auto attr = op.attr("constValue");
         const std::string* literal = attr ? std::get_if<std::string>(&*attr) : nullptr;
         if (!literal) {
             return false;
@@ -432,15 +415,15 @@ int main() {
                literal->find("'b0") != std::string::npos;
     };
 
-    const grh::Operation regSyncOp = graph->getOperation(regSync->stateOp);
+    const grh::ir::Operation regSyncOp = graph->getOperation(regSync->stateOp);
     ValueId syncData = regSyncOp.operands().back();
     OperationId dataOpId = syncData ? graph->getValue(syncData).definingOp()
                                     : OperationId::invalid();
     if (!dataOpId) {
         return fail("reg_sync_rst data is missing defining operation");
     }
-    const grh::Operation dataOp = graph->getOperation(dataOpId);
-    if (dataOp.kind() == grh::OperationKind::kMux) {
+    const grh::ir::Operation dataOp = graph->getOperation(dataOpId);
+    if (dataOp.kind() == grh::ir::OperationKind::kMux) {
         // 图中仍保留 mux 表达 reset：走原有校验路径
         if (dataOp.operands().size() != 3) {
             return fail("reg_sync_rst mux operand count mismatch");
@@ -457,8 +440,8 @@ int main() {
         if (!syncConcatId) {
             return fail("reg_sync_rst data path is not driven by concat");
         }
-        const grh::Operation syncConcat = graph->getOperation(syncConcatId);
-        if (syncConcat.kind() != grh::OperationKind::kConcat) {
+        const grh::ir::Operation syncConcat = graph->getOperation(syncConcatId);
+        if (syncConcat.kind() != grh::ir::OperationKind::kConcat) {
             return fail("reg_sync_rst data path is not driven by concat");
         }
         if (syncConcat.operands().size() != 2 ||
@@ -467,8 +450,8 @@ int main() {
         }
     } else {
         // 允许阶段21抽取 reset 后，data 直接为 concat(hi, lo)
-        const grh::Operation syncConcat = dataOp;
-        if (syncConcat.kind() != grh::OperationKind::kConcat) {
+        const grh::ir::Operation syncConcat = dataOp;
+        if (syncConcat.kind() != grh::ir::OperationKind::kConcat) {
             return fail("reg_sync_rst data is not driven by kMux");
         }
         if (syncConcat.operands().size() != 2 ||
@@ -483,7 +466,7 @@ int main() {
             fail("Reset state operation missing");
             return false;
         }
-        const grh::Operation op = graph->getOperation(entry.stateOp);
+        const grh::ir::Operation op = graph->getOperation(entry.stateOp);
         if (!expectStringAttr(*graph, op, "rstPolarity", expectLevel)) {
             fail("rstPolarity attribute mismatch");
             return false;
@@ -514,7 +497,7 @@ int main() {
     if (!inst18) {
         return fail("Top instance seq_stage18 not found");
     }
-    const grh::Graph* graph18 = netlist.findGraph("seq_stage18");
+    const grh::ir::Graph* graph18 = netlist.findGraph("seq_stage18");
     if (!graph18) {
         return fail("GRH graph seq_stage18 not found");
     }
@@ -539,19 +522,19 @@ int main() {
     if (!memEntry->stateOp) {
         return fail("seq_stage18 mem entry lacks kMemory state op");
     }
-    const grh::Operation memOp18 = graph18->getOperation(memEntry->stateOp);
-    if (memOp18.kind() != grh::OperationKind::kMemory) {
+    const grh::ir::Operation memOp18 = graph18->getOperation(memEntry->stateOp);
+    if (memOp18.kind() != grh::ir::OperationKind::kMemory) {
         return fail("seq_stage18 mem entry lacks kMemory state op");
     }
 
     const std::string memSymbol(memOp18.symbolText());
 
     OperationId syncReadId =
-        findMemoryOp(*graph18, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+        findMemoryOp(*graph18, grh::ir::OperationKind::kMemorySyncReadPort, memSymbol);
     if (!syncReadId) {
         return fail("kMemorySyncReadPort not found for seq_stage18");
     }
-    const grh::Operation syncRead = graph18->getOperation(syncReadId);
+    const grh::ir::Operation syncRead = graph18->getOperation(syncReadId);
     if (syncRead.operands().size() != 3 || syncRead.operands()[0] != clk18 ||
         syncRead.operands()[1] != rdAddr) {
         return fail("Memory sync read operands are incorrect");
@@ -562,25 +545,25 @@ int main() {
     if (!syncReadEnOpId) {
         return fail("Memory sync read enable is not tied to constant one");
     }
-    const grh::Operation syncReadEnOp = graph18->getOperation(syncReadEnOpId);
-    if (syncReadEnOp.kind() != grh::OperationKind::kConstant) {
+    const grh::ir::Operation syncReadEnOp = graph18->getOperation(syncReadEnOpId);
+    if (syncReadEnOp.kind() != grh::ir::OperationKind::kConstant) {
         return fail("Memory sync read enable is not tied to constant one");
     }
     if (syncRead.results().size() != 1 ||
         graph18->getValue(syncRead.results().front()).width() != 8) {
         return fail("Memory sync read result width mismatch");
     }
-    const grh::Operation rdRegOp = graph18->getOperation(rdRegEntry->stateOp);
+    const grh::ir::Operation rdRegOp = graph18->getOperation(rdRegEntry->stateOp);
     if (rdRegOp.operands().empty() ||
         rdRegOp.operands().back() != syncRead.results().front()) {
         return fail("rd_reg data input is not driven by the sync read port");
     }
     OperationId writePortId =
-        findMemoryOp(*graph18, grh::OperationKind::kMemoryWritePort, memSymbol);
+        findMemoryOp(*graph18, grh::ir::OperationKind::kMemoryWritePort, memSymbol);
     if (!writePortId) {
         return fail("kMemoryWritePort not found for seq_stage18");
     }
-    const grh::Operation writePort = graph18->getOperation(writePortId);
+    const grh::ir::Operation writePort = graph18->getOperation(writePortId);
     if (writePort.operands().size() != 4 || writePort.operands()[0] != clk18 ||
         writePort.operands()[1] != wrAddr) {
         return fail("Memory write port operands mismatched");
@@ -591,8 +574,8 @@ int main() {
     if (!writeEnOpId) {
         return fail("Memory write port enable should be constant one");
     }
-    const grh::Operation writeEnOp = graph18->getOperation(writeEnOpId);
-    if (writeEnOp.kind() != grh::OperationKind::kConstant) {
+    const grh::ir::Operation writeEnOp = graph18->getOperation(writeEnOpId);
+    if (writeEnOp.kind() != grh::ir::OperationKind::kConstant) {
         return fail("Memory write port enable should be constant one");
     }
     if (graph18->getValue(writePort.operands()[3]).width() != 8) {
@@ -600,11 +583,11 @@ int main() {
     }
 
     OperationId maskPortId =
-        findMemoryOp(*graph18, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+        findMemoryOp(*graph18, grh::ir::OperationKind::kMemoryMaskWritePort, memSymbol);
     if (!maskPortId) {
         return fail("kMemoryMaskWritePort not found for seq_stage18");
     }
-    const grh::Operation maskPort = graph18->getOperation(maskPortId);
+    const grh::ir::Operation maskPort = graph18->getOperation(maskPortId);
     if (maskPort.operands().size() != 5 || maskPort.operands()[0] != clk18 ||
         maskPort.operands()[1] != maskAddr) {
         return fail("Memory mask write operands mismatched");
@@ -615,8 +598,8 @@ int main() {
     if (!maskEnOpId) {
         return fail("Memory mask write enable should be constant one");
     }
-    const grh::Operation maskEnOp = graph18->getOperation(maskEnOpId);
-    if (maskEnOp.kind() != grh::OperationKind::kConstant) {
+    const grh::ir::Operation maskEnOp = graph18->getOperation(maskEnOpId);
+    if (maskEnOp.kind() != grh::ir::OperationKind::kConstant) {
         return fail("Memory mask write enable should be constant one");
     }
     if (graph18->getValue(maskPort.operands()[3]).width() != 8 ||
@@ -632,8 +615,8 @@ int main() {
     if (!dataShiftId) {
         return fail("Memory mask write data path is not shifted by bit_index");
     }
-    const grh::Operation dataShift = graph18->getOperation(dataShiftId);
-    if (dataShift.kind() != grh::OperationKind::kShl ||
+    const grh::ir::Operation dataShift = graph18->getOperation(dataShiftId);
+    if (dataShift.kind() != grh::ir::OperationKind::kShl ||
         dataShift.operands().size() != 2 || dataShift.operands()[1] != bitIndex) {
         return fail("Memory mask write data path is not shifted by bit_index");
     }
@@ -643,16 +626,16 @@ int main() {
     if (!dataConcatId) {
         return fail("Memory mask write data concat does not source bit_value");
     }
-    const grh::Operation dataConcat = graph18->getOperation(dataConcatId);
-    if (dataConcat.kind() != grh::OperationKind::kConcat ||
+    const grh::ir::Operation dataConcat = graph18->getOperation(dataConcatId);
+    if (dataConcat.kind() != grh::ir::OperationKind::kConcat ||
         dataConcat.operands().size() != 2 || dataConcat.operands()[1] != bitValue) {
         return fail("Memory mask write data concat does not source bit_value");
     }
     if (!maskShiftId) {
         return fail("Memory mask write mask is not shifted by bit_index");
     }
-    const grh::Operation maskShift = graph18->getOperation(maskShiftId);
-    if (maskShift.kind() != grh::OperationKind::kShl ||
+    const grh::ir::Operation maskShift = graph18->getOperation(maskShiftId);
+    if (maskShift.kind() != grh::ir::OperationKind::kShl ||
         maskShift.operands().size() != 2 || maskShift.operands()[1] != bitIndex) {
         return fail("Memory mask write mask is not shifted by bit_index");
     }
@@ -662,8 +645,8 @@ int main() {
     if (!maskConstId) {
         return fail("Memory mask base should be a constant one-hot literal");
     }
-    const grh::Operation maskConst = graph18->getOperation(maskConstId);
-    if (maskConst.kind() != grh::OperationKind::kConstant) {
+    const grh::ir::Operation maskConst = graph18->getOperation(maskConstId);
+    if (maskConst.kind() != grh::ir::OperationKind::kConstant) {
         return fail("Memory mask base should be a constant one-hot literal");
     }
 
@@ -687,13 +670,13 @@ int main() {
     // -----------------------
 
     // Helper to find graph by name.
-    auto fetchGraph = [&](std::string_view name) -> const grh::Graph* {
+    auto fetchGraph = [&](std::string_view name) -> const grh::ir::Graph* {
         const slang::ast::InstanceSymbol* ins = findInstanceByName(compilation->getRoot().topInstances, name);
         if (!ins) {
             fail(std::string("Top instance not found: ") + std::string(name));
             return nullptr;
         }
-        const grh::Graph* g = netlist.findGraph(std::string(name));
+        const grh::ir::Graph* g = netlist.findGraph(std::string(name));
         if (!g) {
             fail(std::string("GRH graph not found: ") + std::string(name));
             return nullptr;
@@ -702,7 +685,7 @@ int main() {
     };
 
     // 19.1 if (en) r <= d;
-    if (const grh::Graph* g19_1 = fetchGraph("seq_stage19_if_en_reg")) {
+    if (const grh::ir::Graph* g19_1 = fetchGraph("seq_stage19_if_en_reg")) {
         ValueId clk = findPort(*g19_1, "clk", /*isInput=*/true);
         ValueId en  = findPort(*g19_1, "en", /*isInput=*/true);
         ValueId d   = findPort(*g19_1, "d", /*isInput=*/true);
@@ -715,8 +698,8 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage19_if_en_reg missing stateOp");
         }
-        const grh::Operation stateOp = g19_1->getOperation(r->stateOp);
-        if (stateOp.kind() == grh::OperationKind::kRegister) {
+        const grh::ir::Operation stateOp = g19_1->getOperation(r->stateOp);
+        if (stateOp.kind() == grh::ir::OperationKind::kRegister) {
             if (stateOp.operands().size() != 2 || stateOp.operands().front() != clk) {
                 return fail("seq_stage19_if_en_reg clock binding error");
             }
@@ -726,8 +709,8 @@ int main() {
             if (!muxId) {
                 return fail("seq_stage19_if_en_reg data is not a kMux");
             }
-            const grh::Operation mux = g19_1->getOperation(muxId);
-            if (mux.kind() != grh::OperationKind::kMux || mux.operands().size() != 3) {
+            const grh::ir::Operation mux = g19_1->getOperation(muxId);
+            if (mux.kind() != grh::ir::OperationKind::kMux || mux.operands().size() != 3) {
                 return fail("seq_stage19_if_en_reg data is not a kMux");
             }
             if (!mentionsPort(*g19_1, mux.operands().front(), en)) {
@@ -740,7 +723,7 @@ int main() {
             if (mux.operands()[2] != r->value) {
                 return fail("seq_stage19_if_en_reg mux false branch is not hold(Q)");
             }
-        } else if (stateOp.kind() == grh::OperationKind::kRegisterEn) {
+        } else if (stateOp.kind() == grh::ir::OperationKind::kRegisterEn) {
             // Stage21+：允许被特化为带使能原语
             if (stateOp.operands().size() != 3 || stateOp.operands().front() != clk) {
                 return fail("seq_stage19_if_en_reg kRegisterEn operand mismatch");
@@ -758,7 +741,7 @@ int main() {
     }
 
     // 19.2 if-en gated memory read/write/mask
-    if (const grh::Graph* g19_2 = fetchGraph("seq_stage19_if_en_mem")) {
+    if (const grh::ir::Graph* g19_2 = fetchGraph("seq_stage19_if_en_mem")) {
         ValueId clk      = findPort(*g19_2, "clk", /*isInput=*/true);
         ValueId en_wr    = findPort(*g19_2, "en_wr", /*isInput=*/true);
         ValueId en_bit   = findPort(*g19_2, "en_bit", /*isInput=*/true);
@@ -777,23 +760,23 @@ int main() {
         if (!mem || !rd_reg || !mem->stateOp) {
             return fail("seq_stage19_if_en_mem mem/rd_reg not found or mem not kMemory");
         }
-        const grh::Operation memOp = g19_2->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g19_2->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage19_if_en_mem mem/rd_reg not found or mem not kMemory");
         }
         const std::string memSymbol(memOp.symbolText());
         OperationId wrId =
-            findMemoryOp(*g19_2, grh::OperationKind::kMemoryWritePort, memSymbol);
+            findMemoryOp(*g19_2, grh::ir::OperationKind::kMemoryWritePort, memSymbol);
         OperationId mwrId =
-            findMemoryOp(*g19_2, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+            findMemoryOp(*g19_2, grh::ir::OperationKind::kMemoryMaskWritePort, memSymbol);
         OperationId rdId =
-            findMemoryOp(*g19_2, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+            findMemoryOp(*g19_2, grh::ir::OperationKind::kMemorySyncReadPort, memSymbol);
         if (!wrId || !mwrId || !rdId) {
             return fail("seq_stage19_if_en_mem expected memory ports not found");
         }
-        const grh::Operation wr = g19_2->getOperation(wrId);
-        const grh::Operation mwr = g19_2->getOperation(mwrId);
-        const grh::Operation rd = g19_2->getOperation(rdId);
+        const grh::ir::Operation wr = g19_2->getOperation(wrId);
+        const grh::ir::Operation mwr = g19_2->getOperation(mwrId);
+        const grh::ir::Operation rd = g19_2->getOperation(rdId);
         if (wr.operands().size() != 4 || wr.operands()[0] != clk || wr.operands()[1] != wr_addr) {
             return fail("seq_stage19_if_en_mem write port operand mismatch");
         }
@@ -814,7 +797,7 @@ int main() {
         if (!mentionsPort(*g19_2, rd.operands()[2], en_rd)) {
             return fail("seq_stage19_if_en_mem sync read enable does not mention en_rd");
         }
-        const grh::Operation rdRegOp = g19_2->getOperation(rd_reg->stateOp);
+        const grh::ir::Operation rdRegOp = g19_2->getOperation(rd_reg->stateOp);
         if (rdRegOp.operands().empty()) {
             return fail("seq_stage19_if_en_mem rd_reg missing data operand");
         }
@@ -826,8 +809,8 @@ int main() {
             if (!mId) {
                 return fail("seq_stage19_if_en_mem rd_reg not driven by sync read or mux");
             }
-            const grh::Operation m = g19_2->getOperation(mId);
-            if (m.kind() != grh::OperationKind::kMux || m.operands().size() != 3) {
+            const grh::ir::Operation m = g19_2->getOperation(mId);
+            if (m.kind() != grh::ir::OperationKind::kMux || m.operands().size() != 3) {
                 return fail("seq_stage19_if_en_mem rd_reg not driven by sync read or mux");
             }
             if (!mentionsPort(*g19_2, m.operands().front(), en_rd)) {
@@ -840,7 +823,7 @@ int main() {
     }
 
     // 19.3 case(sel) branches -> write/mask enables
-    if (const grh::Graph* g19_3 = fetchGraph("seq_stage19_case_mem")) {
+    if (const grh::ir::Graph* g19_3 = fetchGraph("seq_stage19_case_mem")) {
         ValueId clk = findPort(*g19_3, "clk", /*isInput=*/true);
         ValueId sel = findPort(*g19_3, "sel", /*isInput=*/true);
         ValueId addr = findPort(*g19_3, "addr", /*isInput=*/true);
@@ -853,20 +836,20 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage19_case_mem mem not found");
         }
-        const grh::Operation memOp = g19_3->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g19_3->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage19_case_mem mem not found");
         }
         const std::string memSymbol(memOp.symbolText());
         OperationId wrId =
-            findMemoryOp(*g19_3, grh::OperationKind::kMemoryWritePort, memSymbol);
+            findMemoryOp(*g19_3, grh::ir::OperationKind::kMemoryWritePort, memSymbol);
         OperationId mwrId =
-            findMemoryOp(*g19_3, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+            findMemoryOp(*g19_3, grh::ir::OperationKind::kMemoryMaskWritePort, memSymbol);
         if (!wrId || !mwrId) {
             return fail("seq_stage19_case_mem expected write/mask ports missing");
         }
-        const grh::Operation wr = g19_3->getOperation(wrId);
-        const grh::Operation mwr = g19_3->getOperation(mwrId);
+        const grh::ir::Operation wr = g19_3->getOperation(wrId);
+        const grh::ir::Operation mwr = g19_3->getOperation(mwrId);
         // write enable should reference sel and equal sel==0
         ValueId wrEn = wr.operands().size() > 2 ? wr.operands()[2] : ValueId::invalid();
         OperationId wrEnOpId = wrEn ? g19_3->getValue(wrEn).definingOp()
@@ -874,8 +857,8 @@ int main() {
         if (!wrEn || !wrEnOpId) {
             return fail("seq_stage19_case_mem write enable is not eq(sel, const)");
         }
-        const grh::Operation wrEnOp = g19_3->getOperation(wrEnOpId);
-        if (wrEnOp.kind() != grh::OperationKind::kEq) {
+        const grh::ir::Operation wrEnOp = g19_3->getOperation(wrEnOpId);
+        if (wrEnOp.kind() != grh::ir::OperationKind::kEq) {
             return fail("seq_stage19_case_mem write enable is not eq(sel, const)");
         }
         if (!mentionsPort(*g19_3, wrEnOp.operands().front(), sel) &&
@@ -889,8 +872,8 @@ int main() {
         if (!mwrEn || !mwrEnOpId) {
             return fail("seq_stage19_case_mem mask write enable is not eq(sel, const)");
         }
-        const grh::Operation mwrEnOp = g19_3->getOperation(mwrEnOpId);
-        if (mwrEnOp.kind() != grh::OperationKind::kEq) {
+        const grh::ir::Operation mwrEnOp = g19_3->getOperation(mwrEnOpId);
+        if (mwrEnOp.kind() != grh::ir::OperationKind::kEq) {
             return fail("seq_stage19_case_mem mask write enable is not eq(sel, const)");
         }
         if (!mentionsPort(*g19_3, mwrEnOp.operands().front(), sel) &&
@@ -900,7 +883,7 @@ int main() {
     }
 
     // 19.4 casez wildcard: two writes, each enable references sel with wildcard logic
-    if (const grh::Graph* g19_4 = fetchGraph("seq_stage19_casez_mem")) {
+    if (const grh::ir::Graph* g19_4 = fetchGraph("seq_stage19_casez_mem")) {
         ValueId clk = findPort(*g19_4, "clk", /*isInput=*/true);
         ValueId sel = findPort(*g19_4, "sel", /*isInput=*/true);
         ValueId addr = findPort(*g19_4, "addr", /*isInput=*/true);
@@ -913,20 +896,19 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage19_casez_mem mem not found");
         }
-        const grh::Operation memOp = g19_4->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g19_4->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage19_casez_mem mem not found");
         }
         const std::string memSymbol(memOp.symbolText());
         // Collect all write ports for this mem
         std::vector<OperationId> writes;
-        const grh::ir::SymbolId memKey = g19_4->lookupSymbol("memSymbol");
         for (const auto& opId : g19_4->operations()) {
-            const grh::Operation op = g19_4->getOperation(opId);
-            if (op.kind() != grh::OperationKind::kMemoryWritePort) {
+            const grh::ir::Operation op = g19_4->getOperation(opId);
+            if (op.kind() != grh::ir::OperationKind::kMemoryWritePort) {
                 continue;
             }
-            auto attr = memKey.valid() ? op.attr(memKey) : std::nullopt;
+            auto attr = op.attr("memSymbol");
             const std::string* symbol = attr ? std::get_if<std::string>(&*attr) : nullptr;
             if (symbol && *symbol == memSymbol) {
                 writes.push_back(opId);
@@ -936,7 +918,7 @@ int main() {
             return fail("seq_stage19_casez_mem expects two write ports");
         }
         for (OperationId wrId : writes) {
-            const grh::Operation wr = g19_4->getOperation(wrId);
+            const grh::ir::Operation wr = g19_4->getOperation(wrId);
             if (wr.operands().size() < 3) {
                 return fail("seq_stage19_casez_mem write port missing enable");
             }
@@ -948,7 +930,7 @@ int main() {
     }
 
     // 19.5 rst + en register
-    if (const grh::Graph* g19_5 = fetchGraph("seq_stage19_rst_en_reg")) {
+    if (const grh::ir::Graph* g19_5 = fetchGraph("seq_stage19_rst_en_reg")) {
         ValueId clk = findPort(*g19_5, "clk", /*isInput=*/true);
         ValueId rst = findPort(*g19_5, "rst", /*isInput=*/true);
         ValueId en  = findPort(*g19_5, "en",  /*isInput=*/true);
@@ -965,8 +947,8 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage19_rst_en_reg missing stateOp");
         }
-        const grh::Operation stateOp = g19_5->getOperation(r->stateOp);
-        if (stateOp.kind() == grh::OperationKind::kRegisterRst) {
+        const grh::ir::Operation stateOp = g19_5->getOperation(r->stateOp);
+        if (stateOp.kind() == grh::ir::OperationKind::kRegisterRst) {
             if (!expectStringAttr(*g19_5, stateOp, "rstPolarity", "high")) {
                 return fail("seq_stage19_rst_en_reg rstPolarity attribute unexpected");
             }
@@ -982,7 +964,7 @@ int main() {
             if (!mentionsPort(*g19_5, data, en)) {
                 return fail("seq_stage19_rst_en_reg data path does not reference en");
             }
-        } else if (stateOp.kind() == grh::OperationKind::kRegisterEnRst) {
+        } else if (stateOp.kind() == grh::ir::OperationKind::kRegisterEnRst) {
             // Stage21+：特化为带使能 + 同步复位原语
             if (!expectStringAttr(*g19_5, stateOp, "rstPolarity", "high")) {
                 return fail("seq_stage19_rst_en_reg (EnRst) rstPolarity attribute unexpected");
@@ -1015,7 +997,7 @@ int main() {
     // -----------------------
 
     // 20.1 for + continue: last-write-wins -> r <= d2
-    if (const grh::Graph* g20_1 = fetchGraph("seq_stage20_for_last_write")) {
+    if (const grh::ir::Graph* g20_1 = fetchGraph("seq_stage20_for_last_write")) {
         ValueId clk = findPort(*g20_1, "clk", /*isInput=*/true);
         ValueId d0  = findPort(*g20_1, "d0",  /*isInput=*/true);
         ValueId d2  = findPort(*g20_1, "d2",  /*isInput=*/true);
@@ -1032,8 +1014,8 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage20_for_last_write r is not kRegister");
         }
-        const grh::Operation rOp = g20_1->getOperation(r->stateOp);
-        if (rOp.kind() != grh::OperationKind::kRegister) {
+        const grh::ir::Operation rOp = g20_1->getOperation(r->stateOp);
+        if (rOp.kind() != grh::ir::OperationKind::kRegister) {
             return fail("seq_stage20_for_last_write r is not kRegister");
         }
         if (rOp.operands().size() < 2 || rOp.operands().front() != clk) {
@@ -1055,7 +1037,7 @@ int main() {
     // -----------------------
 
     // 22.1 basic display emits kDisplay with clk/en/var
-    if (const grh::Graph* g22_1 = fetchGraph("seq_stage22_display_basic")) {
+    if (const grh::ir::Graph* g22_1 = fetchGraph("seq_stage22_display_basic")) {
         ValueId clk = findPort(*g22_1, "clk", /*isInput=*/true);
         ValueId d = findPort(*g22_1, "d", /*isInput=*/true);
         ValueId q = findPort(*g22_1, "q", /*isInput=*/false);
@@ -1072,11 +1054,11 @@ int main() {
         if (!rEntry || !rEntry->value) {
             return fail("seq_stage22_display_basic missing reg memo for r");
         }
-        OperationId displayId = findOpByKind(*g22_1, grh::OperationKind::kDisplay);
+        OperationId displayId = findOpByKind(*g22_1, grh::ir::OperationKind::kDisplay);
         if (!displayId) {
             return fail("seq_stage22_display_basic missing kDisplay");
         }
-        const grh::Operation display = g22_1->getOperation(displayId);
+        const grh::ir::Operation display = g22_1->getOperation(displayId);
         if (display.operands().size() != 3) {
             return fail("seq_stage22_display_basic display operand count mismatch");
         }
@@ -1096,18 +1078,18 @@ int main() {
     }
 
     // 22.2 guarded write: enable operand should reference guard (en)
-    if (const grh::Graph* g22_2 = fetchGraph("seq_stage22_guarded_write")) {
+    if (const grh::ir::Graph* g22_2 = fetchGraph("seq_stage22_guarded_write")) {
         ValueId clk = findPort(*g22_2, "clk", /*isInput=*/true);
         ValueId en = findPort(*g22_2, "en", /*isInput=*/true);
         ValueId d = findPort(*g22_2, "d", /*isInput=*/true);
         if (!clk || !en || !d) {
             return fail("seq_stage22_guarded_write missing ports");
         }
-        OperationId displayId = findOpByKind(*g22_2, grh::OperationKind::kDisplay);
+        OperationId displayId = findOpByKind(*g22_2, grh::ir::OperationKind::kDisplay);
         if (!displayId) {
             return fail("seq_stage22_guarded_write missing kDisplay");
         }
-        const grh::Operation display = g22_2->getOperation(displayId);
+        const grh::ir::Operation display = g22_2->getOperation(displayId);
         if (display.operands().size() != 4) {
             return fail("seq_stage22_guarded_write operand count mismatch");
         }
@@ -1123,17 +1105,17 @@ int main() {
     }
 
     // 22.3 strobe variant: ensure kind recorded
-    if (const grh::Graph* g22_3 = fetchGraph("seq_stage22_strobe")) {
+    if (const grh::ir::Graph* g22_3 = fetchGraph("seq_stage22_strobe")) {
         ValueId clk = findPort(*g22_3, "clk", /*isInput=*/true);
         ValueId d = findPort(*g22_3, "d", /*isInput=*/true);
         if (!clk || !d) {
             return fail("seq_stage22_strobe missing ports");
         }
-        OperationId displayId = findOpByKind(*g22_3, grh::OperationKind::kDisplay);
+        OperationId displayId = findOpByKind(*g22_3, grh::ir::OperationKind::kDisplay);
         if (!displayId) {
             return fail("seq_stage22_strobe missing kDisplay");
         }
-        const grh::Operation display = g22_3->getOperation(displayId);
+        const grh::ir::Operation display = g22_3->getOperation(displayId);
         if (display.operands().size() != 3 ||
             display.operands()[0] != clk || display.operands()[2] != d) {
             return fail("seq_stage22_strobe operands mismatch");
@@ -1150,15 +1132,15 @@ int main() {
     // -----------------------
 
     // Helper: fetch assert ops and basic checks.
-    auto expectAssert = [&](const grh::Graph& graph, ValueId clk,
+    auto expectAssert = [&](const grh::ir::Graph& graph, ValueId clk,
                             std::optional<std::string_view> message = std::nullopt) -> bool {
         std::vector<OperationId> asserts =
-            collectOpsByKind(graph, grh::OperationKind::kAssert);
+            collectOpsByKind(graph, grh::ir::OperationKind::kAssert);
         if (asserts.empty()) {
             return fail("Expected at least one kAssert");
         }
         for (OperationId opId : asserts) {
-            const grh::Operation op = graph.getOperation(opId);
+            const grh::ir::Operation op = graph.getOperation(opId);
             if (op.operands().size() != 2) {
                 return fail("kAssert operand count mismatch");
             }
@@ -1175,7 +1157,7 @@ int main() {
     };
 
     // 23.1 basic assert
-    if (const grh::Graph* g23_1 = fetchGraph("seq_stage23_assert_basic")) {
+    if (const grh::ir::Graph* g23_1 = fetchGraph("seq_stage23_assert_basic")) {
         ValueId clk = findPort(*g23_1, "clk", /*isInput=*/true);
         if (!clk) {
             return fail("seq_stage23_assert_basic missing clk");
@@ -1186,7 +1168,7 @@ int main() {
     }
 
     // 23.2 guarded assert with message
-    if (const grh::Graph* g23_2 = fetchGraph("seq_stage23_assert_guard")) {
+    if (const grh::ir::Graph* g23_2 = fetchGraph("seq_stage23_assert_guard")) {
         ValueId clk = findPort(*g23_2, "clk", /*isInput=*/true);
         ValueId en = findPort(*g23_2, "en", /*isInput=*/true);
         ValueId d = findPort(*g23_2, "d", /*isInput=*/true);
@@ -1194,11 +1176,11 @@ int main() {
             return fail("seq_stage23_assert_guard missing ports");
         }
         std::vector<OperationId> asserts =
-            collectOpsByKind(*g23_2, grh::OperationKind::kAssert);
+            collectOpsByKind(*g23_2, grh::ir::OperationKind::kAssert);
         if (asserts.size() != 1) {
             return fail("seq_stage23_assert_guard expected one kAssert");
         }
-        const grh::Operation op = g23_2->getOperation(asserts.front());
+        const grh::ir::Operation op = g23_2->getOperation(asserts.front());
         if (op.operands().size() != 2 || op.operands()[0] != clk) {
             return fail("seq_stage23_assert_guard operand mismatch");
         }
@@ -1213,15 +1195,15 @@ int main() {
     }
 
     // 23.3 comb assert warning only
-    if (const grh::Graph* g23_3 = fetchGraph("comb_stage23_assert_warning")) {
+    if (const grh::ir::Graph* g23_3 = fetchGraph("comb_stage23_assert_warning")) {
         std::vector<OperationId> asserts =
-            collectOpsByKind(*g23_3, grh::OperationKind::kAssert);
+            collectOpsByKind(*g23_3, grh::ir::OperationKind::kAssert);
         if (!asserts.empty()) {
             return fail("comb_stage23_assert_warning should not emit kAssert");
         }
     }
     // 20.2 foreach + static break: lower 4 bits from d, upper 4 bits hold from Q
-    if (const grh::Graph* g20_2 = fetchGraph("seq_stage20_foreach_partial")) {
+    if (const grh::ir::Graph* g20_2 = fetchGraph("seq_stage20_foreach_partial")) {
         ValueId clk = findPort(*g20_2, "clk", /*isInput=*/true);
         ValueId d   = findPort(*g20_2, "d",   /*isInput=*/true);
         if (!clk || !d) {
@@ -1237,8 +1219,8 @@ int main() {
         if (!r || !r->stateOp) {
             return fail("seq_stage20_foreach_partial r is not kRegister");
         }
-        const grh::Operation rOp = g20_2->getOperation(r->stateOp);
-        if (rOp.kind() != grh::OperationKind::kRegister) {
+        const grh::ir::Operation rOp = g20_2->getOperation(r->stateOp);
+        if (rOp.kind() != grh::ir::OperationKind::kRegister) {
             return fail("seq_stage20_foreach_partial r is not kRegister");
         }
         if (rOp.operands().size() < 2 || rOp.operands().front() != clk) {
@@ -1250,8 +1232,8 @@ int main() {
         if (!concatId) {
             return fail("seq_stage20_foreach_partial data is not kConcat");
         }
-        const grh::Operation concat = g20_2->getOperation(concatId);
-        if (concat.kind() != grh::OperationKind::kConcat || concat.operands().size() != 2) {
+        const grh::ir::Operation concat = g20_2->getOperation(concatId);
+        if (concat.kind() != grh::ir::OperationKind::kConcat || concat.operands().size() != 2) {
             return fail("seq_stage20_foreach_partial data is not kConcat");
         }
         // hi operand should be hold slice of Q[7:4]
@@ -1261,8 +1243,8 @@ int main() {
         if (!hiSliceId) {
             return fail("seq_stage20_foreach_partial high hold slice incorrect");
         }
-        const grh::Operation hiSlice = g20_2->getOperation(hiSliceId);
-        if (hiSlice.kind() != grh::OperationKind::kSliceStatic ||
+        const grh::ir::Operation hiSlice = g20_2->getOperation(hiSliceId);
+        if (hiSlice.kind() != grh::ir::OperationKind::kSliceStatic ||
             hiSlice.operands().size() != 1 || hiSlice.operands().front() != r->value) {
             return fail("seq_stage20_foreach_partial high hold slice incorrect");
         }
@@ -1278,7 +1260,7 @@ int main() {
     }
 
     // 20.3 for with memory writes: expect two kMemoryWritePort and one kMemorySyncReadPort
-    if (const grh::Graph* g20_3 = fetchGraph("seq_stage20_for_memory")) {
+    if (const grh::ir::Graph* g20_3 = fetchGraph("seq_stage20_for_memory")) {
         const auto* inst = findInstanceByName(compilation->getRoot().topInstances,
                                               "seq_stage20_for_memory");
         if (!inst) {
@@ -1289,26 +1271,25 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage20_for_memory mem not found or mem not kMemory");
         }
-        const grh::Operation memOp = g20_3->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g20_3->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage20_for_memory mem not found or mem not kMemory");
         }
         const std::string memSymbol(memOp.symbolText());
         int wrCount = 0;
         int rdCount = 0;
-        const grh::ir::SymbolId memKey = g20_3->lookupSymbol("memSymbol");
         for (const auto& opId : g20_3->operations()) {
-            const grh::Operation op = g20_3->getOperation(opId);
-            if (op.kind() != grh::OperationKind::kMemoryWritePort &&
-                op.kind() != grh::OperationKind::kMemorySyncReadPort) {
+            const grh::ir::Operation op = g20_3->getOperation(opId);
+            if (op.kind() != grh::ir::OperationKind::kMemoryWritePort &&
+                op.kind() != grh::ir::OperationKind::kMemorySyncReadPort) {
                 continue;
             }
-            auto attr = memKey.valid() ? op.attr(memKey) : std::nullopt;
+            auto attr = op.attr("memSymbol");
             const std::string* symbol = attr ? std::get_if<std::string>(&*attr) : nullptr;
             if (!symbol || *symbol != memSymbol) {
                 continue;
             }
-            if (op.kind() == grh::OperationKind::kMemoryWritePort) {
+            if (op.kind() == grh::ir::OperationKind::kMemoryWritePort) {
                 wrCount++;
             } else {
                 rdCount++;
@@ -1322,7 +1303,7 @@ int main() {
     // -----------------------
     // Stage27: memory addr/clkPolarity normalization
     // -----------------------
-    if (const grh::Graph* g27 = fetchGraph("seq_stage27_mem_addr")) {
+    if (const grh::ir::Graph* g27 = fetchGraph("seq_stage27_mem_addr")) {
         ValueId clk = findPort(*g27, "clk", /*isInput=*/true);
         if (!clk) {
             return fail("seq_stage27_mem_addr missing clk port");
@@ -1337,24 +1318,24 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage27_mem_addr mem not found or not kMemory");
         }
-        const grh::Operation memOp = g27->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g27->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage27_mem_addr mem not found or not kMemory");
         }
         const std::string memSymbol(memOp.symbolText());
         OperationId wrId =
-            findMemoryOp(*g27, grh::OperationKind::kMemoryWritePort, memSymbol);
+            findMemoryOp(*g27, grh::ir::OperationKind::kMemoryWritePort, memSymbol);
         OperationId mwrId =
-            findMemoryOp(*g27, grh::OperationKind::kMemoryMaskWritePort, memSymbol);
+            findMemoryOp(*g27, grh::ir::OperationKind::kMemoryMaskWritePort, memSymbol);
         OperationId rdId =
-            findMemoryOp(*g27, grh::OperationKind::kMemorySyncReadPort, memSymbol);
+            findMemoryOp(*g27, grh::ir::OperationKind::kMemorySyncReadPort, memSymbol);
         if (!wrId || !mwrId || !rdId) {
             return fail("seq_stage27_mem_addr expected write/mask/read ports");
         }
-        const grh::Operation wr = g27->getOperation(wrId);
-        const grh::Operation mwr = g27->getOperation(mwrId);
-        const grh::Operation rd = g27->getOperation(rdId);
-        auto expectAddrShape = [&](const grh::Operation& op, std::string_view label) -> bool {
+        const grh::ir::Operation wr = g27->getOperation(wrId);
+        const grh::ir::Operation mwr = g27->getOperation(mwrId);
+        const grh::ir::Operation rd = g27->getOperation(rdId);
+        auto expectAddrShape = [&](const grh::ir::Operation& op, std::string_view label) -> bool {
             if (op.operands().size() < 2) {
                 std::string msg(label);
                 msg.append(" has insufficient operands");
@@ -1382,7 +1363,7 @@ int main() {
     // -----------------------
     // Stage29: memory ports with reset
     // -----------------------
-    if (const grh::Graph* g29_arst = fetchGraph("seq_stage29_arst_mem")) {
+    if (const grh::ir::Graph* g29_arst = fetchGraph("seq_stage29_arst_mem")) {
         ValueId clk = findPort(*g29_arst, "clk", /*isInput=*/true);
         ValueId rst_n = findPort(*g29_arst, "rst_n", /*isInput=*/true);
         if (!clk || !rst_n) {
@@ -1398,20 +1379,20 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage29_arst_mem mem not found or not kMemory");
         }
-        const grh::Operation memOp = g29_arst->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g29_arst->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage29_arst_mem mem not found or not kMemory");
         }
         const std::string memSymbol(memOp.symbolText());
 
-        auto writes = collectMemoryOps(*g29_arst, grh::OperationKind::kMemoryWritePortArst, memSymbol);
-        auto masks = collectMemoryOps(*g29_arst, grh::OperationKind::kMemoryMaskWritePortArst, memSymbol);
-        auto reads = collectMemoryOps(*g29_arst, grh::OperationKind::kMemorySyncReadPortArst, memSymbol);
+        auto writes = collectMemoryOps(*g29_arst, grh::ir::OperationKind::kMemoryWritePortArst, memSymbol);
+        auto masks = collectMemoryOps(*g29_arst, grh::ir::OperationKind::kMemoryMaskWritePortArst, memSymbol);
+        auto reads = collectMemoryOps(*g29_arst, grh::ir::OperationKind::kMemorySyncReadPortArst, memSymbol);
         if (writes.size() != 2 || masks.size() != 2 || reads.size() != 1) {
             return fail("seq_stage29_arst_mem expected 2 write, 2 mask write, 1 read port");
         }
         for (OperationId opId : writes) {
-            const grh::Operation op = g29_arst->getOperation(opId);
+            const grh::ir::Operation op = g29_arst->getOperation(opId);
             if (op.operands().size() < 5 || op.operands()[0] != clk ||
                 op.operands()[1] != rst_n) {
                 return fail("seq_stage29_arst_mem write port operands mismatch");
@@ -1423,7 +1404,7 @@ int main() {
             }
         }
         for (OperationId opId : masks) {
-            const grh::Operation op = g29_arst->getOperation(opId);
+            const grh::ir::Operation op = g29_arst->getOperation(opId);
             if (op.operands().size() < 6 || op.operands()[0] != clk ||
                 op.operands()[1] != rst_n) {
                 return fail("seq_stage29_arst_mem mask port operands mismatch");
@@ -1434,7 +1415,7 @@ int main() {
                 return fail("seq_stage29_arst_mem mask port attributes mismatch");
             }
         }
-        const grh::Operation rd = g29_arst->getOperation(reads.front());
+        const grh::ir::Operation rd = g29_arst->getOperation(reads.front());
         if (rd.operands().size() < 4 || rd.operands()[0] != clk ||
             rd.operands()[1] != rst_n) {
             return fail("seq_stage29_arst_mem read port operands mismatch");
@@ -1446,7 +1427,7 @@ int main() {
         }
     }
 
-    if (const grh::Graph* g29_rst = fetchGraph("seq_stage29_rst_mem")) {
+    if (const grh::ir::Graph* g29_rst = fetchGraph("seq_stage29_rst_mem")) {
         ValueId clk = findPort(*g29_rst, "clk", /*isInput=*/true);
         ValueId rst = findPort(*g29_rst, "rst", /*isInput=*/true);
         if (!clk || !rst) {
@@ -1462,20 +1443,20 @@ int main() {
         if (!mem || !mem->stateOp) {
             return fail("seq_stage29_rst_mem mem not found or not kMemory");
         }
-        const grh::Operation memOp = g29_rst->getOperation(mem->stateOp);
-        if (memOp.kind() != grh::OperationKind::kMemory) {
+        const grh::ir::Operation memOp = g29_rst->getOperation(mem->stateOp);
+        if (memOp.kind() != grh::ir::OperationKind::kMemory) {
             return fail("seq_stage29_rst_mem mem not found or not kMemory");
         }
         const std::string memSymbol(memOp.symbolText());
 
-        auto writes = collectMemoryOps(*g29_rst, grh::OperationKind::kMemoryWritePortRst, memSymbol);
-        auto masks = collectMemoryOps(*g29_rst, grh::OperationKind::kMemoryMaskWritePortRst, memSymbol);
-        auto reads = collectMemoryOps(*g29_rst, grh::OperationKind::kMemorySyncReadPortRst, memSymbol);
+        auto writes = collectMemoryOps(*g29_rst, grh::ir::OperationKind::kMemoryWritePortRst, memSymbol);
+        auto masks = collectMemoryOps(*g29_rst, grh::ir::OperationKind::kMemoryMaskWritePortRst, memSymbol);
+        auto reads = collectMemoryOps(*g29_rst, grh::ir::OperationKind::kMemorySyncReadPortRst, memSymbol);
         if (writes.size() != 2 || masks.size() != 2 || reads.size() != 1) {
             return fail("seq_stage29_rst_mem expected 2 write, 2 mask write, 1 read port");
         }
         for (OperationId opId : writes) {
-            const grh::Operation op = g29_rst->getOperation(opId);
+            const grh::ir::Operation op = g29_rst->getOperation(opId);
             if (op.operands().size() < 5 || op.operands()[0] != clk ||
                 op.operands()[1] != rst) {
                 return fail("seq_stage29_rst_mem write port operands mismatch");
@@ -1487,7 +1468,7 @@ int main() {
             }
         }
         for (OperationId opId : masks) {
-            const grh::Operation op = g29_rst->getOperation(opId);
+            const grh::ir::Operation op = g29_rst->getOperation(opId);
             if (op.operands().size() < 6 || op.operands()[0] != clk ||
                 op.operands()[1] != rst) {
                 return fail("seq_stage29_rst_mem mask port operands mismatch");
@@ -1498,7 +1479,7 @@ int main() {
                 return fail("seq_stage29_rst_mem mask port attributes mismatch");
             }
         }
-        const grh::Operation rd = g29_rst->getOperation(reads.front());
+        const grh::ir::Operation rd = g29_rst->getOperation(reads.front());
         if (rd.operands().size() < 4 || rd.operands()[0] != clk ||
             rd.operands()[1] != rst) {
             return fail("seq_stage29_rst_mem read port operands mismatch");

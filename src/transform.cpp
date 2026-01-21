@@ -7,7 +7,7 @@ namespace wolf_sv::transform
 
     namespace
     {
-        std::string formatContext(const grh::Graph *graph, const grh::Operation *op, const grh::Value *value)
+        std::string formatContext(const grh::ir::Graph *graph, const grh::ir::Operation *op, const grh::ir::Value *value)
         {
             std::string ctx;
             if (graph)
@@ -154,7 +154,7 @@ namespace wolf_sv::transform
         diags().debug(name_.empty() ? id_ : name_, std::move(message), std::move(context));
     }
 
-    void Pass::error(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    void Pass::error(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Error))
         {
@@ -163,7 +163,7 @@ namespace wolf_sv::transform
         diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
     }
 
-    void Pass::warning(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    void Pass::warning(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Warning))
         {
@@ -172,7 +172,7 @@ namespace wolf_sv::transform
         diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
     }
 
-    void Pass::info(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    void Pass::info(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Info))
         {
@@ -181,7 +181,7 @@ namespace wolf_sv::transform
         diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
     }
 
-    void Pass::debug(const grh::Graph &graph, const grh::Operation &op, std::string message)
+    void Pass::debug(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Debug))
         {
@@ -190,7 +190,7 @@ namespace wolf_sv::transform
         diags().debug(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, &op, nullptr));
     }
 
-    void Pass::error(const grh::Graph &graph, const grh::Value &value, std::string message)
+    void Pass::error(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Error))
         {
@@ -199,7 +199,7 @@ namespace wolf_sv::transform
         diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
     }
 
-    void Pass::warning(const grh::Graph &graph, const grh::Value &value, std::string message)
+    void Pass::warning(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Warning))
         {
@@ -208,7 +208,7 @@ namespace wolf_sv::transform
         diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
     }
 
-    void Pass::info(const grh::Graph &graph, const grh::Value &value, std::string message)
+    void Pass::info(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Info))
         {
@@ -217,7 +217,7 @@ namespace wolf_sv::transform
         diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
     }
 
-    void Pass::debug(const grh::Graph &graph, const grh::Value &value, std::string message)
+    void Pass::debug(const grh::ir::Graph &graph, const grh::ir::Value &value, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Debug))
         {
@@ -226,7 +226,7 @@ namespace wolf_sv::transform
         diags().debug(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, &value));
     }
 
-    void Pass::error(const grh::Graph &graph, std::string message)
+    void Pass::error(const grh::ir::Graph &graph, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Error))
         {
@@ -235,7 +235,7 @@ namespace wolf_sv::transform
         diags().error(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
     }
 
-    void Pass::warning(const grh::Graph &graph, std::string message)
+    void Pass::warning(const grh::ir::Graph &graph, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Warning))
         {
@@ -244,7 +244,7 @@ namespace wolf_sv::transform
         diags().warning(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
     }
 
-    void Pass::info(const grh::Graph &graph, std::string message)
+    void Pass::info(const grh::ir::Graph &graph, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Info))
         {
@@ -253,7 +253,7 @@ namespace wolf_sv::transform
         diags().info(name_.empty() ? id_ : name_, std::move(message), formatContext(&graph, nullptr, nullptr));
     }
 
-    void Pass::debug(const grh::Graph &graph, std::string message)
+    void Pass::debug(const grh::ir::Graph &graph, std::string message)
     {
         if (!shouldEmit(PassDiagnosticKind::Debug))
         {
@@ -290,7 +290,7 @@ namespace wolf_sv::transform
         pipeline_.clear();
     }
 
-    PassManagerResult PassManager::run(grh::Netlist &netlist, PassDiagnostics &diags)
+    PassManagerResult PassManager::run(grh::ir::Netlist &netlist, PassDiagnostics &diags)
     {
         PassManagerResult result;
         PassContext context{netlist, diags, options_.verbosity};

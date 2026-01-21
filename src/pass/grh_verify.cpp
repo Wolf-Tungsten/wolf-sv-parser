@@ -34,7 +34,7 @@ namespace wolf_sv::transform
             Unknown
         };
 
-        AttrValueKind classifyAttr(const grh::AttributeValue &value)
+        AttrValueKind classifyAttr(const grh::ir::AttributeValue &value)
         {
             if (std::holds_alternative<bool>(value))
             {
@@ -133,86 +133,86 @@ namespace wolf_sv::transform
             return spec;
         }
 
-        const std::unordered_map<grh::OperationKind, OperationSpec> &operationSpecs()
+        const std::unordered_map<grh::ir::OperationKind, OperationSpec> &operationSpecs()
         {
-            static const std::unordered_map<grh::OperationKind, OperationSpec> specs = []()
+            static const std::unordered_map<grh::ir::OperationKind, OperationSpec> specs = []()
             {
-                std::unordered_map<grh::OperationKind, OperationSpec> map;
+                std::unordered_map<grh::ir::OperationKind, OperationSpec> map;
 
                 OperationSpec binary = makeSpec(exact(2), exact(1), {});
                 OperationSpec unary = makeSpec(exact(1), exact(1), {});
 
                 const std::vector binaryKinds = {
-                    grh::OperationKind::kAdd, grh::OperationKind::kSub, grh::OperationKind::kMul, grh::OperationKind::kDiv, grh::OperationKind::kMod,
-                    grh::OperationKind::kEq, grh::OperationKind::kNe, grh::OperationKind::kLt, grh::OperationKind::kLe, grh::OperationKind::kGt, grh::OperationKind::kGe,
-                    grh::OperationKind::kAnd, grh::OperationKind::kOr, grh::OperationKind::kXor, grh::OperationKind::kXnor, grh::OperationKind::kLogicAnd, grh::OperationKind::kLogicOr,
-                    grh::OperationKind::kShl, grh::OperationKind::kLShr, grh::OperationKind::kAShr};
+                    grh::ir::OperationKind::kAdd, grh::ir::OperationKind::kSub, grh::ir::OperationKind::kMul, grh::ir::OperationKind::kDiv, grh::ir::OperationKind::kMod,
+                    grh::ir::OperationKind::kEq, grh::ir::OperationKind::kNe, grh::ir::OperationKind::kLt, grh::ir::OperationKind::kLe, grh::ir::OperationKind::kGt, grh::ir::OperationKind::kGe,
+                    grh::ir::OperationKind::kAnd, grh::ir::OperationKind::kOr, grh::ir::OperationKind::kXor, grh::ir::OperationKind::kXnor, grh::ir::OperationKind::kLogicAnd, grh::ir::OperationKind::kLogicOr,
+                    grh::ir::OperationKind::kShl, grh::ir::OperationKind::kLShr, grh::ir::OperationKind::kAShr};
                 for (auto kind : binaryKinds)
                 {
                     map.emplace(kind, binary);
                 }
 
                 const std::vector unaryKinds = {
-                    grh::OperationKind::kNot, grh::OperationKind::kLogicNot, grh::OperationKind::kReduceAnd, grh::OperationKind::kReduceOr,
-                    grh::OperationKind::kReduceXor, grh::OperationKind::kReduceNor, grh::OperationKind::kReduceNand, grh::OperationKind::kReduceXnor};
+                    grh::ir::OperationKind::kNot, grh::ir::OperationKind::kLogicNot, grh::ir::OperationKind::kReduceAnd, grh::ir::OperationKind::kReduceOr,
+                    grh::ir::OperationKind::kReduceXor, grh::ir::OperationKind::kReduceNor, grh::ir::OperationKind::kReduceNand, grh::ir::OperationKind::kReduceXnor};
                 for (auto kind : unaryKinds)
                 {
                     map.emplace(kind, unary);
                 }
 
-                map.emplace(grh::OperationKind::kConstant, makeSpec(exact(0), exact(1), {makeStringAttr("constValue", {})}));
-                map.emplace(grh::OperationKind::kMux, makeSpec(exact(3), exact(1), {}));
-                map.emplace(grh::OperationKind::kAssign, makeSpec(exact(1), exact(1), {}));
-                map.emplace(grh::OperationKind::kConcat, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, exact(1), {}));
-                map.emplace(grh::OperationKind::kReplicate, makeSpec(exact(1), exact(1), {makeIntAttr("rep")}));
-                map.emplace(grh::OperationKind::kSliceStatic, makeSpec(exact(1), exact(1), {makeIntAttr("sliceStart"), makeIntAttr("sliceEnd")}));
-                map.emplace(grh::OperationKind::kSliceDynamic, makeSpec(exact(2), exact(1), {makeIntAttr("sliceWidth")}));
-                map.emplace(grh::OperationKind::kSliceArray, makeSpec(exact(2), exact(1), {makeIntAttr("sliceWidth")}));
+                map.emplace(grh::ir::OperationKind::kConstant, makeSpec(exact(0), exact(1), {makeStringAttr("constValue", {})}));
+                map.emplace(grh::ir::OperationKind::kMux, makeSpec(exact(3), exact(1), {}));
+                map.emplace(grh::ir::OperationKind::kAssign, makeSpec(exact(1), exact(1), {}));
+                map.emplace(grh::ir::OperationKind::kConcat, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, exact(1), {}));
+                map.emplace(grh::ir::OperationKind::kReplicate, makeSpec(exact(1), exact(1), {makeIntAttr("rep")}));
+                map.emplace(grh::ir::OperationKind::kSliceStatic, makeSpec(exact(1), exact(1), {makeIntAttr("sliceStart"), makeIntAttr("sliceEnd")}));
+                map.emplace(grh::ir::OperationKind::kSliceDynamic, makeSpec(exact(2), exact(1), {makeIntAttr("sliceWidth")}));
+                map.emplace(grh::ir::OperationKind::kSliceArray, makeSpec(exact(2), exact(1), {makeIntAttr("sliceWidth")}));
 
-                map.emplace(grh::OperationKind::kLatch, makeSpec(exact(2), exact(1), {makeStringAttr("enLevel", {"high", "low"})}));
-                map.emplace(grh::OperationKind::kLatchArst, makeSpec(exact(4), exact(1), {makeStringAttr("enLevel", {"high", "low"}), makeStringAttr("rstPolarity", {"high", "low"})}));
+                map.emplace(grh::ir::OperationKind::kLatch, makeSpec(exact(2), exact(1), {makeStringAttr("enLevel", {"high", "low"})}));
+                map.emplace(grh::ir::OperationKind::kLatchArst, makeSpec(exact(4), exact(1), {makeStringAttr("enLevel", {"high", "low"}), makeStringAttr("rstPolarity", {"high", "low"})}));
 
                 auto clkPolarity = makeStringAttr("clkPolarity", {"posedge", "negedge"});
                 auto enLevel = makeStringAttr("enLevel", {"high", "low"});
                 auto rstPolarity = makeStringAttr("rstPolarity", {"high", "low"});
-                map.emplace(grh::OperationKind::kRegister, makeSpec(exact(2), exact(1), {clkPolarity}));
-                map.emplace(grh::OperationKind::kRegisterEn, makeSpec(exact(3), exact(1), {clkPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kRegisterRst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity}));
-                map.emplace(grh::OperationKind::kRegisterEnRst, makeSpec(exact(5), exact(1), {clkPolarity, rstPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kRegisterArst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity}));
-                map.emplace(grh::OperationKind::kRegisterEnArst, makeSpec(exact(5), exact(1), {clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kRegister, makeSpec(exact(2), exact(1), {clkPolarity}));
+                map.emplace(grh::ir::OperationKind::kRegisterEn, makeSpec(exact(3), exact(1), {clkPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kRegisterRst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity}));
+                map.emplace(grh::ir::OperationKind::kRegisterEnRst, makeSpec(exact(5), exact(1), {clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kRegisterArst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity}));
+                map.emplace(grh::ir::OperationKind::kRegisterEnArst, makeSpec(exact(5), exact(1), {clkPolarity, rstPolarity, enLevel}));
 
-                map.emplace(grh::OperationKind::kMemory, makeSpec(exact(0), exact(0), {makeIntAttr("width"), makeIntAttr("row"), makeBoolAttr("isSigned")}));
-                map.emplace(grh::OperationKind::kMemoryAsyncReadPort, makeSpec(exact(1), exact(1), {makeStringAttr("memSymbol", {})}));
-                map.emplace(grh::OperationKind::kMemorySyncReadPort, makeSpec(exact(3), exact(1), {clkPolarity, makeStringAttr("memSymbol", {}), enLevel}));
-                map.emplace(grh::OperationKind::kMemorySyncReadPortRst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity, enLevel, makeStringAttr("memSymbol", {})}));
-                map.emplace(grh::OperationKind::kMemorySyncReadPortArst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity, enLevel, makeStringAttr("memSymbol", {})}));
+                map.emplace(grh::ir::OperationKind::kMemory, makeSpec(exact(0), exact(0), {makeIntAttr("width"), makeIntAttr("row"), makeBoolAttr("isSigned")}));
+                map.emplace(grh::ir::OperationKind::kMemoryAsyncReadPort, makeSpec(exact(1), exact(1), {makeStringAttr("memSymbol", {})}));
+                map.emplace(grh::ir::OperationKind::kMemorySyncReadPort, makeSpec(exact(3), exact(1), {clkPolarity, makeStringAttr("memSymbol", {}), enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemorySyncReadPortRst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity, enLevel, makeStringAttr("memSymbol", {})}));
+                map.emplace(grh::ir::OperationKind::kMemorySyncReadPortArst, makeSpec(exact(4), exact(1), {clkPolarity, rstPolarity, enLevel, makeStringAttr("memSymbol", {})}));
 
-                map.emplace(grh::OperationKind::kMemoryWritePort, makeSpec(exact(4), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kMemoryWritePortRst, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kMemoryWritePortArst, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryWritePort, makeSpec(exact(4), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryWritePortRst, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryWritePortArst, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
 
-                map.emplace(grh::OperationKind::kMemoryMaskWritePort, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kMemoryMaskWritePortRst, makeSpec(exact(6), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
-                map.emplace(grh::OperationKind::kMemoryMaskWritePortArst, makeSpec(exact(6), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryMaskWritePort, makeSpec(exact(5), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryMaskWritePortRst, makeSpec(exact(6), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
+                map.emplace(grh::ir::OperationKind::kMemoryMaskWritePortArst, makeSpec(exact(6), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
 
-                map.emplace(grh::OperationKind::kInstance, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
+                map.emplace(grh::ir::OperationKind::kInstance, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
                                                                      {makeStringAttr("moduleName", {}), makeStringArrayAttr("inputPortName"), makeStringArrayAttr("outputPortName"), makeStringAttr("instanceName", {})}));
 
-                map.emplace(grh::OperationKind::kBlackbox, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
+                map.emplace(grh::ir::OperationKind::kBlackbox, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
                                                                      {makeStringAttr("moduleName", {}), makeStringArrayAttr("inputPortName"), makeStringArrayAttr("outputPortName"),
                                                                       makeStringArrayAttr("parameterNames"), makeStringArrayAttr("parameterValues"), makeStringAttr("instanceName", {})}));
 
-                map.emplace(grh::OperationKind::kDisplay, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, exact(0),
+                map.emplace(grh::ir::OperationKind::kDisplay, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, exact(0),
                                                                     {clkPolarity, makeStringAttr("formatString", {}), makeStringAttr("displayKind", {"display", "write", "strobe"})}));
-                map.emplace(grh::OperationKind::kAssert, makeSpec(exact(2), exact(0),
+                map.emplace(grh::ir::OperationKind::kAssert, makeSpec(exact(2), exact(0),
                                                                    {clkPolarity},
                                                                    {makeStringAttr("message", {}, true), makeStringAttr("severity", {}, true)}));
 
-                map.emplace(grh::OperationKind::kDpicImport, makeSpec(exact(0), exact(0),
+                map.emplace(grh::ir::OperationKind::kDpicImport, makeSpec(exact(0), exact(0),
                                                                       {makeStringArrayAttr("argsDirection"), makeIntArrayAttr("argsWidth"), makeStringArrayAttr("argsName")}));
 
-                map.emplace(grh::OperationKind::kDpicCall, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
+                map.emplace(grh::ir::OperationKind::kDpicCall, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
                                                                      {clkPolarity, makeStringAttr("targetImportSymbol", {}), makeStringArrayAttr("inArgName"), makeStringArrayAttr("outArgName")}));
 
                 return map;
@@ -221,7 +221,7 @@ namespace wolf_sv::transform
             return specs;
         }
 
-        bool matchesAllowedStrings(const grh::AttributeValue &value, const AttributeRule &rule)
+        bool matchesAllowedStrings(const grh::ir::AttributeValue &value, const AttributeRule &rule)
         {
             if (rule.allowedStrings.empty() || rule.kind != AttrValueKind::String)
             {
@@ -232,7 +232,7 @@ namespace wolf_sv::transform
         }
 
         template <class T>
-        bool lengthEquals(const grh::AttributeValue &value, std::size_t expected)
+        bool lengthEquals(const grh::ir::AttributeValue &value, std::size_t expected)
         {
             if (const auto *arr = std::get_if<std::vector<T>>(&value))
             {
@@ -243,7 +243,7 @@ namespace wolf_sv::transform
 
         struct OperationRef
         {
-            grh::Graph *graph = nullptr;
+            grh::ir::Graph *graph = nullptr;
             grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
 
@@ -265,11 +265,11 @@ namespace wolf_sv::transform
             return lhsTuple < rhsTuple;
         }
 
-        std::optional<OperationRef> findOperationInNetlist(grh::Netlist &netlist, std::string_view symbol)
+        std::optional<OperationRef> findOperationInNetlist(grh::ir::Netlist &netlist, std::string_view symbol)
         {
             for (const auto &graphEntry : netlist.graphs())
             {
-                grh::Graph *graph = graphEntry.second.get();
+                grh::ir::Graph *graph = graphEntry.second.get();
                 if (!graph)
                 {
                     continue;
@@ -295,14 +295,10 @@ namespace wolf_sv::transform
             return norm;
         }
 
-        std::optional<grh::AttributeValue> findAttr(const grh::Graph &graph, const grh::Operation &op, std::string_view name)
+        std::optional<grh::ir::AttributeValue> findAttr(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view name)
         {
-            const grh::ir::SymbolId key = graph.lookupSymbol(name);
-            if (!key.valid())
-            {
-                return std::nullopt;
-            }
-            return op.attr(key);
+            (void)graph;
+            return op.attr(name);
         }
 
     } // namespace
@@ -313,7 +309,7 @@ namespace wolf_sv::transform
     PassResult GRHVerifyPass::run()
     {
         PassResult result;
-        grh::Netlist &netlistRef = netlist();
+        grh::ir::Netlist &netlistRef = netlist();
         PassDiagnostics &diagsRef = diags();
 
         std::unordered_map<grh::ir::ValueId, std::vector<grh::ir::ValueUser>, grh::ir::ValueIdHash> expectedUsers;
@@ -321,7 +317,7 @@ namespace wolf_sv::transform
 
         for (const auto &graphEntry : netlistRef.graphs())
         {
-            grh::Graph &graph = *graphEntry.second;
+            grh::ir::Graph &graph = *graphEntry.second;
             expectedUsers.clear();
             expectedDefiningOps.clear();
 
@@ -332,7 +328,7 @@ namespace wolf_sv::transform
 
             for (const auto opId : graph.operations())
             {
-                const grh::Operation op = graph.getOperation(opId);
+                const grh::ir::Operation op = graph.getOperation(opId);
 
                 const auto &specIt = operationSpecs().find(op.kind());
                 if (specIt == operationSpecs().end())
@@ -404,7 +400,7 @@ namespace wolf_sv::transform
 
                     for (const auto &attr : op.attrs())
                     {
-                        const std::string_view attrName = graph.symbolText(attr.key);
+                        const std::string_view attrName = attr.key;
                         if (!allowedAttrs.contains(attrName))
                         {
                             info(graph, op, "Unexpected attribute (kept): " + std::string(attrName));
@@ -470,16 +466,16 @@ namespace wolf_sv::transform
                 // Per-kind referential checks
                 switch (op.kind())
                 {
-                case grh::OperationKind::kMemoryAsyncReadPort:
-                case grh::OperationKind::kMemorySyncReadPort:
-                case grh::OperationKind::kMemorySyncReadPortRst:
-                case grh::OperationKind::kMemorySyncReadPortArst:
-                case grh::OperationKind::kMemoryWritePort:
-                case grh::OperationKind::kMemoryWritePortRst:
-                case grh::OperationKind::kMemoryWritePortArst:
-                case grh::OperationKind::kMemoryMaskWritePort:
-                case grh::OperationKind::kMemoryMaskWritePortRst:
-                case grh::OperationKind::kMemoryMaskWritePortArst:
+                case grh::ir::OperationKind::kMemoryAsyncReadPort:
+                case grh::ir::OperationKind::kMemorySyncReadPort:
+                case grh::ir::OperationKind::kMemorySyncReadPortRst:
+                case grh::ir::OperationKind::kMemorySyncReadPortArst:
+                case grh::ir::OperationKind::kMemoryWritePort:
+                case grh::ir::OperationKind::kMemoryWritePortRst:
+                case grh::ir::OperationKind::kMemoryWritePortArst:
+                case grh::ir::OperationKind::kMemoryMaskWritePort:
+                case grh::ir::OperationKind::kMemoryMaskWritePortRst:
+                case grh::ir::OperationKind::kMemoryMaskWritePortArst:
                 {
                     const auto memSymbol = verifyStringAttr("memSymbol");
                     if (!memSymbol)
@@ -491,13 +487,13 @@ namespace wolf_sv::transform
                     {
                         error(graph, op, "memSymbol does not resolve to an operation: " + *memSymbol);
                     }
-                    else if (graph.getOperation(targetId).kind() != grh::OperationKind::kMemory)
+                    else if (graph.getOperation(targetId).kind() != grh::ir::OperationKind::kMemory)
                     {
                         error(graph, op, "memSymbol must point to kMemory");
                     }
                     break;
                 }
-                case grh::OperationKind::kInstance:
+                case grh::ir::OperationKind::kInstance:
                 {
                     const auto moduleName = verifyStringAttr("moduleName");
                     auto inputNames = findAttr(graph, op, "inputPortName");
@@ -516,7 +512,7 @@ namespace wolf_sv::transform
                     }
                     break;
                 }
-                case grh::OperationKind::kBlackbox:
+                case grh::ir::OperationKind::kBlackbox:
                 {
                     auto inputNames = findAttr(graph, op, "inputPortName");
                     auto outputNames = findAttr(graph, op, "outputPortName");
@@ -548,7 +544,7 @@ namespace wolf_sv::transform
                     }
                     break;
                 }
-                case grh::OperationKind::kDpicImport:
+                case grh::ir::OperationKind::kDpicImport:
                 {
                     auto dirIt = findAttr(graph, op, "argsDirection");
                     auto widthIt = findAttr(graph, op, "argsWidth");
@@ -572,7 +568,7 @@ namespace wolf_sv::transform
                     }
                     break;
                 }
-                case grh::OperationKind::kDpicCall:
+                case grh::ir::OperationKind::kDpicCall:
                 {
                     const auto targetImport = verifyStringAttr("targetImportSymbol");
                     if (targetImport)
@@ -582,7 +578,7 @@ namespace wolf_sv::transform
                         {
                             error(graph, op, "targetImportSymbol not found: " + *targetImport);
                         }
-                        else if (target->graph->getOperation(target->op).kind() != grh::OperationKind::kDpicImport)
+                        else if (target->graph->getOperation(target->op).kind() != grh::ir::OperationKind::kDpicImport)
                         {
                             error(graph, op, "targetImportSymbol must reference kDpicImport");
                         }
@@ -615,7 +611,7 @@ namespace wolf_sv::transform
             // Validate value definitions and user lists
             for (const auto valueId : graph.values())
             {
-                grh::Value value = graph.getValue(valueId);
+                grh::ir::Value value = graph.getValue(valueId);
                 const auto expectedUserIter = expectedUsers.find(valueId);
                 const auto expectedDefIter = expectedDefiningOps.find(valueId);
 
@@ -660,7 +656,7 @@ namespace wolf_sv::transform
                     }
                     try
                     {
-                        grh::Operation userOp = graph.getOperation(user.operation);
+                        grh::ir::Operation userOp = graph.getOperation(user.operation);
                         if (user.operandIndex >= userOp.operands().size())
                         {
                             error(graph, value, "User operand index out of range");

@@ -13,8 +13,8 @@ int fail(const std::string& message) {
 }
 
 int testNetWriteBack() {
-    grh::Netlist netlist;
-    grh::Graph& graph = netlist.createGraph("wb_net");
+    grh::ir::Netlist netlist;
+    grh::ir::Graph& graph = netlist.createGraph("wb_net");
     auto makeValue = [&](std::string_view name, int32_t width, bool isSigned) {
         return graph.createValue(graph.internSymbol(name), width, isSigned);
     };
@@ -40,11 +40,11 @@ int testNetWriteBack() {
     OperationId concatOpId = OperationId::invalid();
     OperationId assignOpId = OperationId::invalid();
     for (OperationId opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
-        if (op.kind() == grh::OperationKind::kConcat) {
+        const grh::ir::Operation op = graph.getOperation(opId);
+        if (op.kind() == grh::ir::OperationKind::kConcat) {
             concatOpId = opId;
         }
-        if (op.kind() == grh::OperationKind::kAssign) {
+        if (op.kind() == grh::ir::OperationKind::kAssign) {
             assignOpId = opId;
         }
     }
@@ -55,8 +55,8 @@ int testNetWriteBack() {
     if (!assignOpId) {
         return fail("Expected kAssign operation driving the net value");
     }
-    const grh::Operation concatOp = graph.getOperation(concatOpId);
-    const grh::Operation assignOp = graph.getOperation(assignOpId);
+    const grh::ir::Operation concatOp = graph.getOperation(concatOpId);
+    const grh::ir::Operation assignOp = graph.getOperation(assignOpId);
     if (concatOp.operands().size() != 2) {
         return fail("Concat operation should have 2 operands");
     }
@@ -77,8 +77,8 @@ int testNetWriteBack() {
 }
 
 int testRegWriteBack() {
-    grh::Netlist netlist;
-    grh::Graph& graph = netlist.createGraph("wb_reg");
+    grh::ir::Netlist netlist;
+    grh::ir::Graph& graph = netlist.createGraph("wb_reg");
     auto makeValue = [&](std::string_view name, int32_t width, bool isSigned) {
         return graph.createValue(graph.internSymbol(name), width, isSigned);
     };
@@ -88,7 +88,7 @@ int testRegWriteBack() {
     regEntry.isSigned = false;
     regEntry.value = makeValue("reg_q", 4, false);
 
-    OperationId regOp = graph.createOperation(grh::OperationKind::kRegister,
+    OperationId regOp = graph.createOperation(grh::ir::OperationKind::kRegister,
                                               graph.internSymbol("reg_state"));
     graph.addResult(regOp, regEntry.value);
     regEntry.stateOp = regOp;
@@ -113,7 +113,7 @@ int testRegWriteBack() {
         if (opId == regOp) {
             continue;
         }
-        if (graph.getOperation(opId).kind() == grh::OperationKind::kAssign) {
+        if (graph.getOperation(opId).kind() == grh::ir::OperationKind::kAssign) {
             return fail("Register write-back should not emit extra kAssign operations");
         }
     }
@@ -121,8 +121,8 @@ int testRegWriteBack() {
 }
 
 int testPartialCoverage() {
-    grh::Netlist netlist;
-    grh::Graph& graph = netlist.createGraph("wb_partial");
+    grh::ir::Netlist netlist;
+    grh::ir::Graph& graph = netlist.createGraph("wb_partial");
     auto makeValue = [&](std::string_view name, int32_t width, bool isSigned) {
         return graph.createValue(graph.internSymbol(name), width, isSigned);
     };
@@ -144,15 +144,15 @@ int testPartialCoverage() {
     OperationId assignOpId = OperationId::invalid();
     OperationId zeroOpId = OperationId::invalid();
     for (OperationId opId : graph.operations()) {
-        const grh::Operation op = graph.getOperation(opId);
+        const grh::ir::Operation op = graph.getOperation(opId);
         switch (op.kind()) {
-        case grh::OperationKind::kConcat:
+        case grh::ir::OperationKind::kConcat:
             concatOpId = opId;
             break;
-        case grh::OperationKind::kAssign:
+        case grh::ir::OperationKind::kAssign:
             assignOpId = opId;
             break;
-        case grh::OperationKind::kConstant:
+        case grh::ir::OperationKind::kConstant:
             zeroOpId = opId;
             break;
         default:
@@ -163,9 +163,9 @@ int testPartialCoverage() {
     if (!concatOpId || !assignOpId || !zeroOpId) {
         return fail("Partial coverage should create constant, concat and assign operations");
     }
-    const grh::Operation concatOp = graph.getOperation(concatOpId);
-    const grh::Operation assignOp = graph.getOperation(assignOpId);
-    const grh::Operation zeroOp = graph.getOperation(zeroOpId);
+    const grh::ir::Operation concatOp = graph.getOperation(concatOpId);
+    const grh::ir::Operation assignOp = graph.getOperation(assignOpId);
+    const grh::ir::Operation zeroOp = graph.getOperation(zeroOpId);
     if (zeroOp.results().size() != 1) {
         return fail("Zero-fill constant should produce exactly one result");
     }

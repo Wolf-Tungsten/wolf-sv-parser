@@ -8,7 +8,7 @@
 
 using namespace wolf_sv;
 using namespace wolf_sv::emit;
-using namespace wolf_sv::grh;
+using namespace wolf_sv::grh::ir;
 
 namespace
 {

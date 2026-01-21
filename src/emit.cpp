@@ -87,9 +87,9 @@ namespace wolf_sv::emit
             out.append(static_cast<std::size_t>(indent * kIndentSize), ' ');
         }
 
-        std::vector<const grh::Graph *> graphsSortedByName(const grh::Netlist &netlist)
+        std::vector<const grh::ir::Graph *> graphsSortedByName(const grh::ir::Netlist &netlist)
         {
-            std::vector<const grh::Graph *> graphs;
+            std::vector<const grh::ir::Graph *> graphs;
             graphs.reserve(netlist.graphs().size());
             for (const auto &symbol : netlist.graphOrder())
             {
@@ -101,8 +101,8 @@ namespace wolf_sv::emit
             return graphs;
         }
 
-        std::string serializeWithJsonWriter(const grh::Netlist &netlist,
-                                            std::span<const grh::Graph *const> topGraphs,
+        std::string serializeWithJsonWriter(const grh::ir::Netlist &netlist,
+                                            std::span<const grh::ir::Graph *const> topGraphs,
                                             bool pretty)
         {
             slang::JsonWriter writer;
@@ -111,7 +111,7 @@ namespace wolf_sv::emit
 
             writer.writeProperty("graphs");
             writer.startArray();
-            for (const grh::Graph *graph : graphsSortedByName(netlist))
+            for (const grh::ir::Graph *graph : graphsSortedByName(netlist))
             {
                 graph->writeJson(writer);
             }
@@ -119,7 +119,7 @@ namespace wolf_sv::emit
 
             writer.writeProperty("tops");
             writer.startArray();
-            for (const grh::Graph *graph : topGraphs)
+            for (const grh::ir::Graph *graph : topGraphs)
             {
                 writer.writeValue(graph->symbol());
             }
@@ -160,7 +160,7 @@ namespace wolf_sv::emit
         }
 
         void writeDebugInline(std::string &out, JsonPrintMode mode,
-                              const std::optional<grh::SrcLoc> &debugInfo)
+                              const std::optional<grh::ir::SrcLoc> &debugInfo)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
@@ -177,7 +177,7 @@ namespace wolf_sv::emit
                               });
         }
 
-        std::string formatSrcAttribute(const std::optional<grh::SrcLoc> &srcLoc)
+        std::string formatSrcAttribute(const std::optional<grh::ir::SrcLoc> &srcLoc)
         {
             if (!srcLoc || srcLoc->file.empty() || srcLoc->line == 0)
             {
@@ -207,7 +207,7 @@ namespace wolf_sv::emit
             return oss.str();
         }
 
-        void writeUsersInline(std::string &out, const grh::Graph &graph, std::span<const grh::ir::ValueUser> users, JsonPrintMode mode)
+        void writeUsersInline(std::string &out, const grh::ir::Graph &graph, std::span<const grh::ir::ValueUser> users, JsonPrintMode mode)
         {
             const char *comma = commaToken(mode);
             out.push_back('[');
@@ -239,7 +239,7 @@ namespace wolf_sv::emit
             out.push_back(']');
         }
 
-        void writeAttrsInline(std::string &out, const grh::Graph &graph, std::span<const grh::ir::AttrKV> attrs, JsonPrintMode mode)
+        void writeAttrsInline(std::string &out, std::span<const grh::ir::AttrKV> attrs, JsonPrintMode mode)
         {
             out.push_back('{');
             bool firstAttr = true;
@@ -250,7 +250,7 @@ namespace wolf_sv::emit
                 {
                     out.append(comma);
                 }
-                appendQuotedString(out, graph.symbolText(attr.key));
+                appendQuotedString(out, attr.key);
                 out.append(colonToken(mode));
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
@@ -371,7 +371,7 @@ namespace wolf_sv::emit
             out.push_back('}');
         }
 
-        void writeValueInline(std::string &out, const grh::Graph &graph, const grh::Value &value, JsonPrintMode mode)
+        void writeValueInline(std::string &out, const grh::ir::Graph &graph, const grh::ir::Value &value, JsonPrintMode mode)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
@@ -411,14 +411,14 @@ namespace wolf_sv::emit
                               });
         }
 
-        void writeOperationInline(std::string &out, const grh::Graph &graph, const grh::Operation &op, JsonPrintMode mode)
+        void writeOperationInline(std::string &out, const grh::ir::Graph &graph, const grh::ir::Operation &op, JsonPrintMode mode)
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
                                        { appendQuotedString(out, op.symbolText()); });
                                   prop("kind", [&]
-                                       { appendQuotedString(out, grh::toString(op.kind())); });
+                                       { appendQuotedString(out, grh::ir::toString(op.kind())); });
                                   prop("in", [&]
                                        {
                                            out.push_back('[');
@@ -454,7 +454,7 @@ namespace wolf_sv::emit
                                   if (!op.attrs().empty())
                                   {
                                       prop("attrs", [&]
-                                           { writeAttrsInline(out, graph, op.attrs(), mode); });
+                                           { writeAttrsInline(out, op.attrs(), mode); });
                                   }
                                   if (op.srcLoc())
                                   {
@@ -488,7 +488,7 @@ namespace wolf_sv::emit
         }
 
         void writePortsPrettyCompact(std::string &out,
-                                     const grh::Graph &graph,
+                                     const grh::ir::Graph &graph,
                                      std::span<const grh::ir::Port> ports,
                                      JsonPrintMode mode,
                                      int indent)
@@ -516,7 +516,7 @@ namespace wolf_sv::emit
             out.push_back(']');
         }
 
-        void writeGraphPrettyCompact(std::string &out, const grh::Graph &graph, int baseIndent)
+        void writeGraphPrettyCompact(std::string &out, const grh::ir::Graph &graph, int baseIndent)
         {
             out.push_back('{');
             int indent = baseIndent + 1;
@@ -606,7 +606,6 @@ namespace wolf_sv::emit
 
         void writeAttrsInlineIr(std::string &out,
                                 std::span<const grh::ir::AttrKV> attrs,
-                                const grh::ir::GraphSymbolTable &symbols,
                                 JsonPrintMode mode)
         {
             out.push_back('{');
@@ -618,7 +617,7 @@ namespace wolf_sv::emit
                 {
                     out.append(comma);
                 }
-                appendQuotedString(out, symbols.text(attr.key));
+                appendQuotedString(out, attr.key);
                 out.append(colonToken(mode));
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
@@ -786,7 +785,7 @@ namespace wolf_sv::emit
                                   prop("sym", [&]
                                        { appendQuotedString(out, lookupName(opNames, opId.index)); });
                                   prop("kind", [&]
-                                       { appendQuotedString(out, grh::toString(view.opKind(opId))); });
+                                       { appendQuotedString(out, grh::ir::toString(view.opKind(opId))); });
                                   prop("in", [&]
                                        {
                                            out.push_back('[');
@@ -823,7 +822,7 @@ namespace wolf_sv::emit
                                   if (!attrs.empty())
                                   {
                                       prop("attrs", [&]
-                                           { writeAttrsInlineIr(out, attrs, symbols, mode); });
+                                           { writeAttrsInlineIr(out, attrs, mode); });
                                   }
                                   if (auto loc = view.opSrcLoc(opId))
                                   {
@@ -917,9 +916,9 @@ namespace wolf_sv::emit
             out.push_back('}');
         }
 
-        void writeAttributeValue(slang::JsonWriter &writer, const grh::AttributeValue &value)
+        void writeAttributeValue(slang::JsonWriter &writer, const grh::ir::AttributeValue &value)
         {
-            if (!grh::attributeValueIsJsonSerializable(value))
+            if (!grh::ir::attributeValueIsJsonSerializable(value))
             {
                 throw std::runtime_error("Attribute value is not JSON serializable");
             }
@@ -1004,7 +1003,7 @@ namespace wolf_sv::emit
                 value);
         }
 
-        void writeSrcLocJson(slang::JsonWriter &writer, const std::optional<grh::SrcLoc> &srcLoc)
+        void writeSrcLocJson(slang::JsonWriter &writer, const std::optional<grh::ir::SrcLoc> &srcLoc)
         {
             if (!srcLoc || srcLoc->file.empty())
             {
@@ -1113,7 +1112,7 @@ namespace wolf_sv::emit
                 writer.writeProperty("sym");
                 writer.writeValue(lookupName(opNames, opId.index));
                 writer.writeProperty("kind");
-                writer.writeValue(grh::toString(view.opKind(opId)));
+                writer.writeValue(grh::ir::toString(view.opKind(opId)));
 
                 writer.writeProperty("in");
                 writer.startArray();
@@ -1138,7 +1137,7 @@ namespace wolf_sv::emit
                     writer.startObject();
                     for (const auto &attr : attrs)
                     {
-                        writer.writeProperty(symbols.text(attr.key));
+                        writer.writeProperty(attr.key);
                         writer.startObject();
                         writeAttributeValue(writer, attr.value);
                         writer.endObject();
@@ -1232,7 +1231,7 @@ namespace wolf_sv::emit
             }
         }
 
-        std::string serializePrettyCompact(const grh::Netlist &netlist, std::span<const grh::Graph *const> topGraphs)
+        std::string serializePrettyCompact(const grh::ir::Netlist &netlist, std::span<const grh::ir::Graph *const> topGraphs)
         {
             std::string out;
             int indent = 0;
@@ -1248,7 +1247,7 @@ namespace wolf_sv::emit
             if (!graphs.empty())
             {
                 bool first = true;
-                for (const grh::Graph *graph : graphs)
+                for (const grh::ir::Graph *graph : graphs)
                 {
                     if (!first)
                     {
@@ -1269,7 +1268,7 @@ namespace wolf_sv::emit
             if (!topGraphs.empty())
             {
                 bool firstTop = true;
-                for (const grh::Graph *graph : topGraphs)
+                for (const grh::ir::Graph *graph : topGraphs)
                 {
                     if (!firstTop)
                     {
@@ -1288,8 +1287,8 @@ namespace wolf_sv::emit
             return out;
         }
 
-        std::string serializeNetlistJson(const grh::Netlist &netlist,
-                                         std::span<const grh::Graph *const> topGraphs,
+        std::string serializeNetlistJson(const grh::ir::Netlist &netlist,
+                                         std::span<const grh::ir::Graph *const> topGraphs,
                                          JsonPrintMode mode)
         {
             switch (mode)
@@ -1345,7 +1344,7 @@ namespace wolf_sv::emit
         }
     }
 
-    bool Emit::validateTopGraphs(const std::vector<const grh::Graph *> &topGraphs) const
+    bool Emit::validateTopGraphs(const std::vector<const grh::ir::Graph *> &topGraphs) const
     {
         if (topGraphs.empty())
         {
@@ -1355,10 +1354,10 @@ namespace wolf_sv::emit
         return true;
     }
 
-    std::vector<const grh::Graph *> Emit::resolveTopGraphs(const grh::Netlist &netlist,
+    std::vector<const grh::ir::Graph *> Emit::resolveTopGraphs(const grh::ir::Netlist &netlist,
                                                            const EmitOptions &options) const
     {
-        std::vector<const grh::Graph *> result;
+        std::vector<const grh::ir::Graph *> result;
         std::unordered_set<std::string> seen;
 
         auto tryAdd = [&](std::string_view name)
@@ -1368,7 +1367,7 @@ namespace wolf_sv::emit
                 return;
             }
 
-            const grh::Graph *graph = netlist.findGraph(name);
+            const grh::ir::Graph *graph = netlist.findGraph(name);
             if (graph == nullptr)
             {
                 reportError("Top graph not found", std::string(name));
@@ -1440,11 +1439,11 @@ namespace wolf_sv::emit
         return stream;
     }
 
-    EmitResult Emit::emit(const grh::Netlist &netlist, const EmitOptions &options)
+    EmitResult Emit::emit(const grh::ir::Netlist &netlist, const EmitOptions &options)
     {
         EmitResult result;
 
-        std::vector<const grh::Graph *> topGraphs = resolveTopGraphs(netlist, options);
+        std::vector<const grh::ir::Graph *> topGraphs = resolveTopGraphs(netlist, options);
         if (!validateTopGraphs(topGraphs))
         {
             result.success = false;
@@ -1459,9 +1458,9 @@ namespace wolf_sv::emit
         return result;
     }
 
-    std::optional<std::string> EmitJSON::emitToString(const grh::Netlist &netlist, const EmitOptions &options)
+    std::optional<std::string> EmitJSON::emitToString(const grh::ir::Netlist &netlist, const EmitOptions &options)
     {
-        std::vector<const grh::Graph *> topGraphs = resolveTopGraphs(netlist, options);
+        std::vector<const grh::ir::Graph *> topGraphs = resolveTopGraphs(netlist, options);
         if (!validateTopGraphs(topGraphs))
         {
             return std::nullopt;
@@ -1478,8 +1477,8 @@ namespace wolf_sv::emit
         }
     }
 
-    EmitResult EmitJSON::emitImpl(const grh::Netlist &netlist,
-                                  std::span<const grh::Graph *const> topGraphs,
+    EmitResult EmitJSON::emitImpl(const grh::ir::Netlist &netlist,
+                                  std::span<const grh::ir::Graph *const> topGraphs,
                                   const EmitOptions &options)
     {
         EmitResult result;
@@ -1608,7 +1607,7 @@ namespace wolf_sv::emit
         {
             int64_t width = 1;
             bool isSigned = false;
-            std::optional<grh::SrcLoc> debug;
+            std::optional<grh::ir::SrcLoc> debug;
         };
 
         struct PortDecl
@@ -1617,7 +1616,7 @@ namespace wolf_sv::emit
             int64_t width = 1;
             bool isSigned = false;
             bool isReg = false;
-            std::optional<grh::SrcLoc> debug;
+            std::optional<grh::ir::SrcLoc> debug;
         };
 
         struct SeqKey
@@ -1673,14 +1672,10 @@ namespace wolf_sv::emit
         }
 
         template <typename T>
-        std::optional<T> getAttribute(const grh::Graph &graph, const grh::Operation &op, std::string_view key)
+        std::optional<T> getAttribute(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
         {
-            const grh::ir::SymbolId keyId = graph.lookupSymbol(key);
-            if (!keyId.valid())
-            {
-                return std::nullopt;
-            }
-            auto attr = op.attr(keyId);
+            (void)graph;
+            auto attr = op.attr(key);
             if (!attr)
             {
                 return std::nullopt;
@@ -1694,16 +1689,10 @@ namespace wolf_sv::emit
 
         template <typename T>
         std::optional<T> getAttribute(const grh::ir::GraphView &view,
-                                      const grh::ir::GraphSymbolTable &symbols,
                                       grh::ir::OperationId op,
                                       std::string_view key)
         {
-            const grh::ir::SymbolId keyId = symbols.lookup(key);
-            if (!keyId.valid())
-            {
-                return std::nullopt;
-            }
-            auto attr = view.opAttr(op, keyId);
+            auto attr = view.opAttr(op, key);
             if (!attr)
             {
                 return std::nullopt;
@@ -1716,74 +1705,74 @@ namespace wolf_sv::emit
             return std::nullopt;
         }
 
-        std::string binOpToken(grh::OperationKind kind)
+        std::string binOpToken(grh::ir::OperationKind kind)
         {
             switch (kind)
             {
-            case grh::OperationKind::kAdd:
+            case grh::ir::OperationKind::kAdd:
                 return "+";
-            case grh::OperationKind::kSub:
+            case grh::ir::OperationKind::kSub:
                 return "-";
-            case grh::OperationKind::kMul:
+            case grh::ir::OperationKind::kMul:
                 return "*";
-            case grh::OperationKind::kDiv:
+            case grh::ir::OperationKind::kDiv:
                 return "/";
-            case grh::OperationKind::kMod:
+            case grh::ir::OperationKind::kMod:
                 return "%";
-            case grh::OperationKind::kEq:
+            case grh::ir::OperationKind::kEq:
                 return "==";
-            case grh::OperationKind::kNe:
+            case grh::ir::OperationKind::kNe:
                 return "!=";
-            case grh::OperationKind::kLt:
+            case grh::ir::OperationKind::kLt:
                 return "<";
-            case grh::OperationKind::kLe:
+            case grh::ir::OperationKind::kLe:
                 return "<=";
-            case grh::OperationKind::kGt:
+            case grh::ir::OperationKind::kGt:
                 return ">";
-            case grh::OperationKind::kGe:
+            case grh::ir::OperationKind::kGe:
                 return ">=";
-            case grh::OperationKind::kAnd:
+            case grh::ir::OperationKind::kAnd:
                 return "&";
-            case grh::OperationKind::kOr:
+            case grh::ir::OperationKind::kOr:
                 return "|";
-            case grh::OperationKind::kXor:
+            case grh::ir::OperationKind::kXor:
                 return "^";
-            case grh::OperationKind::kXnor:
+            case grh::ir::OperationKind::kXnor:
                 return "~^";
-            case grh::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicAnd:
                 return "&&";
-            case grh::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kLogicOr:
                 return "||";
-            case grh::OperationKind::kShl:
+            case grh::ir::OperationKind::kShl:
                 return "<<";
-            case grh::OperationKind::kLShr:
+            case grh::ir::OperationKind::kLShr:
                 return ">>";
-            case grh::OperationKind::kAShr:
+            case grh::ir::OperationKind::kAShr:
                 return ">>>";
             default:
                 return {};
             }
         }
 
-        std::string unaryOpToken(grh::OperationKind kind)
+        std::string unaryOpToken(grh::ir::OperationKind kind)
         {
             switch (kind)
             {
-            case grh::OperationKind::kNot:
+            case grh::ir::OperationKind::kNot:
                 return "~";
-            case grh::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kLogicNot:
                 return "!";
-            case grh::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceAnd:
                 return "&";
-            case grh::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceOr:
                 return "|";
-            case grh::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceXor:
                 return "^";
-            case grh::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNor:
                 return "~|";
-            case grh::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceNand:
                 return "~&";
-            case grh::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kReduceXnor:
                 return "~^";
             default:
                 return {};
@@ -1819,7 +1808,7 @@ namespace wolf_sv::emit
             return -1;
         }
 
-        std::string sensitivityList(const grh::Graph &graph, const SeqKey &key)
+        std::string sensitivityList(const grh::ir::Graph &graph, const SeqKey &key)
         {
             if (!key.clk.valid() || key.clkEdge.empty())
             {
@@ -1838,8 +1827,8 @@ namespace wolf_sv::emit
         }
     } // namespace
 
-    EmitResult EmitSystemVerilog::emitImpl(const grh::Netlist &netlist,
-                                           std::span<const grh::Graph *const> topGraphs,
+    EmitResult EmitSystemVerilog::emitImpl(const grh::ir::Netlist &netlist,
+                                           std::span<const grh::ir::Graph *const> topGraphs,
                                            const EmitOptions &options)
     {
         EmitResult result;
@@ -1848,7 +1837,7 @@ namespace wolf_sv::emit
         // Index DPI imports across the netlist for later resolution.
         struct DpiImportRef
         {
-            const grh::Graph *graph = nullptr;
+            const grh::ir::Graph *graph = nullptr;
             grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
         std::unordered_map<std::string, DpiImportRef> dpicImports;
@@ -1859,11 +1848,11 @@ namespace wolf_sv::emit
             {
                 continue;
             }
-            const grh::Graph &graph = *graphIt->second;
+            const grh::ir::Graph &graph = *graphIt->second;
             for (const auto opId : graph.operations())
             {
-                const grh::Operation op = graph.getOperation(opId);
-                if (op.kind() == grh::OperationKind::kDpicImport)
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (op.kind() == grh::ir::OperationKind::kDpicImport)
                 {
                     dpicImports.emplace(std::string(op.symbolText()), DpiImportRef{&graph, opId});
                 }
@@ -1874,7 +1863,7 @@ namespace wolf_sv::emit
         std::unordered_set<std::string> usedModuleNames;
         for (const auto &graphSymbol : netlist.graphOrder())
         {
-            const grh::Graph *graph = netlist.findGraph(graphSymbol);
+            const grh::ir::Graph *graph = netlist.findGraph(graphSymbol);
             if (!graph)
             {
                 continue;
@@ -1895,7 +1884,7 @@ namespace wolf_sv::emit
 
         std::ostringstream moduleBuffer;
         bool firstModule = true;
-        for (const grh::Graph *graph : graphsSortedByName(netlist))
+        for (const grh::ir::Graph *graph : graphsSortedByName(netlist))
         {
             if (!firstModule)
             {
@@ -1908,12 +1897,12 @@ namespace wolf_sv::emit
 
             auto valueName = [&](grh::ir::ValueId valueId) -> std::string
             {
-                grh::Value value = graph->getValue(valueId);
+                grh::ir::Value value = graph->getValue(valueId);
                 return std::string(value.symbolText());
             };
             auto opName = [&](grh::ir::OperationId opId) -> std::string
             {
-                grh::Operation op = graph->getOperation(opId);
+                grh::ir::Operation op = graph->getOperation(opId);
                 return std::string(op.symbolText());
             };
 
@@ -1928,7 +1917,7 @@ namespace wolf_sv::emit
                     continue;
                 }
                 const std::string name = std::string(graph->symbolText(port.name));
-                grh::Value value = graph->getValue(port.value);
+                grh::ir::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Input, value.width(), value.isSigned(), false,
                                            value.srcLoc()};
             }
@@ -1939,7 +1928,7 @@ namespace wolf_sv::emit
                     continue;
                 }
                 const std::string name = std::string(graph->symbolText(port.name));
-                grh::Value value = graph->getValue(port.value);
+                grh::ir::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
                                            value.srcLoc()};
             }
@@ -1964,7 +1953,7 @@ namespace wolf_sv::emit
             std::unordered_set<std::string> instanceNamesUsed;
 
             auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
-                                     const std::optional<grh::SrcLoc> &debug = std::nullopt)
+                                     const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
             {
                 if (declaredNames.find(name) != declaredNames.end())
                 {
@@ -1981,7 +1970,7 @@ namespace wolf_sv::emit
 
             auto ensureWireDecl = [&](grh::ir::ValueId valueId)
             {
-                grh::Value value = graph->getValue(valueId);
+                grh::ir::Value value = graph->getValue(valueId);
                 const std::string name = std::string(value.symbolText());
                 if (declaredNames.find(name) != declaredNames.end())
                 {
@@ -2022,7 +2011,7 @@ namespace wolf_sv::emit
                 }
             };
 
-            auto resolveMemorySymbol = [&](const grh::Operation &userOp) -> std::optional<std::string>
+            auto resolveMemorySymbol = [&](const grh::ir::Operation &userOp) -> std::optional<std::string>
             {
                 auto attr = getAttribute<std::string>(*graph, userOp, "memSymbol");
                 if (attr)
@@ -2033,8 +2022,8 @@ namespace wolf_sv::emit
                 std::optional<std::string> candidate;
                 for (const auto maybeId : graph->operations())
                 {
-                    const grh::Operation maybeOp = graph->getOperation(maybeId);
-                    if (maybeOp.kind() == grh::OperationKind::kMemory)
+                    const grh::ir::Operation maybeOp = graph->getOperation(maybeId);
+                    if (maybeOp.kind() == grh::ir::OperationKind::kMemory)
                     {
                         if (candidate)
                         {
@@ -2094,7 +2083,7 @@ namespace wolf_sv::emit
             // -------------------------
             for (const auto opId : graph->operations())
             {
-                const grh::Operation op = graph->getOperation(opId);
+                const grh::ir::Operation op = graph->getOperation(opId);
                 const auto &operands = op.operands();
                 const auto &results = op.results();
                 const std::string opContext = std::string(op.symbolText());
@@ -2149,7 +2138,7 @@ namespace wolf_sv::emit
 
                 switch (op.kind())
                 {
-                case grh::OperationKind::kConstant:
+                case grh::ir::OperationKind::kConstant:
                 {
                     if (results.empty())
                     {
@@ -2166,26 +2155,26 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kAdd:
-                case grh::OperationKind::kSub:
-                case grh::OperationKind::kMul:
-                case grh::OperationKind::kDiv:
-                case grh::OperationKind::kMod:
-                case grh::OperationKind::kEq:
-                case grh::OperationKind::kNe:
-                case grh::OperationKind::kLt:
-                case grh::OperationKind::kLe:
-                case grh::OperationKind::kGt:
-                case grh::OperationKind::kGe:
-                case grh::OperationKind::kAnd:
-                case grh::OperationKind::kOr:
-                case grh::OperationKind::kXor:
-                case grh::OperationKind::kXnor:
-                case grh::OperationKind::kLogicAnd:
-                case grh::OperationKind::kLogicOr:
-                case grh::OperationKind::kShl:
-                case grh::OperationKind::kLShr:
-                case grh::OperationKind::kAShr:
+                case grh::ir::OperationKind::kAdd:
+                case grh::ir::OperationKind::kSub:
+                case grh::ir::OperationKind::kMul:
+                case grh::ir::OperationKind::kDiv:
+                case grh::ir::OperationKind::kMod:
+                case grh::ir::OperationKind::kEq:
+                case grh::ir::OperationKind::kNe:
+                case grh::ir::OperationKind::kLt:
+                case grh::ir::OperationKind::kLe:
+                case grh::ir::OperationKind::kGt:
+                case grh::ir::OperationKind::kGe:
+                case grh::ir::OperationKind::kAnd:
+                case grh::ir::OperationKind::kOr:
+                case grh::ir::OperationKind::kXor:
+                case grh::ir::OperationKind::kXnor:
+                case grh::ir::OperationKind::kLogicAnd:
+                case grh::ir::OperationKind::kLogicOr:
+                case grh::ir::OperationKind::kShl:
+                case grh::ir::OperationKind::kLShr:
+                case grh::ir::OperationKind::kAShr:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
@@ -2199,14 +2188,14 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kNot:
-                case grh::OperationKind::kLogicNot:
-                case grh::OperationKind::kReduceAnd:
-                case grh::OperationKind::kReduceOr:
-                case grh::OperationKind::kReduceXor:
-                case grh::OperationKind::kReduceNor:
-                case grh::OperationKind::kReduceNand:
-                case grh::OperationKind::kReduceXnor:
+                case grh::ir::OperationKind::kNot:
+                case grh::ir::OperationKind::kLogicNot:
+                case grh::ir::OperationKind::kReduceAnd:
+                case grh::ir::OperationKind::kReduceOr:
+                case grh::ir::OperationKind::kReduceXor:
+                case grh::ir::OperationKind::kReduceNor:
+                case grh::ir::OperationKind::kReduceNand:
+                case grh::ir::OperationKind::kReduceXnor:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -2218,7 +2207,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kMux:
+                case grh::ir::OperationKind::kMux:
                 {
                     if (operands.size() < 3 || results.empty())
                     {
@@ -2231,7 +2220,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kAssign:
+                case grh::ir::OperationKind::kAssign:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -2242,7 +2231,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kConcat:
+                case grh::ir::OperationKind::kConcat:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
@@ -2264,7 +2253,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kReplicate:
+                case grh::ir::OperationKind::kReplicate:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -2283,7 +2272,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kSliceStatic:
+                case grh::ir::OperationKind::kSliceStatic:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -2312,7 +2301,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kSliceDynamic:
+                case grh::ir::OperationKind::kSliceDynamic:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
@@ -2331,7 +2320,7 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kSliceArray:
+                case grh::ir::OperationKind::kSliceArray:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
@@ -2359,8 +2348,8 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kLatch:
-                case grh::OperationKind::kLatchArst:
+                case grh::ir::OperationKind::kLatch:
+                case grh::ir::OperationKind::kLatchArst:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
@@ -2372,7 +2361,7 @@ namespace wolf_sv::emit
                     grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
                     grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
-                    if (op.kind() == grh::OperationKind::kLatch)
+                    if (op.kind() == grh::ir::OperationKind::kLatch)
                     {
                         if (operands.size() >= 2)
                         {
@@ -2399,7 +2388,7 @@ namespace wolf_sv::emit
                         reportError("Latch enable must be 1 bit", opContext);
                         break;
                     }
-                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
                     {
                         if (!rst.valid() || !resetVal.valid())
                         {
@@ -2423,7 +2412,7 @@ namespace wolf_sv::emit
                     }
 
                     std::optional<bool> rstActiveHigh;
-                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
                     {
                         auto rstPolarityAttr = getAttribute<std::string>(*graph, op, "rstPolarity");
                         rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity");
@@ -2433,15 +2422,17 @@ namespace wolf_sv::emit
                         }
                     }
 
-                    const std::string &regName = opContext;
                     const grh::ir::ValueId q = results[0];
-                    const grh::Value dValue = graph->getValue(d);
+                    const std::string &valueSym = valueName(q);
+                    const std::string &opSym = opContext;
+                    const std::string &regName = !valueSym.empty() ? valueSym : opSym;
+                    const grh::ir::Value dValue = graph->getValue(d);
                     if (graph->getValue(q).width() != dValue.width())
                     {
                         reportError("Latch data/output width mismatch", opContext);
                         break;
                     }
-                    if (op.kind() == grh::OperationKind::kLatchArst && resetVal.valid() &&
+                    if (op.kind() == grh::ir::OperationKind::kLatchArst && resetVal.valid() &&
                         graph->getValue(resetVal).width() != dValue.width())
                     {
                         reportError("Latch resetValue width mismatch", opContext);
@@ -2461,7 +2452,7 @@ namespace wolf_sv::emit
 
                     std::ostringstream stmt;
                     const int baseIndent = 2;
-                    if (op.kind() == grh::OperationKind::kLatchArst)
+                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
                     {
                         if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                         {
@@ -2490,12 +2481,12 @@ namespace wolf_sv::emit
                     addLatchBlock(block.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kRegister:
-                case grh::OperationKind::kRegisterEn:
-                case grh::OperationKind::kRegisterRst:
-                case grh::OperationKind::kRegisterEnRst:
-                case grh::OperationKind::kRegisterArst:
-                case grh::OperationKind::kRegisterEnArst:
+                case grh::ir::OperationKind::kRegister:
+                case grh::ir::OperationKind::kRegisterEn:
+                case grh::ir::OperationKind::kRegisterRst:
+                case grh::ir::OperationKind::kRegisterEnRst:
+                case grh::ir::OperationKind::kRegisterArst:
+                case grh::ir::OperationKind::kRegisterEnArst:
                 {
                     if (operands.empty() || results.empty())
                     {
@@ -2509,22 +2500,24 @@ namespace wolf_sv::emit
                         break;
                     }
 
-                    const std::string &regName = opContext;
                     const grh::ir::ValueId q = results[0];
+                    const std::string &valueSym = valueName(q);
+                    const std::string &opSym = opContext;
+                    const std::string &regName = !valueSym.empty() ? valueSym : opSym;
                     const grh::ir::ValueId clk = operands[0];
                     grh::ir::ValueId rst = grh::ir::ValueId::invalid();
                     grh::ir::ValueId en = grh::ir::ValueId::invalid();
                     grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
                     grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
-                    if (op.kind() == grh::OperationKind::kRegister)
+                    if (op.kind() == grh::ir::OperationKind::kRegister)
                     {
                         if (operands.size() >= 2)
                         {
                             d = operands[1];
                         }
                     }
-                    else if (op.kind() == grh::OperationKind::kRegisterEn)
+                    else if (op.kind() == grh::ir::OperationKind::kRegisterEn)
                     {
                         if (operands.size() >= 3)
                         {
@@ -2532,7 +2525,7 @@ namespace wolf_sv::emit
                             d = operands[2];
                         }
                     }
-                    else if (op.kind() == grh::OperationKind::kRegisterRst || op.kind() == grh::OperationKind::kRegisterArst)
+                    else if (op.kind() == grh::ir::OperationKind::kRegisterRst || op.kind() == grh::ir::OperationKind::kRegisterArst)
                     {
                         if (operands.size() >= 4)
                         {
@@ -2541,7 +2534,7 @@ namespace wolf_sv::emit
                             d = operands[3];
                         }
                     }
-                    else if (op.kind() == grh::OperationKind::kRegisterEnRst || op.kind() == grh::OperationKind::kRegisterEnArst)
+                    else if (op.kind() == grh::ir::OperationKind::kRegisterEnRst || op.kind() == grh::ir::OperationKind::kRegisterEnArst)
                     {
                         if (operands.size() >= 5)
                         {
@@ -2565,8 +2558,8 @@ namespace wolf_sv::emit
                     const auto enExpr = formatEnableExpr(en, enLevel);
                     std::optional<bool> rstActiveHigh;
                     std::string asyncEdge;
-                    if (op.kind() == grh::OperationKind::kRegisterArst ||
-                        op.kind() == grh::OperationKind::kRegisterEnArst) {
+                    if (op.kind() == grh::ir::OperationKind::kRegisterArst ||
+                        op.kind() == grh::ir::OperationKind::kRegisterEnArst) {
                         if (rst.valid())
                         {
                             rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
@@ -2584,7 +2577,7 @@ namespace wolf_sv::emit
                     }
 
                     const bool directDrive = valueName(q) == regName;
-                    const grh::Value dValue = graph->getValue(d);
+                    const grh::ir::Value dValue = graph->getValue(d);
                     ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
                     if (directDrive)
                     {
@@ -2615,10 +2608,10 @@ namespace wolf_sv::emit
                     bool emitted = true;
                     switch (op.kind())
                     {
-                    case grh::OperationKind::kRegister:
+                    case grh::ir::OperationKind::kRegister:
                         appendIndented(stmt, baseIndent, regName + " <= " + valueName(d) + ";");
                         break;
-                    case grh::OperationKind::kRegisterEn:
+                    case grh::ir::OperationKind::kRegisterEn:
                         if (!en.valid())
                         {
                             reportError("kRegisterEn missing enable operand", opContext);
@@ -2634,8 +2627,8 @@ namespace wolf_sv::emit
                         appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                         appendIndented(stmt, baseIndent, "end");
                         break;
-                    case grh::OperationKind::kRegisterRst:
-                    case grh::OperationKind::kRegisterArst: {
+                    case grh::ir::OperationKind::kRegisterRst:
+                    case grh::ir::OperationKind::kRegisterArst: {
                         if (!rst.valid() || !rstActiveHigh || !resetVal.valid())
                         {
                             reportError("Register with reset missing operand or rstPolarity", opContext);
@@ -2651,8 +2644,8 @@ namespace wolf_sv::emit
                         appendIndented(stmt, baseIndent, "end");
                         break;
                     }
-                    case grh::OperationKind::kRegisterEnRst:
-                    case grh::OperationKind::kRegisterEnArst: {
+                    case grh::ir::OperationKind::kRegisterEnRst:
+                    case grh::ir::OperationKind::kRegisterEnArst: {
                         if (!rst.valid() || !rstActiveHigh || !resetVal.valid() || !en.valid())
                         {
                             reportError("kRegisterEnRst missing operands", opContext);
@@ -2684,7 +2677,7 @@ namespace wolf_sv::emit
                     }
                     break;
                 }
-                case grh::OperationKind::kMemory:
+                case grh::ir::OperationKind::kMemory:
                 {
                     auto widthAttr = getAttribute<int64_t>(*graph, op, "width");
                     auto rowAttr = getAttribute<int64_t>(*graph, op, "row");
@@ -2700,7 +2693,7 @@ namespace wolf_sv::emit
                     declaredNames.insert(opContext);
                     break;
                 }
-                case grh::OperationKind::kMemoryAsyncReadPort:
+                case grh::ir::OperationKind::kMemoryAsyncReadPort:
                 {
                     if (operands.size() < 1 || results.empty())
                     {
@@ -2717,25 +2710,25 @@ namespace wolf_sv::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::OperationKind::kMemorySyncReadPort:
-                case grh::OperationKind::kMemorySyncReadPortRst:
-                case grh::OperationKind::kMemorySyncReadPortArst:
+                case grh::ir::OperationKind::kMemorySyncReadPort:
+                case grh::ir::OperationKind::kMemorySyncReadPortRst:
+                case grh::ir::OperationKind::kMemorySyncReadPortArst:
                 {
                     const bool hasReset =
-                        op.kind() == grh::OperationKind::kMemorySyncReadPortRst ||
-                        op.kind() == grh::OperationKind::kMemorySyncReadPortArst;
-                    const bool asyncReset = op.kind() == grh::OperationKind::kMemorySyncReadPortArst;
+                        op.kind() == grh::ir::OperationKind::kMemorySyncReadPortRst ||
+                        op.kind() == grh::ir::OperationKind::kMemorySyncReadPortArst;
+                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemorySyncReadPortArst;
                     const std::size_t expectedOperands = hasReset ? 4 : 3;
                     if (operands.size() < expectedOperands || results.empty())
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands or results", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
+                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
                     auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
@@ -2749,7 +2742,7 @@ namespace wolf_sv::emit
                     const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
                     if (!clk.valid() || !addr.valid() || !en.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands or results", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands or results", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2768,7 +2761,7 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
@@ -2778,7 +2771,7 @@ namespace wolf_sv::emit
                     bool memSigned = false;
                     if (memOpId.valid())
                     {
-                        const grh::Operation memOp = graph->getOperation(memOpId);
+                        const grh::ir::Operation memOp = graph->getOperation(memOpId);
                         memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
                         memSigned = getAttribute<bool>(*graph, memOp, "isSigned").value_or(false);
                     }
@@ -2814,25 +2807,25 @@ namespace wolf_sv::emit
                     }
                     break;
                 }
-                case grh::OperationKind::kMemoryWritePort:
-                case grh::OperationKind::kMemoryWritePortRst:
-                case grh::OperationKind::kMemoryWritePortArst:
+                case grh::ir::OperationKind::kMemoryWritePort:
+                case grh::ir::OperationKind::kMemoryWritePortRst:
+                case grh::ir::OperationKind::kMemoryWritePortArst:
                 {
                     const bool hasReset =
-                        op.kind() == grh::OperationKind::kMemoryWritePortRst ||
-                        op.kind() == grh::OperationKind::kMemoryWritePortArst;
-                    const bool asyncReset = op.kind() == grh::OperationKind::kMemoryWritePortArst;
+                        op.kind() == grh::ir::OperationKind::kMemoryWritePortRst ||
+                        op.kind() == grh::ir::OperationKind::kMemoryWritePortArst;
+                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemoryWritePortArst;
                     const std::size_t expectedOperands = hasReset ? 5 : 4;
                     if (operands.size() < expectedOperands)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
+                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
                     auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
@@ -2847,7 +2840,7 @@ namespace wolf_sv::emit
                     const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
                     if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2866,7 +2859,7 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
@@ -2890,25 +2883,25 @@ namespace wolf_sv::emit
                     addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kMemoryMaskWritePort:
-                case grh::OperationKind::kMemoryMaskWritePortRst:
-                case grh::OperationKind::kMemoryMaskWritePortArst:
+                case grh::ir::OperationKind::kMemoryMaskWritePort:
+                case grh::ir::OperationKind::kMemoryMaskWritePortRst:
+                case grh::ir::OperationKind::kMemoryMaskWritePortArst:
                 {
                     const bool hasReset =
-                        op.kind() == grh::OperationKind::kMemoryMaskWritePortRst ||
-                        op.kind() == grh::OperationKind::kMemoryMaskWritePortArst;
-                    const bool asyncReset = op.kind() == grh::OperationKind::kMemoryMaskWritePortArst;
+                        op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortRst ||
+                        op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortArst;
+                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortArst;
                     const std::size_t expectedOperands = hasReset ? 6 : 5;
                     if (operands.size() < expectedOperands)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
                     auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     if (!clkPolarity)
                     {
-                        reportWarning(std::string(grh::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
+                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
                         clkPolarity = std::string("posedge");
                     }
                     auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
@@ -2924,7 +2917,7 @@ namespace wolf_sv::emit
                     const grh::ir::ValueId mask = operands[hasReset ? 5 : 4];
                     if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || !mask.valid() || (hasReset && !rst.valid()))
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing operands", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
                         break;
                     }
                     auto enExpr = formatEnableExpr(en, enLevel);
@@ -2943,7 +2936,7 @@ namespace wolf_sv::emit
                     }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
+                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
@@ -2951,7 +2944,7 @@ namespace wolf_sv::emit
                     int64_t memWidth = 1;
                     if (memOpId.valid())
                     {
-                        const grh::Operation memOp = graph->getOperation(memOpId);
+                        const grh::ir::Operation memOp = graph->getOperation(memOpId);
                         memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
                     }
 
@@ -2983,8 +2976,8 @@ namespace wolf_sv::emit
                     addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kInstance:
-                case grh::OperationKind::kBlackbox:
+                case grh::ir::OperationKind::kInstance:
+                case grh::ir::OperationKind::kBlackbox:
                 {
                     auto moduleName = getAttribute<std::string>(*graph, op, "moduleName");
                     auto inputNames = getAttribute<std::vector<std::string>>(*graph, op, "inputPortName");
@@ -3006,7 +2999,7 @@ namespace wolf_sv::emit
                         moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : *moduleName;
 
                     std::ostringstream decl;
-                    if (op.kind() == grh::OperationKind::kBlackbox)
+                    if (op.kind() == grh::ir::OperationKind::kBlackbox)
                     {
                         auto paramNames = getAttribute<std::vector<std::string>>(*graph, op, "parameterNames");
                         auto paramValues = getAttribute<std::vector<std::string>>(*graph, op, "parameterValues");
@@ -3062,7 +3055,7 @@ namespace wolf_sv::emit
                     }
                     break;
                 }
-                case grh::OperationKind::kDisplay:
+                case grh::ir::OperationKind::kDisplay:
                 {
                     if (operands.size() < 2)
                     {
@@ -3089,7 +3082,7 @@ namespace wolf_sv::emit
                     addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kAssert:
+                case grh::ir::OperationKind::kAssert:
                 {
                     if (operands.size() < 2)
                     {
@@ -3111,7 +3104,7 @@ namespace wolf_sv::emit
                     addSequentialStmt(key, stmt.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kDpicImport:
+                case grh::ir::OperationKind::kDpicImport:
                 {
                     auto argsDir = getAttribute<std::vector<std::string>>(*graph, op, "argsDirection");
                     auto argsWidth = getAttribute<std::vector<int64_t>>(*graph, op, "argsWidth");
@@ -3137,7 +3130,7 @@ namespace wolf_sv::emit
                     dpiImportDecls.emplace_back(decl.str(), opId);
                     break;
                 }
-                case grh::OperationKind::kDpicCall:
+                case grh::ir::OperationKind::kDpicCall:
                 {
                     if (operands.size() < 2)
                     {
@@ -3160,7 +3153,7 @@ namespace wolf_sv::emit
                         break;
                     }
                     const DpiImportRef &importRef = itImport->second;
-                    const grh::Operation importOp = importRef.graph->getOperation(importRef.op);
+                    const grh::ir::Operation importOp = importRef.graph->getOperation(importRef.op);
                     auto importArgs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsName");
                     auto importDirs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsDirection");
                     if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
@@ -3172,7 +3165,7 @@ namespace wolf_sv::emit
                     // Declare intermediate regs for outputs and connect them back.
                     for (const auto res : results)
                     {
-                        const grh::Value resValue = graph->getValue(res);
+                        const grh::ir::Value resValue = graph->getValue(res);
                         const std::string tempName = std::string(resValue.symbolText()) + "_intm";
                         ensureRegDecl(tempName, resValue.width(), resValue.isSigned(), op.srcLoc());
                         addAssign("assign " + std::string(resValue.symbolText()) + " = " + tempName + ";", opId);
@@ -3234,7 +3227,7 @@ namespace wolf_sv::emit
             // Declare remaining wires for non-port values not defined above.
             for (const auto valueId : graph->values())
             {
-                const grh::Value val = graph->getValue(valueId);
+                const grh::ir::Value val = graph->getValue(valueId);
                 if (val.isInput() || val.isOutput())
                 {
                     continue;
@@ -3316,7 +3309,7 @@ namespace wolf_sv::emit
             if (!memoryDecls.empty())
             {
                 moduleBuffer << '\n';
-                auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::SrcLoc>
+                auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::ir::SrcLoc>
                 {
                     if (!opId.valid())
                     {
@@ -3342,7 +3335,7 @@ namespace wolf_sv::emit
                 for (const auto &[inst, opPtr] : instanceDecls)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3357,7 +3350,7 @@ namespace wolf_sv::emit
                 for (const auto &[decl, opPtr] : dpiImportDecls)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3372,7 +3365,7 @@ namespace wolf_sv::emit
                 for (const auto &[stmt, opPtr] : portBindingStmts)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3387,7 +3380,7 @@ namespace wolf_sv::emit
                 for (const auto &[stmt, opPtr] : assignStmts)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3402,7 +3395,7 @@ namespace wolf_sv::emit
                 for (const auto &[block, opPtr] : latchBlocks)
                 {
                     const std::string attr =
-                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << '\n';
@@ -3423,7 +3416,7 @@ namespace wolf_sv::emit
                         continue;
                     }
                     const std::string attr =
-                        formatSrcAttribute(seq.op.valid() ? graph->getOperation(seq.op).srcLoc() : std::optional<grh::SrcLoc>{});
+                        formatSrcAttribute(seq.op.valid() ? graph->getOperation(seq.op).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
                         moduleBuffer << "  " << attr << "\n";
@@ -3541,7 +3534,7 @@ namespace wolf_sv::emit
             }
             return "op_" + std::to_string(opId.index);
         };
-        auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::SrcLoc>
+        auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::ir::SrcLoc>
         {
             if (!opId.valid())
             {
@@ -3564,7 +3557,7 @@ namespace wolf_sv::emit
         std::unordered_map<std::string, grh::ir::OperationId> dpicImports;
         for (const auto opId : view.operations())
         {
-            if (view.opKind(opId) == grh::OperationKind::kDpicImport)
+            if (view.opKind(opId) == grh::ir::OperationKind::kDpicImport)
             {
                 const std::string &name = opName(opId);
                 if (!name.empty())
@@ -3661,7 +3654,7 @@ namespace wolf_sv::emit
         std::unordered_set<std::string> instanceNamesUsed;
 
         auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
-                                 const std::optional<grh::SrcLoc> &debug = std::nullopt)
+                                 const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
         {
             if (declaredNames.find(name) != declaredNames.end())
             {
@@ -3730,7 +3723,7 @@ namespace wolf_sv::emit
 
         auto resolveMemorySymbol = [&](grh::ir::OperationId userOp) -> std::optional<std::string>
         {
-            auto attr = getAttribute<std::string>(view, symbols, userOp, "memSymbol");
+            auto attr = getAttribute<std::string>(view, userOp, "memSymbol");
             if (attr)
             {
                 return attr;
@@ -3738,7 +3731,7 @@ namespace wolf_sv::emit
             std::optional<std::string> candidate;
             for (const auto opId : view.operations())
             {
-                if (view.opKind(opId) == grh::OperationKind::kMemory)
+                if (view.opKind(opId) == grh::ir::OperationKind::kMemory)
                 {
                     const std::string &name = opName(opId);
                     if (name.empty())
@@ -3856,14 +3849,14 @@ namespace wolf_sv::emit
 
             switch (kind)
             {
-            case grh::OperationKind::kConstant:
+            case grh::ir::OperationKind::kConstant:
             {
                 if (results.empty())
                 {
                     reportError("kConstant missing result", context);
                     break;
                 }
-                auto constValue = getAttribute<std::string>(view, symbols, opId, "constValue");
+                auto constValue = getAttribute<std::string>(view, opId, "constValue");
                 if (!constValue)
                 {
                     reportError("kConstant missing constValue attribute", context);
@@ -3873,26 +3866,26 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kAdd:
-            case grh::OperationKind::kSub:
-            case grh::OperationKind::kMul:
-            case grh::OperationKind::kDiv:
-            case grh::OperationKind::kMod:
-            case grh::OperationKind::kEq:
-            case grh::OperationKind::kNe:
-            case grh::OperationKind::kLt:
-            case grh::OperationKind::kLe:
-            case grh::OperationKind::kGt:
-            case grh::OperationKind::kGe:
-            case grh::OperationKind::kAnd:
-            case grh::OperationKind::kOr:
-            case grh::OperationKind::kXor:
-            case grh::OperationKind::kXnor:
-            case grh::OperationKind::kLogicAnd:
-            case grh::OperationKind::kLogicOr:
-            case grh::OperationKind::kShl:
-            case grh::OperationKind::kLShr:
-            case grh::OperationKind::kAShr:
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+            case grh::ir::OperationKind::kAnd:
+            case grh::ir::OperationKind::kOr:
+            case grh::ir::OperationKind::kXor:
+            case grh::ir::OperationKind::kXnor:
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
             {
                 if (operands.size() < 2 || results.empty())
                 {
@@ -3906,14 +3899,14 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kNot:
-            case grh::OperationKind::kLogicNot:
-            case grh::OperationKind::kReduceAnd:
-            case grh::OperationKind::kReduceOr:
-            case grh::OperationKind::kReduceXor:
-            case grh::OperationKind::kReduceNor:
-            case grh::OperationKind::kReduceNand:
-            case grh::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kNot:
+            case grh::ir::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceXnor:
             {
                 if (operands.empty() || results.empty())
                 {
@@ -3925,7 +3918,7 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kMux:
+            case grh::ir::OperationKind::kMux:
             {
                 if (operands.size() < 3 || results.empty())
                 {
@@ -3938,7 +3931,7 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kAssign:
+            case grh::ir::OperationKind::kAssign:
             {
                 if (operands.empty() || results.empty())
                 {
@@ -3949,7 +3942,7 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kConcat:
+            case grh::ir::OperationKind::kConcat:
             {
                 if (operands.size() < 2 || results.empty())
                 {
@@ -3971,14 +3964,14 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kReplicate:
+            case grh::ir::OperationKind::kReplicate:
             {
                 if (operands.empty() || results.empty())
                 {
                     reportError("kReplicate missing operands or results", context);
                     break;
                 }
-                auto rep = getAttribute<int64_t>(view, symbols, opId, "rep");
+                auto rep = getAttribute<int64_t>(view, opId, "rep");
                 if (!rep)
                 {
                     reportError("kReplicate missing rep attribute", context);
@@ -3990,15 +3983,15 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kSliceStatic:
+            case grh::ir::OperationKind::kSliceStatic:
             {
                 if (operands.empty() || results.empty())
                 {
                     reportError("kSliceStatic missing operands or results", context);
                     break;
                 }
-                auto sliceStart = getAttribute<int64_t>(view, symbols, opId, "sliceStart");
-                auto sliceEnd = getAttribute<int64_t>(view, symbols, opId, "sliceEnd");
+                auto sliceStart = getAttribute<int64_t>(view, opId, "sliceStart");
+                auto sliceEnd = getAttribute<int64_t>(view, opId, "sliceEnd");
                 if (!sliceStart || !sliceEnd)
                 {
                     reportError("kSliceStatic missing sliceStart or sliceEnd", context);
@@ -4019,14 +4012,14 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kSliceDynamic:
+            case grh::ir::OperationKind::kSliceDynamic:
             {
                 if (operands.size() < 2 || results.empty())
                 {
                     reportError("kSliceDynamic missing operands or results", context);
                     break;
                 }
-                auto width = getAttribute<int64_t>(view, symbols, opId, "sliceWidth");
+                auto width = getAttribute<int64_t>(view, opId, "sliceWidth");
                 if (!width)
                 {
                     reportError("kSliceDynamic missing sliceWidth", context);
@@ -4039,14 +4032,14 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kSliceArray:
+            case grh::ir::OperationKind::kSliceArray:
             {
                 if (operands.size() < 2 || results.empty())
                 {
                     reportError("kSliceArray missing operands or results", context);
                     break;
                 }
-                auto width = getAttribute<int64_t>(view, symbols, opId, "sliceWidth");
+                auto width = getAttribute<int64_t>(view, opId, "sliceWidth");
                 if (!width)
                 {
                     reportError("kSliceArray missing sliceWidth", context);
@@ -4067,8 +4060,8 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kLatch:
-            case grh::OperationKind::kLatchArst:
+            case grh::ir::OperationKind::kLatch:
+            case grh::ir::OperationKind::kLatchArst:
             {
                 if (operands.size() < 2 || results.empty())
                 {
@@ -4080,7 +4073,7 @@ namespace wolf_sv::emit
                 grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
                 grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
-                if (kind == grh::OperationKind::kLatch)
+                if (kind == grh::ir::OperationKind::kLatch)
                 {
                     if (operands.size() >= 2)
                     {
@@ -4107,7 +4100,7 @@ namespace wolf_sv::emit
                     reportError("Latch enable must be 1 bit", context);
                     break;
                 }
-                if (kind == grh::OperationKind::kLatchArst)
+                if (kind == grh::ir::OperationKind::kLatchArst)
                 {
                     if (!rst.valid() || !resetVal.valid())
                     {
@@ -4121,7 +4114,7 @@ namespace wolf_sv::emit
                     }
                 }
 
-                auto enLevelAttr = getAttribute<std::string>(view, symbols, opId, "enLevel");
+                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
                 const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
                 auto enExpr = formatEnableExpr(en, enLevel, context);
                 if (!enExpr)
@@ -4130,9 +4123,9 @@ namespace wolf_sv::emit
                 }
 
                 std::optional<bool> rstActiveHigh;
-                if (kind == grh::OperationKind::kLatchArst)
+                if (kind == grh::ir::OperationKind::kLatchArst)
                 {
-                    auto rstPolarityAttr = getAttribute<std::string>(view, symbols, opId, "rstPolarity");
+                    auto rstPolarityAttr = getAttribute<std::string>(view, opId, "rstPolarity");
                     rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity", context);
                     if (!rstActiveHigh)
                     {
@@ -4140,19 +4133,21 @@ namespace wolf_sv::emit
                     }
                 }
 
-                const std::string &regName = opName(opId);
+                const grh::ir::ValueId q = results[0];
+                const std::string &valueSym = valueName(q);
+                const std::string &opSym = opName(opId);
+                const std::string &regName = !valueSym.empty() ? valueSym : opSym;
                 if (regName.empty())
                 {
                     reportError("Latch operation missing symbol", context);
                     break;
                 }
-                const grh::ir::ValueId q = results[0];
                 if (view.valueWidth(q) != view.valueWidth(d))
                 {
                     reportError("Latch data/output width mismatch", context);
                     break;
                 }
-                if (kind == grh::OperationKind::kLatchArst && resetVal.valid() &&
+                if (kind == grh::ir::OperationKind::kLatchArst && resetVal.valid() &&
                     view.valueWidth(resetVal) != view.valueWidth(d))
                 {
                     reportError("Latch resetValue width mismatch", context);
@@ -4172,7 +4167,7 @@ namespace wolf_sv::emit
 
                 std::ostringstream stmt;
                 const int baseIndent = 2;
-                if (kind == grh::OperationKind::kLatchArst)
+                if (kind == grh::ir::OperationKind::kLatchArst)
                 {
                     if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                     {
@@ -4201,46 +4196,48 @@ namespace wolf_sv::emit
                 addLatchBlock(block.str(), opId);
                 break;
             }
-            case grh::OperationKind::kRegister:
-            case grh::OperationKind::kRegisterEn:
-            case grh::OperationKind::kRegisterRst:
-            case grh::OperationKind::kRegisterEnRst:
-            case grh::OperationKind::kRegisterArst:
-            case grh::OperationKind::kRegisterEnArst:
+            case grh::ir::OperationKind::kRegister:
+            case grh::ir::OperationKind::kRegisterEn:
+            case grh::ir::OperationKind::kRegisterRst:
+            case grh::ir::OperationKind::kRegisterEnRst:
+            case grh::ir::OperationKind::kRegisterArst:
+            case grh::ir::OperationKind::kRegisterEnArst:
             {
                 if (operands.empty() || results.empty())
                 {
                     reportError("Register operation missing operands or results", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
                 if (!clkPolarity)
                 {
                     reportError("Register operation missing clkPolarity", context);
                     break;
                 }
 
-                const std::string &regName = opName(opId);
+                const grh::ir::ValueId q = results[0];
+                const std::string &valueSym = valueName(q);
+                const std::string &opSym = opName(opId);
+                const std::string &regName = !valueSym.empty() ? valueSym : opSym;
                 if (regName.empty())
                 {
                     reportError("Register operation missing symbol", context);
                     break;
                 }
-                const grh::ir::ValueId q = results[0];
                 const grh::ir::ValueId clk = operands[0];
                 grh::ir::ValueId rst = grh::ir::ValueId::invalid();
                 grh::ir::ValueId en = grh::ir::ValueId::invalid();
                 grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
                 grh::ir::ValueId d = grh::ir::ValueId::invalid();
 
-                if (kind == grh::OperationKind::kRegister)
+                if (kind == grh::ir::OperationKind::kRegister)
                 {
                     if (operands.size() >= 2)
                     {
                         d = operands[1];
                     }
                 }
-                else if (kind == grh::OperationKind::kRegisterEn)
+                else if (kind == grh::ir::OperationKind::kRegisterEn)
                 {
                     if (operands.size() >= 3)
                     {
@@ -4248,7 +4245,7 @@ namespace wolf_sv::emit
                         d = operands[2];
                     }
                 }
-                else if (kind == grh::OperationKind::kRegisterRst || kind == grh::OperationKind::kRegisterArst)
+                else if (kind == grh::ir::OperationKind::kRegisterRst || kind == grh::ir::OperationKind::kRegisterArst)
                 {
                     if (operands.size() >= 4)
                     {
@@ -4257,7 +4254,7 @@ namespace wolf_sv::emit
                         d = operands[3];
                     }
                 }
-                else if (kind == grh::OperationKind::kRegisterEnRst || kind == grh::OperationKind::kRegisterEnArst)
+                else if (kind == grh::ir::OperationKind::kRegisterEnRst || kind == grh::ir::OperationKind::kRegisterEnArst)
                 {
                     if (operands.size() >= 5)
                     {
@@ -4274,14 +4271,14 @@ namespace wolf_sv::emit
                     break;
                 }
 
-                auto rstPolarityAttr = getAttribute<std::string>(view, symbols, opId, "rstPolarity");
-                auto enLevelAttr = getAttribute<std::string>(view, symbols, opId, "enLevel");
+                auto rstPolarityAttr = getAttribute<std::string>(view, opId, "rstPolarity");
+                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
                 const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
                 const auto enExpr = en.valid() ? formatEnableExpr(en, enLevel, context) : std::optional<std::string>{};
                 std::optional<bool> rstActiveHigh;
                 std::string asyncEdge;
-                if (kind == grh::OperationKind::kRegisterArst ||
-                    kind == grh::OperationKind::kRegisterEnArst)
+                if (kind == grh::ir::OperationKind::kRegisterArst ||
+                    kind == grh::ir::OperationKind::kRegisterEnArst)
                 {
                     rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity", context);
                     if (!rstActiveHigh)
@@ -4290,8 +4287,8 @@ namespace wolf_sv::emit
                     }
                     asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
                 }
-                else if (kind == grh::OperationKind::kRegisterRst ||
-                         kind == grh::OperationKind::kRegisterEnRst)
+                else if (kind == grh::ir::OperationKind::kRegisterRst ||
+                         kind == grh::ir::OperationKind::kRegisterEnRst)
                 {
                     rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity", context);
                     if (!rstActiveHigh)
@@ -4324,8 +4321,8 @@ namespace wolf_sv::emit
                 }
 
                 IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                if (kind == grh::OperationKind::kRegisterArst ||
-                    kind == grh::OperationKind::kRegisterEnArst)
+                if (kind == grh::ir::OperationKind::kRegisterArst ||
+                    kind == grh::ir::OperationKind::kRegisterEnArst)
                 {
                     if (rst.valid() && rstActiveHigh)
                     {
@@ -4333,8 +4330,8 @@ namespace wolf_sv::emit
                         key.asyncEdge = asyncEdge;
                     }
                 }
-                else if (kind == grh::OperationKind::kRegisterRst ||
-                         kind == grh::OperationKind::kRegisterEnRst)
+                else if (kind == grh::ir::OperationKind::kRegisterRst ||
+                         kind == grh::ir::OperationKind::kRegisterEnRst)
                 {
                     if (rst.valid() && rstActiveHigh)
                     {
@@ -4348,10 +4345,10 @@ namespace wolf_sv::emit
                 bool emitted = true;
                 switch (kind)
                 {
-                case grh::OperationKind::kRegister:
+                case grh::ir::OperationKind::kRegister:
                     appendIndented(stmt, baseIndent, regName + " <= " + valueName(d) + ";");
                     break;
-                case grh::OperationKind::kRegisterEn:
+                case grh::ir::OperationKind::kRegisterEn:
                     if (!enExpr)
                     {
                         emitted = false;
@@ -4361,7 +4358,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                     appendIndented(stmt, baseIndent, "end");
                     break;
-                case grh::OperationKind::kRegisterRst:
+                case grh::ir::OperationKind::kRegisterRst:
                     if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                     {
                         reportError("Register reset missing operands or polarity", context);
@@ -4381,7 +4378,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                     appendIndented(stmt, baseIndent, "end");
                     break;
-                case grh::OperationKind::kRegisterEnRst:
+                case grh::ir::OperationKind::kRegisterEnRst:
                     if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                     {
                         reportError("Register reset missing operands or polarity", context);
@@ -4406,7 +4403,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                     appendIndented(stmt, baseIndent, "end");
                     break;
-                case grh::OperationKind::kRegisterArst:
+                case grh::ir::OperationKind::kRegisterArst:
                     if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                     {
                         reportError("Register reset missing operands or polarity", context);
@@ -4419,7 +4416,7 @@ namespace wolf_sv::emit
                     appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
                     appendIndented(stmt, baseIndent, "end");
                     break;
-                case grh::OperationKind::kRegisterEnArst:
+                case grh::ir::OperationKind::kRegisterEnArst:
                     if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
                     {
                         reportError("Register reset missing operands or polarity", context);
@@ -4448,11 +4445,11 @@ namespace wolf_sv::emit
                 }
                 break;
             }
-            case grh::OperationKind::kMemory:
+            case grh::ir::OperationKind::kMemory:
             {
-                auto widthAttr = getAttribute<int64_t>(view, symbols, opId, "width");
-                auto rowAttr = getAttribute<int64_t>(view, symbols, opId, "row");
-                auto isSignedAttr = getAttribute<bool>(view, symbols, opId, "isSigned");
+                auto widthAttr = getAttribute<int64_t>(view, opId, "width");
+                auto rowAttr = getAttribute<int64_t>(view, opId, "row");
+                auto isSignedAttr = getAttribute<bool>(view, opId, "isSigned");
                 if (!widthAttr || !rowAttr || !isSignedAttr)
                 {
                     reportError("kMemory missing width/row/isSigned", context);
@@ -4471,14 +4468,14 @@ namespace wolf_sv::emit
                 declaredNames.insert(memName);
                 break;
             }
-            case grh::OperationKind::kMemoryAsyncReadPort:
+            case grh::ir::OperationKind::kMemoryAsyncReadPort:
             {
                 if (operands.size() < 1 || results.empty())
                 {
                     reportError("kMemoryAsyncReadPort missing operands or results", context);
                     break;
                 }
-                auto memSymbol = getAttribute<std::string>(view, symbols, opId, "memSymbol");
+                auto memSymbol = getAttribute<std::string>(view, opId, "memSymbol");
                 if (!memSymbol)
                 {
                     reportError("kMemoryAsyncReadPort missing memSymbol", context);
@@ -4488,29 +4485,29 @@ namespace wolf_sv::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::OperationKind::kMemorySyncReadPort:
-            case grh::OperationKind::kMemorySyncReadPortRst:
-            case grh::OperationKind::kMemorySyncReadPortArst:
+            case grh::ir::OperationKind::kMemorySyncReadPort:
+            case grh::ir::OperationKind::kMemorySyncReadPortRst:
+            case grh::ir::OperationKind::kMemorySyncReadPortArst:
             {
-                const bool hasReset = kind == grh::OperationKind::kMemorySyncReadPortRst ||
-                                      kind == grh::OperationKind::kMemorySyncReadPortArst;
-                const bool asyncReset = kind == grh::OperationKind::kMemorySyncReadPortArst;
+                const bool hasReset = kind == grh::ir::OperationKind::kMemorySyncReadPortRst ||
+                                      kind == grh::ir::OperationKind::kMemorySyncReadPortArst;
+                const bool asyncReset = kind == grh::ir::OperationKind::kMemorySyncReadPortArst;
                 const std::size_t expectedOperands = hasReset ? 4 : 3;
                 if (operands.size() < expectedOperands || results.empty())
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands or results", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands or results", context);
                     break;
                 }
                 auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
                 if (!clkPolarity)
                 {
-                    reportWarning(std::string(grh::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
+                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
                     clkPolarity = std::string("posedge");
                 }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, symbols, opId, "rstPolarity")
+                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
                                                 : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, symbols, opId, "enLevel");
+                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
                 const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
                 const grh::ir::ValueId clk = operands[0];
                 const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
@@ -4518,7 +4515,7 @@ namespace wolf_sv::emit
                 const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
                 if (!clk.valid() || !addr.valid() || !en.valid() || (hasReset && !rst.valid()))
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands or results", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands or results", context);
                     break;
                 }
                 auto enExpr = formatEnableExpr(en, enLevel, context);
@@ -4537,7 +4534,7 @@ namespace wolf_sv::emit
                 }
                 if (!memSymbolAttr)
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing memSymbol or clkPolarity", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
                     break;
                 }
                 const std::string &memSymbol = *memSymbolAttr;
@@ -4546,8 +4543,8 @@ namespace wolf_sv::emit
                 bool memSigned = false;
                 if (auto it = opByName.find(memSymbol); it != opByName.end())
                 {
-                    memWidth = getAttribute<int64_t>(view, symbols, it->second, "width").value_or(1);
-                    memSigned = getAttribute<bool>(view, symbols, it->second, "isSigned").value_or(false);
+                    memWidth = getAttribute<int64_t>(view, it->second, "width").value_or(1);
+                    memSigned = getAttribute<bool>(view, it->second, "isSigned").value_or(false);
                 }
                 ensureRegDecl(opName(opId), memWidth, memSigned, view.opSrcLoc(opId));
 
@@ -4581,29 +4578,29 @@ namespace wolf_sv::emit
                 }
                 break;
             }
-            case grh::OperationKind::kMemoryWritePort:
-            case grh::OperationKind::kMemoryWritePortRst:
-            case grh::OperationKind::kMemoryWritePortArst:
+            case grh::ir::OperationKind::kMemoryWritePort:
+            case grh::ir::OperationKind::kMemoryWritePortRst:
+            case grh::ir::OperationKind::kMemoryWritePortArst:
             {
-                const bool hasReset = kind == grh::OperationKind::kMemoryWritePortRst ||
-                                      kind == grh::OperationKind::kMemoryWritePortArst;
-                const bool asyncReset = kind == grh::OperationKind::kMemoryWritePortArst;
+                const bool hasReset = kind == grh::ir::OperationKind::kMemoryWritePortRst ||
+                                      kind == grh::ir::OperationKind::kMemoryWritePortArst;
+                const bool asyncReset = kind == grh::ir::OperationKind::kMemoryWritePortArst;
                 const std::size_t expectedOperands = hasReset ? 5 : 4;
                 if (operands.size() < expectedOperands)
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
                     break;
                 }
                 auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
                 if (!clkPolarity)
                 {
-                    reportWarning(std::string(grh::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
+                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
                     clkPolarity = std::string("posedge");
                 }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, symbols, opId, "rstPolarity")
+                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
                                                 : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, symbols, opId, "enLevel");
+                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
                 const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
                 const grh::ir::ValueId clk = operands[0];
                 const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
@@ -4612,7 +4609,7 @@ namespace wolf_sv::emit
                 const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
                 if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || (hasReset && !rst.valid()))
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
                     break;
                 }
                 auto enExpr = formatEnableExpr(en, enLevel, context);
@@ -4631,7 +4628,7 @@ namespace wolf_sv::emit
                 }
                 if (!memSymbolAttr)
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing memSymbol or clkPolarity", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
                     break;
                 }
                 const std::string &memSymbol = *memSymbolAttr;
@@ -4655,29 +4652,29 @@ namespace wolf_sv::emit
                 addSequentialStmt(key, stmt.str(), opId);
                 break;
             }
-            case grh::OperationKind::kMemoryMaskWritePort:
-            case grh::OperationKind::kMemoryMaskWritePortRst:
-            case grh::OperationKind::kMemoryMaskWritePortArst:
+            case grh::ir::OperationKind::kMemoryMaskWritePort:
+            case grh::ir::OperationKind::kMemoryMaskWritePortRst:
+            case grh::ir::OperationKind::kMemoryMaskWritePortArst:
             {
-                const bool hasReset = kind == grh::OperationKind::kMemoryMaskWritePortRst ||
-                                      kind == grh::OperationKind::kMemoryMaskWritePortArst;
-                const bool asyncReset = kind == grh::OperationKind::kMemoryMaskWritePortArst;
+                const bool hasReset = kind == grh::ir::OperationKind::kMemoryMaskWritePortRst ||
+                                      kind == grh::ir::OperationKind::kMemoryMaskWritePortArst;
+                const bool asyncReset = kind == grh::ir::OperationKind::kMemoryMaskWritePortArst;
                 const std::size_t expectedOperands = hasReset ? 6 : 5;
                 if (operands.size() < expectedOperands)
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
                     break;
                 }
                 auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
                 if (!clkPolarity)
                 {
-                    reportWarning(std::string(grh::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
+                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
                     clkPolarity = std::string("posedge");
                 }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, symbols, opId, "rstPolarity")
+                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
                                                 : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, symbols, opId, "enLevel");
+                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
                 const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
                 const grh::ir::ValueId clk = operands[0];
                 const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
@@ -4688,7 +4685,7 @@ namespace wolf_sv::emit
                 if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || !mask.valid() ||
                     (hasReset && !rst.valid()))
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing operands", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
                     break;
                 }
                 auto enExpr = formatEnableExpr(en, enLevel, context);
@@ -4707,14 +4704,14 @@ namespace wolf_sv::emit
                 }
                 if (!memSymbolAttr)
                 {
-                    reportError(std::string(grh::toString(kind)) + " missing memSymbol or clkPolarity", context);
+                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
                     break;
                 }
                 const std::string &memSymbol = *memSymbolAttr;
                 int64_t memWidth = 1;
                 if (auto it = opByName.find(memSymbol); it != opByName.end())
                 {
-                    memWidth = getAttribute<int64_t>(view, symbols, it->second, "width").value_or(1);
+                    memWidth = getAttribute<int64_t>(view, it->second, "width").value_or(1);
                 }
 
                 IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
@@ -4745,13 +4742,13 @@ namespace wolf_sv::emit
                 addSequentialStmt(key, stmt.str(), opId);
                 break;
             }
-            case grh::OperationKind::kInstance:
-            case grh::OperationKind::kBlackbox:
+            case grh::ir::OperationKind::kInstance:
+            case grh::ir::OperationKind::kBlackbox:
             {
-                auto moduleNameAttr = getAttribute<std::string>(view, symbols, opId, "moduleName");
-                auto inputNames = getAttribute<std::vector<std::string>>(view, symbols, opId, "inputPortName");
-                auto outputNames = getAttribute<std::vector<std::string>>(view, symbols, opId, "outputPortName");
-                auto instanceNameBase = getAttribute<std::string>(view, symbols, opId, "instanceName")
+                auto moduleNameAttr = getAttribute<std::string>(view, opId, "moduleName");
+                auto inputNames = getAttribute<std::vector<std::string>>(view, opId, "inputPortName");
+                auto outputNames = getAttribute<std::vector<std::string>>(view, opId, "outputPortName");
+                auto instanceNameBase = getAttribute<std::string>(view, opId, "instanceName")
                                             .value_or(opName(opId));
                 std::string instanceName = instanceNameBase;
                 int instSuffix = 1;
@@ -4767,10 +4764,10 @@ namespace wolf_sv::emit
                 const std::string &targetModuleName = *moduleNameAttr;
 
                 std::ostringstream decl;
-                if (kind == grh::OperationKind::kBlackbox)
+                if (kind == grh::ir::OperationKind::kBlackbox)
                 {
-                    auto paramNames = getAttribute<std::vector<std::string>>(view, symbols, opId, "parameterNames");
-                    auto paramValues = getAttribute<std::vector<std::string>>(view, symbols, opId, "parameterValues");
+                    auto paramNames = getAttribute<std::vector<std::string>>(view, opId, "parameterNames");
+                    auto paramValues = getAttribute<std::vector<std::string>>(view, opId, "parameterValues");
                     if (paramNames && paramValues && !paramNames->empty() && paramNames->size() == paramValues->size())
                     {
                         decl << targetModuleName << " #(" << '\n';
@@ -4816,15 +4813,15 @@ namespace wolf_sv::emit
                 instanceDecls.emplace_back(decl.str(), opId);
                 break;
             }
-            case grh::OperationKind::kDisplay:
+            case grh::ir::OperationKind::kDisplay:
             {
                 if (operands.size() < 2)
                 {
                     reportError("kDisplay missing operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
-                auto format = getAttribute<std::string>(view, symbols, opId, "format");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
+                auto format = getAttribute<std::string>(view, opId, "format");
                 if (!clkPolarity || !format)
                 {
                     reportError("kDisplay missing clkPolarity or format", context);
@@ -4843,20 +4840,20 @@ namespace wolf_sv::emit
                 addSequentialStmt(key, stmt.str(), opId);
                 break;
             }
-            case grh::OperationKind::kAssert:
+            case grh::ir::OperationKind::kAssert:
             {
                 if (operands.size() < 2)
                 {
                     reportError("kAssert missing operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
                 if (!clkPolarity)
                 {
                     reportError("kAssert missing clkPolarity", context);
                     break;
                 }
-                auto message = getAttribute<std::string>(view, symbols, opId, "message")
+                auto message = getAttribute<std::string>(view, opId, "message")
                                    .value_or(std::string("Assertion failed"));
                 IrSeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                 std::ostringstream stmt;
@@ -4866,11 +4863,11 @@ namespace wolf_sv::emit
                 addSequentialStmt(key, stmt.str(), opId);
                 break;
             }
-            case grh::OperationKind::kDpicImport:
+            case grh::ir::OperationKind::kDpicImport:
             {
-                auto argsDir = getAttribute<std::vector<std::string>>(view, symbols, opId, "argsDirection");
-                auto argsWidth = getAttribute<std::vector<int64_t>>(view, symbols, opId, "argsWidth");
-                auto argsName = getAttribute<std::vector<std::string>>(view, symbols, opId, "argsName");
+                auto argsDir = getAttribute<std::vector<std::string>>(view, opId, "argsDirection");
+                auto argsWidth = getAttribute<std::vector<int64_t>>(view, opId, "argsWidth");
+                auto argsName = getAttribute<std::vector<std::string>>(view, opId, "argsName");
                 if (!argsDir || !argsWidth || !argsName ||
                     argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                 {
@@ -4899,17 +4896,17 @@ namespace wolf_sv::emit
                 dpiImportDecls.emplace_back(decl.str(), opId);
                 break;
             }
-            case grh::OperationKind::kDpicCall:
+            case grh::ir::OperationKind::kDpicCall:
             {
                 if (operands.size() < 2)
                 {
                     reportError("kDpicCall missing clk/enable operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, symbols, opId, "clkPolarity");
-                auto targetImport = getAttribute<std::string>(view, symbols, opId, "targetImportSymbol");
-                auto inArgName = getAttribute<std::vector<std::string>>(view, symbols, opId, "inArgName");
-                auto outArgName = getAttribute<std::vector<std::string>>(view, symbols, opId, "outArgName");
+                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
+                auto targetImport = getAttribute<std::string>(view, opId, "targetImportSymbol");
+                auto inArgName = getAttribute<std::vector<std::string>>(view, opId, "inArgName");
+                auto outArgName = getAttribute<std::vector<std::string>>(view, opId, "outArgName");
                 if (!clkPolarity || !targetImport || !inArgName || !outArgName)
                 {
                     reportError("kDpicCall missing metadata", context);
@@ -4921,8 +4918,8 @@ namespace wolf_sv::emit
                     reportError("kDpicCall cannot resolve import symbol", *targetImport);
                     break;
                 }
-                auto importArgs = getAttribute<std::vector<std::string>>(view, symbols, itImport->second, "argsName");
-                auto importDirs = getAttribute<std::vector<std::string>>(view, symbols, itImport->second, "argsDirection");
+                auto importArgs = getAttribute<std::vector<std::string>>(view, itImport->second, "argsName");
+                auto importDirs = getAttribute<std::vector<std::string>>(view, itImport->second, "argsDirection");
                 if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
                 {
                     reportError("kDpicCall found malformed import signature", *targetImport);
