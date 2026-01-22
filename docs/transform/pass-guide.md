@@ -4,8 +4,8 @@
 
 ## 文件放置与命名
 - 头文件放在 `include/pass/`，实现放在 `src/pass/`，文件名尽量简短且贴合职责，例如 `foo_opt.hpp` / `foo_opt.cpp`。
-- 类名使用 `PascalCase`，继承基类 `wolf_sv::transform::Pass`，构造函数接受必要的配置参数（不再使用统一的 `PassConfig`）。
-- 默认命名空间：`wolf_sv::transform`。
+- 类名使用 `PascalCase`，继承基类 `wolf_sv_parser::transform::Pass`，构造函数接受必要的配置参数（不再使用统一的 `PassConfig`）。
+- 默认命名空间：`wolf_sv_parser::transform`。
 - `id` 由子类构造设置，标记 pass 类型；`name` 在 `PassManager::addPass` 时设置，未显式提供时默认等于 id，用于区分同类 pass 的多次实例化（诊断前缀使用 name）。
 
 ## Skeleton 与参数配置
@@ -15,7 +15,7 @@
 #pragma once
 #include "transform.hpp"
 
-namespace wolf_sv::transform {
+namespace wolf_sv_parser::transform {
 
     struct FooOptOptions {
         bool enableFoo = true;
@@ -31,13 +31,13 @@ namespace wolf_sv::transform {
         FooOptOptions options_;
     };
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform
 ```
 ```cpp
 // src/pass/foo_opt.cpp
 #include "pass/foo_opt.hpp"
 
-namespace wolf_sv::transform {
+namespace wolf_sv_parser::transform {
 
     FooOptPass::FooOptPass(FooOptOptions opts)
         : Pass("foo-opt", "Foo Optimizer", "Optimize foo patterns"), options_(opts) {}
@@ -49,7 +49,7 @@ namespace wolf_sv::transform {
         return result;
     }
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform
 ```
 - 参数通过构造参数传入，必要时定义 options 结构体；保持默认值合理，便于调用方直接构造。
 

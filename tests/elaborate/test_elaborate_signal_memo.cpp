@@ -17,7 +17,7 @@
 #include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/ast/types/Type.h"
 
-using namespace wolf_sv;
+using namespace wolf_sv_parser;
 
 namespace {
 

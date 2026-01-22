@@ -115,7 +115,7 @@ int main(int argc, char **argv)
     };
     applyOutputPath();
 
-    auto applyCommonEmitOptions = [&](wolf_sv::emit::EmitOptions &emitOptions)
+    auto applyCommonEmitOptions = [&](grh::emit::EmitOptions &emitOptions)
     {
         if (outputDirOverride)
         {
@@ -140,8 +140,8 @@ int main(int argc, char **argv)
         std::cout << writer.view();
     }
 
-    wolf_sv::ElaborateDiagnostics elaborateDiagnostics;
-    wolf_sv::Elaborate elaborator(&elaborateDiagnostics);
+    wolf_sv_parser::ElaborateDiagnostics elaborateDiagnostics;
+    wolf_sv_parser::Elaborate elaborator(&elaborateDiagnostics);
     auto netlist = elaborator.convert(root);
 
     bool hasElaborateError = false;
@@ -153,13 +153,13 @@ int main(int argc, char **argv)
             const char *tag = "NYI";
             switch (message.kind)
             {
-            case wolf_sv::ElaborateDiagnosticKind::Todo:
+            case wolf_sv_parser::ElaborateDiagnosticKind::Todo:
                 tag = "TODO";
                 break;
-            case wolf_sv::ElaborateDiagnosticKind::Warning:
+            case wolf_sv_parser::ElaborateDiagnosticKind::Warning:
                 tag = "WARN";
                 break;
-            case wolf_sv::ElaborateDiagnosticKind::NotYetImplemented:
+            case wolf_sv_parser::ElaborateDiagnosticKind::NotYetImplemented:
             default:
                 tag = "NYI";
                 hasElaborateError = true;
@@ -195,12 +195,12 @@ int main(int argc, char **argv)
     }
 
     // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
-    wolf_sv::transform::PassDiagnostics transformDiagnostics;
-    wolf_sv::transform::PassManager passManager;
-    passManager.addPass(std::make_unique<wolf_sv::transform::GRHVerifyPass>());
-    passManager.addPass(std::make_unique<wolf_sv::transform::ConstantFoldPass>());
-    passManager.addPass(std::make_unique<wolf_sv::transform::StatsPass>());
-    wolf_sv::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
+    wolf_sv_parser::transform::PassDiagnostics transformDiagnostics;
+    wolf_sv_parser::transform::PassManager passManager;
+    passManager.addPass(std::make_unique<wolf_sv_parser::transform::GRHVerifyPass>());
+    passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
+    passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
+    wolf_sv_parser::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
 
     if (!transformDiagnostics.empty())
     {
@@ -209,16 +209,16 @@ int main(int argc, char **argv)
             const char *tag = "info";
             switch (message.kind)
             {
-            case wolf_sv::transform::PassDiagnosticKind::Error:
+            case wolf_sv_parser::transform::PassDiagnosticKind::Error:
                 tag = "error";
                 break;
-            case wolf_sv::transform::PassDiagnosticKind::Warning:
+            case wolf_sv_parser::transform::PassDiagnosticKind::Warning:
                 tag = "warn";
                 break;
-            case wolf_sv::transform::PassDiagnosticKind::Debug:
+            case wolf_sv_parser::transform::PassDiagnosticKind::Debug:
                 tag = "debug";
                 break;
-            case wolf_sv::transform::PassDiagnosticKind::Info:
+            case wolf_sv_parser::transform::PassDiagnosticKind::Info:
             default:
                 tag = "info";
                 break;
@@ -240,23 +240,23 @@ int main(int argc, char **argv)
     bool emitOk = true;
     if (dumpJson == true)
     {
-        wolf_sv::emit::EmitDiagnostics emitDiagnostics;
-        wolf_sv::emit::EmitJSON emitter(&emitDiagnostics);
+        grh::emit::EmitDiagnostics emitDiagnostics;
+        grh::emit::EmitJSON emitter(&emitDiagnostics);
 
-        wolf_sv::emit::EmitOptions emitOptions;
-        emitOptions.jsonMode = wolf_sv::emit::JsonPrintMode::PrettyCompact;
+        grh::emit::EmitOptions emitOptions;
+        emitOptions.jsonMode = grh::emit::JsonPrintMode::PrettyCompact;
         applyCommonEmitOptions(emitOptions);
         if (jsonOutputName)
         {
             emitOptions.outputFilename = *jsonOutputName;
         }
 
-        wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
             {
-                const char *tag = message.kind == wolf_sv::emit::EmitDiagnosticKind::Error ? "error" : "warn";
+                const char *tag = message.kind == grh::emit::EmitDiagnosticKind::Error ? "error" : "warn";
                 std::cerr << "[emit-json] [" << tag << "] " << message.message;
                 if (!message.context.empty())
                 {
@@ -279,21 +279,21 @@ int main(int argc, char **argv)
 
     if (dumpSv == true)
     {
-        wolf_sv::emit::EmitDiagnostics emitDiagnostics;
-        wolf_sv::emit::EmitSystemVerilog emitter(&emitDiagnostics);
-        wolf_sv::emit::EmitOptions emitOptions;
+        grh::emit::EmitDiagnostics emitDiagnostics;
+        grh::emit::EmitSystemVerilog emitter(&emitDiagnostics);
+        grh::emit::EmitOptions emitOptions;
         applyCommonEmitOptions(emitOptions);
         if (svOutputName)
         {
             emitOptions.outputFilename = *svOutputName;
         }
 
-        wolf_sv::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
             {
-                const char *tag = message.kind == wolf_sv::emit::EmitDiagnosticKind::Error ? "error" : "warn";
+                const char *tag = message.kind == grh::emit::EmitDiagnosticKind::Error ? "error" : "warn";
                 std::cerr << "[emit-sv] [" << tag << "] " << message.message;
                 if (!message.context.empty())
                 {

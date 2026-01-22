@@ -35,7 +35,7 @@
 > 目标：Transform 以独立 pass 的形式实现，实现支持 pass 的基本框架。
 
 ## 框架定位与拆分
-- 在 `wolf_sv::transform` 命名空间新增公共头 `include/transform.hpp` 与实现 `src/transform.cpp`，所有与Pass相关的基础设施（基类）都在上述两个文件中实现，创建 src/pass 文件夹 和 include/pass 文件夹，存放具体pass的实现（子类）
+- 在 `wolf_sv_parser::transform` 命名空间新增公共头 `include/transform.hpp` 与实现 `src/transform.cpp`，所有与Pass相关的基础设施（基类）都在上述两个文件中实现，创建 src/pass 文件夹 和 include/pass 文件夹，存放具体pass的实现（子类）
 - Pass 持有对 `grh::Netlist` 的可变引用，明确 transform 仅在 Elaborate → Emit 之间运行。
 - Pass 以就地修改 Netlist/Graph 为原则，不直接处理 I/O；与 emit/elaborate 同样使用轻量诊断结构，主流程统一汇总/打印。
 - 约定 pass id（短字符串）与可读 name/desc，id 用于 CLI/注册，desc 用于日志/诊断，便于后续扩展内置/自定义 pass。

@@ -17,7 +17,7 @@ namespace slang {
 class JsonWriter;
 }
 
-namespace wolf_sv::grh {
+namespace grh {
 
 namespace ir {
 
@@ -592,6 +592,6 @@ private:
 
 } // namespace ir
 
-} // namespace wolf_sv::grh
+} // namespace grh
 
 #endif // WOLF_SV_GRH_HPP

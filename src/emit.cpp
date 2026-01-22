@@ -14,7 +14,7 @@
 
 #include "slang/text/Json.h"
 
-namespace wolf_sv::emit
+namespace grh::emit
 {
 
     namespace
@@ -5215,4 +5215,4 @@ namespace wolf_sv::emit
         return result;
     }
 
-} // namespace wolf_sv::emit
+} // namespace grh::emit

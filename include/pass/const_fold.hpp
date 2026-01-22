@@ -3,7 +3,7 @@
 
 #include "transform.hpp"
 
-namespace wolf_sv::transform
+namespace wolf_sv_parser::transform
 {
 
     struct ConstantFoldOptions
@@ -24,6 +24,6 @@ namespace wolf_sv::transform
         ConstantFoldOptions options_;
     };
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform
 
 #endif // WOLF_SV_PASS_CONST_FOLD_HPP

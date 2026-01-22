@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-using namespace wolf_sv;
-using namespace wolf_sv::transform;
+using namespace wolf_sv_parser;
+using namespace wolf_sv_parser::transform;
 
 namespace
 {

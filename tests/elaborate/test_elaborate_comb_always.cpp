@@ -17,8 +17,8 @@
 #include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/driver/Driver.h"
 
-using namespace wolf_sv;
-using namespace wolf_sv::emit;
+using namespace wolf_sv_parser;
+using namespace grh::emit;
 
 namespace {
 

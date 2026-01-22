@@ -6,9 +6,8 @@
 #include <iostream>
 #include <string>
 
-using namespace wolf_sv;
-using namespace wolf_sv::emit;
-using namespace wolf_sv::grh::ir;
+using namespace grh::emit;
+using namespace grh::ir;
 
 namespace
 {

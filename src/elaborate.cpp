@@ -53,7 +53,7 @@
 #include "slang/numeric/SVInt.h"
 #include "slang/text/SourceManager.h"
 
-namespace wolf_sv {
+namespace wolf_sv_parser {
 
 namespace {
 
@@ -7837,7 +7837,7 @@ ValueId RHSConverter::createTemporaryValue(const slang::ast::Type& type,
 
 OperationId RHSConverter::createOperation(grh::ir::OperationKind kind, std::string_view hint) {
     std::string name = makeOperationName(hint, operationCounter_++);
-    OperationId op = ::wolf_sv::createOperation(graph(), kind, name);
+    OperationId op = ::wolf_sv_parser::createOperation(graph(), kind, name);
     applyDebug(graph(), op, makeDebugInfo(sourceManager_, currentExpr_));
     return op;
 }
@@ -10189,4 +10189,4 @@ void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body
     }
 }
 
-} // namespace wolf_sv
+} // namespace wolf_sv_parser

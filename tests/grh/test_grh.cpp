@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-using namespace wolf_sv::grh::ir;
-using namespace wolf_sv::emit;
+using namespace grh::ir;
+using namespace grh::emit;
 
 namespace
 {
@@ -348,7 +348,7 @@ int main()
         }
 
         {
-            namespace grh_ir = wolf_sv::grh::ir;
+            namespace grh_ir = grh::ir;
 
             grh_ir::NetlistSymbolTable netlistSymbols;
             auto demoSym = netlistSymbols.intern("demo");
@@ -431,7 +431,7 @@ int main()
         }
 
         {
-            namespace grh_ir = wolf_sv::grh::ir;
+            namespace grh_ir = grh::ir;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -532,7 +532,7 @@ int main()
         }
 
         {
-            namespace grh_ir = wolf_sv::grh::ir;
+            namespace grh_ir = grh::ir;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -632,7 +632,7 @@ int main()
         }
 
         {
-            namespace grh_ir = wolf_sv::grh::ir;
+            namespace grh_ir = grh::ir;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -687,7 +687,7 @@ int main()
         }
 
         {
-            namespace grh_ir = wolf_sv::grh::ir;
+            namespace grh_ir = grh::ir;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);

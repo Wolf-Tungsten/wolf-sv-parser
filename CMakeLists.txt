@@ -23,6 +23,7 @@ add_subdirectory(src/pass)
 add_library(grh STATIC
     src/grh.cpp
     src/load.cpp
+    src/emit.cpp
 )
 
 target_include_directories(grh
@@ -51,21 +52,6 @@ target_link_libraries(transform
         grh
 )
 
-## emit
-add_library(emit STATIC
-    src/emit.cpp
-)
-
-target_include_directories(emit
-    PUBLIC
-        include
-)
-
-target_link_libraries(emit
-    PUBLIC
-        grh
-)
-
 ## elaborate
 add_library(elaborate STATIC
     src/elaborate.cpp
@@ -90,7 +76,7 @@ target_link_libraries(wolf-sv-parser
     PRIVATE
         transform
         elaborate
-        emit
+        grh
 )
 
 enable_testing()
@@ -125,7 +111,6 @@ add_executable(grh-tests
 target_link_libraries(grh-tests
     PRIVATE
         grh
-        emit
 )
 
 target_compile_definitions(grh-tests
@@ -154,7 +139,7 @@ add_executable(emit-base
 
 target_link_libraries(emit-base
     PRIVATE
-        emit
+        grh
 )
 
 target_compile_definitions(emit-base
@@ -170,7 +155,7 @@ add_executable(emit-json
 
 target_link_libraries(emit-json
     PRIVATE
-        emit
+        grh
 )
 
 target_compile_definitions(emit-json
@@ -186,7 +171,7 @@ add_executable(emit-json-ir
 
 target_link_libraries(emit-json-ir
     PRIVATE
-        emit
+        grh
 )
 
 target_compile_definitions(emit-json-ir
@@ -202,7 +187,7 @@ add_executable(emit-sv
 
 target_link_libraries(emit-sv
     PRIVATE
-        emit
+        grh
         elaborate
 )
 
@@ -220,7 +205,7 @@ add_executable(emit-sv-ir
 
 target_link_libraries(emit-sv-ir
     PRIVATE
-        emit
+        grh
 )
 
 target_compile_definitions(emit-sv-ir
@@ -238,7 +223,7 @@ add_executable(elaborate-smoke
 target_link_libraries(elaborate-smoke
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-smoke
@@ -290,7 +275,7 @@ add_executable(elaborate-hierarchy
 target_link_libraries(elaborate-hierarchy
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-hierarchy
@@ -309,7 +294,7 @@ add_executable(elaborate-signal-memo
 target_link_libraries(elaborate-signal-memo
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-signal-memo
@@ -327,7 +312,7 @@ add_executable(elaborate-rhs-converter
 target_link_libraries(elaborate-rhs-converter
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-rhs-converter
@@ -346,7 +331,7 @@ add_executable(elaborate-write-back-memo
 target_link_libraries(elaborate-write-back-memo
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 register_test_exe(elaborate-write-back-memo)
@@ -359,7 +344,7 @@ add_executable(elaborate-assign
 target_link_libraries(elaborate-assign
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-assign
@@ -378,7 +363,7 @@ add_executable(elaborate-comb-always
 target_link_libraries(elaborate-comb-always
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-comb-always
@@ -396,7 +381,7 @@ add_executable(elaborate-latch
 target_link_libraries(elaborate-latch
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-latch
@@ -415,7 +400,7 @@ add_executable(elaborate-seq-always
 target_link_libraries(elaborate-seq-always
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-seq-always
@@ -434,7 +419,7 @@ add_executable(elaborate-stage21
 target_link_libraries(elaborate-stage21
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-stage21
@@ -452,7 +437,7 @@ add_executable(elaborate-blackbox
 target_link_libraries(elaborate-blackbox
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-blackbox
@@ -470,7 +455,7 @@ add_executable(elaborate-dpic
 target_link_libraries(elaborate-dpic
     PRIVATE
         elaborate
-        emit
+        grh
 )
 
 target_compile_definitions(elaborate-dpic

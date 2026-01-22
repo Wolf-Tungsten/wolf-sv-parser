@@ -3,7 +3,7 @@
 
 #include "transform.hpp"
 
-namespace wolf_sv::transform
+namespace wolf_sv_parser::transform
 {
 
     class StatsPass : public Pass
@@ -14,6 +14,6 @@ namespace wolf_sv::transform
         PassResult run() override;
     };
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform
 
 #endif // WOLF_SV_PASS_DEMO_STATS_HPP

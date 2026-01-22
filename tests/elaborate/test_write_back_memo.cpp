@@ -3,7 +3,7 @@
 #include <iostream>
 #include <string>
 
-using namespace wolf_sv;
+using namespace wolf_sv_parser;
 
 namespace {
 

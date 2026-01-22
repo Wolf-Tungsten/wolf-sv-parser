@@ -13,7 +13,7 @@
 #include <string_view>
 #include <vector>
 
-namespace wolf_sv::emit
+namespace grh::emit
 {
 
     enum class EmitDiagnosticKind
@@ -129,6 +129,6 @@ namespace wolf_sv::emit
                             const EmitOptions &options) override;
     };
 
-} // namespace wolf_sv::emit
+} // namespace grh::emit
 
 #endif // WOLF_SV_EMIT_HPP

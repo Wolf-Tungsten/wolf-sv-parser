@@ -12,9 +12,9 @@
 #include "slang/analysis/AnalysisManager.h"
 #include "slang/driver/Driver.h"
 
-using namespace wolf_sv;
-using namespace wolf_sv::emit;
-using namespace wolf_sv::grh::ir;
+using namespace grh::emit;
+using namespace grh::ir;
+using namespace wolf_sv_parser;
 
 namespace
 {

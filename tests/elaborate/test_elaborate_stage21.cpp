@@ -12,7 +12,7 @@
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/ValueSymbol.h"
 
-using namespace wolf_sv;
+using namespace wolf_sv_parser;
 
 namespace {
 

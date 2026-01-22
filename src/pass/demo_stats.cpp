@@ -5,7 +5,7 @@
 #include <sstream>
 #include <string>
 
-namespace wolf_sv::transform
+namespace wolf_sv_parser::transform
 {
 
     StatsPass::StatsPass() : Pass("stats", "operation-value-stats", "Count graphs, operations, and values for diagnostics") {}
@@ -36,4 +36,4 @@ namespace wolf_sv::transform
         return result;
     }
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform

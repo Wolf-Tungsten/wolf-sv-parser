@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-namespace wolf_sv::transform
+namespace wolf_sv_parser::transform
 {
 
     namespace
@@ -356,4 +356,4 @@ namespace wolf_sv::transform
         return result;
     }
 
-} // namespace wolf_sv::transform
+} // namespace wolf_sv_parser::transform

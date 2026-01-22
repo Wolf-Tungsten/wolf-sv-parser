@@ -5,7 +5,7 @@
 
 #include <string_view>
 
-namespace wolf_sv::grh::ir::load
+namespace grh::ir::load
 {
 
     class Load
@@ -22,6 +22,6 @@ namespace wolf_sv::grh::ir::load
         grh::ir::Netlist load(std::string_view data) override;
     };
 
-} // namespace wolf_sv::grh::ir::load
+} // namespace grh::ir::load
 
 #endif // WOLF_SV_GRH_IR_LOAD_HPP

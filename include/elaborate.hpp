@@ -63,7 +63,7 @@ class ProceduralBlockSymbol;
 class ContinuousAssignSymbol;
 } // namespace slang::ast
 
-namespace wolf_sv {
+namespace wolf_sv_parser {
 using ValueId = grh::ir::ValueId;
 using OperationId = grh::ir::OperationId;
 using SymbolId = grh::ir::SymbolId;
@@ -1013,6 +1013,6 @@ private:
     std::unordered_map<const slang::ast::InstanceBodySymbol*, BlackboxMemoEntry> blackboxMemo_;
 };
 
-} // namespace wolf_sv
+} // namespace wolf_sv_parser
 
 #endif // WOLF_SV_ELABORATE_HPP

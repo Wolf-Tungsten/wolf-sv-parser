@@ -16,23 +16,23 @@
 #include <variant>
 #include <vector>
 
-namespace wolf_sv::grh::ir::load
+namespace grh::ir::load
 {
 
     namespace
     {
 
-        using wolf_sv::grh::ir::AttributeValue;
-        using wolf_sv::grh::ir::Graph;
-        using wolf_sv::grh::ir::Netlist;
-        using wolf_sv::grh::ir::OperationId;
-        using wolf_sv::grh::ir::OperationKind;
-        using wolf_sv::grh::ir::SymbolId;
-        using wolf_sv::grh::ir::Value;
-        using wolf_sv::grh::ir::ValueId;
-        using wolf_sv::grh::ir::attributeValueIsJsonSerializable;
-        using wolf_sv::grh::ir::parseOperationKind;
-        using wolf_sv::grh::ir::SrcLoc;
+        using grh::ir::AttributeValue;
+        using grh::ir::Graph;
+        using grh::ir::Netlist;
+        using grh::ir::OperationId;
+        using grh::ir::OperationKind;
+        using grh::ir::SymbolId;
+        using grh::ir::Value;
+        using grh::ir::ValueId;
+        using grh::ir::attributeValueIsJsonSerializable;
+        using grh::ir::parseOperationKind;
+        using grh::ir::SrcLoc;
 
         enum class AttributeKind
         {
@@ -922,15 +922,15 @@ namespace wolf_sv::grh::ir::load
         return netlist;
     }
 
-} // namespace wolf_sv::grh::ir::load
+} // namespace grh::ir::load
 
-namespace wolf_sv::grh::ir
+namespace grh::ir
 {
 
     Netlist Netlist::fromJsonString(std::string_view json)
     {
-        wolf_sv::grh::ir::load::LoadJson loader;
+        grh::ir::load::LoadJson loader;
         return loader.load(json);
     }
 
-} // namespace wolf_sv::grh::ir
+} // namespace grh::ir

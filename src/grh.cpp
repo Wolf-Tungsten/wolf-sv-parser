@@ -16,7 +16,7 @@
 
 #include "slang/text/Json.h"
 
-namespace wolf_sv::grh::ir
+namespace grh::ir
 {
 
     bool attributeValueIsJsonSerializable(const AttributeValue &value)
@@ -2716,4 +2716,4 @@ namespace wolf_sv::grh::ir
         }
     }
 
-} // namespace wolf_sv::grh::ir
+} // namespace grh::ir
