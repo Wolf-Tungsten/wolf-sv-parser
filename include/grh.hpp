@@ -88,7 +88,15 @@ enum class OperationKind {
 std::string_view toString(OperationKind kind) noexcept;
 std::optional<OperationKind> parseOperationKind(std::string_view text) noexcept;
 
-using AttributeValue = std::variant<bool, int64_t, double, std::string, std::vector<bool>, std::vector<int64_t>, std::vector<double>, std::vector<std::string>>;
+using AttributeValue = std::variant<
+    bool,
+    int64_t,
+    double,
+    std::string,
+    std::vector<bool>,
+    std::vector<int64_t>,
+    std::vector<double>,
+    std::vector<std::string>>;
 
 struct SrcLoc
 {
@@ -390,6 +398,7 @@ private:
     void validateSymbol(SymbolId sym, std::string_view context) const;
     void bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context);
     void unbindSymbol(SymbolId sym, SymbolKind kind, uint32_t index);
+    void bindPort(std::vector<Port>& ports, SymbolId name, ValueId value, std::string_view context);
 
     GraphId graphId_;
     GraphSymbolTable* symbols_ = nullptr;
