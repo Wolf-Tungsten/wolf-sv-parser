@@ -5616,6 +5616,8 @@ std::string AlwaysConverter::makeShadowOpName(const SignalMemoEntry& entry,
     base.push_back('_');
     base.append(suffix);
     base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
+    base.push_back('_');
     base.append(std::to_string(shadowNameCounter_++));
     return base;
 }
@@ -5631,6 +5633,8 @@ std::string AlwaysConverter::makeShadowValueName(const SignalMemoEntry& entry,
     }
     base.push_back('_');
     base.append(suffix);
+    base.push_back('_');
+    base.append(std::to_string(controlInstanceId_));
     base.push_back('_');
     base.append(std::to_string(shadowNameCounter_++));
     return base;
@@ -5804,7 +5808,71 @@ AlwaysConverter::mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
             }
         }
         else {
-            mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
+            if (entry->multiDriver) {
+                struct Range {
+                    int64_t msb = 0;
+                    int64_t lsb = 0;
+                };
+                std::vector<Range> ranges;
+                auto collectRanges = [&](const ShadowState* state) {
+                    if (!state) {
+                        return;
+                    }
+                    for (const auto& slice : state->slices) {
+                        ranges.push_back(Range{slice.msb, slice.lsb});
+                    }
+                    for (const auto& slice : state->nbaSlices) {
+                        ranges.push_back(Range{slice.msb, slice.lsb});
+                    }
+                };
+                collectRanges(trueIt != trueFrame.map.end() ? &trueIt->second : nullptr);
+                collectRanges(falseIt != falseFrame.map.end() ? &falseIt->second : nullptr);
+
+                if (!ranges.empty()) {
+                    std::sort(ranges.begin(), ranges.end(), [](const Range& lhs, const Range& rhs) {
+                        if (lhs.lsb != rhs.lsb) {
+                            return lhs.lsb < rhs.lsb;
+                        }
+                        return lhs.msb < rhs.msb;
+                    });
+
+                    std::vector<Range> mergedRanges;
+                    mergedRanges.reserve(ranges.size());
+                    for (const Range& range : ranges) {
+                        if (mergedRanges.empty() || range.lsb > mergedRanges.back().msb + 1) {
+                            mergedRanges.push_back(range);
+                        }
+                        else {
+                            mergedRanges.back().msb = std::max(mergedRanges.back().msb, range.msb);
+                        }
+                    }
+
+                    std::sort(mergedRanges.begin(), mergedRanges.end(),
+                              [](const Range& lhs, const Range& rhs) {
+                                  if (lhs.msb != rhs.msb) {
+                                      return lhs.msb > rhs.msb;
+                                  }
+                                  return lhs.lsb > rhs.lsb;
+                              });
+
+                    WriteBackMemo::Slice muxSlice = buildFullSlice(*entry, muxValue);
+                    for (const Range& range : mergedRanges) {
+                        WriteBackMemo::Slice slice = muxSlice;
+                        slice.msb = range.msb;
+                        slice.lsb = range.lsb;
+                        slice.value = sliceExistingValue(muxSlice, range.msb, range.lsb);
+                        if (slice.value) {
+                            mergedState.slices.push_back(std::move(slice));
+                        }
+                    }
+                }
+                else {
+                    mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
+                }
+            }
+            else {
+                mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
+            }
         }
         mergedState.composedBlocking = muxValue;
         mergedState.composedAll = muxValue;
@@ -9887,6 +9955,10 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                        std::vector<const slang::ast::ProceduralBlockSymbol*>>
         regDriverBlocks;
     regDriverBlocks.reserve(candidates.size());
+    std::unordered_map<const slang::ast::ValueSymbol*,
+                       std::vector<const slang::ast::ProceduralBlockSymbol*>>
+        netDriverBlocks;
+    netDriverBlocks.reserve(candidates.size());
 
     auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver,
                           const slang::ast::ProceduralBlockSymbol* block = nullptr) {
@@ -9900,8 +9972,10 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
 
         auto [driverIt, _] = driverKinds.emplace(&symbol, MemoDriverKind::None);
         MemoDriverKind& state = driverIt->second;
-        if (driver == MemoDriverKind::Reg && block) {
-            auto& owners = regDriverBlocks[&symbol];
+        if (block) {
+            auto& owners = driver == MemoDriverKind::Reg
+                               ? regDriverBlocks[&symbol]
+                               : netDriverBlocks[&symbol];
             if (std::find(owners.begin(), owners.end(), block) == owners.end()) {
                 owners.push_back(block);
             }
@@ -9995,6 +10069,7 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
 
         const bool isNetSymbol = symbol && symbol->kind == slang::ast::SymbolKind::Net;
+        const bool isVarSymbol = symbol && symbol->kind == slang::ast::SymbolKind::Variable;
         const bool netOnly = hasDriver(driver, MemoDriverKind::Net) &&
                              !hasDriver(driver, MemoDriverKind::Reg);
         const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
@@ -10012,8 +10087,12 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         // Wires with an initializer may not be recorded as having drivers; still treat them as nets
         // so RHS conversion can resolve the NamedValue.
         const bool treatAsDriverlessNet = isNetSymbol && !hasDriver(driver, MemoDriverKind::Reg);
+        const bool treatAsDriverlessVar = isVarSymbol && driver == MemoDriverKind::None;
 
-        if (netOnly || treatAsDriverlessNet) {
+        if (netOnly || treatAsDriverlessNet || treatAsDriverlessVar) {
+            if (auto it = netDriverBlocks.find(symbol); it != netDriverBlocks.end()) {
+                entry.multiDriver = it->second.size() > 1;
+            }
             nets.push_back(entry);
         }
         else if (regOnly) {

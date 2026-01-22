@@ -19,7 +19,7 @@
 4. 对 coverage 中每个目标：
    - 调用 `rebuildShadowValue` 得到 true/false branch 的完整 Value（缺失位段以 0 补齐，等效于 `pmux` 中的“无驱动”填 0）。
    - 创建 `kMux`，条件为步骤1中得到的布尔值，true/false 分支分别对接上述 Value。
-   - 把结果写回父 ShadowFrame，等效于 Yosys 在 `proc_mux` 里把 `pmux` 结果重新赋给左值。
+   - 把结果写回父 ShadowFrame，等效于 Yosys 在 `proc_mux` 里把 `pmux` 结果重新赋给左值；若该目标被标记为多组合驱动，则仅写回被触达的切片范围，避免跨 always 生成全宽写回导致冲突。
 5. 合并完成后，父 ShadowFrame 即表示 `if` 语句执行完的 SSA 状态，后续语句继续在其上原地追加。
 
 ## case 降级流程

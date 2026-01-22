@@ -10,11 +10,13 @@
   - `width` / `isSigned`：记录 flatten 后的总 bit 宽度与符号属性。
   - `fields`：一组 `SignalMemoField`，描述结构体 / 数组被 flatten 后每个叶子字段的路径、位宽及位段 `[msb:lsb]`。TypeHelper 会保证字段按高位到低位排列，便于切片。
   - `value`：指向 `grh::Graph` 中 materialize 出来的 `Value`。net 类信号不会绑定 `stateOp`。
+  - `multiDriver`：标记是否有多个组合过程块驱动该信号，用于后续切片合并时避免生成全宽写回导致冲突。
 - **生命周期**
   1. `Elaborate::collectSignalMemos` 遍历 `InstanceBodySymbol` 的成员，过滤出固定位宽的 `NetSymbol` / `VariableSymbol`，并记录驱动类别；
   2. `Elaborate::ensureNetValues` 在模块第一次 elaboration 时，根据 memo 信息创建/复用 `grh::Value`；
   3. `Elaborate::processNetInitializers` 扫描带 initializer 的 wire，使用 Comb RHS 转换初值并借助 WriteBackMemo 生成连续赋值；即便没有显式驱动也会把此类 wire 留在 netMemo 中，保证 RHS 可解析。
-  4. 后续 RHS/LHS 访问通过 `SignalMemoEntry` 里的字段直接找到该 `Value`。
+  4. 对于无驱动的 `variable`（端口连接或占位场景常见），仍按 net 进入 netMemo，确保 RHS NamedValue 可解析且可参与 comb 合并。
+  5. 后续 RHS/LHS 访问通过 `SignalMemoEntry` 里的字段直接找到该 `Value`。
 
 ## Reg Memo
 - **定义位置**：与 Net Memo 共用 `SignalMemoEntry`，额外使用 `drivingBlock`、`stateOp` 字段，实例存放于 `Elaborate::regMemo_`。
