@@ -90,6 +90,12 @@ public:
     void todo(const slang::ast::Symbol& symbol, std::string message);
     void nyi(const slang::ast::Symbol& symbol, std::string message);
     void warn(const slang::ast::Symbol& symbol, std::string message);
+    void todo(const slang::SourceLocation& location, std::string message,
+              std::string originSymbol = {});
+    void nyi(const slang::SourceLocation& location, std::string message,
+             std::string originSymbol = {});
+    void warn(const slang::SourceLocation& location, std::string message,
+              std::string originSymbol = {});
 
     const std::vector<ElaborateDiagnostic>& messages() const noexcept { return messages_; }
     bool empty() const noexcept { return messages_.empty(); }
@@ -97,6 +103,8 @@ public:
 private:
     void add(ElaborateDiagnosticKind kind, const slang::ast::Symbol& symbol,
              std::string message);
+    void add(ElaborateDiagnosticKind kind, std::string originSymbol,
+             std::optional<slang::SourceLocation> location, std::string message);
 
     std::vector<ElaborateDiagnostic> messages_;
 };

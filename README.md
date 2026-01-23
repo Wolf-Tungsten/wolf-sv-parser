@@ -61,6 +61,8 @@ wolf-sv-parser 支持 slang 的所有标准命令行选项，包括：
 
 更多选项请参考 [slang 文档](https://sv-lang.com/user-manual.html)。
 
+注意：wolf-sv-parser 默认启用 `--single-unit`，将所有输入文件视为单个编译单元；如需隔离编译单元，请分多次调用或使用 `-v/--libfile`。
+
 ## 项目结构
 
 ```

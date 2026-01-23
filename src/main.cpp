@@ -28,6 +28,7 @@ int main(int argc, char **argv)
 {
     Driver driver;
     driver.addStandardArgs();
+    driver.options.singleUnit = true;
     driver.options.compilationFlags.at(slang::ast::CompilationFlags::AllowTopLevelIfacePorts) = true;
 
     std::optional<bool> dumpAst;
@@ -148,6 +149,42 @@ int main(int argc, char **argv)
     if (!elaborateDiagnostics.empty())
     {
         const auto *sourceManager = compilation->getSourceManager();
+        auto extractLine = [](std::string_view text, size_t offset) -> std::string_view {
+            if (offset > text.size()) {
+                return {};
+            }
+            size_t lineStart = text.rfind('\n', offset);
+            if (lineStart == std::string_view::npos) {
+                lineStart = 0;
+            } else {
+                lineStart += 1;
+            }
+            size_t lineEnd = text.find('\n', offset);
+            if (lineEnd == std::string_view::npos) {
+                lineEnd = text.size();
+            }
+            return text.substr(lineStart, lineEnd - lineStart);
+        };
+        auto trimLine = [](std::string_view line) -> std::string {
+            size_t start = 0;
+            while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) {
+                start++;
+            }
+            size_t end = line.size();
+            while (end > start &&
+                   std::isspace(static_cast<unsigned char>(line[end - 1]))) {
+                end--;
+            }
+            return std::string(line.substr(start, end - start));
+        };
+        auto shortenLine = [](const std::string& line, size_t maxLen) -> std::string {
+            if (line.size() <= maxLen) {
+                return line;
+            }
+            std::string clipped = line.substr(0, maxLen);
+            clipped.append("...");
+            return clipped;
+        };
         for (const auto &message : elaborateDiagnostics.messages())
         {
             const char *tag = "NYI";
@@ -168,6 +205,7 @@ int main(int argc, char **argv)
             std::cerr << "[elaborate] [" << tag << "] ";
 
             bool printedLocation = false;
+            std::string statementSnippet;
             if (sourceManager && message.location && message.location->valid())
             {
                 const auto loc = sourceManager->getFullyOriginalLoc(*message.location);
@@ -175,8 +213,19 @@ int main(int argc, char **argv)
                 {
                     auto fileName = sourceManager->getFileName(loc);
                     auto line = sourceManager->getLineNumber(loc);
-                    std::cerr << fileName << ":" << line << " ";
+                    auto column = sourceManager->getColumnNumber(loc);
+                    std::cerr << fileName << ":" << line << ":" << column << " ";
                     printedLocation = true;
+
+                    const std::string_view text = sourceManager->getSourceText(loc.buffer());
+                    if (!text.empty())
+                    {
+                        const std::string_view lineText = extractLine(text, loc.offset());
+                        if (!lineText.empty())
+                        {
+                            statementSnippet = shortenLine(trimLine(lineText), 200);
+                        }
+                    }
                 }
             }
             if (!printedLocation && !message.originSymbol.empty())
@@ -184,6 +233,10 @@ int main(int argc, char **argv)
                 std::cerr << message.originSymbol << " ";
             }
             std::cerr << "- " << message.message << '\n';
+            if (!statementSnippet.empty())
+            {
+                std::cerr << "  statement: " << statementSnippet << '\n';
+            }
         }
     }
 

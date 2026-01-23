@@ -5105,9 +5105,9 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
         return;
     }
 
-    auto emitWireAssignmentDiag = [&](const slang::ast::ValueSymbol& target) {
-        std::string message = std::string(modeLabel());
-        message.append(" performs procedural assignment to wire ");
+    auto emitWireAssignmentDiag = [&](const slang::ast::ValueSymbol& target,
+                                      const slang::ast::Expression* originExpr) {
+        std::string message = "procedural block performs procedural assignment to wire ";
         if (!target.name.empty()) {
             message.append(target.name);
         }
@@ -5115,7 +5115,13 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
             message.append("signal");
         }
         message.append("; declare it as logic/reg or use a continuous assign");
-        diagnostics_->nyi(target, std::move(message));
+        if (originExpr) {
+            diagnostics_->nyi(originExpr->sourceRange.start(), std::move(message),
+                              deriveSymbolPath(block_));
+        }
+        else {
+            diagnostics_->nyi(target, std::move(message));
+        }
     };
 
     auto reportWireAssignment = [&](const slang::ast::Expression& expr) -> bool {
@@ -5125,7 +5131,7 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
         }
         if (const slang::ast::ValueSymbol* target = resolveAssignedSymbol(assign->left())) {
             if (target->kind == slang::ast::SymbolKind::Net) {
-                emitWireAssignmentDiag(*target);
+                emitWireAssignmentDiag(*target, &expr);
                 return true;
             }
         }
@@ -5240,6 +5246,78 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
         return offending;
     };
 
+    auto findInvalidLocation = [&](const slang::ast::Statement& root)
+        -> std::optional<slang::SourceLocation> {
+        struct Finder : public slang::ast::ASTVisitor<Finder, true, true, true> {
+            std::optional<slang::SourceLocation> location;
+
+            static std::optional<slang::SourceLocation> pickLocation(
+                slang::SourceLocation primary, slang::SourceLocation fallback) {
+                if (primary.valid()) {
+                    return primary;
+                }
+                if (fallback.valid()) {
+                    return fallback;
+                }
+                return std::nullopt;
+            }
+
+            void handle(const slang::ast::InvalidExpression& expr) {
+                if (location) {
+                    return;
+                }
+                if (expr.child) {
+                    expr.child->visit(*this);
+                }
+                if (location) {
+                    return;
+                }
+                const slang::SourceLocation primary = expr.sourceRange.start();
+                slang::SourceLocation fallback;
+                if (expr.child) {
+                    fallback = expr.child->sourceRange.start();
+                }
+                location = pickLocation(primary, fallback);
+            }
+
+            void handle(const slang::ast::InvalidStatement& stmt) {
+                if (location) {
+                    return;
+                }
+                if (stmt.child) {
+                    stmt.child->visit(*this);
+                }
+                if (location) {
+                    return;
+                }
+                const slang::SourceLocation primary = stmt.sourceRange.start();
+                slang::SourceLocation fallback;
+                if (stmt.child) {
+                    fallback = stmt.child->sourceRange.start();
+                }
+                location = pickLocation(primary, fallback);
+            }
+
+            void handle(const slang::ast::ExpressionStatement& stmt) {
+                if (location) {
+                    return;
+                }
+                visitDefault(stmt);
+            }
+
+            void handle(const slang::ast::StatementList& stmt) {
+                if (location) {
+                    return;
+                }
+                visitDefault(stmt);
+            }
+        };
+
+        Finder finder;
+        root.visit(finder);
+        return finder.location;
+    };
+
     if (const auto* invalid = stmt.as_if<slang::ast::InvalidStatement>()) {
         if (const slang::ast::Statement* child = invalid->child) {
             if (const auto* exprStmt = child->as_if<slang::ast::ExpressionStatement>()) {
@@ -5248,35 +5326,49 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
                 }
             }
             if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(*child)) {
-                emitWireAssignmentDiag(*netTarget);
+                emitWireAssignmentDiag(*netTarget, nullptr);
                 return;
             }
             if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(stmt)) {
-                emitWireAssignmentDiag(*netTarget);
+                emitWireAssignmentDiag(*netTarget, nullptr);
                 return;
             }
             if (&stmt != &block_.getBody()) {
                 if (const slang::ast::ValueSymbol* netTarget = findWireAssignment(block_.getBody())) {
-                    emitWireAssignmentDiag(*netTarget);
+                    emitWireAssignmentDiag(*netTarget, nullptr);
                     return;
                 }
             }
             if (const slang::ast::ValueSymbol* netTarget = findWireAssignmentInBlock()) {
-                emitWireAssignmentDiag(*netTarget);
+                emitWireAssignmentDiag(*netTarget, nullptr);
                 return;
             }
-            std::string message = std::string(modeLabel());
-            message.append(
-                " contains an invalid statement; a common cause is procedural assignment to a "
-                "wire (e.g., port not declared logic/reg)");
-            diagnostics_->nyi(block_, std::move(message));
+            const slang::ast::Statement* originStmt = &stmt;
+            if (invalid->child) {
+                originStmt = invalid->child;
+            }
+            std::optional<slang::SourceLocation> originLocation =
+                findInvalidLocation(*originStmt);
+            if (!originLocation) {
+                originLocation = originStmt->sourceRange.start();
+            }
+            std::string message =
+                "procedural block contains an invalid statement; common causes include "
+                "procedural assignment to a wire (e.g., port not declared logic/reg) or "
+                "undefined preprocessor macros in the block";
+            diagnostics_->nyi(originLocation.value_or(slang::SourceLocation{}),
+                              std::move(message), deriveSymbolPath(block_));
             return;
         }
     }
 
-    std::string message = std::string(modeLabel());
-    message.append(" contains an invalid statement (semantic analysis failed)");
-    diagnostics_->nyi(block_, std::move(message));
+    std::string message = "procedural block contains an invalid statement (semantic analysis failed)";
+    std::optional<slang::SourceLocation> originLocation = findInvalidLocation(stmt);
+    if (!originLocation) {
+        originLocation = stmt.sourceRange.start();
+    }
+    diagnostics_->nyi(originLocation.value_or(slang::SourceLocation{}),
+                      std::move(message), deriveSymbolPath(block_));
 }
 
 void AlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
@@ -8678,13 +8770,38 @@ void ElaborateDiagnostics::warn(const slang::ast::Symbol& symbol, std::string me
     add(ElaborateDiagnosticKind::Warning, symbol, std::move(message));
 }
 
+void ElaborateDiagnostics::todo(const slang::SourceLocation& location, std::string message,
+                                std::string originSymbol) {
+    add(ElaborateDiagnosticKind::Todo, std::move(originSymbol),
+        location.valid() ? std::optional(location) : std::nullopt, std::move(message));
+}
+
+void ElaborateDiagnostics::nyi(const slang::SourceLocation& location, std::string message,
+                               std::string originSymbol) {
+    add(ElaborateDiagnosticKind::NotYetImplemented, std::move(originSymbol),
+        location.valid() ? std::optional(location) : std::nullopt, std::move(message));
+}
+
+void ElaborateDiagnostics::warn(const slang::SourceLocation& location, std::string message,
+                                std::string originSymbol) {
+    add(ElaborateDiagnosticKind::Warning, std::move(originSymbol),
+        location.valid() ? std::optional(location) : std::nullopt, std::move(message));
+}
+
 void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, const slang::ast::Symbol& symbol,
+                               std::string message) {
+    add(kind, deriveSymbolPath(symbol),
+        symbol.location.valid() ? std::optional(symbol.location) : std::nullopt, std::move(message));
+}
+
+void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, std::string originSymbol,
+                               std::optional<slang::SourceLocation> location,
                                std::string message) {
     ElaborateDiagnostic diagnostic{
         .kind = kind,
         .message = std::move(message),
-        .originSymbol = deriveSymbolPath(symbol),
-        .location = symbol.location.valid() ? std::optional(symbol.location) : std::nullopt};
+        .originSymbol = std::move(originSymbol),
+        .location = location};
     messages_.push_back(std::move(diagnostic));
 }
 
