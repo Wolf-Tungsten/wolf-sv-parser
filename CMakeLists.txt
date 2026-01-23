@@ -452,6 +452,24 @@ target_compile_definitions(elaborate-blackbox
 
 register_test_exe(elaborate-blackbox)
 
+# elaborate: inout
+add_executable(elaborate-inout
+    tests/elaborate/test_elaborate_inout.cpp
+)
+
+target_link_libraries(elaborate-inout
+    PRIVATE
+        elaborate
+        grh
+)
+
+target_compile_definitions(elaborate-inout
+    PRIVATE
+        WOLF_SV_ELAB_INOUT_DATA_PATH="${ELABORATE_INPUT_DIR}/inout.sv"
+)
+
+register_test_exe(elaborate-inout)
+
 # elaborate: dpic
 add_executable(elaborate-dpic
     tests/elaborate/test_elaborate_dpic.cpp

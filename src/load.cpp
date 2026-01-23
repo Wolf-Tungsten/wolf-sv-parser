@@ -705,6 +705,7 @@ namespace grh::ir::load
             std::unordered_map<std::string, ValueId> valueBySymbol;
             std::unordered_set<uint32_t> declaredInputs;
             std::unordered_set<uint32_t> declaredOutputs;
+            std::unordered_set<uint32_t> declaredInouts;
 
             const auto &valuesArray = valuesIt->second.asArray("graph.vals");
             for (const auto &valueEntry : valuesArray)
@@ -719,9 +720,14 @@ namespace grh::ir::load
 
                 bool isInput = valueObj.at("in").asBool("value.in");
                 bool isOutput = valueObj.at("out").asBool("value.out");
-                if (isInput && isOutput)
+                bool isInout = false;
+                if (auto inoutIt = valueObj.find("inout"); inoutIt != valueObj.end())
                 {
-                    throw std::runtime_error("Value cannot be both input and output in JSON");
+                    isInout = inoutIt->second.asBool("value.inout");
+                }
+                if ((isInput && isOutput) || (isInout && (isInput || isOutput)))
+                {
+                    throw std::runtime_error("Value cannot be both input/output/inout in JSON");
                 }
 
                 if (isInput)
@@ -731,6 +737,10 @@ namespace grh::ir::load
                 if (isOutput)
                 {
                     declaredOutputs.insert(valueSym.value);
+                }
+                if (isInout)
+                {
+                    declaredInouts.insert(valueSym.value);
                 }
 
                 if (auto dbgIt = valueObj.find("loc"); dbgIt != valueObj.end())
@@ -781,6 +791,38 @@ namespace grh::ir::load
                 };
                 parsePortArray("in", true);
                 parsePortArray("out", false);
+
+                auto inoutIt = portsObj.find("inout");
+                if (inoutIt != portsObj.end())
+                {
+                    const auto &portArray = inoutIt->second.asArray("graph.ports.inout");
+                    for (const auto &entry : portArray)
+                    {
+                        const auto &portObj = entry.asObject("graph.inout_port");
+                        auto nameField = portObj.find("name");
+                        auto inField = portObj.find("in");
+                        auto outField = portObj.find("out");
+                        auto oeField = portObj.find("oe");
+                        if (nameField == portObj.end() || inField == portObj.end() ||
+                            outField == portObj.end() || oeField == portObj.end())
+                        {
+                            throw std::runtime_error("Inout port entry missing name/in/out/oe");
+                        }
+                        const std::string inName = inField->second.asString("graph.port.in");
+                        const std::string outName = outField->second.asString("graph.port.out");
+                        const std::string oeName = oeField->second.asString("graph.port.oe");
+                        auto inIt = valueBySymbol.find(inName);
+                        auto outIt = valueBySymbol.find(outName);
+                        auto oeIt = valueBySymbol.find(oeName);
+                        if (inIt == valueBySymbol.end() || outIt == valueBySymbol.end() ||
+                            oeIt == valueBySymbol.end())
+                        {
+                            throw std::runtime_error("Inout port references unknown value");
+                        }
+                        SymbolId portName = graph.internSymbol(nameField->second.asString("graph.port.name"));
+                        graph.bindInoutPort(portName, inIt->second, outIt->second, oeIt->second);
+                    }
+                }
             }
             else
             {
@@ -830,6 +872,45 @@ namespace grh::ir::load
                 if (!value.isOutput())
                 {
                     throw std::runtime_error("Value marked out=true but not bound to output port: " + std::string(graph.symbolText(sym)));
+                }
+            }
+
+            for (const auto &port : graph.inoutPorts())
+            {
+                Value inValue = graph.getValue(port.in);
+                Value outValue = graph.getValue(port.out);
+                Value oeValue = graph.getValue(port.oe);
+                if (inValue.isInput() || inValue.isOutput() || outValue.isInput() ||
+                    outValue.isOutput() || oeValue.isInput() || oeValue.isOutput())
+                {
+                    throw std::runtime_error("Inout port values must not be marked as input/output");
+                }
+                if (!inValue.isInout() || !outValue.isInout() || !oeValue.isInout())
+                {
+                    throw std::runtime_error("Inout port values must be marked as inout");
+                }
+            }
+
+            for (const auto &symbolValue : declaredInouts)
+            {
+                SymbolId sym{symbolValue};
+                ValueId valueId = graph.findValue(sym);
+                if (!valueId.valid())
+                {
+                    throw std::runtime_error("Value marked inout=true not found in graph");
+                }
+                bool seen = false;
+                for (const auto &port : graph.inoutPorts())
+                {
+                    if (port.in == valueId || port.out == valueId || port.oe == valueId)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen)
+                {
+                    throw std::runtime_error("Value marked inout=true but not bound to inout port");
                 }
             }
 

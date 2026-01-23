@@ -15,13 +15,14 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
   - `sym`: 符号名。
   - `w`: 位宽。
   - `sgn`: 是否有符号。
-  - `in` / `out`: 输入/输出标记（不可同时为真）。
+  - `in` / `out` / `inout`: 输入/输出/inout 标记（不可同时为真）。
   - `def`: 可选，定义该值的 Operation 符号。
   - `users`: 使用者数组 `{ op, idx }`，描述操作与操作数索引。
   - `loc`: 可选，源码位置 `{ file, line, col, endLine, endCol }`。
 - `ports`: 端口对象。
   - `in`: 输入端口数组，每项 `{ name, val }`。
   - `out`: 输出端口数组，每项 `{ name, val }`。
+  - `inout`: inout 端口数组，每项 `{ name, in, out, oe }`。
 - `ops`: 操作列表，保持创建顺序。每个操作包含：
   - `sym`: 符号名。
   - `kind`: 操作类型字符串（来自 `grh::toString(OperationKind)`）。

@@ -90,6 +90,23 @@ namespace
             }
         }
 
+        auto lhsInoutPorts = lhs.inoutPorts();
+        auto rhsInoutPorts = rhs.inoutPorts();
+        if (lhsInoutPorts.size() != rhsInoutPorts.size())
+        {
+            return "inout port count mismatch";
+        }
+        for (std::size_t i = 0; i < lhsInoutPorts.size(); ++i)
+        {
+            if (lhsInoutPorts[i].name != rhsInoutPorts[i].name ||
+                lhsInoutPorts[i].in != rhsInoutPorts[i].in ||
+                lhsInoutPorts[i].out != rhsInoutPorts[i].out ||
+                lhsInoutPorts[i].oe != rhsInoutPorts[i].oe)
+            {
+                return "inout port mismatch";
+            }
+        }
+
         for (std::size_t i = 0; i < lhsOps.size(); ++i)
         {
             auto opId = lhsOps[i];
@@ -171,6 +188,10 @@ namespace
             if (lhs.valueIsOutput(valueId) != rhs.valueIsOutput(valueId))
             {
                 return "valueIsOutput mismatch";
+            }
+            if (lhs.valueIsInout(valueId) != rhs.valueIsInout(valueId))
+            {
+                return "valueIsInout mismatch";
             }
             if (lhs.valueDef(valueId) != rhs.valueDef(valueId))
             {

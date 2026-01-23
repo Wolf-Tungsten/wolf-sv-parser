@@ -1243,6 +1243,7 @@ LHSConverter::LHSConverter(LHSConverter::Context context) :
     netMemo_(context.netMemo),
     regMemo_(context.regMemo),
     memMemo_(context.memMemo),
+    inoutOverrides_(context.inoutOverrides),
     origin_(context.origin),
     diagnostics_(context.diagnostics),
     sourceManager_(context.sourceManager),
@@ -1402,6 +1403,12 @@ const SignalMemoEntry* LHSConverter::resolveMemoEntry(const slang::ast::Expressi
 }
 
 const SignalMemoEntry* LHSConverter::findMemoEntry(const slang::ast::ValueSymbol& symbol) const {
+    if (inoutOverrides_) {
+        auto it = inoutOverrides_->find(&symbol);
+        if (it != inoutOverrides_->end()) {
+            return it->second;
+        }
+    }
     // Prefer memory classification over reg when both views contain the symbol.
     for (const SignalMemoEntry& entry : netMemo_) {
         if (entry.symbol == &symbol) {
@@ -2561,13 +2568,53 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     }
 
     std::vector<ValueId> inputOperands;
+    std::vector<ValueId> inoutInputOperands;
     std::vector<std::string> inputNames;
+    std::vector<std::string> inoutNames;
     std::vector<ValueId> outputValues;
+    std::vector<ValueId> inoutOutputValues;
     std::vector<std::string> outputNames;
     inputOperands.reserve(entry.args.size());
+    inoutInputOperands.reserve(entry.args.size());
     inputNames.reserve(entry.args.size());
+    inoutNames.reserve(entry.args.size());
     outputValues.reserve(entry.args.size());
+    inoutOutputValues.reserve(entry.args.size());
     outputNames.reserve(entry.args.size());
+
+    auto handleOutputArg = [&](const DpiImportArg& argInfo, const slang::ast::Expression* actual,
+                               std::vector<ValueId>& outValues,
+                               std::vector<std::string>& outNames) -> bool {
+        std::string valueName = makeControlValueName("dpic_out");
+        ValueId resultValue =
+            createValue(graph(), valueName, argInfo.width > 0 ? argInfo.width : 1,
+                        argInfo.isSigned);
+        applyDebug(graph(), resultValue, makeDebugInfo(sourceManager_, actual));
+        if (!lhsConverter_->convertExpression(*actual, resultValue)) {
+            const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*actual);
+            const SignalMemoEntry* entry =
+                symbol ? findMemoEntryForSymbol(*symbol) : nullptr;
+            if (!entry) {
+                if (diagnostics()) {
+                    std::string msg = "Failed to convert DPI output argument LHS for ";
+                    msg.append(argInfo.name);
+                    msg.append(" (expr kind=");
+                    msg.append(std::to_string(static_cast<int>(actual->kind)));
+                    msg.push_back(')');
+                    diagnostics()->nyi(block(), std::move(msg));
+                }
+                return false;
+            }
+            WriteBackMemo::Slice slice = buildFullSlice(*entry, resultValue);
+            slice.originExpr = actual;
+            std::vector<WriteBackMemo::Slice> slices;
+            slices.push_back(std::move(slice));
+            handleEntryWrite(*entry, std::move(slices));
+        }
+        outValues.push_back(resultValue);
+        outNames.push_back(argInfo.name);
+        return true;
+    };
 
     for (std::size_t idx = 0; idx < entry.args.size(); ++idx) {
         const DpiImportArg& argInfo = entry.args[idx];
@@ -2578,8 +2625,15 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
             }
             return true;
         }
+        const slang::ast::Expression* actualExpr = actual;
+        if (actualExpr->kind == slang::ast::ExpressionKind::Assignment) {
+            const auto& assign = actualExpr->as<slang::ast::AssignmentExpression>();
+            if (assign.isLValueArg()) {
+                actualExpr = &assign.left();
+            }
+        }
         if (argInfo.direction == slang::ast::ArgumentDirection::In) {
-            ValueId value = rhsConverter_->convert(*actual);
+            ValueId value = rhsConverter_->convert(*actualExpr);
             if (!value.valid()) {
                 return true;
             }
@@ -2595,35 +2649,29 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
             inputOperands.push_back(value);
             inputNames.push_back(argInfo.name);
         }
-        else {
-            std::string valueName = makeControlValueName("dpic_out");
-            ValueId resultValue =
-                createValue(graph(), valueName, argInfo.width > 0 ? argInfo.width : 1,
-                            argInfo.isSigned);
-            applyDebug(graph(), resultValue, makeDebugInfo(sourceManager_, actual));
-            if (!lhsConverter_->convertExpression(*actual, resultValue)) {
-                const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*actual);
-                const SignalMemoEntry* entry =
-                    symbol ? findMemoEntryForSymbol(*symbol) : nullptr;
-                if (!entry) {
-                    if (diagnostics()) {
-                        std::string msg = "Failed to convert DPI output argument LHS for ";
-                        msg.append(argInfo.name);
-                        msg.append(" (expr kind=");
-                        msg.append(std::to_string(static_cast<int>(actual->kind)));
-                        msg.push_back(')');
-                        diagnostics()->nyi(block(), std::move(msg));
-                    }
-                    return true;
-                }
-                WriteBackMemo::Slice slice = buildFullSlice(*entry, resultValue);
-                slice.originExpr = actual;
-                std::vector<WriteBackMemo::Slice> slices;
-                slices.push_back(std::move(slice));
-                handleEntryWrite(*entry, std::move(slices));
+        else if (argInfo.direction == slang::ast::ArgumentDirection::Out) {
+            if (!handleOutputArg(argInfo, actualExpr, outputValues, outputNames)) {
+                return true;
             }
-            outputValues.push_back(resultValue);
-            outputNames.push_back(argInfo.name);
+        }
+        else {
+            ValueId value = rhsConverter_->convert(*actualExpr);
+            if (!value.valid()) {
+                return true;
+            }
+            if (graph().getValue(value).width() != argInfo.width) {
+                if (diagnostics()) {
+                    std::ostringstream oss;
+                    oss << "DPI input arg width mismatch: expected " << argInfo.width
+                        << " actual " << graph().getValue(value).width();
+                    diagnostics()->nyi(block(), oss.str());
+                }
+                return true;
+            }
+            inoutInputOperands.push_back(value);
+            if (!handleOutputArg(argInfo, actualExpr, inoutOutputValues, inoutNames)) {
+                return true;
+            }
         }
     }
 
@@ -2635,7 +2683,13 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     for (ValueId operand : inputOperands) {
         addOperand(graph(), op, operand);
     }
+    for (ValueId operand : inoutInputOperands) {
+        addOperand(graph(), op, operand);
+    }
     for (ValueId result : outputValues) {
+        addResult(graph(), op, result);
+    }
+    for (ValueId result : inoutOutputValues) {
         addResult(graph(), op, result);
     }
     if (clockPolarityAttr_) {
@@ -2656,6 +2710,9 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     }
     setAttr(graph(), op, "inArgName", inputNames);
     setAttr(graph(), op, "outArgName", outputNames);
+    if (!inoutNames.empty()) {
+        setAttr(graph(), op, "inoutArgName", inoutNames);
+    }
     return true;
 }
 
@@ -8701,6 +8758,19 @@ Elaborate::peekDpiImports(const slang::ast::InstanceBodySymbol& body) const {
     return {};
 }
 
+const InoutPortMemo* Elaborate::findInoutMemo(const slang::ast::InstanceBodySymbol& body,
+                                              const slang::ast::ValueSymbol& symbol) const {
+    auto it = inoutMemo_.find(&body);
+    if (it == inoutMemo_.end()) {
+        return nullptr;
+    }
+    auto memoIt = it->second.find(&symbol);
+    if (memoIt == it->second.end()) {
+        return nullptr;
+    }
+    return &memoIt->second;
+}
+
 const BlackboxMemoEntry*
 Elaborate::peekBlackboxMemo(const slang::ast::InstanceBodySymbol& body) const {
     if (auto it = blackboxMemo_.find(&body); it != blackboxMemo_.end()) {
@@ -8788,13 +8858,54 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
             const bool isSigned = typeInfo.isSigned;
 
             std::string portName(port->name);
-            ValueId value = createValue(graph, portName, width, isSigned);
-            applyDebug(graph, value, makeDebugInfo(sourceManager_, port));
+            auto createPortValue = [&](std::string_view suffix, bool signedValue) -> ValueId {
+                std::string name = portName;
+                name.append(suffix);
+                ValueId value = createValue(graph, name, width, signedValue);
+                applyDebug(graph, value, makeDebugInfo(sourceManager_, port));
+                return value;
+            };
+
+            ValueId value = ValueId::invalid();
+            ValueId inValue = ValueId::invalid();
+            ValueId outValue = ValueId::invalid();
+            ValueId oeValue = ValueId::invalid();
+            if (port->direction == slang::ast::ArgumentDirection::InOut) {
+                inValue = createPortValue("__in", isSigned);
+                outValue = createPortValue("__out", isSigned);
+                oeValue = createPortValue("__oe", /*signedValue=*/false);
+                value = inValue;
+            }
+            else {
+                value = createPortValue("", isSigned);
+            }
+
             registerValueForSymbol(*port, value);
             if (const auto* internal = port->internalSymbol ?
                                            port->internalSymbol->as_if<slang::ast::ValueSymbol>()
                                            : nullptr) {
                 registerValueForSymbol(*internal, value);
+                if (port->direction == slang::ast::ArgumentDirection::InOut) {
+                    InoutPortMemo memo;
+                    memo.symbol = internal;
+                    memo.in = inValue;
+                    memo.out = outValue;
+                    memo.oe = oeValue;
+                    memo.outEntry.symbol = internal;
+                    memo.outEntry.type = &type;
+                    memo.outEntry.width = width;
+                    memo.outEntry.isSigned = isSigned;
+                    memo.outEntry.value = outValue;
+                    memo.outEntry.fields.reserve(typeInfo.fields.size());
+                    for (const auto& field : typeInfo.fields) {
+                        memo.outEntry.fields.push_back(
+                            SignalMemoField{field.path, field.msb, field.lsb, field.isSigned});
+                    }
+                    memo.oeEntry = memo.outEntry;
+                    memo.oeEntry.isSigned = false;
+                    memo.oeEntry.value = oeValue;
+                    inoutMemo_[&body][internal] = std::move(memo);
+                }
             }
 
             grh::ir::SymbolId portSym = graph.internSymbol(portName);
@@ -8806,6 +8917,12 @@ void Elaborate::populatePorts(const slang::ast::InstanceSymbol& instance,
                 graph.bindOutputPort(portSym, value);
                 break;
             case slang::ast::ArgumentDirection::InOut:
+                if (!inValue || !outValue || !oeValue) {
+                    handleUnsupportedPort(*port, "InOut port lacks values", diagnostics_);
+                    break;
+                }
+                graph.bindInoutPort(portSym, inValue, outValue, oeValue);
+                break;
             case slang::ast::ArgumentDirection::Ref:
                 handleUnsupportedPort(*port,
                                       std::string("direction ") +
@@ -9102,6 +9219,135 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .diagnostics = diagnostics_,
         .sourceManager = sourceManager_};
     CombRHSConverter converter(context);
+
+    const slang::ast::ValueSymbol* lhsSymbol = resolveAssignedSymbol(assignment->left());
+    const InoutPortMemo* inoutMemo =
+        lhsSymbol ? findInoutMemo(body, *lhsSymbol) : nullptr;
+    if (inoutMemo) {
+        auto isAllZLiteral = [&](const slang::ast::Expression& valueExpr) -> bool {
+            slang::ast::EvalContext eval(assign);
+            eval.reset();
+            slang::ConstantValue value = valueExpr.eval(eval);
+            if (!value || !value.isInteger()) {
+                return false;
+            }
+            const slang::SVInt& literal = value.integer();
+            const auto width = static_cast<int64_t>(literal.getBitWidth());
+            for (int64_t bit = 0; bit < width; ++bit) {
+                slang::logic_t bitVal = literal[static_cast<int32_t>(bit)];
+                if (bitVal.value != slang::logic_t::Z_VALUE) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        const auto* condExpr = assignment->right().as_if<slang::ast::ConditionalExpression>();
+        if (!condExpr || condExpr->conditions.empty() || condExpr->conditions.front().pattern) {
+            if (diagnostics_) {
+                diagnostics_->nyi(assign, "Inout assign must use a simple ternary with 'z'");
+            }
+            return;
+        }
+        const auto& condition = condExpr->conditions.front();
+        const slang::ast::Expression& trueExpr = condExpr->left();
+        const slang::ast::Expression& falseExpr = condExpr->right();
+        const bool trueIsZ = isAllZLiteral(trueExpr);
+        const bool falseIsZ = isAllZLiteral(falseExpr);
+        if (trueIsZ == falseIsZ) {
+            if (diagnostics_) {
+                diagnostics_->nyi(assign, "Inout ternary must have exactly one 'z' branch");
+            }
+            return;
+        }
+
+        const slang::ast::Expression& dataExpr = trueIsZ ? falseExpr : trueExpr;
+        ValueId dataValue = converter.convert(dataExpr);
+        if (!dataValue) {
+            return;
+        }
+
+        ValueId condValue = converter.convert(*condition.expr);
+        if (!condValue) {
+            return;
+        }
+        if (graph.getValue(condValue).width() > 1) {
+            OperationId reduce =
+                createOperation(graph, grh::ir::OperationKind::kReduceOr,
+                                makeUniqueOperationName(graph, "inout_cond_reduce"));
+            addOperand(graph, reduce, condValue);
+            ValueId reduced =
+                createValue(graph, makeUniqueOperationName(graph, "inout_cond"), 1, false);
+            addResult(graph, reduce, reduced);
+            condValue = reduced;
+        }
+        if (graph.getValue(condValue).width() != 1) {
+            if (diagnostics_) {
+                diagnostics_->nyi(assign, "Inout ternary condition must be 1-bit");
+            }
+            return;
+        }
+
+        ValueId oeValue = condValue;
+        if (trueIsZ) {
+            OperationId invOp =
+                createOperation(graph, grh::ir::OperationKind::kLogicNot,
+                                makeUniqueOperationName(graph, "inout_oe_not"));
+            addOperand(graph, invOp, condValue);
+            ValueId invVal =
+                createValue(graph, makeUniqueOperationName(graph, "inout_oe"), 1, false);
+            addResult(graph, invOp, invVal);
+            oeValue = invVal;
+        }
+
+        const int64_t targetWidth = inoutMemo->outEntry.width;
+        const int64_t oeWidth = graph.getValue(oeValue).width();
+        if (oeWidth != targetWidth) {
+            if (oeWidth == 1 && targetWidth > 1) {
+                OperationId repOp =
+                    createOperation(graph, grh::ir::OperationKind::kReplicate,
+                                    makeUniqueOperationName(graph, "inout_oe_rep"));
+                setAttr(graph, repOp, "rep", targetWidth);
+                addOperand(graph, repOp, oeValue);
+                ValueId repVal =
+                    createValue(graph, makeUniqueOperationName(graph, "inout_oe"), targetWidth,
+                                false);
+                addResult(graph, repOp, repVal);
+                oeValue = repVal;
+            }
+            else {
+                if (diagnostics_) {
+                    diagnostics_->nyi(assign, "Inout oe width mismatch");
+                }
+                return;
+            }
+        }
+
+        WriteBackMemo& memo = ensureWriteBackMemo(body);
+        std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*> outOverride;
+        std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*> oeOverride;
+        outOverride.emplace(inoutMemo->symbol, &inoutMemo->outEntry);
+        oeOverride.emplace(inoutMemo->symbol, &inoutMemo->oeEntry);
+
+        LHSConverter::Context lhsContext{
+            .graph = &graph,
+            .netMemo = netMemo,
+            .regMemo = {},
+            .memMemo = {},
+            .inoutOverrides = &outOverride,
+            .origin = &assign,
+            .diagnostics = diagnostics_,
+            .sourceManager = sourceManager_};
+        ContinuousAssignLHSConverter lhsOut(lhsContext, memo);
+        lhsOut.convert(*assignment, dataValue);
+
+        LHSConverter::Context oeContext = lhsContext;
+        oeContext.inoutOverrides = &oeOverride;
+        ContinuousAssignLHSConverter lhsOe(oeContext, memo);
+        lhsOe.convert(*assignment, oeValue);
+        return;
+    }
+
     ValueId rhsValue = converter.convert(assignment->right());
     if (!rhsValue) {
         return;
@@ -9112,6 +9358,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         .graph = &graph,
         .netMemo = netMemo,
         .regMemo = {},
+        .memMemo = {},
         .origin = &assign,
         .diagnostics = diagnostics_,
         .sourceManager = sourceManager_};
@@ -9248,6 +9495,12 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
 
     std::vector<std::string> inputPortNames;
     std::vector<std::string> outputPortNames;
+    std::vector<std::string> inoutPortNames;
+    std::vector<ValueId> inputOperands;
+    std::vector<ValueId> outputResults;
+    std::vector<ValueId> inoutOutOperands;
+    std::vector<ValueId> inoutOeOperands;
+    std::vector<ValueId> inoutInResults;
 
     for (const slang::ast::Symbol* portSymbol : childInstance.body.getPortList()) {
         if (!portSymbol) {
@@ -9274,24 +9527,19 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                 if (!value) {
                     break;
                 }
-                addOperand(parentGraph, op, value);
+                inputOperands.push_back(value);
                 inputPortNames.emplace_back(port->name);
                 break;
             }
             case slang::ast::ArgumentDirection::Out: {
                 ValueId resolved = expr ? resolveConnectionValue(*expr, parentGraph, port)
                                             : ValueId::invalid();
-                if (resolved && !parentGraph.getValue(resolved).definingOp()) {
-                    addResult(parentGraph, op, resolved);
-                    outputPortNames.emplace_back(port->name);
-                    break;
-                }
-
-                ValueId resultValue = makePortValue(*port);
+                const bool useDirect = resolved && !parentGraph.getValue(resolved).definingOp();
+                ValueId resultValue = useDirect ? resolved : makePortValue(*port);
                 if (!resultValue) {
                     break;
                 }
-                addResult(parentGraph, op, resultValue);
+                outputResults.push_back(resultValue);
                 outputPortNames.emplace_back(port->name);
 
                 const slang::ast::Expression* targetExpr = expr;
@@ -9301,7 +9549,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                         targetExpr = &assign.left();
                     }
                 }
-                if (targetExpr && portWriteMemo) {
+                if (!useDirect && targetExpr && portWriteMemo) {
                     LHSConverter::Context lhsContext{
                         .graph = &parentGraph,
                         .netMemo = netMemo,
@@ -9326,9 +9574,50 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                 break;
             }
             case slang::ast::ArgumentDirection::InOut:
+            {
+                if (!expr) {
+                    if (diagnostics_) {
+                        diagnostics_->nyi(*port, "Missing inout port connection during hierarchy elaboration");
+                    }
+                    break;
+                }
+                const slang::ast::Expression* targetExpr = expr;
+                if (targetExpr->kind == slang::ast::ExpressionKind::Assignment) {
+                    const auto& assign = targetExpr->as<slang::ast::AssignmentExpression>();
+                    if (assign.isLValueArg()) {
+                        targetExpr = &assign.left();
+                    }
+                }
+                if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
+                    if (diagnostics_) {
+                        diagnostics_->nyi(*port, "Hierarchical inout port connections are not supported");
+                    }
+                    break;
+                }
+                if (!targetExpr->as_if<slang::ast::NamedValueExpression>()) {
+                    if (diagnostics_) {
+                        diagnostics_->nyi(*port, "Inout port connections must be simple named values");
+                    }
+                    break;
+                }
+                const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*targetExpr);
+                const InoutPortMemo* inoutMemo =
+                    (symbol && contextBody) ? findInoutMemo(*contextBody, *symbol) : nullptr;
+                if (!inoutMemo) {
+                    if (diagnostics_) {
+                        diagnostics_->nyi(*port, "Inout port connection lacks inout value triple");
+                    }
+                    break;
+                }
+                inoutOutOperands.push_back(inoutMemo->out);
+                inoutOeOperands.push_back(inoutMemo->oe);
+                inoutInResults.push_back(inoutMemo->in);
+                inoutPortNames.emplace_back(port->name);
+                break;
+            }
             case slang::ast::ArgumentDirection::Ref:
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "InOut/Ref port directions are not supported yet");
+                    diagnostics_->nyi(*port, "Ref port directions are not supported yet");
                 }
                 break;
             default:
@@ -9355,10 +9644,27 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
         }
     }
 
+    for (ValueId operand : inputOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId operand : inoutOutOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId operand : inoutOeOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId result : outputResults) {
+        addResult(parentGraph, op, result);
+    }
+    for (ValueId result : inoutInResults) {
+        addResult(parentGraph, op, result);
+    }
+
     setAttr(parentGraph, op, "moduleName", targetGraph.symbol());
     setAttr(parentGraph, op, "instanceName", instanceName);
     setAttr(parentGraph, op, "inputPortName", inputPortNames);
     setAttr(parentGraph, op, "outputPortName", outputPortNames);
+    setAttr(parentGraph, op, "inoutPortName", inoutPortNames);
 }
 
 void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childInstance,
@@ -9434,6 +9740,12 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
 
     std::vector<std::string> inputPortNames;
     std::vector<std::string> outputPortNames;
+    std::vector<std::string> inoutPortNames;
+    std::vector<ValueId> inputOperands;
+    std::vector<ValueId> outputResults;
+    std::vector<ValueId> inoutOutOperands;
+    std::vector<ValueId> inoutOeOperands;
+    std::vector<ValueId> inoutInResults;
     inputPortNames.reserve(memo.ports.size());
     outputPortNames.reserve(memo.ports.size());
 
@@ -9473,7 +9785,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
                     << portMeta.width << ", got " << parentGraph.getValue(value).width() << ")";
                 diagnostics_->nyi(*port, oss.str());
             }
-            addOperand(parentGraph, op, value);
+            inputOperands.push_back(value);
             inputPortNames.emplace_back(portMeta.name);
             break;
         }
@@ -9492,7 +9804,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
             if (!resultValue) {
                 break;
             }
-            addResult(parentGraph, op, resultValue);
+            outputResults.push_back(resultValue);
             outputPortNames.emplace_back(portMeta.name);
 
             if (!useDirect && expr && portWriteMemo) {
@@ -9528,13 +9840,78 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
             }
             break;
         }
+        case slang::ast::ArgumentDirection::InOut: {
+            if (!expr) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(*port, "Missing inout port connection during blackbox elaboration");
+                }
+                break;
+            }
+            const slang::ast::Expression* targetExpr = expr;
+            if (targetExpr->kind == slang::ast::ExpressionKind::Assignment) {
+                const auto& assign = targetExpr->as<slang::ast::AssignmentExpression>();
+                if (assign.isLValueArg()) {
+                    targetExpr = &assign.left();
+                }
+            }
+            if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(*port, "Hierarchical inout port connections are not supported");
+                }
+                break;
+            }
+            if (!targetExpr->as_if<slang::ast::NamedValueExpression>()) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(*port, "Inout port connections must be simple named values");
+                }
+                break;
+            }
+            const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(*targetExpr);
+            const InoutPortMemo* inoutMemo =
+                (symbol && contextBody) ? findInoutMemo(*contextBody, *symbol) : nullptr;
+            if (!inoutMemo) {
+                if (diagnostics_) {
+                    diagnostics_->nyi(*port, "Inout port connection lacks inout value triple");
+                }
+                break;
+            }
+            if (diagnostics_ && portMeta.width > 0 &&
+                parentGraph.getValue(inoutMemo->out).width() != portMeta.width) {
+                std::ostringstream oss;
+                oss << "Port width mismatch for " << portMeta.name << " (expected "
+                    << portMeta.width << ", got " << parentGraph.getValue(inoutMemo->out).width()
+                    << ")";
+                diagnostics_->nyi(*port, oss.str());
+            }
+            inoutOutOperands.push_back(inoutMemo->out);
+            inoutOeOperands.push_back(inoutMemo->oe);
+            inoutInResults.push_back(inoutMemo->in);
+            inoutPortNames.emplace_back(portMeta.name);
+            break;
+        }
         default:
             if (diagnostics_) {
                 diagnostics_->nyi(*port,
-                                  "InOut/Ref port directions are not supported for blackbox");
+                                  "Ref port directions are not supported for blackbox");
             }
             break;
         }
+    }
+
+    for (ValueId operand : inputOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId operand : inoutOutOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId operand : inoutOeOperands) {
+        addOperand(parentGraph, op, operand);
+    }
+    for (ValueId result : outputResults) {
+        addResult(parentGraph, op, result);
+    }
+    for (ValueId result : inoutInResults) {
+        addResult(parentGraph, op, result);
     }
 
     std::vector<std::string> parameterNames;
@@ -9550,6 +9927,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
     setAttr(parentGraph, op, "instanceName", instanceName);
     setAttr(parentGraph, op, "inputPortName", inputPortNames);
     setAttr(parentGraph, op, "outputPortName", outputPortNames);
+    setAttr(parentGraph, op, "inoutPortName", inoutPortNames);
     setAttr(parentGraph, op, "parameterNames", parameterNames);
     setAttr(parentGraph, op, "parameterValues", parameterValues);
 }
@@ -9918,9 +10296,9 @@ Elaborate::ensureBlackboxMemo(const slang::ast::InstanceBodySymbol& body) {
                 switch (port->direction) {
                 case slang::ast::ArgumentDirection::In:
                 case slang::ast::ArgumentDirection::Out:
+                case slang::ast::ArgumentDirection::InOut:
                     entry.ports.push_back(std::move(memoPort));
                     break;
-                case slang::ast::ArgumentDirection::InOut:
                 case slang::ast::ArgumentDirection::Ref:
                     handleUnsupportedPort(
                         *port,
@@ -10133,7 +10511,8 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                 auto args = call.arguments();
                 for (std::size_t idx = 0; idx < entry.args.size(); ++idx) {
                     const DpiImportArg& argInfo = entry.args[idx];
-                    if (argInfo.direction != slang::ast::ArgumentDirection::Out) {
+                    if (argInfo.direction != slang::ast::ArgumentDirection::Out &&
+                        argInfo.direction != slang::ast::ArgumentDirection::InOut) {
                         continue;
                     }
                     if (idx >= args.size() || !args[idx]) {
@@ -10269,8 +10648,9 @@ void Elaborate::collectDpiImports(const slang::ast::InstanceBodySymbol& body) {
                     continue;
                 }
                 if (arg->direction != slang::ast::ArgumentDirection::In &&
-                    arg->direction != slang::ast::ArgumentDirection::Out) {
-                    report(*arg, "DPI import 仅支持 input/output 方向参数");
+                    arg->direction != slang::ast::ArgumentDirection::Out &&
+                    arg->direction != slang::ast::ArgumentDirection::InOut) {
+                    report(*arg, "DPI import 仅支持 input/output/inout 方向参数");
                     valid = false;
                     break;
                 }
@@ -10350,8 +10730,15 @@ void Elaborate::materializeDpiImports(const slang::ast::InstanceBodySymbol& body
         names.reserve(entry.args.size());
 
         for (const DpiImportArg& arg : entry.args) {
-            directions.emplace_back(arg.direction == slang::ast::ArgumentDirection::In ? "input"
-                                                                                       : "output");
+            if (arg.direction == slang::ast::ArgumentDirection::In) {
+                directions.emplace_back("input");
+            }
+            else if (arg.direction == slang::ast::ArgumentDirection::Out) {
+                directions.emplace_back("output");
+            }
+            else {
+                directions.emplace_back("inout");
+            }
             widths.push_back(arg.width);
             names.push_back(arg.name);
         }

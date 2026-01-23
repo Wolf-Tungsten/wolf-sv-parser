@@ -24,3 +24,24 @@ module dpic_stage24(
         end
     end
 endmodule
+
+module dpic_inout_case(
+    input  logic        clk,
+    input  logic        en,
+    input  logic [7:0]  seed,
+    output logic [7:0]  accum_out
+);
+    import "DPI-C" function void dpic_accum(
+        input  logic [7:0]  seed,
+        inout  logic [7:0]  accum
+    );
+
+    logic [7:0] accum;
+    assign accum_out = accum;
+
+    always_ff @(posedge clk) begin
+        if (en) begin
+            dpic_accum(seed, accum);
+        end
+    end
+endmodule

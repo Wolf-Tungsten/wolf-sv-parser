@@ -176,6 +176,16 @@ struct BlackboxMemoEntry {
     std::vector<BlackboxParameter> parameters;
 };
 
+/// Tracks GRH values and memo overrides for an inout port.
+struct InoutPortMemo {
+    const slang::ast::ValueSymbol* symbol = nullptr;
+    ValueId in = ValueId::invalid();
+    ValueId out = ValueId::invalid();
+    ValueId oe = ValueId::invalid();
+    SignalMemoEntry outEntry;
+    SignalMemoEntry oeEntry;
+};
+
 /// Records pending writes against memoized signals before SSA write-back.
 class WriteBackMemo {
 public:
@@ -248,6 +258,8 @@ public:
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
         std::span<const SignalMemoEntry> memMemo;
+        const std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*>*
+            inoutOverrides = nullptr;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
         const slang::SourceManager* sourceManager = nullptr;
@@ -330,6 +342,8 @@ private:
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
+    const std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*>*
+        inoutOverrides_ = nullptr;
     std::unordered_map<const slang::ast::Expression*, ValueId> cache_;
     bool suppressCache_ = false;
     std::size_t valueCounter_ = 0;
@@ -386,6 +400,8 @@ public:
         std::span<const SignalMemoEntry> netMemo;
         std::span<const SignalMemoEntry> regMemo;
         std::span<const SignalMemoEntry> memMemo;
+        const std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*>*
+            inoutOverrides = nullptr;
         const slang::ast::Symbol* origin = nullptr;
         ElaborateDiagnostics* diagnostics = nullptr;
         const slang::SourceManager* sourceManager = nullptr;
@@ -447,6 +463,8 @@ private:
     std::span<const SignalMemoEntry> netMemo_;
     std::span<const SignalMemoEntry> regMemo_;
     std::span<const SignalMemoEntry> memMemo_;
+    const std::unordered_map<const slang::ast::ValueSymbol*, const SignalMemoEntry*>*
+        inoutOverrides_ = nullptr;
     const slang::ast::Symbol* origin_ = nullptr;
     ElaborateDiagnostics* diagnostics_ = nullptr;
     const slang::SourceManager* sourceManager_ = nullptr;
@@ -945,6 +963,8 @@ public:
     /// Returns memoized DPI import declarations for the provided module body.
     std::span<const DpiImportEntry>
     peekDpiImports(const slang::ast::InstanceBodySymbol& body) const;
+    const InoutPortMemo* findInoutMemo(const slang::ast::InstanceBodySymbol& body,
+                                       const slang::ast::ValueSymbol& symbol) const;
 
 private:
     grh::ir::Graph* materializeGraph(const slang::ast::InstanceSymbol& instance,
@@ -1009,6 +1029,9 @@ private:
         memMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, std::vector<DpiImportEntry>>
         dpiImports_;
+    std::unordered_map<const slang::ast::InstanceBodySymbol*,
+                       std::unordered_map<const slang::ast::ValueSymbol*, InoutPortMemo>>
+        inoutMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, WriteBackMemo> writeBackMemo_;
     std::unordered_map<const slang::ast::InstanceBodySymbol*, BlackboxMemoEntry> blackboxMemo_;
 };

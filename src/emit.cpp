@@ -385,6 +385,8 @@ namespace grh::emit
                                        { out.append(value.isInput() ? "true" : "false"); });
                                   prop("out", [&]
                                        { out.append(value.isOutput() ? "true" : "false"); });
+                                  prop("inout", [&]
+                                       { out.append(value.isInout() ? "true" : "false"); });
                                   if (value.definingOp())
                                   {
                                       prop("def", [&]
@@ -516,6 +518,42 @@ namespace grh::emit
             out.push_back(']');
         }
 
+        void writeInoutPortsPrettyCompact(std::string &out,
+                                          const grh::ir::Graph &graph,
+                                          std::span<const grh::ir::InoutPort> ports,
+                                          JsonPrintMode mode,
+                                          int indent)
+        {
+            (void)mode;
+            out.push_back('[');
+            bool first = true;
+            for (const auto &port : ports)
+            {
+                if (!first)
+                {
+                    out.push_back(',');
+                }
+                appendNewlineAndIndent(out, indent);
+                writeInlineObject(out, mode, [&](auto &&prop)
+                                  {
+                                      prop("name", [&]
+                                           { appendQuotedString(out, graph.symbolText(port.name)); });
+                                      prop("in", [&]
+                                           { appendQuotedString(out, graph.getValue(port.in).symbolText()); });
+                                      prop("out", [&]
+                                           { appendQuotedString(out, graph.getValue(port.out).symbolText()); });
+                                      prop("oe", [&]
+                                           { appendQuotedString(out, graph.getValue(port.oe).symbolText()); });
+                                  });
+                first = false;
+            }
+            if (!ports.empty())
+            {
+                appendNewlineAndIndent(out, indent - 1);
+            }
+            out.push_back(']');
+        }
+
         void writeGraphPrettyCompact(std::string &out, const grh::ir::Graph &graph, int baseIndent)
         {
             out.push_back('{');
@@ -551,6 +589,12 @@ namespace grh::emit
             appendQuotedString(out, "out");
             out.append(": ");
             writePortsPrettyCompact(out, graph, graph.outputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            out.push_back(',');
+
+            appendNewlineAndIndent(out, portsIndent);
+            appendQuotedString(out, "inout");
+            out.append(": ");
+            writeInoutPortsPrettyCompact(out, graph, graph.inoutPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
 
             appendNewlineAndIndent(out, indent);
             out.push_back('}');
@@ -757,6 +801,8 @@ namespace grh::emit
                                        { out.append(view.valueIsInput(valueId) ? "true" : "false"); });
                                   prop("out", [&]
                                        { out.append(view.valueIsOutput(valueId) ? "true" : "false"); });
+                                  prop("inout", [&]
+                                       { out.append(view.valueIsInout(valueId) ? "true" : "false"); });
                                   if (const auto def = view.valueDef(valueId); def.valid())
                                   {
                                       prop("def", [&]
@@ -859,6 +905,43 @@ namespace grh::emit
             out.push_back(']');
         }
 
+        void writeInoutPortsPrettyCompactIr(std::string &out,
+                                            std::span<const grh::ir::InoutPort> ports,
+                                            const std::vector<std::string> &valueNames,
+                                            const grh::ir::GraphSymbolTable &symbols,
+                                            JsonPrintMode mode,
+                                            int indent)
+        {
+            (void)mode;
+            out.push_back('[');
+            bool first = true;
+            for (const auto &port : ports)
+            {
+                if (!first)
+                {
+                    out.push_back(',');
+                }
+                appendNewlineAndIndent(out, indent);
+                writeInlineObject(out, mode, [&](auto &&prop)
+                                  {
+                                      prop("name", [&]
+                                           { appendQuotedString(out, symbols.text(port.name)); });
+                                      prop("in", [&]
+                                           { appendQuotedString(out, lookupName(valueNames, port.in.index)); });
+                                      prop("out", [&]
+                                           { appendQuotedString(out, lookupName(valueNames, port.out.index)); });
+                                      prop("oe", [&]
+                                           { appendQuotedString(out, lookupName(valueNames, port.oe.index)); });
+                                  });
+                first = false;
+            }
+            if (!ports.empty())
+            {
+                appendNewlineAndIndent(out, indent - 1);
+            }
+            out.push_back(']');
+        }
+
         void writeGraphPrettyCompactIr(std::string &out,
                                        const grh::ir::GraphView &view,
                                        const grh::ir::GraphSymbolTable &symbols,
@@ -900,6 +983,12 @@ namespace grh::emit
             appendQuotedString(out, "out");
             out.append(": ");
             writePortsPrettyCompactIr(out, view.outputPorts(), valueNames, symbols, JsonPrintMode::PrettyCompact, portsIndent + 1);
+            out.push_back(',');
+
+            appendNewlineAndIndent(out, portsIndent);
+            appendQuotedString(out, "inout");
+            out.append(": ");
+            writeInoutPortsPrettyCompactIr(out, view.inoutPorts(), valueNames, symbols, JsonPrintMode::PrettyCompact, portsIndent + 1);
 
             appendNewlineAndIndent(out, indent);
             out.push_back('}');
@@ -1050,6 +1139,8 @@ namespace grh::emit
                 writer.writeValue(view.valueIsInput(valueId));
                 writer.writeProperty("out");
                 writer.writeValue(view.valueIsOutput(valueId));
+                writer.writeProperty("inout");
+                writer.writeValue(view.valueIsInout(valueId));
                 if (const auto def = view.valueDef(valueId); def.valid())
                 {
                     writer.writeProperty("def");
@@ -1098,6 +1189,23 @@ namespace grh::emit
                 writer.writeValue(symbols.text(port.name));
                 writer.writeProperty("val");
                 writer.writeValue(lookupName(valueNames, port.value.index));
+                writer.endObject();
+            }
+            writer.endArray();
+
+            writer.writeProperty("inout");
+            writer.startArray();
+            for (const auto &port : view.inoutPorts())
+            {
+                writer.startObject();
+                writer.writeProperty("name");
+                writer.writeValue(symbols.text(port.name));
+                writer.writeProperty("in");
+                writer.writeValue(lookupName(valueNames, port.in.index));
+                writer.writeProperty("out");
+                writer.writeValue(lookupName(valueNames, port.out.index));
+                writer.writeProperty("oe");
+                writer.writeValue(lookupName(valueNames, port.oe.index));
                 writer.endObject();
             }
             writer.endArray();
@@ -1600,7 +1708,8 @@ namespace grh::emit
         enum class PortDir
         {
             Input,
-            Output
+            Output,
+            Inout
         };
 
         struct NetDecl
@@ -1932,6 +2041,17 @@ namespace grh::emit
                 portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
                                            value.srcLoc()};
             }
+            for (const auto &port : graph->inoutPorts())
+            {
+                if (!port.name.valid())
+                {
+                    continue;
+                }
+                const std::string name = std::string(graph->symbolText(port.name));
+                grh::ir::Value value = graph->getValue(port.out);
+                portDecls[name] = PortDecl{PortDir::Inout, value.width(), value.isSigned(), false,
+                                           value.srcLoc()};
+            }
 
             // Book-keeping for declarations.
             std::unordered_set<std::string> declaredNames;
@@ -2076,6 +2196,27 @@ namespace grh::emit
                     continue;
                 }
                 bindOutputPort(std::string(graph->symbolText(port.name)), port.value);
+            }
+            for (const auto &port : graph->inoutPorts())
+            {
+                if (!port.name.valid())
+                {
+                    continue;
+                }
+                const std::string portName = std::string(graph->symbolText(port.name));
+                const std::string inName = valueName(port.in);
+                const std::string outName = valueName(port.out);
+                const std::string oeName = valueName(port.oe);
+                const int64_t width = graph->getValue(port.out).width();
+                ensureWireDecl(port.in);
+                ensureWireDecl(port.out);
+                ensureWireDecl(port.oe);
+                portBindingStmts.emplace_back(
+                    "assign " + inName + " = " + portName + ";", grh::ir::OperationId::invalid());
+                portBindingStmts.emplace_back(
+                    "assign " + portName + " = " + oeName + " ? " + outName + " : {" +
+                        std::to_string(width) + "{1'bz}};",
+                    grh::ir::OperationId::invalid());
             }
 
             // -------------------------
@@ -2982,6 +3123,7 @@ namespace grh::emit
                     auto moduleName = getAttribute<std::string>(*graph, op, "moduleName");
                     auto inputNames = getAttribute<std::vector<std::string>>(*graph, op, "inputPortName");
                     auto outputNames = getAttribute<std::vector<std::string>>(*graph, op, "outputPortName");
+                    auto inoutNames = getAttribute<std::vector<std::string>>(*graph, op, "inoutPortName");
                     auto instanceNameBase = getAttribute<std::string>(*graph, op, "instanceName").value_or(opContext);
                     std::string instanceName = instanceNameBase;
                     int instSuffix = 1;
@@ -2992,6 +3134,13 @@ namespace grh::emit
                     if (!moduleName || !inputNames || !outputNames)
                     {
                         reportError("Instance missing module or port names", opContext);
+                        break;
+                    }
+                    const std::size_t inoutCount = inoutNames ? inoutNames->size() : 0;
+                    if (operands.size() < inputNames->size() + inoutCount * 2 ||
+                        results.size() < outputNames->size() + inoutCount)
+                    {
+                        reportError("Instance port counts do not match operands/results", opContext);
                         break;
                     }
                     const auto moduleNameIt = emittedModuleNames.find(*moduleName);
@@ -3023,7 +3172,7 @@ namespace grh::emit
                         decl << targetModuleName << " ";
                     }
                     std::vector<std::pair<std::string, std::string>> connections;
-                    connections.reserve(inputNames->size() + outputNames->size());
+                    connections.reserve(inputNames->size() + outputNames->size() + inoutCount);
                     for (std::size_t i = 0; i < inputNames->size(); ++i)
                     {
                         if (i < operands.size())
@@ -3036,6 +3185,62 @@ namespace grh::emit
                         if (i < results.size())
                         {
                             connections.emplace_back((*outputNames)[i], valueName(results[i]));
+                        }
+                    }
+                    if (inoutNames)
+                    {
+                        auto ensureNamedWireDecl = [&](const std::string &base, int64_t width,
+                                                       bool isSigned) -> std::string
+                        {
+                            const std::string root = base.empty() ? std::string("_inout") : base;
+                            std::string candidate = root;
+                            std::size_t suffix = 0;
+                            while (declaredNames.find(candidate) != declaredNames.end())
+                            {
+                                candidate = root;
+                                candidate.push_back('_');
+                                candidate.append(std::to_string(++suffix));
+                            }
+                            wireDecls.emplace(candidate, NetDecl{width, isSigned, op.srcLoc()});
+                            declaredNames.insert(candidate);
+                            return candidate;
+                        };
+                        bool inoutOk = true;
+                        for (std::size_t i = 0; i < inoutNames->size(); ++i)
+                        {
+                            const std::size_t outIndex = inputNames->size() + i;
+                            const std::size_t oeIndex = inputNames->size() + inoutNames->size() + i;
+                            const std::size_t inIndex = outputNames->size() + i;
+                            if (outIndex >= operands.size() || oeIndex >= operands.size() ||
+                                inIndex >= results.size())
+                            {
+                                reportError("Instance inout index out of range", opContext);
+                                inoutOk = false;
+                                break;
+                            }
+                            const std::string wireBase =
+                                instanceName.empty()
+                                    ? (*inoutNames)[i] + "_inout"
+                                    : instanceName + "_" + (*inoutNames)[i] + "_inout";
+                            const int64_t width = graph->getValue(operands[outIndex]).width();
+                            const bool isSigned = graph->getValue(operands[outIndex]).isSigned();
+                            const std::string wireName = ensureNamedWireDecl(wireBase, width, isSigned);
+                            connections.emplace_back((*inoutNames)[i], wireName);
+                            ensureWireDecl(operands[outIndex]);
+                            ensureWireDecl(operands[oeIndex]);
+                            ensureWireDecl(results[inIndex]);
+                            portBindingStmts.emplace_back(
+                                "assign " + wireName + " = " + valueName(operands[oeIndex]) + " ? " +
+                                    valueName(operands[outIndex]) + " : {" + std::to_string(width) +
+                                    "{1'bz}};",
+                                opId);
+                            portBindingStmts.emplace_back(
+                                "assign " + valueName(results[inIndex]) + " = " + wireName + ";",
+                                opId);
+                        }
+                        if (!inoutOk)
+                        {
+                            break;
                         }
                     }
 
@@ -3141,9 +3346,21 @@ namespace grh::emit
                     auto targetImport = getAttribute<std::string>(*graph, op, "targetImportSymbol");
                     auto inArgName = getAttribute<std::vector<std::string>>(*graph, op, "inArgName");
                     auto outArgName = getAttribute<std::vector<std::string>>(*graph, op, "outArgName");
+                    auto inoutArgName = getAttribute<std::vector<std::string>>(*graph, op, "inoutArgName");
                     if (!clkPolarity || !targetImport || !inArgName || !outArgName)
                     {
                         reportError("kDpicCall missing metadata", opContext);
+                        break;
+                    }
+                    const std::size_t inoutCount = inoutArgName ? inoutArgName->size() : 0;
+                    if (operands.size() < 2 + inArgName->size() + inoutCount)
+                    {
+                        reportError("kDpicCall operand count does not match args", opContext);
+                        break;
+                    }
+                    if (results.size() < outArgName->size() + inoutCount)
+                    {
+                        reportError("kDpicCall result count does not match args", opContext);
                         break;
                     }
                     auto itImport = dpicImports.find(*targetImport);
@@ -3172,11 +3389,31 @@ namespace grh::emit
                     }
 
                     SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    bool callOk = true;
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                    if (inoutArgName && !inoutArgName->empty())
+                    {
+                        for (std::size_t i = 0; i < inoutArgName->size(); ++i)
+                        {
+                            const std::size_t operandIndex = 2 + inArgName->size() + i;
+                            const std::size_t resultIndex = outArgName->size() + i;
+                            if (operandIndex >= operands.size() || resultIndex >= results.size())
+                            {
+                                reportError("kDpicCall inout arg index out of range", opContext);
+                                callOk = false;
+                                break;
+                            }
+                            const std::string tempName = valueName(results[resultIndex]) + "_intm";
+                            appendIndented(stmt, 3, tempName + " = " + valueName(operands[operandIndex]) + ";");
+                        }
+                        if (!callOk)
+                        {
+                            break;
+                        }
+                    }
                     stmt << std::string(kIndentSizeSv * 3, ' ') << *targetImport << "(";
                     bool firstArg = true;
-                    bool callOk = true;
                     for (std::size_t i = 0; i < importArgs->size(); ++i)
                     {
                         if (!firstArg)
@@ -3196,6 +3433,24 @@ namespace grh::emit
                                 break;
                             }
                             stmt << valueName(operands[static_cast<std::size_t>(idx + 2)]);
+                        }
+                        else if (dir == "inout")
+                        {
+                            if (!inoutArgName)
+                            {
+                                reportError("kDpicCall missing inoutArgName for " + formal, opContext);
+                                callOk = false;
+                                break;
+                            }
+                            int idx = findNameIndex(*inoutArgName, formal);
+                            const std::size_t resultIndex = outArgName->size() + static_cast<std::size_t>(idx);
+                            if (idx < 0 || resultIndex >= results.size())
+                            {
+                                reportError("kDpicCall missing matching inout arg " + formal, opContext);
+                                callOk = false;
+                                break;
+                            }
+                            stmt << valueName(results[resultIndex]) << "_intm";
                         }
                         else
                         {
@@ -3259,7 +3514,18 @@ namespace grh::emit
                     {
                         moduleBuffer << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << (decl.dir == PortDir::Input ? "input wire " : (decl.isReg ? "output reg " : "output wire "));
+                    if (decl.dir == PortDir::Input)
+                    {
+                        moduleBuffer << "  input wire ";
+                    }
+                    else if (decl.dir == PortDir::Output)
+                    {
+                        moduleBuffer << "  " << (decl.isReg ? "output reg " : "output wire ");
+                    }
+                    else
+                    {
+                        moduleBuffer << "  inout wire ";
+                    }
                     moduleBuffer << signedPrefix(decl.isSigned);
                     const std::string range = widthRange(decl.width);
                     if (!range.empty())
@@ -3278,6 +3544,14 @@ namespace grh::emit
                     emitPortLine(std::string(graph->symbolText(port.name)));
                 }
                 for (const auto &port : graph->outputPorts())
+                {
+                    if (!port.name.valid())
+                    {
+                        continue;
+                    }
+                    emitPortLine(std::string(graph->symbolText(port.name)));
+                }
+                for (const auto &port : graph->inoutPorts())
                 {
                     if (!port.name.valid())
                     {
@@ -3591,8 +3865,17 @@ namespace grh::emit
         // -------------------------
         std::vector<std::pair<std::string, grh::ir::ValueId>> inputPorts;
         std::vector<std::pair<std::string, grh::ir::ValueId>> outputPorts;
+        struct InoutPortBinding {
+            std::string name;
+            grh::ir::ValueId in;
+            grh::ir::ValueId out;
+            grh::ir::ValueId oe;
+            int64_t width = 1;
+        };
+        std::vector<InoutPortBinding> inoutPorts;
         inputPorts.reserve(view.inputPorts().size());
         outputPorts.reserve(view.outputPorts().size());
+        inoutPorts.reserve(view.inoutPorts().size());
 
         std::map<std::string, PortDecl, std::less<>> portDecls;
         for (const auto &port : view.inputPorts())
@@ -3632,6 +3915,28 @@ namespace grh::emit
             portDecls[portName] = PortDecl{PortDir::Output, view.valueWidth(port.value),
                                            view.valueSigned(port.value), false,
                                            view.valueSrcLoc(port.value)};
+        }
+        for (const auto &port : view.inoutPorts())
+        {
+            if (!port.name.valid())
+            {
+                reportError("Inout port missing symbol");
+                continue;
+            }
+            const std::string portName = std::string(symbols.text(port.name));
+            const std::string &inName = valueName(port.in);
+            const std::string &outName = valueName(port.out);
+            const std::string &oeName = valueName(port.oe);
+            if (portName.empty() || inName.empty() || outName.empty() || oeName.empty())
+            {
+                reportError("Inout port missing symbol");
+                continue;
+            }
+            inoutPorts.push_back(InoutPortBinding{portName, port.in, port.out, port.oe,
+                                                 view.valueWidth(port.out)});
+            portDecls[portName] = PortDecl{PortDir::Inout, view.valueWidth(port.out),
+                                           view.valueSigned(port.out), false,
+                                           view.valueSrcLoc(port.out)};
         }
 
         // Book-keeping for declarations.
@@ -3781,6 +4086,22 @@ namespace grh::emit
         for (const auto &[portName, valueId] : outputPorts)
         {
             bindOutputPort(portName, valueId);
+        }
+        for (const auto &port : inoutPorts)
+        {
+            const std::string &inName = valueName(port.in);
+            const std::string &outName = valueName(port.out);
+            const std::string &oeName = valueName(port.oe);
+            ensureWireDecl(port.in);
+            ensureWireDecl(port.out);
+            ensureWireDecl(port.oe);
+            portBindingStmts.emplace_back(
+                "assign " + inName + " = " + port.name + ";",
+                grh::ir::OperationId::invalid());
+            portBindingStmts.emplace_back(
+                "assign " + port.name + " = " + oeName + " ? " + outName + " : {" +
+                    std::to_string(port.width) + "{1'bz}};",
+                grh::ir::OperationId::invalid());
         }
 
         auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string>
@@ -4748,6 +5069,7 @@ namespace grh::emit
                 auto moduleNameAttr = getAttribute<std::string>(view, opId, "moduleName");
                 auto inputNames = getAttribute<std::vector<std::string>>(view, opId, "inputPortName");
                 auto outputNames = getAttribute<std::vector<std::string>>(view, opId, "outputPortName");
+                auto inoutNames = getAttribute<std::vector<std::string>>(view, opId, "inoutPortName");
                 auto instanceNameBase = getAttribute<std::string>(view, opId, "instanceName")
                                             .value_or(opName(opId));
                 std::string instanceName = instanceNameBase;
@@ -4759,6 +5081,13 @@ namespace grh::emit
                 if (!moduleNameAttr || !inputNames || !outputNames)
                 {
                     reportError("Instance missing module or port names", context);
+                    break;
+                }
+                const std::size_t inoutCount = inoutNames ? inoutNames->size() : 0;
+                if (operands.size() < inputNames->size() + inoutCount * 2 ||
+                    results.size() < outputNames->size() + inoutCount)
+                {
+                    reportError("Instance port counts do not match operands/results", context);
                     break;
                 }
                 const std::string &targetModuleName = *moduleNameAttr;
@@ -4788,7 +5117,7 @@ namespace grh::emit
                     decl << targetModuleName << " ";
                 }
                 std::vector<std::pair<std::string, std::string>> connections;
-                connections.reserve(inputNames->size() + outputNames->size());
+                connections.reserve(inputNames->size() + outputNames->size() + inoutCount);
                 for (std::size_t i = 0; i < inputNames->size(); ++i)
                 {
                     if (i < operands.size())
@@ -4801,6 +5130,62 @@ namespace grh::emit
                     if (i < results.size())
                     {
                         connections.emplace_back((*outputNames)[i], valueName(results[i]));
+                    }
+                }
+                if (inoutNames)
+                {
+                    auto ensureNamedWireDecl = [&](const std::string &base, int64_t width,
+                                                   bool isSigned) -> std::string
+                    {
+                        const std::string root = base.empty() ? std::string("_inout") : base;
+                        std::string candidate = root;
+                        std::size_t suffix = 0;
+                        while (declaredNames.find(candidate) != declaredNames.end())
+                        {
+                            candidate = root;
+                            candidate.push_back('_');
+                            candidate.append(std::to_string(++suffix));
+                        }
+                        wireDecls.emplace(candidate, NetDecl{width, isSigned, view.opSrcLoc(opId)});
+                        declaredNames.insert(candidate);
+                        return candidate;
+                    };
+                    bool inoutOk = true;
+                    for (std::size_t i = 0; i < inoutNames->size(); ++i)
+                    {
+                        const std::size_t outIndex = inputNames->size() + i;
+                        const std::size_t oeIndex = inputNames->size() + inoutNames->size() + i;
+                        const std::size_t inIndex = outputNames->size() + i;
+                        if (outIndex >= operands.size() || oeIndex >= operands.size() ||
+                            inIndex >= results.size())
+                        {
+                            reportError("Instance inout index out of range", context);
+                            inoutOk = false;
+                            break;
+                        }
+                        const std::string wireBase =
+                            instanceName.empty()
+                                ? (*inoutNames)[i] + "_inout"
+                                : instanceName + "_" + (*inoutNames)[i] + "_inout";
+                        const int64_t width = view.valueWidth(operands[outIndex]);
+                        const bool isSigned = view.valueSigned(operands[outIndex]);
+                        const std::string wireName = ensureNamedWireDecl(wireBase, width, isSigned);
+                        connections.emplace_back((*inoutNames)[i], wireName);
+                        ensureWireDecl(operands[outIndex]);
+                        ensureWireDecl(operands[oeIndex]);
+                        ensureWireDecl(results[inIndex]);
+                        portBindingStmts.emplace_back(
+                            "assign " + wireName + " = " + valueName(operands[oeIndex]) + " ? " +
+                                valueName(operands[outIndex]) + " : {" + std::to_string(width) +
+                                "{1'bz}};",
+                            opId);
+                        portBindingStmts.emplace_back(
+                            "assign " + valueName(results[inIndex]) + " = " + wireName + ";",
+                            opId);
+                    }
+                    if (!inoutOk)
+                    {
+                        break;
                     }
                 }
                 decl << instanceName << " (\n";
@@ -4907,9 +5292,21 @@ namespace grh::emit
                 auto targetImport = getAttribute<std::string>(view, opId, "targetImportSymbol");
                 auto inArgName = getAttribute<std::vector<std::string>>(view, opId, "inArgName");
                 auto outArgName = getAttribute<std::vector<std::string>>(view, opId, "outArgName");
+                auto inoutArgName = getAttribute<std::vector<std::string>>(view, opId, "inoutArgName");
                 if (!clkPolarity || !targetImport || !inArgName || !outArgName)
                 {
                     reportError("kDpicCall missing metadata", context);
+                    break;
+                }
+                const std::size_t inoutCount = inoutArgName ? inoutArgName->size() : 0;
+                if (operands.size() < 2 + inArgName->size() + inoutCount)
+                {
+                    reportError("kDpicCall operand count does not match args", context);
+                    break;
+                }
+                if (results.size() < outArgName->size() + inoutCount)
+                {
+                    reportError("kDpicCall result count does not match args", context);
                     break;
                 }
                 auto itImport = dpicImports.find(*targetImport);
@@ -4940,11 +5337,31 @@ namespace grh::emit
                 }
 
                 IrSeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                bool callOk = true;
                 std::ostringstream stmt;
                 appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                if (inoutArgName && !inoutArgName->empty())
+                {
+                    for (std::size_t i = 0; i < inoutArgName->size(); ++i)
+                    {
+                        const std::size_t operandIndex = 2 + inArgName->size() + i;
+                        const std::size_t resultIndex = outArgName->size() + i;
+                        if (operandIndex >= operands.size() || resultIndex >= results.size())
+                        {
+                            reportError("kDpicCall inout arg index out of range", context);
+                            callOk = false;
+                            break;
+                        }
+                        const std::string tempName = valueName(results[resultIndex]) + "_intm";
+                        appendIndented(stmt, 3, tempName + " = " + valueName(operands[operandIndex]) + ";");
+                    }
+                    if (!callOk)
+                    {
+                        break;
+                    }
+                }
                 stmt << std::string(kIndentSizeSv * 3, ' ') << *targetImport << "(";
                 bool firstArg = true;
-                bool callOk = true;
                 for (std::size_t i = 0; i < importArgs->size(); ++i)
                 {
                     if (!firstArg)
@@ -4964,6 +5381,24 @@ namespace grh::emit
                             break;
                         }
                         stmt << valueName(operands[static_cast<std::size_t>(idx + 2)]);
+                    }
+                    else if (dir == "inout")
+                    {
+                        if (!inoutArgName)
+                        {
+                            reportError("kDpicCall missing inoutArgName for " + formal, context);
+                            callOk = false;
+                            break;
+                        }
+                        int idx = findNameIndex(*inoutArgName, formal);
+                        const std::size_t resultIndex = outArgName->size() + static_cast<std::size_t>(idx);
+                        if (idx < 0 || resultIndex >= results.size())
+                        {
+                            reportError("kDpicCall missing matching inout arg " + formal, context);
+                            callOk = false;
+                            break;
+                        }
+                        stmt << valueName(results[resultIndex]) << "_intm";
                     }
                     else
                     {
@@ -5026,7 +5461,18 @@ namespace grh::emit
                 {
                     moduleBuffer << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << (decl.dir == PortDir::Input ? "input wire " : (decl.isReg ? "output reg " : "output wire "));
+                if (decl.dir == PortDir::Input)
+                {
+                    moduleBuffer << "  input wire ";
+                }
+                else if (decl.dir == PortDir::Output)
+                {
+                    moduleBuffer << "  " << (decl.isReg ? "output reg " : "output wire ");
+                }
+                else
+                {
+                    moduleBuffer << "  inout wire ";
+                }
                 moduleBuffer << signedPrefix(decl.isSigned);
                 const std::string range = widthRange(decl.width);
                 if (!range.empty())
@@ -5043,6 +5489,10 @@ namespace grh::emit
             for (const auto &port : outputPorts)
             {
                 emitPortLine(port.first);
+            }
+            for (const auto &port : inoutPorts)
+            {
+                emitPortLine(port.name);
             }
             moduleBuffer << "\n);\n";
         }

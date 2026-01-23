@@ -77,6 +77,10 @@ ValueId findPort(const grh::ir::Graph& graph, std::string_view name, bool isInpu
     return ValueId::invalid();
 }
 
+ValueId findValueByName(const grh::ir::Graph& graph, std::string_view name) {
+    return graph.findValue(name);
+}
+
 const SignalMemoEntry* findEntry(std::span<const SignalMemoEntry> memo, std::string_view name) {
     for (const SignalMemoEntry& entry : memo) {
         if (entry.symbol && entry.symbol->name == name) {
@@ -298,6 +302,116 @@ int main() {
     }
     if (!connectsToCall) {
         return fail("sum data operand is not driven by kDpicCall result");
+    }
+
+    const slang::ast::InstanceSymbol* inoutInstance = nullptr;
+    for (const slang::ast::InstanceSymbol* inst : compilation->getRoot().topInstances) {
+        if (inst && inst->name == "dpic_inout_case") {
+            inoutInstance = inst;
+            break;
+        }
+    }
+    if (!inoutInstance) {
+        return fail("Top instance dpic_inout_case not found");
+    }
+
+    grh::ir::Graph* inoutGraph = netlist.findGraph("dpic_inout_case");
+    if (!inoutGraph) {
+        return fail("GRH graph dpic_inout_case not found");
+    }
+
+    const slang::ast::InstanceBodySymbol* inoutCanonical = inoutInstance->getCanonicalBody();
+    const slang::ast::InstanceBodySymbol& inoutBody =
+        inoutCanonical ? *inoutCanonical : inoutInstance->body;
+
+    std::span<const DpiImportEntry> inoutImports = elaborator.peekDpiImports(inoutBody);
+    if (inoutImports.size() != 1) {
+        return fail("Expected exactly one DPI import entry in dpic_inout_case");
+    }
+
+    OperationId inoutImportOpId = findOpByKind(*inoutGraph, grh::ir::OperationKind::kDpicImport);
+    if (!inoutImportOpId) {
+        return fail("dpic_inout_case kDpicImport operation missing");
+    }
+    const grh::ir::Operation inoutImportOp = inoutGraph->getOperation(inoutImportOpId);
+
+    auto inoutDirections = getStringVecAttr(*inoutGraph, inoutImportOp, "argsDirection");
+    if (!inoutDirections || *inoutDirections != std::vector<std::string>{"input", "inout"}) {
+        return fail("dpic_inout_case argsDirection mismatch");
+    }
+    auto inoutWidths = getIntVecAttr(*inoutGraph, inoutImportOp, "argsWidth");
+    if (!inoutWidths || *inoutWidths != std::vector<int64_t>{8, 8}) {
+        return fail("dpic_inout_case argsWidth mismatch");
+    }
+    auto inoutNames = getStringVecAttr(*inoutGraph, inoutImportOp, "argsName");
+    if (!inoutNames || *inoutNames != std::vector<std::string>{"seed", "accum"}) {
+        return fail("dpic_inout_case argsName mismatch");
+    }
+
+    OperationId inoutCallOpId = findOpByKind(*inoutGraph, grh::ir::OperationKind::kDpicCall);
+    if (!inoutCallOpId) {
+        return fail("dpic_inout_case kDpicCall operation missing");
+    }
+    const grh::ir::Operation inoutCallOp = inoutGraph->getOperation(inoutCallOpId);
+    if (inoutCallOp.operands().size() != 4) {
+        return fail("dpic_inout_case kDpicCall operand count mismatch");
+    }
+    if (inoutCallOp.results().size() != 1) {
+        return fail("dpic_inout_case kDpicCall result count mismatch");
+    }
+
+    ValueId inoutClk = findPort(*inoutGraph, "clk", /*isInput=*/true);
+    ValueId inoutEn = findPort(*inoutGraph, "en", /*isInput=*/true);
+    ValueId inoutSeed = findPort(*inoutGraph, "seed", /*isInput=*/true);
+    ValueId accumValue = findValueByName(*inoutGraph, "accum");
+    if (!inoutClk || !inoutEn || !inoutSeed || !accumValue) {
+        return fail("dpic_inout_case module ports missing");
+    }
+    if (inoutCallOp.operands()[0] != inoutClk ||
+        inoutCallOp.operands()[1] != inoutEn ||
+        inoutCallOp.operands()[2] != inoutSeed ||
+        inoutCallOp.operands()[3] != accumValue) {
+        return fail("dpic_inout_case kDpicCall operand wiring mismatch");
+    }
+
+    auto inoutInNames = getStringVecAttr(*inoutGraph, inoutCallOp, "inArgName");
+    if (!inoutInNames || *inoutInNames != std::vector<std::string>{"seed"}) {
+        return fail("dpic_inout_case inArgName mismatch");
+    }
+    auto inoutOutNames = getStringVecAttr(*inoutGraph, inoutCallOp, "outArgName");
+    if (!inoutOutNames || !inoutOutNames->empty()) {
+        return fail("dpic_inout_case outArgName mismatch");
+    }
+    auto inoutInoutNames = getStringVecAttr(*inoutGraph, inoutCallOp, "inoutArgName");
+    if (!inoutInoutNames || *inoutInoutNames != std::vector<std::string>{"accum"}) {
+        return fail("dpic_inout_case inoutArgName mismatch");
+    }
+
+    std::span<const SignalMemoEntry> inoutRegMemo = elaborator.peekRegMemo(inoutBody);
+    const SignalMemoEntry* accumEntry = findEntry(inoutRegMemo, "accum");
+    if (!accumEntry || !accumEntry->stateOp) {
+        return fail("dpic_inout_case accum memo/state op missing");
+    }
+    const grh::ir::Operation accumOp = inoutGraph->getOperation(accumEntry->stateOp);
+    if (accumOp.operands().size() < 2) {
+        return fail("dpic_inout_case accum state op missing data operand");
+    }
+    ValueId inoutCallResult = inoutCallOp.results().front();
+    ValueId accumData = accumOp.operands().back();
+    bool accumConnects = accumData == inoutCallResult;
+    if (!accumConnects && accumData) {
+        OperationId dataOpId = inoutGraph->getValue(accumData).definingOp();
+        if (dataOpId && inoutGraph->getOperation(dataOpId).kind() == grh::ir::OperationKind::kMux) {
+            for (ValueId operand : inoutGraph->getOperation(dataOpId).operands()) {
+                if (operand == inoutCallResult) {
+                    accumConnects = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!accumConnects) {
+        return fail("dpic_inout_case accum data operand is not driven by kDpicCall result");
     }
 
     return 0;

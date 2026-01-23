@@ -79,9 +79,12 @@ wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
 
 - 具有一个标记是否为模块输入的布尔字段 isInput
 - 具有一个标记是否为模块输出的布尔字段 isOutput
+- 具有一个标记是否为模块 inout 的布尔字段 isInout
 - 以上二者不能同时为真
 - 当 `isInput == true` 时，该 Value 必须被绑定在所属 Graph 的 `inputPorts` 中；同理，`isOutput == true` 的 Value 必须被绑定在 `outputPorts` 中
-- 未绑定端口的 Value 必须同时满足 `isInput == false` 且 `isOutput == false`
+- 当 `isInout == true` 时，该 Value 必须出现在所属 Graph 的 `inoutPorts` 中（作为 `in/out/oe` 之一）
+- 未绑定端口的 Value 必须满足 `isInput == false` 且 `isOutput == false` 且 `isInout == false`
+- inout 端口对应的 `__in/__out/__oe` Value 仅设置 `isInout`，不使用 `isInput/isOutput` 标记，端口关系由 `inoutPorts` 表驱动
 
 辅助字段
 
@@ -96,10 +99,11 @@ wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
 
 - 具有一个 graph symbol（module 名称），符合 verilog 标识符规范，在网表中唯一，并由 `NetlistSymbolTable` 分配 `GraphId`
 - 具有一个 `GraphSymbolTable` 管理图内符号，`Graph::internSymbol/lookupSymbol/symbolText` 为主要入口
-- 端口以 `std::vector<Port>` 存储，元素为 `{SymbolId name, ValueId value}`；`bindInputPort/bindOutputPort` 负责绑定
+- 端口分为 input/output/inout：input/output 以 `std::vector<Port>` 存储，元素为 `{SymbolId name, ValueId value}`；inout 以 `std::vector<InoutPort>` 存储，元素为 `{SymbolId name, ValueId in, ValueId out, ValueId oe}`；`bindInputPort/bindOutputPort/bindInoutPort` 负责绑定
 - Graph 内部采用 `GraphBuilder`（可变）与 `GraphView`（只读快照）双态；`freeze()` 生成只读视图并可能重排 id
 - `ValueId/OperationId` 的 index 仅在同一构建期会话内稳定，跨 `freeze()` 需要重新获取
-- 不支持 inout 类型端口
+- inout 采用 3-value 模型，读/写/使能为独立 Value，禁止单个 Value 同时作为 input/output 以保持 SSA
+- inout 相关 Value 命名约定为 `BASE__in/__out/__oe`，`BASE` 与端口名对应
 
 生成语义
 
@@ -111,20 +115,61 @@ module ${graphSymbol} (
                + "[" + std::to_string(value(port.value).width - 1) + ":0] " + symbolText(port.name),
         for (const auto& port : outputPorts)
             -> "output " + (value(port.value).signed ? "signed " : "")
-               + "[" + std::to_string(value(port.value).width - 1) + ":0] " + symbolText(port.name)
+               + "[" + std::to_string(value(port.value).width - 1) + ":0] " + symbolText(port.name),
+        for (const auto& port : inoutPorts)
+            -> "inout "  + (value(port.out).signed ? "signed " : "")
+               + "[" + std::to_string(value(port.out).width - 1) + ":0] " + symbolText(port.name)
     )}
 );
+    ${for (const auto& port : inoutPorts)
+        -> "assign " + valueSymbol(port.in) + " = " + symbolText(port.name) + ";"
+           "assign " + symbolText(port.name) + " = " + valueSymbol(port.oe) + " ? "
+               + valueSymbol(port.out) + " : {" + std::to_string(value(port.out).width) + "{1'bz}};"
+    }
     由 Graph 内部的 Operation 和 Value 生成的语句
 endmodule
 ```
 
-其中 `value(...)` 表示通过 Graph 访问 Value 元数据，`symbolText(...)` 用于从 `SymbolId` 取回字符串；`CommaSeparatedList` 先枚举输入端口再枚举输出端口；在冻结后的 `GraphView` 中，端口按端口名的字典序排序（构建期插入顺序不保证保持原始声明顺序）。
+其中 `value(...)` 表示通过 Graph 访问 Value 元数据，`symbolText(...)` 用于从 `SymbolId` 取回字符串；`CommaSeparatedList` 依次枚举 inputPorts、outputPorts、inoutPorts；在冻结后的 `GraphView` 中，端口按端口名的字典序排序（构建期插入顺序不保证保持原始声明顺序）。
 
 Graph 管理 Operation 和 Value 的生命周期：
 
 - Graph 内部存储由 `GraphBuilder/GraphView` 管理，外部仅持有 `ValueId/OperationId` 句柄
 - `Graph::getValue/Graph::getOperation` 返回只读快照，修改必须通过 `Graph` 接口完成
 - `operations()`/`values()` 返回创建顺序的 id 列表（跳过已删除），不保证拓扑顺序
+
+## 端口与 JSON 序列化
+
+Graph JSON 序列化中，端口字段位于 `graph.ports`：
+
+- `ports.in`：输入端口数组，每个元素包含 `name` 与 `val`
+- `ports.out`：输出端口数组，每个元素包含 `name` 与 `val`
+- `ports.inout`：inout 端口数组，每个元素包含 `name/in/out/oe`
+
+约束：
+
+- `ports.in/out` 的 `val` 必须指向 `vals` 中存在的 Value symbol
+- `ports.inout` 的 `in/out/oe` 必须指向 `vals` 中存在的 Value symbol
+- `in/out/oe` 的位宽需匹配端口位宽（建议 `oe` 与 `out` 等宽）
+- inout 三个 Value 在 `vals` 中的 `in/out` 标记必须为 false
+- inout 三个 Value 在 `vals` 中的 `inout` 标记必须为 true，由 `ports.inout` 提供端口语义
+
+示例：
+```json
+{
+  "ports": {
+    "in": [
+      { "name": "i_clk", "val": "i_clk" }
+    ],
+    "out": [
+      { "name": "o_led", "val": "o_led" }
+    ],
+    "inout": [
+      { "name": "pad", "in": "pad__in", "out": "pad__out", "oe": "pad__oe" }
+    ]
+  }
+}
+```
 
 # 网表 - Netlist
 
@@ -829,28 +874,33 @@ kInstance 用于实例化完整定义的模块（Graph），通过 moduleName �
 
 GRH 中的图都是进行参数特化后的，因此 kInstance 不需要参数化支持。
 
-- operands：可变数量的输入信号，m 个
+- operands：可变数量的输入信号，m 个 + inout 驱动/使能信号，q 个
     - in0，in1，... in_m-1：模块输入信号
-- results：可变数量的输出信号，n 个
+    - inoutOut0，inoutOut1，... inoutOut_q-1：inout 驱动值
+    - inoutOe0，inoutOe1，... inoutOe_q-1：inout 使能
+- results：可变数量的输出信号，n 个 + inout 读值，q 个
     - out0，out1，... out_n-1：模块输出信号
+    - inoutIn0，inoutIn1，... inoutIn_q-1：inout 读值
 - attributes：
     - moduleName（string）：被实例化模块的名称，在 netlist 中必须能通过 moduleName 找到一个 graph
     - inputPortName（vector<string>，长度 m）：每个输入信号对应的模块端口名
     - outputPortName（vector<string>，长度 n）：每个输出信号对应的模块端口名
+    - inoutPortName（vector<string>，长度 q）：每个 inout 信号对应的模块端口名
     - instanceName（string）：实例名称
 
 生成语义：
 ```
 ${moduleName} ${instanceName} (
     .${inputPortName[0]}(${in0.symbol}),
-    .${inputPortName[1]}(${in1.symbol}),
     ...
-    .${inputPortName[m-1]}(${in_m-1.symbol}),
     .${outputPortName[0]}(${out0.symbol}),
-    .${outputPortName[1]}(${out1.symbol}),
     ...
-    .${outputPortName[n-1]}(${out_n-1.symbol})
+    .${inoutPortName[0]}(${inoutWire0}),
+    ...
 );
+
+assign ${inoutWire0} = ${inoutOe0.symbol} ? ${inoutOut0.symbol} : {${width}{1'bz}};
+assign ${inoutIn0.symbol} = ${inoutWire0};
 ```
 
 ### 黑盒实例化 kBlackbox
@@ -859,12 +909,15 @@ kBlackbox 用于实例化未定义的黑盒模块，支持参数化，生成实�
 
 - operands：
     - m 个输入信号：in0，in1，... in_m-1
+    - q 个 inout 驱动/使能信号：inoutOut0..inoutOut_q-1 / inoutOe0..inoutOe_q-1
 - results：
     - n 个输出信号：out0，out1，... out_n-1
+    - q 个 inout 读值：inoutIn0..inoutIn_q-1
 - attributes：
     - moduleName（string）：被实例化模块的名称
     - inputPortName（vector<string>，长度 m）：每个输入信号对应的模块端口名
     - outputPortName（vector<string>，长度 n）：每个输出信号对应的模块端口名
+    - inoutPortName（vector<string>，长度 q）：每个 inout 信号对应的模块端口名
     - parameterNames（vector<string>，长度 p）：每个参数化信号对应的参数名
     - parameterValues（vector<string>，长度 p）：每个参数化信号对应的参数值
     - instanceName（string）：实例名称
@@ -884,8 +937,13 @@ ${moduleName} #(
     .${outputPortName[0]}(${out0.symbol}),
     .${outputPortName[1]}(${out1.symbol}),
     ...
-    .${outputPortName[n-1]}(${out_n-1.symbol})
+    .${outputPortName[n-1]}(${out_n-1.symbol}),
+    .${inoutPortName[0]}(${inoutWire0}),
+    ...
 );
+
+assign ${inoutWire0} = ${inoutOe0.symbol} ? ${inoutOut0.symbol} : {${width}{1'bz}};
+assign ${inoutIn0.symbol} = ${inoutWire0};
 ```
 
 ## 调试支持操作
@@ -937,14 +995,14 @@ end
 
 ### DPI 导入操作 kDpicImport
 
-GRH 目前只提供对 `import "DPI-C" function void svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向只支持 input 或 output，inout 不支持，且返回类型必须为 `void`。
+GRH 目前只提供对 `import "DPI-C" function void svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向支持 input/output/inout，且返回类型必须为 `void`。
 
 具有一个唯一标识符 symbol，供 kDpicCall 引用。
 
 - operands：无
 - results：无
 - attributes：
-    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output，不允许 inout
+    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output / inout
     - argsWidth (vector<int64_t>，n个)：记录每个形参的位宽
     - argsName (vector<string>，n个)：记录每个形参的名称
 
@@ -964,13 +1022,17 @@ import "DPI-C" function void ${symbol} (
     - clk: 时钟信号
     - enable：调用使能信号
     - inArg0，inArg1，... 可变数量的输入参数, m 个
+    - inoutArg0，inoutArg1，... 可变数量的 inout 输入参数, q 个
 - results:
     - outArg0，outArg1，... 可变数量的输出参数, p 个
+    - inoutArg0，inoutArg1，... 可变数量的 inout 输出参数, q 个
 - attributes：
     - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
     - targetImportSymbol（string）：记录被调用 kDpicImport Operation 的 symbol。前端必须在当前 Netlist 中基于该 symbol 查找到唯一的 kDpicImport，将其 `argsName`、`argsDirection` 等元数据注入生成语义中引用的 `targetImportSymbol.*` 字段。
     - inArgName (vector<string>，m 个)：记录每个输入参数的名称
     - outArgName (vector<string>，p 个)：记录每个输出参数的名称
+    - inoutArgName (vector<string>，q 个)：记录每个 inout 参数的名称
+    - inoutArgName 与 inout operands/results 索引一一对应，且保持 import 声明中的形参顺序
 
 构图或变换流程在处理 `kDpicCall` 时，需使用 `targetImportSymbol` 字符串到 Netlist 中解析出对应的 `kDpicImport` Operation，并从该 Operation 的 attributes 中读取形参方向、位宽与名称等信息；若解析失败或发现多个候选项，必须立即报错。下文伪代码中的 `importOp` 表示解析得到的 kDpicImport Operation，`importOp.argsName` 等字段均来自该 Operation 的 attributes。
 
@@ -978,15 +1040,21 @@ import "DPI-C" function void ${symbol} (
 ```
 logic [${outArg0.width}-1:0] ${outArg0.symbol}_intm;
 logic [${outArg1.width}-1:0] ${outArg1.symbol}_intm;
+logic [${inoutArg0.width}-1:0] ${inoutArg0.symbol}_intm;
 ...
 
 always @(${clkPolarity} ${clk.symbol}) begin
     if (${enable.symbol}) begin
+        ${inoutArg0.symbol}_intm = ${inoutArg0_in.symbol};
+        ${inoutArg1.symbol}_intm = ${inoutArg1_in.symbol};
+        ...
         ${targetImportSymbol} (
             ${CommaSeparatedList(
                 for (size_t i = 0; i < importOp.argsName.size(); ++i)
                     -> (importOp.argsDirection[i] == "input"
                         ? inArgs[IndexOf(inArgName, importOp.argsName[i])].symbol
+                        : importOp.argsDirection[i] == "inout"
+                          ? inoutOutArgs[IndexOf(inoutArgName, importOp.argsName[i])].symbol + "_intm"
                         : outArgs[IndexOf(outArgName, importOp.argsName[i])].symbol + "_intm")
             )}
         );
@@ -995,16 +1063,19 @@ end
 
 assign ${outArg0.symbol} = ${outArg0.symbol}_intm;
 assign ${outArg1.symbol} = ${outArg1.symbol}_intm;
+assign ${inoutArg0.symbol} = ${inoutArg0.symbol}_intm;
 ...
 
 ```
 
 其中：
 
-- `inArgs = {inArg0, inArg1, …, inArgm-1}` 与 `outArgs = {outArg0, outArg1, …, outArgp-1}` ；
+- `inArgs = {inArg0, inArg1, …, inArgm-1}` 与 `outArgs = {outArg0, outArg1, …, outArgp-1}`；
+- `inoutInArgs = {inoutArg0_in, inoutArg1_in, …}` 为 operands 中的 inout 输入参数；
+- `inoutOutArgs = {inoutArg0, inoutArg1, …}` 为 results 中的 inout 输出参数；
 - `IndexOf(nameList, formalName)` 返回满足 `nameList[k] == formalName` 的唯一索引 `k`；若不存在或存在多个匹配项，则构图逻辑立即报错；
-- `inArgName` / `outArgName` 与 `inArgs` / `outArgs` 在索引维度一一对应，因此 `inArgs[IndexOf(inArgName, formalName)].symbol` 表示实参中名称与形参 `formalName` 对应的输入信号，`outArgs[IndexOf(outArgName, formalName)].symbol` 表示对应的输出信号；
-- 输出实参在 DPI 函数调用处以 `_intm` 后缀的中间变量形式传入，以匹配前面声明的中间寄存器。
+- `inArgName` / `outArgName` / `inoutArgName` 与对应的实参数组在索引维度一一对应；
+- 输出与 inout 实参在 DPI 函数调用处以 `_intm` 后缀的中间变量形式传入，其中 inout 会先用输入值初始化中间变量。
 
 # 编译符号信息
 

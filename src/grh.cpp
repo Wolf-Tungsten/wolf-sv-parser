@@ -303,6 +303,11 @@ namespace grh::ir
         return std::span<const Port>(outputPorts_.data(), outputPorts_.size());
     }
 
+    std::span<const InoutPort> GraphView::inoutPorts() const noexcept
+    {
+        return std::span<const InoutPort>(inoutPorts_.data(), inoutPorts_.size());
+    }
+
     OperationKind GraphView::opKind(OperationId op) const
     {
         return opKinds_[opIndex(op)];
@@ -369,6 +374,11 @@ namespace grh::ir
     bool GraphView::valueIsOutput(ValueId value) const
     {
         return valueIsOutput_[valueIndex(value)] != 0;
+    }
+
+    bool GraphView::valueIsInout(ValueId value) const
+    {
+        return valueIsInout_[valueIndex(value)] != 0;
     }
 
     OperationId GraphView::valueDef(ValueId value) const
@@ -481,6 +491,7 @@ namespace grh::ir
         require(view.valueSigned_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueIsInput_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueIsOutput_.size() == valueCount, "GraphView value metadata size mismatch");
+        require(view.valueIsInout_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueDefs_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueUserRanges_.size() == valueCount, "GraphView value user range size mismatch");
         require(view.valueSrcLocs_.size() == valueCount, "GraphView value metadata size mismatch");
@@ -562,6 +573,7 @@ namespace grh::ir
             data.isSigned = view.valueSigned_[i] != 0;
             data.isInput = false;
             data.isOutput = false;
+            data.isInout = false;
             data.definingOp = OperationId::invalid();
             data.srcLoc = view.valueSrcLocs_[i];
             data.alive = true;
@@ -663,6 +675,7 @@ namespace grh::ir
 
         builder.inputPorts_ = view.inputPorts_;
         builder.outputPorts_ = view.outputPorts_;
+        builder.inoutPorts_ = view.inoutPorts_;
 
         for (const auto &port : builder.inputPorts_)
         {
@@ -684,6 +697,22 @@ namespace grh::ir
                 throw std::runtime_error("GraphView output port refers to invalid value");
             }
         }
+        for (const auto &port : builder.inoutPorts_)
+        {
+            builder.validateSymbol(port.name, "Inout port");
+            port.in.assertGraph(view.graphId_);
+            port.out.assertGraph(view.graphId_);
+            port.oe.assertGraph(view.graphId_);
+            require(port.in.generation == 0, "GraphView inout port input generation must be zero");
+            require(port.out.generation == 0, "GraphView inout port output generation must be zero");
+            require(port.oe.generation == 0, "GraphView inout port enable generation must be zero");
+            if (port.in.index == 0 || port.in.index > valueCount ||
+                port.out.index == 0 || port.out.index > valueCount ||
+                port.oe.index == 0 || port.oe.index > valueCount)
+            {
+                throw std::runtime_error("GraphView inout port refers to invalid value");
+            }
+        }
 
         builder.recomputePortFlags();
 
@@ -698,6 +727,11 @@ namespace grh::ir
             if (builder.values_[i].isOutput != viewOutput)
             {
                 throw std::runtime_error("GraphView output port flag mismatch");
+            }
+            const bool viewInout = view.valueIsInout_[i] != 0;
+            if (builder.values_[i].isInout != viewInout)
+            {
+                throw std::runtime_error("GraphView inout port flag mismatch");
             }
         }
 
@@ -1101,6 +1135,13 @@ namespace grh::ir
         {
             return false;
         }
+        for (const auto &port : inoutPorts_)
+        {
+            if (port.in == value || port.out == value || port.oe == value)
+            {
+                return false;
+            }
+        }
         values_[valIdx].definingOp = OperationId::invalid();
         results.erase(results.begin() + static_cast<std::ptrdiff_t>(index));
         return true;
@@ -1221,6 +1262,13 @@ namespace grh::ir
         {
             return false;
         }
+        for (const auto &port : inoutPorts_)
+        {
+            if (port.in == value || port.out == value || port.oe == value)
+            {
+                return false;
+            }
+        }
         if (values_[valIdx].definingOp.valid())
         {
             return false;
@@ -1259,6 +1307,36 @@ namespace grh::ir
         recomputePortFlags();
     }
 
+    void GraphBuilder::bindInoutPort(std::vector<InoutPort> &ports, SymbolId name, ValueId in,
+                                     ValueId out, ValueId oe, std::string_view context)
+    {
+        validateSymbol(name, context);
+        const std::size_t inIdx = valueIndex(in);
+        const std::size_t outIdx = valueIndex(out);
+        const std::size_t oeIdx = valueIndex(oe);
+        if (!values_[inIdx].alive || !values_[outIdx].alive || !values_[oeIdx].alive)
+        {
+            throw std::runtime_error("ValueId refers to erased value");
+        }
+        bool updated = false;
+        for (auto &port : ports)
+        {
+            if (port.name == name)
+            {
+                port.in = in;
+                port.out = out;
+                port.oe = oe;
+                updated = true;
+                break;
+            }
+        }
+        if (!updated)
+        {
+            ports.push_back(InoutPort{name, in, out, oe});
+        }
+        recomputePortFlags();
+    }
+
     void GraphBuilder::bindInputPort(SymbolId name, ValueId value)
     {
         bindPort(inputPorts_, name, value, "Input port");
@@ -1267,6 +1345,11 @@ namespace grh::ir
     void GraphBuilder::bindOutputPort(SymbolId name, ValueId value)
     {
         bindPort(outputPorts_, name, value, "Output port");
+    }
+
+    void GraphBuilder::bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe)
+    {
+        bindInoutPort(inoutPorts_, name, in, out, oe, "Inout port");
     }
 
     void GraphBuilder::setAttr(OperationId op, std::string_view key, AttributeValue value)
@@ -1490,6 +1573,13 @@ namespace grh::ir
             }
             return lhs.name.value < rhs.name.value;
         };
+        auto inoutPortLess = [&](const InoutPort &lhs, const InoutPort &rhs) {
+            if (symbols_)
+            {
+                return symbols_->text(lhs.name) < symbols_->text(rhs.name);
+            }
+            return lhs.name.value < rhs.name.value;
+        };
 
         auto bindViewSymbol = [&](SymbolId sym, GraphView::SymbolKind kind, uint32_t index, std::string_view context) {
             if (!sym.valid())
@@ -1558,6 +1648,7 @@ namespace grh::ir
         view.valueSigned_.reserve(valueCount);
         view.valueIsInput_.reserve(valueCount);
         view.valueIsOutput_.reserve(valueCount);
+        view.valueIsInout_.reserve(valueCount);
         view.valueDefs_.reserve(valueCount);
         view.valueUserRanges_.reserve(valueCount);
         view.valueSrcLocs_.reserve(valueCount);
@@ -1579,6 +1670,7 @@ namespace grh::ir
             view.valueSigned_.push_back(valueData.isSigned ? 1 : 0);
             view.valueIsInput_.push_back(valueData.isInput ? 1 : 0);
             view.valueIsOutput_.push_back(valueData.isOutput ? 1 : 0);
+            view.valueIsInout_.push_back(valueData.isInout ? 1 : 0);
             view.valueSrcLocs_.push_back(valueData.srcLoc);
             bindViewSymbol(valueData.symbol, GraphView::SymbolKind::kValue, valueId.index, "Value");
 
@@ -1605,6 +1697,14 @@ namespace grh::ir
             view.outputPorts_.push_back(mapped);
         }
         std::sort(view.outputPorts_.begin(), view.outputPorts_.end(), portLess);
+
+        view.inoutPorts_.reserve(inoutPorts_.size());
+        for (const auto &port : inoutPorts_)
+        {
+            InoutPort mapped{port.name, remapValue(port.in), remapValue(port.out), remapValue(port.oe)};
+            view.inoutPorts_.push_back(mapped);
+        }
+        std::sort(view.inoutPorts_.begin(), view.inoutPorts_.end(), inoutPortLess);
 
         std::vector<std::vector<ValueUser>> users(valueCount);
         for (std::size_t i = 0; i < operations_.size(); ++i)
@@ -1705,6 +1805,7 @@ namespace grh::ir
         {
             value.isInput = false;
             value.isOutput = false;
+            value.isInout = false;
         }
         for (const auto &port : inputPorts_)
         {
@@ -1723,6 +1824,25 @@ namespace grh::ir
                 throw std::runtime_error("Output port references erased value");
             }
             values_[valIdx].isOutput = true;
+        }
+        for (const auto &port : inoutPorts_)
+        {
+            auto markInout = [&](ValueId value)
+            {
+                const std::size_t valIdx = valueIndex(value);
+                if (!values_[valIdx].alive)
+                {
+                    throw std::runtime_error("Inout port references erased value");
+                }
+                if (values_[valIdx].isInput || values_[valIdx].isOutput)
+                {
+                    throw std::runtime_error("Inout port references value bound as input/output");
+                }
+                values_[valIdx].isInout = true;
+            };
+            markInout(port.in);
+            markInout(port.out);
+            markInout(port.oe);
         }
     }
 
@@ -2025,7 +2145,7 @@ namespace grh::ir
     }
 
     Value::Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-                 bool isInput, bool isOutput, OperationId definingOp,
+                 bool isInput, bool isOutput, bool isInout, OperationId definingOp,
                  std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc)
         : id_(id),
           symbol_(symbol),
@@ -2034,6 +2154,7 @@ namespace grh::ir
           isSigned_(isSigned),
           isInput_(isInput),
           isOutput_(isOutput),
+          isInout_(isInout),
           definingOp_(definingOp),
           users_(std::move(users)),
           srcLoc_(std::move(srcLoc))
@@ -2187,6 +2308,20 @@ namespace grh::ir
         return std::span<const Port>(outputPortsCache_.data(), outputPortsCache_.size());
     }
 
+    std::span<const InoutPort> Graph::inoutPorts() const
+    {
+        if (!builder_)
+        {
+            if (view_)
+            {
+                return view_->inoutPorts();
+            }
+            return std::span<const InoutPort>();
+        }
+        ensureCaches();
+        return std::span<const InoutPort>(inoutPortsCache_.data(), inoutPortsCache_.size());
+    }
+
     ValueId Graph::createValue(SymbolId symbol, int32_t width, bool isSigned)
     {
         GraphBuilder &builder = ensureBuilder();
@@ -2293,6 +2428,13 @@ namespace grh::ir
         GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.bindOutputPort(name, value);
+    }
+
+    void Graph::bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.bindInoutPort(name, in, out, oe);
     }
 
     ValueId Graph::inputPortValue(SymbolId name) const noexcept
@@ -2485,6 +2627,8 @@ namespace grh::ir
             writer.writeValue(value.isInput());
             writer.writeProperty("out");
             writer.writeValue(value.isOutput());
+            writer.writeProperty("inout");
+            writer.writeValue(value.isInout());
             if (value.definingOp().valid())
             {
                 Operation defOp = getOperation(value.definingOp());
@@ -2537,6 +2681,23 @@ namespace grh::ir
             writer.writeProperty("val");
             Value value = getValue(port.value);
             writer.writeValue(symbolTextOrEmpty(value.symbol()));
+            writer.endObject();
+        }
+        writer.endArray();
+
+        writer.writeProperty("inout");
+        writer.startArray();
+        for (const auto &port : inoutPorts())
+        {
+            writer.startObject();
+            writer.writeProperty("name");
+            writer.writeValue(symbolTextOrEmpty(port.name));
+            writer.writeProperty("in");
+            writer.writeValue(symbolTextOrEmpty(getValue(port.in).symbol()));
+            writer.writeProperty("out");
+            writer.writeValue(symbolTextOrEmpty(getValue(port.out).symbol()));
+            writer.writeProperty("oe");
+            writer.writeValue(symbolTextOrEmpty(getValue(port.oe).symbol()));
             writer.endObject();
         }
         writer.endArray();
@@ -2601,6 +2762,7 @@ namespace grh::ir
         operationsCache_.clear();
         inputPortsCache_.clear();
         outputPortsCache_.clear();
+        inoutPortsCache_.clear();
     }
 
     void Graph::ensureCaches() const
@@ -2613,6 +2775,7 @@ namespace grh::ir
         operationsCache_.clear();
         inputPortsCache_.clear();
         outputPortsCache_.clear();
+        inoutPortsCache_.clear();
         if (builder_)
         {
             const auto &values = builder_->values_;
@@ -2646,6 +2809,7 @@ namespace grh::ir
             }
             inputPortsCache_ = builder_->inputPorts_;
             outputPortsCache_ = builder_->outputPorts_;
+            inoutPortsCache_ = builder_->inoutPorts_;
         }
         cacheValid_ = true;
     }
@@ -2691,6 +2855,7 @@ namespace grh::ir
                      graphView.valueSigned(id),
                      graphView.valueIsInput(id),
                      graphView.valueIsOutput(id),
+                     graphView.valueIsInout(id),
                      graphView.valueDef(id),
                      std::vector<ValueUser>(graphView.valueUsers(id).begin(), graphView.valueUsers(id).end()),
                      graphView.valueSrcLoc(id));
@@ -2744,6 +2909,7 @@ namespace grh::ir
                      data.isSigned,
                      data.isInput,
                      data.isOutput,
+                     data.isInout,
                      data.definingOp,
                      std::move(users),
                      data.srcLoc);

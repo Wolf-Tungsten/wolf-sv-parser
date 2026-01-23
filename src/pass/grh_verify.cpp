@@ -197,11 +197,13 @@ namespace wolf_sv_parser::transform
                 map.emplace(grh::ir::OperationKind::kMemoryMaskWritePortArst, makeSpec(exact(6), exact(0), {makeStringAttr("memSymbol", {}), clkPolarity, rstPolarity, enLevel}));
 
                 map.emplace(grh::ir::OperationKind::kInstance, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
-                                                                     {makeStringAttr("moduleName", {}), makeStringArrayAttr("inputPortName"), makeStringArrayAttr("outputPortName"), makeStringAttr("instanceName", {})}));
+                                                                     {makeStringAttr("moduleName", {}), makeStringArrayAttr("inputPortName"), makeStringArrayAttr("outputPortName"),
+                                                                      makeStringArrayAttr("inoutPortName", true), makeStringAttr("instanceName", {})}));
 
                 map.emplace(grh::ir::OperationKind::kBlackbox, makeSpec(Range{0, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
                                                                      {makeStringAttr("moduleName", {}), makeStringArrayAttr("inputPortName"), makeStringArrayAttr("outputPortName"),
-                                                                      makeStringArrayAttr("parameterNames"), makeStringArrayAttr("parameterValues"), makeStringAttr("instanceName", {})}));
+                                                                      makeStringArrayAttr("inoutPortName", true), makeStringArrayAttr("parameterNames"),
+                                                                      makeStringArrayAttr("parameterValues"), makeStringAttr("instanceName", {})}));
 
                 map.emplace(grh::ir::OperationKind::kDisplay, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, exact(0),
                                                                     {clkPolarity, makeStringAttr("formatString", {}), makeStringAttr("displayKind", {"display", "write", "strobe"})}));
@@ -213,7 +215,8 @@ namespace wolf_sv_parser::transform
                                                                       {makeStringArrayAttr("argsDirection"), makeIntArrayAttr("argsWidth"), makeStringArrayAttr("argsName")}));
 
                 map.emplace(grh::ir::OperationKind::kDpicCall, makeSpec(Range{2, std::numeric_limits<std::size_t>::max()}, Range{0, std::numeric_limits<std::size_t>::max()},
-                                                                     {clkPolarity, makeStringAttr("targetImportSymbol", {}), makeStringArrayAttr("inArgName"), makeStringArrayAttr("outArgName")}));
+                                                                     {clkPolarity, makeStringAttr("targetImportSymbol", {}), makeStringArrayAttr("inArgName"),
+                                                                      makeStringArrayAttr("outArgName"), makeStringArrayAttr("inoutArgName", true)}));
 
                 return map;
             }();
@@ -498,15 +501,28 @@ namespace wolf_sv_parser::transform
                     const auto moduleName = verifyStringAttr("moduleName");
                     auto inputNames = findAttr(graph, op, "inputPortName");
                     auto outputNames = findAttr(graph, op, "outputPortName");
+                    auto inoutNames = findAttr(graph, op, "inoutPortName");
                     if (moduleName && !netlistRef.findGraph(*moduleName))
                     {
                         error(graph, op, "Instance moduleName not found in netlist: " + *moduleName);
                     }
-                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount))
+                    std::size_t inoutCount = 0;
+                    if (inoutNames)
+                    {
+                        if (const auto *inoutVec = std::get_if<std::vector<std::string>>(&*inoutNames))
+                        {
+                            inoutCount = inoutVec->size();
+                        }
+                        else
+                        {
+                            error(graph, op, "inoutPortName must be a string array");
+                        }
+                    }
+                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount - inoutCount * 2))
                     {
                         error(graph, op, "inputPortName size must match operand count");
                     }
-                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount))
+                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount - inoutCount))
                     {
                         error(graph, op, "outputPortName size must match result count");
                     }
@@ -516,13 +532,26 @@ namespace wolf_sv_parser::transform
                 {
                     auto inputNames = findAttr(graph, op, "inputPortName");
                     auto outputNames = findAttr(graph, op, "outputPortName");
+                    auto inoutNames = findAttr(graph, op, "inoutPortName");
                     auto paramNames = findAttr(graph, op, "parameterNames");
                     auto paramValues = findAttr(graph, op, "parameterValues");
-                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount))
+                    std::size_t inoutCount = 0;
+                    if (inoutNames)
+                    {
+                        if (const auto *inoutVec = std::get_if<std::vector<std::string>>(&*inoutNames))
+                        {
+                            inoutCount = inoutVec->size();
+                        }
+                        else
+                        {
+                            error(graph, op, "inoutPortName must be a string array");
+                        }
+                    }
+                    if (inputNames && !lengthEquals<std::string>(*inputNames, operandsCount - inoutCount * 2))
                     {
                         error(graph, op, "inputPortName size must match operand count");
                     }
-                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount))
+                    if (outputNames && !lengthEquals<std::string>(*outputNames, resultsCount - inoutCount))
                     {
                         error(graph, op, "outputPortName size must match result count");
                     }
@@ -560,6 +589,17 @@ namespace wolf_sv_parser::transform
                             {
                                 error(graph, op, "argsDirection/argsWidth/argsName sizes must match");
                             }
+                            else
+                            {
+                                for (const auto &dir : *dirs)
+                                {
+                                    if (dir != "input" && dir != "output" && dir != "inout")
+                                    {
+                                        error(graph, op, "argsDirection must be input/output/inout");
+                                        break;
+                                    }
+                                }
+                            }
                         }
                         else
                         {
@@ -586,9 +626,22 @@ namespace wolf_sv_parser::transform
 
                     auto inNamesIt = findAttr(graph, op, "inArgName");
                     auto outNamesIt = findAttr(graph, op, "outArgName");
+                    auto inoutNamesIt = findAttr(graph, op, "inoutArgName");
+                    std::size_t inoutCount = 0;
+                    if (inoutNamesIt)
+                    {
+                        if (const auto *vec = std::get_if<std::vector<std::string>>(&*inoutNamesIt))
+                        {
+                            inoutCount = vec->size();
+                        }
+                        else
+                        {
+                            error(graph, op, "inoutArgName must be a string array");
+                        }
+                    }
                     if (inNamesIt)
                     {
-                        std::size_t expectedInputs = operandsCount >= 2 ? operandsCount - 2 : 0;
+                        std::size_t expectedInputs = operandsCount >= 2 ? operandsCount - 2 - inoutCount : 0;
                         if (!lengthEquals<std::string>(*inNamesIt, expectedInputs))
                         {
                             error(graph, op, "inArgName size must match input argument count");
@@ -596,7 +649,8 @@ namespace wolf_sv_parser::transform
                     }
                     if (outNamesIt)
                     {
-                        if (!lengthEquals<std::string>(*outNamesIt, resultsCount))
+                        std::size_t expectedOutputs = resultsCount - inoutCount;
+                        if (!lengthEquals<std::string>(*outNamesIt, expectedOutputs))
                         {
                             error(graph, op, "outArgName size must match output argument count");
                         }

@@ -251,6 +251,13 @@ struct Port {
     ValueId value;
 };
 
+struct InoutPort {
+    SymbolId name;
+    ValueId in;
+    ValueId out;
+    ValueId oe;
+};
+
 struct AttrKV {
     std::string key;
     AttributeValue value;
@@ -264,6 +271,7 @@ public:
     std::span<const ValueId> values() const noexcept;
     std::span<const Port> inputPorts() const noexcept;
     std::span<const Port> outputPorts() const noexcept;
+    std::span<const InoutPort> inoutPorts() const noexcept;
     OperationKind opKind(OperationId op) const;
     std::span<const ValueId> opOperands(OperationId op) const;
     std::span<const ValueId> opResults(OperationId op) const;
@@ -276,6 +284,7 @@ public:
     bool valueSigned(ValueId value) const;
     bool valueIsInput(ValueId value) const;
     bool valueIsOutput(ValueId value) const;
+    bool valueIsInout(ValueId value) const;
     OperationId valueDef(ValueId value) const;
     std::span<const ValueUser> valueUsers(ValueId value) const;
     std::optional<SrcLoc> valueSrcLoc(ValueId value) const;
@@ -300,6 +309,7 @@ private:
     std::vector<ValueId> values_;
     std::vector<Port> inputPorts_;
     std::vector<Port> outputPorts_;
+    std::vector<InoutPort> inoutPorts_;
     std::vector<OperationKind> opKinds_;
     std::vector<SymbolId> opSymbols_;
     std::vector<Range> opOperandRanges_;
@@ -315,6 +325,7 @@ private:
     std::vector<uint8_t> valueSigned_;
     std::vector<uint8_t> valueIsInput_;
     std::vector<uint8_t> valueIsOutput_;
+    std::vector<uint8_t> valueIsInout_;
     std::vector<OperationId> valueDefs_;
     std::vector<Range> valueUserRanges_;
     std::vector<ValueUser> useList_;
@@ -344,6 +355,7 @@ public:
     bool eraseValue(ValueId value);
     void bindInputPort(SymbolId name, ValueId value);
     void bindOutputPort(SymbolId name, ValueId value);
+    void bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe);
     void setAttr(OperationId op, std::string_view key, AttributeValue value);
     void setOpKind(OperationId op, OperationKind kind);
     bool eraseAttr(OperationId op, std::string_view key);
@@ -364,6 +376,7 @@ private:
         bool isSigned = false;
         bool isInput = false;
         bool isOutput = false;
+        bool isInout = false;
         OperationId definingOp = OperationId::invalid();
         std::optional<SrcLoc> srcLoc;
         bool alive = true;
@@ -399,6 +412,8 @@ private:
     void bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context);
     void unbindSymbol(SymbolId sym, SymbolKind kind, uint32_t index);
     void bindPort(std::vector<Port>& ports, SymbolId name, ValueId value, std::string_view context);
+    void bindInoutPort(std::vector<InoutPort>& ports, SymbolId name, ValueId in, ValueId out,
+                       ValueId oe, std::string_view context);
 
     GraphId graphId_;
     GraphSymbolTable* symbols_ = nullptr;
@@ -406,6 +421,7 @@ private:
     std::vector<OperationData> operations_;
     std::vector<Port> inputPorts_;
     std::vector<Port> outputPorts_;
+    std::vector<InoutPort> inoutPorts_;
     std::unordered_map<uint32_t, SymbolBinding> symbolIndex_;
 };
 
@@ -418,6 +434,7 @@ public:
     bool isSigned() const noexcept { return isSigned_; }
     bool isInput() const noexcept { return isInput_; }
     bool isOutput() const noexcept { return isOutput_; }
+    bool isInout() const noexcept { return isInout_; }
     OperationId definingOp() const noexcept { return definingOp_; }
     std::span<const ValueUser> users() const noexcept { return std::span<const ValueUser>(users_.data(), users_.size()); }
     const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
@@ -426,7 +443,7 @@ private:
     friend class Graph;
 
     Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-          bool isInput, bool isOutput, OperationId definingOp,
+          bool isInput, bool isOutput, bool isInout, OperationId definingOp,
           std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc);
 
     ValueId id_{};
@@ -436,6 +453,7 @@ private:
     bool isSigned_ = false;
     bool isInput_ = false;
     bool isOutput_ = false;
+    bool isInout_ = false;
     OperationId definingOp_{};
     std::vector<ValueUser> users_;
     std::optional<SrcLoc> srcLoc_;
@@ -494,6 +512,7 @@ public:
     std::span<const ValueId> values() const;
     std::span<const Port> inputPorts() const;
     std::span<const Port> outputPorts() const;
+    std::span<const InoutPort> inoutPorts() const;
 
     ValueId createValue(SymbolId symbol, int32_t width, bool isSigned);
     OperationId createOperation(OperationKind kind, SymbolId symbol);
@@ -507,6 +526,7 @@ public:
 
     void bindInputPort(SymbolId name, ValueId value);
     void bindOutputPort(SymbolId name, ValueId value);
+    void bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe);
     ValueId inputPortValue(SymbolId name) const noexcept;
     ValueId outputPortValue(SymbolId name) const noexcept;
 
@@ -554,6 +574,7 @@ private:
     mutable std::vector<OperationId> operationsCache_;
     mutable std::vector<Port> inputPortsCache_;
     mutable std::vector<Port> outputPortsCache_;
+    mutable std::vector<InoutPort> inoutPortsCache_;
     mutable bool cacheValid_ = false;
 };
 
