@@ -2427,17 +2427,31 @@ namespace grh::emit
                         reportError("kSliceStatic missing sliceStart or sliceEnd", opContext);
                         break;
                     }
+                    const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
-                    if (*sliceStart == *sliceEnd)
+                    expr << "assign " << valueName(results[0]) << " = ";
+                    if (operandWidth == 1)
                     {
-                        expr << *sliceStart;
+                        if (*sliceStart != 0 || *sliceEnd != 0)
+                        {
+                            reportError("kSliceStatic index out of range for scalar", opContext);
+                        }
+                        expr << valueName(operands[0]);
                     }
                     else
                     {
-                        expr << *sliceEnd << ":" << *sliceStart;
+                        expr << valueName(operands[0]) << "[";
+                        if (*sliceStart == *sliceEnd)
+                        {
+                            expr << *sliceStart;
+                        }
+                        else
+                        {
+                            expr << *sliceEnd << ":" << *sliceStart;
+                        }
+                        expr << "]";
                     }
-                    expr << "];";
+                    expr << ";";
                     addAssign(expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2455,8 +2469,22 @@ namespace grh::emit
                         reportError("kSliceDynamic missing sliceWidth", opContext);
                         break;
                     }
+                    const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "];";
+                    expr << "assign " << valueName(results[0]) << " = ";
+                    if (operandWidth == 1)
+                    {
+                        if (*width != 1)
+                        {
+                            reportError("kSliceDynamic width exceeds scalar", opContext);
+                        }
+                        expr << valueName(operands[0]);
+                    }
+                    else
+                    {
+                        expr << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "]";
+                    }
+                    expr << ";";
                     addAssign(expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2474,17 +2502,27 @@ namespace grh::emit
                         reportError("kSliceArray missing sliceWidth", opContext);
                         break;
                     }
+                    const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
-                    if (*width == 1)
+                    expr << "assign " << valueName(results[0]) << " = ";
+                    if (*width == 1 && operandWidth == 1)
                     {
-                        expr << valueName(operands[1]);
+                        expr << valueName(operands[0]);
                     }
                     else
                     {
-                        expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                        expr << valueName(operands[0]) << "[";
+                        if (*width == 1)
+                        {
+                            expr << valueName(operands[1]);
+                        }
+                        else
+                        {
+                            expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                        }
+                        expr << "]";
                     }
-                    expr << "];";
+                    expr << ";";
                     addAssign(expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -3103,6 +3141,15 @@ namespace grh::emit
 
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                    if (memWidth <= 1)
+                    {
+                        appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
+                        appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
+                        appendIndented(stmt, 3, "end");
+                        appendIndented(stmt, 2, "end");
+                        addSequentialStmt(key, stmt.str(), opId);
+                        break;
+                    }
                     appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
                     appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                     appendIndented(stmt, 3, "end else begin");
@@ -4318,17 +4365,31 @@ namespace grh::emit
                     reportError("kSliceStatic missing sliceStart or sliceEnd", context);
                     break;
                 }
+                const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
-                if (*sliceStart == *sliceEnd)
+                expr << "assign " << valueName(results[0]) << " = ";
+                if (operandWidth == 1)
                 {
-                    expr << *sliceStart;
+                    if (*sliceStart != 0 || *sliceEnd != 0)
+                    {
+                        reportError("kSliceStatic index out of range for scalar", context);
+                    }
+                    expr << valueName(operands[0]);
                 }
                 else
                 {
-                    expr << *sliceEnd << ":" << *sliceStart;
+                    expr << valueName(operands[0]) << "[";
+                    if (*sliceStart == *sliceEnd)
+                    {
+                        expr << *sliceStart;
+                    }
+                    else
+                    {
+                        expr << *sliceEnd << ":" << *sliceStart;
+                    }
+                    expr << "]";
                 }
-                expr << "];";
+                expr << ";";
                 addAssign(expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -4346,9 +4407,22 @@ namespace grh::emit
                     reportError("kSliceDynamic missing sliceWidth", context);
                     break;
                 }
+                const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "["
-                     << valueName(operands[1]) << " +: " << *width << "];";
+                expr << "assign " << valueName(results[0]) << " = ";
+                if (operandWidth == 1)
+                {
+                    if (*width != 1)
+                    {
+                        reportError("kSliceDynamic width exceeds scalar", context);
+                    }
+                    expr << valueName(operands[0]);
+                }
+                else
+                {
+                    expr << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "]";
+                }
+                expr << ";";
                 addAssign(expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -4366,17 +4440,27 @@ namespace grh::emit
                     reportError("kSliceArray missing sliceWidth", context);
                     break;
                 }
+                const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = " << valueName(operands[0]) << "[";
-                if (*width == 1)
+                expr << "assign " << valueName(results[0]) << " = ";
+                if (*width == 1 && operandWidth == 1)
                 {
-                    expr << valueName(operands[1]);
+                    expr << valueName(operands[0]);
                 }
                 else
                 {
-                    expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                    expr << valueName(operands[0]) << "[";
+                    if (*width == 1)
+                    {
+                        expr << valueName(operands[1]);
+                    }
+                    else
+                    {
+                        expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                    }
+                    expr << "]";
                 }
-                expr << "];";
+                expr << ";";
                 addAssign(expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -5049,6 +5133,15 @@ namespace grh::emit
 
                 std::ostringstream stmt;
                 appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                if (memWidth <= 1)
+                {
+                    appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
+                    appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
+                    appendIndented(stmt, 3, "end");
+                    appendIndented(stmt, 2, "end");
+                    addSequentialStmt(key, stmt.str(), opId);
+                    break;
+                }
                 appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
                 appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                 appendIndented(stmt, 3, "end else begin");

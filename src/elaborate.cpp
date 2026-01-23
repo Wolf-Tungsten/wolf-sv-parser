@@ -1835,21 +1835,6 @@ ValueId SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpre
 
 ValueId SeqAlwaysRHSConverter::convertElementSelect(
     const slang::ast::ElementSelectExpression& expr) {
-    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
-    if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
-        if (entry->stateOp.valid() &&
-            owner_.graph().getOperation(entry->stateOp).kind() == grh::ir::OperationKind::kMemory) {
-            ValueId addrValue = convert(expr.selector());
-            if (!addrValue.valid()) {
-                return ValueId::invalid();
-            }
-            if (seqOwner) {
-                // Use current guard as enable for sync read if available.
-                ValueId en = owner_.currentGuardValue();
-                return seqOwner->buildMemorySyncRead(*entry, addrValue, expr, en);
-            }
-        }
-    }
     return AlwaysBlockRHSConverter::convertElementSelect(expr);
 }
 
@@ -1967,6 +1952,75 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
             }
             seqOwner->recordMemoryWordWrite(*memoryEntry, assignment, addrValue, rhsValue,
                                             currentEn);
+            return true;
+        }
+
+        if (const auto* rangeSelect =
+                normalizedRoot->as_if<slang::ast::RangeSelectExpression>()) {
+            const slang::ast::Expression* rangeBase =
+                skipImplicitConversions(rangeSelect->value());
+            if (rangeBase != baseElement) {
+                emitUnsupported("Nested memory indexing beyond single range is not supported yet");
+                return true;
+            }
+
+            if (rangeSelect->getSelectionKind() != slang::ast::RangeSelectionKind::Simple) {
+                emitUnsupported("Memory range write requires a simple constant range");
+                return true;
+            }
+
+            std::optional<int64_t> left = evaluateConstant(rangeSelect->left());
+            std::optional<int64_t> right = evaluateConstant(rangeSelect->right());
+            if (!left || !right) {
+                emitUnsupported("Memory range write bounds must be constant");
+                return true;
+            }
+
+            auto normalizeIndex = [&](int64_t rawIndex) -> int64_t {
+                if (!rangeBase->type || !rangeBase->type->isFixedSize()) {
+                    return rawIndex;
+                }
+                const slang::ConstantRange range = rangeBase->type->getFixedRange();
+                return static_cast<int64_t>(
+                    range.translateIndex(static_cast<int32_t>(rawIndex)));
+            };
+
+            const int64_t normLeft = normalizeIndex(*left);
+            const int64_t normRight = normalizeIndex(*right);
+            const int64_t sliceWidth =
+                normLeft >= normRight ? (normLeft - normRight + 1)
+                                      : (normRight - normLeft + 1);
+            if (sliceWidth <= 0) {
+                emitUnsupported("Memory range write width is invalid");
+                return true;
+            }
+            if (owner_.graph().getValue(rhsValue).width() != sliceWidth) {
+                emitUnsupported("Memory range write width mismatch");
+                return true;
+            }
+
+            const int64_t lsbIndex = std::min(normLeft, normRight);
+            if (lsbIndex < 0 || lsbIndex + sliceWidth > entryWidth) {
+                emitUnsupported("Memory range write is out of bounds");
+                return true;
+            }
+
+            int64_t indexWidth = 1;
+            uint64_t maxIndex = static_cast<uint64_t>(std::max<int64_t>(
+                entryWidth > 0 ? entryWidth - 1 : 0, lsbIndex));
+            while (maxIndex >>= 1) {
+                ++indexWidth;
+            }
+            slang::SVInt literal(static_cast<slang::bitwidth_t>(indexWidth),
+                                 static_cast<uint64_t>(lsbIndex), /*isSigned=*/false);
+            ValueId lsbValue =
+                owner_.createLiteralValue(literal, /*isSigned=*/false, "mem_range_lsb");
+            if (!lsbValue.valid()) {
+                return true;
+            }
+
+            seqOwner->recordMemorySliceWrite(*memoryEntry, assignment, addrValue, lsbValue,
+                                             sliceWidth, rhsValue, currentEn);
             return true;
         }
 
@@ -2103,7 +2157,7 @@ bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
     }
 
     ValueId maskValue =
-        seqOwner->buildShiftedMask(indexValue, targetWidth, "lhs_dyn_mask");
+        seqOwner->buildShiftedMask(indexValue, targetWidth, rhsWidth, "lhs_dyn_mask");
     if (!maskValue.valid()) {
         return true;
     }
@@ -3126,10 +3180,21 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(ValueId clockValue) {
             return;
         }
         const int64_t rowWidth = memoryRowWidth(*intent.entry);
+        const int64_t sliceWidth = intent.bitWidth > 0 ? intent.bitWidth : 1;
+        if (sliceWidth > rowWidth) {
+            reportMemoryIssue(intent.entry, intent.originExpr,
+                              "memory mask write width exceeds row width");
+            return;
+        }
+        if (graph().getValue(intent.bitValue).width() != sliceWidth) {
+            reportMemoryIssue(intent.entry, intent.originExpr,
+                              "memory mask write width mismatch");
+            return;
+        }
         ValueId dataValue =
             buildShiftedBitValue(intent.bitValue, intent.bitIndex, rowWidth, "mem_bit_data");
         ValueId maskValue =
-            buildShiftedMask(intent.bitIndex, rowWidth, "mem_bit_mask");
+            buildShiftedMask(intent.bitIndex, rowWidth, sliceWidth, "mem_bit_mask");
         if (!dataValue || !maskValue) {
             reportMemoryIssue(intent.entry, intent.originExpr,
                               "failed to synthesize memory bit intent");
@@ -3230,6 +3295,14 @@ void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
                                               const slang::ast::Expression& origin,
                                               ValueId addrValue, ValueId bitIndex,
                                               ValueId bitValue, ValueId enable) {
+    recordMemorySliceWrite(entry, origin, addrValue, bitIndex, 1, bitValue, enable);
+}
+
+void SeqAlwaysConverter::recordMemorySliceWrite(const SignalMemoEntry& entry,
+                                                const slang::ast::Expression& origin,
+                                                ValueId addrValue, ValueId bitIndex,
+                                                int64_t bitWidth, ValueId bitValue,
+                                                ValueId enable) {
     ValueId normalizedAddr = normalizeMemoryAddress(entry, addrValue, &origin);
     if (!normalizedAddr) {
         return;
@@ -3240,6 +3313,7 @@ void SeqAlwaysConverter::recordMemoryBitWrite(const SignalMemoEntry& entry,
     intent.addr = normalizedAddr;
     intent.bitIndex = bitIndex;
     intent.bitValue = bitValue;
+    intent.bitWidth = bitWidth;
     intent.enable = enable;
     memoryBitWrites_.push_back(intent);
 }
@@ -3517,22 +3591,30 @@ ValueId SeqAlwaysConverter::buildShiftedBitValue(ValueId sourceBit, ValueId bitI
 }
 
 ValueId SeqAlwaysConverter::buildShiftedMask(ValueId bitIndex, int64_t targetWidth,
+                                                 int64_t maskWidth,
                                                  std::string_view label) {
-    if (targetWidth <= 0) {
+    if (targetWidth <= 0 || maskWidth <= 0 || maskWidth > targetWidth) {
+        if (diagnostics()) {
+            diagnostics()->nyi(block(), "Memory mask width is invalid");
+        }
         return ValueId::invalid();
     }
-    slang::SVInt literal(static_cast<slang::bitwidth_t>(targetWidth), 1, /*isSigned=*/false);
+    slang::SVInt literal(static_cast<slang::bitwidth_t>(maskWidth), 0, /*isSigned=*/false);
+    literal.setAllOnes();
     const auto debugInfo = makeDebugInfo(sourceManager_, &block());
     OperationId constOp =
         createOperation(graph(), grh::ir::OperationKind::kConstant, makeMemoryHelperOpName(label));
     applyDebug(graph(), constOp, debugInfo);
     ValueId baseValue =
-        createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
+        createValue(graph(), makeMemoryHelperValueName(label), maskWidth, /*isSigned=*/false);
     applyDebug(graph(), baseValue, debugInfo);
     addResult(graph(), constOp, baseValue);
     setAttr(graph(), constOp, "constValue",
             literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
     ValueId base = baseValue;
+    if (maskWidth != targetWidth) {
+        base = createConcatWithZeroPadding(baseValue, targetWidth - maskWidth, label);
+    }
     if (!base) {
         return ValueId::invalid();
     }
@@ -8497,12 +8579,15 @@ ValueId CombRHSConverter::createIntConstant(int64_t value, const slang::ast::Typ
 std::optional<int64_t>
 CombRHSConverter::translateStaticIndex(const slang::ast::Expression& valueExpr,
                                        int64_t rawIndex) const {
-    const SignalMemoEntry* entry = findMemoEntryFromExpression(valueExpr);
-    if (entry && entry->symbol) {
-        const std::string suffix = "[" + std::to_string(rawIndex) + "]";
-        for (const auto& field : entry->fields) {
-            if (field.path.ends_with(suffix)) {
-                return field.lsb;
+    if (valueExpr.as_if<slang::ast::NamedValueExpression>() ||
+        valueExpr.as_if<slang::ast::HierarchicalValueExpression>()) {
+        const SignalMemoEntry* entry = findMemoEntryFromExpression(valueExpr);
+        if (entry && entry->symbol) {
+            const std::string suffix = "[" + std::to_string(rawIndex) + "]";
+            for (const auto& field : entry->fields) {
+                if (field.path.ends_with(suffix)) {
+                    return field.lsb;
+                }
             }
         }
     }
@@ -9156,17 +9241,17 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
         }
 
         if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
-            processInstanceArray(*instanceArray, graph, netlist);
+            processInstanceArray(*instanceArray, body, graph, netlist);
             continue;
         }
 
         if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>()) {
-            processGenerateBlock(*generateBlock, graph, netlist);
+            processGenerateBlock(*generateBlock, body, graph, netlist);
             continue;
         }
 
         if (const auto* generateArray = member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
-            processGenerateBlockArray(*generateArray, graph, netlist);
+            processGenerateBlockArray(*generateArray, body, graph, netlist);
             continue;
         }
 
@@ -9177,6 +9262,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
 }
 
 void Elaborate::processInstanceArray(const slang::ast::InstanceArraySymbol& array,
+                                     const slang::ast::InstanceBodySymbol& body,
                                      grh::ir::Graph& graph, grh::ir::Netlist& netlist) {
     for (const slang::ast::Symbol* element : array.elements) {
         if (!element) {
@@ -9189,51 +9275,78 @@ void Elaborate::processInstanceArray(const slang::ast::InstanceArraySymbol& arra
         }
 
         if (const auto* nestedArray = element->as_if<slang::ast::InstanceArraySymbol>()) {
-            processInstanceArray(*nestedArray, graph, netlist);
+            processInstanceArray(*nestedArray, body, graph, netlist);
             continue;
         }
 
         if (const auto* generateBlock = element->as_if<slang::ast::GenerateBlockSymbol>()) {
-            processGenerateBlock(*generateBlock, graph, netlist);
+            processGenerateBlock(*generateBlock, body, graph, netlist);
             continue;
         }
 
         if (const auto* generateArray = element->as_if<slang::ast::GenerateBlockArraySymbol>()) {
-            processGenerateBlockArray(*generateArray, graph, netlist);
+            processGenerateBlockArray(*generateArray, body, graph, netlist);
         }
     }
 }
 
 void Elaborate::processGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
+                                     const slang::ast::InstanceBodySymbol& body,
                                      grh::ir::Graph& graph, grh::ir::Netlist& netlist) {
     if (block.isUninstantiated) {
         return;
     }
 
     for (const slang::ast::Symbol& member : block.members()) {
+        if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>()) {
+            processContinuousAssign(*continuous, body, graph);
+            continue;
+        }
+
+        if (const auto* proc = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
+            using slang::ast::ProceduralBlockKind;
+            if (proc->procedureKind == ProceduralBlockKind::Initial) {
+                if (diagnostics_) {
+                    diagnostics_->warn(*proc, "initial blocks are ignored (non-synthesizable)");
+                }
+                continue;
+            }
+            if (proc->procedureKind == ProceduralBlockKind::AlwaysLatch || isCombProceduralBlock(*proc)) {
+                processCombAlways(*proc, body, graph);
+            }
+            else if (isSeqProceduralBlock(*proc)) {
+                processSeqAlways(*proc, body, graph);
+            }
+            else if (diagnostics_) {
+                diagnostics_->nyi(*proc, "Procedural block kind is not supported yet");
+            }
+            continue;
+        }
+
         if (const auto* childInstance = member.as_if<slang::ast::InstanceSymbol>()) {
             processInstance(*childInstance, graph, netlist);
             continue;
         }
 
         if (const auto* instanceArray = member.as_if<slang::ast::InstanceArraySymbol>()) {
-            processInstanceArray(*instanceArray, graph, netlist);
+            processInstanceArray(*instanceArray, body, graph, netlist);
             continue;
         }
 
         if (const auto* nestedBlock = member.as_if<slang::ast::GenerateBlockSymbol>()) {
-            processGenerateBlock(*nestedBlock, graph, netlist);
+            processGenerateBlock(*nestedBlock, body, graph, netlist);
             continue;
         }
 
         if (const auto* nestedArray = member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
-            processGenerateBlockArray(*nestedArray, graph, netlist);
+            processGenerateBlockArray(*nestedArray, body, graph, netlist);
             continue;
         }
     }
 }
 
 void Elaborate::processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                          const slang::ast::InstanceBodySymbol& body,
                                           grh::ir::Graph& graph, grh::ir::Netlist& netlist) {
     if (!array.valid) {
         if (diagnostics_) {
@@ -9246,7 +9359,7 @@ void Elaborate::processGenerateBlockArray(const slang::ast::GenerateBlockArraySy
         if (!entry) {
             continue;
         }
-        processGenerateBlock(*entry, graph, netlist);
+        processGenerateBlock(*entry, body, graph, netlist);
     }
 }
 

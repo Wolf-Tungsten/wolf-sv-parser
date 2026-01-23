@@ -1,17 +1,87 @@
-# OpenC910 调试方案
+# OpenC910 调试方案（基于 case_004 模板）
 
-测试命令 make run_c910_test
+目标：在 `tests/data/openc910/bug_cases` 下建立可复现、可对照、可回归的最小用例，
+同时覆盖 wolf-sv-parser 编译复现、原始 RTL Verilator 基准和 wolf_emit.sv Verilator 对照。
 
-建立孤立测试现场
+## 目录结构约定
 
-1.在 tests/data/openc910/bug_cases/ 目录下新建一个测试用例目录 假设为 case_001
-2.最小化提取涉及的输入 verilog 文件和依赖的文件，编写一个 filelist.f 文件、Makefile 文件和一个简单的 testbench 文件
-3.对最小化的模块进行wolf-sv-parser 处理，定位问题，形成错误报告和修复方案，写入 case_001/bug_report.md 文件
+```
+tests/data/openc910/bug_cases/case_xxx/
+  filelist.f
+  <minimized>.v
+  tb_case_xxx.v
+  tb_case_xxx.cpp
+  bug_report.md
+  Makefile
+```
 
-最小化提取方法参考
+说明：
+- `filelist.f`：最小化后的 Verilog 文件列表（含 stub）。
+- `tb_case_xxx.v`：供 wolf-sv-parser 的 SV 顶层（`TOP`），只做 DUT 包装。
+- `tb_case_xxx.cpp`：Verilator C++ TB（直接驱动 DUT）。
+- `bug_report.md`：复现步骤、现象、期望、定位记录。
+- `Makefile`：统一的复现入口与清理。
 
-1.从报错符号入手（例如 ifu_icache_tag_wen_hold_0），定位相关模块（如 ct_ifu_icache_if）
-2.只保留该模块源码，其他子模块用本地桩模块 stub_modules.v 代替（端口保持一致即可）
-3.testbench 直接实例化该模块，所有输入拉低，输出悬空即可
-4.filelist.f 仅包含 stub_modules.v、目标模块和 testbench
-5.Makefile 直接调用 wolf-sv-parser 处理 filelist.f，保持复现稳定后再进一步裁剪
+## Makefile 目标（参考 case_004）
+
+- `run`：wolf-sv-parser 生成 `wolf_emit.sv`（使用 `TOP=tb_case_xxx`）。
+- `run_verilator`：Verilator 直接仿真 RTL（使用 `DUT_TOP`）。
+- `run_wolf_sv_parser_verilator`：Verilator 仿真 `wolf_emit.sv`（使用 `DUT_TOP`）。
+- `clean`：清除 `build/c910_bug_case/case_xxx`。
+
+产物目录统一落在：
+- `build/c910_bug_case/case_xxx/rtl`（RTL 仿真临时文件与可执行）
+- `build/c910_bug_case/case_xxx/wolf`（wolf_emit.sv 与仿真临时文件）
+
+## 新用例创建步骤
+
+1. 新建目录：`tests/data/openc910/bug_cases/case_xxx/`。
+2. 最小化提取 RTL（优先复用现有文件）：
+   - 先定位报错模块与依赖链，尽量直接复用仓库内已有 RTL 文件。
+   - `filelist.f` 优先列 `tests/data/openc910/C910_RTL_FACTORY` 内的原始 RTL 路径。
+   - 非必要不要把 RTL 复制到 `case_xxx` 目录；需要新增 `.v` 时必须说明理由。
+   - 只有在依赖过深且无法裁剪时，才新增 `stub_modules.v`，并记录原因。
+3. 编写 `filelist.f`：
+   - 只列入最小 RTL、必要的 `stub_modules.v`（如有）、`tb_case_xxx.v`。
+4. 编写 `tb_case_xxx.v`（不驱动信号）：
+   - 仅作为 wolf-sv-parser 顶层，实例化 DUT 并暴露端口。
+   - 不要在 `.v` 中把输入/输出写死，也不要加 `initial/always` 驱动。
+   - 所有激励与检查只放在 `tb_case_xxx.cpp` 中完成。
+5. 编写 `tb_case_xxx.cpp`：
+   - 直接实例化 `DUT_TOP`，包含 `V<DUT_TOP>.h`。
+   - 提供 clock tick、reset、基础激励与断言。
+   - 至少包含一组明确的正确性检查（未满足则返回非零）。
+   - 只需覆盖关键行为，但要求确定性。
+6. 参考 case_004 的 Makefile：
+   - 定义 `TOP`、`DUT_TOP`、`OUT_DIR`、`WOLF_DIR`、`RTL_DIR`。
+   - `run_verilator` 走原始 `filelist.f`。
+   - `run_wolf_sv_parser_verilator` 走 `wolf_emit.sv`。
+7. 编写 `bug_report.md`：
+   - 复现命令、现象、期望、最小化过程与初步分析。
+
+## 复现流程
+
+在 repo 根目录执行：
+
+1. `make -C tests/data/openc910/bug_cases/case_xxx run`
+2. `make -C tests/data/openc910/bug_cases/case_xxx run_verilator`
+3. `make -C tests/data/openc910/bug_cases/case_xxx run_wolf_sv_parser_verilator`
+
+期望：
+- `run_verilator` 与 `run_wolf_sv_parser_verilator` 输出一致；
+- 若一致但 wolf-sv-parser 在 `run` 阶段报错，则定位在解析/生成链路；
+- 若不一致，优先对比 `wolf_emit.sv` 与原始 RTL 语义差异。
+
+## 最小化提取建议
+
+- 从报错符号出发定位模块，再向下裁剪依赖。
+- filelist 复用 `C910_RTL_FACTORY` 原始 RTL 为主，非必要不要创建或复制 `.v`。
+- 保持参数定义与端口宽度一致；必要时在 TB 中显式设置参数。
+- 优先保留时序结构（always 块/复位/时钟），删除无关逻辑。
+- `tb_case_xxx.v` 只做 DUT 包装，不写死信号、不内建激励。
+- RTL 与 wolf_emit 双路径同时验证，避免“看似修复但行为不一致”。
+
+## 产物与清理
+
+所有临时产物都在 `build/c910_bug_case/case_xxx/`，不应提交。
+使用 `make -C tests/data/openc910/bug_cases/case_xxx clean` 清理。

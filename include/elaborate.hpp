@@ -873,9 +873,12 @@ private:
     void recordMemoryBitWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
                               ValueId addrValue, ValueId bitIndex, ValueId bitValue,
                               ValueId enable);
+    void recordMemorySliceWrite(const SignalMemoEntry& entry, const slang::ast::Expression& origin,
+                                ValueId addrValue, ValueId bitIndex, int64_t bitWidth,
+                                ValueId bitValue, ValueId enable);
     ValueId buildShiftedBitValue(ValueId sourceBit, ValueId bitIndex,
                                      int64_t targetWidth, std::string_view label);
-    ValueId buildShiftedMask(ValueId bitIndex, int64_t targetWidth,
+    ValueId buildShiftedMask(ValueId bitIndex, int64_t targetWidth, int64_t maskWidth,
                                  std::string_view label);
     ValueId createConcatWithZeroPadding(ValueId value, int64_t padWidth,
                                             std::string_view label);
@@ -931,6 +934,7 @@ private:
         ValueId addr = ValueId::invalid();
         ValueId bitIndex = ValueId::invalid();
         ValueId bitValue = ValueId::invalid();
+        int64_t bitWidth = 1;
         ValueId enable = ValueId::invalid();
     };
 
@@ -982,11 +986,14 @@ private:
     void emitModulePlaceholder(const slang::ast::InstanceSymbol& instance, grh::ir::Graph& graph);
     void convertInstanceBody(const slang::ast::InstanceSymbol& instance, grh::ir::Graph& graph,
                              grh::ir::Netlist& netlist);
-    void processInstanceArray(const slang::ast::InstanceArraySymbol& array, grh::ir::Graph& graph,
-                              grh::ir::Netlist& netlist);
-    void processGenerateBlock(const slang::ast::GenerateBlockSymbol& block, grh::ir::Graph& graph,
-                              grh::ir::Netlist& netlist);
+    void processInstanceArray(const slang::ast::InstanceArraySymbol& array,
+                              const slang::ast::InstanceBodySymbol& body,
+                              grh::ir::Graph& graph, grh::ir::Netlist& netlist);
+    void processGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
+                              const slang::ast::InstanceBodySymbol& body,
+                              grh::ir::Graph& graph, grh::ir::Netlist& netlist);
     void processGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                   const slang::ast::InstanceBodySymbol& body,
                                    grh::ir::Graph& graph, grh::ir::Netlist& netlist);
     void processNetInitializers(const slang::ast::InstanceBodySymbol& body, grh::ir::Graph& graph);
     void processContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
