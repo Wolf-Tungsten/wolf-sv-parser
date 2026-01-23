@@ -9382,6 +9382,56 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         instanceName = "_inst_" + std::to_string(instanceCounter_++);
     }
 
+    const slang::ast::InstanceBodySymbol* contextBody = nullptr;
+    for (const auto& [body, mappedGraph] : graphByBody_) {
+        if (mappedGraph == &parentGraph) {
+            contextBody = body;
+            break;
+        }
+    }
+
+    std::span<const SignalMemoEntry> netMemo;
+    std::span<const SignalMemoEntry> regMemo;
+    std::span<const SignalMemoEntry> memMemo;
+    WriteBackMemo* portWriteMemo = nullptr;
+    if (contextBody) {
+        netMemo = peekNetMemo(*contextBody);
+        regMemo = peekRegMemo(*contextBody);
+        memMemo = peekMemMemo(*contextBody);
+        portWriteMemo = &ensureWriteBackMemo(*contextBody);
+    }
+
+    class PortLHSConverter : public LHSConverter {
+    public:
+        using LHSConverter::LHSConverter;
+        bool convert(const slang::ast::Expression& expr, ValueId rhsValue,
+                     std::vector<WriteResult>& outResults) {
+            return lowerExpression(expr, rhsValue, outResults);
+        }
+    };
+
+    auto makePortValue = [&](const slang::ast::PortSymbol& port) -> ValueId {
+        TypeHelper::Info info = TypeHelper::analyze(port.getType(), port, diagnostics_);
+        std::string base =
+            instanceName.empty() || port.name.empty()
+                ? std::string(port.name.empty() ? "_port" : port.name)
+                : sanitizeForGraphName(instanceName + "_" + std::string(port.name));
+        if (base.empty()) {
+            base = "_port";
+        }
+        std::string candidate = base;
+        std::size_t suffix = 0;
+        while (parentGraph.findValue(candidate) || parentGraph.findOperation(candidate)) {
+            candidate = base;
+            candidate.push_back('_');
+            candidate.append(std::to_string(++suffix));
+        }
+        const int64_t width = info.width > 0 ? info.width : 1;
+        ValueId value = createValue(parentGraph, candidate, width, info.isSigned);
+        applyDebug(parentGraph, value, makeDebugInfo(sourceManager_, &port));
+        return value;
+    };
+
     std::vector<std::string> inputPortNames;
     std::vector<std::string> outputPortNames;
     inputPortNames.reserve(memo.ports.size());
@@ -9406,31 +9456,78 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         }
 
         const slang::ast::Expression* expr = connection->getExpression();
-        if (!expr) {
-            continue;
-        }
-
-        ValueId value = resolveConnectionValue(*expr, parentGraph, port);
-        if (!value) {
-            continue;
-        }
-
-        if (diagnostics_ && portMeta.width > 0 && parentGraph.getValue(value).width() != portMeta.width) {
-            std::ostringstream oss;
-            oss << "Port width mismatch for " << portMeta.name << " (expected " << portMeta.width
-                << ", got " << parentGraph.getValue(value).width() << ")";
-            diagnostics_->nyi(*port, oss.str());
-        }
 
         switch (portMeta.direction) {
-        case slang::ast::ArgumentDirection::In:
+        case slang::ast::ArgumentDirection::In: {
+            if (!expr) {
+                break;
+            }
+            ValueId value = resolveConnectionValue(*expr, parentGraph, port);
+            if (!value) {
+                break;
+            }
+            if (diagnostics_ && portMeta.width > 0 &&
+                parentGraph.getValue(value).width() != portMeta.width) {
+                std::ostringstream oss;
+                oss << "Port width mismatch for " << portMeta.name << " (expected "
+                    << portMeta.width << ", got " << parentGraph.getValue(value).width() << ")";
+                diagnostics_->nyi(*port, oss.str());
+            }
             addOperand(parentGraph, op, value);
             inputPortNames.emplace_back(portMeta.name);
             break;
-        case slang::ast::ArgumentDirection::Out:
-            addResult(parentGraph, op, value);
+        }
+        case slang::ast::ArgumentDirection::Out: {
+            ValueId resolved = expr ? resolveConnectionValue(*expr, parentGraph, port)
+                                    : ValueId::invalid();
+            if (diagnostics_ && resolved && portMeta.width > 0 &&
+                parentGraph.getValue(resolved).width() != portMeta.width) {
+                std::ostringstream oss;
+                oss << "Port width mismatch for " << portMeta.name << " (expected "
+                    << portMeta.width << ", got " << parentGraph.getValue(resolved).width() << ")";
+                diagnostics_->nyi(*port, oss.str());
+            }
+            const bool useDirect = resolved && !parentGraph.getValue(resolved).definingOp();
+            ValueId resultValue = useDirect ? resolved : makePortValue(*port);
+            if (!resultValue) {
+                break;
+            }
+            addResult(parentGraph, op, resultValue);
             outputPortNames.emplace_back(portMeta.name);
+
+            if (!useDirect && expr && portWriteMemo) {
+                const slang::ast::Expression* targetExpr = expr;
+                if (targetExpr->kind == slang::ast::ExpressionKind::Assignment) {
+                    const auto& assign = targetExpr->as<slang::ast::AssignmentExpression>();
+                    if (assign.isLValueArg()) {
+                        targetExpr = &assign.left();
+                    }
+                }
+                if (targetExpr) {
+                    LHSConverter::Context lhsContext{
+                        .graph = &parentGraph,
+                        .netMemo = netMemo,
+                        .regMemo = regMemo,
+                        .memMemo = memMemo,
+                        .origin = port,
+                        .diagnostics = diagnostics_,
+                        .sourceManager = sourceManager_};
+                    PortLHSConverter lhsConverter(lhsContext);
+                    std::vector<LHSConverter::WriteResult> writeResults;
+                    if (lhsConverter.convert(*targetExpr, resultValue, writeResults)) {
+                        for (LHSConverter::WriteResult& result : writeResults) {
+                            if (!result.target) {
+                                continue;
+                            }
+                            portWriteMemo->recordWrite(*result.target,
+                                                       WriteBackMemo::AssignmentKind::Continuous,
+                                                       port, std::move(result.slices));
+                        }
+                    }
+                }
+            }
             break;
+        }
         default:
             if (diagnostics_) {
                 diagnostics_->nyi(*port,

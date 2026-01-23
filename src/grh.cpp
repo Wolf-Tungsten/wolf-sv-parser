@@ -63,6 +63,23 @@ namespace grh::ir
             return sym.valid() ? std::string(symbols.text(sym)) : std::string();
         }
 
+        std::string formatSrcLocForDebug(const std::optional<SrcLoc> &srcLoc)
+        {
+            if (!srcLoc || srcLoc->file.empty() || srcLoc->line == 0)
+            {
+                return {};
+            }
+            std::string out = srcLoc->file;
+            out.push_back(':');
+            out += std::to_string(srcLoc->line);
+            if (srcLoc->column != 0)
+            {
+                out.push_back(':');
+                out += std::to_string(srcLoc->column);
+            }
+            return out;
+        }
+
         ValueId findPortValue(std::span<const Port> ports, SymbolId name) noexcept
         {
             if (!name.valid())
@@ -789,7 +806,86 @@ namespace grh::ir
         ValueData &data = values_[valIdx];
         if (data.definingOp.valid())
         {
-            throw std::runtime_error("Value already has a defining operation");
+            auto describeValue = [&](ValueId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "value=<invalid>";
+                }
+                std::string out = "value_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > values_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const ValueData &valueData = values_[idx - 1];
+                if (symbols_ && valueData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(valueData.symbol)) + ")";
+                }
+                out += " w=" + std::to_string(valueData.width);
+                out += valueData.isSigned ? " signed" : " unsigned";
+                if (valueData.isInput)
+                {
+                    out += " input";
+                }
+                if (valueData.isOutput)
+                {
+                    out += " output";
+                }
+                const std::string loc = formatSrcLocForDebug(valueData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+            auto describeOp = [&](OperationId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "op=<invalid>";
+                }
+                std::string out = "op_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > operations_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const OperationData &opData = operations_[idx - 1];
+                out += " kind=";
+                out += std::string(toString(opData.kind));
+                if (symbols_ && opData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(opData.symbol)) + ")";
+                }
+                const std::string loc = formatSrcLocForDebug(opData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+
+            std::string message = "Value already has a defining operation; ";
+            message += describeValue(value);
+            message += "; new_def=";
+            message += describeOp(op);
+            message += "; existing_def=";
+            message += describeOp(data.definingOp);
+            throw std::runtime_error(message);
         }
         data.definingOp = op;
         operations_[opIdx].results.push_back(value);
@@ -841,7 +937,88 @@ namespace grh::ir
         }
         if (values_[valIdx].definingOp.valid())
         {
-            throw std::runtime_error("Value already has a defining operation");
+            auto describeValue = [&](ValueId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "value=<invalid>";
+                }
+                std::string out = "value_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > values_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const ValueData &valueData = values_[idx - 1];
+                if (symbols_ && valueData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(valueData.symbol)) + ")";
+                }
+                out += " w=" + std::to_string(valueData.width);
+                out += valueData.isSigned ? " signed" : " unsigned";
+                if (valueData.isInput)
+                {
+                    out += " input";
+                }
+                if (valueData.isOutput)
+                {
+                    out += " output";
+                }
+                const std::string loc = formatSrcLocForDebug(valueData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+            auto describeOp = [&](OperationId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "op=<invalid>";
+                }
+                std::string out = "op_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > operations_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const OperationData &opData = operations_[idx - 1];
+                out += " kind=";
+                out += std::string(toString(opData.kind));
+                if (symbols_ && opData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(opData.symbol)) + ")";
+                }
+                const std::string loc = formatSrcLocForDebug(opData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+
+            std::string message = "Value already has a defining operation while replacing result ";
+            message += std::to_string(index);
+            message += "; ";
+            message += describeValue(value);
+            message += "; new_def=";
+            message += describeOp(op);
+            message += "; existing_def=";
+            message += describeOp(values_[valIdx].definingOp);
+            throw std::runtime_error(message);
         }
 
         const std::size_t currentIdx = valueIndex(current);
