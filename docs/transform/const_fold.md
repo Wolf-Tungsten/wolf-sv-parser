@@ -17,6 +17,7 @@
    - 为每个折叠结果创建新的 Value + `kConstant` op，命名前缀 `__constfold_*`，放入同一 Graph。
    - 调用 `replaceUsers` 将原 result 的所有用户 operand 替换为新常量，并通过 `Graph::replaceOutputValue` 维护输出端口绑定。
    - 折叠成功的原 op 记入待删列表，单轮完成后统一 `graph.removeOperation`（清理 users/def/operationOrder）。
+   - 折叠结束后清理无用户且不绑定端口的 `kConstant` op，避免 emit 输出死 assign（值仍保留）。
 4) **诊断与失败条件**：
    - error：常量解析失败、缺失属性、结果/operand 缺失、替换/索引异常、未捕获异常。
    - warning：含未知值且 disallow X 折叠。
@@ -33,7 +34,7 @@
 - 仅处理单结果 op（代码按 results.size() 遍历，但常见折叠算子均单结果）；多结果算子需扩展测试验证。
 - X/Z 传播策略简单（全跳过或全允许），未做更精细的四态折叠/短路。
 - 新常量不会尝试合并重复 literal；可能引入重复等效常量节点。
-- 仍保留旧 Value（仅删除旧 op），如果需要垃圾回收未使用的中间值，可另加清理 pass。
+- 仍保留旧 Value（仅删除旧 op），未做 Value 级垃圾回收。
 
 ## 相关文件
 - Pass 实现：`src/pass/const_fold.cpp`

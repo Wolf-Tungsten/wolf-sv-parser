@@ -110,6 +110,32 @@ namespace wolf_sv_parser::transform
             return std::nullopt;
         }
 
+        bool isValuePortBound(const grh::ir::Graph &graph, grh::ir::ValueId value)
+        {
+            for (const auto &port : graph.inputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                if (port.in == value || port.out == value || port.oe == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         std::optional<ConstantValue> parseConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op, const grh::ir::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
         {
             try
@@ -626,6 +652,67 @@ namespace wolf_sv_parser::transform
                 break;
             }
         }
+
+        bool removedDeadConstants = false;
+        for (const auto &graphEntry : netlist().graphs())
+        {
+            grh::ir::Graph &graph = *graphEntry.second;
+            std::vector<grh::ir::OperationId> deadConstOps;
+            for (const auto opId : graph.operations())
+            {
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    continue;
+                }
+                const auto &results = op.results();
+                if (results.empty())
+                {
+                    error(graph, op, "kConstant missing result");
+                    failed = true;
+                    continue;
+                }
+                bool live = false;
+                for (const auto resId : results)
+                {
+                    if (!resId.valid())
+                    {
+                        error(graph, op, "kConstant missing result");
+                        failed = true;
+                        live = true;
+                        break;
+                    }
+                    if (isValuePortBound(graph, resId))
+                    {
+                        live = true;
+                        break;
+                    }
+                    if (!graph.getValue(resId).users().empty())
+                    {
+                        live = true;
+                        break;
+                    }
+                }
+                if (!live)
+                {
+                    deadConstOps.push_back(opId);
+                }
+            }
+            for (const auto opId : deadConstOps)
+            {
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (!graph.eraseOp(opId))
+                {
+                    error(graph, op, "Failed to erase dead kConstant op");
+                    failed = true;
+                }
+                else
+                {
+                    removedDeadConstants = true;
+                }
+            }
+        }
+        result.changed = result.changed || removedDeadConstants;
 
         if (failed)
         {

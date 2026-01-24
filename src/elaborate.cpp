@@ -6423,7 +6423,7 @@ bool AlwaysConverter::isCombinationalFullCase(const slang::ast::CaseStatement& s
     if (isSequential() || stmt.defaultCase) {
         return false;
     }
-    if (stmt.condition != CaseStatementCondition::Normal) {
+    if (stmt.condition == CaseStatementCondition::Inside) {
         return false;
     }
 
@@ -6437,34 +6437,98 @@ bool AlwaysConverter::isCombinationalFullCase(const slang::ast::CaseStatement& s
     }
 
     const uint64_t required = 1ull << bitWidth;
-    std::unordered_set<uint64_t> seen;
-    seen.reserve(stmt.items.size());
+    if (stmt.condition == CaseStatementCondition::Normal) {
+        std::unordered_set<uint64_t> seen;
+        seen.reserve(stmt.items.size());
 
+        for (const auto& item : stmt.items) {
+            for (const slang::ast::Expression* expr : item.expressions) {
+                if (!expr) {
+                    continue;
+                }
+                std::optional<slang::SVInt> constant =
+                    evaluateConstantInt(*expr, /*allowUnknown=*/false);
+                if (!constant) {
+                    return false;
+                }
+                slang::SVInt normalized =
+                    constant->trunc(static_cast<slang::bitwidth_t>(bitWidth));
+                normalized.setSigned(false);
+                std::optional<uint64_t> valueOpt = normalized.as<uint64_t>();
+                if (!valueOpt) {
+                    return false;
+                }
+                seen.insert(*valueOpt);
+                if (seen.size() >= required) {
+                    return true;
+                }
+            }
+        }
+
+        return seen.size() >= required;
+    }
+
+    constexpr int64_t kMaxWildcardCaseWidth = 20;
+    if (bitWidth > kMaxWildcardCaseWidth) {
+        return false;
+    }
+
+    std::vector<uint8_t> covered(static_cast<std::size_t>(required), 0);
+    uint64_t coveredCount = 0;
+    auto markCovered = [&](uint64_t value) {
+        if (covered[value] != 0) {
+            return false;
+        }
+        covered[value] = 1;
+        ++coveredCount;
+        return coveredCount >= required;
+    };
+
+    // Binary analysis: treat unknown bits in case items as don't-care for coverage.
     for (const auto& item : stmt.items) {
         for (const slang::ast::Expression* expr : item.expressions) {
             if (!expr) {
                 continue;
             }
             std::optional<slang::SVInt> constant =
-                evaluateConstantInt(*expr, /*allowUnknown=*/false);
+                evaluateConstantInt(*expr, /*allowUnknown=*/true);
             if (!constant) {
                 return false;
             }
             slang::SVInt normalized =
-                constant->trunc(static_cast<slang::bitwidth_t>(bitWidth));
+                constant->resize(static_cast<slang::bitwidth_t>(bitWidth));
             normalized.setSigned(false);
-            std::optional<uint64_t> valueOpt = normalized.as<uint64_t>();
-            if (!valueOpt) {
-                return false;
+
+            uint64_t baseValue = 0;
+            std::vector<int64_t> wildcards;
+            wildcards.reserve(bitWidth);
+            for (int64_t bit = 0; bit < bitWidth; ++bit) {
+                slang::logic_t bitValue = normalized[static_cast<int32_t>(bit)];
+                if (bitValue.isUnknown()) {
+                    wildcards.push_back(bit);
+                    continue;
+                }
+                if ((bitValue.value & 0x1u) != 0u) {
+                    baseValue |= (1ull << bit);
+                }
             }
-            seen.insert(*valueOpt);
-            if (seen.size() >= required) {
-                return true;
+
+            const uint64_t combinations = 1ull << wildcards.size();
+            for (uint64_t combo = 0; combo < combinations; ++combo) {
+                uint64_t value = baseValue;
+                for (std::size_t idx = 0; idx < wildcards.size(); ++idx) {
+                    if ((combo >> idx) & 0x1ull) {
+                        value |= (1ull << wildcards[idx]);
+                    }
+                }
+                if (markCovered(value)) {
+                    return true;
+                }
             }
         }
     }
 
-    return seen.size() >= required;
+    return coveredCount >= required;
 }
 
 void AlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& stmt) {
