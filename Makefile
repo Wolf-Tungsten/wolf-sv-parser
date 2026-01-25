@@ -12,6 +12,7 @@ C910_ROOT := tests/data/openc910
 C910_SMART_RUN_DIR := $(C910_ROOT)/smart_run
 C910_BUG_CASES_DIR := $(C910_ROOT)/bug_cases
 C910_SMART_CODE_BASE ?= $(abspath $(C910_ROOT)/C910_RTL_FACTORY)
+SMART_ENV ?= $(C910_SMART_RUN_DIR)/env.sh
 SMART_SIM ?= verilator
 SMART_CASE ?= coremark
 VERILATOR ?= verilator
@@ -34,7 +35,7 @@ HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
 C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
 C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
-.PHONY: all run_hdlbits_test run_c910_test build_wolf_parser \
+.PHONY: all run_hdlbits_test run_c910_test run_c910_test_ref build_wolf_parser \
 	run_c910_bug_case run_all_c910_bug_cases clean check-id
 
 all: run_hdlbits_test
@@ -68,10 +69,17 @@ $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 
 run_c910_test:
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
+	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
+		. "$(SMART_ENV)"; \
+	fi; \
 	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM)"; \
 	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 		CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-		CODE_BASE_PATH="$(C910_SMART_CODE_BASE)"
+		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
+		TOOL_EXTENSION="$$TOOL_EXTENSION"
+
+run_c910_test_ref: SMART_SIM=verilator_ref
+run_c910_test_ref: run_c910_test
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 C910_BUG_CASE_DEPS := build_wolf_parser
