@@ -4729,6 +4729,79 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
 std::optional<bool> SeqAlwaysConverter::matchResetCondition(ValueId condition,
                                                             ValueId resetSignal) {
     const bool debugReset = std::getenv("WOLF_DEBUG_RESET") != nullptr;
+    auto parseConstBool = [&](ValueId candidate) -> std::optional<bool> {
+        if (!candidate || candidate.graph != graph().id()) {
+            return std::nullopt;
+        }
+        OperationId op = graph().getValue(candidate).definingOp();
+        if (!op) {
+            return std::nullopt;
+        }
+        const grh::ir::Operation opView = graph().getOperation(op);
+        if (opView.kind() != grh::ir::OperationKind::kConstant) {
+            return std::nullopt;
+        }
+        auto attr = opView.attr("constValue");
+        if (!attr) {
+            return std::nullopt;
+        }
+        const auto* literal = std::get_if<std::string>(&*attr);
+        if (!literal) {
+            return std::nullopt;
+        }
+
+        slang::SVInt parsed = slang::SVInt::fromString(*literal);
+        if (parsed.hasUnknown()) {
+            return std::nullopt;
+        }
+
+        const uint64_t* words = parsed.getRawPtr();
+        const uint32_t wordCount = parsed.getNumWords();
+        bool isZero = true;
+        bool isOne = true;
+        for (uint32_t i = 0; i < wordCount; ++i) {
+            if (words[i] != 0) {
+                isZero = false;
+            }
+            if (i == 0) {
+                if (words[i] != 1) {
+                    isOne = false;
+                }
+            } else if (words[i] != 0) {
+                isOne = false;
+            }
+        }
+        if (isZero) {
+            return false;
+        }
+        if (isOne) {
+            return true;
+        }
+
+        const uint32_t bitWidth = parsed.getBitWidth();
+        const uint32_t fullWords = bitWidth / 64;
+        const uint32_t remBits = bitWidth % 64;
+        bool allOnes = true;
+        for (uint32_t i = 0; i < fullWords; ++i) {
+            if (words[i] != std::numeric_limits<uint64_t>::max()) {
+                allOnes = false;
+                break;
+            }
+        }
+        if (allOnes && remBits != 0) {
+            const uint64_t mask = (uint64_t(1) << remBits) - 1;
+            if ((words[fullWords] & mask) != mask) {
+                allOnes = false;
+            }
+        }
+        if (allOnes) {
+            const auto resetValue = graph().getValue(resetSignal);
+            if (resetValue.isSigned() || resetValue.width() == static_cast<int32_t>(bitWidth)) {
+                return true;
+            }
+        }
+        return std::nullopt;
+    };
     if (condition == resetSignal) {
         return /* inverted */ false;
     }
@@ -4762,6 +4835,22 @@ std::optional<bool> SeqAlwaysConverter::matchResetCondition(ValueId condition,
             if (opView.kind() == grh::ir::OperationKind::kNot &&
                 graph().getValue(condition).width() == graph().getValue(resetSignal).width()) {
                 return true;
+            }
+        }
+        if (operands.size() == 2 &&
+            (opView.kind() == grh::ir::OperationKind::kEq ||
+             opView.kind() == grh::ir::OperationKind::kNe)) {
+            const ValueId lhs = operands[0];
+            const ValueId rhs = operands[1];
+            std::optional<bool> constBool;
+            if (lhs == resetSignal) {
+                constBool = parseConstBool(rhs);
+            } else if (rhs == resetSignal) {
+                constBool = parseConstBool(lhs);
+            }
+            if (constBool.has_value()) {
+                const bool isEq = opView.kind() == grh::ir::OperationKind::kEq;
+                return isEq ? !*constBool : *constBool;
             }
         }
     }

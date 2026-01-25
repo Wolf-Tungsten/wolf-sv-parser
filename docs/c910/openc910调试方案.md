@@ -27,6 +27,8 @@ tests/data/openc910/bug_cases/case_xxx/
 - `run`：wolf-sv-parser 生成 `wolf_emit.sv`（使用 `TOP=tb_case_xxx`）。
 - `run_verilator`：Verilator 直接仿真 RTL（使用 `DUT_TOP`）。
 - `run_wolf_sv_parser_verilator`：Verilator 仿真 `wolf_emit.sv`（使用 `DUT_TOP`）。
+- `run_verilator` 默认需带覆盖率报告（line coverage >= 90%）；若未满足应视为用例不完整。
+- `run_wolf_sv_parser_verilator` 同样需打印覆盖率并检查阈值（默认 line coverage >= 90%）。
 - `clean`：清除 `build/c910_bug_case/case_xxx`。
 
 产物目录统一落在：
@@ -69,6 +71,7 @@ tests/data/openc910/bug_cases/case_xxx/
 
 期望：
 - `run_verilator` 与 `run_wolf_sv_parser_verilator` 输出一致；
+- `run_verilator` 与 `run_wolf_sv_parser_verilator` 均需输出 line coverage 报告且覆盖率 >= 90%；
 - 若一致但 wolf-sv-parser 在 `run` 阶段报错，则定位在解析/生成链路；
 - 若不一致，优先对比 `wolf_emit.sv` 与原始 RTL 语义差异。
 
@@ -95,4 +98,7 @@ tests/data/openc910/bug_cases/case_xxx/
 ## 产物与清理
 
 所有临时产物都在 `build/c910_bug_case/case_xxx/`，不应提交。
+覆盖率产物：
+- RTL 路径：`build/c910_bug_case/case_xxx/rtl/coverage.dat`、`build/c910_bug_case/case_xxx/rtl/coverage.info`
+- wolf 路径：`build/c910_bug_case/case_xxx/wolf/coverage.dat`、`build/c910_bug_case/case_xxx/wolf/coverage.info`
 使用 `make -C tests/data/openc910/bug_cases/case_xxx clean` 清理。
