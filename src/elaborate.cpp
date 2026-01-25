@@ -8080,7 +8080,103 @@ ValueId WriteBackMemo::composeSlices(Entry& entry, grh::ir::Graph& graph,
         return ValueId::invalid();
     }
 
-    std::sort(entry.slices.begin(), entry.slices.end(),
+    std::vector<Slice> slices = entry.slices;
+    const auto debugInfo = srcLocForEntry(entry);
+    auto sliceExisting = [&](const Slice& existing, int64_t msb, int64_t lsb) -> ValueId {
+        if (!existing.value) {
+            return ValueId::invalid();
+        }
+        if (lsb == existing.lsb && msb == existing.msb) {
+            return existing.value;
+        }
+        if (lsb < existing.lsb || msb > existing.msb || msb < lsb) {
+            return ValueId::invalid();
+        }
+
+        const int64_t relStart = lsb - existing.lsb;
+        const int64_t relEnd = msb - existing.lsb;
+        OperationId op =
+            createOperation(graph, grh::ir::OperationKind::kSliceStatic,
+                            makeOperationName(entry, "overlap_slice"));
+        applyDebug(graph, op, debugInfo);
+        addOperand(graph, op, existing.value);
+        setAttr(graph, op, "sliceStart", relStart);
+        setAttr(graph, op, "sliceEnd", relEnd);
+
+        ValueId result = createValue(graph, makeValueName(entry, "overlap_slice"),
+                                     msb - lsb + 1,
+                                     graph.getValue(existing.value).isSigned());
+        applyDebug(graph, result, debugInfo);
+        addResult(graph, op, result);
+        return result;
+    };
+
+    auto insertSlice = [&](std::vector<Slice>& entries, const Slice& slice) -> bool {
+        Slice copy = slice;
+        std::vector<Slice> preserved;
+        preserved.reserve(entries.size() + 2);
+
+        for (const Slice& existing : entries) {
+            const bool overlap = !(copy.msb < existing.lsb || copy.lsb > existing.msb);
+            if (!overlap) {
+                preserved.push_back(existing);
+                continue;
+            }
+
+            if (existing.msb > copy.msb) {
+                Slice upper = existing;
+                upper.lsb = copy.msb + 1;
+                upper.value = sliceExisting(existing, upper.msb, upper.lsb);
+                if (!upper.value) {
+                    return false;
+                }
+                preserved.push_back(std::move(upper));
+            }
+
+            if (existing.lsb < copy.lsb) {
+                Slice lower = existing;
+                lower.msb = copy.lsb - 1;
+                lower.value = sliceExisting(existing, lower.msb, lower.lsb);
+                if (!lower.value) {
+                    return false;
+                }
+                preserved.push_back(std::move(lower));
+            }
+        }
+
+        preserved.push_back(std::move(copy));
+        entries = std::move(preserved);
+        std::sort(entries.begin(), entries.end(), [](const Slice& lhs, const Slice& rhs) {
+            if (lhs.msb != rhs.msb) {
+                return lhs.msb > rhs.msb;
+            }
+            return lhs.lsb > rhs.lsb;
+        });
+        return true;
+    };
+
+    if (entry.kind == AssignmentKind::Continuous && slices.size() > 1) {
+        std::vector<Slice> ordered = slices;
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const Slice& lhs, const Slice& rhs) {
+                             const int64_t lhsWidth = lhs.msb - lhs.lsb + 1;
+                             const int64_t rhsWidth = rhs.msb - rhs.lsb + 1;
+                             return lhsWidth > rhsWidth;
+                         });
+        std::vector<Slice> merged;
+        merged.reserve(ordered.size());
+        for (const Slice& slice : ordered) {
+            if (!insertSlice(merged, slice)) {
+                reportIssue(entry, "Write-back overlap slice merge failed", diagnostics);
+                return ValueId::invalid();
+            }
+        }
+        if (!merged.empty()) {
+            slices = std::move(merged);
+        }
+    }
+
+    std::sort(slices.begin(), slices.end(),
               [](const Slice& lhs, const Slice& rhs) {
                   if (lhs.msb != rhs.msb) {
                       return lhs.msb > rhs.msb;
@@ -8090,11 +8186,10 @@ ValueId WriteBackMemo::composeSlices(Entry& entry, grh::ir::Graph& graph,
 
     const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
     int64_t expectedMsb = targetWidth - 1;
-    const auto debugInfo = srcLocForEntry(entry);
     std::vector<ValueId> components;
-    components.reserve(entry.slices.size() + 2);
+    components.reserve(slices.size() + 2);
 
-    for (const Slice& slice : entry.slices) {
+    for (const Slice& slice : slices) {
         if (!slice.value) {
             reportIssue(entry, "Write-back slice is missing RHS value", diagnostics);
             return ValueId::invalid();

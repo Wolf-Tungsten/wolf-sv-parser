@@ -55,6 +55,7 @@
      - 对 net：创建 `kAssign` 把组合出的 SSA Value 写回 `entry.value`；
      - 对 reg：将组合结果连接到 `entry.stateOp` 的数据端（寄存器族 operand），保持寄存器 SSA 输出不被破坏；
      - 对 `kMemory`：不在 Write-Back Memo 中直接写回；顺序 always 中的 memory 写由 SeqAlwaysConverter 记录 `MemoryWriteIntent` 并在 finalize 阶段生成写口。
+  3. 连续赋值（net）若存在重叠切片，会先按“窄覆盖宽”规则合并切片，再进入最终拼接，避免 write-back 因重叠报错。
  3. finalize 结束后 memo 会被清空，保证每次 elaboration 只消费一次 pending writes。
 
 通过上述分层 memo，elaborate 可以把「解析 slang AST」、「构造 GRH 节点」以及「最终写回/驱动 stateful 对象」解耦，既便于诊断，也方便阶段化落地。
