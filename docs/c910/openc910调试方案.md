@@ -72,6 +72,17 @@ tests/data/openc910/bug_cases/case_xxx/
 - 若一致但 wolf-sv-parser 在 `run` 阶段报错，则定位在解析/生成链路；
 - 若不一致，优先对比 `wolf_emit.sv` 与原始 RTL 语义差异。
 
+## 顶层一键入口
+
+在 repo 根目录使用顶层 Makefile 快捷执行并自动清理：
+
+- 单个用例：`make run_c910_bug_case BUG_CASE=case_xxx`
+- 全部用例：`make run_c910_bug_case`
+
+说明：
+- 以上目标会先构建 `wolf-sv-parser`，再依次执行 `clean/run/run_verilator/run_wolf_sv_parser_verilator`。
+- 若需要跳过构建，可加 `SKIP_WOLF_BUILD=1`。
+
 ## 最小化提取建议
 
 - 从报错符号出发定位模块，再向下裁剪依赖。

@@ -10,6 +10,7 @@ WOLF_PARSER := $(BUILD_DIR)/bin/wolf-sv-parser
 HDLBITS_ROOT := tests/data/hdlbits
 C910_ROOT := tests/data/openc910
 C910_SMART_RUN_DIR := $(C910_ROOT)/smart_run
+C910_BUG_CASES_DIR := $(C910_ROOT)/bug_cases
 C910_SMART_CODE_BASE ?= $(abspath $(C910_ROOT)/C910_RTL_FACTORY)
 SMART_SIM ?= verilator
 SMART_CASE ?= coremark
@@ -30,8 +31,11 @@ VERILATOR_MK := $(OUT_DIR)/$(VERILATOR_PREFIX).mk
 
 TB_SOURCES := $(wildcard $(HDLBITS_ROOT)/tb/tb_*.cpp)
 HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
+C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
+C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
-.PHONY: all run_hdlbits_test run_c910_test clean check-id
+.PHONY: all run_hdlbits_test run_c910_test build_wolf_parser \
+	run_c910_bug_case run_all_c910_bug_cases clean check-id
 
 all: run_hdlbits_test
 
@@ -43,7 +47,11 @@ check-id:
 	@test -f $(DUT_SRC) || { echo "Missing DUT source: $(DUT_SRC)"; exit 1; }
 	@test -f $(TB_SRC) || { echo "Missing testbench: $(TB_SRC)"; exit 1; }
 
-$(WOLF_PARSER): CMakeLists.txt
+$(WOLF_PARSER):
+	$(CMAKE) -S . -B $(BUILD_DIR)
+	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
+
+build_wolf_parser:
 	$(CMAKE) -S . -B $(BUILD_DIR)
 	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
 
@@ -64,6 +72,37 @@ run_c910_test:
 	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 		CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 		CODE_BASE_PATH="$(C910_SMART_CODE_BASE)"
+
+ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
+C910_BUG_CASE_DEPS := build_wolf_parser
+endif
+
+run_c910_bug_case: $(C910_BUG_CASE_DEPS)
+ifneq ($(strip $(BUG_CASE)),)
+	@if [ ! -d "$(C910_BUG_CASES_DIR)/$(BUG_CASE)" ]; then \
+		echo "BUG_CASE not found: $(BUG_CASE)"; \
+		echo "Available: $(C910_BUG_CASES)"; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) clean
+	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) run_verilator
+	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) run_wolf_sv_parser_verilator
+else
+	@echo "BUG_CASE not set; running all available cases: $(C910_BUG_CASES)"
+	@$(MAKE) --no-print-directory run_all_c910_bug_cases SKIP_WOLF_BUILD=1
+endif
+
+.PHONY: run_all_c910_bug_cases
+ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
+C910_BUG_CASE_ALL_DEPS := build_wolf_parser
+endif
+
+run_all_c910_bug_cases: $(C910_BUG_CASE_ALL_DEPS)
+	@for bug_case in $(C910_BUG_CASES); do \
+		echo "==== Running BUG_CASE=$$bug_case ===="; \
+		$(MAKE) --no-print-directory run_c910_bug_case BUG_CASE=$$bug_case \
+			SKIP_WOLF_BUILD=1 || exit $$?; \
+	done
 
 run_hdlbits_test:
 ifneq ($(strip $(DUT)),)

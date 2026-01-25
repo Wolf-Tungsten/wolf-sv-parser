@@ -452,6 +452,8 @@ protected:
     const SignalMemoEntry* findMemoEntry(const slang::ast::ValueSymbol& symbol) const;
     std::optional<int64_t> evaluateConstant(const slang::ast::Expression& expr);
     slang::ast::EvalContext& ensureEvalContext();
+    ValueId createSliceValue(ValueId source, int64_t lsb, int64_t msb,
+                                 const slang::ast::Expression& originExpr);
 
 private:
     struct BitRange {
@@ -475,8 +477,6 @@ private:
 private:
     std::optional<BitRange> lookupRangeByPath(const SignalMemoEntry& entry,
                                               std::string_view path) const;
-    ValueId createSliceValue(ValueId source, int64_t lsb, int64_t msb,
-                                 const slang::ast::Expression& originExpr);
     void report(std::string message);
     static bool pathMatchesDescendant(std::string_view parent, std::string_view candidate);
     void flushPending(std::vector<WriteResult>& outResults);
@@ -542,6 +542,8 @@ public:
 private:
     bool handleDynamicElementAssign(const slang::ast::ElementSelectExpression& element,
                                     ValueId rhsValue);
+    bool handleConcatenation(const slang::ast::ConcatenationExpression& concat, ValueId rhsValue);
+    bool handleMemoryOrFallback(const slang::ast::Expression& expr, ValueId rhsValue);
 };
 
 /// RHS converter used by procedural always blocks.

@@ -1904,6 +1904,9 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
     auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
 
     const slang::ast::Expression* root = skipImplicitConversions(assignment.left());
+    if (const auto* concat = root->as_if<slang::ast::ConcatenationExpression>()) {
+        return handleConcatenation(*concat, rhsValue);
+    }
     const slang::ast::Expression* cursor = root;
     const SignalMemoEntry* memoryEntry = nullptr;
     const slang::ast::ElementSelectExpression* baseElement = nullptr;
@@ -2074,6 +2077,254 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
     }
 
     return AlwaysBlockLHSConverter::convert(assignment, rhsValue);
+}
+
+bool SeqAlwaysLHSConverter::handleConcatenation(
+    const slang::ast::ConcatenationExpression& concat, ValueId rhsValue) {
+    const auto operands = concat.operands();
+    if (operands.empty()) {
+        if (diagnostics()) {
+            diagnostics()->error(owner_.block(), "Empty concatenation on assign LHS");
+        }
+        return false;
+    }
+
+    const int64_t rhsWidth = owner_.graph().getValue(rhsValue).width();
+    int64_t remainingWidth = rhsWidth;
+    int64_t currentMsb = rhsWidth - 1;
+
+    for (const slang::ast::Expression* operand : operands) {
+        if (!operand || !operand->type) {
+            if (diagnostics()) {
+                diagnostics()->error(owner_.block(),
+                                     "Concatenation operand lacks type information");
+            }
+            return false;
+        }
+        if (!operand->type->isBitstreamType() || !operand->type->isFixedSize()) {
+            if (diagnostics()) {
+                diagnostics()->error(owner_.block(),
+                                     "Concatenation operand must be a fixed-size bitstream");
+            }
+            return false;
+        }
+
+        const int64_t operandWidth =
+            static_cast<int64_t>(operand->type->getBitstreamWidth());
+        if (operandWidth <= 0) {
+            if (diagnostics()) {
+                diagnostics()->error(owner_.block(),
+                                     "Concatenation operand has zero width");
+            }
+            return false;
+        }
+        if (operandWidth > remainingWidth) {
+            if (diagnostics()) {
+                diagnostics()->error(owner_.block(),
+                                     "Concatenation operand width exceeds available RHS bits");
+            }
+            return false;
+        }
+
+        const int64_t sliceLsb = currentMsb - operandWidth + 1;
+        ValueId sliceValue = createSliceValue(rhsValue, sliceLsb, currentMsb, *operand);
+        if (!sliceValue.valid()) {
+            return false;
+        }
+        if (!handleMemoryOrFallback(*operand, sliceValue)) {
+            return false;
+        }
+
+        currentMsb = sliceLsb - 1;
+        remainingWidth -= operandWidth;
+    }
+
+    if (remainingWidth != 0) {
+        if (diagnostics()) {
+            diagnostics()->error(owner_.block(),
+                                 "Concatenation coverage does not match RHS width");
+        }
+        return false;
+    }
+    return true;
+}
+
+bool SeqAlwaysLHSConverter::handleMemoryOrFallback(const slang::ast::Expression& expr,
+                                                   ValueId rhsValue) {
+    auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+    const slang::ast::Expression* root = skipImplicitConversions(expr);
+    if (const auto* concat = root->as_if<slang::ast::ConcatenationExpression>()) {
+        return handleConcatenation(*concat, rhsValue);
+    }
+
+    const slang::ast::Expression* cursor = root;
+    const SignalMemoEntry* memoryEntry = nullptr;
+    const slang::ast::ElementSelectExpression* baseElement = nullptr;
+
+    while (cursor) {
+        if (const auto* element = cursor->as_if<slang::ast::ElementSelectExpression>()) {
+            const slang::ast::Expression* inner = skipImplicitConversions(element->value());
+            if (const auto* named = inner->as_if<slang::ast::NamedValueExpression>()) {
+                if (const auto* symbol = named->symbol.as_if<slang::ast::ValueSymbol>()) {
+                    const SignalMemoEntry* candidate = findMemoEntry(*symbol);
+                    if (candidate && candidate->stateOp.valid() &&
+                        owner_.graph().getOperation(candidate->stateOp).kind() ==
+                            grh::ir::OperationKind::kMemory) {
+                        memoryEntry = candidate;
+                        baseElement = element;
+                        break;
+                    }
+                }
+            }
+            cursor = inner;
+            continue;
+        }
+        if (const auto* member = cursor->as_if<slang::ast::MemberAccessExpression>()) {
+            cursor = skipImplicitConversions(member->value());
+            continue;
+        }
+        if (const auto* range = cursor->as_if<slang::ast::RangeSelectExpression>()) {
+            cursor = skipImplicitConversions(range->value());
+            continue;
+        }
+        break;
+    }
+
+    auto emitUnsupported = [&](std::string_view message) {
+        if (diagnostics()) {
+            diagnostics()->error(owner_.block(), std::string(message));
+        }
+    };
+
+    if (memoryEntry && baseElement) {
+        if (!owner_.rhsConverter_ || !seqOwner) {
+            emitUnsupported("Seq always memory write lacks RHS converter context");
+            return true;
+        }
+
+        ValueId addrValue = owner_.rhsConverter_->convert(baseElement->selector());
+        if (!addrValue.valid()) {
+            return true;
+        }
+
+        const bool rootIsBase = root == baseElement;
+        ValueId currentEn = owner_.currentGuardValue();
+        const int64_t entryWidth = seqOwner->memoryRowWidth(*memoryEntry);
+
+        if (rootIsBase) {
+            if (owner_.graph().getValue(rhsValue).width() != entryWidth) {
+                emitUnsupported("Memory word write width mismatch");
+                return true;
+            }
+            seqOwner->recordMemoryWordWrite(*memoryEntry, expr, addrValue, rhsValue, currentEn);
+            return true;
+        }
+
+        if (const auto* rangeSelect =
+                root->as_if<slang::ast::RangeSelectExpression>()) {
+            const slang::ast::Expression* rangeBase =
+                skipImplicitConversions(rangeSelect->value());
+            if (rangeBase != baseElement) {
+                emitUnsupported("Nested memory indexing beyond single range is not supported yet");
+                return true;
+            }
+
+            if (rangeSelect->getSelectionKind() != slang::ast::RangeSelectionKind::Simple) {
+                emitUnsupported("Memory range write requires a simple constant range");
+                return true;
+            }
+
+            std::optional<int64_t> left = evaluateConstant(rangeSelect->left());
+            std::optional<int64_t> right = evaluateConstant(rangeSelect->right());
+            if (!left || !right) {
+                emitUnsupported("Memory range write bounds must be constant");
+                return true;
+            }
+
+            auto normalizeIndex = [&](int64_t rawIndex) -> int64_t {
+                if (!rangeBase->type || !rangeBase->type->isFixedSize()) {
+                    return rawIndex;
+                }
+                const slang::ConstantRange range = rangeBase->type->getFixedRange();
+                return static_cast<int64_t>(
+                    range.translateIndex(static_cast<int32_t>(rawIndex)));
+            };
+
+            const int64_t normLeft = normalizeIndex(*left);
+            const int64_t normRight = normalizeIndex(*right);
+            const int64_t sliceWidth =
+                normLeft >= normRight ? (normLeft - normRight + 1)
+                                      : (normRight - normLeft + 1);
+            if (sliceWidth <= 0) {
+                emitUnsupported("Memory range write width is invalid");
+                return true;
+            }
+            if (owner_.graph().getValue(rhsValue).width() != sliceWidth) {
+                emitUnsupported("Memory range write width mismatch");
+                return true;
+            }
+
+            const int64_t lsbIndex = std::min(normLeft, normRight);
+            if (lsbIndex < 0 || lsbIndex + sliceWidth > entryWidth) {
+                emitUnsupported("Memory range write is out of bounds");
+                return true;
+            }
+
+            int64_t indexWidth = 1;
+            uint64_t maxIndex = static_cast<uint64_t>(std::max<int64_t>(
+                entryWidth > 0 ? entryWidth - 1 : 0, lsbIndex));
+            while (maxIndex >>= 1) {
+                ++indexWidth;
+            }
+            slang::SVInt literal(static_cast<slang::bitwidth_t>(indexWidth),
+                                 static_cast<uint64_t>(lsbIndex), /*isSigned=*/false);
+            ValueId lsbValue =
+                owner_.createLiteralValue(literal, /*isSigned=*/false, "mem_range_lsb");
+            if (!lsbValue.valid()) {
+                return true;
+            }
+
+            seqOwner->recordMemorySliceWrite(*memoryEntry, expr, addrValue, lsbValue,
+                                             sliceWidth, rhsValue, currentEn);
+            return true;
+        }
+
+        const auto* bitSelect = root->as_if<slang::ast::ElementSelectExpression>();
+        if (!bitSelect) {
+            emitUnsupported("Memory assignment must target full row or single bit");
+            return true;
+        }
+        const slang::ast::Expression* bitBase = skipImplicitConversions(bitSelect->value());
+        if (bitBase != baseElement) {
+            emitUnsupported("Nested memory indexing beyond single-bit is not supported yet");
+            return true;
+        }
+
+        if (owner_.graph().getValue(rhsValue).width() != 1) {
+            emitUnsupported("Memory single-bit write expects 1-bit RHS");
+            return true;
+        }
+
+        ValueId bitIndexValue = owner_.rhsConverter_->convert(bitSelect->selector());
+        if (!bitIndexValue.valid()) {
+            return true;
+        }
+
+        seqOwner->recordMemoryBitWrite(*memoryEntry, expr, addrValue, bitIndexValue,
+                                       rhsValue, currentEn);
+        return true;
+    }
+
+    if (const auto* element = root->as_if<slang::ast::ElementSelectExpression>()) {
+        std::optional<int64_t> staticIndex = evaluateConstant(element->selector());
+        if (!staticIndex) {
+            if (handleDynamicElementAssign(*element, rhsValue)) {
+                return true;
+            }
+        }
+    }
+
+    return AlwaysBlockLHSConverter::convertExpression(expr, rhsValue);
 }
 
 bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr,
