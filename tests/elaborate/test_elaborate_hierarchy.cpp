@@ -104,7 +104,9 @@ bool buildNetlist(const std::string& context, const std::filesystem::path& sourc
     driver.reportCompilation(*compilation, /* quiet */ true);
     driver.runAnalysis(*compilation);
 
-    Elaborate elaborator(&diagnostics);
+    ElaborateOptions elaborateOptions;
+    elaborateOptions.abortOnError = false;
+    Elaborate elaborator(&diagnostics, elaborateOptions);
     netlist = elaborator.convert(compilation->getRoot());
     return true;
 }

@@ -72,7 +72,9 @@ namespace
         driver.runAnalysis(*compilation);
 
         ElaborateDiagnostics diagnostics;
-        Elaborate elaborator(&diagnostics);
+        ElaborateOptions elaborateOptions;
+        elaborateOptions.abortOnError = false;
+        Elaborate elaborator(&diagnostics, elaborateOptions);
         Netlist netlist = elaborator.convert(compilation->getRoot());
         if (!diagnostics.messages().empty())
         {

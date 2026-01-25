@@ -134,7 +134,9 @@ int main() {
     driver.runAnalysis(*compilation);
 
     ElaborateDiagnostics diagnostics;
-    Elaborate elaborator(&diagnostics);
+    ElaborateOptions elaborateOptions;
+    elaborateOptions.abortOnError = false;
+    Elaborate elaborator(&diagnostics, elaborateOptions);
     grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
     if (!diagnostics.empty()) {
         bool unexpected = false;

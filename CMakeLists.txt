@@ -416,6 +416,24 @@ target_compile_definitions(elaborate-seq-always
 
 register_test_exe(elaborate-seq-always)
 
+# elaborate: mem
+add_executable(elaborate-mem
+    tests/elaborate/test_elaborate_mem.cpp
+)
+
+target_link_libraries(elaborate-mem
+    PRIVATE
+        elaborate
+        grh
+)
+
+target_compile_definitions(elaborate-mem
+    PRIVATE
+        WOLF_SV_ELAB_MEM_DATA_PATH="${ELABORATE_INPUT_DIR}/mem_multi_clk.sv"
+)
+
+register_test_exe(elaborate-mem)
+
 # elaborate: stage21
 add_executable(elaborate-stage21
     tests/elaborate/test_elaborate_stage21.cpp

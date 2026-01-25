@@ -17,7 +17,9 @@
 
 #include <memory>
 #include <optional>
+#include <exception>
 #include <filesystem>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -72,7 +74,7 @@ using SymbolId = grh::ir::SymbolId;
 /// Diagnostic categories emitted by the elaboration pipeline.
 enum class ElaborateDiagnosticKind {
     Todo,
-    NotYetImplemented,
+    Error,
     Warning
 };
 
@@ -88,17 +90,19 @@ struct ElaborateDiagnostic {
 class ElaborateDiagnostics {
 public:
     void todo(const slang::ast::Symbol& symbol, std::string message);
-    void nyi(const slang::ast::Symbol& symbol, std::string message);
+    void error(const slang::ast::Symbol& symbol, std::string message);
     void warn(const slang::ast::Symbol& symbol, std::string message);
     void todo(const slang::SourceLocation& location, std::string message,
               std::string originSymbol = {});
-    void nyi(const slang::SourceLocation& location, std::string message,
+    void error(const slang::SourceLocation& location, std::string message,
              std::string originSymbol = {});
     void warn(const slang::SourceLocation& location, std::string message,
               std::string originSymbol = {});
 
+    void setOnError(std::function<void()> callback) { onError_ = std::move(callback); }
     const std::vector<ElaborateDiagnostic>& messages() const noexcept { return messages_; }
     bool empty() const noexcept { return messages_.empty(); }
+    bool hasError() const noexcept { return hasError_; }
 
 private:
     void add(ElaborateDiagnosticKind kind, const slang::ast::Symbol& symbol,
@@ -107,6 +111,13 @@ private:
              std::optional<slang::SourceLocation> location, std::string message);
 
     std::vector<ElaborateDiagnostic> messages_;
+    bool hasError_ = false;
+    std::function<void()> onError_;
+};
+
+class ElaborateAbort final : public std::exception {
+public:
+    const char* what() const noexcept override { return "elaborate aborted"; }
 };
 
 /// Options controlling the elaboration pipeline behaviour.
@@ -114,6 +125,8 @@ struct ElaborateOptions {
     /// When true, create placeholder operations describing the module body.
     /// This is disabled by default now that module bodies are elaborated.
     bool emitPlaceholders = false;
+    /// When true, abort elaboration immediately after the first Error diagnostic.
+    bool abortOnError = true;
 };
 
 /// Captures a flattened field inside a memoized signal.
@@ -139,6 +152,7 @@ struct SignalMemoEntry {
     const slang::ast::ValueSymbol* syncResetSymbol = nullptr;
     bool syncResetActiveHigh = true;
     bool multiDriver = false;
+    bool forceRegisterArray = false;
 };
 
 /// Describes a single DPI import argument lowered during elaboration.
@@ -694,6 +708,9 @@ protected:
                                    int64_t segLsb);
     ValueId createMuxForEntry(const SignalMemoEntry& entry, ValueId condition,
                                   ValueId onTrue, ValueId onFalse, std::string_view label);
+    ValueId createMuxForWidth(const SignalMemoEntry& entry, ValueId condition,
+                              ValueId onTrue, ValueId onFalse, int64_t width,
+                              std::string_view label);
     ValueId buildCaseMatch(const slang::ast::CaseStatement::ItemGroup& item,
                                ValueId controlValue,
                                slang::ast::CaseStatementCondition condition);
@@ -887,6 +904,7 @@ private:
     std::optional<ValueId> deriveClockValue();
     ValueId convertTimingExpr(const slang::ast::Expression& expr);
     ValueId buildDataOperand(const WriteBackMemo::Entry& entry);
+    ValueId buildDataOperandSlice(const WriteBackMemo::Entry& entry, int64_t msb, int64_t lsb);
     ValueId createHoldSlice(const WriteBackMemo::Entry& entry, ValueId source,
                             int64_t msb, int64_t lsb);
     bool attachClockOperand(OperationId stateOp, ValueId clkValue,
@@ -905,10 +923,17 @@ private:
         ValueId resetValue = ValueId::invalid();
         ValueId dataWithoutReset = ValueId::invalid();
     };
+    struct InferredReset {
+        ValueId signal = ValueId::invalid();
+        bool activeHigh = true;
+        ResetExtraction extraction;
+    };
     std::optional<ResetContext> buildResetContext(const SignalMemoEntry& entry);
     std::optional<ResetExtraction>
     extractResetBranches(ValueId dataValue, ValueId resetSignal, bool activeHigh,
                          const WriteBackMemo::Entry& entry);
+    std::optional<InferredReset> inferResetFromMux(ValueId dataValue,
+                                                   const WriteBackMemo::Entry& entry);
     std::optional<ResetExtraction>
     extractAsyncResetAssignment(const SignalMemoEntry& entry, const ResetContext& context);
     std::optional<bool> matchResetCondition(ValueId condition, ValueId resetSignal);

@@ -143,7 +143,12 @@ int main(int argc, char **argv)
 
     wolf_sv_parser::ElaborateDiagnostics elaborateDiagnostics;
     wolf_sv_parser::Elaborate elaborator(&elaborateDiagnostics);
-    auto netlist = elaborator.convert(root);
+    grh::ir::Netlist netlist;
+    try {
+        netlist = elaborator.convert(root);
+    } catch (const wolf_sv_parser::ElaborateAbort&) {
+        // Diagnostics already recorded; stop elaboration immediately.
+    }
 
     bool hasElaborateError = false;
     if (!elaborateDiagnostics.empty())
@@ -187,7 +192,7 @@ int main(int argc, char **argv)
         };
         for (const auto &message : elaborateDiagnostics.messages())
         {
-            const char *tag = "NYI";
+            const char *tag = "ERROR";
             switch (message.kind)
             {
             case wolf_sv_parser::ElaborateDiagnosticKind::Todo:
@@ -196,9 +201,9 @@ int main(int argc, char **argv)
             case wolf_sv_parser::ElaborateDiagnosticKind::Warning:
                 tag = "WARN";
                 break;
-            case wolf_sv_parser::ElaborateDiagnosticKind::NotYetImplemented:
+            case wolf_sv_parser::ElaborateDiagnosticKind::Error:
             default:
-                tag = "NYI";
+                tag = "ERROR";
                 hasElaborateError = true;
                 break;
             }
@@ -239,11 +244,15 @@ int main(int argc, char **argv)
             }
         }
     }
+    if (elaborateDiagnostics.hasError())
+    {
+        hasElaborateError = true;
+    }
 
-    // Terminate if there are NYI (Not Yet Implemented) errors
+    // Terminate if there are elaboration errors.
     if (hasElaborateError)
     {
-        std::cerr << "Build failed: elaboration encountered Not Yet Implemented features\n";
+        std::cerr << "Build failed: elaboration encountered errors\n";
         return 2;
     }
 

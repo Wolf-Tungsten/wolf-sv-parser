@@ -58,3 +58,27 @@
  3. finalize 结束后 memo 会被清空，保证每次 elaboration 只消费一次 pending writes。
 
 通过上述分层 memo，elaborate 可以把「解析 slang AST」、「构造 GRH 节点」以及「最终写回/驱动 stateful 对象」解耦，既便于诊断，也方便阶段化落地。
+
+## 顺序寄存器数组切片合成
+- **适用场景**：unpacked array 被判定为寄存器数组（非 kMemory），且存在多路时序驱动（例如 generate 内每元素写入 + reset）。
+- **处理策略**：顺序 always 在合并分支时按切片生成小宽度 mux，不再构造整条数组宽度的 shadow 总线；每个 slice 只拼接本段覆盖的 RHS + hold 位段。
+- **写回方式**：`SeqAlwaysConverter` 对每个 slice 直接构造 `buildDataOperandSlice`，生成独立的寄存器 split，避免 640-bit 级别的中间 concat。
+- **收益**：减少仿真中间信号规模，降低组合网表规模，保持与原始写入/复位优先级一致。
+- **多路时序驱动判定**：
+  - **何时判定**：在 `collectSignalMemos` 扫描所有过程块后确定。
+  - **判定条件**：同一 `ValueSymbol` 被多个时序过程块驱动（不同 `always_ff/always`）。同一过程块内多次写入不算多路驱动。
+  - **结果**：`regDriverBlocks[symbol].size() > 1` 时，`SignalMemoEntry::multiDriver = true`，并为每个驱动块拆出一份 entry，后续顺序合并走 multi-driver 路径。
+  - **代码位置**：`src/elaborate.cpp` 的 `Elaborate::collectSignalMemos`（`regDriverBlocks` 统计与 entry 拆分）。
+- **寄存器数组 vs kMemory 分流**：
+  - **何时分流**：同样在 `collectSignalMemos` 扫描完成后统一决定。
+  - **默认规则**：凡是 `deriveMemoryLayout(type, symbol)` 成立的 unpacked array，默认进入 `memMemo`，作为 `kMemory` 处理。
+  - **强制寄存器数组**：如果数组写入满足以下条件，设置 `forceRegisterArray = true`，并改走 reg memo：
+    - 所有写入都是 element-select（例如 `mem[i] <= ...`）
+    - index 为编译期静态值（genvar/param/const），无动态索引
+    - 不存在 whole-assign（对整个数组或数组 slice 的赋值）
+- **分流结果**：`forceRegisterArray` 会阻止 `deriveMemoryLayout` 进入 memMemo；`ensureRegState` 也会跳过 kMemory 分配。
+- **代码位置**：`src/elaborate.cpp` 的 `collectSignalMemos`（`ArrayWriteInfo` 与 `forceRegisterArray` 设定）、`ensureRegState`、`ensureMemState`；字段定义在 `include/elaborate.hpp`。
+- **顺序小结**：
+  - `collectSignalMemos` 先遍历过程块，收集 `regDriverBlocks` 与 `arrayWrites`。
+  - 扫描结束后先据 `arrayWrites` 设置 `forceRegisterArray`，完成 mem vs reg 分流。
+  - 生成 reg entries 时再用 `regDriverBlocks.size()` 标记 `multiDriver` 并拆分 entry。

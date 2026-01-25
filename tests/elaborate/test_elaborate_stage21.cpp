@@ -109,7 +109,9 @@ int main() {
     driver.runAnalysis(*compilation);
 
     ElaborateDiagnostics diagnostics;
-    Elaborate elaborator(&diagnostics);
+    ElaborateOptions elaborateOptions;
+    elaborateOptions.abortOnError = false;
+    Elaborate elaborator(&diagnostics, elaborateOptions);
     grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     // Case 1: seq_stage21_en_reg => kRegisterEn with [clk, en, data]

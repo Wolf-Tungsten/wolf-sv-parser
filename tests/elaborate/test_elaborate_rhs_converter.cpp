@@ -136,7 +136,9 @@ int main() {
     }
 
     ElaborateDiagnostics diagnostics;
-    Elaborate elaborator(&diagnostics);
+    ElaborateOptions elaborateOptions;
+    elaborateOptions.abortOnError = false;
+    Elaborate elaborator(&diagnostics, elaborateOptions);
     grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     grh::ir::Graph* graph = netlist.findGraph("rhs_converter_case");

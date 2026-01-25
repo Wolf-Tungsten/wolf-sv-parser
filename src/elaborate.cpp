@@ -406,7 +406,7 @@ int64_t clampBitWidth(uint64_t width, ElaborateDiagnostics* diagnostics,
                       const slang::ast::Symbol& symbol) {
     if (width == 0) {
         if (diagnostics) {
-            diagnostics->nyi(symbol, "Port has indeterminate width; treating as 1-bit placeholder");
+            diagnostics->error(symbol, "Port has indeterminate width; treating as 1-bit placeholder");
         }
         return 1;
     }
@@ -414,7 +414,7 @@ int64_t clampBitWidth(uint64_t width, ElaborateDiagnostics* diagnostics,
     constexpr auto maxValue = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
     if (width > maxValue) {
         if (diagnostics) {
-            diagnostics->nyi(symbol,
+            diagnostics->error(symbol,
                              "Port width exceeds GRH limit; clamping to int64_t::max width");
         }
         return std::numeric_limits<int64_t>::max();
@@ -427,7 +427,7 @@ void handleUnsupportedPort(const slang::ast::Symbol& symbol, std::string_view de
     if (diagnostics) {
         std::string message = "Unsupported port form: ";
         message.append(description);
-        diagnostics->nyi(symbol, message);
+        diagnostics->error(symbol, message);
     }
 }
 
@@ -556,7 +556,7 @@ private:
                     static_cast<int64_t>(packed.elementType.getBitstreamWidth());
                 if (elementWidth <= 0) {
                     if (diagnostics) {
-                        diagnostics->nyi(origin,
+                        diagnostics->error(origin,
                                          "Encountered zero-width element in packed array flatten");
                     }
                     break;
@@ -587,7 +587,7 @@ private:
                     static_cast<int64_t>(unpacked.elementType.getBitstreamWidth());
                 if (elementWidth <= 0) {
                     if (diagnostics) {
-                        diagnostics->nyi(origin,
+                        diagnostics->error(origin,
                                          "Encountered zero-width element in unpacked array flatten");
                     }
                     break;
@@ -619,7 +619,7 @@ private:
                 const int64_t fieldWidth = static_cast<int64_t>(fieldType.getBitstreamWidth());
                 if (fieldWidth <= 0) {
                     if (diagnostics) {
-                        diagnostics->nyi(origin,
+                        diagnostics->error(origin,
                                          "Encountered zero-width struct field while flattening");
                     }
                     continue;
@@ -891,7 +891,7 @@ deriveMemoryLayout(const slang::ast::Type& type, const slang::ast::ValueSymbol& 
             const uint64_t extent = unpacked.range.fullWidth();
             if (extent == 0) {
                 if (diagnostics) {
-                    diagnostics->nyi(symbol,
+                    diagnostics->error(symbol,
                                      "Unpacked array dimension must have positive extent");
                 }
                 return std::nullopt;
@@ -901,7 +901,7 @@ deriveMemoryLayout(const slang::ast::Type& type, const slang::ast::ValueSymbol& 
             total *= extent;
             if (total > maxValue) {
                 if (diagnostics) {
-                    diagnostics->nyi(symbol,
+                    diagnostics->error(symbol,
                                      "Memory row count exceeds GRH limit; clamping to int64_t::max");
                 }
                 rows = std::numeric_limits<int64_t>::max();
@@ -958,7 +958,7 @@ deriveClockPolarity(const slang::ast::ProceduralBlockSymbol& block,
     const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
     if (!timing) {
         if (diagnostics) {
-            diagnostics->nyi(symbol,
+            diagnostics->error(symbol,
                              "Sequential driver lacks timing control; unable to determine clock edge");
         }
         return std::nullopt;
@@ -967,7 +967,7 @@ deriveClockPolarity(const slang::ast::ProceduralBlockSymbol& block,
     const slang::ast::SignalEventControl* event = findEdgeEventControl(*timing);
     if (!event) {
         if (diagnostics) {
-            diagnostics->nyi(symbol,
+            diagnostics->error(symbol,
                              "Sequential driver timing control is not an edge-sensitive event");
         }
         return std::nullopt;
@@ -983,7 +983,7 @@ deriveClockPolarity(const slang::ast::ProceduralBlockSymbol& block,
     case EdgeKind::None:
     default:
         if (diagnostics) {
-            diagnostics->nyi(symbol,
+            diagnostics->error(symbol,
                              "Sequential driver uses unsupported edge kind (dual-edge / level)");
         }
         return std::nullopt;
@@ -1153,7 +1153,7 @@ detectAsyncResetEvent(const slang::ast::ProceduralBlockSymbol& block,
     }
     if (events.size() > 2) {
         if (diagnostics) {
-            diagnostics->nyi(block, "Multiple asynchronous reset events are not supported yet");
+            diagnostics->error(block, "Multiple asynchronous reset events are not supported yet");
         }
         return std::nullopt;
     }
@@ -1723,7 +1723,7 @@ ValueId LHSConverter::createSliceValue(ValueId source, int64_t lsb, int64_t msb,
 
 void LHSConverter::report(std::string message) {
     if (diagnostics_ && origin_) {
-        diagnostics_->nyi(*origin_, std::move(message));
+        diagnostics_->error(*origin_, std::move(message));
     }
 }
 
@@ -1835,6 +1835,20 @@ ValueId SeqAlwaysRHSConverter::handleMemoEntry(const slang::ast::NamedValueExpre
 
 ValueId SeqAlwaysRHSConverter::convertElementSelect(
     const slang::ast::ElementSelectExpression& expr) {
+    if (const SignalMemoEntry* entry = findMemoEntryFromExpression(expr.value())) {
+        if (entry->stateOp &&
+            graph().getOperation(entry->stateOp).kind() == grh::ir::OperationKind::kMemory) {
+            auto* seqOwner = static_cast<SeqAlwaysConverter*>(&owner_);
+            if (seqOwner) {
+                ValueId addrValue = convert(expr.selector());
+                if (!addrValue) {
+                    return ValueId::invalid();
+                }
+                ValueId guard = owner_.currentGuardValue();
+                return seqOwner->buildMemorySyncRead(*entry, addrValue, expr, guard);
+            }
+        }
+    }
     return AlwaysBlockRHSConverter::convertElementSelect(expr);
 }
 
@@ -1925,7 +1939,7 @@ bool SeqAlwaysLHSConverter::convert(const slang::ast::AssignmentExpression& assi
 
     auto emitUnsupported = [&](std::string_view message) {
         if (diagnostics()) {
-            diagnostics()->nyi(owner_.block(), std::string(message));
+            diagnostics()->error(owner_.block(), std::string(message));
         }
     };
 
@@ -2076,7 +2090,7 @@ bool SeqAlwaysLHSConverter::convertExpression(const slang::ast::Expression& expr
                         owner_.graph().getOperation(candidate->stateOp).kind() ==
                             grh::ir::OperationKind::kMemory) {
                         if (diagnostics()) {
-                            diagnostics()->nyi(owner_.block(),
+                            diagnostics()->error(owner_.block(),
                                                "DPI 输出参数写 memory 暂不支持");
                         }
                         return true;
@@ -2126,7 +2140,7 @@ bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
 
     if (!owner_.rhsConverter_) {
         if (diagnostics()) {
-            diagnostics()->nyi(owner_.block(), "Dynamic LHS index requires RHS converter context");
+            diagnostics()->error(owner_.block(), "Dynamic LHS index requires RHS converter context");
         }
         return true;
     }
@@ -2140,7 +2154,7 @@ bool SeqAlwaysLHSConverter::handleDynamicElementAssign(
     const int32_t rhsWidth = owner_.graph().getValue(rhsValue).width();
     if (rhsWidth <= 0 || rhsWidth > targetWidth) {
         if (diagnostics()) {
-            diagnostics()->nyi(owner_.block(), "Dynamic bit select RHS width mismatch");
+            diagnostics()->error(owner_.block(), "Dynamic bit select RHS width mismatch");
         }
         return true;
     }
@@ -2371,7 +2385,7 @@ bool CombAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressi
         std::string msg = "$display-like task ";
         msg.append(std::string(call.getSubroutineName()));
         msg.append(" ignored in comb always; only sequential displays are modeled");
-        diagnostics()->nyi(block(), std::move(msg));
+        diagnostics()->error(block(), std::move(msg));
     }
     return true;
 }
@@ -2383,7 +2397,7 @@ bool CombAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
         std::string msg = "组合 always 中的 DPI 调用 ";
         msg.append(std::string(call.getSubroutineName()));
         msg.append(" 被忽略；仅支持时序 always");
-        diagnostics()->nyi(block(), std::move(msg));
+        diagnostics()->error(block(), std::move(msg));
     }
     return true;
 }
@@ -2393,7 +2407,7 @@ bool CombAlwaysConverter::handleAssertionIntent(const slang::ast::Expression*,
                                                 std::string_view,
                                                 std::string_view) {
     if (diagnostics() && origin) {
-        diagnostics()->nyi(block(), "组合 always 中的 assert 被忽略；GRH 仅建模时序断言");
+        diagnostics()->error(block(), "组合 always 中的 assert 被忽略；GRH 仅建模时序断言");
     }
     return true;
 }
@@ -2476,7 +2490,7 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
     ValueId clkValue = ensureClockValue();
     if (!clkValue.valid()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential display lacks resolved clock");
+            diagnostics()->error(block(), "Sequential display lacks resolved clock");
         }
         return true;
     }
@@ -2491,7 +2505,7 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
     }
     if (!enableValue.valid()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Failed to derive enable for display operation");
+            diagnostics()->error(block(), "Failed to derive enable for display operation");
         }
         return true;
     }
@@ -2506,7 +2520,7 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
             if (diagnostics()) {
                 std::string msg = std::string(call.getSubroutineName());
                 msg.append(" contains unsupported empty argument");
-                diagnostics()->nyi(block(), std::move(msg));
+                diagnostics()->error(block(), std::move(msg));
             }
             return false;
         }
@@ -2534,7 +2548,7 @@ bool SeqAlwaysConverter::handleDisplaySystemTask(const slang::ast::CallExpressio
                 if (diagnostics()) {
                     std::string msg = std::string(call.getSubroutineName());
                     msg.append(" requires literal format strings for GRH display conversion");
-                    diagnostics()->nyi(block(), std::move(msg));
+                    diagnostics()->error(block(), std::move(msg));
                 }
                 return true;
             }
@@ -2583,7 +2597,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     ValueId clkValue = ensureClockValue();
     if (!clkValue.valid()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential DPI call lacks resolved clock");
+            diagnostics()->error(block(), "Sequential DPI call lacks resolved clock");
         }
         return true;
     }
@@ -2598,14 +2612,14 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     }
     if (!enableValue.valid()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential DPI call failed to derive enable signal");
+            diagnostics()->error(block(), "Sequential DPI call failed to derive enable signal");
         }
         return true;
     }
 
     if (!rhsConverter_ || !lhsConverter_) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential DPI call missing converter context");
+            diagnostics()->error(block(), "Sequential DPI call missing converter context");
         }
         return true;
     }
@@ -2616,7 +2630,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
             std::ostringstream oss;
             oss << "DPI 调用形参与声明不匹配: expected " << entry.args.size() << " got "
                 << args.size();
-            diagnostics()->nyi(block(), oss.str());
+            diagnostics()->error(block(), oss.str());
         }
         return true;
     }
@@ -2655,7 +2669,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
                     msg.append(" (expr kind=");
                     msg.append(std::to_string(static_cast<int>(actual->kind)));
                     msg.push_back(')');
-                    diagnostics()->nyi(block(), std::move(msg));
+                    diagnostics()->error(block(), std::move(msg));
                 }
                 return false;
             }
@@ -2675,7 +2689,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
         const slang::ast::Expression* actual = args[idx];
         if (!actual) {
             if (diagnostics()) {
-                diagnostics()->nyi(block(), "DPI 调用参数缺失表达式");
+                diagnostics()->error(block(), "DPI 调用参数缺失表达式");
             }
             return true;
         }
@@ -2696,7 +2710,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
                     std::ostringstream oss;
                     oss << "DPI input arg width mismatch: expected " << argInfo.width
                         << " actual " << graph().getValue(value).width();
-                    diagnostics()->nyi(block(), oss.str());
+                    diagnostics()->error(block(), oss.str());
                 }
                 return true;
             }
@@ -2718,7 +2732,7 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
                     std::ostringstream oss;
                     oss << "DPI input arg width mismatch: expected " << argInfo.width
                         << " actual " << graph().getValue(value).width();
-                    diagnostics()->nyi(block(), oss.str());
+                    diagnostics()->error(block(), oss.str());
                 }
                 return true;
             }
@@ -2756,11 +2770,11 @@ bool SeqAlwaysConverter::handleDpiCall(const slang::ast::CallExpression& call,
     else if (entry.symbol) {
         setAttr(graph(), op, "targetImportSymbol", std::string(entry.symbol->name));
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "DPI import operation 未在当前 graph 中创建");
+            diagnostics()->error(block(), "DPI import operation 未在当前 graph 中创建");
         }
     }
     else if (diagnostics()) {
-        diagnostics()->nyi(block(), "DPI import operation metadata缺失");
+        diagnostics()->error(block(), "DPI import operation metadata缺失");
     }
     setAttr(graph(), op, "inArgName", inputNames);
     setAttr(graph(), op, "outArgName", outputNames);
@@ -2777,7 +2791,7 @@ bool SeqAlwaysConverter::handleAssertionIntent(const slang::ast::Expression* con
     ValueId clkValue = ensureClockValue();
     if (!clkValue.valid()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential assert lacks resolved clock");
+            diagnostics()->error(block(), "Sequential assert lacks resolved clock");
         }
         return true;
     }
@@ -2788,7 +2802,7 @@ bool SeqAlwaysConverter::handleAssertionIntent(const slang::ast::Expression* con
         ValueId condValue = rhsConverter_->convert(*condition);
         if (!condValue.valid()) {
             if (diagnostics() && origin) {
-                diagnostics()->nyi(block(), "Failed to lower assert condition");
+                diagnostics()->error(block(), "Failed to lower assert condition");
             }
             return true;
         }
@@ -2867,29 +2881,250 @@ bool SeqAlwaysConverter::finalizeRegisterWrites(ValueId clockValue) {
         if (entry.target->multiDriver) {
             const auto debugInfo =
                 makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
-            for (const auto& slice : entry.slices) {
-                if (!slice.value.valid()) {
-                    reportFinalizeIssue(entry, "Multi-driver register slice missing RHS value");
+            auto baseResetContext = buildResetContext(*entry.target);
+            if (!baseResetContext) {
+                baseResetContext = deriveBlockResetContext();
+            }
+
+            struct SliceRange {
+                int64_t msb = 0;
+                int64_t lsb = 0;
+            };
+            std::unordered_set<int64_t> touchedIndices;
+            if (entry.target && entry.target->symbol) {
+                auto extractIndex = [&](const slang::ast::Expression& expr)
+                    -> std::optional<int64_t> {
+                    const slang::ast::Expression* cursor = &expr;
+                    while (cursor) {
+                        if (const auto* conversion =
+                                cursor->as_if<slang::ast::ConversionExpression>()) {
+                            if (conversion->isImplicit()) {
+                                cursor = &conversion->operand();
+                                continue;
+                            }
+                        }
+                        if (const auto* range =
+                                cursor->as_if<slang::ast::RangeSelectExpression>()) {
+                            cursor = &range->value();
+                            continue;
+                        }
+                        if (const auto* member =
+                                cursor->as_if<slang::ast::MemberAccessExpression>()) {
+                            cursor = &member->value();
+                            continue;
+                        }
+                        if (const auto* element =
+                                cursor->as_if<slang::ast::ElementSelectExpression>()) {
+                            slang::ast::EvalContext ctx(block());
+                            ctx.reset();
+                            seedEvalContextWithLoopValues(ctx);
+                            slang::ConstantValue value = element->selector().eval(ctx);
+                            if (!value || !value.isInteger() || value.hasUnknown()) {
+                                return std::nullopt;
+                            }
+                            std::optional<int64_t> asInt = value.integer().as<int64_t>();
+                            return asInt;
+                        }
+                        break;
+                    }
+                    return std::nullopt;
+                };
+                auto recordIndex = [&](const slang::ast::Expression& lhs) {
+                    const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(lhs);
+                    if (symbol != entry.target->symbol) {
+                        return;
+                    }
+                    if (const auto index = extractIndex(lhs)) {
+                        touchedIndices.insert(*index);
+                    }
+                };
+                AssignmentCollector collector(recordIndex);
+                block().getBody().visit(collector);
+            }
+            std::vector<SliceRange> ranges;
+            if (entry.target && entry.target->type && entry.target->symbol) {
+                if (const auto layout =
+                        deriveMemoryLayout(*entry.target->type, *entry.target->symbol, nullptr)) {
+                    const slang::ast::Type& canonical =
+                        entry.target->type->getCanonicalType();
+                    const auto* unpacked =
+                        canonical.as_if<slang::ast::FixedSizeUnpackedArrayType>();
+                    if (unpacked &&
+                        unpacked->elementType.getCanonicalType().kind !=
+                            slang::ast::SymbolKind::FixedSizeUnpackedArrayType) {
+                        const int32_t lower = unpacked->range.lower();
+                        const int32_t upper = unpacked->range.upper();
+                        const int32_t start = std::min(lower, upper);
+                        const int32_t stop = std::max(lower, upper);
+                        const int64_t rowWidth = layout->rowWidth;
+                        if (rowWidth > 0 && stop >= start) {
+                            if (!touchedIndices.empty()) {
+                                ranges.reserve(touchedIndices.size());
+                                for (int64_t idx : touchedIndices) {
+                                    if (idx < start || idx > stop) {
+                                        continue;
+                                    }
+                                    const int64_t offset =
+                                        static_cast<int64_t>(stop - idx) * rowWidth;
+                                    ranges.push_back(
+                                        SliceRange{offset + rowWidth - 1, offset});
+                                }
+                            }
+                            else {
+                                ranges.reserve(static_cast<std::size_t>(stop - start + 1));
+                                for (int32_t idx = start; idx <= stop; ++idx) {
+                                    const int64_t offset =
+                                        static_cast<int64_t>(stop - idx) * rowWidth;
+                                    ranges.push_back(
+                                        SliceRange{offset + rowWidth - 1, offset});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (ranges.empty()) {
+                ranges.reserve(entry.slices.size());
+                for (const auto& slice : entry.slices) {
+                    ranges.push_back(SliceRange{slice.msb, slice.lsb});
+                }
+            }
+
+            for (const SliceRange& range : ranges) {
+                ValueId dataValue = buildDataOperandSlice(entry, range.msb, range.lsb);
+                if (!dataValue) {
                     continue;
                 }
-                const int64_t sliceWidth = slice.msb - slice.lsb + 1;
+                if (dataValue.graph != graph().id()) {
+                    reportFinalizeIssue(entry,
+                                        "Sequential write data operand belongs to a different graph");
+                    continue;
+                }
+
+                auto resetContext = baseResetContext;
+                std::optional<ResetExtraction> resetExtraction;
+                ValueId dataWithoutReset = dataValue;
+                ValueId resetValue = ValueId::invalid();
+                bool resetActive = resetContext && resetContext->kind != ResetContext::Kind::None;
+                if (resetActive) {
+                    if (!resetContext->signal) {
+                        reportFinalizeIssue(entry, "Reset signal is unavailable for this register");
+                        resetActive = false;
+                        resetContext.reset();
+                    }
+                    else {
+                        if (valueDependsOnSignal(dataValue, resetContext->signal)) {
+                            resetExtraction = extractResetBranches(
+                                dataValue, resetContext->signal, resetContext->activeHigh, entry);
+                        }
+                        if (!resetExtraction) {
+                            if (auto extracted =
+                                    extractAsyncResetAssignment(*entry.target, *resetContext)) {
+                                resetValue = extracted->resetValue;
+                                dataWithoutReset = dataValue;
+                                resetExtraction = ResetExtraction{resetValue, dataWithoutReset};
+                            }
+                        }
+                        if (resetExtraction) {
+                            if (!resetValue) {
+                                resetValue = resetExtraction->resetValue;
+                            }
+                            if (resetExtraction->dataWithoutReset) {
+                                dataWithoutReset = resetExtraction->dataWithoutReset;
+                            }
+                            if (resetValue &&
+                                graph().getValue(resetValue).width() !=
+                                    graph().getValue(dataValue).width()) {
+                                resetExtraction.reset();
+                                resetValue = ValueId::invalid();
+                                dataWithoutReset = dataValue;
+                            }
+                        }
+                    }
+                }
+                if (!resetExtraction) {
+                    if (auto inferred = inferResetFromMux(dataValue, entry)) {
+                        ResetContext::Kind inferredKind = ResetContext::Kind::None;
+                        if (resetContext) {
+                            inferredKind = resetContext->kind;
+                        }
+                        if (inferredKind == ResetContext::Kind::None) {
+                            if (auto blockReset = deriveBlockResetContext()) {
+                                inferredKind = blockReset->kind;
+                            }
+                        }
+                        if (inferredKind == ResetContext::Kind::None) {
+                            if (detectAsyncResetEvent(block(), nullptr)) {
+                                inferredKind = ResetContext::Kind::Async;
+                            }
+                            else if (detectSyncReset(block().getBody())) {
+                                inferredKind = ResetContext::Kind::Sync;
+                            }
+                        }
+                        if (inferredKind != ResetContext::Kind::None) {
+                            const bool signalMatches =
+                                !resetContext || !resetContext->signal ||
+                                resetContext->signal == inferred->signal;
+                            if (signalMatches) {
+                                ResetContext inferredContext;
+                                inferredContext.kind = inferredKind;
+                                inferredContext.signal = inferred->signal;
+                                inferredContext.activeHigh = inferred->activeHigh;
+                                resetContext = inferredContext;
+                                resetExtraction = inferred->extraction;
+                                resetValue = inferred->extraction.resetValue;
+                                dataWithoutReset = inferred->extraction.dataWithoutReset;
+                                resetActive = true;
+                            }
+                        }
+                    }
+                }
+                if (!resetExtraction) {
+                    resetActive = false;
+                    resetContext.reset();
+                }
+
+                const int64_t sliceWidth = range.msb - range.lsb + 1;
+                grh::ir::OperationKind opKind = grh::ir::OperationKind::kRegister;
+                std::optional<std::string> rstPolarity;
+                if (resetActive && resetExtraction) {
+                    opKind = resetContext->kind == ResetContext::Kind::Async
+                                 ? grh::ir::OperationKind::kRegisterArst
+                                 : grh::ir::OperationKind::kRegisterRst;
+                    rstPolarity = resetContext->activeHigh ? std::string("high")
+                                                           : std::string("low");
+                }
+
                 OperationId split =
-                    createOperation(graph(), grh::ir::OperationKind::kRegister,
-                                            makeFinalizeOpName(*entry.target, "split"));
+                    createOperation(graph(), opKind, makeFinalizeOpName(*entry.target, "split"));
                 applyDebug(graph(), split, debugInfo);
                 if (clockPolarityAttr_) {
                     setAttr(graph(), split, "clkPolarity", *clockPolarityAttr_);
                 }
+                if (rstPolarity) {
+                    setAttr(graph(), split, "rstPolarity", *rstPolarity);
+                }
                 addOperand(graph(), split, clockValue);
-                ValueId regVal = createValue(graph(), 
-                    makeFinalizeValueName(*entry.target, "split"), sliceWidth, entry.target->isSigned);
+                ValueId regVal =
+                    createValue(graph(), makeFinalizeValueName(*entry.target, "split"), sliceWidth,
+                                entry.target->isSigned);
                 applyDebug(graph(), regVal, debugInfo);
                 addResult(graph(), split, regVal);
-                if (!attachDataOperand(split, slice.value, entry)) {
+
+                if (resetActive && resetExtraction) {
+                    if (!resetValue) {
+                        continue;
+                    }
+                    if (!attachResetOperands(split, resetContext->signal, resetValue, entry)) {
+                        continue;
+                    }
+                }
+                if (!attachDataOperand(split, dataWithoutReset, entry)) {
                     continue;
                 }
                 memo().recordMultiDriverPart(*entry.target,
-                                             WriteBackMemo::MultiDriverPart{slice.msb, slice.lsb,
+                                             WriteBackMemo::MultiDriverPart{range.msb, range.lsb,
                                                                             regVal});
             }
             entry.consumed = true;
@@ -3102,7 +3337,7 @@ bool SeqAlwaysConverter::finalizeMemoryWrites(ValueId clockValue) {
             oss << " (signal=" << entry->symbol->name << ")";
         }
         oss << ": " << message;
-        diagnostics()->nyi(block(), oss.str());
+        diagnostics()->error(block(), oss.str());
     };
 
     if (!clockPolarityAttr_) {
@@ -3324,7 +3559,7 @@ ValueId SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
                                                     ValueId enableOverride) {
     if (!entry.stateOp || graph().getOperation(entry.stateOp).kind() != grh::ir::OperationKind::kMemory) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(),
+            diagnostics()->error(block(),
                                "Seq always memory read target is not backed by kMemory operation");
         }
         return ValueId::invalid();
@@ -3333,7 +3568,7 @@ ValueId SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
     ValueId clkValue = ensureClockValue();
     if (!clockPolarityAttr_) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(),
+            diagnostics()->error(block(),
                                "Seq always memory sync read lacks clock polarity attribute");
         }
         return ValueId::invalid();
@@ -3342,7 +3577,7 @@ ValueId SeqAlwaysConverter::buildMemorySyncRead(const SignalMemoEntry& entry,
                                      : ensureMemoryEnableValue();
     if (!clkValue || !enValue) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Seq always memory read lacks clock or enable");
+            diagnostics()->error(block(), "Seq always memory read lacks clock or enable");
         }
         return ValueId::invalid();
     }
@@ -3432,7 +3667,7 @@ int64_t SeqAlwaysConverter::memoryAddrWidth(const SignalMemoEntry& entry) const 
     std::optional<int64_t> rowsOpt = memoryRowCount(entry);
     if (!rowsOpt || *rowsOpt <= 0) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "无法推导 memory 地址位宽，默认使用 1 bit");
+            diagnostics()->error(block(), "无法推导 memory 地址位宽，默认使用 1 bit");
         }
         return 1;
     }
@@ -3457,7 +3692,7 @@ ValueId SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& entry,
     const int64_t targetWidth = memoryAddrWidth(entry);
     if (targetWidth <= 0) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "memory 地址位宽无效");
+            diagnostics()->error(block(), "memory 地址位宽无效");
         }
         return ValueId::invalid();
     }
@@ -3487,7 +3722,7 @@ ValueId SeqAlwaysConverter::normalizeMemoryAddress(const SignalMemoEntry& entry,
         ValueId zero = createZeroValue(padWidth);
         if (!zero) {
             if (diagnostics()) {
-                diagnostics()->nyi(block(), "memory 地址 zero-extend 失败");
+                diagnostics()->error(block(), "memory 地址 zero-extend 失败");
             }
             return ValueId::invalid();
         }
@@ -3528,7 +3763,7 @@ bool SeqAlwaysConverter::applyClockPolarity(OperationId op, std::string_view con
             std::string msg = "Seq always ";
             msg.append(context);
             msg.append(" 缺少 clkPolarity");
-            diagnostics()->nyi(block(), std::move(msg));
+            diagnostics()->error(block(), std::move(msg));
         }
         return false;
     }
@@ -3540,7 +3775,7 @@ ValueId SeqAlwaysConverter::createConcatWithZeroPadding(ValueId value, int64_t p
                                                             std::string_view label) {
     if (padWidth < 0) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Negative padding requested for memory bit value");
+            diagnostics()->error(block(), "Negative padding requested for memory bit value");
         }
         return ValueId::invalid();
     }
@@ -3595,34 +3830,31 @@ ValueId SeqAlwaysConverter::buildShiftedMask(ValueId bitIndex, int64_t targetWid
                                                  std::string_view label) {
     if (targetWidth <= 0 || maskWidth <= 0 || maskWidth > targetWidth) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Memory mask width is invalid");
+            diagnostics()->error(block(), "Memory mask width is invalid");
         }
         return ValueId::invalid();
     }
-    slang::SVInt literal(static_cast<slang::bitwidth_t>(maskWidth), 0, /*isSigned=*/false);
-    literal.setAllOnes();
+    std::string literalText = std::to_string(targetWidth);
+    literalText.append("'b");
+    for (int64_t bit = targetWidth - 1; bit >= 0; --bit) {
+        literalText.push_back(bit < maskWidth ? '1' : '0');
+    }
+    slang::SVInt literal = slang::SVInt::fromString(literalText);
     const auto debugInfo = makeDebugInfo(sourceManager_, &block());
     OperationId constOp =
         createOperation(graph(), grh::ir::OperationKind::kConstant, makeMemoryHelperOpName(label));
     applyDebug(graph(), constOp, debugInfo);
     ValueId baseValue =
-        createValue(graph(), makeMemoryHelperValueName(label), maskWidth, /*isSigned=*/false);
+        createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
     applyDebug(graph(), baseValue, debugInfo);
     addResult(graph(), constOp, baseValue);
     setAttr(graph(), constOp, "constValue",
             literal.toString(slang::LiteralBase::Hex, true, literal.getBitWidth()));
-    ValueId base = baseValue;
-    if (maskWidth != targetWidth) {
-        base = createConcatWithZeroPadding(baseValue, targetWidth - maskWidth, label);
-    }
-    if (!base) {
-        return ValueId::invalid();
-    }
 
     OperationId shl =
         createOperation(graph(), grh::ir::OperationKind::kShl, makeMemoryHelperOpName(label));
     applyDebug(graph(), shl, debugInfo);
-    addOperand(graph(), shl, base);
+    addOperand(graph(), shl, baseValue);
     addOperand(graph(), shl, bitIndex);
     ValueId shifted =
         createValue(graph(), makeMemoryHelperValueName(label), targetWidth, /*isSigned=*/false);
@@ -3652,7 +3884,7 @@ std::optional<ValueId> SeqAlwaysConverter::deriveClockValue() {
     clockPolarityAttr_.reset();
     if (!timing) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential block lacks timing control");
+            diagnostics()->error(block(), "Sequential block lacks timing control");
         }
         return std::nullopt;
     }
@@ -3661,7 +3893,7 @@ std::optional<ValueId> SeqAlwaysConverter::deriveClockValue() {
     collectSignalEvents(*timing, events);
     if (events.empty()) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential block timing control has no edge events");
+            diagnostics()->error(block(), "Sequential block timing control has no edge events");
         }
         return std::nullopt;
     }
@@ -3673,7 +3905,7 @@ std::optional<ValueId> SeqAlwaysConverter::deriveClockValue() {
 
     if (clockEvent->edge == slang::ast::EdgeKind::None) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "Sequential block clock must be edge-sensitive");
+            diagnostics()->error(block(), "Sequential block clock must be edge-sensitive");
         }
         return std::nullopt;
     }
@@ -3691,7 +3923,7 @@ std::optional<ValueId> SeqAlwaysConverter::deriveClockValue() {
 
     ValueId clkValue = convertTimingExpr(clockEvent->expr);
     if (!clkValue && diagnostics()) {
-        diagnostics()->nyi(block(), "Failed to lower sequential clock expression");
+        diagnostics()->error(block(), "Failed to lower sequential clock expression");
     }
     return clkValue;
 }
@@ -3703,7 +3935,7 @@ ValueId SeqAlwaysConverter::convertTimingExpr(const slang::ast::Expression& expr
 
     if (!rhsConverter_) {
         if (diagnostics()) {
-            diagnostics()->nyi(block(), "RHS converter unavailable for timing expressions");
+            diagnostics()->error(block(), "RHS converter unavailable for timing expressions");
         }
         return ValueId::invalid();
     }
@@ -3738,7 +3970,7 @@ std::optional<SeqAlwaysConverter::ResetContext> SeqAlwaysConverter::deriveBlockR
             }
         }
         else if (diagnostics()) {
-            diagnostics()->nyi(block(), "Async reset edge kind is not supported for this sequential block");
+            diagnostics()->error(block(), "Async reset edge kind is not supported for this sequential block");
         }
     }
 
@@ -3918,6 +4150,125 @@ ValueId SeqAlwaysConverter::buildDataOperand(const WriteBackMemo::Entry& entry) 
     return composed;
 }
 
+ValueId SeqAlwaysConverter::buildDataOperandSlice(const WriteBackMemo::Entry& entry,
+                                                  int64_t segMsb, int64_t segLsb) {
+    if (!entry.target || !entry.target->value) {
+        reportFinalizeIssue(entry, "Sequential write target lacks register value handle");
+        return ValueId::invalid();
+    }
+    if (segMsb < segLsb) {
+        reportFinalizeIssue(entry, "Sequential write slice has invalid bit range");
+        return ValueId::invalid();
+    }
+
+    ValueId targetValue = entry.target->value;
+    if (targetValue && targetValue.graph != graph().id()) {
+        if (entry.target->symbol && !entry.target->symbol->name.empty()) {
+            targetValue = graph().findValue(entry.target->symbol->name);
+        }
+        if (!targetValue || targetValue.graph != graph().id()) {
+            reportFinalizeIssue(entry, "Register value belongs to a different graph");
+            return ValueId::invalid();
+        }
+    }
+
+    const int64_t targetWidth = entry.target->width > 0 ? entry.target->width : 1;
+    if (segMsb >= targetWidth || segLsb < 0) {
+        reportFinalizeIssue(entry, "Sequential write slice exceeds register width");
+        return ValueId::invalid();
+    }
+
+    if (entry.slices.empty()) {
+        return createHoldSlice(entry, targetValue, segMsb, segLsb);
+    }
+
+    std::vector<WriteBackMemo::Slice> overlaps;
+    overlaps.reserve(entry.slices.size());
+    for (const auto& slice : entry.slices) {
+        if (!slice.value) {
+            reportFinalizeIssue(entry, "Sequential write slice is missing RHS value");
+            return ValueId::invalid();
+        }
+        if (slice.msb < segLsb || slice.lsb > segMsb) {
+            continue;
+        }
+        const int64_t overlapMsb = std::min(slice.msb, segMsb);
+        const int64_t overlapLsb = std::max(slice.lsb, segLsb);
+        ValueId overlapValue = slice.value;
+        if (overlapMsb != slice.msb || overlapLsb != slice.lsb) {
+            const int64_t relMsb = overlapMsb - slice.lsb;
+            const int64_t relLsb = overlapLsb - slice.lsb;
+            overlapValue = createHoldSlice(entry, slice.value, relMsb, relLsb);
+            if (!overlapValue) {
+                return ValueId::invalid();
+            }
+        }
+        WriteBackMemo::Slice overlap = slice;
+        overlap.msb = overlapMsb;
+        overlap.lsb = overlapLsb;
+        overlap.value = overlapValue;
+        overlaps.push_back(std::move(overlap));
+    }
+
+    if (overlaps.empty()) {
+        return createHoldSlice(entry, targetValue, segMsb, segLsb);
+    }
+
+    std::sort(overlaps.begin(), overlaps.end(), [](const WriteBackMemo::Slice& lhs,
+                                                   const WriteBackMemo::Slice& rhs) {
+        if (lhs.msb != rhs.msb) {
+            return lhs.msb > rhs.msb;
+        }
+        return lhs.lsb > rhs.lsb;
+    });
+
+    std::vector<ValueId> components;
+    components.reserve(overlaps.size() + 2);
+    int64_t expectedMsb = segMsb;
+    for (const WriteBackMemo::Slice& slice : overlaps) {
+        if (slice.msb < expectedMsb) {
+            ValueId hold = createHoldSlice(entry, targetValue, expectedMsb, slice.msb + 1);
+            if (!hold) {
+                return ValueId::invalid();
+            }
+            components.push_back(hold);
+        }
+        components.push_back(slice.value);
+        expectedMsb = slice.lsb - 1;
+    }
+    if (expectedMsb >= segLsb) {
+        ValueId hold = createHoldSlice(entry, targetValue, expectedMsb, segLsb);
+        if (!hold) {
+            return ValueId::invalid();
+        }
+        components.push_back(hold);
+    }
+
+    if (components.empty()) {
+        return ValueId::invalid();
+    }
+    if (components.size() == 1) {
+        return components.front();
+    }
+
+    const int64_t segWidth = segMsb - segLsb + 1;
+    const auto debugInfo =
+        makeDebugInfo(sourceManager_, entry.target ? entry.target->symbol : nullptr);
+    OperationId concat =
+        createOperation(graph(), grh::ir::OperationKind::kConcat,
+                        makeFinalizeOpName(*entry.target, "seq_range_concat"));
+    applyDebug(graph(), concat, debugInfo);
+    for (ValueId component : components) {
+        addOperand(graph(), concat, component);
+    }
+    ValueId composed =
+        createValue(graph(), makeFinalizeValueName(*entry.target, "seq_range_concat"),
+                    segWidth, entry.target->isSigned);
+    applyDebug(graph(), composed, debugInfo);
+    addResult(graph(), concat, composed);
+    return composed;
+}
+
 ValueId SeqAlwaysConverter::createHoldSlice(const WriteBackMemo::Entry& entry, ValueId source,
                                                 int64_t msb, int64_t lsb) {
     if (!entry.target || !source) {
@@ -4023,7 +4374,7 @@ void SeqAlwaysConverter::reportFinalizeIssue(const WriteBackMemo::Entry& entry,
     if (!origin) {
         origin = &block();
     }
-    diagnostics()->nyi(*origin, std::string(message));
+    diagnostics()->error(*origin, std::string(message));
 }
 
 std::string SeqAlwaysConverter::makeFinalizeOpName(const SignalMemoEntry& entry,
@@ -4041,7 +4392,13 @@ std::string SeqAlwaysConverter::makeFinalizeOpName(const SignalMemoEntry& entry,
     base.append(std::to_string(controlInstanceId_));
     base.push_back('_');
     base.append(std::to_string(finalizeNameCounter_++));
-    return base;
+    std::string candidate = std::move(base);
+    std::size_t uniquifier = 0;
+    while (graph().findOperation(candidate) || graph().findValue(candidate)) {
+        candidate.append("_");
+        candidate.append(std::to_string(++uniquifier));
+    }
+    return candidate;
 }
 
 std::string SeqAlwaysConverter::makeFinalizeValueName(const SignalMemoEntry& entry,
@@ -4059,20 +4416,46 @@ std::string SeqAlwaysConverter::makeFinalizeValueName(const SignalMemoEntry& ent
     base.append(std::to_string(controlInstanceId_));
     base.push_back('_');
     base.append(std::to_string(finalizeNameCounter_++));
-    return base;
+    std::string candidate = std::move(base);
+    std::size_t uniquifier = 0;
+    while (graph().findValue(candidate) || graph().findOperation(candidate)) {
+        candidate.append("_");
+        candidate.append(std::to_string(++uniquifier));
+    }
+    return candidate;
 }
 
 std::optional<SeqAlwaysConverter::ResetContext>
 SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
-    if (!entry.stateOp) {
-        return std::nullopt;
-    }
     ResetContext context;
-    switch (graph().getOperation(entry.stateOp).kind()) {
-    case grh::ir::OperationKind::kRegisterArst:
-        if (!entry.asyncResetExpr) {
+    if (entry.stateOp) {
+        switch (graph().getOperation(entry.stateOp).kind()) {
+        case grh::ir::OperationKind::kRegisterArst:
+            if (!entry.asyncResetExpr) {
+                return std::nullopt;
+            }
+            if (entry.asyncResetEdge != slang::ast::EdgeKind::PosEdge &&
+                entry.asyncResetEdge != slang::ast::EdgeKind::NegEdge) {
+                return std::nullopt;
+            }
+            context.kind = ResetContext::Kind::Async;
+            context.signal = resolveAsyncResetSignal(*entry.asyncResetExpr);
+            context.activeHigh = entry.asyncResetEdge == slang::ast::EdgeKind::PosEdge;
+            return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
+        case grh::ir::OperationKind::kRegisterRst:
+            if (!entry.syncResetSymbol) {
+                return std::nullopt;
+            }
+            context.kind = ResetContext::Kind::Sync;
+            context.signal = resolveSyncResetSignal(*entry.syncResetSymbol);
+            context.activeHigh = entry.syncResetActiveHigh;
+            return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
+        default:
             return std::nullopt;
         }
+    }
+
+    if (entry.asyncResetExpr) {
         if (entry.asyncResetEdge != slang::ast::EdgeKind::PosEdge &&
             entry.asyncResetEdge != slang::ast::EdgeKind::NegEdge) {
             return std::nullopt;
@@ -4081,17 +4464,14 @@ SeqAlwaysConverter::buildResetContext(const SignalMemoEntry& entry) {
         context.signal = resolveAsyncResetSignal(*entry.asyncResetExpr);
         context.activeHigh = entry.asyncResetEdge == slang::ast::EdgeKind::PosEdge;
         return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
-    case grh::ir::OperationKind::kRegisterRst:
-        if (!entry.syncResetSymbol) {
-            return std::nullopt;
-        }
+    }
+    if (entry.syncResetSymbol) {
         context.kind = ResetContext::Kind::Sync;
         context.signal = resolveSyncResetSignal(*entry.syncResetSymbol);
         context.activeHigh = entry.syncResetActiveHigh;
         return context.signal ? std::optional<ResetContext>(context) : std::nullopt;
-    default:
-        break;
     }
+
     return std::nullopt;
 }
 
@@ -4326,6 +4706,154 @@ SeqAlwaysConverter::extractResetBranches(ValueId dataValue, ValueId resetSignal,
     return ResetExtraction{resetValue, dataWithoutReset};
 }
 
+std::optional<SeqAlwaysConverter::InferredReset>
+SeqAlwaysConverter::inferResetFromMux(ValueId dataValue, const WriteBackMemo::Entry& entry) {
+    auto tryCollapseConcat = [&](ValueId candidate) -> ValueId {
+        if (!entry.target) {
+            return candidate;
+        }
+        const int64_t targetWidth = entry.target->width > 0 ? entry.target->width
+                                                            : graph().getValue(candidate).width();
+        OperationId concatOp = graph().getValue(candidate).definingOp();
+        if (!concatOp) {
+            return candidate;
+        }
+        const grh::ir::Operation concatView = graph().getOperation(concatOp);
+        if (concatView.kind() != grh::ir::OperationKind::kConcat) {
+            return candidate;
+        }
+
+        std::vector<ValueId> parts;
+        auto collectSlices = [&](auto&& self, ValueId node) -> bool {
+            if (!node || node.graph != graph().id()) {
+                return false;
+            }
+            OperationId op = graph().getValue(node).definingOp();
+            if (!op) {
+                return false;
+            }
+            const grh::ir::Operation opView = graph().getOperation(op);
+            if (opView.kind() == grh::ir::OperationKind::kConcat) {
+                for (ValueId operand : opView.operands()) {
+                    if (!operand) {
+                        return false;
+                    }
+                    if (!self(self, operand)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            if (opView.kind() == grh::ir::OperationKind::kSliceStatic &&
+                opView.operands().size() == 1) {
+                parts.push_back(node);
+                return true;
+            }
+            return false;
+        };
+
+        if (!collectSlices(collectSlices, candidate)) {
+            return candidate;
+        }
+
+        ValueId commonBase = ValueId::invalid();
+        int64_t expectedMsb = targetWidth - 1;
+        for (ValueId part : parts) {
+            if (!part) {
+                return candidate;
+            }
+            OperationId sliceOp = graph().getValue(part).definingOp();
+            if (!sliceOp) {
+                return candidate;
+            }
+            const grh::ir::Operation sliceView = graph().getOperation(sliceOp);
+            if (sliceView.kind() != grh::ir::OperationKind::kSliceStatic ||
+                sliceView.operands().size() != 1) {
+                return candidate;
+            }
+            ValueId base = sliceView.operands().front();
+            if (!base) {
+                return candidate;
+            }
+
+            auto startAttr = sliceView.attr("sliceStart");
+            auto endAttr = sliceView.attr("sliceEnd");
+            const int64_t* start = startAttr ? std::get_if<int64_t>(&*startAttr) : nullptr;
+            const int64_t* end = endAttr ? std::get_if<int64_t>(&*endAttr) : nullptr;
+            if (!start || !end) {
+                return candidate;
+            }
+            if ((*end - *start + 1) != graph().getValue(part).width()) {
+                return candidate;
+            }
+            if (*end != expectedMsb) {
+                return candidate;
+            }
+            expectedMsb = *start - 1;
+
+            if (!commonBase) {
+                commonBase = base;
+            } else if (commonBase != base) {
+                return candidate;
+            }
+        }
+
+        if (expectedMsb != -1) {
+            return candidate;
+        }
+        if (!commonBase || graph().getValue(commonBase).width() != targetWidth) {
+            return candidate;
+        }
+        return commonBase;
+    };
+
+    ValueId muxValue = tryCollapseConcat(dataValue);
+    OperationId muxOp = muxValue ? graph().getValue(muxValue).definingOp() : OperationId::invalid();
+    if (!muxOp) {
+        return std::nullopt;
+    }
+    const grh::ir::Operation muxView = graph().getOperation(muxOp);
+    if (muxView.kind() != grh::ir::OperationKind::kMux || muxView.operands().size() != 3) {
+        return std::nullopt;
+    }
+
+    ValueId condition = muxView.operands().front();
+    if (!condition) {
+        return std::nullopt;
+    }
+
+    ValueId signal = condition;
+    bool activeHigh = true;
+    if (OperationId condOp = graph().getValue(condition).definingOp()) {
+        const grh::ir::Operation condView = graph().getOperation(condOp);
+        auto condOperands = condView.operands();
+        if ((condView.kind() == grh::ir::OperationKind::kLogicNot ||
+             condView.kind() == grh::ir::OperationKind::kNot) &&
+            condOperands.size() == 1 && condOperands.front()) {
+            signal = condOperands.front();
+            activeHigh = false;
+        }
+    }
+    if (!signal) {
+        return std::nullopt;
+    }
+
+    ValueId resetValue = muxView.operands()[1];
+    ValueId dataWithoutReset = muxView.operands()[2];
+    if (!resetValue || !dataWithoutReset) {
+        return std::nullopt;
+    }
+    if (graph().getValue(resetValue).width() != graph().getValue(dataValue).width()) {
+        return std::nullopt;
+    }
+
+    InferredReset inferred;
+    inferred.signal = signal;
+    inferred.activeHigh = activeHigh;
+    inferred.extraction = ResetExtraction{resetValue, dataWithoutReset};
+    return inferred;
+}
+
 std::optional<SeqAlwaysConverter::ResetExtraction>
 SeqAlwaysConverter::extractAsyncResetAssignment(const SignalMemoEntry& entry,
                                                 const ResetContext& context) {
@@ -4478,7 +5006,17 @@ bool SeqAlwaysConverter::attachResetOperands(OperationId stateOp, ValueId rstSig
         }
         return false;
     }
-    if (graph().getValue(resetValue).width() != entry.target->width) {
+    int64_t expectedWidth = entry.target ? entry.target->width : 0;
+    if (auto results = opView.results(); !results.empty()) {
+        ValueId q = results.front();
+        if (q) {
+            expectedWidth = graph().getValue(q).width();
+        }
+    }
+    if (expectedWidth <= 0) {
+        expectedWidth = graph().getValue(resetValue).width();
+    }
+    if (graph().getValue(resetValue).width() != expectedWidth) {
         reportFinalizeIssue(entry, "Reset value width mismatch");
         return false;
     }
@@ -4647,14 +5185,14 @@ void AlwaysConverter::visitImmediateAssertion(
         if (diagnostics_) {
             std::string message = std::string(modeLabel()) + " unsupported assertion kind: ";
             message.append(std::to_string(static_cast<int>(stmt.assertionKind)));
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
     // Deferred / final immediate assertions are not supported.
     if (stmt.isDeferred || stmt.isFinal) {
         if (diagnostics_) {
-            diagnostics_->nyi(block_, std::string(modeLabel()) +
+            diagnostics_->error(block_, std::string(modeLabel()) +
                                        " deferred/final immediate assertion not supported");
         }
         return;
@@ -4695,7 +5233,7 @@ void AlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
             std::string message =
                 std::string(modeLabel()) +
                 " for-loop requires a statically evaluable stop expression";
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
@@ -4734,7 +5272,7 @@ void AlwaysConverter::visitForLoop(const slang::ast::ForLoopStatement& stmt) {
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " for-loop exceeded maximum unrolled iterations";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             break;
         }
@@ -4783,7 +5321,7 @@ void AlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& s
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " foreach requires static dimension ranges";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return;
         }
@@ -4791,7 +5329,7 @@ void AlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& s
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " foreach skipping dimensions is not supported yet";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return;
         }
@@ -4800,7 +5338,7 @@ void AlwaysConverter::visitForeachLoop(const slang::ast::ForeachLoopStatement& s
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " foreach loop variable must be integral";
-                diagnostics_->nyi(*dim.loopVar, std::move(message));
+                diagnostics_->error(*dim.loopVar, std::move(message));
             }
             return;
         }
@@ -5036,7 +5574,7 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
         if (diagnostics_) {
             std::string message = std::string(modeLabel()) +
                                   " does not allow non-blocking assignments yet";
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
@@ -5054,7 +5592,7 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
             if (diagnostics_) {
                 std::string message = std::string(modeLabel()) +
                                       " does not allow blocking procedural assignments";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return;
         }
@@ -5069,7 +5607,7 @@ void AlwaysConverter::handleAssignment(const slang::ast::AssignmentExpression& e
         if (diagnostics_) {
             std::string message = std::string(modeLabel()) +
                                   " converters are not initialized (internal error)";
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
@@ -5198,11 +5736,11 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
         }
         message.append("; declare it as logic/reg or use a continuous assign");
         if (originExpr) {
-            diagnostics_->nyi(originExpr->sourceRange.start(), std::move(message),
+            diagnostics_->error(originExpr->sourceRange.start(), std::move(message),
                               deriveSymbolPath(block_));
         }
         else {
-            diagnostics_->nyi(target, std::move(message));
+            diagnostics_->error(target, std::move(message));
         }
     };
 
@@ -5438,7 +5976,7 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
                 "procedural block contains an invalid statement; common causes include "
                 "procedural assignment to a wire (e.g., port not declared logic/reg) or "
                 "undefined preprocessor macros in the block";
-            diagnostics_->nyi(originLocation.value_or(slang::SourceLocation{}),
+            diagnostics_->error(originLocation.value_or(slang::SourceLocation{}),
                               std::move(message), deriveSymbolPath(block_));
             return;
         }
@@ -5449,7 +5987,7 @@ void AlwaysConverter::reportInvalidStmt(const slang::ast::Statement& stmt) {
     if (!originLocation) {
         originLocation = stmt.sourceRange.start();
     }
-    diagnostics_->nyi(originLocation.value_or(slang::SourceLocation{}),
+    diagnostics_->error(originLocation.value_or(slang::SourceLocation{}),
                       std::move(message), deriveSymbolPath(block_));
 }
 
@@ -5462,7 +6000,7 @@ void AlwaysConverter::reportUnsupportedStmt(const slang::ast::Statement& stmt) {
     message.append(" (kind = ");
     message.append(std::to_string(static_cast<int>(stmt.kind)));
     message.push_back(')');
-    diagnostics_->nyi(block_, std::move(message));
+    diagnostics_->error(block_, std::move(message));
 }
 
 void AlwaysConverter::handleEntryWrite(const SignalMemoEntry& entry,
@@ -5620,7 +6158,7 @@ void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
             std::string message = std::string(modeLabel()) + " ";
             message.append(kind == LoopControl::Break ? "break" : "continue");
             message.append(" requires statically known control flow");
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
@@ -5629,7 +6167,7 @@ void AlwaysConverter::handleLoopControlRequest(LoopControl kind,
             std::string message = std::string(modeLabel()) + " ";
             message.append(kind == LoopControl::Break ? "break" : "continue");
             message.append(" used outside of a loop is not supported");
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return;
     }
@@ -5950,45 +6488,50 @@ AlwaysConverter::mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
             }
         }
 
-        if (trueIt != trueFrame.map.end()) {
-            trueValue = rebuildShadowValue(*entry, trueIt->second);
-        }
-        if (falseIt != falseFrame.map.end()) {
-            falseValue = rebuildShadowValue(*entry, falseIt->second);
-        }
-
-        // Sequential semantics: missing branch implies hold on that branch.
-        if (isSequential()) {
-            if (!trueValue) {
-                // Use current entry value (Q) as hold.
-                if (!entry->value) {
-                    reportLatchIssue("seq always missing hold value for true branch", entry);
-                    return std::nullopt;
-                }
-                trueValue = entry->value;
-            }
-            if (!falseValue) {
-                if (!entry->value) {
-                    reportLatchIssue("seq always missing hold value for false branch", entry);
-                    return std::nullopt;
-                }
-                falseValue = entry->value;
-            }
-        }
-
-        if (!trueValue || !falseValue) {
-            return std::nullopt;
-        }
-
-        ValueId muxValue = createMuxForEntry(*entry, condBit, trueValue, falseValue, label);
-        if (!muxValue) {
-            return std::nullopt;
-        }
-        if (inferredLatch) {
-            reportLatchIssue("comb always branch coverage incomplete; latch inferred", entry);
-        }
-
+        const bool useSegmentMux = isSequential() && entry->multiDriver;
         ShadowState mergedState;
+        ValueId muxValue = ValueId::invalid();
+
+        if (!useSegmentMux) {
+            if (trueIt != trueFrame.map.end()) {
+                trueValue = rebuildShadowValue(*entry, trueIt->second);
+            }
+            if (falseIt != falseFrame.map.end()) {
+                falseValue = rebuildShadowValue(*entry, falseIt->second);
+            }
+
+            // Sequential semantics: missing branch implies hold on that branch.
+            if (isSequential()) {
+                if (!trueValue) {
+                    // Use current entry value (Q) as hold.
+                    if (!entry->value) {
+                        reportLatchIssue("seq always missing hold value for true branch", entry);
+                        return std::nullopt;
+                    }
+                    trueValue = entry->value;
+                }
+                if (!falseValue) {
+                    if (!entry->value) {
+                        reportLatchIssue("seq always missing hold value for false branch", entry);
+                        return std::nullopt;
+                    }
+                    falseValue = entry->value;
+                }
+            }
+
+            if (!trueValue || !falseValue) {
+                return std::nullopt;
+            }
+
+            muxValue = createMuxForEntry(*entry, condBit, trueValue, falseValue, label);
+            if (!muxValue) {
+                return std::nullopt;
+            }
+            if (inferredLatch) {
+                reportLatchIssue("comb always branch coverage incomplete; latch inferred", entry);
+            }
+        }
+
         if (isSequential()) {
             std::vector<int64_t> cuts;
             const int64_t top = entry->width > 0 ? entry->width - 1 : 0;
@@ -6012,30 +6555,191 @@ AlwaysConverter::mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
             std::sort(cuts.begin(), cuts.end(), std::greater<int64_t>());
             cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
 
-            WriteBackMemo::Slice muxSlice;
-            if (entry->symbol && !entry->symbol->name.empty()) {
-                muxSlice.path = std::string(entry->symbol->name);
-            }
-            muxSlice.msb = top;
-            muxSlice.lsb = 0;
-            muxSlice.value = muxValue;
-
-            for (std::size_t i = 0; i + 1 < cuts.size(); ++i) {
-                const int64_t segMsb = cuts[i];
-                const int64_t segLsb = cuts[i + 1] + 1;
-                if (segMsb < segLsb) {
-                    continue;
+            if (useSegmentMux) {
+                if (!entry->value) {
+                    reportLatchIssue("seq always missing hold value for segment merge", entry);
+                    return std::nullopt;
                 }
-                WriteBackMemo::Slice seg = muxSlice;
-                seg.msb = segMsb;
-                seg.lsb = segLsb;
-                seg.value = sliceExistingValue(muxSlice, segMsb, segLsb);
-                if (seg.value) {
+
+                WriteBackMemo::Slice fullHold = buildFullSlice(*entry, entry->value);
+                auto buildHold = [&](int64_t msb, int64_t lsb) -> ValueId {
+                    if (msb < lsb) {
+                        return ValueId::invalid();
+                    }
+                    if (!entry->value) {
+                        return createZeroValue(msb - lsb + 1);
+                    }
+                    return sliceExistingValue(fullHold, msb, lsb);
+                };
+                struct SegmentValue {
+                    ValueId value = ValueId::invalid();
+                    bool hasWrite = false;
+                };
+                auto buildSegmentValue = [&](const ShadowState* state,
+                                             int64_t segMsb, int64_t segLsb) -> SegmentValue {
+                    if (segMsb < segLsb) {
+                        return {};
+                    }
+
+                    std::vector<WriteBackMemo::Slice> merged;
+                    if (state) {
+                        merged = state->slices;
+                        auto sliceExisting = [&](const WriteBackMemo::Slice& existing,
+                                                 int64_t msb, int64_t lsb) {
+                            return sliceExistingValue(existing, msb, lsb);
+                        };
+                        for (const auto& nb : state->nbaSlices) {
+                            insertShadowSliceList(merged, nb, sliceExisting);
+                        }
+                    }
+
+                    std::vector<WriteBackMemo::Slice> overlaps;
+                    overlaps.reserve(merged.size());
+                    for (const auto& slice : merged) {
+                        if (slice.msb < segLsb || slice.lsb > segMsb) {
+                            continue;
+                        }
+                        const int64_t overlapMsb = std::min(slice.msb, segMsb);
+                        const int64_t overlapLsb = std::max(slice.lsb, segLsb);
+                        WriteBackMemo::Slice overlap = slice;
+                        overlap.msb = overlapMsb;
+                        overlap.lsb = overlapLsb;
+                        if (overlap.msb != slice.msb || overlap.lsb != slice.lsb) {
+                            overlap.value = sliceExistingValue(slice, overlap.msb, overlap.lsb);
+                        }
+                        if (overlap.value) {
+                            overlaps.push_back(std::move(overlap));
+                        }
+                    }
+
+                    if (overlaps.empty()) {
+                        return SegmentValue{};
+                    }
+
+                    std::sort(overlaps.begin(), overlaps.end(),
+                              [](const WriteBackMemo::Slice& lhs, const WriteBackMemo::Slice& rhs) {
+                                  if (lhs.msb != rhs.msb) {
+                                      return lhs.msb > rhs.msb;
+                                  }
+                                  return lhs.lsb > rhs.lsb;
+                              });
+
+                    std::vector<ValueId> components;
+                    components.reserve(overlaps.size() + 2);
+                    int64_t expectedMsb = segMsb;
+                    for (const auto& slice : overlaps) {
+                        if (slice.msb < expectedMsb) {
+                            ValueId hold = buildHold(expectedMsb, slice.msb + 1);
+                            if (!hold) {
+                                return {};
+                            }
+                            components.push_back(hold);
+                        }
+                        components.push_back(slice.value);
+                        expectedMsb = slice.lsb - 1;
+                    }
+                    if (expectedMsb >= segLsb) {
+                        ValueId hold = buildHold(expectedMsb, segLsb);
+                        if (!hold) {
+                            return {};
+                        }
+                        components.push_back(hold);
+                    }
+
+                    if (components.empty()) {
+                        return {};
+                    }
+                    if (components.size() == 1) {
+                        return SegmentValue{components.front(), true};
+                    }
+
+                    const auto debugInfo = makeDebugInfo(sourceManager_, entry->symbol);
+                    OperationId concat =
+                        createOperation(graph_, grh::ir::OperationKind::kConcat,
+                                        makeShadowOpName(*entry, "shadow_concat"));
+                    applyDebug(graph(), concat, debugInfo);
+                    for (ValueId component : components) {
+                        addOperand(graph(), concat, component);
+                    }
+                    ValueId composed =
+                        createValue(graph_, makeShadowValueName(*entry, "shadow_concat"),
+                                    segMsb - segLsb + 1, entry->isSigned);
+                    applyDebug(graph(), composed, debugInfo);
+                    addResult(graph(), concat, composed);
+                    return SegmentValue{composed, true};
+                };
+
+                for (std::size_t i = 0; i + 1 < cuts.size(); ++i) {
+                    const int64_t segMsb = cuts[i];
+                    const int64_t segLsb = cuts[i + 1] + 1;
+                    if (segMsb < segLsb) {
+                        continue;
+                    }
+                    SegmentValue trueSeg =
+                        buildSegmentValue(trueIt != trueFrame.map.end() ? &trueIt->second : nullptr,
+                                          segMsb, segLsb);
+                    SegmentValue falseSeg =
+                        buildSegmentValue(falseIt != falseFrame.map.end() ? &falseIt->second : nullptr,
+                                          segMsb, segLsb);
+                    if (!trueSeg.hasWrite && !falseSeg.hasWrite) {
+                        continue;
+                    }
+                    if (!trueSeg.value) {
+                        trueSeg.value = buildHold(segMsb, segLsb);
+                        if (!trueSeg.value) {
+                            return std::nullopt;
+                        }
+                    }
+                    if (!falseSeg.value) {
+                        falseSeg.value = buildHold(segMsb, segLsb);
+                        if (!falseSeg.value) {
+                            return std::nullopt;
+                        }
+                    }
+                    ValueId segValue = trueSeg.value;
+                    if (trueSeg.value != falseSeg.value) {
+                        segValue =
+                            createMuxForWidth(*entry, condBit, trueSeg.value, falseSeg.value,
+                                              segMsb - segLsb + 1, label);
+                        if (!segValue) {
+                            return std::nullopt;
+                        }
+                    }
+                    WriteBackMemo::Slice seg;
+                    if (entry->symbol && !entry->symbol->name.empty()) {
+                        seg.path = std::string(entry->symbol->name);
+                    }
+                    seg.msb = segMsb;
+                    seg.lsb = segLsb;
+                    seg.value = segValue;
                     mergedState.slices.push_back(std::move(seg));
                 }
-            }
-            if (mergedState.slices.empty()) {
-                mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
+            } else {
+                WriteBackMemo::Slice muxSlice;
+                if (entry->symbol && !entry->symbol->name.empty()) {
+                    muxSlice.path = std::string(entry->symbol->name);
+                }
+                muxSlice.msb = top;
+                muxSlice.lsb = 0;
+                muxSlice.value = muxValue;
+
+                for (std::size_t i = 0; i + 1 < cuts.size(); ++i) {
+                    const int64_t segMsb = cuts[i];
+                    const int64_t segLsb = cuts[i + 1] + 1;
+                    if (segMsb < segLsb) {
+                        continue;
+                    }
+                    WriteBackMemo::Slice seg = muxSlice;
+                    seg.msb = segMsb;
+                    seg.lsb = segLsb;
+                    seg.value = sliceExistingValue(muxSlice, segMsb, segLsb);
+                    if (seg.value) {
+                        mergedState.slices.push_back(std::move(seg));
+                    }
+                }
+                if (mergedState.slices.empty()) {
+                    mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
+                }
             }
         }
         else {
@@ -6105,10 +6809,18 @@ AlwaysConverter::mergeShadowFrames(ValueId condition, ShadowFrame&& trueFrame,
                 mergedState.slices.push_back(buildFullSlice(*entry, muxValue));
             }
         }
-        mergedState.composedBlocking = muxValue;
-        mergedState.composedAll = muxValue;
-        mergedState.dirtyBlocking = false;
-        mergedState.dirtyAll = false;
+        if (muxValue) {
+            mergedState.composedBlocking = muxValue;
+            mergedState.composedAll = muxValue;
+            mergedState.dirtyBlocking = false;
+            mergedState.dirtyAll = false;
+        }
+        else {
+            mergedState.composedBlocking = ValueId::invalid();
+            mergedState.composedAll = ValueId::invalid();
+            mergedState.dirtyBlocking = true;
+            mergedState.dirtyAll = true;
+        }
         if (falseIt == falseFrame.map.end()) {
             falseFrame.map.emplace(entry, std::move(mergedState));
         }
@@ -6139,6 +6851,17 @@ ValueId AlwaysConverter::createMuxForEntry(const SignalMemoEntry& entry,
                                                    ValueId condition, ValueId onTrue,
                                                    ValueId onFalse, std::string_view label) {
     const int64_t width = entry.width > 0 ? entry.width : 1;
+    return createMuxForWidth(entry, condition, onTrue, onFalse, width, label);
+}
+
+ValueId AlwaysConverter::createMuxForWidth(const SignalMemoEntry& entry,
+                                           ValueId condition, ValueId onTrue,
+                                           ValueId onFalse, int64_t width,
+                                           std::string_view label) {
+    if (width <= 0) {
+        reportLatchIssue("comb always mux has invalid width", &entry);
+        return ValueId::invalid();
+    }
     if (graph().getValue(onTrue).width() != width || graph().getValue(onFalse).width() != width) {
         reportLatchIssue("comb always mux width mismatch", &entry);
         return ValueId::invalid();
@@ -6556,7 +7279,7 @@ void AlwaysConverter::checkCaseUniquePriority(const slang::ast::CaseStatement& s
                 if (diagnostics_) {
                     std::string message = "unique case items overlap on constant value ";
                     message.append(constant->toString(slang::LiteralBase::Hex, true));
-                    diagnostics_->nyi(block_, std::move(message));
+                    diagnostics_->error(block_, std::move(message));
                 }
                 return;
             }
@@ -6651,7 +7374,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " for-loop variable must be integral";
-                diagnostics_->nyi(symbol, std::move(message));
+                diagnostics_->error(symbol, std::move(message));
             }
             return false;
         }
@@ -6661,7 +7384,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " for-loop initializer must be constant";
-                diagnostics_->nyi(symbol, std::move(message));
+                diagnostics_->error(symbol, std::move(message));
             }
             return false;
         }
@@ -6692,7 +7415,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
                 if (diagnostics_) {
                     std::string message =
                         std::string(modeLabel()) + " for-loop variable requires an initializer";
-                    diagnostics_->nyi(*var, std::move(message));
+                    diagnostics_->error(*var, std::move(message));
                 }
                 return false;
             }
@@ -6706,7 +7429,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " for-loop requires an initializer";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return false;
         }
@@ -6718,7 +7441,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
                     std::string message =
                         std::string(modeLabel()) +
                         " for-loop initializer must be an assignment";
-                    diagnostics_->nyi(block_, std::move(message));
+                    diagnostics_->error(block_, std::move(message));
                 }
                 return false;
             }
@@ -6728,7 +7451,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
                     std::string message =
                         std::string(modeLabel()) +
                         " for-loop initializer must target a variable symbol";
-                    diagnostics_->nyi(block_, std::move(message));
+                    diagnostics_->error(block_, std::move(message));
                 }
                 return false;
             }
@@ -6742,7 +7465,7 @@ bool AlwaysConverter::prepareForLoopState(const slang::ast::ForLoopStatement& st
         if (diagnostics_) {
             std::string message =
                 std::string(modeLabel()) + " for-loop has no supported loop variables";
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return false;
     }
@@ -6762,7 +7485,7 @@ bool AlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStatemen
         if (diagnostics_) {
             std::string message =
                 std::string(modeLabel()) + " for-loop stop expression must be constant";
-            diagnostics_->nyi(block_, std::move(message));
+            diagnostics_->error(block_, std::move(message));
         }
         return false;
     }
@@ -6787,7 +7510,7 @@ bool AlwaysConverter::evaluateForLoopCondition(const slang::ast::ForLoopStatemen
     if (diagnostics_) {
         std::string message =
             std::string(modeLabel()) + " for-loop stop expression is not boolean";
-        diagnostics_->nyi(block_, std::move(message));
+        diagnostics_->error(block_, std::move(message));
     }
     return false;
 }
@@ -6805,7 +7528,7 @@ bool AlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement& st
                     if (diagnostics_) {
                         std::string message = std::string(modeLabel()) +
                                               " for-loop step expression must produce an integer";
-                        diagnostics_->nyi(*symbol, std::move(message));
+                        diagnostics_->error(*symbol, std::move(message));
                     }
                     return false;
                 }
@@ -6832,7 +7555,7 @@ bool AlwaysConverter::executeForLoopSteps(const slang::ast::ForLoopStatement& st
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " for-loop step expression failed evaluation";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return false;
         }
@@ -6857,7 +7580,7 @@ bool AlwaysConverter::updateLoopBindings(std::span<const ForLoopVarState> states
                     message.append(std::string(state.symbol->name));
                     message.push_back(')');
                 }
-                diagnostics_->nyi(*state.symbol, std::move(message));
+                diagnostics_->error(*state.symbol, std::move(message));
             }
             return false;
         }
@@ -6900,7 +7623,7 @@ bool AlwaysConverter::runForeachRecursive(const slang::ast::ForeachLoopStatement
             if (diagnostics_) {
                 std::string message =
                     std::string(modeLabel()) + " foreach loop exceeded maximum unrolled iterations";
-                diagnostics_->nyi(block_, std::move(message));
+                diagnostics_->error(block_, std::move(message));
             }
             return false;
         }
@@ -7091,7 +7814,7 @@ void WriteBackMemo::reportIssue(const Entry& entry, std::string message,
         return;
     }
     if (const slang::ast::Symbol* symbol = originFor(entry)) {
-        diagnostics->nyi(*symbol, std::move(message));
+        diagnostics->error(*symbol, std::move(message));
     }
 }
 
@@ -7844,7 +8567,7 @@ ValueId RHSConverter::materializeParameterValue(const slang::ast::NamedValueExpr
             std::string message = "Parameter ";
             message.append(std::string(param->name));
             message.append(" has unsupported value type for RHS conversion");
-            diagnostics_->nyi(*origin_, std::move(message));
+            diagnostics_->error(*origin_, std::move(message));
         }
         return ValueId::invalid();
     }
@@ -7858,7 +8581,7 @@ ValueId RHSConverter::materializeParameterValue(const slang::ast::NamedValueExpr
             std::string message = "Parameter ";
             message.append(std::string(param->name));
             message.append(" lacks resolved type information");
-            diagnostics_->nyi(*origin_, std::move(message));
+            diagnostics_->error(*origin_, std::move(message));
         }
         return ValueId::invalid();
     }
@@ -8383,7 +9106,7 @@ ValueId RHSConverter::resolveMemoValue(const SignalMemoEntry& entry) {
 
     if (diagnostics_ && origin_) {
         std::string symbolName = entry.symbol ? std::string(entry.symbol->name) : std::string();
-        diagnostics_->nyi(*origin_,
+        diagnostics_->error(*origin_,
                           "Memo entry missing GRH value for symbol " + symbolName);
     }
     return ValueId::invalid();
@@ -8406,7 +9129,7 @@ RHSConverter::TypeInfo RHSConverter::deriveTypeInfo(const slang::ast::Type& type
     TypeInfo info;
     if (!type.isBitstreamType() || !type.isFixedSize()) {
         if (diagnostics_ && origin_) {
-            diagnostics_->nyi(*origin_,
+            diagnostics_->error(*origin_,
                               "RHS conversion requires fixed-size bitstream type: " +
                                   type.toString());
         }
@@ -8459,7 +9182,7 @@ void RHSConverter::reportUnsupported(std::string_view what,
     message.push_back(' ');
     message.append(slang::ast::toString(expr.kind));
     message.push_back(')');
-    diagnostics_->nyi(*origin_, std::move(message));
+    diagnostics_->error(*origin_, std::move(message));
 }
 
 slang::ast::EvalContext& RHSConverter::ensureEvalContext() {
@@ -8668,6 +9391,29 @@ ValueId CombRHSConverter::translateDynamicIndex(const slang::ast::Expression& va
                                                     const slang::ast::Expression& originExpr,
                                                     std::string_view hint) {
     if (valueExpr.type && valueExpr.type->isUnpackedArray()) {
+        const slang::ast::Type& canonical = valueExpr.type->getCanonicalType();
+        if (const auto* unpacked =
+                canonical.as_if<slang::ast::FixedSizeUnpackedArrayType>()) {
+            const auto& range = unpacked->range;
+            if (range.isLittleEndian()) {
+                ValueId leftConst = createIntConstant(range.left, *originExpr.type, hint);
+                if (!leftConst) {
+                    return ValueId::invalid();
+                }
+                return buildBinaryOp(grh::ir::OperationKind::kSub, leftConst, rawIndex,
+                                     originExpr, hint);
+            }
+
+            if (range.left == 0) {
+                return rawIndex;
+            }
+            ValueId leftConst = createIntConstant(range.left, *originExpr.type, hint);
+            if (!leftConst) {
+                return ValueId::invalid();
+            }
+            return buildBinaryOp(grh::ir::OperationKind::kSub, rawIndex, leftConst,
+                                 originExpr, hint);
+        }
         return rawIndex;
     }
     if (!valueExpr.type || !valueExpr.type->isFixedSize()) {
@@ -8723,7 +9469,9 @@ CombRHSConverter::convertElementSelect(const slang::ast::ElementSelectExpression
         }
     }
 
-    if (!selectorRuntime && expr.isConstantSelect(ctx)) {
+    const bool isUnpackedArray =
+        expr.value().type && expr.value().type->isUnpackedArray();
+    if (!isUnpackedArray && !selectorRuntime && expr.isConstantSelect(ctx)) {
         if (std::optional<int64_t> indexConst = evaluateConstantInt(expr.selector())) {
             if (info.width > 0) {
                 const int64_t baseIndex =
@@ -8911,8 +9659,11 @@ void ElaborateDiagnostics::todo(const slang::ast::Symbol& symbol, std::string me
     add(ElaborateDiagnosticKind::Todo, symbol, std::move(message));
 }
 
-void ElaborateDiagnostics::nyi(const slang::ast::Symbol& symbol, std::string message) {
-    add(ElaborateDiagnosticKind::NotYetImplemented, symbol, std::move(message));
+void ElaborateDiagnostics::error(const slang::ast::Symbol& symbol, std::string message) {
+    add(ElaborateDiagnosticKind::Error, symbol, std::move(message));
+    if (onError_) {
+        onError_();
+    }
 }
 
 void ElaborateDiagnostics::warn(const slang::ast::Symbol& symbol, std::string message) {
@@ -8925,10 +9676,13 @@ void ElaborateDiagnostics::todo(const slang::SourceLocation& location, std::stri
         location.valid() ? std::optional(location) : std::nullopt, std::move(message));
 }
 
-void ElaborateDiagnostics::nyi(const slang::SourceLocation& location, std::string message,
-                               std::string originSymbol) {
-    add(ElaborateDiagnosticKind::NotYetImplemented, std::move(originSymbol),
+void ElaborateDiagnostics::error(const slang::SourceLocation& location, std::string message,
+                                 std::string originSymbol) {
+    add(ElaborateDiagnosticKind::Error, std::move(originSymbol),
         location.valid() ? std::optional(location) : std::nullopt, std::move(message));
+    if (onError_) {
+        onError_();
+    }
 }
 
 void ElaborateDiagnostics::warn(const slang::SourceLocation& location, std::string message,
@@ -8946,6 +9700,9 @@ void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, const slang::ast::S
 void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, std::string originSymbol,
                                std::optional<slang::SourceLocation> location,
                                std::string message) {
+    if (kind == ElaborateDiagnosticKind::Error) {
+        hasError_ = true;
+    }
     ElaborateDiagnostic diagnostic{
         .kind = kind,
         .message = std::move(message),
@@ -8955,7 +9712,15 @@ void ElaborateDiagnostics::add(ElaborateDiagnosticKind kind, std::string originS
 }
 
 Elaborate::Elaborate(ElaborateDiagnostics* diagnostics, ElaborateOptions options) :
-    diagnostics_(diagnostics), options_(options) {}
+    diagnostics_(diagnostics), options_(options) {
+    if (diagnostics_) {
+        if (options_.abortOnError) {
+            diagnostics_->setOnError([]() { throw ElaborateAbort{}; });
+        } else {
+            diagnostics_->setOnError({});
+        }
+    }
+}
 
 grh::ir::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
     sourceManager_ = root.getCompilation().getSourceManager();
@@ -8968,7 +9733,7 @@ grh::ir::Netlist Elaborate::convert(const slang::ast::RootSymbol& root) {
 
         if (!topInstance->isModule()) {
             if (diagnostics_) {
-                diagnostics_->nyi(*topInstance, "Only module instances are supported as top level");
+                diagnostics_->error(*topInstance, "Only module instances are supported as top level");
             }
             continue;
         }
@@ -9299,7 +10064,7 @@ void Elaborate::convertInstanceBody(const slang::ast::InstanceSymbol& instance,
                 processSeqAlways(*block, body, graph);
             }
             else if (diagnostics_) {
-                diagnostics_->nyi(*block, "Procedural block kind is not supported yet");
+                diagnostics_->error(*block, "Procedural block kind is not supported yet");
             }
             continue;
         }
@@ -9382,7 +10147,7 @@ void Elaborate::processGenerateBlock(const slang::ast::GenerateBlockSymbol& bloc
                 processSeqAlways(*proc, body, graph);
             }
             else if (diagnostics_) {
-                diagnostics_->nyi(*proc, "Procedural block kind is not supported yet");
+                diagnostics_->error(*proc, "Procedural block kind is not supported yet");
             }
             continue;
         }
@@ -9414,7 +10179,7 @@ void Elaborate::processGenerateBlockArray(const slang::ast::GenerateBlockArraySy
                                           grh::ir::Graph& graph, grh::ir::Netlist& netlist) {
     if (!array.valid) {
         if (diagnostics_) {
-            diagnostics_->nyi(array, "Generate block array is not elaborated");
+            diagnostics_->error(array, "Generate block array is not elaborated");
         }
         return;
     }
@@ -9496,7 +10261,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
     const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>();
     if (!assignment) {
         if (diagnostics_) {
-            diagnostics_->nyi(assign, "Continuous assign payload is not an assignment expression");
+            diagnostics_->error(assign, "Continuous assign payload is not an assignment expression");
         }
         return;
     }
@@ -9539,7 +10304,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         const auto* condExpr = assignment->right().as_if<slang::ast::ConditionalExpression>();
         if (!condExpr || condExpr->conditions.empty() || condExpr->conditions.front().pattern) {
             if (diagnostics_) {
-                diagnostics_->nyi(assign, "Inout assign must use a simple ternary with 'z'");
+                diagnostics_->error(assign, "Inout assign must use a simple ternary with 'z'");
             }
             return;
         }
@@ -9550,7 +10315,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         const bool falseIsZ = isAllZLiteral(falseExpr);
         if (trueIsZ == falseIsZ) {
             if (diagnostics_) {
-                diagnostics_->nyi(assign, "Inout ternary must have exactly one 'z' branch");
+                diagnostics_->error(assign, "Inout ternary must have exactly one 'z' branch");
             }
             return;
         }
@@ -9577,7 +10342,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
         }
         if (graph.getValue(condValue).width() != 1) {
             if (diagnostics_) {
-                diagnostics_->nyi(assign, "Inout ternary condition must be 1-bit");
+                diagnostics_->error(assign, "Inout ternary condition must be 1-bit");
             }
             return;
         }
@@ -9611,7 +10376,7 @@ void Elaborate::processContinuousAssign(const slang::ast::ContinuousAssignSymbol
             }
             else {
                 if (diagnostics_) {
-                    diagnostics_->nyi(assign, "Inout oe width mismatch");
+                    diagnostics_->error(assign, "Inout oe width mismatch");
                 }
                 return;
             }
@@ -9690,7 +10455,7 @@ void Elaborate::processInstance(const slang::ast::InstanceSymbol& childInstance,
                                 grh::ir::Graph& parentGraph, grh::ir::Netlist& netlist) {
     if (!childInstance.isModule()) {
         if (diagnostics_) {
-            diagnostics_->nyi(childInstance, "Only module instances are supported");
+            diagnostics_->error(childInstance, "Only module instances are supported");
         }
         return;
     }
@@ -9805,7 +10570,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             const auto* connection = childInstance.getPortConnection(*port);
             if (!connection) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Missing port connection during hierarchy elaboration");
+                    diagnostics_->error(*port, "Missing port connection during hierarchy elaboration");
                 }
                 continue;
             }
@@ -9871,7 +10636,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             {
                 if (!expr) {
                     if (diagnostics_) {
-                        diagnostics_->nyi(*port, "Missing inout port connection during hierarchy elaboration");
+                        diagnostics_->error(*port, "Missing inout port connection during hierarchy elaboration");
                     }
                     break;
                 }
@@ -9884,13 +10649,13 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                 }
                 if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
                     if (diagnostics_) {
-                        diagnostics_->nyi(*port, "Hierarchical inout port connections are not supported");
+                        diagnostics_->error(*port, "Hierarchical inout port connections are not supported");
                     }
                     break;
                 }
                 if (!targetExpr->as_if<slang::ast::NamedValueExpression>()) {
                     if (diagnostics_) {
-                        diagnostics_->nyi(*port, "Inout port connections must be simple named values");
+                        diagnostics_->error(*port, "Inout port connections must be simple named values");
                     }
                     break;
                 }
@@ -9899,7 +10664,7 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
                     (symbol && contextBody) ? findInoutMemo(*contextBody, *symbol) : nullptr;
                 if (!inoutMemo) {
                     if (diagnostics_) {
-                        diagnostics_->nyi(*port, "Inout port connection lacks inout value triple");
+                        diagnostics_->error(*port, "Inout port connection lacks inout value triple");
                     }
                     break;
                 }
@@ -9911,12 +10676,12 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
             }
             case slang::ast::ArgumentDirection::Ref:
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Ref port directions are not supported yet");
+                    diagnostics_->error(*port, "Ref port directions are not supported yet");
                 }
                 break;
             default:
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Unknown port direction in hierarchy elaboration");
+                    diagnostics_->error(*port, "Unknown port direction in hierarchy elaboration");
                 }
                 break;
             }
@@ -9925,14 +10690,14 @@ void Elaborate::createInstanceOperation(const slang::ast::InstanceSymbol& childI
 
         if (const auto* multi = portSymbol->as_if<slang::ast::MultiPortSymbol>()) {
             if (diagnostics_) {
-                diagnostics_->nyi(*multi, "Multi-port aggregation is not supported yet");
+                diagnostics_->error(*multi, "Multi-port aggregation is not supported yet");
             }
             continue;
         }
 
         if (const auto* iface = portSymbol->as_if<slang::ast::InterfacePortSymbol>()) {
             if (diagnostics_) {
-                diagnostics_->nyi(*iface, "Interface ports are not supported yet");
+                diagnostics_->error(*iface, "Interface ports are not supported yet");
             }
             continue;
         }
@@ -10048,7 +10813,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         const auto* port = symbol ? symbol->as_if<slang::ast::PortSymbol>() : nullptr;
         if (!port) {
             if (diagnostics_) {
-                diagnostics_->nyi(childInstance, "Port lookup failed for blackbox connection");
+                diagnostics_->error(childInstance, "Port lookup failed for blackbox connection");
             }
             continue;
         }
@@ -10056,7 +10821,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         const auto* connection = childInstance.getPortConnection(*port);
         if (!connection) {
             if (diagnostics_) {
-                diagnostics_->nyi(*port, "Missing port connection during blackbox elaboration");
+                diagnostics_->error(*port, "Missing port connection during blackbox elaboration");
             }
             continue;
         }
@@ -10077,7 +10842,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
                 std::ostringstream oss;
                 oss << "Port width mismatch for " << portMeta.name << " (expected "
                     << portMeta.width << ", got " << parentGraph.getValue(value).width() << ")";
-                diagnostics_->nyi(*port, oss.str());
+                diagnostics_->error(*port, oss.str());
             }
             inputOperands.push_back(value);
             inputPortNames.emplace_back(portMeta.name);
@@ -10091,7 +10856,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
                 std::ostringstream oss;
                 oss << "Port width mismatch for " << portMeta.name << " (expected "
                     << portMeta.width << ", got " << parentGraph.getValue(resolved).width() << ")";
-                diagnostics_->nyi(*port, oss.str());
+                diagnostics_->error(*port, oss.str());
             }
             const bool useDirect = resolved && !parentGraph.getValue(resolved).definingOp();
             ValueId resultValue = useDirect ? resolved : makePortValue(*port);
@@ -10137,7 +10902,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         case slang::ast::ArgumentDirection::InOut: {
             if (!expr) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Missing inout port connection during blackbox elaboration");
+                    diagnostics_->error(*port, "Missing inout port connection during blackbox elaboration");
                 }
                 break;
             }
@@ -10150,13 +10915,13 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
             }
             if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Hierarchical inout port connections are not supported");
+                    diagnostics_->error(*port, "Hierarchical inout port connections are not supported");
                 }
                 break;
             }
             if (!targetExpr->as_if<slang::ast::NamedValueExpression>()) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Inout port connections must be simple named values");
+                    diagnostics_->error(*port, "Inout port connections must be simple named values");
                 }
                 break;
             }
@@ -10165,7 +10930,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
                 (symbol && contextBody) ? findInoutMemo(*contextBody, *symbol) : nullptr;
             if (!inoutMemo) {
                 if (diagnostics_) {
-                    diagnostics_->nyi(*port, "Inout port connection lacks inout value triple");
+                    diagnostics_->error(*port, "Inout port connection lacks inout value triple");
                 }
                 break;
             }
@@ -10175,7 +10940,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
                 oss << "Port width mismatch for " << portMeta.name << " (expected "
                     << portMeta.width << ", got " << parentGraph.getValue(inoutMemo->out).width()
                     << ")";
-                diagnostics_->nyi(*port, oss.str());
+                diagnostics_->error(*port, oss.str());
             }
             inoutOutOperands.push_back(inoutMemo->out);
             inoutOeOperands.push_back(inoutMemo->oe);
@@ -10185,7 +10950,7 @@ void Elaborate::createBlackboxOperation(const slang::ast::InstanceSymbol& childI
         }
         default:
             if (diagnostics_) {
-                diagnostics_->nyi(*port,
+                diagnostics_->error(*port,
                                   "Ref port directions are not supported for blackbox");
             }
             break;
@@ -10266,7 +11031,7 @@ ValueId Elaborate::resolveConnectionValue(const slang::ast::Expression& expr,
         }
         else {
             if (diagnostics_ && origin) {
-                diagnostics_->nyi(*origin, "Assignment port connections are not supported yet");
+                diagnostics_->error(*origin, "Assignment port connections are not supported yet");
             }
             return ValueId::invalid();
         }
@@ -10274,7 +11039,7 @@ ValueId Elaborate::resolveConnectionValue(const slang::ast::Expression& expr,
 
     if (targetExpr->kind == slang::ast::ExpressionKind::HierarchicalValue) {
         if (diagnostics_ && origin) {
-            diagnostics_->nyi(*origin, "Hierarchical port connections are not supported yet");
+            diagnostics_->error(*origin, "Hierarchical port connections are not supported yet");
         }
         return ValueId::invalid();
     }
@@ -10383,8 +11148,10 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
         if (entry.stateOp) {
             continue;
         }
-        // 跳过 memory（非标量寄存器）的 reg 视图，在 ensureMemState 中生成其 kMemory 占位符。
-        if (deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
+        // Skip memory-backed arrays here unless they are forced to stay as register arrays;
+        // ensureMemState will create the kMemory placeholder otherwise.
+        if (!entry.forceRegisterArray &&
+            deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
             continue;
         }
 
@@ -10396,13 +11163,13 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
 
         if (entry.drivingBlock &&
             entry.drivingBlock->procedureKind == slang::ast::ProceduralBlockKind::AlwaysLatch) {
-            // latch 在组合流程中处理，这里不预先生成寄存器占位
+            // Latches are handled in the comb flow; skip pre-creating a register placeholder.
             continue;
         }
 
         if (!entry.drivingBlock) {
             if (diagnostics_) {
-                diagnostics_->nyi(*entry.symbol,
+                diagnostics_->error(*entry.symbol,
                                   "Sequential signal lacks associated procedural block metadata");
             }
             continue;
@@ -10450,7 +11217,7 @@ void Elaborate::ensureRegState(const slang::ast::InstanceBodySymbol& body, grh::
                 opKind = grh::ir::OperationKind::kRegisterArst;
             }
             else if (diagnostics_) {
-                diagnostics_->nyi(*entry.symbol,
+                diagnostics_->error(*entry.symbol,
                                   "Async reset edge kind is not supported for this register");
             }
         }
@@ -10498,7 +11265,7 @@ void Elaborate::ensureMemState(const slang::ast::InstanceBodySymbol& body, grh::
             setAttr(graph, op, "row", layout->rowCount);
             setAttr(graph, op, "isSigned", layout->isSigned);
             entry.stateOp = op;
-            // 将同名 symbol 在 regMemo 里的视图一并更新 stateOp，方便测试从 regMemo 访问到 memory。
+            // Keep the regMemo view in sync so tests can resolve memory symbols via regMemo.
             if (auto regIt = regMemo_.find(&body); regIt != regMemo_.end()) {
                 for (SignalMemoEntry& regEntry : regIt->second) {
                     if (regEntry.symbol == entry.symbol) {
@@ -10555,7 +11322,7 @@ Elaborate::ensureBlackboxMemo(const slang::ast::InstanceBodySymbol& body) {
     entry.hasExplicitAttribute = hasBlackboxAttribute(body);
     entry.hasImplementation = hasBlackboxImplementation(body);
     if (entry.hasExplicitAttribute && entry.hasImplementation && diagnostics_) {
-        diagnostics_->nyi(body.getDefinition(),
+        diagnostics_->error(body.getDefinition(),
                           "Module marked as blackbox but contains implementation; treating as "
                           "normal module body");
     }
@@ -10728,6 +11495,13 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                        std::vector<const slang::ast::ProceduralBlockSymbol*>>
         netDriverBlocks;
     netDriverBlocks.reserve(candidates.size());
+    struct ArrayWriteInfo {
+        bool hasElementAssign = false;
+        bool hasDynamicIndex = false;
+        bool hasWholeAssign = false;
+    };
+    std::unordered_map<const slang::ast::ValueSymbol*, ArrayWriteInfo> arrayWrites;
+    arrayWrites.reserve(candidates.size());
 
     auto markDriver = [&](const slang::ast::ValueSymbol& symbol, MemoDriverKind driver,
                           const slang::ast::ProceduralBlockSymbol* block = nullptr) {
@@ -10754,41 +11528,128 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         }
         if (hasDriver(state, MemoDriverKind::Net) && hasDriver(state, MemoDriverKind::Reg)) {
             if (diagnostics_) {
-                diagnostics_->nyi(symbol,
+                diagnostics_->error(symbol,
                                    "Signal has conflicting net/reg drivers (combinational vs sequential)");
             }
         }
     };
 
-    for (const slang::ast::Symbol& member : body.members()) {
-        if (const auto* assign = member.as_if<slang::ast::ContinuousAssignSymbol>()) {
-            const slang::ast::Expression& expr = assign->getAssignment();
-            if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
-                collectAssignedSymbols(
-                    assignment->left(), [&](const slang::ast::ValueSymbol& symbol) {
-                        markDriver(symbol, MemoDriverKind::Net);
-                    });
-            }
-            continue;
+    auto handleContinuousAssign = [&](const slang::ast::ContinuousAssignSymbol& assign) {
+        const slang::ast::Expression& expr = assign.getAssignment();
+        if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>()) {
+            collectAssignedSymbols(
+                assignment->left(), [&](const slang::ast::ValueSymbol& symbol) {
+                    markDriver(symbol, MemoDriverKind::Net);
+                });
+        }
+    };
+
+    auto analyzeArrayAssignment = [&](const slang::ast::Expression& lhs,
+                                      const slang::ast::ProceduralBlockSymbol& block) {
+        const slang::ast::ValueSymbol* symbol = resolveAssignedSymbol(lhs);
+        if (!symbol) {
+            return;
+        }
+        auto candidateIt = candidates.find(symbol);
+        if (candidateIt == candidates.end()) {
+            return;
+        }
+        if (!deriveMemoryLayout(symbol->getType(), *symbol, diagnostics_)) {
+            return;
         }
 
-        if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
-            if (block->procedureKind == slang::ast::ProceduralBlockKind::Initial) {
+        ArrayWriteInfo& info = arrayWrites[symbol];
+        const slang::ast::Expression* cursor = &lhs;
+        bool sawElementSelect = false;
+        bool dynamicIndex = false;
+        while (cursor) {
+            if (const auto* assignment = cursor->as_if<slang::ast::AssignmentExpression>()) {
+                cursor = &assignment->left();
                 continue;
             }
-            MemoDriverKind driver = classifyProceduralBlock(*block);
-            if (driver == MemoDriverKind::None) {
+            if (const auto* conversion = cursor->as_if<slang::ast::ConversionExpression>()) {
+                if (conversion->isImplicit()) {
+                    cursor = &conversion->operand();
+                    continue;
+                }
+            }
+            if (const auto* range = cursor->as_if<slang::ast::RangeSelectExpression>()) {
+                cursor = &range->value();
                 continue;
             }
+            if (const auto* member = cursor->as_if<slang::ast::MemberAccessExpression>()) {
+                cursor = &member->value();
+                continue;
+            }
+            if (const auto* element = cursor->as_if<slang::ast::ElementSelectExpression>()) {
+                const slang::ast::Expression* baseExpr =
+                    skipImplicitConversions(element->value());
+                const slang::ast::Expression& base = *baseExpr;
+                sawElementSelect = true;
+                struct SelectorRuntimeFinder
+                    : public slang::ast::ASTVisitor<SelectorRuntimeFinder, true, false> {
+                    bool runtime = false;
+                    void handle(const slang::ast::NamedValueExpression& expr) {
+                        if (const auto* sym = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
+                            const auto kind = sym->kind;
+                            if (kind != slang::ast::SymbolKind::Parameter &&
+                                kind != slang::ast::SymbolKind::EnumValue &&
+                                kind != slang::ast::SymbolKind::Genvar) {
+                                runtime = true;
+                            }
+                        }
+                    }
+                    void handle(const slang::ast::HierarchicalValueExpression& expr) {
+                        if (const auto* sym = expr.symbol.as_if<slang::ast::ValueSymbol>()) {
+                            const auto kind = sym->kind;
+                            if (kind != slang::ast::SymbolKind::Parameter &&
+                                kind != slang::ast::SymbolKind::EnumValue &&
+                                kind != slang::ast::SymbolKind::Genvar) {
+                                runtime = true;
+                            }
+                        }
+                    }
+                };
+                SelectorRuntimeFinder finder;
+                element->selector().visit(finder);
+                if (finder.runtime) {
+                    dynamicIndex = true;
+                }
+                cursor = baseExpr;
+                continue;
+            }
+            break;
+        }
+
+        if (dynamicIndex) {
+            info.hasDynamicIndex = true;
+        }
+        else if (sawElementSelect) {
+            info.hasElementAssign = true;
+        }
+        else {
+            info.hasWholeAssign = true;
+        }
+    };
+
+    auto handleProceduralBlock = [&](const slang::ast::ProceduralBlockSymbol& block) {
+        if (block.procedureKind == slang::ast::ProceduralBlockKind::Initial) {
+            return;
+        }
+        MemoDriverKind driver = classifyProceduralBlock(block);
+        if (driver == MemoDriverKind::None) {
+            return;
+        }
 
         auto handleAssignment = [&](const slang::ast::Expression& lhs) {
             collectAssignedSymbols(
                 lhs, [&](const slang::ast::ValueSymbol& symbol) {
-                    markDriver(symbol, driver, block);
+                    markDriver(symbol, driver, &block);
                 });
+            analyzeArrayAssignment(lhs, block);
         };
         AssignmentCollector collector(handleAssignment);
-        block->getBody().visit(collector);
+        block.getBody().visit(collector);
 
         if (!dpiLookup.empty()) {
             auto onDpiCall = [&](const slang::ast::CallExpression& call) {
@@ -10814,15 +11675,62 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
                     }
                     collectAssignedSymbols(
                         *args[idx], [&](const slang::ast::ValueSymbol& symbol) {
-                            markDriver(symbol, MemoDriverKind::Reg, block);
+                            markDriver(symbol, MemoDriverKind::Reg, &block);
                         });
                 }
             };
             DpiCallCollector dpiCollector(dpiLookup, onDpiCall);
-            block->getBody().visit(dpiCollector);
+            block.getBody().visit(dpiCollector);
         }
-        continue;
-    }
+    };
+
+    auto scanScope = [&](const auto& self, const slang::ast::Scope& scope) -> void {
+        for (const slang::ast::Symbol& member : scope.members()) {
+            if (const auto* assign = member.as_if<slang::ast::ContinuousAssignSymbol>()) {
+                handleContinuousAssign(*assign);
+                continue;
+            }
+
+            if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>()) {
+                handleProceduralBlock(*block);
+                continue;
+            }
+
+            if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>()) {
+                self(self, *generateBlock);
+                continue;
+            }
+
+            if (const auto* generateArray =
+                    member.as_if<slang::ast::GenerateBlockArraySymbol>()) {
+                for (const slang::ast::GenerateBlockSymbol* entry : generateArray->entries) {
+                    if (entry) {
+                        self(self, *entry);
+                    }
+                }
+                continue;
+            }
+        }
+    };
+
+    scanScope(scanScope, body);
+
+    for (const auto& [symbol, info] : arrayWrites) {
+        if (!info.hasElementAssign || info.hasDynamicIndex || info.hasWholeAssign) {
+            continue;
+        }
+        MemoDriverKind driver = MemoDriverKind::None;
+        if (auto it = driverKinds.find(symbol); it != driverKinds.end()) {
+            driver = it->second;
+        }
+        const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
+                             !hasDriver(driver, MemoDriverKind::Net);
+        if (regOnly) {
+            continue;
+        }
+        if (auto it = candidates.find(symbol); it != candidates.end()) {
+            it->second.forceRegisterArray = true;
+        }
     }
 
     std::vector<SignalMemoEntry> nets;
@@ -10845,10 +11753,11 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
         const bool regOnly = hasDriver(driver, MemoDriverKind::Reg) &&
                              !hasDriver(driver, MemoDriverKind::Net);
 
-        // Unpacked arrays recognized as memory仅在“纯时序驱动”的情况下进入 memMemo；
-        // 组合驱动的 unpacked array 仍按 net 扁平化处理。
+        // Treat unpacked arrays as memory only for pure sequential drivers; combinational
+        // unpacked arrays remain flattened as nets.
         if (regOnly) {
-            if (deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
+            if (!entry.forceRegisterArray &&
+                deriveMemoryLayout(*entry.type, *entry.symbol, diagnostics_)) {
                 mems.push_back(entry);
                 continue;
             }
@@ -10888,8 +11797,8 @@ void Elaborate::collectSignalMemos(const slang::ast::InstanceBodySymbol& body) {
     std::sort(nets.begin(), nets.end(), byName);
     std::sort(regs.begin(), regs.end(), byName);
     std::sort(mems.begin(), mems.end(), byName);
-    // 让 memory 也出现在 regMemo 视图中（stateOp 为 kMemory，由 ensureMemState 填充）。
-    // 这样下游测试可以在 regMemo 中查到 "mem" 实体，同时仍保留 memMemo 供 memory 专用处理。
+    // Keep memory entries visible in regMemo (stateOp filled by ensureMemState) so downstream
+    // passes can still resolve "mem" symbols while memMemo preserves memory-only handling.
     regs.insert(regs.end(), mems.begin(), mems.end());
     netMemo_[&body] = std::move(nets);
     regMemo_[&body] = std::move(regs);
@@ -10902,7 +11811,7 @@ void Elaborate::collectDpiImports(const slang::ast::InstanceBodySymbol& body) {
 
     auto report = [&](const slang::ast::Symbol& symbol, std::string_view message) {
         if (diagnostics_) {
-            diagnostics_->nyi(symbol, std::string(message));
+            diagnostics_->error(symbol, std::string(message));
         }
     };
 

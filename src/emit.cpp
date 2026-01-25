@@ -2896,7 +2896,6 @@ namespace grh::emit
                     const bool hasReset =
                         op.kind() == grh::ir::OperationKind::kMemorySyncReadPortRst ||
                         op.kind() == grh::ir::OperationKind::kMemorySyncReadPortArst;
-                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemorySyncReadPortArst;
                     const std::size_t expectedOperands = hasReset ? 4 : 3;
                     if (operands.size() < expectedOperands || results.empty())
                     {
@@ -2904,39 +2903,11 @@ namespace grh::emit
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
-                    if (!clkPolarity)
-                    {
-                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
-                        clkPolarity = std::string("posedge");
-                    }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
-                                                    : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
-                    const std::string enLevel =
-                        normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::ir::ValueId clk = operands[0];
-                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
                     const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                    if (!clk.valid() || !addr.valid() || !en.valid() || (hasReset && !rst.valid()))
+                    if (!addr.valid())
                     {
                         reportError(std::string(grh::ir::toString(op.kind())) + " missing operands or results", opContext);
                         break;
-                    }
-                    auto enExpr = formatEnableExpr(en, enLevel);
-                    if (!enExpr)
-                    {
-                        break;
-                    }
-                    std::optional<bool> rstActiveHigh;
-                    if (hasReset)
-                    {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
-                        if (!rstActiveHigh)
-                        {
-                            break;
-                        }
                     }
                     if (!memSymbolAttr)
                     {
@@ -2944,46 +2915,9 @@ namespace grh::emit
                         break;
                     }
                     const std::string &memSymbol = *memSymbolAttr;
-
-                    const grh::ir::OperationId memOpId = graph->findOperation(memSymbol);
-                    int64_t memWidth = 1;
-                    bool memSigned = false;
-                    if (memOpId.valid())
-                    {
-                        const grh::ir::Operation memOp = graph->getOperation(memOpId);
-                        memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
-                        memSigned = getAttribute<bool>(*graph, memOp, "isSigned").value_or(false);
-                    }
-                    ensureRegDecl(opContext, memWidth, memSigned, op.srcLoc());
-
-                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                    if (asyncReset && rst.valid() && rstActiveHigh)
-                    {
-                        key.asyncRst = rst;
-                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                    }
-                    else if (hasReset && rst.valid() && rstActiveHigh)
-                    {
-                        key.syncRst = rst;
-                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                    }
-
-                    std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, 3, opContext + " <= " + memSymbol + "[" + valueName(addr) + "];");
-                    appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
-
                     const grh::ir::ValueId data = results[0];
-                    if (valueName(data) != opContext)
-                    {
-                        ensureWireDecl(data);
-                        addAssign("assign " + valueName(data) + " = " + opContext + ";", opId);
-                    }
-                    else
-                    {
-                        markPortAsRegIfNeeded(data);
-                    }
+                    ensureWireDecl(data);
+                    addAssign("assign " + valueName(data) + " = " + memSymbol + "[" + valueName(addr) + "];", opId);
                     break;
                 }
                 case grh::ir::OperationKind::kMemoryWritePort:
@@ -4896,7 +4830,6 @@ namespace grh::emit
             {
                 const bool hasReset = kind == grh::ir::OperationKind::kMemorySyncReadPortRst ||
                                       kind == grh::ir::OperationKind::kMemorySyncReadPortArst;
-                const bool asyncReset = kind == grh::ir::OperationKind::kMemorySyncReadPortArst;
                 const std::size_t expectedOperands = hasReset ? 4 : 3;
                 if (operands.size() < expectedOperands || results.empty())
                 {
@@ -4904,38 +4837,11 @@ namespace grh::emit
                     break;
                 }
                 auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                if (!clkPolarity)
-                {
-                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
-                    clkPolarity = std::string("posedge");
-                }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
-                                                : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
-                const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
-                const grh::ir::ValueId clk = operands[0];
-                const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
                 const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                if (!clk.valid() || !addr.valid() || !en.valid() || (hasReset && !rst.valid()))
+                if (!addr.valid())
                 {
                     reportError(std::string(grh::ir::toString(kind)) + " missing operands or results", context);
                     break;
-                }
-                auto enExpr = formatEnableExpr(en, enLevel, context);
-                if (!enExpr)
-                {
-                    break;
-                }
-                std::optional<bool> rstActiveHigh;
-                if (hasReset)
-                {
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
                 }
                 if (!memSymbolAttr)
                 {
@@ -4943,44 +4849,9 @@ namespace grh::emit
                     break;
                 }
                 const std::string &memSymbol = *memSymbolAttr;
-
-                int64_t memWidth = 1;
-                bool memSigned = false;
-                if (auto it = opByName.find(memSymbol); it != opByName.end())
-                {
-                    memWidth = getAttribute<int64_t>(view, it->second, "width").value_or(1);
-                    memSigned = getAttribute<bool>(view, it->second, "isSigned").value_or(false);
-                }
-                ensureRegDecl(opName(opId), memWidth, memSigned, view.opSrcLoc(opId));
-
-                IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                if (asyncReset && rst.valid() && rstActiveHigh)
-                {
-                    key.asyncRst = rst;
-                    key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                }
-                else if (hasReset && rst.valid() && rstActiveHigh)
-                {
-                    key.syncRst = rst;
-                    key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                }
-
-                std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                appendIndented(stmt, 3, opName(opId) + " <= " + memSymbol + "[" + valueName(addr) + "];");
-                appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
-
                 const grh::ir::ValueId data = results[0];
-                if (valueName(data) != opName(opId))
-                {
-                    ensureWireDecl(data);
-                    addAssign("assign " + valueName(data) + " = " + opName(opId) + ";", opId);
-                }
-                else
-                {
-                    markPortAsRegIfNeeded(data);
-                }
+                ensureWireDecl(data);
+                addAssign("assign " + valueName(data) + " = " + memSymbol + "[" + valueName(addr) + "];", opId);
                 break;
             }
             case grh::ir::OperationKind::kMemoryWritePort:

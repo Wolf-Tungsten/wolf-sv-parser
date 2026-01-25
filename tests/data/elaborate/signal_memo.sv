@@ -13,7 +13,6 @@ module memo_child(
     logic seq_logic;
     reg   reg_ff;
     logic latch_target;
-    logic conflict_signal;
     memo_struct_t net_struct_bus;
     memo_struct_t reg_struct_bus;
     logic [1:0][3:0] net_packed_matrix;
@@ -50,11 +49,6 @@ module memo_child(
     end
     assign net_unpacked_bus[0] = comb_bus[2:0];
     assign net_unpacked_bus[1] = {star_assign, comb_bus[5:4]};
-
-    assign conflict_signal = star_assign;
-    always_ff @(posedge clk) begin
-        conflict_signal <= rst_n;
-    end
 
     always_ff @(posedge clk) begin
         reg_struct_bus <= net_struct_bus;

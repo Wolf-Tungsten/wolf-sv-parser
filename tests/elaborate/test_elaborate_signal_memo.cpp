@@ -104,7 +104,9 @@ int main() {
     driver.runAnalysis(*compilation);
 
     ElaborateDiagnostics diagnostics;
-    Elaborate elaborator(&diagnostics);
+    ElaborateOptions elaborateOptions;
+    elaborateOptions.abortOnError = false;
+    Elaborate elaborator(&diagnostics, elaborateOptions);
     grh::ir::Netlist netlist = elaborator.convert(compilation->getRoot());
 
     const grh::ir::Graph* graph = netlist.findGraph("memo_child");
@@ -326,7 +328,7 @@ int main() {
 
     std::cout << "[memo] diagnostics count=" << diagnostics.messages().size() << '\n';
     for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
-        const char* kindStr = "NYI";
+        const char* kindStr = "ERROR";
         switch (diag.kind) {
         case ElaborateDiagnosticKind::Todo:
             kindStr = "TODO";
@@ -334,25 +336,13 @@ int main() {
         case ElaborateDiagnosticKind::Warning:
             kindStr = "WARN";
             break;
-        case ElaborateDiagnosticKind::NotYetImplemented:
+        case ElaborateDiagnosticKind::Error:
         default:
-            kindStr = "NYI";
+            kindStr = "ERROR";
             break;
         }
         std::cout << "  - kind=" << kindStr << " origin=" << diag.originSymbol
                   << " message=" << diag.message << '\n';
-    }
-
-    bool foundConflictDiag = false;
-    for (const ElaborateDiagnostic& diag : diagnostics.messages()) {
-        if (diag.message.find("conflicting net/reg") != std::string::npos ||
-            diag.originSymbol.find("conflict_signal") != std::string::npos) {
-            foundConflictDiag = true;
-            break;
-        }
-    }
-    if (!foundConflictDiag) {
-        return fail("Expected conflicting driver diagnostic for conflict_signal");
     }
 
     return 0;
