@@ -45,3 +45,16 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
+## STEP 0002 - 制定 Convert 新架构与工作流方案
+
+目标：
+- 基于 slang AST 能力、GRH 表示约束与 Elaborate 现状，提出新的 Convert 架构与流程
+- 明确分阶段数据模型与职责划分，降低 memo 粘连
+
+实施：
+- 已更新 `docs/convert/convert-architecture.md`，给出 Convert 的静态组件与数据模型
+- 已更新 `docs/convert/convert-workflow.md`，给出运行时从入口到 Netlist 输出的流程
+- 已补充多顶层模块约束、复杂 always/控制流识别、层次保留与参数特化策略
+- 已补充可控调试日志接口的预留说明
+
+完成情况：已完成
