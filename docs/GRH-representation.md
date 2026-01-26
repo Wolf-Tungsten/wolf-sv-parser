@@ -53,7 +53,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
-- 时序：`kLatch`、`kLatchArst`、`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryWritePortRst`、`kMemoryWritePortArst`、`kMemoryMaskWritePort`、`kMemoryMaskWritePortRst`、`kMemoryMaskWritePortArst`
+- 时序：`kLatch`、`kLatchArst`、`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryMaskWritePort`
 - 层次：`kInstance`、`kBlackbox`
 - 调试：`kDisplay`、`kAssert`
 - DPI：`kDpicImport`、`kDpicCall`
@@ -67,6 +67,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内建议唯一且非空；`Graph::internSymbol()` 负责驻留字符串
 - 具有一个 `int32_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
 - 具有一个 bool 类型 signed 标记是否为有符号
+- 支持 SystemVerilog 四态逻辑（0/1/x/z），Value 与 Operation 的语义均按四态传播；常量允许使用 x/z 字面量
 - Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
 生成语义
@@ -603,6 +604,8 @@ assign ${data.symbol} = ${memSymbol}[${addr.symbol}];
 
 kMemorySyncReadPort 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
 
+读数据经过端口内部寄存器 `${symbol}` 输出；复位版本仅作用于该读寄存器，不影响 memory 内容。
+
 - operands：
     - clk：读时钟信号
     - addr：读地址信号
@@ -628,6 +631,8 @@ assign ${data.symbol} = ${symbol};
 
 ### 片上存储器同步读端口（同步复位） kMemorySyncReadPortRst
 
+复位仅作用于读寄存器 `${symbol}`，不改写 `memSymbol` 的存储内容。
+
 - operands：
     - clk：读时钟信号
     - rst：复位信号
@@ -647,7 +652,7 @@ wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
 wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
 reg ${memSymbol.isSigned ? "signed" : ""} [${memSymbol.width}-1:0] ${symbol};
 always @(${clkPolarity} ${clk.symbol}) begin
-    // rst_active 是否触发输出复位由 elaboration 提供的 en/data 决定；en_active 可能已包含 rst_active
+    // 复位作用于读寄存器，rst_active 时的复位值由 elaboration 显式提供
     if (en_active) begin
         ${symbol} <= ${memSymbol}[${addr.symbol}];
     end
@@ -656,6 +661,8 @@ assign ${data.symbol} = ${symbol};
 ```
 
 ### 片上存储器同步读端口（异步复位） kMemorySyncReadPortArst
+
+复位仅作用于读寄存器 `${symbol}`，不改写 `memSymbol` 的存储内容。
 
 - operands：
     - clk：读时钟信号
@@ -676,7 +683,7 @@ wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
 wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
 reg ${memSymbol.isSigned ? "signed" : ""} [${memSymbol.width}-1:0] ${symbol};
 always @(${clkPolarity} ${clk.symbol} or ${rstPolarity == "high" ? "posedge" : "negedge"} ${rst.symbol}) begin
-    // rst_active 是否触发输出复位由 elaboration 提供的 en/data 决定；en_active 可能已包含 rst_active
+    // 复位作用于读寄存器，rst_active 时的复位值由 elaboration 显式提供
     if (en_active) begin
         ${symbol} <= ${memSymbol}[${addr.symbol}];
     end
@@ -685,6 +692,8 @@ assign ${data.symbol} = ${symbol};
 ```
 
 ### 片上存储器写端口 kMemoryWritePort
+
+写端口不提供复位语义；复位行为由上层逻辑显式控制 `en/data`，不自动改写 memory。
 
 - operands：
     - clk：写时钟信号
@@ -707,60 +716,9 @@ always @(${clkPolarity} ${clk.symbol}) begin
 end
 ```
 
-### 片上存储器写端口（同步复位） kMemoryWritePortRst
-
-- operands：
-    - clk：写时钟信号
-    - rst：复位信号
-    - addr：写地址信号
-    - en：写使能信号
-    - data：写数据输入信号
-- results：无
-- attributes：
-    - memSymbol：指向目标 kMemory 的 symbol
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    // rst_active 是否触发写入由 elaboration 生成的 en/data 决定；en_active 可直接包含 rst 相关条件
-    if (en_active) begin
-        ${memSymbol}[${addr.symbol}] <= ${data.symbol};
-    end
-end
-```
-
-### 片上存储器写端口（异步复位） kMemoryWritePortArst
-
-- operands：
-    - clk：写时钟信号
-    - rst：复位信号
-    - addr：写地址信号
-    - en：写使能信号
-    - data：写数据输入信号
-- results：无
-- attributes：
-    - memSymbol：指向目标 kMemory 的 symbol
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`，决定敏感沿
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstPolarity == "high" ? "posedge" : "negedge"} ${rst.symbol}) begin
-    if (en_active) begin
-        ${memSymbol}[${addr.symbol}] <= ${data.symbol};
-    end
-end
-```
-
 ### 片上存储器带掩码写端口 kMemoryMaskWritePort
+
+写端口不提供复位语义；复位行为由上层逻辑显式控制 `en/data/mask`，不自动改写 memory。
 
 - operands：
     - clk：写时钟信号
@@ -778,77 +736,6 @@ end
 ```
 wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
 always @(${clkPolarity} ${clk.symbol}) begin
-    if (en_active) begin
-        if (${mask.symbol} == {${memSymbol.width}{1'b1}}) begin
-            ${memSymbol}[${addr.symbol}] <= ${data.symbol};
-        end else begin
-            for (int i = 0; i < ${memSymbol.width }; i = i + 1) begin
-                if (${mask.symbol}[i]) begin
-                    ${memSymbol}[${addr.symbol}][i] <= ${data.symbol}[i];
-                end
-            end
-        end
-    end
-end
-```
-
-### 片上存储器带掩码写端口（同步复位） kMemoryMaskWritePortRst
-
-- operands：
-    - clk：写时钟信号
-    - rst：复位信号
-    - addr：写地址信号
-    - en：写使能信号
-    - data：写数据输入信号
-    - mask: 逐位写掩码信号
-- results：无
-- attributes：
-    - memSymbol：指向目标 kMemory 的 symbol
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    // rst_active 是否触发写入由 elaboration 生成的 en/data/mask 决定；en_active 可直接包含 rst 相关条件
-    if (en_active) begin
-        if (${mask.symbol} == {${memSymbol.width}{1'b1}}) begin
-            ${memSymbol}[${addr.symbol}] <= ${data.symbol};
-        end else begin
-            for (int i = 0; i < ${memSymbol.width }; i = i + 1) begin
-                if (${mask.symbol}[i]) begin
-                    ${memSymbol}[${addr.symbol}][i] <= ${data.symbol}[i];
-                end
-            end
-        end
-    end
-end
-```
-
-### 片上存储器带掩码写端口（异步复位） kMemoryMaskWritePortArst
-
-- operands：
-    - clk：写时钟信号
-    - rst：复位信号
-    - addr：写地址信号
-    - en：写使能信号
-    - data：写数据输入信号
-    - mask: 逐位写掩码信号
-- results：无
-- attributes：
-    - memSymbol：指向目标 kMemory 的 symbol
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`，决定敏感沿
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstPolarity == "high" ? "posedge" : "negedge"} ${rst.symbol}) begin
     if (en_active) begin
         if (${mask.symbol} == {${memSymbol.width}{1'b1}}) begin
             ${memSymbol}[${addr.symbol}] <= ${data.symbol};
