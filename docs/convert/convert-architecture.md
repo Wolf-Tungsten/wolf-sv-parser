@@ -1,6 +1,6 @@
 # Convert 架构（静态视角）
 
-> 本文描述 Convert 的静态结构：有哪些部件、它们如何组织与协作。
+> 本文聚焦数据结构与并行策略，描述 Convert 的静态组织方式。
 
 ## 目标与边界
 - 输入：slang AST（`slang::ast::*`），由前端构建的 `Compilation` 与 `RootSymbol` 提供。
@@ -17,52 +17,81 @@
 - 层次保留：不做全局扁平化，实例关系通过 kInstance 维护。
 - 可控日志：提供统一的调试日志接口，默认静默，可按级别与模块启用。
 
-## 核心组件
-- **ConvertDriver**
-  - Convert 的入口与总控，管理 `Netlist`、`ConvertDiagnostics`、选项与全局缓存。
-- **ModulePlanner**
-  - 针对一个 `InstanceBodySymbol` 生成 `ModulePlan`，包含端口、信号、读写关系与实例信息。
-- **SymbolCollector**
-  - 解析 `PortSymbol`/`NetSymbol`/`VariableSymbol`/`InstanceSymbol` 等，形成 `SignalInfo` 与 `PortInfo`。
-- **TypeResolver**
-  - 统一计算位宽、符号属性、packed/unpacked 维度与 memory 行数。
-- **RWAnalyzer**
-  - 从连续赋值与过程块提取读写关系，识别复杂 always 类型与可综合控制流（if/for/case），标注控制域（comb/seq/latch）及 clk/rst 语义。
-- **Lowering 层**
-  - `ExprLowerer`：将 `slang::ast::Expression` 转为 GRH Value 与组合逻辑 Op。
-  - `StmtLowerer`：将过程块与控制流转为写回计划与 guard/mux 结构。
-  - `MemoryPortLowerer`：将 memory 读写关系映射到 kMemory* 端口 Op。
-- **WriteBackAssembler**
-  - 汇总同一信号的多路写入，生成 kAssign/kRegister/kLatch 等最终写回节点。
-- **GraphAssembler**
-  - 根据 ModulePlan 构建 `Graph`，绑定端口、创建实例化 Op，并注册别名。
-  - 对非黑盒实例消除参数化，每个参数配置生成独立 Graph。
-  - 保留层次结构，不在此阶段做扁平化。
-- **ConvertLogger**
-  - 统一的调试日志接口，支持 level/tag 过滤，受 options 控制。
+## 核心数据结构
+### ConvertContext
+- 共享状态容器，贯穿整个转换流程。
+- 字段：`compilation`、`root`、`options`、`diagnostics`、`logger`、`planCache`、`planQueue`。
 
-## 代码骨架落位
-- `include/convert.hpp`：Convert 核心数据结构与接口声明
-- `src/convert.cpp`：Convert 骨架实现与默认行为
-- `CMakeLists.txt`：新增 `convert` 静态库目标
+### PlanKey / PlanCache / PlanArtifacts
+- `PlanKey`：`body + paramSignature`，唯一标识参数特化模块。
+- `PlanCache`：`PlanKey -> PlanEntry{status, plan, artifacts}`。
+- `PlanArtifacts`：`loweringPlan` + `writeBackPlan`。
 
-## 关键数据模型
-- **ModulePlan**（模块级静态计划）
-  - `ports[]`：端口名、方向、位宽、inout 拆分信息。
-  - `signals[]`：信号种类（net/reg/mem）、位宽、签名、packed/unpacked 维度、源 AST。
-  - `rwOps[]`：读写事件（LHS/RHS、控制域、clock/reset、优先级）。
-  - `memPorts[]`：memory 端口描述（读/写、同步/异步、掩码）。
-  - `instances[]`：子实例与端口连接描述。
-- **GlobalCache**
-  - `graphByBody`：参数特化后的 `InstanceBodySymbol` -> `GraphId`。
-  - `symbolIdCache`：GRH 符号驻留与复用。
-- **Diagnostics**
-  - 统一记录 `todo/error/warn`，带 AST 位置信息与上下文。
+### ModulePlan
+- 模块级静态计划，结构化记录端口/信号/读写关系等。
+- 字段：`ports`、`signals`、`rwOps`、`memPorts`、`instances`。
 
-## 静态关系（概览）
-- `ConvertDriver` 协调 `ModulePlanner` 构建 `ModulePlan`，再由 `GraphAssembler` 生成 `Graph`。
-- `ModulePlan` 由 `SymbolCollector + TypeResolver + RWAnalyzer` 共同填充。
-- `Lowering` 与 `WriteBackAssembler` 只消耗 Plan，不在分析阶段产生 IR。
+### PlanSymbolTable 与索引化结构
+- `PlanSymbolTable`：模块内符号驻留表，`string_view -> PlanSymbolId`。
+- 索引化主键：`PlanSymbolId/SignalId/PortId`；主表以 `std::vector` 顺序存储。
+- 访问模式：只追加写入，避免中途删除；依据 `InstanceBodySymbol` 成员数量预留容量。
+
+### LoweringPlan / WriteBackPlan
+- `LoweringPlan`：临时 Value/Op 描述、依赖关系与临时命名。
+- `WriteBackPlan`：合并后的写回序列与 guard/mux 决策。
+
+### Diagnostics / Logger
+- `ConvertDiagnostics`：统一收集 todo/error/warn，保留源码位置信息。
+- `ConvertLogger`：level/tag 过滤的可控日志接口。
+
+## Pass 与数据结构关系图
+```
+Context Setup
+  |
+  v
+PlanCache (PlanKey -> PlanEntry{plan, artifacts})
+  |
+  +--> Pass1: SymbolCollectorPass -> ModulePlan(ports/signals/instances)
+  |                               -> store in PlanCache[PlanKey].plan
+  |
+  +--> Pass2: TypeResolverPass    -> update ModulePlan (width/signed/dims)
+  |
+  +--> Pass3: RWAnalyzerPass      -> update ModulePlan (rwOps/memPorts)
+  |
+  +--> Pass4: ExprLowererPass     -> LoweringPlan
+  |                               -> PlanCache[PlanKey].artifacts.loweringPlan
+  |
+  +--> Pass5: StmtLowererPass     -> refine LoweringPlan (guards/write intents)
+  |
+  +--> Pass6: MemoryPortLowererPass -> refine LoweringPlan (mem ports)
+  |
+  +--> Pass7: WriteBackPass       -> WriteBackPlan
+  |                               -> PlanCache[PlanKey].artifacts.writeBackPlan
+  |
+  +--> Pass8: GraphAssemblyPass   -> Graph (GRH Op/Value) -> Netlist
+```
+
+## 并行化策略（以模块为粒度）
+### 并行边界
+- 一个参数特化模块对应一个任务流水线。
+- Pass1~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
+
+### 任务与调度
+- 任务 key：`PlanKey = body + paramSignature`。
+- 调度：固定线程池 + 任务队列；主线程负责投递与汇总。
+- 任务发现：在 Pass1 遍历实例时，将子模块的 `PlanKey` 投递到队列。
+
+### 去重与同步
+- `PlanCache` 负责去重，保证同一 `PlanKey` 只处理一次。
+- `PlanTaskQueue` 负责任务分发，支持队列关闭以收敛并行阶段。
+
+### 数据一致性
+- 并行阶段只写 `PlanCache/PlanArtifacts`，不改 `Netlist`。
+- `GraphAssemblyPass` 串行落地 Graph 与 alias，避免并发写冲突。
+
+### 诊断与日志
+- 诊断：线程本地缓存，最终由主线程合并。
+- 日志：`ConvertLogger` 统一输出，避免多线程交错。
 
 ## GRH 输出契约
 - 端口与信号宽度、符号属性完全基于 slang 类型系统。
@@ -70,3 +99,8 @@
 - 读端口复位仅作用于读寄存器，写端口无复位语义。
 - 四态逻辑语义保持一致，常量允许 x/z。
 - Netlist 允许多个顶层模块，Convert 标记 `topInstances` 形成 topGraphs 列表。
+
+## 代码骨架落位
+- `include/convert.hpp`：Convert 核心数据结构与接口声明。
+- `src/convert.cpp`：Convert 骨架实现与默认行为。
+- `CMakeLists.txt`：新增 `convert` 静态库目标。

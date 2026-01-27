@@ -83,3 +83,30 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `CMakeLists.txt` 将 `convert` 链接到 `wolf-sv-parser`
 
 完成情况：已完成
+
+## STEP 0005 - ModulePlanner 数据结构设计与骨架更新
+
+目标：
+- 细化 ModulePlanner 相关数据结构设计，避免性能瓶颈
+- 支持大规模输入的高效遍历与后续并行化
+
+实施：
+- `docs/convert/convert-architecture.md` 补充 ModulePlanner 数据结构与并行化策略
+- `docs/convert/convert-workflow.md` 标注可并行模块计划阶段
+- `include/convert.hpp`/`src/convert.cpp` 更新 PlanSymbolTable 与索引化结构骨架
+- 进一步明确并行化方法（任务单元、调度模型、去重与阶段边界）
+- 新增 PlanCache/PlanTaskQueue 并接入 ConvertContext 骨架
+
+完成情况：已完成
+
+## STEP 0006 - 建立 ConvertContext 与 Plan 数据结构
+
+目标：
+- 明确 ConvertContext 与 Plan 相关的核心数据结构
+- 为后续 Pass 实现提供最小可用骨架
+
+实施：
+- `include/convert.hpp` 新增 LoweringPlan/WriteBackPlan/PlanArtifacts 骨架
+- `PlanEntry` 扩展以持有 artifacts
+
+完成情况：已完成

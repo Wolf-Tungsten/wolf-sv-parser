@@ -6,6 +6,45 @@
 
 namespace wolf_sv_parser {
 
+PlanSymbolId PlanSymbolTable::intern(std::string_view text)
+{
+    if (text.empty())
+    {
+        return {};
+    }
+    if (auto it = index_.find(text); it != index_.end())
+    {
+        return it->second;
+    }
+    storage_.emplace_back(text);
+    const std::string_view stored = storage_.back();
+    PlanSymbolId id{static_cast<PlanIndex>(storage_.size() - 1)};
+    index_.emplace(stored, id);
+    return id;
+}
+
+PlanSymbolId PlanSymbolTable::lookup(std::string_view text) const
+{
+    if (text.empty())
+    {
+        return {};
+    }
+    if (auto it = index_.find(text); it != index_.end())
+    {
+        return it->second;
+    }
+    return {};
+}
+
+std::string_view PlanSymbolTable::text(PlanSymbolId id) const
+{
+    if (!id.valid() || id.index >= storage_.size())
+    {
+        return {};
+    }
+    return storage_[id.index];
+}
+
 void ConvertDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message)
 {
     add(ConvertDiagnosticKind::Todo, symbol, std::move(message));
@@ -103,16 +142,110 @@ void ConvertLogger::log(ConvertLogLevel level, std::string_view tag, std::string
     sink_(event);
 }
 
+bool PlanCache::tryClaim(const PlanKey& key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end())
+    {
+        entries_.emplace(key, PlanEntry{PlanStatus::Planning, std::nullopt});
+        return true;
+    }
+    if (it->second.status == PlanStatus::Planning)
+    {
+        return false;
+    }
+    if (it->second.status == PlanStatus::Done)
+    {
+        return false;
+    }
+    it->second.status = PlanStatus::Planning;
+    it->second.plan.reset();
+    return true;
+}
+
+void PlanCache::storePlan(const PlanKey& key, ModulePlan plan)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry& entry = entries_[key];
+    entry.status = PlanStatus::Done;
+    entry.plan = std::move(plan);
+}
+
+void PlanCache::markFailed(const PlanKey& key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry& entry = entries_[key];
+    entry.status = PlanStatus::Failed;
+    entry.plan.reset();
+}
+
+std::optional<ModulePlan> PlanCache::findReady(const PlanKey& key) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end() || it->second.status != PlanStatus::Done || !it->second.plan)
+    {
+        return std::nullopt;
+    }
+    return it->second.plan;
+}
+
+void PlanTaskQueue::push(PlanKey key)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_)
+    {
+        return;
+    }
+    queue_.push_back(std::move(key));
+}
+
+bool PlanTaskQueue::tryPop(PlanKey& out)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty())
+    {
+        return false;
+    }
+    out = std::move(queue_.front());
+    queue_.pop_front();
+    return true;
+}
+
+void PlanTaskQueue::close()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+}
+
+bool PlanTaskQueue::closed() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_;
+}
+
+std::size_t PlanTaskQueue::size() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
+}
+
 ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
 {
     ModulePlan plan;
     plan.body = &body;
+    plan.symbol = plan.symbols.intern(body.name);
     return plan;
 }
 
 grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan)
 {
-    std::string symbol = plan.symbol;
+    std::string symbol;
+    if (plan.symbol.valid())
+    {
+        symbol = std::string(plan.symbols.text(plan.symbol));
+    }
     if (symbol.empty())
     {
         symbol = "convert_graph_" + std::to_string(nextAnonymousId_++);
@@ -143,6 +276,8 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     context.options = options_;
     context.diagnostics = &diagnostics_;
     context.logger = &logger_;
+    context.planCache = &planCache_;
+    context.planQueue = &planQueue_;
 
     (void)context;
     return netlist;

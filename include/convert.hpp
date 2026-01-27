@@ -5,11 +5,15 @@
 #include "slang/text/SourceLocation.h"
 
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <functional>
+#include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -91,6 +95,41 @@ struct ConvertLogEvent {
     std::string message;
 };
 
+using PlanIndex = uint32_t;
+constexpr PlanIndex kInvalidPlanIndex = std::numeric_limits<PlanIndex>::max();
+
+struct PlanSymbolId {
+    PlanIndex index = kInvalidPlanIndex;
+
+    bool valid() const noexcept { return index != kInvalidPlanIndex; }
+};
+
+struct StringViewHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view value) const noexcept {
+        return std::hash<std::string_view>{}(value);
+    }
+};
+
+struct StringViewEq {
+    using is_transparent = void;
+    bool operator()(std::string_view lhs, std::string_view rhs) const noexcept {
+        return lhs == rhs;
+    }
+};
+
+class PlanSymbolTable {
+public:
+    PlanSymbolId intern(std::string_view text);
+    PlanSymbolId lookup(std::string_view text) const;
+    std::string_view text(PlanSymbolId id) const;
+    std::size_t size() const noexcept { return storage_.size(); }
+
+private:
+    std::deque<std::string> storage_;
+    std::unordered_map<std::string_view, PlanSymbolId, StringViewHash, StringViewEq> index_;
+};
+
 class ConvertLogger {
 public:
     using Sink = std::function<void(const ConvertLogEvent&)>;
@@ -118,12 +157,17 @@ struct ConvertOptions {
     ConvertLogLevel logLevel = ConvertLogLevel::Warn;
 };
 
+class PlanCache;
+class PlanTaskQueue;
+
 struct ConvertContext {
     const slang::Compilation* compilation = nullptr;
     const slang::ast::RootSymbol* root = nullptr;
     ConvertOptions options{};
     ConvertDiagnostics* diagnostics = nullptr;
     ConvertLogger* logger = nullptr;
+    PlanCache* planCache = nullptr;
+    PlanTaskQueue* planQueue = nullptr;
 };
 
 enum class PortDirection {
@@ -146,18 +190,24 @@ enum class ControlDomain {
     Unknown
 };
 
+using PortId = PlanIndex;
+using SignalId = PlanIndex;
+using InstanceId = PlanIndex;
+using RWOpId = PlanIndex;
+using MemoryPortId = PlanIndex;
+
 struct PortInfo {
-    std::string name;
+    PlanSymbolId name;
     PortDirection direction = PortDirection::Input;
     int32_t width = 0;
     bool isSigned = false;
-    std::string inName;
-    std::string outName;
-    std::string oeName;
+    PlanSymbolId inName;
+    PlanSymbolId outName;
+    PlanSymbolId oeName;
 };
 
 struct SignalInfo {
-    std::string name;
+    PlanSymbolId name;
     SignalKind kind = SignalKind::Net;
     int32_t width = 0;
     bool isSigned = false;
@@ -167,13 +217,13 @@ struct SignalInfo {
 };
 
 struct RWOp {
-    std::string target;
+    SignalId target = kInvalidPlanIndex;
     ControlDomain domain = ControlDomain::Unknown;
     bool isWrite = false;
 };
 
 struct MemoryPortInfo {
-    std::string memory;
+    SignalId memory = kInvalidPlanIndex;
     bool isRead = false;
     bool isWrite = false;
     bool isMasked = false;
@@ -182,19 +232,89 @@ struct MemoryPortInfo {
 };
 
 struct InstanceInfo {
-    std::string instanceName;
-    std::string moduleName;
+    PlanSymbolId instanceName;
+    PlanSymbolId moduleName;
     bool isBlackbox = false;
 };
 
 struct ModulePlan {
     const slang::ast::InstanceBodySymbol* body = nullptr;
-    std::string symbol;
+    PlanSymbolTable symbols;
+    PlanSymbolId symbol;
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
     std::vector<RWOp> rwOps;
     std::vector<MemoryPortInfo> memPorts;
     std::vector<InstanceInfo> instances;
+};
+
+struct LoweringPlan {
+    std::vector<PlanSymbolId> tempSymbols;
+};
+
+struct WriteBackPlan {
+    std::vector<SignalId> targets;
+};
+
+struct PlanArtifacts {
+    std::optional<LoweringPlan> loweringPlan;
+    std::optional<WriteBackPlan> writeBackPlan;
+};
+
+struct PlanKey {
+    const slang::ast::InstanceBodySymbol* body = nullptr;
+    std::string paramSignature;
+
+    bool operator==(const PlanKey& other) const noexcept {
+        return body == other.body && paramSignature == other.paramSignature;
+    }
+};
+
+struct PlanKeyHash {
+    std::size_t operator()(const PlanKey& key) const noexcept {
+        const std::size_t h1 = std::hash<const void*>{}(key.body);
+        const std::size_t h2 = std::hash<std::string>{}(key.paramSignature);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+enum class PlanStatus {
+    Pending,
+    Planning,
+    Done,
+    Failed
+};
+
+struct PlanEntry {
+    PlanStatus status = PlanStatus::Pending;
+    std::optional<ModulePlan> plan;
+    PlanArtifacts artifacts;
+};
+
+class PlanCache {
+public:
+    bool tryClaim(const PlanKey& key);
+    void storePlan(const PlanKey& key, ModulePlan plan);
+    void markFailed(const PlanKey& key);
+    std::optional<ModulePlan> findReady(const PlanKey& key) const;
+
+private:
+    mutable std::mutex mutex_;
+    std::unordered_map<PlanKey, PlanEntry, PlanKeyHash> entries_;
+};
+
+class PlanTaskQueue {
+public:
+    void push(PlanKey key);
+    bool tryPop(PlanKey& out);
+    void close();
+    bool closed() const noexcept;
+    std::size_t size() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::deque<PlanKey> queue_;
+    bool closed_ = false;
 };
 
 class ModulePlanner {
@@ -233,6 +353,8 @@ private:
     ConvertOptions options_{};
     ConvertDiagnostics diagnostics_{};
     ConvertLogger logger_{};
+    PlanCache planCache_{};
+    PlanTaskQueue planQueue_{};
 };
 
 } // namespace wolf_sv_parser
