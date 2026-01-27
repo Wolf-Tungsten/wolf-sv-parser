@@ -19,9 +19,15 @@
 
 ## 核心数据结构
 ### ConvertContext
-- 共享状态容器，贯穿整个转换流程。
+- 共享状态容器，贯穿整个转换流程，仅承载指针与配置，不持有资源所有权。
 - 字段：`compilation`、`root`、`options`、`diagnostics`、`logger`、`planCache`、`planQueue`。
-- 生命周期：每次 convert 时初始化，PlanCache 清空、PlanTaskQueue 复位。
+- 构造位置：`ConvertDriver::convert` 栈上临时构造，指向 driver 内部的 diagnostics/logger/cache/queue。
+- 初始化顺序：`planCache.clear()` 与 `planQueue.reset()` 后再填充字段，避免残留状态。
+- 选项与诊断：
+  - `options` 为值拷贝（`abortOnError`、`enableLogging`、`logLevel`）。
+  - `abortOnError` 为真时，`ConvertDiagnostics` 触发 `ConvertAbort` 终止流程。
+  - `ConvertLogger` 仅在 `enableLogging` 时启用，并受 level/tag 过滤与 sink 约束。
+- 当前实现：Context 完成组装并注入给 `ModulePlanner`/`GraphAssembler` 入口，后续 pass 仍待接入。
 
 ### PlanKey / PlanCache / PlanArtifacts
 - `PlanKey`：`body + paramSignature`，唯一标识参数特化模块。
@@ -32,6 +38,27 @@
 ### ModulePlan
 - 模块级静态计划，结构化记录端口/信号/读写关系等。
 - 字段：`ports`、`signals`、`rwOps`、`memPorts`、`instances`。
+- 端口（`PortInfo`）：
+  - `name` 为端口符号名；inout 以 `inout` 绑定结构记录 `in/out/oe` 三个派生名（`__in/__out/__oe`）。
+  - `direction` 仅由 `PortSymbol::direction` 决定，宽度/签名在 Pass2 才填。
+- 信号（`SignalInfo`）：
+  - Pass1 只填 `name` 与 `kind`（Net/Variable），宽度/维度/记号在后续 pass 完成。
+  - 匿名 net/variable 直接跳过并记录 warn。
+- 实例（`InstanceInfo`）：
+  - `instanceName` 使用实例名，若为空则回退到 `getArrayName()`。
+  - `moduleName` 优先使用 `DefinitionSymbol::name`，为空则回退到实例名。
+  - `isBlackbox` 依据实现存在性判断（当前实现：无实现即 blackbox；若显式标注 blackbox 但仍有实现则报错并按普通模块处理）。
+
+### Pass1: SymbolCollector 数据结构落位
+- 入口：`ModulePlanner::plan`，创建 `ModulePlan` 并绑定 `body`/`symbol`。
+- 收集来源：
+  - 端口：`InstanceBodySymbol::getPortList()` 中的 `PortSymbol`。
+  - 信号：`InstanceBodySymbol::members()` 中的 `NetSymbol`/`VariableSymbol`。
+  - 实例：`InstanceSymbol`/`InstanceArraySymbol`/`GenerateBlockSymbol`/`GenerateBlockArraySymbol`。
+- 任务发现：遍历到子实例时，生成 `PlanKey{body}` 并投递到 `PlanTaskQueue`。
+- PlanSymbolTable：
+  - 统一 intern 模块名、端口名、信号名与实例名，避免重复分配。
+  - Pass1 不生成任何 Value/Op，仅构建符号级骨架。
 
 ### PlanSymbolTable 与索引化结构
 - `PlanSymbolTable`：模块内符号驻留表，`string_view -> PlanSymbolId`。

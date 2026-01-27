@@ -522,5 +522,23 @@ target_compile_definitions(elaborate-dpic
 
 register_test_exe(elaborate-dpic)
 
+# convert: symbol collector
+add_executable(convert-symbol-collector
+    tests/convert/test_convert_symbol_collector.cpp
+)
+
+target_link_libraries(convert-symbol-collector
+    PRIVATE
+        convert
+        grh
+)
+
+target_compile_definitions(convert-symbol-collector
+    PRIVATE
+        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+)
+
+register_test_exe(convert-symbol-collector)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

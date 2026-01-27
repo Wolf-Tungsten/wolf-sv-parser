@@ -18,9 +18,9 @@
 #include <utility>
 #include <vector>
 
-namespace slang {
+namespace slang::ast {
 class Compilation;
-} // namespace slang
+} // namespace slang::ast
 
 namespace slang::ast {
 class RootSymbol;
@@ -161,7 +161,7 @@ class PlanCache;
 class PlanTaskQueue;
 
 struct ConvertContext {
-    const slang::Compilation* compilation = nullptr;
+    const slang::ast::Compilation* compilation = nullptr;
     const slang::ast::RootSymbol* root = nullptr;
     ConvertOptions options{};
     ConvertDiagnostics* diagnostics = nullptr;
@@ -201,9 +201,12 @@ struct PortInfo {
     PortDirection direction = PortDirection::Input;
     int32_t width = 0;
     bool isSigned = false;
-    PlanSymbolId inName;
-    PlanSymbolId outName;
-    PlanSymbolId oeName;
+    struct InoutBinding {
+        PlanSymbolId inName;
+        PlanSymbolId outName;
+        PlanSymbolId oeName;
+    };
+    std::optional<InoutBinding> inout;
 };
 
 struct SignalInfo {
@@ -247,6 +250,46 @@ struct ModulePlan {
     std::vector<MemoryPortInfo> memPorts;
     std::vector<InstanceInfo> instances;
 };
+
+inline const PortInfo* findPortByName(const ModulePlan& plan, std::string_view name)
+{
+    const PlanSymbolId id = plan.symbols.lookup(name);
+    if (!id.valid())
+    {
+        return nullptr;
+    }
+    for (const auto& port : plan.ports)
+    {
+        if (port.name.index == id.index)
+        {
+            return &port;
+        }
+    }
+    return nullptr;
+}
+
+inline const PortInfo* findPortByInoutName(const ModulePlan& plan, std::string_view name)
+{
+    const PlanSymbolId id = plan.symbols.lookup(name);
+    if (!id.valid())
+    {
+        return nullptr;
+    }
+    for (const auto& port : plan.ports)
+    {
+        if (!port.inout)
+        {
+            continue;
+        }
+        const PortInfo::InoutBinding& inout = *port.inout;
+        if (inout.inName.index == id.index || inout.outName.index == id.index ||
+            inout.oeName.index == id.index)
+        {
+            return &port;
+        }
+    }
+    return nullptr;
+}
 
 struct LoweringPlan {
     std::vector<PlanSymbolId> tempSymbols;

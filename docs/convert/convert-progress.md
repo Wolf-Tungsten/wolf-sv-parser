@@ -125,3 +125,17 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增加 PlanArtifacts 无拷贝访问与状态校验逻辑
 
 完成情况：已完成
+
+## STEP 0008 - Pass1 SymbolCollector 落地
+
+目标：
+- 实现 Pass1（SymbolCollectorPass），收集端口/信号/实例信息并填充 ModulePlan
+- 在 Pass1 遍历实例时投递子模块 PlanKey，打通任务发现流程
+
+实施：
+- `ModulePlanner::plan` 补充端口、信号、实例收集逻辑
+- 递归遍历 instance array 与 generate block，覆盖嵌套实例
+- 基于实例体记录 `InstanceInfo`，并向 `PlanTaskQueue` 投递子模块任务
+- `ConvertDriver::convert` 跑通顶层实例的 Pass1 队列调度与 PlanCache 写入
+
+完成情况：已完成
