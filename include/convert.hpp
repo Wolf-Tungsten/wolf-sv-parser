@@ -197,20 +197,20 @@ using RWOpId = PlanIndex;
 using MemoryPortId = PlanIndex;
 
 struct PortInfo {
-    PlanSymbolId name;
+    PlanSymbolId symbol;
     PortDirection direction = PortDirection::Input;
     int32_t width = 0;
     bool isSigned = false;
     struct InoutBinding {
-        PlanSymbolId inName;
-        PlanSymbolId outName;
-        PlanSymbolId oeName;
+        PlanSymbolId inSymbol;
+        PlanSymbolId outSymbol;
+        PlanSymbolId oeSymbol;
     };
-    std::optional<InoutBinding> inout;
+    std::optional<InoutBinding> inoutSymbol;
 };
 
 struct SignalInfo {
-    PlanSymbolId name;
+    PlanSymbolId symbol;
     SignalKind kind = SignalKind::Net;
     int32_t width = 0;
     bool isSigned = false;
@@ -234,16 +234,22 @@ struct MemoryPortInfo {
     bool hasReset = false;
 };
 
+struct InstanceParameter {
+    PlanSymbolId symbol;
+    std::string value;
+};
+
 struct InstanceInfo {
-    PlanSymbolId instanceName;
-    PlanSymbolId moduleName;
+    PlanSymbolId instanceSymbol;
+    PlanSymbolId moduleSymbol;
     bool isBlackbox = false;
+    std::vector<InstanceParameter> parameters;
 };
 
 struct ModulePlan {
     const slang::ast::InstanceBodySymbol* body = nullptr;
-    PlanSymbolTable symbols;
-    PlanSymbolId symbol;
+    PlanSymbolTable symbolTable;
+    PlanSymbolId moduleSymbol;
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
     std::vector<RWOp> rwOps;
@@ -253,14 +259,14 @@ struct ModulePlan {
 
 inline const PortInfo* findPortByName(const ModulePlan& plan, std::string_view name)
 {
-    const PlanSymbolId id = plan.symbols.lookup(name);
+    const PlanSymbolId id = plan.symbolTable.lookup(name);
     if (!id.valid())
     {
         return nullptr;
     }
     for (const auto& port : plan.ports)
     {
-        if (port.name.index == id.index)
+        if (port.symbol.index == id.index)
         {
             return &port;
         }
@@ -270,20 +276,20 @@ inline const PortInfo* findPortByName(const ModulePlan& plan, std::string_view n
 
 inline const PortInfo* findPortByInoutName(const ModulePlan& plan, std::string_view name)
 {
-    const PlanSymbolId id = plan.symbols.lookup(name);
+    const PlanSymbolId id = plan.symbolTable.lookup(name);
     if (!id.valid())
     {
         return nullptr;
     }
     for (const auto& port : plan.ports)
     {
-        if (!port.inout)
+        if (!port.inoutSymbol)
         {
             continue;
         }
-        const PortInfo::InoutBinding& inout = *port.inout;
-        if (inout.inName.index == id.index || inout.outName.index == id.index ||
-            inout.oeName.index == id.index)
+        const PortInfo::InoutBinding& inout = *port.inoutSymbol;
+        if (inout.inSymbol.index == id.index || inout.outSymbol.index == id.index ||
+            inout.oeSymbol.index == id.index)
         {
             return &port;
         }
@@ -383,6 +389,26 @@ public:
     explicit ModulePlanner(ConvertContext& context) : context_(context) {}
 
     ModulePlan plan(const slang::ast::InstanceBodySymbol& body);
+
+private:
+    ConvertContext& context_;
+};
+
+class TypeResolverPass {
+public:
+    explicit TypeResolverPass(ConvertContext& context) : context_(context) {}
+
+    void resolve(ModulePlan& plan);
+
+private:
+    ConvertContext& context_;
+};
+
+class RWAnalyzerPass {
+public:
+    explicit RWAnalyzerPass(ConvertContext& context) : context_(context) {}
+
+    void analyze(ModulePlan& plan);
 
 private:
     ConvertContext& context_;

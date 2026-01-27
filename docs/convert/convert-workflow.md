@@ -6,7 +6,7 @@
 - `RootSymbol`：slang AST 的设计根节点，提供 `topInstances` 与 `Compilation`。
 - `ConvertDriver`/`ConvertOptions`：转换入口与配置，负责创建 ctx 并控制日志/诊断策略。
 - `ConvertContext`（简称 ctx）：贯穿转换流程的共享状态，包含 diagnostics/logger/cache/queue 等指针。
-- `PlanKey`：`InstanceBodySymbol + paramSignature` 的组合，用于唯一标识参数特化模块；`paramSignature` 为参数求值后的序列化标识。
+- `PlanKey`：`InstanceBodySymbol + paramSignature` 的组合，用于唯一标识参数特化模块；`paramSignature` 为非 localparam 的参数求值序列化标识。
 - `PlanCache`：`PlanKey -> PlanEntry{plan, artifacts}` 的缓存容器。
 - `PlanEntry`：`PlanCache` 内的单条记录，包含状态、`ModulePlan` 与 `PlanArtifacts`。
 - `PlanTaskQueue`：`PlanKey` 队列，用于调度待处理模块。
@@ -34,25 +34,25 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
-- 当前实现已完成 Context Setup 与 Pass1，仍返回空 `Netlist`，后续 Pass 逻辑待接入。
+- 当前实现已完成 Context Setup、Pass1、Pass2 与 Pass3，仍返回空 `Netlist`，后续 Pass 逻辑待接入。
 
 ## Pass1: SymbolCollectorPass
 - 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并发现子模块任务。
 - 输入：`InstanceBodySymbol` + ctx。
 - 输出形式：`PlanCache[PlanKey].plan`（包含 ports/signals/instances）。
 - 运行步骤：
-  - 初始化 `ModulePlan`：设置 `plan.body`，根据 `body.name`/`definition.name` 生成 `plan.symbol`。
+  - 初始化 `ModulePlan`：设置 `plan.body`，根据 `body.name`/`definition.name` 生成 `plan.moduleSymbol`。
   - 端口收集：
-    - 遍历 `body.getPortList()`，只处理 `PortSymbol`，并记录 `PortInfo{name,direction}`。
-    - inout 通过 `PortInfo.inout` 记录 `__in/__out/__oe` 名称；`Ref` 方向与匿名/空端口报告 error。
+    - 遍历 `body.getPortList()`，只处理 `PortSymbol`，并记录 `PortInfo{symbol,direction}`。
+    - inout 通过 `PortInfo.inoutSymbol` 记录 `__in/__out/__oe` 名称；`Ref` 方向与匿名/空端口报告 error。
     - `MultiPortSymbol`/`InterfacePortSymbol` 当前视为不支持并记录 error。
   - 信号收集：
     - 扫描 `body.members()` 中的 `NetSymbol`/`VariableSymbol`。
-    - Pass1 仅填 `SignalInfo{name,kind}`，宽度/维度由 Pass2 补齐。
+    - Pass1 仅填 `SignalInfo{symbol,kind}`，宽度/维度由 Pass2 补齐。
     - 匿名符号跳过并记录 warn。
   - 实例收集与任务发现：
     - 扫描 `InstanceSymbol`/`InstanceArraySymbol`/`GenerateBlockSymbol`/`GenerateBlockArraySymbol`。
-    - 记录 `InstanceInfo{instanceName,moduleName,isBlackbox}`。
+    - 记录 `InstanceInfo{instanceSymbol,moduleSymbol,isBlackbox}`；黑盒实例额外记录参数绑定。
     - 为每个子实例体投递 `PlanKey{body}` 到 `PlanTaskQueue`。
 - 当前实现由 `ConvertDriver::convert` 先投递顶层实例，再 drain 队列并写入 `PlanCache`。
 
@@ -60,11 +60,34 @@
 - 功能：计算位宽、签名、packed/unpacked 维度与 memory 行数。
 - 输入：`ModulePlan` + `slang::ast::Type` + ctx。
 - 输出形式：原地更新 `ModulePlan`。
+- 运行步骤：
+  - 预处理：根据 `PlanSymbolTable` 建立端口/信号名到索引的映射表。
+  - 端口：回扫 `PortSymbol` 获取类型，剥离 type alias 并计算固定宽度，
+    填充 `PortInfo.width/isSigned`；端口出现 unpacked 维度时记录 warn 并忽略其数组维度。
+  - 信号：回扫 `NetSymbol`/`VariableSymbol` 获取类型，剥离 type alias；
+    若存在 fixed unpacked 维度则按外到内顺序记录 `unpackedDims`，
+    同时累乘写入 `memoryRows`，并继续下探到元素类型。
+  - packed 维度：在元素类型上收集 packed array 维度并写入 `packedDims`。
+  - 宽度/签名：对最终元素类型计算固定宽度并写入 `SignalInfo.width/isSigned`。
+  - 约束：不定宽度或动态/关联/队列数组会记录诊断并回退为 1-bit。
+  - 边界：宽度与维度在超出 GRH 表示范围时 clamp 到上限。
 
 ## Pass3: RWAnalyzerPass
 - 功能：建立读写关系与控制域语义。
 - 输入：`ModulePlan` + 过程块/连续赋值 AST + ctx。
 - 输出形式：原地更新 `ModulePlan.rwOps`/`ModulePlan.memPorts`。
+- 运行步骤：
+  - 预处理：建立 `PlanSymbolId -> SignalId` 映射，清空 `rwOps`/`memPorts`。
+  - 过程块扫描：遍历 `ProceduralBlockSymbol`，根据 `procedureKind` 与 timing control
+    分类 `ControlDomain`（comb/seq/latch/unknown）。
+  - 连续赋值扫描：遍历 `ContinuousAssignSymbol`，固定为 combinational 域。
+  - 语句遍历：
+    - 遇到 assignment expression：LHS 递归标记为写，RHS/条件/索引标记为读。
+    - 遇到 pre/post increment/decrement：同一目标同时记读与写。
+    - 其余表达式按读取路径遍历。
+  - Memory 端口生成：对 `SignalInfo.memoryRows > 0` 的访问生成 `MemoryPortInfo`；
+    sequential 域推断 `isSync=true`，comb 域为 `false`。
+  - 去重：按 `(signal, domain, isWrite)` 与 `(memory, flags)` 维度合并重复项。
 
 ## Pass4: ExprLowererPass
 - 功能：RHS 表达式降级为临时 Value/Op 描述。

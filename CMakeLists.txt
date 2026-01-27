@@ -540,5 +540,41 @@ target_compile_definitions(convert-symbol-collector
 
 register_test_exe(convert-symbol-collector)
 
+# convert: type resolver
+add_executable(convert-type-resolver
+    tests/convert/test_convert_type_resolver.cpp
+)
+
+target_link_libraries(convert-type-resolver
+    PRIVATE
+        convert
+        grh
+)
+
+target_compile_definitions(convert-type-resolver
+    PRIVATE
+        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+)
+
+register_test_exe(convert-type-resolver)
+
+# convert: rw analyzer
+add_executable(convert-rw-analyzer
+    tests/convert/test_convert_rw_analyzer.cpp
+)
+
+target_link_libraries(convert-rw-analyzer
+    PRIVATE
+        convert
+        grh
+)
+
+target_compile_definitions(convert-rw-analyzer
+    PRIVATE
+        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+)
+
+register_test_exe(convert-rw-analyzer)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

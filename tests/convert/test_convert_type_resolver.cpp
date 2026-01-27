@@ -1,6 +1,7 @@
 #include "convert.hpp"
 
 #include <filesystem>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -9,14 +10,13 @@
 
 #include "slang/analysis/AnalysisManager.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
-#include "slang/ast/symbols/PortSymbols.h"
-#include "slang/driver/Driver.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/driver/Driver.h"
 
 namespace {
 
 int fail(const std::string& message) {
-    std::cerr << "[convert-symbol-collector] " << message << '\n';
+    std::cerr << "[convert-type-resolver] " << message << '\n';
     return 1;
 }
 
@@ -36,7 +36,7 @@ std::unique_ptr<CompilationBundle> compileInput(const std::filesystem::path& sou
     }
 
     std::vector<std::string> argStorage;
-    argStorage.emplace_back("convert-symbol-collector");
+    argStorage.emplace_back("convert-type-resolver");
     argStorage.emplace_back(sourcePath.string());
     std::vector<const char*> argv;
     argv.reserve(argStorage.size());
@@ -97,95 +97,49 @@ const slang::ast::InstanceSymbol* findTopInstance(slang::ast::Compilation& compi
     return nullptr;
 }
 
-bool hasPort(const wolf_sv_parser::ModulePlan& plan, std::string_view name,
-             wolf_sv_parser::PortDirection direction) {
+const wolf_sv_parser::PortInfo* findPort(const wolf_sv_parser::ModulePlan& plan,
+                                         std::string_view name) {
+    const wolf_sv_parser::PlanSymbolId id = plan.symbolTable.lookup(name);
+    if (!id.valid()) {
+        return nullptr;
+    }
     for (const auto& port : plan.ports) {
-        if (plan.symbolTable.text(port.symbol) == name && port.direction == direction) {
-            return true;
+        if (port.symbol.index == id.index) {
+            return &port;
         }
     }
-    return false;
+    return nullptr;
 }
 
-bool hasSignal(const wolf_sv_parser::ModulePlan& plan, std::string_view name,
-               wolf_sv_parser::SignalKind kind) {
+const wolf_sv_parser::SignalInfo* findSignal(const wolf_sv_parser::ModulePlan& plan,
+                                             std::string_view name) {
+    const wolf_sv_parser::PlanSymbolId id = plan.symbolTable.lookup(name);
+    if (!id.valid()) {
+        return nullptr;
+    }
     for (const auto& signal : plan.signals) {
-        if (plan.symbolTable.text(signal.symbol) == name && signal.kind == kind) {
-            return true;
+        if (signal.symbol.index == id.index) {
+            return &signal;
         }
     }
-    return false;
+    return nullptr;
 }
 
-bool hasInstance(const wolf_sv_parser::ModulePlan& plan, std::string_view instanceName,
-                 std::string_view moduleName) {
-    for (const auto& instance : plan.instances) {
-        if (plan.symbolTable.text(instance.instanceSymbol) == instanceName &&
-            plan.symbolTable.text(instance.moduleSymbol) == moduleName) {
-            return true;
-        }
+bool matchesDims(const std::vector<int32_t>& actual, std::initializer_list<int32_t> expected) {
+    if (actual.size() != expected.size()) {
+        return false;
     }
-    return false;
+    std::size_t idx = 0;
+    for (int32_t value : expected) {
+        if (actual[idx] != value) {
+            return false;
+        }
+        ++idx;
+    }
+    return true;
 }
 
-std::string describePorts(const wolf_sv_parser::ModulePlan& plan) {
-    std::string result;
-    for (const auto& port : plan.ports) {
-        if (!result.empty()) {
-            result.append(", ");
-        }
-        std::string_view name = plan.symbolTable.text(port.symbol);
-        std::string_view dir = "unknown";
-        switch (port.direction) {
-        case wolf_sv_parser::PortDirection::Input:
-            dir = "input";
-            break;
-        case wolf_sv_parser::PortDirection::Output:
-            dir = "output";
-            break;
-        case wolf_sv_parser::PortDirection::Inout:
-            dir = "inout";
-            break;
-        }
-        result.append(std::string(name)).append("(").append(dir).append(")");
-    }
-    if (result.empty()) {
-        result = "<none>";
-    }
-    return result;
-}
-
-std::string describeAstPorts(const slang::ast::InstanceBodySymbol& body) {
-    std::string result;
-    for (const slang::ast::Symbol* portSymbol : body.getPortList()) {
-        if (!portSymbol) {
-            continue;
-        }
-        if (!result.empty()) {
-            result.append(", ");
-        }
-        if (const auto* port = portSymbol->as_if<slang::ast::PortSymbol>()) {
-            std::string_view dir = slang::ast::toString(port->direction);
-            result.append(std::string(port->name)).append("(").append(dir).append(")");
-        }
-        else if (const auto* multi = portSymbol->as_if<slang::ast::MultiPortSymbol>()) {
-            std::string_view dir = slang::ast::toString(multi->direction);
-            result.append(std::string(multi->name)).append("(multi ").append(dir).append(")");
-        }
-        else if (const auto* iface = portSymbol->as_if<slang::ast::InterfacePortSymbol>()) {
-            result.append(std::string(iface->name)).append("(iface)");
-        }
-        else {
-            result.append(std::string(portSymbol->name)).append("(unknown)");
-        }
-    }
-    if (result.empty()) {
-        result = "<none>";
-    }
-    return result;
-}
-
-int testPorts(const std::filesystem::path& sourcePath) {
+int testPackedPorts(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "top_module");
     if (!bundle || !bundle->compilation) {
         return fail("Failed to build compilation for " + sourcePath.string());
@@ -213,20 +167,25 @@ int testPorts(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
+    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
+    resolver.resolve(plan);
 
-    if (!hasPort(plan, "in", wolf_sv_parser::PortDirection::Input)) {
-        return fail("Expected input port 'in' in " + sourcePath.string() +
-                    "; ports=" + describePorts(plan) +
-                    "; ast_ports=" + describeAstPorts(top->body));
+    const auto* in = findPort(plan, "in");
+    if (!in || in->width != 100 || in->isSigned) {
+        return fail("Expected input 'in' width=100 unsigned in " + sourcePath.string());
     }
-    if (!hasPort(plan, "out", wolf_sv_parser::PortDirection::Output)) {
-        return fail("Expected output port 'out' in " + sourcePath.string() +
-                    "; ports=" + describePorts(plan) +
-                    "; ast_ports=" + describeAstPorts(top->body));
+    const auto* outBoth = findPort(plan, "out_both");
+    if (!outBoth || outBoth->width != 99 || outBoth->isSigned) {
+        return fail("Expected output 'out_both' width=99 unsigned in " + sourcePath.string());
     }
-    if (!plan.instances.empty()) {
-        return fail("Did not expect child instances in " + sourcePath.string());
+    const auto* outAny = findPort(plan, "out_any");
+    if (!outAny || outAny->width != 99 || outAny->isSigned) {
+        return fail("Expected output 'out_any' width=99 unsigned in " + sourcePath.string());
+    }
+    const auto* outDiff = findPort(plan, "out_different");
+    if (!outDiff || outDiff->width != 100 || outDiff->isSigned) {
+        return fail("Expected output 'out_different' width=100 unsigned in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -234,7 +193,7 @@ int testPorts(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
-int testSignals(const std::filesystem::path& sourcePath) {
+int testPackedSignalDims(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "top_module");
     if (!bundle || !bundle->compilation) {
         return fail("Failed to build compilation for " + sourcePath.string());
@@ -262,10 +221,32 @@ int testSignals(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
+    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
+    resolver.resolve(plan);
 
-    if (!hasSignal(plan, "counter", wolf_sv_parser::SignalKind::Variable)) {
-        return fail("Expected internal variable 'counter' in " + sourcePath.string());
+    const auto* y = findPort(plan, "y");
+    if (!y || y->width != 3) {
+        return fail("Expected input 'y' width=3 in " + sourcePath.string());
+    }
+    const auto* y2 = findPort(plan, "Y2");
+    if (!y2 || y2->width != 1) {
+        return fail("Expected output 'Y2' width=1 in " + sourcePath.string());
+    }
+
+    const auto* signal = findSignal(plan, "Y");
+    if (!signal) {
+        return fail("Expected signal 'Y' in " + sourcePath.string());
+    }
+    if (signal->width != 3 || signal->isSigned) {
+        return fail("Expected signal 'Y' width=3 unsigned in " + sourcePath.string());
+    }
+    if (!matchesDims(signal->packedDims, {3}) || !signal->unpackedDims.empty()) {
+        return fail("Expected signal 'Y' packedDims={3} and no unpackedDims in " +
+                    sourcePath.string());
+    }
+    if (signal->memoryRows != 0) {
+        return fail("Expected signal 'Y' memoryRows=0 in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -273,7 +254,7 @@ int testSignals(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
-int testInstances(const std::filesystem::path& sourcePath) {
+int testMemoryDims(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "top_module");
     if (!bundle || !bundle->compilation) {
         return fail("Failed to build compilation for " + sourcePath.string());
@@ -301,30 +282,33 @@ int testInstances(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
+    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
+    resolver.resolve(plan);
 
-    if (!hasInstance(plan, "inst", "mod_a")) {
-        return fail("Expected child instance inst:mod_a in " + sourcePath.string());
+    const auto* pht = findSignal(plan, "PHT");
+    if (!pht) {
+        return fail("Expected signal 'PHT' in " + sourcePath.string());
     }
-    if (plan.instances.size() != 1) {
-        return fail("Expected exactly one child instance in " + sourcePath.string());
+    if (pht->width != 2 || pht->memoryRows != 128) {
+        return fail("Expected signal 'PHT' width=2 memoryRows=128 in " + sourcePath.string());
+    }
+    if (!matchesDims(pht->packedDims, {2}) || !matchesDims(pht->unpackedDims, {128})) {
+        return fail("Expected signal 'PHT' packedDims={2} unpackedDims={128} in " +
+                    sourcePath.string());
     }
 
-    wolf_sv_parser::PlanKey key;
-    std::size_t queueCount = 0;
-    bool foundChild = false;
-    while (planQueue.tryPop(key)) {
-        ++queueCount;
-        if (key.body && key.body->getDefinition().name == "mod_a") {
-            foundChild = true;
-        }
+    const auto* ghr = findSignal(plan, "GHR");
+    if (!ghr) {
+        return fail("Expected signal 'GHR' in " + sourcePath.string());
     }
-    if (!foundChild) {
-        return fail("Expected mod_a PlanKey enqueued in " + sourcePath.string());
+    if (ghr->width != 7 || ghr->memoryRows != 0) {
+        return fail("Expected signal 'GHR' width=7 memoryRows=0 in " + sourcePath.string());
     }
-    if (queueCount != 1) {
-        return fail("Expected exactly one queued PlanKey in " + sourcePath.string());
+    if (!matchesDims(ghr->packedDims, {7})) {
+        return fail("Expected signal 'GHR' packedDims={7} in " + sourcePath.string());
     }
+
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
     }
@@ -336,23 +320,23 @@ int testInstances(const std::filesystem::path& sourcePath) {
 int main() {
     const std::filesystem::path dutDir =
         std::filesystem::path(WOLF_SV_CONVERT_HDLBITS_DUT_DIR);
-    const std::filesystem::path portsPath = dutDir / "dut_003.v";
-    const std::filesystem::path signalsPath = dutDir / "dut_159.v";
-    const std::filesystem::path instancesPath = dutDir / "dut_020.v";
+    const std::filesystem::path packedPortsPath = dutDir / "dut_060.v";
+    const std::filesystem::path packedSignalPath = dutDir / "dut_145.v";
+    const std::filesystem::path memoryPath = dutDir / "dut_162.v";
 
-    if (!std::filesystem::exists(portsPath) ||
-        !std::filesystem::exists(signalsPath) ||
-        !std::filesystem::exists(instancesPath)) {
+    if (!std::filesystem::exists(packedPortsPath) ||
+        !std::filesystem::exists(packedSignalPath) ||
+        !std::filesystem::exists(memoryPath)) {
         return fail("Missing HDLBits input files in " + dutDir.string());
     }
 
-    if (int result = testPorts(portsPath); result != 0) {
+    if (int result = testPackedPorts(packedPortsPath); result != 0) {
         return result;
     }
-    if (int result = testSignals(signalsPath); result != 0) {
+    if (int result = testPackedSignalDims(packedSignalPath); result != 0) {
         return result;
     }
-    if (int result = testInstances(instancesPath); result != 0) {
+    if (int result = testMemoryDims(memoryPath); result != 0) {
         return result;
     }
     return 0;

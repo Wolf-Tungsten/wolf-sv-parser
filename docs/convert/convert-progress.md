@@ -139,3 +139,40 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `ConvertDriver::convert` 跑通顶层实例的 Pass1 队列调度与 PlanCache 写入
 
 完成情况：已完成
+
+## STEP 0009 - Pass2 TypeResolver 落地
+
+目标：
+- 实现 Pass2（TypeResolverPass），计算端口/信号的位宽、签名、packed/unpacked 维度与 memory 行数
+- 将 Pass2 接入 Convert 主流程，保证 ModulePlan 类型信息完整
+
+计划：
+- 回扫 PortSymbol/NetSymbol/VariableSymbol 获取 `slang::ast::Type` 并更新 ModulePlan
+- 解析 packed/unpacked 维度并计算 `memoryRows`，补充诊断与边界处理
+- 更新架构与工作流文档保持一致
+
+实施：
+- `src/convert.cpp` 新增 TypeResolverPass 与类型解析辅助逻辑
+- ConvertDriver 在 Pass1 后调用 TypeResolverPass 更新 ModulePlan
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成
+
+## STEP 0010 - Pass3 RWAnalyzer 落地
+
+目标：
+- 实现 Pass3（RWAnalyzerPass），建立读写关系与控制域语义
+- 将 Pass3 接入 Convert 主流程，更新 `ModulePlan.rwOps`/`ModulePlan.memPorts`
+
+计划：
+- 解析过程块/连续赋值 AST，分类控制域并收集读写访问
+- 识别 memory 访问并生成 `MemoryPortInfo`
+- 更新架构与工作流文档保持一致
+
+实施：
+- `src/convert.cpp` 新增 RWAnalyzerPass 与 AST 遍历/控制域分类逻辑
+- ConvertDriver 在 Pass2 后调用 RWAnalyzerPass 更新 ModulePlan
+- 新增 `convert-rw-analyzer` HDLBits 测试与 CMake 注册
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成
