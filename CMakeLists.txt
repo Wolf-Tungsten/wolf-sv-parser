@@ -576,5 +576,23 @@ target_compile_definitions(convert-rw-analyzer
 
 register_test_exe(convert-rw-analyzer)
 
+# convert: expr lowerer
+add_executable(convert-expr-lowerer
+    tests/convert/test_convert_expr_lowerer.cpp
+)
+
+target_link_libraries(convert-expr-lowerer
+    PRIVATE
+        convert
+        grh
+)
+
+target_compile_definitions(convert-expr-lowerer
+    PRIVATE
+        WOLF_SV_CONVERT_EXPR_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/expr_lowerer.sv"
+)
+
+register_test_exe(convert-expr-lowerer)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

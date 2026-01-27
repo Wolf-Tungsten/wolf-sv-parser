@@ -176,3 +176,18 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
+
+## STEP 0011 - Pass4 ExprLowerer 落地
+
+目标：
+- 实现 Pass4（ExprLowererPass），将 RHS 表达式降级为 LoweringPlan
+- 接入 Convert 主流程并补充测试
+
+实施：
+- `include/convert.hpp` 增补 LoweringPlan 节点结构与 ExprLowererPass 声明
+- `src/convert.cpp` 实现 ExprLowererPass，覆盖常见 unary/binary/conditional/concat/replicate/select
+- ConvertDriver 在 Pass3 后生成并缓存 `loweringPlan`
+- 新增 `convert-expr-lowerer` 测试与 fixture
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成

@@ -73,26 +73,52 @@
   - 边界：宽度与维度在超出 GRH 表示范围时 clamp 到上限。
 
 ## Pass3: RWAnalyzerPass
-- 功能：建立读写关系与控制域语义。
+- 功能：建立读写关系、控制域语义，并记录访问点用于端口数量/优先级分析。
 - 输入：`ModulePlan` + 过程块/连续赋值 AST + ctx。
-- 输出形式：原地更新 `ModulePlan.rwOps`/`ModulePlan.memPorts`。
+- 输出形式：原地更新 `ModulePlan.rwOps`/`ModulePlan.memPorts`，并写入 `RWOp.sites`/`MemoryPortInfo.sites`。
 - 运行步骤：
-  - 预处理：建立 `PlanSymbolId -> SignalId` 映射，清空 `rwOps`/`memPorts`。
+  - 预处理：建立 `PlanSymbolId -> SignalId` 映射，清空 `rwOps`/`memPorts`，初始化 `RWAnalyzerState`（每模块一个）。
   - 过程块扫描：遍历 `ProceduralBlockSymbol`，根据 `procedureKind` 与 timing control
     分类 `ControlDomain`（comb/seq/latch/unknown）。
   - 连续赋值扫描：遍历 `ContinuousAssignSymbol`，固定为 combinational 域。
   - 语句遍历：
-    - 遇到 assignment expression：LHS 递归标记为写，RHS/条件/索引标记为读。
-    - 遇到 pre/post increment/decrement：同一目标同时记读与写。
+    - assignment expression：LHS 递归标记为写，RHS/条件/索引标记为读。
+    - pre/post increment/decrement：同一目标同时记读与写。
     - 其余表达式按读取路径遍历。
+  - 访问点记录：每次访问追加 `AccessSite{location, sequence}`；
+    `location` 取 `expr.sourceRange.start()`，不直接保存 AST 节点。
   - Memory 端口生成：对 `SignalInfo.memoryRows > 0` 的访问生成 `MemoryPortInfo`；
     sequential 域推断 `isSync=true`，comb 域为 `false`。
-  - 去重：按 `(signal, domain, isWrite)` 与 `(memory, flags)` 维度合并重复项。
+  - 归并：按 `(signal, domain, isWrite)` 与 `(memory, flags)` 归并形态，
+    重复访问不丢弃，改为追加 `sites`。
 
 ## Pass4: ExprLowererPass
-- 功能：RHS 表达式降级为临时 Value/Op 描述。
+- 功能：将 RHS 表达式树归一化为 LoweringPlan 中的表达式节点图。
 - 输入：`ModulePlan` + 表达式 AST + ctx。
 - 输出形式：`PlanCache[PlanKey].artifacts.loweringPlan`。
+- 形式化定义：
+  - LoweringPlan.values：表达式节点序列，节点类型为 `ExprNode{kind, op, operands, symbol, literal, location}`。
+  - LoweringPlan.roots：每条 RHS 表达式对应一个 root，指向其顶层 `ExprNodeId`。
+  - LoweringPlan.tempSymbols：每个 `Operation` 节点分配一个临时名 `_expr_tmp_<n>`。
+- 处理规则：
+  - 输入集合：模块内全部 `AssignmentExpression` 的 RHS；复合赋值 `lhs op= rhs` 转为
+    `op(lhs, rhs)` 后作为 RHS root。
+  - 终结节点：
+    - Named/Hierarchical value -> `ExprNode{kind=Symbol, symbol=PlanSymbolId}`。
+    - Integer/unsized literal/string -> `ExprNode{kind=Constant, literal=...}`。
+  - 复合节点：
+    - Unary/Binary/Conditional/Concat/Replicate/Select -> `ExprNode{kind=Operation, op=...}`，
+      `operands` 按源 AST 的子表达式顺序填入其 `ExprNodeId`。
+  - 失败策略：不支持的表达式记录 TODO 诊断并跳过该子树。
+- 案例：
+  - 输入：`assign y = (a & b) ? ~c : (a | b);`
+  - 输出（示意）：
+    - values：
+      `Symbol(a)`, `Symbol(b)`, `Op(kAnd, [a,b])`,
+      `Symbol(c)`, `Op(kNot, [c])`, `Symbol(a)`, `Symbol(b)`,
+      `Op(kOr, [a,b])`, `Op(kMux, [and, not, or])`
+    - roots：`[kMux 节点索引]`
+    - tempSymbols：`[_expr_tmp_0, _expr_tmp_1, _expr_tmp_2, _expr_tmp_3]`
 
 ## Pass5: StmtLowererPass
 - 功能：语句与控制流降级，形成 guard/mux 与写回意图。

@@ -195,6 +195,7 @@ using SignalId = PlanIndex;
 using InstanceId = PlanIndex;
 using RWOpId = PlanIndex;
 using MemoryPortId = PlanIndex;
+using ExprNodeId = PlanIndex;
 
 struct PortInfo {
     PlanSymbolId symbol;
@@ -219,10 +220,16 @@ struct SignalInfo {
     std::vector<int32_t> unpackedDims;
 };
 
+struct AccessSite {
+    slang::SourceLocation location{};
+    uint32_t sequence = 0;
+};
+
 struct RWOp {
     SignalId target = kInvalidPlanIndex;
     ControlDomain domain = ControlDomain::Unknown;
     bool isWrite = false;
+    std::vector<AccessSite> sites;
 };
 
 struct MemoryPortInfo {
@@ -232,6 +239,7 @@ struct MemoryPortInfo {
     bool isMasked = false;
     bool isSync = false;
     bool hasReset = false;
+    std::vector<AccessSite> sites;
 };
 
 struct InstanceParameter {
@@ -297,7 +305,31 @@ inline const PortInfo* findPortByInoutName(const ModulePlan& plan, std::string_v
     return nullptr;
 }
 
+enum class ExprNodeKind {
+    Invalid,
+    Constant,
+    Symbol,
+    Operation
+};
+
+struct ExprNode {
+    ExprNodeKind kind = ExprNodeKind::Invalid;
+    grh::ir::OperationKind op = grh::ir::OperationKind::kConstant;
+    PlanSymbolId symbol;
+    PlanSymbolId tempSymbol;
+    std::string literal;
+    std::vector<ExprNodeId> operands;
+    slang::SourceLocation location{};
+};
+
+struct LoweredRoot {
+    ExprNodeId value = kInvalidPlanIndex;
+    slang::SourceLocation location{};
+};
+
 struct LoweringPlan {
+    std::vector<ExprNode> values;
+    std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
 };
 
@@ -409,6 +441,16 @@ public:
     explicit RWAnalyzerPass(ConvertContext& context) : context_(context) {}
 
     void analyze(ModulePlan& plan);
+
+private:
+    ConvertContext& context_;
+};
+
+class ExprLowererPass {
+public:
+    explicit ExprLowererPass(ConvertContext& context) : context_(context) {}
+
+    LoweringPlan lower(ModulePlan& plan);
 
 private:
     ConvertContext& context_;
