@@ -297,8 +297,25 @@ public:
     void storePlan(const PlanKey& key, ModulePlan plan);
     void markFailed(const PlanKey& key);
     std::optional<ModulePlan> findReady(const PlanKey& key) const;
+    void clear();
+    bool setLoweringPlan(const PlanKey& key, LoweringPlan plan);
+    bool setWriteBackPlan(const PlanKey& key, WriteBackPlan plan);
+    std::optional<LoweringPlan> getLoweringPlan(const PlanKey& key) const;
+    std::optional<WriteBackPlan> getWriteBackPlan(const PlanKey& key) const;
+    bool withLoweringPlan(const PlanKey& key,
+                          const std::function<void(const LoweringPlan&)>& fn) const;
+    bool withWriteBackPlan(const PlanKey& key,
+                           const std::function<void(const WriteBackPlan&)>& fn) const;
+    bool withLoweringPlanMut(const PlanKey& key,
+                             const std::function<void(LoweringPlan&)>& fn);
+    bool withWriteBackPlanMut(const PlanKey& key,
+                              const std::function<void(WriteBackPlan&)>& fn);
 
 private:
+    PlanEntry& getOrCreateEntryLocked(const PlanKey& key);
+    PlanEntry* findEntryLocked(const PlanKey& key);
+    const PlanEntry* findEntryLocked(const PlanKey& key) const;
+
     mutable std::mutex mutex_;
     std::unordered_map<PlanKey, PlanEntry, PlanKeyHash> entries_;
 };
@@ -310,6 +327,7 @@ public:
     void close();
     bool closed() const noexcept;
     std::size_t size() const;
+    void reset();
 
 private:
     mutable std::mutex mutex_;

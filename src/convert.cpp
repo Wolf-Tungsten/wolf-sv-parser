@@ -1,6 +1,7 @@
 #include "convert.hpp"
 
 #include "slang/ast/Symbol.h"
+#include "slang/ast/symbols/CompilationUnitSymbols.h"
 
 #include <utility>
 
@@ -164,6 +165,31 @@ bool PlanCache::tryClaim(const PlanKey& key)
     return true;
 }
 
+PlanEntry& PlanCache::getOrCreateEntryLocked(const PlanKey& key)
+{
+    return entries_[key];
+}
+
+PlanEntry* PlanCache::findEntryLocked(const PlanKey& key)
+{
+    auto it = entries_.find(key);
+    if (it == entries_.end())
+    {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+const PlanEntry* PlanCache::findEntryLocked(const PlanKey& key) const
+{
+    auto it = entries_.find(key);
+    if (it == entries_.end())
+    {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 void PlanCache::storePlan(const PlanKey& key, ModulePlan plan)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -189,6 +215,119 @@ std::optional<ModulePlan> PlanCache::findReady(const PlanKey& key) const
         return std::nullopt;
     }
     return it->second.plan;
+}
+
+void PlanCache::clear()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+}
+
+static bool canWriteArtifacts(const PlanEntry& entry)
+{
+    if (entry.status == PlanStatus::Failed || entry.status == PlanStatus::Pending)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool PlanCache::setLoweringPlan(const PlanKey& key, LoweringPlan plan)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !canWriteArtifacts(*entry))
+    {
+        return false;
+    }
+    entry.artifacts.loweringPlan = std::move(plan);
+    return true;
+}
+
+bool PlanCache::setWriteBackPlan(const PlanKey& key, WriteBackPlan plan)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !canWriteArtifacts(*entry))
+    {
+        return false;
+    }
+    entry.artifacts.writeBackPlan = std::move(plan);
+    return true;
+}
+
+std::optional<LoweringPlan> PlanCache::getLoweringPlan(const PlanKey& key) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end() || !it->second.artifacts.loweringPlan)
+    {
+        return std::nullopt;
+    }
+    return it->second.artifacts.loweringPlan;
+}
+
+std::optional<WriteBackPlan> PlanCache::getWriteBackPlan(const PlanKey& key) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(key);
+    if (it == entries_.end() || !it->second.artifacts.writeBackPlan)
+    {
+        return std::nullopt;
+    }
+    return it->second.artifacts.writeBackPlan;
+}
+
+bool PlanCache::withLoweringPlan(const PlanKey& key,
+                                 const std::function<void(const LoweringPlan&)>& fn) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !entry->artifacts.loweringPlan || !fn)
+    {
+        return false;
+    }
+    fn(*entry->artifacts.loweringPlan);
+    return true;
+}
+
+bool PlanCache::withWriteBackPlan(const PlanKey& key,
+                                  const std::function<void(const WriteBackPlan&)>& fn) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !entry->artifacts.writeBackPlan || !fn)
+    {
+        return false;
+    }
+    fn(*entry->artifacts.writeBackPlan);
+    return true;
+}
+
+bool PlanCache::withLoweringPlanMut(const PlanKey& key,
+                                    const std::function<void(LoweringPlan&)>& fn)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !entry->artifacts.loweringPlan || !fn || !canWriteArtifacts(*entry))
+    {
+        return false;
+    }
+    fn(*entry->artifacts.loweringPlan);
+    return true;
+}
+
+bool PlanCache::withWriteBackPlanMut(const PlanKey& key,
+                                     const std::function<void(WriteBackPlan&)>& fn)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    PlanEntry* entry = findEntryLocked(key);
+    if (!entry || !entry->artifacts.writeBackPlan || !fn || !canWriteArtifacts(*entry))
+    {
+        return false;
+    }
+    fn(*entry->artifacts.writeBackPlan);
+    return true;
 }
 
 void PlanTaskQueue::push(PlanKey key)
@@ -231,6 +370,13 @@ std::size_t PlanTaskQueue::size() const
     return queue_.size();
 }
 
+void PlanTaskQueue::reset()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.clear();
+    closed_ = false;
+}
+
 ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
 {
     ModulePlan plan;
@@ -271,7 +417,11 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
 {
     grh::ir::Netlist netlist;
 
+    planCache_.clear();
+    planQueue_.reset();
+
     ConvertContext context{};
+    context.compilation = &root.getCompilation();
     context.root = &root;
     context.options = options_;
     context.diagnostics = &diagnostics_;

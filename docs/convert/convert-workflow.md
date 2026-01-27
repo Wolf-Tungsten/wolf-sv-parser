@@ -6,6 +6,7 @@
 - 功能：初始化 `ConvertContext` 与全局缓存。
 - 输入：`Compilation`、`RootSymbol`、`ConvertOptions`。
 - 输出：`ConvertContext`、top instance 列表、空 `Netlist`。
+- 说明：每次转换前清空 `PlanCache`，重置 `PlanTaskQueue`，并从 `RootSymbol` 关联 `Compilation`。
 
 ## Pass1: SymbolCollectorPass
 - 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架。

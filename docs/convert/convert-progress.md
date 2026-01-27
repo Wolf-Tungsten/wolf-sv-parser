@@ -110,3 +110,18 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `PlanEntry` 扩展以持有 artifacts
 
 完成情况：已完成
+
+## STEP 0007 - Context Setup 实现与文档对齐
+
+目标：
+- 实现 ConvertContext 初始化与缓存复位逻辑
+- 同步 Context Setup 的文档描述
+
+实施：
+- `PlanCache::clear` 与 `PlanTaskQueue::reset` 实现并在 convert 时调用
+- `ConvertContext` 初始化时设置 compilation/root/options/diagnostics/logger
+- 文档补充 Context Setup 生命周期说明
+- 细化 `PlanCache` 的 PlanArtifacts 读写接口
+- 增加 PlanArtifacts 无拷贝访问与状态校验逻辑
+
+完成情况：已完成

@@ -21,10 +21,12 @@
 ### ConvertContext
 - 共享状态容器，贯穿整个转换流程。
 - 字段：`compilation`、`root`、`options`、`diagnostics`、`logger`、`planCache`、`planQueue`。
+- 生命周期：每次 convert 时初始化，PlanCache 清空、PlanTaskQueue 复位。
 
 ### PlanKey / PlanCache / PlanArtifacts
 - `PlanKey`：`body + paramSignature`，唯一标识参数特化模块。
 - `PlanCache`：`PlanKey -> PlanEntry{status, plan, artifacts}`。
+- 访问接口：支持 set/get 与 `with*` 回调访问，回调在锁内执行以避免拷贝。
 - `PlanArtifacts`：`loweringPlan` + `writeBackPlan`。
 
 ### ModulePlan
