@@ -41,6 +41,11 @@
 - **ConvertLogger**
   - 统一的调试日志接口，支持 level/tag 过滤，受 options 控制。
 
+## 代码骨架落位
+- `include/convert.hpp`：Convert 核心数据结构与接口声明
+- `src/convert.cpp`：Convert 骨架实现与默认行为
+- `CMakeLists.txt`：新增 `convert` 静态库目标
+
 ## 关键数据模型
 - **ModulePlan**（模块级静态计划）
   - `ports[]`：端口名、方向、位宽、inout 拆分信息。

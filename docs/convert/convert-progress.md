@@ -58,3 +58,28 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 已补充可控调试日志接口的预留说明
 
 完成情况：已完成
+
+## STEP 0003 - 建立 Convert 静态骨架代码
+
+目标：
+- 落地 Convert 核心类型/接口的代码骨架
+- 同步更新架构与工作流文档中的代码落位
+
+实施：
+- 新增 `include/convert.hpp` 与 `src/convert.cpp` 的骨架定义
+- 新增 `convert` 静态库目标并接入 `CMakeLists.txt`
+- 更新 `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md`
+
+完成情况：已完成
+
+## STEP 0004 - 接入 Convert 到 CLI 与构建流程
+
+目标：
+- 在 `wolf-sv-parser` CLI 中接入 Convert 入口，便于测试调试
+- 将 Convert 链接到可执行文件构建流程
+
+实施：
+- `src/main.cpp` 增加 `--use-convert` 与 Convert 日志相关选项
+- `CMakeLists.txt` 将 `convert` 链接到 `wolf-sv-parser`
+
+完成情况：已完成

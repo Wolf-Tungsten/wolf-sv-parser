@@ -72,6 +72,21 @@ target_link_libraries(elaborate
         grh
 )
 
+## convert
+add_library(convert STATIC
+    src/convert.cpp
+)
+
+target_include_directories(convert
+    PUBLIC
+        include
+)
+
+target_link_libraries(convert
+    PUBLIC
+        grh
+)
+
 # Application
 add_executable(wolf-sv-parser
     src/main.cpp
@@ -80,6 +95,7 @@ add_executable(wolf-sv-parser
 target_link_libraries(wolf-sv-parser
     PRIVATE
         transform
+        convert
         elaborate
         grh
 )

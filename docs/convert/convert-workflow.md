@@ -3,7 +3,7 @@
 > 本文描述 Convert 的运行时流程，从入口到输出按时间顺序展开。
 
 ## 入口阶段
-1. 构建 `ConvertContext`：注入 `Compilation`、`RootSymbol`、选项与 `ConvertDiagnostics`。
+1. `ConvertDriver::convert` 作为入口，构建 `ConvertContext`：注入 `Compilation`、`RootSymbol`、选项与 `ConvertDiagnostics`。
 2. 初始化 `ConvertLogger`（默认关闭），由选项控制日志级别与过滤规则。
 3. 初始化 `Netlist` 与全局缓存（symbol 表、Graph 缓存）。
 4. 读取 `RootSymbol::topInstances`，建立顶层实例列表（允许多个 top）。
