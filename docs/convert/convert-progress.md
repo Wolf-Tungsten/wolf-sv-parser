@@ -290,3 +290,89 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 非常量 casez/casex 发出 warning 并回退 `kCaseEq`
 
 完成情况：已完成
+
+## STEP 0017 - Pass5 case inside 语义支持
+
+目标：
+- 支持 `case inside` 的匹配语义并参与 guard 组合
+- 覆盖 range/inside list 等 item 形式的匹配
+- 明确不支持场景的诊断策略
+
+计划：
+- 在 StmtLowerer 的 case 分支中实现 `CaseStatementCondition::Inside` 的 match lowering
+- 逐 item 生成 inside match，并与 priorMatch 组合 guard
+- 对无法转换的 item 直接报错并跳过该 item
+- 增补 case inside 相关测试与 fixture
+
+实施：
+- StmtLowerer 支持 `CaseStatementCondition::Inside`，逐 item 生成 match 并复用 priorMatch
+- 普通 item：integral 使用 `kWildcardEq`，非 integral 使用 `kEq`
+- `ValueRange` 支持 `[a:b]`、`[a +/- b]`、`[a +%- b]` 展开为 `kGe/kLe` 组合
+- 新增 case inside fixture，并将测试语言版本升级到 SV2023 以解析 `+/-`、`+%-`
+
+完成情况：已完成
+
+## STEP 0018 - Pass5 不支持语法的错误诊断收敛
+
+目标：
+- pattern 条件（if/else-if）与 pattern case 明确报错，不再回退生成无 guard 语义
+- while/do-while/forever 直接报错并停止对其 body 的降级
+
+计划：
+- 将相关分支的诊断从 todo 升级为 error
+- 对 pattern 条件/PatternCase/while/do/forever 采用 “报错 + 跳过” 策略
+- 更新 workflow/architecture 说明不支持范围
+- 增补错误路径测试
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0019 - Pass5 循环展开上限提升
+
+目标：
+- 扩大静态展开的迭代上限，解决 4096 不够大的问题
+- 保持可配置或可调整的上限策略
+
+计划：
+- 将 `kMaxLoopIterations` 调整为更大的默认值，或迁移到 ConvertOptions 配置
+- 更新文档对循环展开上限的说明
+- 增补大迭代次数的 repeat/for/foreach 测试
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0020 - Pass5 位选/范围选 LHS 支持
+
+目标：
+- 支持 bit-select / range-select LHS 的部分赋值
+- 生成可被后续 WriteBack 处理的写回意图
+
+计划：
+- 扩展 WriteIntent 以携带部分赋值的切片信息（索引/范围表达式）
+- 在 StmtLowerer 解析 LHS 并记录 slice 元数据
+- 更新后续 Pass（WriteBack/GraphAssembly）对部分写回的处理
+- 增补位选/范围选 LHS 的测试与 fixture
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0021 - Pass5 测试覆盖扩展
+
+目标：
+- 覆盖 case inside、pattern 条件报错、while/do/forever 报错、展开上限、位选/范围选 LHS
+
+计划：
+- 扩展 `tests/data/convert/stmt_lowerer.sv` 增加新模块用例
+- 在 `tests/convert/test_convert_stmt_lowerer.cpp` 增加断言与诊断验证
+- 需要时新增独立测试目标以区分错误路径与正常路径
+
+实施：
+- 待实施
+
+完成情况：未开始

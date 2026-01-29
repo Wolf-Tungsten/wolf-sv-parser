@@ -30,6 +30,7 @@ std::unique_ptr<CompilationBundle> compileInput(const std::filesystem::path& sou
     auto bundle = std::make_unique<CompilationBundle>();
     auto& driver = bundle->driver;
     driver.addStandardArgs();
+    driver.languageVersion = slang::LanguageVersion::v1800_2023;
     driver.options.compilationFlags.at(slang::ast::CompilationFlags::AllowTopLevelIfacePorts) = true;
     if (!topModule.empty()) {
         driver.options.topModules.emplace_back(topModule);
@@ -390,6 +391,36 @@ int testCaseX2State(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testCaseInside(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_case_inside_stmt", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 5) {
+        return fail("Expected 5 write intents in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kWildcardEq)) {
+        return fail("Missing wildcard-eq op in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kGe) ||
+        !hasOp(lowering, grh::ir::OperationKind::kLe)) {
+        return fail("Missing range compare ops in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kAdd) ||
+        !hasOp(lowering, grh::ir::OperationKind::kSub) ||
+        !hasOp(lowering, grh::ir::OperationKind::kMul) ||
+        !hasOp(lowering, grh::ir::OperationKind::kDiv)) {
+        return fail("Missing tolerance math ops in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testRepeatLoop(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -470,6 +501,9 @@ int main() {
         return status;
     }
     if (int status = testCaseX2State(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testCaseInside(sourcePath); status != 0) {
         return status;
     }
     if (int status = testRepeatLoop(sourcePath); status != 0) {

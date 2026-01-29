@@ -1621,11 +1621,6 @@ struct StmtLowererState {
             return;
         }
 
-        if (stmt.condition == slang::ast::CaseStatementCondition::Inside)
-        {
-            reportUnsupported(stmt, "case inside lowering uses unconditional guards");
-        }
-
         ExprNodeId baseGuard = currentGuard();
         ExprNodeId priorMatch = kInvalidPlanIndex;
 
@@ -2376,6 +2371,127 @@ private:
         return info;
     }
 
+    ExprNodeId buildInsideValueRangeMatch(ExprNodeId control,
+                                          const slang::ast::ValueRangeExpression& range,
+                                          slang::SourceLocation location)
+    {
+        const bool leftUnbounded =
+            range.left().kind == slang::ast::ExpressionKind::UnboundedLiteral;
+        const bool rightUnbounded =
+            range.right().kind == slang::ast::ExpressionKind::UnboundedLiteral;
+
+        ExprNodeId left = kInvalidPlanIndex;
+        ExprNodeId right = kInvalidPlanIndex;
+        if (!leftUnbounded)
+        {
+            left = lowerExpression(range.left());
+            if (left == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+        }
+        if (!rightUnbounded)
+        {
+            right = lowerExpression(range.right());
+            if (right == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+        }
+
+        if (range.rangeKind == slang::ast::ValueRangeKind::Simple)
+        {
+            ExprNodeId lowerBound = kInvalidPlanIndex;
+            ExprNodeId upperBound = kInvalidPlanIndex;
+            if (!leftUnbounded)
+            {
+                lowerBound =
+                    makeOperation(grh::ir::OperationKind::kGe, {control, left}, location);
+            }
+            if (!rightUnbounded)
+            {
+                upperBound =
+                    makeOperation(grh::ir::OperationKind::kLe, {control, right}, location);
+            }
+            if (lowerBound == kInvalidPlanIndex && upperBound == kInvalidPlanIndex)
+            {
+                return addConstantLiteral("1'b1", location);
+            }
+            if (lowerBound == kInvalidPlanIndex)
+            {
+                return upperBound;
+            }
+            if (upperBound == kInvalidPlanIndex)
+            {
+                return lowerBound;
+            }
+            return makeLogicAnd(lowerBound, upperBound, location);
+        }
+
+        if (leftUnbounded || rightUnbounded)
+        {
+            reportUnsupported(range, "Unbounded inside tolerance range unsupported");
+            return kInvalidPlanIndex;
+        }
+
+        ExprNodeId tolerance = right;
+        if (range.rangeKind == slang::ast::ValueRangeKind::RelativeTolerance)
+        {
+            const bool useFloating =
+                (range.left().type && range.left().type->isFloating()) ||
+                (range.right().type && range.right().type->isFloating());
+            ExprNodeId scale =
+                addConstantLiteral(useFloating ? "100.0" : "100", location);
+            ExprNodeId mul =
+                makeOperation(grh::ir::OperationKind::kMul, {left, right}, location);
+            tolerance = makeOperation(grh::ir::OperationKind::kDiv, {mul, scale}, location);
+        }
+        else if (range.rangeKind != slang::ast::ValueRangeKind::AbsoluteTolerance)
+        {
+            reportUnsupported(range, "Unsupported inside tolerance range kind");
+            return kInvalidPlanIndex;
+        }
+
+        ExprNodeId lowerExpr =
+            makeOperation(grh::ir::OperationKind::kSub, {left, tolerance}, location);
+        ExprNodeId upperExpr =
+            makeOperation(grh::ir::OperationKind::kAdd, {left, tolerance}, location);
+        ExprNodeId lowerBound =
+            makeOperation(grh::ir::OperationKind::kGe, {control, lowerExpr}, location);
+        ExprNodeId upperBound =
+            makeOperation(grh::ir::OperationKind::kLe, {control, upperExpr}, location);
+        return makeLogicAnd(lowerBound, upperBound, location);
+    }
+
+    ExprNodeId buildInsideItemMatch(ExprNodeId control,
+                                    const slang::ast::Expression& controlExpr,
+                                    const slang::ast::Expression& item,
+                                    slang::SourceLocation location)
+    {
+        if (const auto* range = item.as_if<slang::ast::ValueRangeExpression>())
+        {
+            return buildInsideValueRangeMatch(control, *range, location);
+        }
+        if (item.kind == slang::ast::ExpressionKind::UnboundedLiteral)
+        {
+            reportUnsupported(item, "Unbounded literal inside match unsupported");
+            return kInvalidPlanIndex;
+        }
+
+        ExprNodeId itemId = lowerExpression(item);
+        if (itemId == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+
+        const bool integral = controlExpr.type && controlExpr.type->isIntegral() &&
+                              item.type && item.type->isIntegral();
+        const grh::ir::OperationKind op =
+            integral ? grh::ir::OperationKind::kWildcardEq
+                     : grh::ir::OperationKind::kEq;
+        return makeOperation(op, {control, itemId}, location);
+    }
+
     ExprNodeId buildCaseItemMatch(ExprNodeId control,
                                   const slang::ast::Expression& controlExpr,
                                   slang::ast::CaseStatementCondition condition,
@@ -2386,6 +2502,33 @@ private:
         if (control == kInvalidPlanIndex)
         {
             return kInvalidPlanIndex;
+        }
+        if (condition == slang::ast::CaseStatementCondition::Inside)
+        {
+            ExprNodeId combined = kInvalidPlanIndex;
+            for (const slang::ast::Expression* expr : items)
+            {
+                if (!expr)
+                {
+                    continue;
+                }
+                scanExpression(*expr);
+                ExprNodeId term =
+                    buildInsideItemMatch(control, controlExpr, *expr, location);
+                if (term == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                if (combined == kInvalidPlanIndex)
+                {
+                    combined = term;
+                }
+                else
+                {
+                    combined = makeLogicOr(combined, term, location);
+                }
+            }
+            return combined;
         }
         const bool controlTwoState = isTwoStateExpr(controlExpr);
         ExprNodeId combined = kInvalidPlanIndex;

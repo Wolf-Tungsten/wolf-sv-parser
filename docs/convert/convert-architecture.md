@@ -510,6 +510,40 @@
       - `casez/casex` 若 item 为常量，会构建 mask 并生成
         `(sel & mask) == (item & mask)`；若 item 非常量无法生成 mask，则回退到 `===`
         并发出 warning（可能不可综合）。
+  - #### Case inside 语句（Pass5）
+    - 规则：
+      - item 为普通表达式：integral 使用 `kWildcardEq`（`==?`），其他类型使用 `kEq`。
+      - item 为 `ValueRange`：
+        - `[a:b]` -> `kGe(control, a)` 与 `kLe(control, b)` 再 `kLogicAnd`；
+        - `[a +/- b]` -> `kSub(a, b)`/`kAdd(a, b)` + `kGe/kLe`；
+        - `[a +%- b]` -> `kMul(a, b)`、`kDiv(..., 100)` 后再 `kSub/kAdd` + `kGe/kLe`。
+      - guard 合并遵循 `base && match && !priorMatch`。
+    - 示例（match 降级示意）：
+      - 输入：
+        ```
+        case (sel) inside
+          8'h00: y = a;
+          [8'h10:8'h1f]: y = b;
+          [8'h20 +/- 8'h03]: y = c;
+          default: y = d;
+        endcase
+        ```
+      - `values`（match 示例）：
+        - `0: Symbol(sel)`
+        - `1: Const(8'h00)`
+        - `2: Op(kWildcardEq, [0,1])` (match0)
+        - `3: Const(8'h10)`
+        - `4: Const(8'h1f)`
+        - `5: Op(kGe, [0,3])`
+        - `6: Op(kLe, [0,4])`
+        - `7: Op(kLogicAnd, [5,6])` (match1)
+        - `8: Const(8'h20)`
+        - `9: Const(8'h03)`
+        - `10: Op(kSub, [8,9])`
+        - `11: Op(kAdd, [8,9])`
+        - `12: Op(kGe, [0,10])`
+        - `13: Op(kLe, [0,11])`
+        - `14: Op(kLogicAnd, [12,13])` (match2)
   - #### 循环语句（Pass5 静态展开）
     - repeat：
       - 输入：`repeat(3) y = a;`

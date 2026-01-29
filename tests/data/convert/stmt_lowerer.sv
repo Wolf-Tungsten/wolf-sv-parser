@@ -148,3 +148,23 @@ module stmt_lowerer_foreach_stmt(
         end
     end
 endmodule
+
+module stmt_lowerer_case_inside_stmt(
+    input logic [7:0] sel,
+    input logic a,
+    input logic b,
+    input logic c,
+    input logic d,
+    input logic e,
+    output logic y
+);
+    always_comb begin
+        case (sel) inside
+            8'h00: y = a;
+            [8'h10:8'h1f]: y = b;
+            [8'h20 +/- 8'h03]: y = c;
+            [8'h40 +%- 8'h10]: y = d;
+            default: y = e;
+        endcase
+    end
+endmodule

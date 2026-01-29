@@ -155,6 +155,15 @@
         - `casez/casex`：若 item 为常量，先生成 mask（casez 忽略 Z/?，casex 忽略 X/Z/?），
           使用 `(control & mask) == (item & mask)` 生成 match（综合优先）；
           item 非常量无法生成 mask 则回退 `kCaseEq` 并 warning。
+        - `case inside`：
+          - item 为 `ValueRange`：
+            - Simple `[a:b]` -> `(control >= a) && (control <= b)`；
+            - AbsoluteTolerance `[a +/- b]` -> `(control >= a - b) && (control <= a + b)`；
+            - RelativeTolerance `[a +%- b]` -> `(control >= a - (a*b/100)) && (control <= a + (a*b/100))`。
+          - item 为普通表达式：
+            - control 与 item 均为 integral -> `kWildcardEq`（`==?`）；
+            - 其他类型 -> `kEq`。
+          - 不支持场景（如 tolerance range 携带 unbounded）发出诊断并跳过该 item。
     - 循环语句：
       - `repeat/for/foreach` 若可静态求值则展开多次访问 body；
       - 不可静态求值则记录 TODO 并按一次访问回退。
