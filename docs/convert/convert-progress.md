@@ -344,9 +344,12 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增补大迭代次数的 repeat/for/foreach 测试
 
 实施：
-- 待实施
+- `ConvertOptions` 新增 `maxLoopIterations`（默认 65536）并接入 StmtLowerer 的循环展开判定
+- StmtLowerer 以配置上限替代硬编码 4096
+- 新增大迭代次数 repeat/for/foreach fixture 与测试断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0020 - Pass5 位选/范围选 LHS 支持
 
@@ -359,6 +362,44 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 在 StmtLowerer 解析 LHS 并记录 slice 元数据
 - 更新后续 Pass（WriteBack/GraphAssembly）对部分写回的处理
 - 增补位选/范围选 LHS 的测试与 fixture
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0022 - Pass5 静态可求值 break/continue 支持
+
+目标：
+- 在可静态求值的循环中支持 break/continue 语义
+- 保持语义正确且不引入新的 IR 结构
+
+计划：
+- 在 StmtLowerer 的循环展开中检测 break/continue 语句
+- 仅当 break/continue 的条件可用 EvalContext 静态求值时生效
+- break: 终止展开；continue: 跳过本次迭代余下语句
+- 不可静态求值则维持现有回退策略并发出诊断
+- 增补 break/continue 静态求值用例与断言
+- 更新 workflow/architecture 对可支持范围的说明
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0023 - Pass5 动态 break/continue guard 传播支持
+
+目标：
+- 对“综合可接受”的 break/continue 提供语义等价的 guard 展开
+- 覆盖 if/else、case 中的 break/continue，并保持展开后写回顺序一致
+
+计划：
+- 在循环展开期间引入 per-iteration 的 flow guard（alive/skip）
+- break 生成“终止后续迭代”的 guard 更新；continue 生成“跳过当前迭代后续语句”的 guard
+- 在语句序列中向下传播 guard，支持嵌套 if/else/case 中的 break/continue
+- 明确 guard 合并规则与不可支持场景的诊断策略
+- 增补动态 break/continue 的测试与 fixture
+- 更新 workflow/architecture 对 guard 传播流程的描述
 
 实施：
 - 待实施

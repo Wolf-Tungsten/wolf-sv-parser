@@ -149,6 +149,40 @@ module stmt_lowerer_foreach_stmt(
     end
 endmodule
 
+module stmt_lowerer_repeat_large_stmt(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        repeat (5000) begin
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_for_large_stmt(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 5000; i = i + 1) begin
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_foreach_large_stmt(
+    input logic a,
+    output logic y
+);
+    logic [7:0] arr [0:4999];
+    always_comb begin
+        foreach (arr[i]) begin
+            y = a;
+        end
+    end
+endmodule
+
 module stmt_lowerer_case_inside_stmt(
     input logic [7:0] sel,
     input logic a,

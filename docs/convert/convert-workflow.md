@@ -168,8 +168,9 @@
     - `PatternCaseStatement`：
       - 报错并跳过分支，不回退生成无 guard 语义。
     - 循环语句：
-      - `repeat/for/foreach` 若可静态求值则展开多次访问 body；
-      - 不可静态求值则记录 TODO 并按一次访问回退。
+      - `repeat/for/foreach` 若可静态求值且总迭代次数不超过
+        `ConvertOptions.maxLoopIterations`（默认 65536）则展开多次访问 body；
+      - 不可静态求值或超过上限则记录 TODO 并按一次访问回退。
       - `while/do-while/forever` 报错并跳过 body。
   - 步骤 4：guard 表达式降级
     - guard 使用 Pass5 内部表达式降级逻辑追加到 `LoweringPlan.values`；

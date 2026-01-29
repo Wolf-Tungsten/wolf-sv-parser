@@ -1382,20 +1382,23 @@ void lowerGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
 struct StmtLowererState {
     class AssignmentExprVisitor;
 
-    static constexpr uint32_t kMaxLoopIterations = 4096;
-
     ModulePlan& plan;
     ConvertDiagnostics* diagnostics;
     LoweringPlan& lowering;
     std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
     std::unordered_map<const slang::ast::AssignmentExpression*, ExprNodeId> assignmentRoots;
+    uint32_t maxLoopIterations = 0;
     uint32_t nextTemp = 0;
     std::size_t nextRoot = 0;
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
 
-    StmtLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics, LoweringPlan& lowering)
-        : plan(plan), diagnostics(diagnostics), lowering(lowering)
+    StmtLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics, LoweringPlan& lowering,
+                     uint32_t maxLoopIterations)
+        : plan(plan),
+          diagnostics(diagnostics),
+          lowering(lowering),
+          maxLoopIterations(maxLoopIterations)
     {
         nextTemp = static_cast<uint32_t>(lowering.tempSymbols.size());
     }
@@ -1860,13 +1863,19 @@ private:
             return false;
         }
 
+        if (maxLoopIterations == 0)
+        {
+            return false;
+        }
+
         slang::ast::EvalContext ctx(*plan.body);
         std::optional<int64_t> count = evalConstantInt(stmt.count, ctx);
         if (!count || *count < 0)
         {
             return false;
         }
-        if (static_cast<uint64_t>(*count) > kMaxLoopIterations)
+        const uint64_t maxIterations = static_cast<uint64_t>(maxLoopIterations);
+        if (static_cast<uint64_t>(*count) > maxIterations)
         {
             return false;
         }
@@ -1885,6 +1894,11 @@ private:
             return false;
         }
 
+        if (maxLoopIterations == 0)
+        {
+            return false;
+        }
+
         slang::ast::EvalContext ctx(*plan.body);
         if (!prepareForLoopState(stmt, ctx))
         {
@@ -1892,7 +1906,7 @@ private:
         }
 
         uint32_t iterations = 0;
-        while (iterations < kMaxLoopIterations)
+        while (iterations < maxLoopIterations)
         {
             bool cond = false;
             if (!evalForLoopCondition(stmt, ctx, cond))
@@ -1923,6 +1937,12 @@ private:
             return false;
         }
 
+        if (maxLoopIterations == 0)
+        {
+            return false;
+        }
+
+        const uint64_t maxIterations = static_cast<uint64_t>(maxLoopIterations);
         uint64_t total = 1;
         for (const auto& dim : stmt.loopDims)
         {
@@ -1935,14 +1955,14 @@ private:
             {
                 return false;
             }
-            if (total > kMaxLoopIterations / width)
+            if (total > maxIterations / width)
             {
                 return false;
             }
             total *= width;
         }
 
-        if (total > kMaxLoopIterations)
+        if (total > maxIterations)
         {
             return false;
         }
@@ -3705,7 +3725,8 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
     lowering.writes.clear();
 
-    StmtLowererState state(plan, context_.diagnostics, lowering);
+    StmtLowererState state(plan, context_.diagnostics, lowering,
+                           context_.options.maxLoopIterations);
     for (const slang::ast::Symbol& member : plan.body->members())
     {
         lowerStmtMemberSymbol(member, state);

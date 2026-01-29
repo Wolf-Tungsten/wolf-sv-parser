@@ -155,6 +155,7 @@ struct ConvertOptions {
     bool abortOnError = true;
     bool enableLogging = false;
     ConvertLogLevel logLevel = ConvertLogLevel::Warn;
+    uint32_t maxLoopIterations = 65536;
 };
 
 class PlanCache;

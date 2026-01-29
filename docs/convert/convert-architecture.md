@@ -68,6 +68,7 @@
       - `abortOnError`: `bool` -> 诊断 error 是否触发 `ConvertAbort`。
       - `enableLogging`: `bool` -> 是否启用 `ConvertLogger`。
       - `logLevel`: `ConvertLogLevel` -> 日志等级过滤阈值。
+      - `maxLoopIterations`: `uint32_t` -> Pass5 静态展开循环的最大迭代上限。
   - `diagnostics`：
     - 作用：集中收集 todo/error/warn。
     - 建立：指向 `ConvertDriver::diagnostics_`。
@@ -583,7 +584,9 @@
           - `WriteIntent{y, value=0, guard=invalid}`
           - `WriteIntent{y, value=0, guard=invalid}`
     - 说明：
-      - 仅对静态可求值循环做展开；`guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
+      - 仅对静态可求值且总迭代次数不超过 `ConvertOptions.maxLoopIterations` 的循环做展开；
+        默认上限为 65536；超过上限则报 TODO 并回退为单次访问；
+        `guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
       - `while/do-while/forever` 当前不支持，Pass5 报错并跳过 body。
 - 生成与使用约定：
   - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。

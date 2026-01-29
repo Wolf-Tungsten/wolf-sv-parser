@@ -149,6 +149,8 @@ bool hasOp(const wolf_sv_parser::LoweringPlan& plan, grh::ir::OperationKind op) 
     return false;
 }
 
+constexpr std::size_t kLargeLoopCount = 5000;
+
 int testLowerer(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -472,6 +474,60 @@ int testForeachLoop(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testLargeRepeatLoop(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_repeat_large_stmt", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != kLargeLoopCount) {
+        return fail("Expected " + std::to_string(kLargeLoopCount) +
+                    " write intents in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testLargeForLoop(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_large_stmt", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != kLargeLoopCount) {
+        return fail("Expected " + std::to_string(kLargeLoopCount) +
+                    " write intents in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testLargeForeachLoop(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_foreach_large_stmt", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != kLargeLoopCount) {
+        return fail("Expected " + std::to_string(kLargeLoopCount) +
+                    " write intents in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -512,5 +568,14 @@ int main() {
     if (int status = testForLoop(sourcePath); status != 0) {
         return status;
     }
-    return testForeachLoop(sourcePath);
+    if (int status = testForeachLoop(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLargeRepeatLoop(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLargeForLoop(sourcePath); status != 0) {
+        return status;
+    }
+    return testLargeForeachLoop(sourcePath);
 }
