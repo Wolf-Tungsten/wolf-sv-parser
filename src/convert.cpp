@@ -1442,19 +1442,7 @@ struct StmtLowererState {
         }
         if (const auto* patternCase = stmt.as_if<slang::ast::PatternCaseStatement>())
         {
-            reportUnsupported(stmt, "Pattern case lowering uses unconditional guards");
-            scanExpression(patternCase->expr);
-            for (const auto& item : patternCase->items)
-            {
-                if (item.stmt)
-                {
-                    visitStatement(*item.stmt);
-                }
-            }
-            if (patternCase->defaultCase)
-            {
-                visitStatement(*patternCase->defaultCase);
-            }
+            reportError(stmt, "Pattern case lowering is unsupported");
             return;
         }
         if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>())
@@ -1489,22 +1477,17 @@ struct StmtLowererState {
         }
         if (const auto* whileLoop = stmt.as_if<slang::ast::WhileLoopStatement>())
         {
-            reportUnsupported(stmt, "While-loop lowering uses unconditional guards");
-            scanExpression(whileLoop->cond);
-            visitStatement(whileLoop->body);
+            reportError(stmt, "While-loop lowering is unsupported");
             return;
         }
         if (const auto* doWhileLoop = stmt.as_if<slang::ast::DoWhileLoopStatement>())
         {
-            reportUnsupported(stmt, "Do-while lowering uses unconditional guards");
-            scanExpression(doWhileLoop->cond);
-            visitStatement(doWhileLoop->body);
+            reportError(stmt, "Do-while lowering is unsupported");
             return;
         }
         if (const auto* foreverLoop = stmt.as_if<slang::ast::ForeverLoopStatement>())
         {
-            reportUnsupported(stmt, "Forever-loop lowering uses unconditional guards");
-            visitStatement(foreverLoop->body);
+            reportError(stmt, "Forever-loop lowering is unsupported");
             return;
         }
         if (const auto* foreachLoop = stmt.as_if<slang::ast::ForeachLoopStatement>())
@@ -1542,7 +1525,6 @@ struct StmtLowererState {
         bool hasPattern = false;
         for (const auto& cond : stmt.conditions)
         {
-            scanExpression(*cond.expr);
             if (cond.pattern)
             {
                 hasPattern = true;
@@ -1550,13 +1532,12 @@ struct StmtLowererState {
         }
         if (hasPattern)
         {
-            reportUnsupported(stmt, "Patterned condition lowering uses unconditional guards");
-            visitStatement(stmt.ifTrue);
-            if (stmt.ifFalse)
-            {
-                visitStatement(*stmt.ifFalse);
-            }
+            reportError(stmt, "Patterned condition lowering is unsupported");
             return;
+        }
+        for (const auto& cond : stmt.conditions)
+        {
+            scanExpression(*cond.expr);
         }
 
         ExprNodeId combinedCond = kInvalidPlanIndex;
@@ -2845,6 +2826,14 @@ private:
         if (diagnostics)
         {
             diagnostics->todo(stmt.sourceRange.start(), std::string(message));
+        }
+    }
+
+    void reportError(const slang::ast::Statement& stmt, std::string_view message)
+    {
+        if (diagnostics)
+        {
+            diagnostics->error(stmt.sourceRange.start(), std::string(message));
         }
     }
 };

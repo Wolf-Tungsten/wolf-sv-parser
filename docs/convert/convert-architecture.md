@@ -475,6 +475,8 @@
           - `WriteIntent{y, value=0, guard=3}`
           - `WriteIntent{y, value=1, guard=6}`
           - `WriteIntent{y, value=2, guard=8}`
+    - 说明：
+      - 带 `matches` 的 pattern condition 当前不支持，Pass5 直接报错并跳过分支。
   - #### Case 语句（Pass5）
     - 输入：
       ```
@@ -510,6 +512,7 @@
       - `casez/casex` 若 item 为常量，会构建 mask 并生成
         `(sel & mask) == (item & mask)`；若 item 非常量无法生成 mask，则回退到 `===`
         并发出 warning（可能不可综合）。
+      - `case (...) matches`（PatternCase）当前不支持，Pass5 直接报错并跳过分支。
   - #### Case inside 语句（Pass5）
     - 规则：
       - item 为普通表达式：integral 使用 `kWildcardEq`（`==?`），其他类型使用 `kEq`。
@@ -581,6 +584,7 @@
           - `WriteIntent{y, value=0, guard=invalid}`
     - 说明：
       - 仅对静态可求值循环做展开；`guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
+      - `while/do-while/forever` 当前不支持，Pass5 报错并跳过 body。
 - 生成与使用约定：
   - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
   - 使用：Pass5~Pass6 读取 `loweringPlan`，不回扫 AST。

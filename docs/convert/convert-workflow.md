@@ -145,6 +145,7 @@
       - 对多条件 `if` 链构建 `cond`（条件间 `logic-and`）；
       - true guard = `base && cond`，false guard = `base && !cond`；
       - 推入 guard 后递归访问分支语句。
+      - 若存在 pattern condition（`matches`），报错并跳过分支，不回退生成无 guard 语义。
     - `CaseStatement`：
       - 构建每个 item 的 match，并以 `logic-or` 聚合；
       - guard = `base && match && !priorMatch`；
@@ -164,9 +165,12 @@
             - control 与 item 均为 integral -> `kWildcardEq`（`==?`）；
             - 其他类型 -> `kEq`。
           - 不支持场景（如 tolerance range 携带 unbounded）发出诊断并跳过该 item。
+    - `PatternCaseStatement`：
+      - 报错并跳过分支，不回退生成无 guard 语义。
     - 循环语句：
       - `repeat/for/foreach` 若可静态求值则展开多次访问 body；
       - 不可静态求值则记录 TODO 并按一次访问回退。
+      - `while/do-while/forever` 报错并跳过 body。
   - 步骤 4：guard 表达式降级
     - guard 使用 Pass5 内部表达式降级逻辑追加到 `LoweringPlan.values`；
     - guard 节点同样分配 `_expr_tmp_<n>` 临时名。

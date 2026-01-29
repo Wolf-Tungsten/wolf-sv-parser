@@ -607,5 +607,19 @@ target_compile_definitions(convert-stmt-lowerer
 )
 register_test_exe(convert-stmt-lowerer)
 
+# convert: stmt lowerer error paths
+add_executable(convert-stmt-lowerer-errors
+    tests/convert/test_convert_stmt_lowerer_errors.cpp
+)
+target_link_libraries(convert-stmt-lowerer-errors
+    PRIVATE
+        convert
+)
+target_compile_definitions(convert-stmt-lowerer-errors
+    PRIVATE
+        WOLF_SV_CONVERT_STMT_ERROR_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/stmt_lowerer_errors.sv"
+)
+register_test_exe(convert-stmt-lowerer-errors)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

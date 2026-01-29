@@ -325,9 +325,12 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增补错误路径测试
 
 实施：
-- 待实施
+- StmtLowerer 将 pattern condition 与 pattern case 升级为 error 并直接跳过分支
+- while/do-while/forever 直接报错并停止对 body 的降级
+- 新增 `convert-stmt-lowerer-errors` 测试与 fixture 覆盖错误路径
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0019 - Pass5 循环展开上限提升
 
