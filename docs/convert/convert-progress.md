@@ -427,6 +427,67 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 需要时新增独立测试目标以区分错误路径与正常路径
 
 实施：
+- `tests/data/convert/stmt_lowerer.sv` 增补 case inside、展开上限与 LHS 选择用例
+- `tests/convert/test_convert_stmt_lowerer.cpp` 增加 case inside/展开上限/LHS 选择断言
+- `tests/data/convert/stmt_lowerer_errors.sv` 增补 pattern/while/do/forever 错误用例
+- `tests/convert/test_convert_stmt_lowerer_errors.cpp` 覆盖 pattern/while/do/forever 错误路径断言
+
+完成情况：已完成
+
+## STEP 0024 - Pass5 LHS 复合目标与成员选择支持
+
+目标：
+- 支持 assignment/continuous assign 的 LHS 复合目标（concatenation/streaming concat）
+- 支持 struct/array member select 作为 LHS，避免仅支持命名值/位选/范围选
+- 将复合 LHS 拆解为多条 WriteIntent，保持赋值顺序与 guard 语义一致
+
+计划：
+- 扩展 `WriteIntent` 表达能力（多 target 或拆分策略），补充 LHS 语义解析
+- 在 StmtLowerer 解析 LHS 时识别 concat/streaming 与 member select
+- 新增 LHS 复合目标/成员选择 fixture 与断言
+- 更新 workflow/architecture 对 LHS 支持范围的说明
+
+实施：
+- 扩展 `WriteSliceKind` 支持 MemberSelect 并在 StmtLowerer 解析 struct/array member LHS
+- StmtLowerer 支持 concat/streaming concat LHS，拆分 RHS 为多条 WriteIntent
+- 新增 `stmt_lowerer_lhs_concat/stream/member` fixture 与 `convert-stmt-lowerer` 断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成
+
+## STEP 0025 - Pass5 TimedStatement 语义处理与诊断
+
+目标：
+- 明确处理 `#delay` / `@event` / `wait` 等 timed 语句，避免当前“忽略 timing”的隐式语义偏差
+- 对不可支持的 timing 控制给出 error 诊断
+- 关注点仅限可综合语法，不可综合语法留作未来支持
+
+计划：
+- 在 StmtLowerer 识别 TimedStatement 的控制类型并分流处理
+- 对不可综合/无法建模的 timing 直接报错并停止对 body 的降级
+- 增补 timed 语句 fixture 与错误路径断言
+- 更新 workflow/architecture 对 timing 处理策略的说明
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0026 - Pass5 while/do-while/forever 静态展开支持
+
+目标：
+- 支持可静态求值的 while/do-while/forever 展开（受 maxLoopIterations 限制）
+- 对不可静态求值的循环保持报错并终止降级
+- 保持 break/continue guard 语义与现有循环展开一致
+- 关注点仅限可综合语法，不可综合语法留作未来支持
+
+计划：
+- 复用 For/Repeat 的静态求值与 loop guard 逻辑，新增 while/do-while/forever 入口
+- 维持 `maxLoopIterations` 上限与诊断信息一致性
+- 新增 while/do-while 静态展开 fixture 与断言
+- 更新 workflow/architecture 文档；标注此步骤将取代 STEP 0018 中“while/do/forever 报错”的行为
+
+实施：
 - 待实施
 
 完成情况：未开始

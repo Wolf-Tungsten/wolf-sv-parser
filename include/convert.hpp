@@ -331,7 +331,8 @@ struct LoweredRoot {
 enum class WriteSliceKind {
     None,
     BitSelect,
-    RangeSelect
+    RangeSelect,
+    MemberSelect
 };
 
 enum class WriteRangeKind {
@@ -346,6 +347,7 @@ struct WriteSlice {
     ExprNodeId index = kInvalidPlanIndex;
     ExprNodeId left = kInvalidPlanIndex;
     ExprNodeId right = kInvalidPlanIndex;
+    PlanSymbolId member;
     slang::SourceLocation location{};
 };
 

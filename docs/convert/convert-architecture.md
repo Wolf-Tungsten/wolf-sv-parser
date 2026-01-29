@@ -472,11 +472,12 @@
   - `isNonBlocking`: `bool` -> 是否非阻塞赋值。
   - `location`: `slang::SourceLocation` -> 写回语句位置。
 - WriteSlice 字段总览（字段 -> 类型 -> 含义）：
-  - `kind`: `WriteSliceKind` -> BitSelect/RangeSelect。
+  - `kind`: `WriteSliceKind` -> BitSelect/RangeSelect/MemberSelect。
   - `rangeKind`: `WriteRangeKind` -> Simple/IndexedUp/IndexedDown（仅 RangeSelect 有效）。
   - `index`: `ExprNodeId` -> bit-select 索引（仅 BitSelect 有效）。
   - `left`: `ExprNodeId` -> range 左表达式（RangeSelect）。
   - `right`: `ExprNodeId` -> range 右表达式（RangeSelect）。
+  - `member`: `PlanSymbolId` -> 成员名（MemberSelect）。
   - `location`: `slang::SourceLocation` -> 片段选择位置。
 
 #### 3.10.8. 举例说明
@@ -567,6 +568,43 @@
         - `WriteIntent{target=y, slices=[{kind=RangeSelect, rangeKind=IndexedUp, left=6, right=7}], value=2, guard=invalid}`
     - 说明：
       - `slices` 按 LHS 选择链路顺序记录；bit-select 仅填 `index`，range-select 填 `left/right`。
+  - #### LHS 复合目标写回（Pass5）
+    - 输入：
+      ```
+      always_comb begin
+        {y, z} = data;
+      end
+      ```
+    - 输出（示意）：
+      - `values`（RHS + slice）：
+        - `0: Symbol(data)` (rhs0)
+        - `1: Const(7)` (slice high)
+        - `2: Const(4)` (slice low)
+        - `3: Op(kSliceDynamic, [0,1,2])` (rhs[7:4])
+        - `4: Const(3)` (slice high)
+        - `5: Const(0)` (slice low)
+        - `6: Op(kSliceDynamic, [0,4,5])` (rhs[3:0])
+      - `writes`：
+        - `WriteIntent{target=y, value=3, guard=invalid}`
+        - `WriteIntent{target=z, value=6, guard=invalid}`
+    - 说明：
+      - LHS concatenation/left-to-right streaming concat 会拆分成多条 WriteIntent。
+    - 成员选择示例（含 memory 访问）：
+      ```
+      typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+      pair_t mem [0:3];
+      always_ff @(posedge clk) begin
+        mem[idx].hi <= a;
+        mem[idx].lo <= b;
+      end
+      ```
+    - 输出（示意）：
+      - `writes`：
+        - `WriteIntent{target=mem, slices=[{kind=BitSelect, index=expr(idx)}, {kind=MemberSelect, member=hi}], value=rhs(a), guard=invalid}`
+        - `WriteIntent{target=mem, slices=[{kind=BitSelect, index=expr(idx)}, {kind=MemberSelect, member=lo}], value=rhs(b), guard=invalid}`
+    - 说明：
+      - `index=expr(idx)` 表示 index 字段保存 `idx` 的 ExprNodeId（由表达式降级得到）。
+      - element select（数组索引）与 member select 都会追加到 slices 链路，顺序与 LHS 访问一致。
   - #### Case 语句（Pass5）
     - 输入：
       ```

@@ -136,8 +136,9 @@ Pass5 以“入口类型”为一级结构：
 #### 1.1 入口流程
 1) 设置 `domain = comb`。  
 2) 访问赋值表达式并消费 RHS root（来自 Pass4）。  
-3) 解析 LHS -> `target + slices`。  
-4) 生成 `WriteIntent`（guard 为空）。  
+3) 解析 LHS -> `targets + slices`（支持 concat/streaming concat、bit/range/member select）。  
+4) 若 LHS 为复合目标则按位宽拆分 RHS 并生成多条 `WriteIntent`；否则生成单条。  
+5) 右到左 streaming（slice_size > 0）与 with-clause 当前仍报 TODO。  
 代码位置：`lowerStmtContinuousAssign`。  
 
 #### 1.2 示例
@@ -167,7 +168,7 @@ assign y = a & b;
 
 ##### 2.2.1 赋值类语句
 - `ExpressionStatement/ProceduralAssignStatement`：  
-  - 消费 RHS root；解析 LHS；生成 `WriteIntent`。  
+  - 消费 RHS root；解析 LHS（支持 concat/streaming/member）；生成 `WriteIntent`（复合 LHS 拆分）。  
 代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::handleAssignment`。  
 
 示例：  
@@ -266,7 +267,7 @@ endgenerate
 - 输出：若实例化，等价于一次 ContinuousAssign 入口处理。  
 
 ### 4. 写回意图落地
-- 形态：`WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`。  
+- 形态：`WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`（`slices` 支持 member select）。  
 - `guard = kInvalidPlanIndex` 表示无显式 guard。  
 代码位置：`StmtLowererState::handleAssignment`。  
 

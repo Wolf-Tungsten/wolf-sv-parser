@@ -1406,6 +1406,16 @@ struct StmtLowererState {
     struct LoopFlowContext {
         ExprNodeId loopAlive = kInvalidPlanIndex;
     };
+    struct LValueTarget {
+        PlanSymbolId target;
+        std::vector<WriteSlice> slices;
+        uint64_t width = 0;
+        slang::SourceLocation location{};
+    };
+    struct LValueCompositeInfo {
+        bool isComposite = false;
+        bool reverseOrder = false;
+    };
     std::vector<LoopFlowContext> loopFlowStack;
     std::optional<std::string> loopControlFailure;
 
@@ -1742,9 +1752,13 @@ struct StmtLowererState {
     void handleAssignment(const slang::ast::AssignmentExpression& expr)
     {
         ExprNodeId value = resolveAssignmentRoot(expr);
-        std::vector<WriteSlice> slices;
-        PlanSymbolId target = resolveLValueSymbol(expr.left(), slices);
-        if (!target.valid())
+        std::vector<LValueTarget> targets;
+        LValueCompositeInfo composite;
+        if (!resolveLValueTargets(expr.left(), targets, composite))
+        {
+            return;
+        }
+        if (targets.empty())
         {
             reportUnsupported(expr, "Unsupported LHS in assignment");
             return;
@@ -1754,15 +1768,80 @@ struct StmtLowererState {
             return;
         }
 
-        WriteIntent intent;
-        intent.target = target;
-        intent.slices = std::move(slices);
-        intent.value = value;
-        intent.guard = currentGuard(expr.sourceRange.start());
-        intent.domain = domain;
-        intent.isNonBlocking = expr.isNonBlocking();
-        intent.location = expr.sourceRange.start();
-        lowering.writes.push_back(std::move(intent));
+        ExprNodeId guard = currentGuard(expr.sourceRange.start());
+        if (targets.size() == 1 && !composite.isComposite)
+        {
+            WriteIntent intent;
+            intent.target = targets.front().target;
+            intent.slices = std::move(targets.front().slices);
+            intent.value = value;
+            intent.guard = guard;
+            intent.domain = domain;
+            intent.isNonBlocking = expr.isNonBlocking();
+            intent.location = expr.sourceRange.start();
+            lowering.writes.push_back(std::move(intent));
+            return;
+        }
+
+        uint64_t totalWidth = 0;
+        for (const auto& target : targets)
+        {
+            if (target.width == 0)
+            {
+                reportUnsupported(expr, "Unsupported LHS width in assignment");
+                return;
+            }
+            totalWidth += target.width;
+        }
+        if (totalWidth == 0)
+        {
+            reportUnsupported(expr, "Unsupported LHS width in assignment");
+            return;
+        }
+
+        auto emitSliceWrite = [&](LValueTarget& target, uint64_t high, uint64_t low) {
+            ExprNodeId sliceValue = makeRhsSlice(value, high, low, expr.sourceRange.start());
+            if (sliceValue == kInvalidPlanIndex)
+            {
+                return;
+            }
+            WriteIntent intent;
+            intent.target = target.target;
+            intent.slices = std::move(target.slices);
+            intent.value = sliceValue;
+            intent.guard = guard;
+            intent.domain = domain;
+            intent.isNonBlocking = expr.isNonBlocking();
+            intent.location = expr.sourceRange.start();
+            lowering.writes.push_back(std::move(intent));
+        };
+
+        if (composite.reverseOrder)
+        {
+            uint64_t offset = 0;
+            for (auto& target : targets)
+            {
+                const uint64_t low = offset;
+                const uint64_t high = offset + target.width - 1;
+                offset += target.width;
+                emitSliceWrite(target, high, low);
+            }
+            return;
+        }
+
+        uint64_t remaining = totalWidth;
+        for (auto& target : targets)
+        {
+            if (target.width > remaining)
+            {
+                reportUnsupported(expr, "LHS width exceeds RHS span");
+                return;
+            }
+            remaining -= target.width;
+            const uint64_t low = remaining;
+            const uint64_t high = remaining + target.width - 1;
+            emitSliceWrite(target, high, low);
+        }
     }
 
     class AssignmentExprVisitor
@@ -3544,6 +3623,102 @@ private:
         return WriteRangeKind::Simple;
     }
 
+    uint64_t computeExprWidth(const slang::ast::Expression& expr)
+    {
+        if (!expr.type)
+        {
+            return 0;
+        }
+        return computeFixedWidth(*expr.type, *plan.body, diagnostics);
+    }
+
+    ExprNodeId makeRhsSlice(ExprNodeId value, uint64_t high, uint64_t low,
+                            slang::SourceLocation location)
+    {
+        if (value == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (high == low)
+        {
+            ExprNodeId index = addConstantLiteral(std::to_string(low), location);
+            return makeOperation(grh::ir::OperationKind::kSliceDynamic, {value, index}, location);
+        }
+        ExprNodeId left = addConstantLiteral(std::to_string(high), location);
+        ExprNodeId right = addConstantLiteral(std::to_string(low), location);
+        return makeOperation(grh::ir::OperationKind::kSliceDynamic, {value, left, right}, location);
+    }
+
+    bool resolveLValueTargets(const slang::ast::Expression& expr,
+                              std::vector<LValueTarget>& targets,
+                              LValueCompositeInfo& composite)
+    {
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            if (conversion->isImplicit())
+            {
+                return resolveLValueTargets(conversion->operand(), targets, composite);
+            }
+            reportUnsupported(expr, "Unsupported explicit conversion in LHS");
+            return false;
+        }
+        if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
+        {
+            composite.isComposite = true;
+            for (const slang::ast::Expression* operand : concat->operands())
+            {
+                if (!operand)
+                {
+                    continue;
+                }
+                if (!resolveLValueTargets(*operand, targets, composite))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (const auto* stream = expr.as_if<slang::ast::StreamingConcatenationExpression>())
+        {
+            composite.isComposite = true;
+            if (stream->getSliceSize() != 0)
+            {
+                reportUnsupported(expr, "Right-to-left streaming LHS is unsupported");
+                return false;
+            }
+            for (const auto& element : stream->streams())
+            {
+                if (element.withExpr)
+                {
+                    reportUnsupported(*element.withExpr,
+                                      "Streaming LHS with with-clause is unsupported");
+                    return false;
+                }
+                if (!resolveLValueTargets(*element.operand, targets, composite))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        LValueTarget target;
+        target.target = resolveLValueSymbol(expr, target.slices);
+        if (!target.target.valid())
+        {
+            return false;
+        }
+        target.width = computeExprWidth(expr);
+        if (composite.isComposite && target.width == 0)
+        {
+            reportUnsupported(expr, "Unsupported LHS width in assignment");
+            return false;
+        }
+        target.location = expr.sourceRange.start();
+        targets.push_back(std::move(target));
+        return true;
+    }
+
     PlanSymbolId resolveLValueSymbol(const slang::ast::Expression& expr,
                                      std::vector<WriteSlice>& slices)
     {
@@ -3554,6 +3729,32 @@ private:
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
             return plan.symbolTable.lookup(hier->symbol.name);
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            if (conversion->isImplicit())
+            {
+                return resolveLValueSymbol(conversion->operand(), slices);
+            }
+            return {};
+        }
+        if (const auto* member = expr.as_if<slang::ast::MemberAccessExpression>())
+        {
+            PlanSymbolId base = resolveLValueSymbol(member->value(), slices);
+            if (!base.valid())
+            {
+                return {};
+            }
+            if (member->member.name.empty())
+            {
+                return {};
+            }
+            WriteSlice slice;
+            slice.kind = WriteSliceKind::MemberSelect;
+            slice.member = plan.symbolTable.intern(member->member.name);
+            slice.location = member->sourceRange.start();
+            slices.push_back(std::move(slice));
+            return base;
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {

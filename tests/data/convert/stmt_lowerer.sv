@@ -217,6 +217,42 @@ module stmt_lowerer_lhs_select(
     end
 endmodule
 
+typedef struct packed {
+    logic [3:0] hi;
+    logic [3:0] lo;
+} stmt_pair_t;
+
+module stmt_lowerer_lhs_concat(
+    input logic [7:0] data,
+    output logic [3:0] y,
+    output logic [3:0] z
+);
+    always_comb begin
+        {y, z} = data;
+    end
+endmodule
+
+module stmt_lowerer_lhs_stream(
+    input logic [7:0] data,
+    output logic [3:0] y,
+    output logic [3:0] z
+);
+    always_comb begin
+        {>>{y, z}} = data;
+    end
+endmodule
+
+module stmt_lowerer_lhs_member(
+    input logic [3:0] a,
+    input logic [3:0] b,
+    output stmt_pair_t y
+);
+    always_comb begin
+        y.hi = a;
+        y.lo = b;
+    end
+endmodule
+
 module stmt_lowerer_for_break(
     input logic a,
     output logic y

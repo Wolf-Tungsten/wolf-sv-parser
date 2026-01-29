@@ -484,6 +484,126 @@ int testLhsSelect(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testLhsConcat(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_lhs_concat", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+
+    std::unordered_map<std::string, int> targetCounts;
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid()) {
+            return fail("Missing write target in " + sourcePath.string());
+        }
+        targetCounts[std::string(plan.symbolTable.text(write.target))]++;
+        if (!write.slices.empty()) {
+            return fail("Unexpected slices for concat LHS in " + sourcePath.string());
+        }
+        if (write.value == wolf_sv_parser::kInvalidPlanIndex ||
+            write.value >= lowering.values.size()) {
+            return fail("Invalid write value in " + sourcePath.string());
+        }
+        const auto& node = lowering.values[write.value];
+        if (node.kind != wolf_sv_parser::ExprNodeKind::Operation ||
+            node.op != grh::ir::OperationKind::kSliceDynamic) {
+            return fail("Expected RHS slice op for concat LHS in " + sourcePath.string());
+        }
+    }
+
+    if (targetCounts["y"] != 1 || targetCounts["z"] != 1) {
+        return fail("Unexpected concat LHS targets in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testLhsStream(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_lhs_stream", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+
+    std::unordered_map<std::string, int> targetCounts;
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid()) {
+            return fail("Missing write target in " + sourcePath.string());
+        }
+        targetCounts[std::string(plan.symbolTable.text(write.target))]++;
+        if (!write.slices.empty()) {
+            return fail("Unexpected slices for streaming LHS in " + sourcePath.string());
+        }
+        if (write.value == wolf_sv_parser::kInvalidPlanIndex ||
+            write.value >= lowering.values.size()) {
+            return fail("Invalid write value in " + sourcePath.string());
+        }
+        const auto& node = lowering.values[write.value];
+        if (node.kind != wolf_sv_parser::ExprNodeKind::Operation ||
+            node.op != grh::ir::OperationKind::kSliceDynamic) {
+            return fail("Expected RHS slice op for streaming LHS in " + sourcePath.string());
+        }
+    }
+
+    if (targetCounts["y"] != 1 || targetCounts["z"] != 1) {
+        return fail("Unexpected streaming LHS targets in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testLhsMemberSelect(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_lhs_member", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+
+    std::unordered_map<std::string, int> memberCounts;
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+        if (write.slices.size() != 1) {
+            return fail("Expected one member slice per write in " + sourcePath.string());
+        }
+        const auto& slice = write.slices.front();
+        if (slice.kind != wolf_sv_parser::WriteSliceKind::MemberSelect ||
+            !slice.member.valid()) {
+            return fail("Missing member select slice in " + sourcePath.string());
+        }
+        memberCounts[std::string(plan.symbolTable.text(slice.member))]++;
+    }
+
+    if (memberCounts["hi"] != 1 || memberCounts["lo"] != 1) {
+        return fail("Unexpected member select targets in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testRepeatLoop(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -799,6 +919,15 @@ int main() {
         return status;
     }
     if (int status = testLhsSelect(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLhsConcat(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLhsStream(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLhsMemberSelect(sourcePath); status != 0) {
         return status;
     }
     if (int status = testRepeatLoop(sourcePath); status != 0) {
