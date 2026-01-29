@@ -366,7 +366,7 @@
     - 建立：Pass4 每创建一个操作节点就追加一个 temp symbol。
     - 输出：供写回/生成阶段绑定临时值命名。
   - `writes`：
-    - 作用：记录每条赋值语句的写回意图、guard 与控制域。
+    - 作用：记录每条赋值语句的写回意图、guard 与控制域，并携带 LHS 切片信息。
     - 建立：Pass5 解析语句与控制流后追加。
     - 输出：供 Pass6/Pass7 合并写回与 guard/mux 决策；静态展开的循环会追加多条写回意图。
     - 说明：guard 本身以 `ExprNode` 形式保存在 `values`，`WriteIntent.guard` 仅保存对应节点索引。
@@ -410,11 +410,19 @@
     - 作用：记录 root 的源码位置。
 - WriteIntent 字段总览（字段 -> 类型 -> 含义）：
   - `target`: `PlanSymbolId` -> 写回目标符号。
+  - `slices`: `std::vector<WriteSlice>` -> LHS 位选/范围选链路；为空表示整信号写回。
   - `value`: `ExprNodeId` -> RHS root 节点索引。
   - `guard`: `ExprNodeId` -> guard 条件节点索引（无 guard 时为 invalid）。
   - `domain`: `ControlDomain` -> 控制域（comb/seq/latch/unknown）。
   - `isNonBlocking`: `bool` -> 是否非阻塞赋值。
   - `location`: `slang::SourceLocation` -> 写回语句位置。
+- WriteSlice 字段总览（字段 -> 类型 -> 含义）：
+  - `kind`: `WriteSliceKind` -> BitSelect/RangeSelect。
+  - `rangeKind`: `WriteRangeKind` -> Simple/IndexedUp/IndexedDown（仅 RangeSelect 有效）。
+  - `index`: `ExprNodeId` -> bit-select 索引（仅 BitSelect 有效）。
+  - `left`: `ExprNodeId` -> range 左表达式（RangeSelect）。
+  - `right`: `ExprNodeId` -> range 右表达式（RangeSelect）。
+  - `location`: `slang::SourceLocation` -> 片段选择位置。
 - 举例说明：
   - #### 表达式降级（Pass4）
     - 输入：`assign y = (a & b) ? ~c : (a | b);`
@@ -478,6 +486,31 @@
           - `WriteIntent{y, value=2, guard=8}`
     - 说明：
       - 带 `matches` 的 pattern condition 当前不支持，Pass5 直接报错并跳过分支。
+  - #### LHS 分片写回（Pass5）
+    - 输入：
+      ```
+      always_comb begin
+        y[3] = a;
+        y[7:4] = b;
+        y[idx +: 2] = c;
+      end
+      ```
+    - 输出（示意）：
+      - `values`（RHS + LHS 索引）：
+        - `0: Symbol(a)` (rhs0)
+        - `1: Symbol(b)` (rhs1)
+        - `2: Symbol(c)` (rhs2)
+        - `3: Const(3)` (bit index)
+        - `4: Const(7)` (range left)
+        - `5: Const(4)` (range right)
+        - `6: Symbol(idx)` (range base)
+        - `7: Const(2)` (range width)
+      - `writes`：
+        - `WriteIntent{target=y, slices=[{kind=BitSelect, index=3}], value=0, guard=invalid}`
+        - `WriteIntent{target=y, slices=[{kind=RangeSelect, rangeKind=Simple, left=4, right=5}], value=1, guard=invalid}`
+        - `WriteIntent{target=y, slices=[{kind=RangeSelect, rangeKind=IndexedUp, left=6, right=7}], value=2, guard=invalid}`
+    - 说明：
+      - `slices` 按 LHS 选择链路顺序记录；bit-select 仅填 `index`，range-select 填 `left/right`。
   - #### Case 语句（Pass5）
     - 输入：
       ```

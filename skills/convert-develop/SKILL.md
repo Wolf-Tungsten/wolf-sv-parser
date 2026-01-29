@@ -23,7 +23,8 @@ description: Standardize development for Convert steps in wolf-sv-parser. Use wh
 
 - Add or extend tests under `tests/convert/` with fixtures in `tests/data/convert/`.
 - Register new test targets in `CMakeLists.txt` following the existing `convert-*` pattern and compile definitions.
-- Run relevant tests when possible; otherwise report what was not run and why.
+- Proactively run configure/build/tests: `cmake -S . -B build` (if needed), `cmake --build build -j$(nproc)`, then `ctest --test-dir build --output-on-failure` (or `ctest -R convert-...`).
+- If the user requests not to run tests or the environment blocks execution, explicitly state what was skipped and why.
 
 ## Documentation Updates
 

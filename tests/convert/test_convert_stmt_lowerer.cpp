@@ -423,6 +423,67 @@ int testCaseInside(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testLhsSelect(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_lhs_select", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 5) {
+        return fail("Expected 5 write intents in " + sourcePath.string());
+    }
+
+    std::size_t bitSelects = 0;
+    std::size_t rangeSelects = 0;
+    std::size_t rangeSimple = 0;
+    std::size_t rangeUp = 0;
+    std::size_t rangeDown = 0;
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+        if (write.slices.size() != 1) {
+            return fail("Expected one slice per write in " + sourcePath.string());
+        }
+        const auto& slice = write.slices.front();
+        if (slice.kind == wolf_sv_parser::WriteSliceKind::BitSelect) {
+            if (slice.index == wolf_sv_parser::kInvalidPlanIndex) {
+                return fail("Missing bit-select index in " + sourcePath.string());
+            }
+            ++bitSelects;
+        } else if (slice.kind == wolf_sv_parser::WriteSliceKind::RangeSelect) {
+            if (slice.left == wolf_sv_parser::kInvalidPlanIndex ||
+                slice.right == wolf_sv_parser::kInvalidPlanIndex) {
+                return fail("Missing range-select bounds in " + sourcePath.string());
+            }
+            ++rangeSelects;
+            if (slice.rangeKind == wolf_sv_parser::WriteRangeKind::Simple) {
+                ++rangeSimple;
+            } else if (slice.rangeKind == wolf_sv_parser::WriteRangeKind::IndexedUp) {
+                ++rangeUp;
+            } else if (slice.rangeKind == wolf_sv_parser::WriteRangeKind::IndexedDown) {
+                ++rangeDown;
+            }
+        } else {
+            return fail("Unexpected slice kind in " + sourcePath.string());
+        }
+    }
+
+    if (bitSelects != 2 || rangeSelects != 3) {
+        return fail("Unexpected slice counts in " + sourcePath.string());
+    }
+    if (rangeSimple != 1 || rangeUp != 1 || rangeDown != 1) {
+        return fail("Unexpected range selection kinds in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testRepeatLoop(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -560,6 +621,9 @@ int main() {
         return status;
     }
     if (int status = testCaseInside(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testLhsSelect(sourcePath); status != 0) {
         return status;
     }
     if (int status = testRepeatLoop(sourcePath); status != 0) {

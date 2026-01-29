@@ -202,3 +202,17 @@ module stmt_lowerer_case_inside_stmt(
         endcase
     end
 endmodule
+
+module stmt_lowerer_lhs_select(
+    input logic [7:0] data,
+    input logic [2:0] idx,
+    output logic [7:0] y
+);
+    always_comb begin
+        y[3] = data[0];
+        y[7:4] = data[7:4];
+        y[idx] = data[1];
+        y[idx +: 2] = data[3:2];
+        y[idx -: 2] = data[5:4];
+    end
+endmodule

@@ -364,9 +364,13 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增补位选/范围选 LHS 的测试与 fixture
 
 实施：
-- 待实施
+- `WriteIntent` 新增 `slices`/`WriteSlice`/`WriteRangeKind` 描述 LHS 切片信息
+- WriteBack/GraphAssembly 仍未落地，切片信息已预留供后续 Pass 消费
+- StmtLowerer 在解析 LHS 时收集 bit-select 与 range-select（含 indexed up/down）
+- 新增 `stmt_lowerer_lhs_select` fixture 与断言覆盖切片类型与范围选择种类
+- `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0022 - Pass5 静态可求值 break/continue 支持
 

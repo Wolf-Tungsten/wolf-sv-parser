@@ -140,7 +140,7 @@
     - `StatementList/BlockStatement/TimedStatement/InvalidStatement`：递归进入子语句。
     - `ExpressionStatement/ProceduralAssignStatement`：
       - 提取 `AssignmentExpression`，消费 `LoweringPlan.roots` 对应 RHS；
-      - 读取当前 guard 与 domain，追加 `WriteIntent`。
+      - 解析 LHS 并记录 `target + slices`，读取当前 guard 与 domain，追加 `WriteIntent`。
     - `ConditionalStatement`：
       - 对多条件 `if` 链构建 `cond`（条件间 `logic-and`）；
       - true guard = `base && cond`，false guard = `base && !cond`；
@@ -195,7 +195,7 @@
         - `WriteIntent{target=y, value=0, guard=2}`
         - `WriteIntent{target=y, value=1, guard=3}`
   - 步骤 5：写回意图生成
-    - 追加 `WriteIntent{target, value, guard, domain, isNonBlocking, location}`。
+    - 追加 `WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`。
 
 ## Pass6: MemoryPortLowererPass
 - 功能：细化 memory 读写端口的 Lowering 描述。

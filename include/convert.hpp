@@ -328,8 +328,30 @@ struct LoweredRoot {
     slang::SourceLocation location{};
 };
 
+enum class WriteSliceKind {
+    None,
+    BitSelect,
+    RangeSelect
+};
+
+enum class WriteRangeKind {
+    Simple,
+    IndexedUp,
+    IndexedDown
+};
+
+struct WriteSlice {
+    WriteSliceKind kind = WriteSliceKind::None;
+    WriteRangeKind rangeKind = WriteRangeKind::Simple;
+    ExprNodeId index = kInvalidPlanIndex;
+    ExprNodeId left = kInvalidPlanIndex;
+    ExprNodeId right = kInvalidPlanIndex;
+    slang::SourceLocation location{};
+};
+
 struct WriteIntent {
     PlanSymbolId target;
+    std::vector<WriteSlice> slices;
     ExprNodeId value = kInvalidPlanIndex;
     ExprNodeId guard = kInvalidPlanIndex;
     ControlDomain domain = ControlDomain::Unknown;

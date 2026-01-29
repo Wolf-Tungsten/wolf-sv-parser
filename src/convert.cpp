@@ -1675,16 +1675,11 @@ struct StmtLowererState {
     void handleAssignment(const slang::ast::AssignmentExpression& expr)
     {
         ExprNodeId value = resolveAssignmentRoot(expr);
-        bool isPartial = false;
-        PlanSymbolId target = resolveLValueSymbol(expr.left(), isPartial);
+        std::vector<WriteSlice> slices;
+        PlanSymbolId target = resolveLValueSymbol(expr.left(), slices);
         if (!target.valid())
         {
             reportUnsupported(expr, "Unsupported LHS in assignment");
-            return;
-        }
-        if (isPartial)
-        {
-            reportUnsupported(expr, "Partial assignment lowering not implemented");
             return;
         }
         if (value == kInvalidPlanIndex)
@@ -1694,6 +1689,7 @@ struct StmtLowererState {
 
         WriteIntent intent;
         intent.target = target;
+        intent.slices = std::move(slices);
         intent.value = value;
         intent.guard = currentGuard();
         intent.domain = domain;
@@ -2810,7 +2806,24 @@ private:
         return kInvalidPlanIndex;
     }
 
-    PlanSymbolId resolveLValueSymbol(const slang::ast::Expression& expr, bool& isPartial)
+    WriteRangeKind mapRangeKind(slang::ast::RangeSelectionKind kind) const
+    {
+        switch (kind)
+        {
+        case slang::ast::RangeSelectionKind::Simple:
+            return WriteRangeKind::Simple;
+        case slang::ast::RangeSelectionKind::IndexedUp:
+            return WriteRangeKind::IndexedUp;
+        case slang::ast::RangeSelectionKind::IndexedDown:
+            return WriteRangeKind::IndexedDown;
+        default:
+            break;
+        }
+        return WriteRangeKind::Simple;
+    }
+
+    PlanSymbolId resolveLValueSymbol(const slang::ast::Expression& expr,
+                                     std::vector<WriteSlice>& slices)
     {
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
@@ -2822,13 +2835,44 @@ private:
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {
-            isPartial = true;
-            return resolveLValueSymbol(select->value(), isPartial);
+            PlanSymbolId base = resolveLValueSymbol(select->value(), slices);
+            if (!base.valid())
+            {
+                return {};
+            }
+            ExprNodeId index = lowerExpression(select->selector());
+            if (index == kInvalidPlanIndex)
+            {
+                return {};
+            }
+            WriteSlice slice;
+            slice.kind = WriteSliceKind::BitSelect;
+            slice.index = index;
+            slice.location = select->sourceRange.start();
+            slices.push_back(std::move(slice));
+            return base;
         }
         if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
         {
-            isPartial = true;
-            return resolveLValueSymbol(range->value(), isPartial);
+            PlanSymbolId base = resolveLValueSymbol(range->value(), slices);
+            if (!base.valid())
+            {
+                return {};
+            }
+            ExprNodeId left = lowerExpression(range->left());
+            ExprNodeId right = lowerExpression(range->right());
+            if (left == kInvalidPlanIndex || right == kInvalidPlanIndex)
+            {
+                return {};
+            }
+            WriteSlice slice;
+            slice.kind = WriteSliceKind::RangeSelect;
+            slice.rangeKind = mapRangeKind(range->getSelectionKind());
+            slice.left = left;
+            slice.right = right;
+            slice.location = range->sourceRange.start();
+            slices.push_back(std::move(slice));
+            return base;
         }
         return {};
     }
