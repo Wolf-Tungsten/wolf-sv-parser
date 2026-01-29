@@ -216,3 +216,100 @@ module stmt_lowerer_lhs_select(
         y[idx -: 2] = data[5:4];
     end
 endmodule
+
+module stmt_lowerer_for_break(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 4; i = i + 1) begin
+            if (i == 2)
+                break;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_for_continue(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 4; i = i + 1) begin
+            if (i == 1)
+                continue;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_foreach_break(
+    input logic a,
+    output logic y
+);
+    logic [7:0] arr [0:3];
+    always_comb begin
+        foreach (arr[i]) begin
+            if (i == 2)
+                break;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_foreach_continue(
+    input logic a,
+    output logic y
+);
+    logic [7:0] arr [0:3];
+    always_comb begin
+        foreach (arr[i]) begin
+            if (i == 1)
+                continue;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_for_break_dynamic(
+    input logic a,
+    input logic stop,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 3; i = i + 1) begin
+            if (stop)
+                break;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_for_continue_dynamic(
+    input logic a,
+    input logic skip,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 3; i = i + 1) begin
+            if (skip)
+                continue;
+            y = a;
+        end
+    end
+endmodule
+
+module stmt_lowerer_for_break_case_dynamic(
+    input logic [1:0] sel,
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        for (int i = 0; i < 3; i = i + 1) begin
+            case (sel)
+                2'b00: break;
+                default: y = a;
+            endcase
+        end
+    end
+endmodule

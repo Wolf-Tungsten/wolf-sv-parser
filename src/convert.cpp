@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -1382,6 +1383,15 @@ void lowerGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
 struct StmtLowererState {
     class AssignmentExprVisitor;
 
+    enum class LoopControlResult { None, Break, Continue, Unsupported };
+
+    struct ForeachDimState {
+        const slang::ast::ValueSymbol* loopVar = nullptr;
+        int32_t start = 0;
+        int32_t stop = 0;
+        int32_t step = 1;
+    };
+
     ModulePlan& plan;
     ConvertDiagnostics* diagnostics;
     LoweringPlan& lowering;
@@ -1392,6 +1402,12 @@ struct StmtLowererState {
     std::size_t nextRoot = 0;
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
+    std::vector<ExprNodeId> flowStack;
+    struct LoopFlowContext {
+        ExprNodeId loopAlive = kInvalidPlanIndex;
+    };
+    std::vector<LoopFlowContext> loopFlowStack;
+    std::optional<std::string> loopControlFailure;
 
     StmtLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics, LoweringPlan& lowering,
                      uint32_t maxLoopIterations)
@@ -1448,6 +1464,24 @@ struct StmtLowererState {
             reportError(stmt, "Pattern case lowering is unsupported");
             return;
         }
+        if (stmt.as_if<slang::ast::BreakStatement>())
+        {
+            if (handleLoopBreak(stmt))
+            {
+                return;
+            }
+            reportUnsupported(stmt, "Break statement lowering is unsupported");
+            return;
+        }
+        if (stmt.as_if<slang::ast::ContinueStatement>())
+        {
+            if (handleLoopContinue(stmt))
+            {
+                return;
+            }
+            reportUnsupported(stmt, "Continue statement lowering is unsupported");
+            return;
+        }
         if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>())
         {
             scanExpression(exprStmt->expr);
@@ -1461,8 +1495,19 @@ struct StmtLowererState {
         if (const auto* forLoop = stmt.as_if<slang::ast::ForLoopStatement>())
         {
             scanForLoopControl(*forLoop);
+            const bool hasLoopControl = containsLoopControl(forLoop->body);
+            if (hasLoopControl)
+            {
+                clearLoopControlFailure();
+            }
             if (!tryUnrollFor(*forLoop))
             {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(stmt,
+                                           "For-loop with break/continue requires static unrolling");
+                    return;
+                }
                 reportUnsupported(stmt, "For-loop lowering uses unconditional guards");
                 visitStatement(forLoop->body);
             }
@@ -1471,8 +1516,19 @@ struct StmtLowererState {
         if (const auto* repeatLoop = stmt.as_if<slang::ast::RepeatLoopStatement>())
         {
             scanExpression(repeatLoop->count);
+            const bool hasLoopControl = containsLoopControl(repeatLoop->body);
+            if (hasLoopControl)
+            {
+                clearLoopControlFailure();
+            }
             if (!tryUnrollRepeat(*repeatLoop))
             {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(stmt,
+                                           "Repeat-loop with break/continue requires static unrolling");
+                    return;
+                }
                 reportUnsupported(stmt, "Repeat-loop lowering uses unconditional guards");
                 visitStatement(repeatLoop->body);
             }
@@ -1496,8 +1552,19 @@ struct StmtLowererState {
         if (const auto* foreachLoop = stmt.as_if<slang::ast::ForeachLoopStatement>())
         {
             scanExpression(foreachLoop->arrayRef);
+            const bool hasLoopControl = containsLoopControl(foreachLoop->body);
+            if (hasLoopControl)
+            {
+                clearLoopControlFailure();
+            }
             if (!tryUnrollForeach(*foreachLoop))
             {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(stmt,
+                                           "Foreach-loop with break/continue requires static unrolling");
+                    return;
+                }
                 reportUnsupported(stmt, "Foreach-loop lowering uses unconditional guards");
                 visitStatement(foreachLoop->body);
             }
@@ -1568,7 +1635,7 @@ struct StmtLowererState {
             }
         }
 
-        ExprNodeId baseGuard = currentGuard();
+        ExprNodeId baseGuard = currentPathGuard();
         ExprNodeId trueGuard = combineGuard(baseGuard, combinedCond, stmt.sourceRange.start());
         pushGuard(trueGuard);
         visitStatement(stmt.ifTrue);
@@ -1605,7 +1672,7 @@ struct StmtLowererState {
             return;
         }
 
-        ExprNodeId baseGuard = currentGuard();
+        ExprNodeId baseGuard = currentPathGuard();
         ExprNodeId priorMatch = kInvalidPlanIndex;
 
         bool warnedCaseEq = false;
@@ -1691,7 +1758,7 @@ struct StmtLowererState {
         intent.target = target;
         intent.slices = std::move(slices);
         intent.value = value;
-        intent.guard = currentGuard();
+        intent.guard = currentGuard(expr.sourceRange.start());
         intent.domain = domain;
         intent.isNonBlocking = expr.isNonBlocking();
         intent.location = expr.sourceRange.start();
@@ -1713,13 +1780,27 @@ struct StmtLowererState {
     };
 
 private:
-    ExprNodeId currentGuard() const
+    ExprNodeId currentPathGuard() const
     {
         if (guardStack.empty())
         {
             return kInvalidPlanIndex;
         }
         return guardStack.back();
+    }
+
+    ExprNodeId currentFlowGuard() const
+    {
+        if (flowStack.empty())
+        {
+            return kInvalidPlanIndex;
+        }
+        return flowStack.back();
+    }
+
+    ExprNodeId currentGuard(slang::SourceLocation location)
+    {
+        return combineGuard(currentPathGuard(), currentFlowGuard(), location);
     }
 
     void pushGuard(ExprNodeId guard)
@@ -1733,6 +1814,91 @@ private:
         {
             guardStack.pop_back();
         }
+    }
+
+    void pushFlowGuard(ExprNodeId guard)
+    {
+        flowStack.push_back(guard);
+    }
+
+    void popFlowGuard()
+    {
+        if (!flowStack.empty())
+        {
+            flowStack.pop_back();
+        }
+    }
+
+    void updateFlowGuard(ExprNodeId guard)
+    {
+        if (flowStack.empty())
+        {
+            return;
+        }
+        flowStack.back() = guard;
+    }
+
+    bool inDynamicLoop() const
+    {
+        return !loopFlowStack.empty();
+    }
+
+    ExprNodeId currentLoopAlive() const
+    {
+        if (loopFlowStack.empty())
+        {
+            return kInvalidPlanIndex;
+        }
+        return loopFlowStack.back().loopAlive;
+    }
+
+    void updateLoopAlive(ExprNodeId guard)
+    {
+        if (loopFlowStack.empty())
+        {
+            return;
+        }
+        loopFlowStack.back().loopAlive = guard;
+    }
+
+    void pushLoopContext()
+    {
+        loopFlowStack.push_back({});
+    }
+
+    void popLoopContext()
+    {
+        if (!loopFlowStack.empty())
+        {
+            loopFlowStack.pop_back();
+        }
+    }
+
+    bool handleLoopBreak(const slang::ast::Statement& stmt)
+    {
+        if (!inDynamicLoop())
+        {
+            return false;
+        }
+        const auto location = stmt.sourceRange.start();
+        ExprNodeId trigger = ensureGuardExpr(currentGuard(location), location);
+        ExprNodeId notTrigger = makeLogicNot(trigger, location);
+        updateFlowGuard(combineGuard(currentFlowGuard(), notTrigger, location));
+        updateLoopAlive(combineGuard(currentLoopAlive(), notTrigger, location));
+        return true;
+    }
+
+    bool handleLoopContinue(const slang::ast::Statement& stmt)
+    {
+        if (!inDynamicLoop())
+        {
+            return false;
+        }
+        const auto location = stmt.sourceRange.start();
+        ExprNodeId trigger = ensureGuardExpr(currentGuard(location), location);
+        ExprNodeId notTrigger = makeLogicNot(trigger, location);
+        updateFlowGuard(combineGuard(currentFlowGuard(), notTrigger, location));
+        return true;
     }
 
     ExprNodeId takeNextRoot(slang::SourceLocation location)
@@ -1763,6 +1929,15 @@ private:
             return base;
         }
         return makeOperation(grh::ir::OperationKind::kLogicAnd, {base, extra}, location);
+    }
+
+    ExprNodeId ensureGuardExpr(ExprNodeId guard, slang::SourceLocation location)
+    {
+        if (guard != kInvalidPlanIndex)
+        {
+            return guard;
+        }
+        return addConstantLiteral("1'b1", location);
     }
 
     ExprNodeId makeLogicAnd(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
@@ -1854,82 +2029,130 @@ private:
 
     bool tryUnrollRepeat(const slang::ast::RepeatLoopStatement& stmt)
     {
-        if (containsLoopControl(stmt.body))
-        {
-            return false;
-        }
-
         if (maxLoopIterations == 0)
         {
+            setLoopControlFailure("maxLoopIterations is 0");
             return false;
         }
 
-        slang::ast::EvalContext ctx(*plan.body);
-        std::optional<int64_t> count = evalConstantInt(stmt.count, ctx);
+        slang::ast::EvalContext countCtx(*plan.body);
+        std::optional<int64_t> count = evalConstantInt(stmt.count, countCtx);
         if (!count || *count < 0)
         {
+            setLoopControlFailure("repeat count is not statically evaluable");
             return false;
         }
         const uint64_t maxIterations = static_cast<uint64_t>(maxLoopIterations);
         if (static_cast<uint64_t>(*count) > maxIterations)
         {
+            setLoopControlFailure("repeat count exceeds maxLoopIterations");
             return false;
         }
 
-        for (int64_t i = 0; i < *count; ++i)
+        const bool hasLoopControl = containsLoopControl(stmt.body);
+        if (!hasLoopControl)
         {
-            visitStatement(stmt.body);
+            for (int64_t i = 0; i < *count; ++i)
+            {
+                visitStatement(stmt.body);
+            }
+            return true;
         }
-        return true;
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        LoopControlResult dryRun = runRepeatWithControl(stmt, *count, dryCtx, false);
+        if (dryRun != LoopControlResult::Unsupported)
+        {
+            slang::ast::EvalContext emitCtx(*plan.body);
+            LoopControlResult result = runRepeatWithControl(stmt, *count, emitCtx, true);
+            if (result != LoopControlResult::Unsupported)
+            {
+                return true;
+            }
+        }
+
+        clearLoopControlFailure();
+        return unrollRepeatDynamic(stmt, *count);
     }
 
     bool tryUnrollFor(const slang::ast::ForLoopStatement& stmt)
     {
-        if (!stmt.stopExpr || containsLoopControl(stmt.body))
+        if (!stmt.stopExpr)
         {
+            setLoopControlFailure("for-loop missing stop condition");
             return false;
         }
 
         if (maxLoopIterations == 0)
         {
+            setLoopControlFailure("maxLoopIterations is 0");
             return false;
         }
 
-        slang::ast::EvalContext ctx(*plan.body);
-        if (!prepareForLoopState(stmt, ctx))
+        const bool hasLoopControl = containsLoopControl(stmt.body);
+        if (!hasLoopControl)
         {
-            return false;
-        }
-
-        uint32_t iterations = 0;
-        while (iterations < maxLoopIterations)
-        {
-            bool cond = false;
-            if (!evalForLoopCondition(stmt, ctx, cond))
+            slang::ast::EvalContext ctx(*plan.body);
+            if (!prepareForLoopState(stmt, ctx))
             {
                 return false;
             }
-            if (!cond)
+
+            uint32_t iterations = 0;
+            while (iterations < maxLoopIterations)
+            {
+                bool cond = false;
+                if (!evalForLoopCondition(stmt, ctx, cond))
+                {
+                    return false;
+                }
+                if (!cond)
+                {
+                    return true;
+                }
+
+                visitStatement(stmt.body);
+
+                if (!executeForLoopSteps(stmt, ctx))
+                {
+                    return false;
+                }
+                ++iterations;
+            }
+            return false;
+        }
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        if (!prepareForLoopState(stmt, dryCtx))
+        {
+            setLoopControlFailure("for-loop init is not statically evaluable");
+            return false;
+        }
+        LoopControlResult dryRun = runForWithControl(stmt, dryCtx, false);
+        if (dryRun != LoopControlResult::Unsupported)
+        {
+            slang::ast::EvalContext emitCtx(*plan.body);
+            if (!prepareForLoopState(stmt, emitCtx))
+            {
+                setLoopControlFailure("for-loop init is not statically evaluable");
+                return false;
+            }
+            LoopControlResult result = runForWithControl(stmt, emitCtx, true);
+            if (result != LoopControlResult::Unsupported)
             {
                 return true;
             }
-
-            visitStatement(stmt.body);
-
-            if (!executeForLoopSteps(stmt, ctx))
-            {
-                return false;
-            }
-            ++iterations;
         }
 
-        return false;
+        clearLoopControlFailure();
+        return unrollForDynamic(stmt);
     }
 
     bool tryUnrollForeach(const slang::ast::ForeachLoopStatement& stmt)
     {
-        if (containsLoopControl(stmt.body) || stmt.loopDims.empty())
+        if (stmt.loopDims.empty())
         {
+            setLoopControlFailure("foreach has no loop dimensions");
             return false;
         }
 
@@ -1944,15 +2167,18 @@ private:
         {
             if (!dim.range)
             {
+                setLoopControlFailure("foreach dimension range is not static");
                 return false;
             }
             const uint64_t width = dim.range->fullWidth();
             if (width == 0)
             {
+                setLoopControlFailure("foreach dimension has zero width");
                 return false;
             }
             if (total > maxIterations / width)
             {
+                setLoopControlFailure("foreach iterations exceed maxLoopIterations");
                 return false;
             }
             total *= width;
@@ -1960,35 +2186,531 @@ private:
 
         if (total > maxIterations)
         {
+            setLoopControlFailure("foreach iterations exceed maxLoopIterations");
             return false;
         }
 
-        for (uint64_t i = 0; i < total; ++i)
+        const bool hasLoopControl = containsLoopControl(stmt.body);
+        if (!hasLoopControl)
         {
-            visitStatement(stmt.body);
+            for (uint64_t i = 0; i < total; ++i)
+            {
+                visitStatement(stmt.body);
+            }
+            return true;
         }
-        return true;
+
+        if (tryUnrollForeachWithControl(stmt))
+        {
+            return true;
+        }
+
+        clearLoopControlFailure();
+        return unrollForeachDynamic(stmt, total);
     }
 
     bool containsLoopControl(const slang::ast::Statement& stmt) const
     {
-        struct ControlVisitor : public slang::ast::ASTVisitor<ControlVisitor, false, true> {
-            bool found = false;
-
-            void handle(const slang::ast::BreakStatement&)
+        if (stmt.as_if<slang::ast::BreakStatement>() ||
+            stmt.as_if<slang::ast::ContinueStatement>())
+        {
+            return true;
+        }
+        if (const auto* list = stmt.as_if<slang::ast::StatementList>())
+        {
+            for (const slang::ast::Statement* child : list->list)
             {
-                found = true;
+                if (!child)
+                {
+                    continue;
+                }
+                if (containsLoopControl(*child))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (const auto* block = stmt.as_if<slang::ast::BlockStatement>())
+        {
+            return containsLoopControl(block->body);
+        }
+        if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>())
+        {
+            return containsLoopControl(timed->stmt);
+        }
+        if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>())
+        {
+            if (containsLoopControl(conditional->ifTrue))
+            {
+                return true;
+            }
+            if (conditional->ifFalse && containsLoopControl(*conditional->ifFalse))
+            {
+                return true;
+            }
+            return false;
+        }
+        if (const auto* caseStmt = stmt.as_if<slang::ast::CaseStatement>())
+        {
+            for (const auto& item : caseStmt->items)
+            {
+                if (item.stmt && containsLoopControl(*item.stmt))
+                {
+                    return true;
+                }
+            }
+            if (caseStmt->defaultCase && containsLoopControl(*caseStmt->defaultCase))
+            {
+                return true;
+            }
+            return false;
+        }
+        if (stmt.as_if<slang::ast::ForLoopStatement>() ||
+            stmt.as_if<slang::ast::RepeatLoopStatement>() ||
+            stmt.as_if<slang::ast::ForeachLoopStatement>() ||
+            stmt.as_if<slang::ast::WhileLoopStatement>() ||
+            stmt.as_if<slang::ast::DoWhileLoopStatement>() ||
+            stmt.as_if<slang::ast::ForeverLoopStatement>())
+        {
+            return false;
+        }
+        if (const auto* invalid = stmt.as_if<slang::ast::InvalidStatement>())
+        {
+            if (invalid->child)
+            {
+                return containsLoopControl(*invalid->child);
+            }
+            return false;
+        }
+        return false;
+    }
+
+    LoopControlResult visitStatementWithControl(const slang::ast::Statement& stmt,
+                                                slang::ast::EvalContext& ctx,
+                                                bool emit)
+    {
+        if (!containsLoopControl(stmt))
+        {
+            if (emit)
+            {
+                visitStatement(stmt);
+            }
+            return LoopControlResult::None;
+        }
+
+        if (const auto* list = stmt.as_if<slang::ast::StatementList>())
+        {
+            for (const slang::ast::Statement* child : list->list)
+            {
+                if (!child)
+                {
+                    continue;
+                }
+                LoopControlResult result = visitStatementWithControl(*child, ctx, emit);
+                if (result != LoopControlResult::None)
+                {
+                    return result;
+                }
+            }
+            return LoopControlResult::None;
+        }
+        if (const auto* block = stmt.as_if<slang::ast::BlockStatement>())
+        {
+            return visitStatementWithControl(block->body, ctx, emit);
+        }
+        if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>())
+        {
+            return visitStatementWithControl(timed->stmt, ctx, emit);
+        }
+        if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>())
+        {
+            return visitConditionalWithControl(*conditional, ctx, emit);
+        }
+        if (stmt.as_if<slang::ast::CaseStatement>())
+        {
+            setLoopControlFailure("case statement with break/continue is not statically evaluable");
+            return LoopControlResult::Unsupported;
+        }
+        if (stmt.as_if<slang::ast::PatternCaseStatement>())
+        {
+            reportError(stmt, "Pattern case lowering is unsupported");
+            return LoopControlResult::Unsupported;
+        }
+        if (stmt.as_if<slang::ast::BreakStatement>())
+        {
+            return LoopControlResult::Break;
+        }
+        if (stmt.as_if<slang::ast::ContinueStatement>())
+        {
+            return LoopControlResult::Continue;
+        }
+        if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>())
+        {
+            if (emit)
+            {
+                scanExpression(exprStmt->expr);
+            }
+            return LoopControlResult::None;
+        }
+        if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>())
+        {
+            if (emit)
+            {
+                scanExpression(procAssign->assignment);
+            }
+            return LoopControlResult::None;
+        }
+        if (const auto* invalid = stmt.as_if<slang::ast::InvalidStatement>())
+        {
+            if (invalid->child)
+            {
+                return visitStatementWithControl(*invalid->child, ctx, emit);
+            }
+            return LoopControlResult::None;
+        }
+        if (stmt.kind == slang::ast::StatementKind::Empty)
+        {
+            return LoopControlResult::None;
+        }
+
+        setLoopControlFailure("unsupported statement in loop with break/continue");
+        return LoopControlResult::Unsupported;
+    }
+
+    LoopControlResult visitConditionalWithControl(const slang::ast::ConditionalStatement& stmt,
+                                                  slang::ast::EvalContext& ctx,
+                                                  bool emit)
+    {
+        if (stmt.conditions.empty())
+        {
+            reportUnsupported(stmt, "Conditional statement missing condition");
+            return LoopControlResult::Unsupported;
+        }
+        for (const auto& cond : stmt.conditions)
+        {
+            if (cond.pattern)
+            {
+                reportError(stmt, "Patterned condition lowering is unsupported");
+                return LoopControlResult::Unsupported;
+            }
+        }
+
+        bool combined = true;
+        for (const auto& cond : stmt.conditions)
+        {
+            if (emit)
+            {
+                scanExpression(*cond.expr);
+            }
+            std::optional<bool> value = evalConstantBool(*cond.expr, ctx);
+            if (!value)
+            {
+                setLoopControlFailure("if-condition for break/continue is not statically evaluable");
+                return LoopControlResult::Unsupported;
+            }
+            combined = combined && *value;
+        }
+
+        if (combined)
+        {
+            return visitStatementWithControl(stmt.ifTrue, ctx, emit);
+        }
+        if (stmt.ifFalse)
+        {
+            return visitStatementWithControl(*stmt.ifFalse, ctx, emit);
+        }
+        return LoopControlResult::None;
+    }
+
+    LoopControlResult runRepeatWithControl(const slang::ast::RepeatLoopStatement& stmt,
+                                           int64_t count,
+                                           slang::ast::EvalContext& ctx,
+                                           bool emit)
+    {
+        for (int64_t i = 0; i < count; ++i)
+        {
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Unsupported)
+            {
+                return result;
+            }
+            if (result == LoopControlResult::Break)
+            {
+                return result;
+            }
+        }
+        return LoopControlResult::None;
+    }
+
+    LoopControlResult runForWithControl(const slang::ast::ForLoopStatement& stmt,
+                                        slang::ast::EvalContext& ctx,
+                                        bool emit)
+    {
+        uint32_t iterations = 0;
+        while (iterations < maxLoopIterations)
+        {
+            bool cond = false;
+            if (!evalForLoopCondition(stmt, ctx, cond))
+            {
+                setLoopControlFailure("for-loop condition is not statically evaluable");
+                return LoopControlResult::Unsupported;
+            }
+            if (!cond)
+            {
+                return LoopControlResult::None;
             }
 
-            void handle(const slang::ast::ContinueStatement&)
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Unsupported)
             {
-                found = true;
+                return result;
             }
-        };
+            if (result == LoopControlResult::Break)
+            {
+                return result;
+            }
+            if (result == LoopControlResult::Continue)
+            {
+                if (!executeForLoopSteps(stmt, ctx))
+                {
+                    setLoopControlFailure("for-loop step is not statically evaluable");
+                    return LoopControlResult::Unsupported;
+                }
+                ++iterations;
+                continue;
+            }
 
-        ControlVisitor visitor;
-        stmt.visit(visitor);
-        return visitor.found;
+            if (!executeForLoopSteps(stmt, ctx))
+            {
+                setLoopControlFailure("for-loop step is not statically evaluable");
+                return LoopControlResult::Unsupported;
+            }
+            ++iterations;
+        }
+
+        setLoopControlFailure("for-loop exceeds maxLoopIterations");
+        return LoopControlResult::Unsupported;
+    }
+
+    bool unrollRepeatDynamic(const slang::ast::RepeatLoopStatement& stmt, int64_t count)
+    {
+        pushLoopContext();
+        for (int64_t i = 0; i < count; ++i)
+        {
+            ExprNodeId iterGuard = currentLoopAlive();
+            pushFlowGuard(iterGuard);
+            visitStatement(stmt.body);
+            popFlowGuard();
+        }
+        popLoopContext();
+        return true;
+    }
+
+    bool unrollForDynamic(const slang::ast::ForLoopStatement& stmt)
+    {
+        slang::ast::EvalContext ctx(*plan.body);
+        if (!prepareForLoopState(stmt, ctx))
+        {
+            setLoopControlFailure("for-loop init is not statically evaluable");
+            return false;
+        }
+
+        pushLoopContext();
+        uint32_t iterations = 0;
+        while (iterations < maxLoopIterations)
+        {
+            bool cond = false;
+            if (!evalForLoopCondition(stmt, ctx, cond))
+            {
+                setLoopControlFailure("for-loop condition is not statically evaluable");
+                popLoopContext();
+                return false;
+            }
+            if (!cond)
+            {
+                popLoopContext();
+                return true;
+            }
+
+            ExprNodeId iterGuard = currentLoopAlive();
+            pushFlowGuard(iterGuard);
+            visitStatement(stmt.body);
+            popFlowGuard();
+
+            if (!executeForLoopSteps(stmt, ctx))
+            {
+                setLoopControlFailure("for-loop step is not statically evaluable");
+                popLoopContext();
+                return false;
+            }
+            ++iterations;
+        }
+
+        setLoopControlFailure("for-loop exceeds maxLoopIterations");
+        popLoopContext();
+        return false;
+    }
+
+    bool unrollForeachDynamic(const slang::ast::ForeachLoopStatement& stmt, uint64_t total)
+    {
+        pushLoopContext();
+        for (uint64_t i = 0; i < total; ++i)
+        {
+            ExprNodeId iterGuard = currentLoopAlive();
+            pushFlowGuard(iterGuard);
+            visitStatement(stmt.body);
+            popFlowGuard();
+        }
+        popLoopContext();
+        return true;
+    }
+
+    bool tryUnrollForeachWithControl(const slang::ast::ForeachLoopStatement& stmt)
+    {
+        std::vector<ForeachDimState> dims;
+        dims.reserve(stmt.loopDims.size());
+        for (const auto& dim : stmt.loopDims)
+        {
+            if (!dim.range || !dim.loopVar)
+            {
+                setLoopControlFailure("foreach dimension is not statically evaluable");
+                return false;
+            }
+            const slang::ast::Type& type = dim.loopVar->getType();
+            if (!type.isIntegral())
+            {
+                setLoopControlFailure("foreach loop variable is not integral");
+                return false;
+            }
+            const int32_t lo = std::min(dim.range->left, dim.range->right);
+            const int32_t hi = std::max(dim.range->left, dim.range->right);
+            ForeachDimState state;
+            state.loopVar = dim.loopVar;
+            state.start = lo;
+            state.stop = hi;
+            state.step = 1;
+            dims.push_back(state);
+        }
+
+        if (dims.empty())
+        {
+            return false;
+        }
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        std::size_t dryIterations = 0;
+        LoopControlResult dryRun =
+            unrollForeachRecursive(stmt, dims, 0, dryIterations, dryCtx, false);
+        if (dryRun == LoopControlResult::Unsupported)
+        {
+            return false;
+        }
+
+        slang::ast::EvalContext emitCtx(*plan.body);
+        std::size_t emitIterations = 0;
+        LoopControlResult result =
+            unrollForeachRecursive(stmt, dims, 0, emitIterations, emitCtx, true);
+        return result == LoopControlResult::None || result == LoopControlResult::Break;
+    }
+
+    LoopControlResult unrollForeachRecursive(const slang::ast::ForeachLoopStatement& stmt,
+                                             std::span<const ForeachDimState> dims,
+                                             std::size_t depth,
+                                             std::size_t& iterations,
+                                             slang::ast::EvalContext& ctx,
+                                             bool emit)
+    {
+        if (depth >= dims.size())
+        {
+            if (iterations++ >= maxLoopIterations)
+            {
+                setLoopControlFailure("foreach iterations exceed maxLoopIterations");
+                return LoopControlResult::Unsupported;
+            }
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Continue)
+            {
+                return LoopControlResult::None;
+            }
+            return result;
+        }
+
+        const ForeachDimState& dim = dims[depth];
+        for (int32_t index = dim.start;; index += dim.step)
+        {
+            if (!setLoopLocal(*dim.loopVar, index, ctx))
+            {
+                return LoopControlResult::Unsupported;
+            }
+
+            LoopControlResult result =
+                unrollForeachRecursive(stmt, dims, depth + 1, iterations, ctx, emit);
+            if (result == LoopControlResult::Break)
+            {
+                return LoopControlResult::Break;
+            }
+            if (result == LoopControlResult::Unsupported)
+            {
+                return LoopControlResult::Unsupported;
+            }
+
+            if (index == dim.stop)
+            {
+                break;
+            }
+        }
+
+        return LoopControlResult::None;
+    }
+
+    bool setLoopLocal(const slang::ast::ValueSymbol& symbol, int64_t value,
+                      slang::ast::EvalContext& ctx) const
+    {
+        const slang::ast::Type& type = symbol.getType();
+        if (!type.isIntegral())
+        {
+            return false;
+        }
+        const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+        const slang::bitwidth_t width =
+            static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+        slang::SVInt literal(value);
+        slang::SVInt resized = literal.resize(width);
+        resized.setSigned(type.isSigned());
+        slang::ConstantValue stored(resized);
+        if (slang::ConstantValue* slot = ctx.findLocal(&symbol))
+        {
+            *slot = std::move(stored);
+            return true;
+        }
+        return ctx.createLocal(&symbol, std::move(stored)) != nullptr;
+    }
+
+    std::optional<bool> evalConstantBool(const slang::ast::Expression& expr,
+                                         slang::ast::EvalContext& ctx) const
+    {
+        slang::ConstantValue value = expr.eval(ctx);
+        if (!value || value.hasUnknown())
+        {
+            return std::nullopt;
+        }
+        if (value.isTrue())
+        {
+            return true;
+        }
+        if (value.isFalse())
+        {
+            return false;
+        }
+        if (value.isInteger())
+        {
+            if (auto raw = value.integer().as<int64_t>())
+            {
+                return *raw != 0;
+            }
+        }
+        return std::nullopt;
     }
 
     std::optional<int64_t> evalConstantInt(const slang::ast::Expression& expr,
@@ -2900,6 +3622,39 @@ private:
             diagnostics->error(stmt.sourceRange.start(), std::string(message));
         }
     }
+
+    void reportError(const slang::ast::Expression& expr, std::string_view message)
+    {
+        if (diagnostics)
+        {
+            diagnostics->error(expr.sourceRange.start(), std::string(message));
+        }
+    }
+
+    void reportLoopControlError(const slang::ast::Statement& stmt, std::string_view header)
+    {
+        std::string message(header);
+        if (loopControlFailure)
+        {
+            message.append(": ");
+            message.append(*loopControlFailure);
+        }
+        reportError(stmt, message);
+    }
+
+    void clearLoopControlFailure()
+    {
+        loopControlFailure.reset();
+    }
+
+    void setLoopControlFailure(std::string message)
+    {
+        if (!loopControlFailure)
+        {
+            loopControlFailure = std::move(message);
+        }
+    }
+
 };
 
 void lowerStmtGenerateBlock(const slang::ast::GenerateBlockSymbol& block,

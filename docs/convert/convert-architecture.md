@@ -2,13 +2,53 @@
 
 > 本文聚焦数据结构与并行策略，描述 Convert 的静态组织方式。
 
-## 目标与边界
+## 目录
+- 1. 目标与边界
+- 2. 设计原则
+- 3. 核心数据结构
+  - 3.1. ConvertContext
+  - 3.2. PlanKey
+  - 3.3. PlanEntry（核心结构）
+  - 3.4. ModulePlan
+  - 3.5. PlanSymbolTable
+  - 3.6. AccessSite
+  - 3.7. RWOp
+  - 3.8. MemoryPortInfo
+  - 3.9. InstanceInfo
+  - 3.10. LoweringPlan
+    - 3.10.1. 总览与角色
+    - 3.10.2. 字段总览
+    - 3.10.3. 类型别名
+    - 3.10.4. 字段详解
+    - 3.10.5. ExprNode
+    - 3.10.6. LoweredRoot
+    - 3.10.7. WriteIntent / WriteSlice
+    - 3.10.8. 举例说明
+  - 3.11. WriteBackPlan
+  - 3.12. Diagnostics / Logger
+- 4. Pass 中间数据结构
+  - 4.1. Pass1: SymbolCollector
+  - 4.2. Pass2: TypeResolver
+  - 4.3. Pass3: RWAnalyzer
+  - 4.4. Pass5: StmtLowerer 内部临时结构
+    - 4.4.1. 动态 break/continue 完整示例（分 + 案例）
+- 5. Pass 与数据结构关系图
+- 6. 并行化策略（以模块为粒度）
+  - 6.1. 并行边界
+  - 6.2. 任务与调度
+  - 6.3. 去重与同步
+  - 6.4. 数据一致性
+  - 6.5. 诊断与日志
+- 7. GRH 输出契约
+- 8. 代码骨架落位
+
+## 1. 目标与边界
 - 输入：slang AST（`slang::ast::*`），由前端构建的 `Compilation` 与 `RootSymbol` 提供。
 - 输出：GRH IR（`grh::ir::Netlist` / `Graph` / `Value` / `Operation`）。
 - 职责：把已解析并类型化的 AST 转为结构化网表，并输出可定位的诊断信息。
 - 非职责：覆盖所有 SV 特性、完整时序/综合语义证明。
 
-## 设计原则
+## 2. 设计原则
 - 分阶段：先收集与分析，再生成 IR，避免边扫边写导致状态纠缠。
 - 以 slang 类型系统为源：宽度、符号、packed/unpacked 维度、参数值均从 `slang::ast::Type` 与常量求值获取。
 - 显式的数据模型：使用 Plan/Info 结构保存信号、端口、读写关系与控制域，降低隐式 memo。
@@ -17,30 +57,13 @@
 - 层次保留：不做全局扁平化，实例关系通过 kInstance 维护。
 - 可控日志：提供统一的调试日志接口，默认静默，可按级别与模块启用。
 
-## 核心数据结构
+## 3. 核心数据结构
 - 总览：
   - 定位：描述 Convert 的核心模型与共享状态，定义模块计划、符号索引与访问关系的稳定形态。
   - 结构清单：PlanKey、ConvertContext、PlanEntry、ModulePlan、PlanSymbolTable、AccessSite、
     RWOp、MemoryPortInfo、InstanceInfo、LoweringPlan/WriteBackPlan、Diagnostics/Logger。
 
-### PlanKey
-- 总览：
-  - 定位：模块计划的唯一标识，区分不同参数特化实例。
-  - 角色：作为 PlanCache/PlanTaskQueue 的 key，保证特化模块不会合并。
-- 字段总览（字段 -> 类型 -> 含义）：
-  - `body`: `const slang::ast::InstanceBodySymbol*` -> 模块实例体指针。
-  - `paramSignature`: `std::string` -> 参数序列化签名（非 localparam）。
-- 字段详解：
-  - `body`：
-    - 作用：指向具体模块体，提供稳定索引。
-    - 建立：Pass1 扫描实例体时填入。
-    - 输出：作为 PlanCache 与 PlanTaskQueue 的 key。
-  - `paramSignature`：
-    - 作用：区分参数特化实例，避免不同参数值被合并。
-    - 建立：Pass1 序列化参数名和值生成。
-    - 输出：参与 PlanKey 哈希与相等判断。
-
-### ConvertContext
+### 3.1. ConvertContext
 - 总览：
   - 定位：转换期共享状态容器，仅承载指针与配置（不持有资源所有权）。
   - 角色：为 Pass1~Pass8 提供编译期信息与缓存/队列入口。
@@ -105,7 +128,24 @@
   - 构造位置：`ConvertDriver::convert` 栈上临时构造。
   - 初始化顺序：先 `planCache.clear()` 与 `planQueue.reset()`，再填充 Context 字段。
 
-### PlanEntry（核心结构）
+### 3.2. PlanKey
+- 总览：
+  - 定位：模块计划的唯一标识，区分不同参数特化实例。
+  - 角色：作为 PlanCache/PlanTaskQueue 的 key，保证特化模块不会合并。
+- 字段总览（字段 -> 类型 -> 含义）：
+  - `body`: `const slang::ast::InstanceBodySymbol*` -> 模块实例体指针。
+  - `paramSignature`: `std::string` -> 参数序列化签名（非 localparam）。
+- 字段详解：
+  - `body`：
+    - 作用：指向具体模块体，提供稳定索引。
+    - 建立：Pass1 扫描实例体时填入。
+    - 输出：作为 PlanCache 与 PlanTaskQueue 的 key。
+  - `paramSignature`：
+    - 作用：区分参数特化实例，避免不同参数值被合并。
+    - 建立：Pass1 序列化参数名和值生成。
+    - 输出：参与 PlanKey 哈希与相等判断。
+
+### 3.3. PlanEntry（核心结构）
 - 总览：
   - 定位：模块计划的“状态 + 产物”核心单元，承载一个模块从计划到写回的生命周期。
   - 角色：PlanCache 的 value，控制并发去重与产物落地。
@@ -135,7 +175,7 @@
   - `PlanCache`：`PlanKey -> PlanEntry` 的并发缓存与去重容器。
   - `PlanArtifacts`：`PlanEntry` 内部的中间产物容器。
 
-### ModulePlan
+### 3.4. ModulePlan
 - 总览：
   - 定位：模块级静态计划，集中记录端口/信号/实例/读写关系等“长期稳定事实”。
   - 角色：Pass1~Pass7 的共享输入与写入目标。
@@ -188,7 +228,7 @@
     可按需生成、缓存或释放，避免与稳定骨架耦合。
   - 这种分层明确生命周期边界，便于并行/增量执行时隔离写入冲突与内存管理。
 
-### PlanSymbolTable
+### 3.5. PlanSymbolTable
 - 总览：
   - 定位：模块内符号驻留与索引化容器，提供 `string_view -> PlanSymbolId` 的稳定映射。
   - 目的：避免重复分配字符串，保证 name 查找与反查的性能与一致性。
@@ -217,7 +257,7 @@
   - `PlanSymbolId` 作为主键；`PortId/SignalId` 等均是 `std::vector` 索引。
   - 访问模式只追加写入，避免中途删除带来的引用失效。
 
-### AccessSite
+### 3.6. AccessSite
 - 总览：
   - 定位：单次访问点的最小描述，用于保留访问次数与顺序信息。
   - 角色：为端口数量推断与写入优先级分析提供原始依据。
@@ -235,7 +275,7 @@
     - 建立：RWAnalyzer 内部递增计数生成。
     - 输出：供后续阶段排序/优先级判断。
 
-### RWOp
+### 3.7. RWOp
 - 总览：
   - 定位：`ModulePlan.rwOps` 的单条读写记录，描述“哪个信号在什么控制域发生读/写”。
   - 角色：下游做读写归因、写回策略与端口数量分析的输入。
@@ -265,7 +305,7 @@
   - 生成：Pass3 负责填充并按 `(target, domain, isWrite)` 归并；访问点以 `sites` 保留。
   - 使用：Pass4~Pass7 以 `rwOps` 作为读写关系输入，不直接回扫 AST。
 
-### MemoryPortInfo
+### 3.8. MemoryPortInfo
 - 总览：
   - 定位：`ModulePlan.memPorts` 的单条 memory 端口记录，描述“某个 memory 在某类访问形态下需要的端口能力”。
   - 角色：Pass6 细化 memory 端口与数量规划的输入。
@@ -308,7 +348,7 @@
     访问点通过 `sites` 保留。
   - 使用：Pass6 以 `memPorts` 为输入，不回扫 AST；端口数量与拆分策略在 Pass6 决定。
 
-### InstanceInfo
+### 3.9. InstanceInfo
 - 总览：
   - 定位：`ModulePlan.instances` 的单条子实例记录，描述“当前模块里包含哪些实例、它们指向哪个 module 体、是否黑盒”。
   - 角色：实例层次保留、任务发现与黑盒记录。
@@ -341,22 +381,25 @@
   - 任务发现：每条 `InstanceInfo` 关联一个子模块 PlanKey，由 Pass1 递归投递到队列。
   - 使用：Pass4~Pass7 消费 `instances` 构建实例层级与连接关系，不回扫 AST。
 
-### LoweringPlan
-- 总览：
-  - 定位：`LoweringPlan` 记录 Pass4~Pass6 的表达式降级结果。
-  - 角色：`LoweringPlan` 为 StmtLowerer/MemoryPortLowerer 的共享输入。
-- LoweringPlan 字段总览（字段 -> 类型 -> 含义）：
-  - `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
-  - `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
-  - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
-  - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
-- 类型别名说明：
-  - `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
-- LoweringPlan 字段详解：
-  - `values`：
-    - 作用：保存降级后的表达式节点，节点之间通过索引引用。
-    - 建立：Pass4 对 RHS 表达式树递归降级时追加。
-    - 输出：供 Pass5/Pass6 解析依赖关系与写回意图。
+### 3.10. LoweringPlan
+#### 3.10.1. 总览与角色
+- 定位：`LoweringPlan` 记录 Pass4~Pass6 的表达式降级结果。
+- 角色：`LoweringPlan` 为 StmtLowerer/MemoryPortLowerer 的共享输入。
+
+#### 3.10.2. 字段总览
+- `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
+- `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
+- `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
+- `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
+
+#### 3.10.3. 类型别名
+- `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
+
+#### 3.10.4. 字段详解
+- `values`：
+  - 作用：保存降级后的表达式节点，节点之间通过索引引用。
+  - 建立：Pass4 对 RHS 表达式树递归降级时追加。
+  - 输出：供 Pass5/Pass6 解析依赖关系与写回意图。
   - `roots`：
     - 作用：标记每条 RHS 表达式的入口节点索引。
     - 建立：Pass4 处理赋值语句时收集 RHS 入口。
@@ -369,8 +412,16 @@
     - 作用：记录每条赋值语句的写回意图、guard 与控制域，并携带 LHS 切片信息。
     - 建立：Pass5 解析语句与控制流后追加。
     - 输出：供 Pass6/Pass7 合并写回与 guard/mux 决策；静态展开的循环会追加多条写回意图。
-    - 说明：guard 本身以 `ExprNode` 形式保存在 `values`，`WriteIntent.guard` 仅保存对应节点索引。
-- ExprNode 字段总览（字段 -> 类型 -> 含义）：
+    - 说明：guard 本身以 `ExprNode` 形式保存在 `values`，`WriteIntent.guard` 仅保存对应节点索引；
+      动态 break/continue 会额外生成 `loopAlive/flowGuard` 相关节点并参与 guard 组合，但不引入新结构字段。
+    - loopAlive/flowGuard 存储方式：
+      - `loopAlive` 与 `flowGuard` 都是普通 guard 表达式，落在 `LoweringPlan.values` 中；
+        其节点索引通过 `WriteIntent.guard` 间接引用（例如 `guard = flowGuard && branchGuard`）。
+      - Pass5 内部使用栈来维护 `loopAlive/flowGuard`，属于 Pass 内部临时状态，
+        不会作为独立字段持久化到 `LoweringPlan`。
+
+#### 3.10.5. ExprNode
+- 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `ExprNodeKind` -> Constant/Symbol/Operation。
   - `op`: `grh::ir::OperationKind` -> 操作节点类型（仅 Operation 有效）。
   - `symbol`: `PlanSymbolId` -> 命名值节点绑定的符号名。
@@ -378,7 +429,7 @@
   - `literal`: `std::string` -> 常量文本。
   - `operands`: `std::vector<ExprNodeId>` -> 操作数索引。
   - `location`: `slang::SourceLocation` -> 源码位置。
-- ExprNode 字段详解：
+- 字段详解：
   - `kind`：
     - 作用：决定节点类型以及哪些字段有效。
     - 输出：Pass5/Pass6 依据 kind 解析节点语义。
@@ -399,15 +450,19 @@
     - 约束：仅 `kind == Operation` 时有效。
   - `location`：
     - 作用：保留源码位置信息，便于诊断与日志。
-- LoweredRoot 字段总览（字段 -> 类型 -> 含义）：
+
+#### 3.10.6. LoweredRoot
+- 字段总览（字段 -> 类型 -> 含义）：
   - `value`: `ExprNodeId` -> 根节点索引。
   - `location`: `slang::SourceLocation` -> 源码位置。
-- LoweredRoot 字段详解：
+- 字段详解：
   - `value`：
     - 作用：指向 `values` 中的根节点。
     - 输出：作为每条 RHS 的入口。
   - `location`：
     - 作用：记录 root 的源码位置。
+
+#### 3.10.7. WriteIntent / WriteSlice
 - WriteIntent 字段总览（字段 -> 类型 -> 含义）：
   - `target`: `PlanSymbolId` -> 写回目标符号。
   - `slices`: `std::vector<WriteSlice>` -> LHS 位选/范围选链路；为空表示整信号写回。
@@ -423,8 +478,9 @@
   - `left`: `ExprNodeId` -> range 左表达式（RangeSelect）。
   - `right`: `ExprNodeId` -> range 右表达式（RangeSelect）。
   - `location`: `slang::SourceLocation` -> 片段选择位置。
-- 举例说明：
-  - #### 表达式降级（Pass4）
+
+#### 3.10.8. 举例说明
+- 表达式降级（Pass4）：
     - 输入：`assign y = (a & b) ? ~c : (a | b);`
     - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。
     - `LoweredRoot.value`：指向 `kMux` 节点索引（RHS 顶层根）。
@@ -441,7 +497,7 @@
     - `roots`：`[8]`
     - `tempSymbols`：`[2->tmp0, 4->tmp1, 7->tmp2, 8->tmp3]`
     - 说明：`a/b` 在 AST 中出现两次时会生成两个 `Symbol` 节点，因此 `values` 共 9 项。
-  - #### 分支语句（Pass5）
+- 分支语句（Pass5）：
     - if/else：
       - 输入：
         ```
@@ -620,21 +676,67 @@
       - 仅对静态可求值且总迭代次数不超过 `ConvertOptions.maxLoopIterations` 的循环做展开；
         默认上限为 65536；超过上限则报 TODO 并回退为单次访问；
         `guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
+      - 循环体内 `break/continue` 的 guard 可静态求值时，展开期直接裁剪：
+        break 终止后续迭代，continue 跳过当前迭代剩余语句。
+      - guard 不可静态求值时，启用动态 guard 传播：
+        `loopAlive` 跨迭代传播，`flowGuard` 屏蔽当前迭代剩余语句；
+        break/continue 分别更新 `loopAlive`/`flowGuard`。
+      - 若循环边界不可静态求值或超过上限 -> 报错不支持。
       - `while/do-while/forever` 当前不支持，Pass5 报错并跳过 body。
-- 生成与使用约定：
-  - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
-  - 使用：Pass5~Pass6 读取 `loweringPlan`，不回扫 AST。
+  - #### 循环语句（Pass5 动态 guard 传播）
+    - 输入：
+      ```
+      for (int i = 0; i < 3; i++) begin
+        if (stop) break;
+        if (skip) continue;
+        y = a;
+      end
+      ```
+    - 处理要点（总）：
+      - 动态 guard 由 `loopAlive` 与 `flowGuard` 组成；每次迭代开始 `flowGuard = loopAlive`。
+      - break 更新 `loopAlive` 与 `flowGuard`，continue 只更新 `flowGuard`。
+      - 写回 guard 由 `flowGuard && 分支 guard` 组合，保证 stop/skip 为真时屏蔽后续语句与迭代。
+    - 输出（完整示意：values + writes）（分）：
+      - 约定：`b_i = loopAlive_i`，`f_i = flowGuard_i`，每次迭代开始 `f_i = b_i`。
+      - values（仅列 guard 相关新增节点，省略已存在的 symbol/const 节点）：
+        - 迭代 0：
+          - `t0 = f0 && stop`（break 触发条件）
+          - `nb0 = !t0`
+          - `f0a = f0 && nb0`（break 后 flowGuard）
+          - `b1 = b0 && nb0`（下一迭代 loopAlive）
+          - `t1 = f0a && skip`（continue 触发条件）
+          - `nc0 = !t1`
+          - `f0b = f0a && nc0`（continue 后 flowGuard，写回 guard）
+        - 迭代 1：
+          - `f1 = b1`
+          - `t2 = f1 && stop`，`nb1 = !t2`，`f1a = f1 && nb1`，`b2 = b1 && nb1`
+          - `t3 = f1a && skip`，`nc1 = !t3`，`f1b = f1a && nc1`
+        - 迭代 2：
+          - `f2 = b2`
+          - `t4 = f2 && stop`，`nb2 = !t4`，`f2a = f2 && nb2`，`b3 = b2 && nb2`
+          - `t5 = f2a && skip`，`nc2 = !t5`，`f2b = f2a && nc2`
+      - writes（示意）：
+        - `WriteIntent{target=y, value=rhs(a), guard=f0b, domain=comb}`
+        - `WriteIntent{target=y, value=rhs(a), guard=f1b, domain=comb}`
+        - `WriteIntent{target=y, value=rhs(a), guard=f2b, domain=comb}`
+      - 说明：
+        - 上述 `t*/nb*/nc*/f*` 均是 `LoweringPlan.values` 中的节点；
+          `WriteIntent.guard` 保存其索引。
+        - 实际节点索引由构建顺序决定，这里仅展示结构关系。
+  - 生成与使用约定：
+    - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
+    - 使用：Pass5~Pass6 读取 `loweringPlan`，不回扫 AST。
 
-### WriteBackPlan
+### 3.11. WriteBackPlan
 - 总览：
   - 暂未展开，后续补充写回合并与 guard/mux 决策细节。
 
-### Diagnostics / Logger
+### 3.12. Diagnostics / Logger
 - 总览：
   - `ConvertDiagnostics`：统一收集 todo/error/warn，保留源码位置信息。
   - `ConvertLogger`：level/tag 过滤的可控日志接口。
 
-## Pass 中间数据结构
+## 4. Pass 中间数据结构
 - 总览：
   - 定位：单个 Pass 内部的临时结构/索引/去重表，不进入 `ModulePlan` 或 `PlanArtifacts`。
   - 目的：降低跨 Pass 的耦合与状态污染，便于并行与复用。
@@ -642,8 +744,9 @@
   - Pass1：ParameterSnapshot
   - Pass2：TypeResolution / PortIndexMap / SignalIndexMap
   - Pass3：RWAnalyzerState / RWVisitor
+  - Pass5：StmtLowererState（guardStack/flowStack/loopFlowStack 等临时状态）
 
-### Pass1: SymbolCollector
+### 4.1. Pass1: SymbolCollector
 - 总览：
   - 作用：在符号收集阶段提取参数绑定快照，支撑参数特化与黑盒参数记录。
   - 输出：PlanKey.paramSignature 与 InstanceInfo.parameters。
@@ -662,7 +765,7 @@
       - `signature` -> PlanKey.paramSignature。
       - `parameters` -> InstanceInfo.parameters（仅黑盒实例保留）。
 
-### Pass2: TypeResolver
+### 4.2. Pass2: TypeResolver
 - 总览：
   - 作用：用临时分析结果与索引表支撑类型解析，避免对 ModulePlan 进行半成品写入。
   - 输出：回写 PortInfo/SignalInfo 的宽度、符号与维度信息。
@@ -691,7 +794,7 @@
     - 建立：遍历 `ModulePlan.signals` 构建。
     - 输出：仅在 Pass2 内部使用。
 
-### Pass3: RWAnalyzer
+### 4.3. Pass3: RWAnalyzer
 - 总览：
   - 作用：在读写分析阶段集中维护索引、归并与 AST 访问入口。
   - 输出：`ModulePlan.rwOps` 与 `ModulePlan.memPorts`（并保留访问点）。
@@ -725,7 +828,69 @@
     - 建立：每个过程块/连续赋值构造一个 visitor，绑定当前 `ControlDomain`。
     - 输出：调用 `RWAnalyzerState` 写入访问记录。
 
-## Pass 与数据结构关系图
+### 4.4. Pass5: StmtLowerer 内部临时结构
+- 总览（总）：
+  - 定位：仅在 Pass5 运行期使用的临时状态，服务于语句递归、guard 组合与 loop 控制流传播。
+  - 目标：不新增持久化字段的前提下，完成 if/case/loop 的 guard 叠加与 break/continue 的语义还原。
+  - 代码位置：`StmtLowererState`（定义），`StmtLowererState::visitStatement`（主入口）。
+- 结构清单（分）：
+  - `guardStack`：分支路径 guard 栈（if/case 的 path guard）。
+  - `flowStack`：迭代内 flow guard 栈（动态 break/continue 使用）。
+  - `loopFlowStack`：循环上下文栈，保存当前循环的 `loopAlive`。
+  - `nextRoot/nextTemp`：消费 RHS root 与分配临时符号的游标。
+  - `loopControlFailure`：静态展开失败原因（诊断信息来源）。
+- 数据落位（分）：
+  - `guardStack/flowStack/loopFlowStack` 只存在于 Pass5，退出 Pass5 后即销毁。
+  - 最终 guard 落位在 `LoweringPlan.values`，`WriteIntent.guard` 仅保存索引，不保存 stack 本体。
+  - `loopAlive/flowGuard` 本身也是普通表达式节点，和其它 guard 一样进入 `LoweringPlan.values`。
+- 运行机制（分）：
+  - `guardStack`：进入 if/case 分支时 push，离开分支时 pop。
+  - `flowStack`：进入动态展开的“迭代体”时 push，break/continue 更新栈顶 guard。
+  - `loopFlowStack`：进入动态循环时 push，break 更新 `loopAlive`，用于后续迭代 guard。
+  - 代码位置：`StmtLowererState::pushGuard/popGuard`，`pushFlowGuard/popFlowGuard`，
+    `pushLoopContext/popLoopContext`，`handleLoopBreak/handleLoopContinue`。
+
+#### 4.4.1. 动态 break/continue 完整示例（分 + 案例）
+- 输入：
+  ```
+  for (int i = 0; i < 3; i++) begin
+    if (stop) break;
+    if (skip) continue;
+    y = a;
+  end
+  ```
+- 总体流程（总）：
+  - 用 `loopAlive` 记录“后续迭代是否仍然可达”，用 `flowGuard` 记录“当前迭代内是否继续执行后续语句”。
+  - break 更新 `loopAlive` 与 `flowGuard`，continue 只更新 `flowGuard`。
+  - 最终写回的 guard = `flowGuard && pathGuard`，并写入 `LoweringPlan.values` 供 `WriteIntent.guard` 引用。
+- 初始数据结构（分）：
+  - `guardStack = []`（无分支路径 guard）。
+  - `flowStack = []`（尚未进入迭代体）。
+  - `loopFlowStack = []`（尚未进入动态循环）。
+  - `LoweringPlan.values` 中尚无与该循环相关的 guard 节点。
+- 进入循环与迭代体（分）：
+  - 进入动态循环时 `pushLoopContext`，得到 `loopAlive = 1` 并存入 `loopFlowStack`。
+  - 每次迭代开始：`pushFlowGuard(loopAlive)`，此时 `flowStack.top == loopAlive`。
+- 处理 `if (stop) break;`（分）：
+  - `if (stop)` 进入 true 分支时 `guardStack.top == stop`。
+  - `handleLoopBreak` 使用 `currentGuard = flowGuard && stop` 作为触发条件：
+    - `notTrigger = !(flowGuard && stop)`
+    - `flowGuard = flowGuard && notTrigger`（屏蔽本迭代后续语句）
+    - `loopAlive = loopAlive && notTrigger`（屏蔽后续迭代）
+  - 直观等价于：`flowGuard = flowGuard && !stop`，`loopAlive = loopAlive && !stop`。
+- 处理 `if (skip) continue;`（分）：
+  - `if (skip)` 进入 true 分支时 `guardStack.top == skip`。
+  - `handleLoopContinue` 使用 `currentGuard = flowGuard && skip`：
+    - `notTrigger = !(flowGuard && skip)`
+    - `flowGuard = flowGuard && notTrigger`
+  - 直观等价于：`flowGuard = flowGuard && !skip`（仅影响当前迭代）。
+- 最终写回落地（分）：
+  - 语句 `y = a` 的写回 guard 使用 `currentGuard = flowGuard && pathGuard`，
+    在本例中 `pathGuard` 为空，因此写回 guard 直接来自 `flowGuard`。
+  - `flowGuard`/`loopAlive` 相关的 `kLogicAnd/kLogicNot` 节点追加进
+    `LoweringPlan.values`，其索引由 `WriteIntent.guard` 引用。
+
+## 5. Pass 与数据结构关系图
 ```
 Context Setup
   |
@@ -752,36 +917,36 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
   +--> Pass8: GraphAssemblyPass   -> Graph (GRH Op/Value) -> Netlist
 ```
 
-## 并行化策略（以模块为粒度）
-### 并行边界
+## 6. 并行化策略（以模块为粒度）
+### 6.1. 并行边界
 - 一个参数特化模块对应一个任务流水线。
 - Pass1~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
 
-### 任务与调度
+### 6.2. 任务与调度
 - 任务 key：`PlanKey = body + paramSignature`。
 - 调度：固定线程池 + 任务队列；主线程负责投递与汇总。
 - 任务发现：在 Pass1 遍历实例时，将子模块的 `PlanKey` 投递到队列。
 
-### 去重与同步
+### 6.3. 去重与同步
 - `PlanCache` 负责去重，保证同一 `PlanKey` 只处理一次。
 - `PlanTaskQueue` 负责任务分发，支持队列关闭以收敛并行阶段。
 
-### 数据一致性
+### 6.4. 数据一致性
 - 并行阶段只写 `PlanCache/PlanArtifacts`，不改 `Netlist`。
 - `GraphAssemblyPass` 串行落地 Graph 与 alias，避免并发写冲突。
 
-### 诊断与日志
+### 6.5. 诊断与日志
 - 诊断：线程本地缓存，最终由主线程合并。
 - 日志：`ConvertLogger` 统一输出，避免多线程交错。
 
-## GRH 输出契约
+## 7. GRH 输出契约
 - 端口与信号宽度、符号属性完全基于 slang 类型系统。
 - memory 仅使用精简后的读写端口集合（`kMemoryAsyncReadPort` / `kMemorySyncReadPort` / `kMemorySyncReadPortRst` / `kMemorySyncReadPortArst` / `kMemoryWritePort` / `kMemoryMaskWritePort`）。
 - 读端口复位仅作用于读寄存器，写端口无复位语义。
 - 四态逻辑语义保持一致，常量允许 x/z。
 - Netlist 允许多个顶层模块，Convert 标记 `topInstances` 形成 topGraphs 列表。
 
-## 代码骨架落位
+## 8. 代码骨架落位
 - `include/convert.hpp`：Convert 核心数据结构与接口声明。
 - `src/convert.cpp`：Convert 骨架实现与默认行为。
 - `CMakeLists.txt`：新增 `convert` 静态库目标。

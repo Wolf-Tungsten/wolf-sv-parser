@@ -589,6 +589,181 @@ int testLargeForeachLoop(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testForLoopBreak(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_break", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForLoopContinue(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_continue", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 3) {
+        return fail("Expected 3 write intents in " + sourcePath.string());
+    }
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForeachLoopBreak(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_foreach_break", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForeachLoopContinue(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_foreach_continue", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 3) {
+        return fail("Expected 3 write intents in " + sourcePath.string());
+    }
+    for (const auto& write : lowering.writes) {
+        if (!write.target.valid() ||
+            plan.symbolTable.text(write.target) != std::string_view("y")) {
+            return fail("Unexpected write target in " + sourcePath.string());
+        }
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForBreakDynamic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_break_dynamic", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 3) {
+        return fail("Expected 3 write intents in " + sourcePath.string());
+    }
+    std::size_t guarded = 0;
+    for (const auto& write : lowering.writes) {
+        if (write.guard != wolf_sv_parser::kInvalidPlanIndex &&
+            write.guard < lowering.values.size()) {
+            ++guarded;
+        }
+    }
+    if (guarded != lowering.writes.size()) {
+        return fail("Expected all writes guarded in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kLogicNot) ||
+        !hasOp(lowering, grh::ir::OperationKind::kLogicAnd)) {
+        return fail("Missing guard ops for dynamic break in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForContinueDynamic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_continue_dynamic", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 3) {
+        return fail("Expected 3 write intents in " + sourcePath.string());
+    }
+    std::size_t guarded = 0;
+    for (const auto& write : lowering.writes) {
+        if (write.guard != wolf_sv_parser::kInvalidPlanIndex &&
+            write.guard < lowering.values.size()) {
+            ++guarded;
+        }
+    }
+    if (guarded != lowering.writes.size()) {
+        return fail("Expected all writes guarded in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kLogicNot) ||
+        !hasOp(lowering, grh::ir::OperationKind::kLogicAnd)) {
+        return fail("Missing guard ops for dynamic continue in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForBreakCaseDynamic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_for_break_case_dynamic", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 3) {
+        return fail("Expected 3 write intents in " + sourcePath.string());
+    }
+    if (!hasOp(lowering, grh::ir::OperationKind::kLogicNot) ||
+        !hasOp(lowering, grh::ir::OperationKind::kLogicAnd)) {
+        return fail("Missing guard ops for case break in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -641,5 +816,26 @@ int main() {
     if (int status = testLargeForLoop(sourcePath); status != 0) {
         return status;
     }
-    return testLargeForeachLoop(sourcePath);
+    if (int status = testLargeForeachLoop(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForLoopBreak(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForLoopContinue(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForeachLoopBreak(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForeachLoopContinue(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForBreakDynamic(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForContinueDynamic(sourcePath); status != 0) {
+        return status;
+    }
+    return testForBreakCaseDynamic(sourcePath);
 }

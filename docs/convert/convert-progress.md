@@ -372,7 +372,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
-## STEP 0022 - Pass5 静态可求值 break/continue 支持
+## STEP 0021 - Pass5 静态可求值 break/continue 支持
 
 目标：
 - 在可静态求值的循环中支持 break/continue 语义
@@ -387,11 +387,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture 对可支持范围的说明
 
 实施：
-- 待实施
+- StmtLowerer 的 repeat/for/foreach 静态展开支持 break/continue，并在 guard 可静态求值时执行
+- 若循环体含 break/continue 且 guard 不可静态求值 -> 直接报错不支持
+- 新增 break/continue 相关 fixture 与 `convert-stmt-lowerer` 断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
-## STEP 0023 - Pass5 动态 break/continue guard 传播支持
+## STEP 0022 - Pass5 动态 break/continue guard 传播支持
 
 目标：
 - 对“综合可接受”的 break/continue 提供语义等价的 guard 展开
@@ -406,11 +409,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture 对 guard 传播流程的描述
 
 实施：
-- 待实施
+- StmtLowerer 为 repeat/for/foreach 引入动态 break/continue 的 flow guard 传播（loopAlive/flowGuard）
+- break 更新 `loopAlive`，continue 更新 `flowGuard`，保证后续语句与迭代被正确屏蔽
+- 新增动态 break/continue 的 fixture 与 `convert-stmt-lowerer` 断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
-## STEP 0021 - Pass5 测试覆盖扩展
+## STEP 0023 - Pass5 测试覆盖扩展
 
 目标：
 - 覆盖 case inside、pattern 条件报错、while/do/forever 报错、展开上限、位选/范围选 LHS

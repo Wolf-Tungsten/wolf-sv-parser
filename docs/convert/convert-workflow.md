@@ -121,81 +121,154 @@
     - tempSymbols：`[_expr_tmp_0, _expr_tmp_1, _expr_tmp_2, _expr_tmp_3]`
 
 ## Pass5: StmtLowererPass
-- 功能：语句与控制流降级，形成 guard 与写回意图。
+- 功能：语句与控制流降级，生成 guard 与写回意图。
 - 输入：`ModulePlan` + 语句 AST + `LoweringPlan` + ctx。
-- 输出形式：更新 `LoweringPlan`。
-- 顶层流程：
-  - 初始化 Pass5 状态（清空 `writes`，准备 guard 栈与 root 游标）。
-  - 遍历模块成员并递归遍历语句树，形成 guard 与写回意图。
-  - 将 guard 表达式节点写入 `LoweringPlan.values`，并追加 `WriteIntent`。
-- 步骤分解：
-  - 步骤 1：初始化与状态准备
-    - 清空 `LoweringPlan.writes`。
-    - 初始化 `guardStack`、`domain`、`nextRoot` 等状态。
-  - 步骤 2：模块成员遍历
-    - `ContinuousAssignSymbol`：设定 `domain=comb`，访问赋值表达式。
-    - `ProceduralBlockSymbol`：按过程块类型分类 `domain`，递归访问语句体。
-    - `GenerateBlockSymbol/GenerateBlockArraySymbol`：递归进入成员。
-  - 步骤 3：语句级递归遍历
-    - `StatementList/BlockStatement/TimedStatement/InvalidStatement`：递归进入子语句。
-    - `ExpressionStatement/ProceduralAssignStatement`：
-      - 提取 `AssignmentExpression`，消费 `LoweringPlan.roots` 对应 RHS；
-      - 解析 LHS 并记录 `target + slices`，读取当前 guard 与 domain，追加 `WriteIntent`。
-    - `ConditionalStatement`：
-      - 对多条件 `if` 链构建 `cond`（条件间 `logic-and`）；
-      - true guard = `base && cond`，false guard = `base && !cond`；
-      - 推入 guard 后递归访问分支语句。
-      - 若存在 pattern condition（`matches`），报错并跳过分支，不回退生成无 guard 语义。
-    - `CaseStatement`：
-      - 构建每个 item 的 match，并以 `logic-or` 聚合；
-      - guard = `base && match && !priorMatch`；
-      - default guard = `base && !priorMatch`；
-      - 判定规则：
-        - 普通 `case`：若 control 为 2-state 且 item 可常量求值且不含 X/Z -> `kEq`；
-          否则回退为 `kCaseEq` 并发出 warning（可能不可综合）。
-        - `casez/casex`：若 item 为常量，先生成 mask（casez 忽略 Z/?，casex 忽略 X/Z/?），
-          使用 `(control & mask) == (item & mask)` 生成 match（综合优先）；
-          item 非常量无法生成 mask 则回退 `kCaseEq` 并 warning。
-        - `case inside`：
-          - item 为 `ValueRange`：
-            - Simple `[a:b]` -> `(control >= a) && (control <= b)`；
-            - AbsoluteTolerance `[a +/- b]` -> `(control >= a - b) && (control <= a + b)`；
-            - RelativeTolerance `[a +%- b]` -> `(control >= a - (a*b/100)) && (control <= a + (a*b/100))`。
-          - item 为普通表达式：
-            - control 与 item 均为 integral -> `kWildcardEq`（`==?`）；
-            - 其他类型 -> `kEq`。
-          - 不支持场景（如 tolerance range 携带 unbounded）发出诊断并跳过该 item。
-    - `PatternCaseStatement`：
-      - 报错并跳过分支，不回退生成无 guard 语义。
-    - 循环语句：
-      - `repeat/for/foreach` 若可静态求值且总迭代次数不超过
-        `ConvertOptions.maxLoopIterations`（默认 65536）则展开多次访问 body；
-      - 不可静态求值或超过上限则记录 TODO 并按一次访问回退。
-      - `while/do-while/forever` 报错并跳过 body。
-  - 步骤 4：guard 表达式降级
-    - guard 使用 Pass5 内部表达式降级逻辑追加到 `LoweringPlan.values`；
-    - guard 节点同样分配 `_expr_tmp_<n>` 临时名。
-    - 案例（if/else guard）：
-      - 输入：
-        ```
-        always_comb begin
-          if (a) y = b; else y = c;
-        end
-        ```
-      - guard 生成过程：
-        - 当前 guard 为空 -> base = invalid
-        - 条件 `a` 降级为 `Symbol(a)`，记为 `g0`
-        - true guard = `g0`，false guard = `!g0`
-      - `LoweringPlan.values`（示意）：
-        - `0: Symbol(b)` (rhs0)
-        - `1: Symbol(c)` (rhs1)
-        - `2: Symbol(a)` (g0)
-        - `3: Op(kLogicNot, [2])` (g1)
-      - `LoweringPlan.writes`：
-        - `WriteIntent{target=y, value=0, guard=2}`
-        - `WriteIntent{target=y, value=1, guard=3}`
-  - 步骤 5：写回意图生成
-    - 追加 `WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`。
+- 输出形式：更新 `LoweringPlan`（追加 guard 节点与 `WriteIntent`）。
+
+### 0. 总体脉络
+Pass5 以“入口类型”为一级结构：
+1) 连续赋值入口（ContinuousAssignSymbol）  
+2) 过程块入口（ProceduralBlockSymbol）  
+3) 生成器入口（GenerateBlockSymbol / GenerateBlockArraySymbol）  
+每个入口内部再细化到具体语句类型的处理流程。
+
+### 1. 连续赋值入口（ContinuousAssignSymbol）
+#### 1.1 入口流程
+1) 设置 `domain = comb`。  
+2) 访问赋值表达式并消费 RHS root（来自 Pass4）。  
+3) 解析 LHS -> `target + slices`。  
+4) 生成 `WriteIntent`（guard 为空）。  
+代码位置：`lowerStmtContinuousAssign`。  
+
+#### 1.2 示例
+```
+assign y = a & b;
+```
+- 输出：`WriteIntent{target=y, value=rhs(a&b), guard=invalid, domain=comb}`。  
+
+### 2. 过程块入口（ProceduralBlockSymbol）
+#### 2.1 入口流程
+1) 根据过程块类型设置 `domain`：  
+   - `always_comb` -> comb  
+   - `always_ff` -> seq  
+   - `always_latch` -> latch  
+   - `initial` / `final` -> seq  
+   - `always` -> 进一步按 timing control 判定：  
+     - 无 timing control 或 implicit event（`@*` 语义）-> comb  
+     - 包含边沿敏感事件（`posedge/negedge`）-> seq  
+     - 纯电平敏感 event list -> comb  
+     - 其余无法识别的 timing -> unknown  
+2) 递归访问语句体。  
+3) 退出时恢复原 `domain`。  
+代码位置：`classifyProceduralBlock`，`lowerStmtProceduralBlock`。  
+
+#### 2.2 过程块内语句类型细分
+过程块内部的语句递归主要覆盖以下类型：
+
+##### 2.2.1 赋值类语句
+- `ExpressionStatement/ProceduralAssignStatement`：  
+  - 消费 RHS root；解析 LHS；生成 `WriteIntent`。  
+代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::handleAssignment`。  
+
+示例：  
+```
+always_ff @(posedge clk) begin
+  q <= d;
+end
+```
+- 输出：`WriteIntent{target=q, value=rhs(d), guard=invalid, domain=seq}`。  
+
+##### 2.2.2 分支语句（if/else）
+- 多条件 if：按顺序 `logic-and` 合并 `cond`。  
+- `trueGuard = base && cond`；`falseGuard = base && !cond`。  
+- guard 入栈后递归访问分支语句。  
+- pattern condition 直接报错并跳过分支。  
+代码位置：`StmtLowererState::visitConditional`。  
+
+示例：  
+```
+if (a) y = b; else y = c;
+```
+- 写回：`guard=g0` 与 `guard=!g0` 两条。  
+
+##### 2.2.3 分支语句（case / casez / casex / case inside）
+- item guard = `base && match && !priorMatch`；default guard = `base && !priorMatch`。  
+- 普通 `case`：2-state + 常量无 X/Z -> `kEq`；否则回退 `kCaseEq` 并 warning。  
+- `casez/casex`：常量 item 生成 mask，用 `(control & mask) == (item & mask)`。  
+- `case inside`：  
+  - `ValueRange`：`[a:b]` / `[a +/- b]` / `[a +%- b]` 按范围匹配公式生成。  
+  - 普通表达式：integral -> `kWildcardEq`，否则 `kEq`。  
+代码位置：`StmtLowererState::visitCase`，`StmtLowererState::buildCaseItemMatch`，`StmtLowererState::buildCaseWildcardMask`，`StmtLowererState::buildInsideValueRangeMatch`。  
+
+示例（casez mask）：  
+```
+casez (sel)
+  2'b0?: y = a;
+  default: y = b;
+endcase
+```
+- `match0 = (sel & mask) == (2'b0? & mask)`，default guard 为 `!match0`。  
+
+##### 2.2.4 循环语句（repeat / for / foreach）
+- 可静态求值且迭代次数 <= `ConvertOptions.maxLoopIterations` 时展开。  
+- `break/continue` 的处理分两种：  
+  - guard 可静态求值：直接在展开期裁剪迭代（break 终止后续迭代，continue 跳过当前迭代剩余语句）。  
+  - guard 不可静态求值：进入动态 guard 传播模式：  
+    - `loopAlive`：跨迭代 guard；break 更新 `loopAlive = loopAlive && !breakCond`。  
+    - `flowGuard`：当前迭代 guard；break/continue 更新 `flowGuard = flowGuard && !cond`，用于屏蔽剩余语句。  
+- 若循环边界不可静态求值或超过上限 -> 报错不支持。  
+- 不含 `break/continue` 时：不可静态求值或超上限 -> TODO + 单次访问回退。  
+代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::tryUnrollRepeat`，`StmtLowererState::tryUnrollFor`，`StmtLowererState::tryUnrollForeach`，`StmtLowererState::visitStatementWithControl`。  
+
+示例（for + continue）：  
+```
+for (int i = 0; i < 4; i++) begin
+  if (i == 1) continue;
+  y = a;
+end
+```
+- 结果：展开写回 3 次（跳过 `i==1`）。  
+
+示例（动态 break/continue guard 传播）：  
+```
+for (int i = 0; i < 3; i++) begin
+  if (stop) break;
+  if (skip) continue;
+  y = a;
+end
+```
+- 解释：  
+  - 初始 `loopAlive = 1`，每次迭代开始 `flowGuard = loopAlive`。  
+  - `break`：`loopAlive = loopAlive && !stop`，同时 `flowGuard = flowGuard && !stop`。  
+  - `continue`：`flowGuard = flowGuard && !skip`。  
+  - 写回 guard = `flowGuard && 当前分支 guard`，保证 stop/skip 为真时屏蔽后续语句与迭代。  
+
+##### 2.2.5 不支持语句
+- `PatternCaseStatement`：报错并跳过。  
+- `while/do-while/forever`：报错并跳过 body。  
+代码位置：`StmtLowererState::visitStatement`。  
+
+### 3. 生成器入口（GenerateBlockSymbol / GenerateBlockArraySymbol）
+#### 3.1 入口流程
+1) 跳过未实例化 block。  
+2) 遍历成员，对每个成员再次执行入口分派（1/2/3）。  
+3) 遇到嵌套 generate 继续递归。  
+代码位置：`lowerStmtMemberSymbol`，`lowerStmtGenerateBlock`，`lowerStmtGenerateBlockArray`。  
+
+#### 3.2 示例
+```
+generate
+  if (USE_A) begin : g
+    assign y = a;
+  end
+endgenerate
+```
+- 输出：若实例化，等价于一次 ContinuousAssign 入口处理。  
+
+### 4. 写回意图落地
+- 形态：`WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`。  
+- `guard = kInvalidPlanIndex` 表示无显式 guard。  
+代码位置：`StmtLowererState::handleAssignment`。  
 
 ## Pass6: MemoryPortLowererPass
 - 功能：细化 memory 读写端口的 Lowering 描述。
