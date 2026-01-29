@@ -149,6 +149,42 @@ module stmt_lowerer_foreach_stmt(
     end
 endmodule
 
+module stmt_lowerer_while_static(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        y = 1'b0;
+        while (1'b1) begin
+            y = a;
+            break;
+        end
+    end
+endmodule
+
+module stmt_lowerer_do_while_static(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        do begin
+            y = a;
+        end while (1'b0);
+    end
+endmodule
+
+module stmt_lowerer_forever_static(
+    input logic a,
+    output logic y
+);
+    always_comb begin
+        forever begin
+            y = a;
+            break;
+        end
+    end
+endmodule
+
 module stmt_lowerer_repeat_large_stmt(
     input logic a,
     output logic y
@@ -250,6 +286,92 @@ module stmt_lowerer_lhs_member(
     always_comb begin
         y.hi = a;
         y.lo = b;
+    end
+endmodule
+
+module stmt_lowerer_timed_delay(
+    input logic a,
+    output logic y
+);
+    always begin
+        #1 y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_event(
+    input logic a,
+    input logic clk,
+    output logic y
+);
+    always begin
+        @(posedge clk) y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_wait(
+    input logic a,
+    output logic y
+);
+    always begin
+        wait (a) y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_wait_fork(
+    input logic a,
+    output logic y
+);
+    always begin
+        wait fork;
+        y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_disable_fork(
+    input logic a,
+    output logic y
+);
+    always begin
+        disable fork;
+        y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_event_trigger(
+    input logic a,
+    output logic y
+);
+    event ev;
+    always begin
+        -> ev;
+        y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_event_trigger_delay(
+    input logic a,
+    output logic y
+);
+    event ev;
+    always begin
+        ->> #1 ev;
+        y = a;
+    end
+endmodule
+
+module stmt_lowerer_timed_wait_order(
+    input logic a,
+    input logic b,
+    output logic y
+);
+    event ev1;
+    event ev2;
+    always begin
+        wait_order (ev1, ev2) begin
+            y = a;
+        end else begin
+            y = b;
+        end
     end
 endmodule
 

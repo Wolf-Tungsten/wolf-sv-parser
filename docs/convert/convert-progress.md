@@ -316,17 +316,17 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 目标：
 - pattern 条件（if/else-if）与 pattern case 明确报错，不再回退生成无 guard 语义
-- while/do-while/forever 直接报错并停止对其 body 的降级
+- ~~while/do-while/forever 直接报错并停止对其 body 的降级~~（已被 STEP 0026 替代）
 
 计划：
 - 将相关分支的诊断从 todo 升级为 error
-- 对 pattern 条件/PatternCase/while/do/forever 采用 “报错 + 跳过” 策略
+- ~~对 pattern 条件/PatternCase/while/do/forever 采用 “报错 + 跳过” 策略~~（已被 STEP 0026 替代）
 - 更新 workflow/architecture 说明不支持范围
 - 增补错误路径测试
 
 实施：
 - StmtLowerer 将 pattern condition 与 pattern case 升级为 error 并直接跳过分支
-- while/do-while/forever 直接报错并停止对 body 的降级
+- ~~while/do-while/forever 直接报错并停止对 body 的降级~~（已被 STEP 0026 替代）
 - 新增 `convert-stmt-lowerer-errors` 测试与 fixture 覆盖错误路径
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
@@ -463,15 +463,18 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 关注点仅限可综合语法，不可综合语法留作未来支持
 
 计划：
-- 在 StmtLowerer 识别 TimedStatement 的控制类型并分流处理
-- 对不可综合/无法建模的 timing 直接报错并停止对 body 的降级
-- 增补 timed 语句 fixture 与错误路径断言
+- 在 StmtLowerer 识别 TimedStatement / wait / wait fork / wait order / event trigger / disable fork
+- 对 timing/并发控制发出 warning，忽略语义并继续降级可执行 body
+- 增补 timed 语句 fixture 与 warning 断言
 - 更新 workflow/architecture 对 timing 处理策略的说明
 
 实施：
-- 待实施
+- StmtLowerer 遇到 TimedStatement / wait / wait fork / wait order / event trigger / disable fork
+  发出 warning，忽略 timing/并发语义并继续降低可执行 body
+- 新增 timed delay/event/wait/wait fork/disable fork/event trigger 的 fixture 与断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0026 - Pass5 while/do-while/forever 静态展开支持
 
@@ -486,6 +489,36 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 维持 `maxLoopIterations` 上限与诊断信息一致性
 - 新增 while/do-while 静态展开 fixture 与断言
 - 更新 workflow/architecture 文档；标注此步骤将取代 STEP 0018 中“while/do/forever 报错”的行为
+
+实施：
+- StmtLowerer 新增 while/do-while/forever 静态展开路径与 EvalContext 评估逻辑
+- 循环展开统一先 dry-run，失败直接报错并不产出写回
+- 新增 while/do-while/forever 静态展开 fixture 与 `convert-stmt-lowerer` 断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成
+
+## STEP 0027 - Pass5 调试系统任务与 DPI 调用降级
+
+目标：
+- 在 Pass5 识别并保留调试系统任务（例如 `$display/$info/$warning/$error/$fatal`）
+- 支持 DPI-C 导入函数/任务的语句调用，并对 `ref/out/inout` 参数建模读写依赖
+- 保留语句顺序，emit 侧按 GRH 的调用/副作用 OP 规范化输出
+- 仅在 edge-sensitive 时钟驱动的过程块内生成 display/DPI 调用；否则丢弃并诊断
+- 对不可识别的调用给出明确诊断，保持可综合路径不受影响
+
+计划：
+- 扩展 `LoweringPlan`，新增“副作用语句”记录结构（Call/SideEffect intent），
+  记录 kind/name/op、guard/domain/location、以及参数列表
+- 引入时钟绑定：在进入过程块时解析 edge-sensitive timing control，记录 `clk` 与 `clkPolarity`；
+  若无法解析或非 edge-sensitive，display/DPI 调用按 GRH 要求丢弃并诊断
+- 参数建模：`in` -> `ExprNodeId`；`ref/out/inout` -> `LValueTarget + slices`，
+  `inout` 同时记录读入表达式与写回目标，形成读写依赖
+- 引入语句顺序：新增统一的有序 `LoweredStmt` 列表，Write/Call 统一按序存储
+- StmtLowerer 在 `ExpressionStatement` 中识别系统任务与 DPI 调用，解析方向并生成 intent
+- 复用 Pass4 表达式降级生成实参值（仅语句级调用，不扩展 Pass4 表达式调用）
+- 新增 `stmt_lowerer` fixture 与断言覆盖 `$display` 与 DPI `ref/out/inout` 调用顺序
+- 更新 workflow/architecture，补充 Pass5 处理“副作用语句”的流程与限制
 
 实施：
 - 待实施

@@ -605,6 +605,18 @@
     - 说明：
       - `index=expr(idx)` 表示 index 字段保存 `idx` 的 ExprNodeId（由表达式降级得到）。
       - element select（数组索引）与 member select 都会追加到 slices 链路，顺序与 LHS 访问一致。
+  - #### TimedStatement（Pass5）
+    - 输入：
+      ```
+      always begin
+        #1 y = a;
+      end
+      ```
+    - 输出（示意）：
+      - `writes`：`WriteIntent{target=y, value=rhs(a), guard=invalid}`
+    - 说明：
+      - timed control 仅触发 warning，降级时忽略 timing 语义并继续降低 body。
+      - `wait` / `wait fork` / `wait order` / `event trigger` / `disable fork` 采取同样策略。
   - #### Case 语句（Pass5）
     - 输入：
       ```
@@ -712,15 +724,18 @@
           - `WriteIntent{y, value=0, guard=invalid}`
     - 说明：
       - 仅对静态可求值且总迭代次数不超过 `ConvertOptions.maxLoopIterations` 的循环做展开；
-        默认上限为 65536；超过上限则报 TODO 并回退为单次访问；
+        默认上限为 65536；
+        repeat/for/foreach 在不含 `break/continue` 时，超上限或不可静态求值 -> TODO + 单次访问回退；
+        while/do-while/forever 不回退，直接报错；
         `guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
       - 循环体内 `break/continue` 的 guard 可静态求值时，展开期直接裁剪：
         break 终止后续迭代，continue 跳过当前迭代剩余语句。
       - guard 不可静态求值时，启用动态 guard 传播：
         `loopAlive` 跨迭代传播，`flowGuard` 屏蔽当前迭代剩余语句；
         break/continue 分别更新 `loopAlive`/`flowGuard`。
+      - while/do-while 使用 `EvalContext` 静态求值条件；do-while 至少执行一次；
+        forever 需要在上限内由 break 终止，否则报错。
       - 若循环边界不可静态求值或超过上限 -> 报错不支持。
-      - `while/do-while/forever` 当前不支持，Pass5 报错并跳过 body。
   - #### 循环语句（Pass5 动态 guard 传播）
     - 输入：
       ```

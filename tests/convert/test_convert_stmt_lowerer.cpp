@@ -149,6 +149,17 @@ bool hasOp(const wolf_sv_parser::LoweringPlan& plan, grh::ir::OperationKind op) 
     return false;
 }
 
+bool hasWarningMessage(const wolf_sv_parser::ConvertDiagnostics& diagnostics,
+                       std::string_view needle) {
+    for (const auto& message : diagnostics.messages()) {
+        if (message.kind == wolf_sv_parser::ConvertDiagnosticKind::Warning &&
+            message.message.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 constexpr std::size_t kLargeLoopCount = 5000;
 
 int testLowerer(const std::filesystem::path& sourcePath) {
@@ -604,6 +615,166 @@ int testLhsMemberSelect(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testTimedDelay(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_delay", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring timing control")) {
+        return fail("Expected timing warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedEvent(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_event", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring timing control")) {
+        return fail("Expected timing warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedWait(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_wait", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring wait statement")) {
+        return fail("Expected wait warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedWaitFork(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_wait_fork", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring wait fork")) {
+        return fail("Expected wait fork warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedDisableFork(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_disable_fork", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring disable fork")) {
+        return fail("Expected disable fork warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedEventTrigger(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_event_trigger", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring event trigger")) {
+        return fail("Expected event trigger warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedEventTriggerDelay(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_event_trigger_delay", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring event trigger")) {
+        return fail("Expected event trigger warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testTimedWaitOrder(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_timed_wait_order", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "Ignoring wait order")) {
+        return fail("Expected wait order warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testRepeatLoop(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -648,6 +819,57 @@ int testForeachLoop(const std::filesystem::path& sourcePath) {
 
     if (lowering.writes.size() != 2) {
         return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testWhileLoopStatic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_while_static", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 2) {
+        return fail("Expected 2 write intents in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testDoWhileLoopStatic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_do_while_static", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testForeverLoopStatic(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_forever_static", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (lowering.writes.size() != 1) {
+        return fail("Expected 1 write intent in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -930,6 +1152,30 @@ int main() {
     if (int status = testLhsMemberSelect(sourcePath); status != 0) {
         return status;
     }
+    if (int status = testTimedDelay(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedEvent(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedWait(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedWaitFork(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedDisableFork(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedEventTrigger(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedEventTriggerDelay(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testTimedWaitOrder(sourcePath); status != 0) {
+        return status;
+    }
     if (int status = testRepeatLoop(sourcePath); status != 0) {
         return status;
     }
@@ -937,6 +1183,15 @@ int main() {
         return status;
     }
     if (int status = testForeachLoop(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testWhileLoopStatic(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testDoWhileLoopStatic(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testForeverLoopStatic(sourcePath); status != 0) {
         return status;
     }
     if (int status = testLargeRepeatLoop(sourcePath); status != 0) {

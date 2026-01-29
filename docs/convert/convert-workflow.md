@@ -210,16 +210,20 @@ endcase
 ```
 - `match0 = (sel & mask) == (2'b0? & mask)`，default guard 为 `!match0`。  
 
-##### 2.2.4 循环语句（repeat / for / foreach）
+##### 2.2.4 循环语句（repeat / for / foreach / while / do-while / forever）
 - 可静态求值且迭代次数 <= `ConvertOptions.maxLoopIterations` 时展开。  
 - `break/continue` 的处理分两种：  
   - guard 可静态求值：直接在展开期裁剪迭代（break 终止后续迭代，continue 跳过当前迭代剩余语句）。  
-  - guard 不可静态求值：进入动态 guard 传播模式：  
+  - guard 不可静态求值：进入动态 guard 传播模式（仅 repeat/for/foreach）：  
     - `loopAlive`：跨迭代 guard；break 更新 `loopAlive = loopAlive && !breakCond`。  
     - `flowGuard`：当前迭代 guard；break/continue 更新 `flowGuard = flowGuard && !cond`，用于屏蔽剩余语句。  
 - 若循环边界不可静态求值或超过上限 -> 报错不支持。  
-- 不含 `break/continue` 时：不可静态求值或超上限 -> TODO + 单次访问回退。  
-代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::tryUnrollRepeat`，`StmtLowererState::tryUnrollFor`，`StmtLowererState::tryUnrollForeach`，`StmtLowererState::visitStatementWithControl`。  
+- repeat/for/foreach：不含 `break/continue` 时，不可静态求值或超上限 -> TODO + 单次访问回退。  
+- while/do-while/forever：仅静态展开，do-while 保证至少执行一次，forever 需在上限内由 break 终止。  
+代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::tryUnrollRepeat`，
+`StmtLowererState::tryUnrollFor`，`StmtLowererState::tryUnrollForeach`，
+`StmtLowererState::tryUnrollWhile`，`StmtLowererState::tryUnrollDoWhile`，
+`StmtLowererState::tryUnrollForever`，`StmtLowererState::visitStatementWithControl`。  
 
 示例（for + continue）：  
 ```
@@ -246,7 +250,8 @@ end
 
 ##### 2.2.5 不支持语句
 - `PatternCaseStatement`：报错并跳过。  
-- `while/do-while/forever`：报错并跳过 body。  
+- `TimedStatement` / `wait` / `wait fork` / `wait order` / `event trigger` / `disable fork`：
+  发出 warning，忽略 timing/并发语义，仅降低可执行的 body（若存在）。  
 代码位置：`StmtLowererState::visitStatement`。  
 
 ### 3. 生成器入口（GenerateBlockSymbol / GenerateBlockArraySymbol）

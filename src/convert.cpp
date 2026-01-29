@@ -1456,7 +1456,42 @@ struct StmtLowererState {
         }
         if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>())
         {
+            warnTimedStatement(*timed);
             visitStatement(timed->stmt);
+            return;
+        }
+        if (const auto* wait = stmt.as_if<slang::ast::WaitStatement>())
+        {
+            warnWaitStatement(*wait);
+            visitStatement(wait->stmt);
+            return;
+        }
+        if (const auto* waitFork = stmt.as_if<slang::ast::WaitForkStatement>())
+        {
+            warnWaitForkStatement(*waitFork);
+            return;
+        }
+        if (const auto* waitOrder = stmt.as_if<slang::ast::WaitOrderStatement>())
+        {
+            warnWaitOrderStatement(*waitOrder);
+            if (waitOrder->ifTrue)
+            {
+                visitStatement(*waitOrder->ifTrue);
+            }
+            if (waitOrder->ifFalse)
+            {
+                visitStatement(*waitOrder->ifFalse);
+            }
+            return;
+        }
+        if (const auto* eventTrigger = stmt.as_if<slang::ast::EventTriggerStatement>())
+        {
+            warnEventTriggerStatement(*eventTrigger);
+            return;
+        }
+        if (const auto* disableFork = stmt.as_if<slang::ast::DisableForkStatement>())
+        {
+            warnDisableForkStatement(*disableFork);
             return;
         }
         if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>())
@@ -1546,17 +1581,52 @@ struct StmtLowererState {
         }
         if (const auto* whileLoop = stmt.as_if<slang::ast::WhileLoopStatement>())
         {
-            reportError(stmt, "While-loop lowering is unsupported");
+            scanExpression(whileLoop->cond);
+            const bool hasLoopControl = containsLoopControl(whileLoop->body);
+            clearLoopControlFailure();
+            if (!tryUnrollWhile(*whileLoop))
+            {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(stmt,
+                                           "While-loop with break/continue requires static unrolling");
+                    return;
+                }
+                reportLoopFailure(stmt, "While-loop lowering failed");
+            }
             return;
         }
         if (const auto* doWhileLoop = stmt.as_if<slang::ast::DoWhileLoopStatement>())
         {
-            reportError(stmt, "Do-while lowering is unsupported");
+            scanExpression(doWhileLoop->cond);
+            const bool hasLoopControl = containsLoopControl(doWhileLoop->body);
+            clearLoopControlFailure();
+            if (!tryUnrollDoWhile(*doWhileLoop))
+            {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(
+                        stmt, "Do-while loop with break/continue requires static unrolling");
+                    return;
+                }
+                reportLoopFailure(stmt, "Do-while loop lowering failed");
+            }
             return;
         }
         if (const auto* foreverLoop = stmt.as_if<slang::ast::ForeverLoopStatement>())
         {
-            reportError(stmt, "Forever-loop lowering is unsupported");
+            const bool hasLoopControl = containsLoopControl(foreverLoop->body);
+            clearLoopControlFailure();
+            if (!tryUnrollForever(*foreverLoop))
+            {
+                if (hasLoopControl)
+                {
+                    reportLoopControlError(
+                        stmt, "Forever-loop with break/continue requires static unrolling");
+                    return;
+                }
+                reportLoopFailure(stmt, "Forever-loop lowering failed");
+            }
             return;
         }
         if (const auto* foreachLoop = stmt.as_if<slang::ast::ForeachLoopStatement>())
@@ -1940,9 +2010,11 @@ private:
         loopFlowStack.back().loopAlive = guard;
     }
 
-    void pushLoopContext()
+    void pushLoopContext(slang::SourceLocation location)
     {
-        loopFlowStack.push_back({});
+        LoopFlowContext context;
+        context.loopAlive = addConstantLiteral("1'b1", location);
+        loopFlowStack.push_back(std::move(context));
     }
 
     void popLoopContext()
@@ -2064,6 +2136,85 @@ private:
         return makeOperation(grh::ir::OperationKind::kCaseEq, {lhs, rhs}, location);
     }
 
+    void warnIgnoredStatement(const slang::ast::Statement& stmt, std::string_view label)
+    {
+        if (!diagnostics)
+        {
+            return;
+        }
+        std::string message("Ignoring ");
+        message.append(label);
+        message.append("; lowering statement without timing semantics");
+        diagnostics->warn(stmt.sourceRange.start(), std::move(message));
+    }
+
+    std::string describeTiming(const slang::ast::TimingControl& timing) const
+    {
+        using slang::ast::TimingControlKind;
+        switch (timing.kind)
+        {
+        case TimingControlKind::Delay:
+            return "delay";
+        case TimingControlKind::Delay3:
+            return "delay3";
+        case TimingControlKind::OneStepDelay:
+            return "one-step delay";
+        case TimingControlKind::CycleDelay:
+            return "cycle delay";
+        case TimingControlKind::SignalEvent:
+            return "event";
+        case TimingControlKind::EventList:
+            return "event list";
+        case TimingControlKind::ImplicitEvent:
+            return "implicit event";
+        case TimingControlKind::RepeatedEvent:
+            return "repeated event";
+        case TimingControlKind::BlockEventList:
+            return "block event list";
+        case TimingControlKind::Invalid:
+        default:
+            break;
+        }
+        return "timing control";
+    }
+
+    void warnTimedStatement(const slang::ast::TimedStatement& stmt)
+    {
+        if (!diagnostics)
+        {
+            return;
+        }
+        std::string message("Ignoring timing control (");
+        message.append(describeTiming(stmt.timing));
+        message.append("); lowering statement without timing semantics");
+        diagnostics->warn(stmt.sourceRange.start(), std::move(message));
+    }
+
+    void warnWaitStatement(const slang::ast::WaitStatement& stmt)
+    {
+        warnIgnoredStatement(stmt, "wait statement");
+    }
+
+    void warnWaitForkStatement(const slang::ast::WaitForkStatement& stmt)
+    {
+        warnIgnoredStatement(stmt, "wait fork");
+    }
+
+    void warnWaitOrderStatement(const slang::ast::WaitOrderStatement& stmt)
+    {
+        warnIgnoredStatement(stmt, "wait order");
+    }
+
+    void warnEventTriggerStatement(const slang::ast::EventTriggerStatement& stmt)
+    {
+        warnIgnoredStatement(stmt, "event trigger");
+    }
+
+    void warnDisableForkStatement(const slang::ast::DisableForkStatement& stmt)
+    {
+        warnIgnoredStatement(stmt, "disable fork");
+    }
+
     void scanForLoopControl(const slang::ast::ForLoopStatement& stmt)
     {
         AssignmentExprVisitor visitor(*this);
@@ -2152,6 +2303,75 @@ private:
 
         clearLoopControlFailure();
         return unrollRepeatDynamic(stmt, *count);
+    }
+
+    bool tryUnrollWhile(const slang::ast::WhileLoopStatement& stmt)
+    {
+        if (maxLoopIterations == 0)
+        {
+            setLoopControlFailure("maxLoopIterations is 0");
+            return false;
+        }
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        LoopControlResult dryRun = runWhileWithControl(stmt, dryCtx, false);
+        if (dryRun != LoopControlResult::Unsupported)
+        {
+            slang::ast::EvalContext emitCtx(*plan.body);
+            LoopControlResult result = runWhileWithControl(stmt, emitCtx, true);
+            if (result != LoopControlResult::Unsupported)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool tryUnrollDoWhile(const slang::ast::DoWhileLoopStatement& stmt)
+    {
+        if (maxLoopIterations == 0)
+        {
+            setLoopControlFailure("maxLoopIterations is 0");
+            return false;
+        }
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        LoopControlResult dryRun = runDoWhileWithControl(stmt, dryCtx, false);
+        if (dryRun != LoopControlResult::Unsupported)
+        {
+            slang::ast::EvalContext emitCtx(*plan.body);
+            LoopControlResult result = runDoWhileWithControl(stmt, emitCtx, true);
+            if (result != LoopControlResult::Unsupported)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool tryUnrollForever(const slang::ast::ForeverLoopStatement& stmt)
+    {
+        if (maxLoopIterations == 0)
+        {
+            setLoopControlFailure("maxLoopIterations is 0");
+            return false;
+        }
+
+        slang::ast::EvalContext dryCtx(*plan.body);
+        LoopControlResult dryRun = runForeverWithControl(stmt, dryCtx, false);
+        if (dryRun != LoopControlResult::Unsupported)
+        {
+            slang::ast::EvalContext emitCtx(*plan.body);
+            LoopControlResult result = runForeverWithControl(stmt, emitCtx, true);
+            if (result != LoopControlResult::Unsupported)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     bool tryUnrollFor(const slang::ast::ForLoopStatement& stmt)
@@ -2572,9 +2792,100 @@ private:
         return LoopControlResult::Unsupported;
     }
 
+    LoopControlResult runWhileWithControl(const slang::ast::WhileLoopStatement& stmt,
+                                          slang::ast::EvalContext& ctx,
+                                          bool emit)
+    {
+        uint32_t iterations = 0;
+        while (iterations < maxLoopIterations)
+        {
+            std::optional<bool> cond = evalConstantBool(stmt.cond, ctx);
+            if (!cond)
+            {
+                setLoopControlFailure("while-loop condition is not statically evaluable");
+                return LoopControlResult::Unsupported;
+            }
+            if (!*cond)
+            {
+                return LoopControlResult::None;
+            }
+
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Unsupported)
+            {
+                return result;
+            }
+            if (result == LoopControlResult::Break)
+            {
+                return result;
+            }
+            ++iterations;
+        }
+
+        setLoopControlFailure("while-loop exceeds maxLoopIterations");
+        return LoopControlResult::Unsupported;
+    }
+
+    LoopControlResult runDoWhileWithControl(const slang::ast::DoWhileLoopStatement& stmt,
+                                            slang::ast::EvalContext& ctx,
+                                            bool emit)
+    {
+        uint32_t iterations = 0;
+        while (iterations < maxLoopIterations)
+        {
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Unsupported)
+            {
+                return result;
+            }
+            if (result == LoopControlResult::Break)
+            {
+                return result;
+            }
+            ++iterations;
+
+            std::optional<bool> cond = evalConstantBool(stmt.cond, ctx);
+            if (!cond)
+            {
+                setLoopControlFailure("do-while condition is not statically evaluable");
+                return LoopControlResult::Unsupported;
+            }
+            if (!*cond)
+            {
+                return LoopControlResult::None;
+            }
+        }
+
+        setLoopControlFailure("do-while exceeds maxLoopIterations");
+        return LoopControlResult::Unsupported;
+    }
+
+    LoopControlResult runForeverWithControl(const slang::ast::ForeverLoopStatement& stmt,
+                                            slang::ast::EvalContext& ctx,
+                                            bool emit)
+    {
+        uint32_t iterations = 0;
+        while (iterations < maxLoopIterations)
+        {
+            LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
+            if (result == LoopControlResult::Unsupported)
+            {
+                return result;
+            }
+            if (result == LoopControlResult::Break)
+            {
+                return result;
+            }
+            ++iterations;
+        }
+
+        setLoopControlFailure("forever-loop exceeds maxLoopIterations");
+        return LoopControlResult::Unsupported;
+    }
+
     bool unrollRepeatDynamic(const slang::ast::RepeatLoopStatement& stmt, int64_t count)
     {
-        pushLoopContext();
+        pushLoopContext(stmt.sourceRange.start());
         for (int64_t i = 0; i < count; ++i)
         {
             ExprNodeId iterGuard = currentLoopAlive();
@@ -2595,7 +2906,7 @@ private:
             return false;
         }
 
-        pushLoopContext();
+        pushLoopContext(stmt.sourceRange.start());
         uint32_t iterations = 0;
         while (iterations < maxLoopIterations)
         {
@@ -2633,7 +2944,7 @@ private:
 
     bool unrollForeachDynamic(const slang::ast::ForeachLoopStatement& stmt, uint64_t total)
     {
-        pushLoopContext();
+        pushLoopContext(stmt.sourceRange.start());
         for (uint64_t i = 0; i < total; ++i)
         {
             ExprNodeId iterGuard = currentLoopAlive();
@@ -3843,6 +4154,17 @@ private:
         reportError(stmt, message);
     }
 
+    void reportLoopFailure(const slang::ast::Statement& stmt, std::string_view header)
+    {
+        std::string message(header);
+        if (loopControlFailure)
+        {
+            message.append(": ");
+            message.append(*loopControlFailure);
+        }
+        reportError(stmt, message);
+    }
+
     void clearLoopControlFailure()
     {
         loopControlFailure.reset();
@@ -4032,6 +4354,14 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
                 if (diagnostics)
                 {
                     diagnostics->warn(*variable, "Skipping anonymous variable symbol");
+                }
+                continue;
+            }
+            if (variable->getType().isEvent())
+            {
+                if (diagnostics)
+                {
+                    diagnostics->warn(*variable, "Skipping event variable symbol");
                 }
                 continue;
             }
