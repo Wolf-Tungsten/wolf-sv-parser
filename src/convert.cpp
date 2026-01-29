@@ -2,14 +2,21 @@
 
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
+#include "slang/ast/EvalContext.h"
 #include "slang/ast/Scope.h"
+#include "slang/ast/Statement.h"
 #include "slang/ast/Symbol.h"
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/ConversionExpression.h"
 #include "slang/ast/expressions/LiteralExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/expressions/SelectExpressions.h"
+#include "slang/ast/statements/ConditionalStatements.h"
+#include "slang/ast/statements/LoopStatements.h"
+#include "slang/ast/statements/MiscStatements.h"
+#include "slang/numeric/SVInt.h"
 #include "slang/ast/symbols/AttributeSymbol.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
@@ -19,7 +26,9 @@
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/AllTypes.h"
+#include "slang/text/SourceManager.h"
 
+#include <algorithm>
 #include <cctype>
 #include <limits>
 #include <span>
@@ -988,13 +997,17 @@ std::optional<grh::ir::OperationKind> mapBinaryOp(slang::ast::BinaryOperator op)
     case slang::ast::BinaryOperator::BinaryXnor:
         return grh::ir::OperationKind::kXnor;
     case slang::ast::BinaryOperator::Equality:
-    case slang::ast::BinaryOperator::CaseEquality:
-    case slang::ast::BinaryOperator::WildcardEquality:
         return grh::ir::OperationKind::kEq;
+    case slang::ast::BinaryOperator::CaseEquality:
+        return grh::ir::OperationKind::kCaseEq;
+    case slang::ast::BinaryOperator::WildcardEquality:
+        return grh::ir::OperationKind::kWildcardEq;
     case slang::ast::BinaryOperator::Inequality:
-    case slang::ast::BinaryOperator::CaseInequality:
-    case slang::ast::BinaryOperator::WildcardInequality:
         return grh::ir::OperationKind::kNe;
+    case slang::ast::BinaryOperator::CaseInequality:
+        return grh::ir::OperationKind::kCaseNe;
+    case slang::ast::BinaryOperator::WildcardInequality:
+        return grh::ir::OperationKind::kWildcardNe;
     case slang::ast::BinaryOperator::GreaterThanEqual:
         return grh::ir::OperationKind::kGe;
     case slang::ast::BinaryOperator::GreaterThan:
@@ -1363,6 +1376,1405 @@ void lowerGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
             continue;
         }
         lowerGenerateBlock(*entry, state);
+    }
+}
+
+struct StmtLowererState {
+    class AssignmentExprVisitor;
+
+    static constexpr uint32_t kMaxLoopIterations = 4096;
+
+    ModulePlan& plan;
+    ConvertDiagnostics* diagnostics;
+    LoweringPlan& lowering;
+    std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
+    std::unordered_map<const slang::ast::AssignmentExpression*, ExprNodeId> assignmentRoots;
+    uint32_t nextTemp = 0;
+    std::size_t nextRoot = 0;
+    ControlDomain domain = ControlDomain::Unknown;
+    std::vector<ExprNodeId> guardStack;
+
+    StmtLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics, LoweringPlan& lowering)
+        : plan(plan), diagnostics(diagnostics), lowering(lowering)
+    {
+        nextTemp = static_cast<uint32_t>(lowering.tempSymbols.size());
+    }
+
+    void scanExpression(const slang::ast::Expression& expr)
+    {
+        AssignmentExprVisitor visitor(*this);
+        expr.visit(visitor);
+    }
+
+    void visitStatement(const slang::ast::Statement& stmt)
+    {
+        if (const auto* list = stmt.as_if<slang::ast::StatementList>())
+        {
+            for (const slang::ast::Statement* child : list->list)
+            {
+                if (!child)
+                {
+                    continue;
+                }
+                visitStatement(*child);
+            }
+            return;
+        }
+        if (const auto* block = stmt.as_if<slang::ast::BlockStatement>())
+        {
+            visitStatement(block->body);
+            return;
+        }
+        if (const auto* timed = stmt.as_if<slang::ast::TimedStatement>())
+        {
+            visitStatement(timed->stmt);
+            return;
+        }
+        if (const auto* conditional = stmt.as_if<slang::ast::ConditionalStatement>())
+        {
+            visitConditional(*conditional);
+            return;
+        }
+        if (const auto* caseStmt = stmt.as_if<slang::ast::CaseStatement>())
+        {
+            visitCase(*caseStmt);
+            return;
+        }
+        if (const auto* patternCase = stmt.as_if<slang::ast::PatternCaseStatement>())
+        {
+            reportUnsupported(stmt, "Pattern case lowering uses unconditional guards");
+            scanExpression(patternCase->expr);
+            for (const auto& item : patternCase->items)
+            {
+                if (item.stmt)
+                {
+                    visitStatement(*item.stmt);
+                }
+            }
+            if (patternCase->defaultCase)
+            {
+                visitStatement(*patternCase->defaultCase);
+            }
+            return;
+        }
+        if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>())
+        {
+            scanExpression(exprStmt->expr);
+            return;
+        }
+        if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>())
+        {
+            scanExpression(procAssign->assignment);
+            return;
+        }
+        if (const auto* forLoop = stmt.as_if<slang::ast::ForLoopStatement>())
+        {
+            scanForLoopControl(*forLoop);
+            if (!tryUnrollFor(*forLoop))
+            {
+                reportUnsupported(stmt, "For-loop lowering uses unconditional guards");
+                visitStatement(forLoop->body);
+            }
+            return;
+        }
+        if (const auto* repeatLoop = stmt.as_if<slang::ast::RepeatLoopStatement>())
+        {
+            scanExpression(repeatLoop->count);
+            if (!tryUnrollRepeat(*repeatLoop))
+            {
+                reportUnsupported(stmt, "Repeat-loop lowering uses unconditional guards");
+                visitStatement(repeatLoop->body);
+            }
+            return;
+        }
+        if (const auto* whileLoop = stmt.as_if<slang::ast::WhileLoopStatement>())
+        {
+            reportUnsupported(stmt, "While-loop lowering uses unconditional guards");
+            scanExpression(whileLoop->cond);
+            visitStatement(whileLoop->body);
+            return;
+        }
+        if (const auto* doWhileLoop = stmt.as_if<slang::ast::DoWhileLoopStatement>())
+        {
+            reportUnsupported(stmt, "Do-while lowering uses unconditional guards");
+            scanExpression(doWhileLoop->cond);
+            visitStatement(doWhileLoop->body);
+            return;
+        }
+        if (const auto* foreverLoop = stmt.as_if<slang::ast::ForeverLoopStatement>())
+        {
+            reportUnsupported(stmt, "Forever-loop lowering uses unconditional guards");
+            visitStatement(foreverLoop->body);
+            return;
+        }
+        if (const auto* foreachLoop = stmt.as_if<slang::ast::ForeachLoopStatement>())
+        {
+            scanExpression(foreachLoop->arrayRef);
+            if (!tryUnrollForeach(*foreachLoop))
+            {
+                reportUnsupported(stmt, "Foreach-loop lowering uses unconditional guards");
+                visitStatement(foreachLoop->body);
+            }
+            return;
+        }
+        if (const auto* invalid = stmt.as_if<slang::ast::InvalidStatement>())
+        {
+            if (invalid->child)
+            {
+                visitStatement(*invalid->child);
+            }
+            return;
+        }
+        if (stmt.kind == slang::ast::StatementKind::Empty)
+        {
+            return;
+        }
+        reportUnsupported(stmt, "Unsupported statement kind");
+    }
+
+    void visitConditional(const slang::ast::ConditionalStatement& stmt)
+    {
+        if (stmt.conditions.empty())
+        {
+            reportUnsupported(stmt, "Conditional statement missing condition");
+            return;
+        }
+        bool hasPattern = false;
+        for (const auto& cond : stmt.conditions)
+        {
+            scanExpression(*cond.expr);
+            if (cond.pattern)
+            {
+                hasPattern = true;
+            }
+        }
+        if (hasPattern)
+        {
+            reportUnsupported(stmt, "Patterned condition lowering uses unconditional guards");
+            visitStatement(stmt.ifTrue);
+            if (stmt.ifFalse)
+            {
+                visitStatement(*stmt.ifFalse);
+            }
+            return;
+        }
+
+        ExprNodeId combinedCond = kInvalidPlanIndex;
+        for (const auto& cond : stmt.conditions)
+        {
+            ExprNodeId condId = lowerExpression(*cond.expr);
+            if (condId == kInvalidPlanIndex)
+            {
+                reportUnsupported(stmt, "Failed to lower conditional guard");
+                visitStatement(stmt.ifTrue);
+                if (stmt.ifFalse)
+                {
+                    visitStatement(*stmt.ifFalse);
+                }
+                return;
+            }
+            if (combinedCond == kInvalidPlanIndex)
+            {
+                combinedCond = condId;
+            }
+            else
+            {
+                combinedCond =
+                    makeLogicAnd(combinedCond, condId, stmt.sourceRange.start());
+            }
+        }
+
+        ExprNodeId baseGuard = currentGuard();
+        ExprNodeId trueGuard = combineGuard(baseGuard, combinedCond, stmt.sourceRange.start());
+        pushGuard(trueGuard);
+        visitStatement(stmt.ifTrue);
+        popGuard();
+
+        if (stmt.ifFalse)
+        {
+            ExprNodeId notCond = makeLogicNot(combinedCond, stmt.sourceRange.start());
+            ExprNodeId falseGuard = combineGuard(baseGuard, notCond, stmt.sourceRange.start());
+            pushGuard(falseGuard);
+            visitStatement(*stmt.ifFalse);
+            popGuard();
+        }
+    }
+
+    void visitCase(const slang::ast::CaseStatement& stmt)
+    {
+        scanExpression(stmt.expr);
+        ExprNodeId control = lowerExpression(stmt.expr);
+        if (control == kInvalidPlanIndex)
+        {
+            reportUnsupported(stmt, "Case control expression lowering failed");
+            for (const auto& item : stmt.items)
+            {
+                if (item.stmt)
+                {
+                    visitStatement(*item.stmt);
+                }
+            }
+            if (stmt.defaultCase)
+            {
+                visitStatement(*stmt.defaultCase);
+            }
+            return;
+        }
+
+        if (stmt.condition == slang::ast::CaseStatementCondition::Inside)
+        {
+            reportUnsupported(stmt, "case inside lowering uses unconditional guards");
+        }
+
+        ExprNodeId baseGuard = currentGuard();
+        ExprNodeId priorMatch = kInvalidPlanIndex;
+
+        bool warnedCaseEq = false;
+        for (const auto& item : stmt.items)
+        {
+            bool usedCaseEq = false;
+            ExprNodeId itemMatch =
+                buildCaseItemMatch(control, stmt.expr, stmt.condition, item.expressions,
+                                   stmt.sourceRange.start(), usedCaseEq);
+            if (usedCaseEq && !warnedCaseEq && diagnostics)
+            {
+                std::string originSymbol = describeFileLocation(stmt.sourceRange.start());
+                diagnostics->warn(stmt.sourceRange.start(),
+                                  "Case match lowered with case-equality; may be unsynthesizable",
+                                  std::move(originSymbol));
+                warnedCaseEq = true;
+            }
+            if (itemMatch == kInvalidPlanIndex)
+            {
+                reportUnsupported(stmt, "Failed to lower case item match");
+                if (item.stmt)
+                {
+                    visitStatement(*item.stmt);
+                }
+                continue;
+            }
+
+            ExprNodeId itemGuard = combineGuard(baseGuard, itemMatch, stmt.sourceRange.start());
+            if (priorMatch != kInvalidPlanIndex)
+            {
+                ExprNodeId notPrior = makeLogicNot(priorMatch, stmt.sourceRange.start());
+                itemGuard = makeLogicAnd(itemGuard, notPrior, stmt.sourceRange.start());
+            }
+
+            pushGuard(itemGuard);
+            if (item.stmt)
+            {
+                visitStatement(*item.stmt);
+            }
+            popGuard();
+
+            if (priorMatch == kInvalidPlanIndex)
+            {
+                priorMatch = itemMatch;
+            }
+            else
+            {
+                priorMatch =
+                    makeLogicOr(priorMatch, itemMatch, stmt.sourceRange.start());
+            }
+        }
+
+        if (stmt.defaultCase)
+        {
+            ExprNodeId defaultGuard = baseGuard;
+            if (priorMatch != kInvalidPlanIndex)
+            {
+                ExprNodeId notPrior = makeLogicNot(priorMatch, stmt.sourceRange.start());
+                defaultGuard = combineGuard(baseGuard, notPrior, stmt.sourceRange.start());
+            }
+            pushGuard(defaultGuard);
+            visitStatement(*stmt.defaultCase);
+            popGuard();
+        }
+    }
+
+    void handleAssignment(const slang::ast::AssignmentExpression& expr)
+    {
+        ExprNodeId value = resolveAssignmentRoot(expr);
+        bool isPartial = false;
+        PlanSymbolId target = resolveLValueSymbol(expr.left(), isPartial);
+        if (!target.valid())
+        {
+            reportUnsupported(expr, "Unsupported LHS in assignment");
+            return;
+        }
+        if (isPartial)
+        {
+            reportUnsupported(expr, "Partial assignment lowering not implemented");
+            return;
+        }
+        if (value == kInvalidPlanIndex)
+        {
+            return;
+        }
+
+        WriteIntent intent;
+        intent.target = target;
+        intent.value = value;
+        intent.guard = currentGuard();
+        intent.domain = domain;
+        intent.isNonBlocking = expr.isNonBlocking();
+        intent.location = expr.sourceRange.start();
+        lowering.writes.push_back(std::move(intent));
+    }
+
+    class AssignmentExprVisitor
+        : public slang::ast::ASTVisitor<AssignmentExprVisitor, true, true> {
+    public:
+        explicit AssignmentExprVisitor(StmtLowererState& state) : state_(state) {}
+
+        void handle(const slang::ast::AssignmentExpression& expr)
+        {
+            state_.handleAssignment(expr);
+        }
+
+    private:
+        StmtLowererState& state_;
+    };
+
+private:
+    ExprNodeId currentGuard() const
+    {
+        if (guardStack.empty())
+        {
+            return kInvalidPlanIndex;
+        }
+        return guardStack.back();
+    }
+
+    void pushGuard(ExprNodeId guard)
+    {
+        guardStack.push_back(guard);
+    }
+
+    void popGuard()
+    {
+        if (!guardStack.empty())
+        {
+            guardStack.pop_back();
+        }
+    }
+
+    ExprNodeId takeNextRoot(slang::SourceLocation location)
+    {
+        if (nextRoot >= lowering.roots.size())
+        {
+            if (diagnostics)
+            {
+                diagnostics->todo(location, "Missing lowered root for assignment");
+            }
+            ++nextRoot;
+            return kInvalidPlanIndex;
+        }
+        ExprNodeId value = lowering.roots[nextRoot].value;
+        ++nextRoot;
+        return value;
+    }
+
+    ExprNodeId combineGuard(ExprNodeId base, ExprNodeId extra,
+                            slang::SourceLocation location)
+    {
+        if (base == kInvalidPlanIndex)
+        {
+            return extra;
+        }
+        if (extra == kInvalidPlanIndex)
+        {
+            return base;
+        }
+        return makeOperation(grh::ir::OperationKind::kLogicAnd, {base, extra}, location);
+    }
+
+    ExprNodeId makeLogicAnd(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
+    {
+        if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kLogicAnd, {lhs, rhs}, location);
+    }
+
+    ExprNodeId makeLogicOr(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
+    {
+        if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kLogicOr, {lhs, rhs}, location);
+    }
+
+    ExprNodeId makeLogicNot(ExprNodeId operand, slang::SourceLocation location)
+    {
+        if (operand == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kLogicNot, {operand}, location);
+    }
+
+    ExprNodeId makeEq(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
+    {
+        if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kEq, {lhs, rhs}, location);
+    }
+
+    ExprNodeId makeCaseEq(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
+    {
+        if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kCaseEq, {lhs, rhs}, location);
+    }
+
+    void scanForLoopControl(const slang::ast::ForLoopStatement& stmt)
+    {
+        AssignmentExprVisitor visitor(*this);
+        if (!stmt.loopVars.empty())
+        {
+            for (const slang::ast::VariableSymbol* var : stmt.loopVars)
+            {
+                if (!var)
+                {
+                    continue;
+                }
+                if (const slang::ast::Expression* initExpr = var->getInitializer())
+                {
+                    initExpr->visit(visitor);
+                }
+            }
+        }
+        else
+        {
+            for (const slang::ast::Expression* initExpr : stmt.initializers)
+            {
+                if (!initExpr)
+                {
+                    continue;
+                }
+                initExpr->visit(visitor);
+            }
+        }
+        if (stmt.stopExpr)
+        {
+            stmt.stopExpr->visit(visitor);
+        }
+        for (const slang::ast::Expression* step : stmt.steps)
+        {
+            if (!step)
+            {
+                continue;
+            }
+            step->visit(visitor);
+        }
+    }
+
+    bool tryUnrollRepeat(const slang::ast::RepeatLoopStatement& stmt)
+    {
+        if (containsLoopControl(stmt.body))
+        {
+            return false;
+        }
+
+        slang::ast::EvalContext ctx(*plan.body);
+        std::optional<int64_t> count = evalConstantInt(stmt.count, ctx);
+        if (!count || *count < 0)
+        {
+            return false;
+        }
+        if (static_cast<uint64_t>(*count) > kMaxLoopIterations)
+        {
+            return false;
+        }
+
+        for (int64_t i = 0; i < *count; ++i)
+        {
+            visitStatement(stmt.body);
+        }
+        return true;
+    }
+
+    bool tryUnrollFor(const slang::ast::ForLoopStatement& stmt)
+    {
+        if (!stmt.stopExpr || containsLoopControl(stmt.body))
+        {
+            return false;
+        }
+
+        slang::ast::EvalContext ctx(*plan.body);
+        if (!prepareForLoopState(stmt, ctx))
+        {
+            return false;
+        }
+
+        uint32_t iterations = 0;
+        while (iterations < kMaxLoopIterations)
+        {
+            bool cond = false;
+            if (!evalForLoopCondition(stmt, ctx, cond))
+            {
+                return false;
+            }
+            if (!cond)
+            {
+                return true;
+            }
+
+            visitStatement(stmt.body);
+
+            if (!executeForLoopSteps(stmt, ctx))
+            {
+                return false;
+            }
+            ++iterations;
+        }
+
+        return false;
+    }
+
+    bool tryUnrollForeach(const slang::ast::ForeachLoopStatement& stmt)
+    {
+        if (containsLoopControl(stmt.body) || stmt.loopDims.empty())
+        {
+            return false;
+        }
+
+        uint64_t total = 1;
+        for (const auto& dim : stmt.loopDims)
+        {
+            if (!dim.range)
+            {
+                return false;
+            }
+            const uint64_t width = dim.range->fullWidth();
+            if (width == 0)
+            {
+                return false;
+            }
+            if (total > kMaxLoopIterations / width)
+            {
+                return false;
+            }
+            total *= width;
+        }
+
+        if (total > kMaxLoopIterations)
+        {
+            return false;
+        }
+
+        for (uint64_t i = 0; i < total; ++i)
+        {
+            visitStatement(stmt.body);
+        }
+        return true;
+    }
+
+    bool containsLoopControl(const slang::ast::Statement& stmt) const
+    {
+        struct ControlVisitor : public slang::ast::ASTVisitor<ControlVisitor, false, true> {
+            bool found = false;
+
+            void handle(const slang::ast::BreakStatement&)
+            {
+                found = true;
+            }
+
+            void handle(const slang::ast::ContinueStatement&)
+            {
+                found = true;
+            }
+        };
+
+        ControlVisitor visitor;
+        stmt.visit(visitor);
+        return visitor.found;
+    }
+
+    std::optional<int64_t> evalConstantInt(const slang::ast::Expression& expr,
+                                           slang::ast::EvalContext& ctx) const
+    {
+        ctx.reset();
+        slang::ConstantValue value = expr.eval(ctx);
+        if (!value || !value.isInteger() || value.hasUnknown())
+        {
+            return std::nullopt;
+        }
+        return value.integer().as<int64_t>();
+    }
+
+    std::optional<slang::SVInt> evalConstantValue(const slang::ast::Expression& expr,
+                                                  slang::ast::EvalContext& ctx) const
+    {
+        ctx.reset();
+        slang::ConstantValue value = expr.eval(ctx);
+        if (!value || !value.isInteger())
+        {
+            return std::nullopt;
+        }
+        return value.integer();
+    }
+
+    const slang::ast::ValueSymbol*
+    resolveAssignedValueSymbol(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = &expr;
+        while (current)
+        {
+            if (const auto* assign = current->as_if<slang::ast::AssignmentExpression>())
+            {
+                current = &assign->left();
+                continue;
+            }
+            if (const auto* named = current->as_if<slang::ast::NamedValueExpression>())
+            {
+                return &named->symbol;
+            }
+            if (const auto* hier = current->as_if<slang::ast::HierarchicalValueExpression>())
+            {
+                return &hier->symbol;
+            }
+            if (const auto* select = current->as_if<slang::ast::ElementSelectExpression>())
+            {
+                current = &select->value();
+                continue;
+            }
+            if (const auto* range = current->as_if<slang::ast::RangeSelectExpression>())
+            {
+                current = &range->value();
+                continue;
+            }
+            if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+            {
+                if (!conversion->isImplicit())
+                {
+                    break;
+                }
+                current = &conversion->operand();
+                continue;
+            }
+            break;
+        }
+        return nullptr;
+    }
+
+    bool prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
+                             slang::ast::EvalContext& ctx) const
+    {
+        auto addLoopVar = [&](const slang::ast::ValueSymbol& symbol,
+                              const slang::ast::Expression& initExpr) -> bool {
+            const slang::ast::Type& type = symbol.getType();
+            if (!type.isIntegral())
+            {
+                return false;
+            }
+
+            slang::ast::EvalContext initCtx(*plan.body);
+            std::optional<int64_t> value = evalConstantInt(initExpr, initCtx);
+            if (!value)
+            {
+                return false;
+            }
+
+            const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+            const slang::bitwidth_t width =
+                static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+            slang::SVInt initValue(*value);
+            slang::SVInt sized = initValue.resize(width);
+            sized.setSigned(type.isSigned());
+            slang::ConstantValue initConst(sized);
+            return ctx.createLocal(&symbol, std::move(initConst)) != nullptr;
+        };
+
+        if (!stmt.loopVars.empty())
+        {
+            for (const slang::ast::VariableSymbol* var : stmt.loopVars)
+            {
+                if (!var)
+                {
+                    continue;
+                }
+                const slang::ast::Expression* initExpr = var->getInitializer();
+                if (!initExpr)
+                {
+                    return false;
+                }
+                if (!addLoopVar(*var, *initExpr))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        if (stmt.initializers.empty())
+        {
+            return false;
+        }
+        for (const slang::ast::Expression* initExpr : stmt.initializers)
+        {
+            const auto* assign = initExpr ? initExpr->as_if<slang::ast::AssignmentExpression>()
+                                          : nullptr;
+            if (!assign)
+            {
+                return false;
+            }
+            const slang::ast::ValueSymbol* symbol = resolveAssignedValueSymbol(assign->left());
+            if (!symbol)
+            {
+                return false;
+            }
+            if (!addLoopVar(*symbol, assign->right()))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool evalForLoopCondition(const slang::ast::ForLoopStatement& stmt,
+                              slang::ast::EvalContext& ctx, bool& result) const
+    {
+        if (!stmt.stopExpr)
+        {
+            return false;
+        }
+
+        slang::ConstantValue cond = stmt.stopExpr->eval(ctx);
+        if (!cond || cond.hasUnknown())
+        {
+            return false;
+        }
+        if (cond.isTrue())
+        {
+            result = true;
+            return true;
+        }
+        if (cond.isFalse())
+        {
+            result = false;
+            return true;
+        }
+        if (cond.isInteger())
+        {
+            auto value = cond.integer().as<int64_t>();
+            if (!value)
+            {
+                return false;
+            }
+            result = *value != 0;
+            return true;
+        }
+        return false;
+    }
+
+    bool executeForLoopSteps(const slang::ast::ForLoopStatement& stmt,
+                             slang::ast::EvalContext& ctx) const
+    {
+        for (const slang::ast::Expression* step : stmt.steps)
+        {
+            if (!step)
+            {
+                continue;
+            }
+            if (const auto* assign = step->as_if<slang::ast::AssignmentExpression>())
+            {
+                if (const slang::ast::ValueSymbol* symbol =
+                        resolveAssignedValueSymbol(assign->left()))
+                {
+                    slang::ConstantValue value = assign->right().eval(ctx);
+                    if (!value || !value.isInteger() || value.hasUnknown())
+                    {
+                        return false;
+                    }
+                    const slang::ast::Type& type = symbol->getType();
+                    const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+                    const slang::bitwidth_t width =
+                        static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+                    slang::SVInt nextValue = value.integer().resize(width);
+                    nextValue.setSigned(type.isSigned());
+                    slang::ConstantValue nextConst(nextValue);
+                    if (slang::ConstantValue* storage = ctx.findLocal(symbol))
+                    {
+                        *storage = std::move(nextConst);
+                    }
+                    else if (!ctx.createLocal(symbol, std::move(nextConst)))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+
+            slang::ConstantValue value = step->eval(ctx);
+            if (!value)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool isTwoStateExpr(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = &expr;
+        while (current)
+        {
+            if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+            {
+                if (conversion->isImplicit())
+                {
+                    current = &conversion->operand();
+                    continue;
+                }
+            }
+            if (const auto* named = current->as_if<slang::ast::NamedValueExpression>())
+            {
+                return !named->symbol.getType().isFourState();
+            }
+            if (const auto* hier = current->as_if<slang::ast::HierarchicalValueExpression>())
+            {
+                return !hier->symbol.getType().isFourState();
+            }
+            break;
+        }
+        return !expr.type->isFourState();
+    }
+
+    std::string describeFileLocation(slang::SourceLocation location) const
+    {
+        if (!location.valid() || !plan.body)
+        {
+            return {};
+        }
+        const auto* sourceManager = plan.body->getCompilation().getSourceManager();
+        if (!sourceManager)
+        {
+            return {};
+        }
+        const auto loc = sourceManager->getFullyOriginalLoc(location);
+        if (!loc.valid() || !sourceManager->isFileLoc(loc))
+        {
+            return {};
+        }
+        const auto fileName = sourceManager->getFileName(loc);
+        const auto line = sourceManager->getLineNumber(loc);
+        const auto column = sourceManager->getColumnNumber(loc);
+        std::string text(fileName);
+        text.push_back(':');
+        text.append(std::to_string(line));
+        text.push_back(':');
+        text.append(std::to_string(column));
+        return text;
+    }
+
+    ExprNodeId makeOperation(grh::ir::OperationKind op, std::vector<ExprNodeId> operands,
+                             slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Operation;
+        node.op = op;
+        node.operands = std::move(operands);
+        node.location = location;
+        node.tempSymbol = makeTempSymbol();
+        return addNode(nullptr, std::move(node));
+    }
+
+    PlanSymbolId makeTempSymbol()
+    {
+        const std::string name = "_expr_tmp_" + std::to_string(nextTemp++);
+        PlanSymbolId id = plan.symbolTable.intern(name);
+        lowering.tempSymbols.push_back(id);
+        return id;
+    }
+
+    ExprNodeId addNode(const slang::ast::Expression* expr, ExprNode node)
+    {
+        const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
+        lowering.values.push_back(std::move(node));
+        if (expr)
+        {
+            lowered.emplace(expr, id);
+        }
+        return id;
+    }
+
+    ExprNodeId addConstantLiteral(std::string literal, slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Constant;
+        node.literal = std::move(literal);
+        node.location = location;
+        return addNode(nullptr, std::move(node));
+    }
+
+    struct CaseMaskInfo {
+        ExprNodeId mask = kInvalidPlanIndex;
+    };
+
+    CaseMaskInfo buildCaseWildcardMask(const slang::ast::Expression& controlExpr,
+                                       const slang::ast::Expression& itemExpr,
+                                       slang::ast::CaseStatementCondition condition,
+                                       slang::SourceLocation location)
+    {
+        CaseMaskInfo info{};
+        slang::ast::EvalContext ctx(*plan.body);
+        std::optional<slang::SVInt> itemValue = evalConstantValue(itemExpr, ctx);
+        if (!itemValue)
+        {
+            return info;
+        }
+
+        uint64_t controlWidthRaw = controlExpr.type->getBitstreamWidth();
+        slang::bitwidth_t controlWidth =
+            static_cast<slang::bitwidth_t>(controlWidthRaw > 0 ? controlWidthRaw : 0);
+        slang::bitwidth_t itemWidth = itemValue->getBitWidth();
+        slang::bitwidth_t width = controlWidth > 0 ? std::max(controlWidth, itemWidth) : itemWidth;
+        if (width == 0)
+        {
+            return info;
+        }
+
+        const bool controlSigned = controlExpr.type->isSigned();
+        const bool bothSigned = controlSigned && itemValue->isSigned();
+        slang::SVInt aligned = *itemValue;
+        aligned.setSigned(bothSigned);
+        if (width > aligned.getBitWidth())
+        {
+            aligned = aligned.extend(width, bothSigned);
+        }
+
+        std::vector<slang::logic_t> digits;
+        digits.reserve(width);
+        for (int32_t i = static_cast<int32_t>(width); i-- > 0;)
+        {
+            const slang::logic_t bit = aligned[i];
+            bool wildcard = false;
+            if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ)
+            {
+                wildcard = bit.isUnknown();
+            }
+            else
+            {
+                wildcard = exactlyEqual(bit, slang::logic_t::z);
+            }
+            digits.push_back(wildcard ? slang::logic_t(0) : slang::logic_t(1));
+        }
+
+        slang::SVInt mask = slang::SVInt::fromDigits(width, slang::LiteralBase::Binary,
+                                                     false, false, digits);
+        std::string literal = mask.toString(slang::LiteralBase::Binary, true);
+        info.mask = addConstantLiteral(std::move(literal), location);
+        return info;
+    }
+
+    ExprNodeId buildCaseItemMatch(ExprNodeId control,
+                                  const slang::ast::Expression& controlExpr,
+                                  slang::ast::CaseStatementCondition condition,
+                                  std::span<const slang::ast::Expression* const> items,
+                                  slang::SourceLocation location,
+                                  bool& usedCaseEq)
+    {
+        if (control == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        const bool controlTwoState = isTwoStateExpr(controlExpr);
+        ExprNodeId combined = kInvalidPlanIndex;
+        for (const slang::ast::Expression* expr : items)
+        {
+            if (!expr)
+            {
+                continue;
+            }
+            scanExpression(*expr);
+            ExprNodeId itemId = lowerExpression(*expr);
+            if (itemId == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+
+            ExprNodeId term = kInvalidPlanIndex;
+            if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ ||
+                condition == slang::ast::CaseStatementCondition::WildcardJustZ)
+            {
+                CaseMaskInfo maskInfo =
+                    buildCaseWildcardMask(controlExpr, *expr, condition, location);
+                if (maskInfo.mask == kInvalidPlanIndex)
+                {
+                    reportUnsupported(*expr,
+                                      "Wildcard case item not constant; fallback to case equality");
+                    term = makeCaseEq(control, itemId, location);
+                    usedCaseEq = true;
+                }
+                else
+                {
+                    ExprNodeId maskedControl =
+                        makeOperation(grh::ir::OperationKind::kAnd, {control, maskInfo.mask},
+                                      location);
+                    ExprNodeId maskedItem =
+                        makeOperation(grh::ir::OperationKind::kAnd, {itemId, maskInfo.mask},
+                                      location);
+                    term = makeEq(maskedControl, maskedItem, location);
+                }
+            }
+            else
+            {
+                bool preferSynth = false;
+                if (controlTwoState)
+                {
+                    slang::ast::EvalContext ctx(*plan.body);
+                    if (auto value = evalConstantValue(*expr, ctx))
+                    {
+                        preferSynth = !value->hasUnknown();
+                    }
+                }
+                if (preferSynth)
+                {
+                    term = makeEq(control, itemId, location);
+                }
+                else
+                {
+                    term = makeCaseEq(control, itemId, location);
+                    usedCaseEq = true;
+                }
+            }
+
+            if (combined == kInvalidPlanIndex)
+            {
+                combined = term;
+            }
+            else
+            {
+                combined = makeLogicOr(combined, term, location);
+            }
+        }
+        return combined;
+    }
+
+    ExprNodeId resolveAssignmentRoot(const slang::ast::AssignmentExpression& expr)
+    {
+        auto it = assignmentRoots.find(&expr);
+        if (it != assignmentRoots.end())
+        {
+            return it->second;
+        }
+        ExprNodeId value = takeNextRoot(expr.sourceRange.start());
+        assignmentRoots.emplace(&expr, value);
+        return value;
+    }
+
+    ExprNodeId lowerExpression(const slang::ast::Expression& expr)
+    {
+        if (auto it = lowered.find(&expr); it != lowered.end())
+        {
+            return it->second;
+        }
+
+        ExprNode node;
+        node.location = expr.sourceRange.start();
+
+        if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+        {
+            node.kind = ExprNodeKind::Symbol;
+            node.symbol = plan.symbolTable.lookup(named->symbol.name);
+            if (!node.symbol.valid())
+            {
+                reportUnsupported(expr, "Unknown symbol in expression");
+            }
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+        {
+            node.kind = ExprNodeKind::Symbol;
+            node.symbol = plan.symbolTable.lookup(hier->symbol.name);
+            if (!node.symbol.valid())
+            {
+                reportUnsupported(expr, "Unknown hierarchical symbol in expression");
+            }
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
+        {
+            node.kind = ExprNodeKind::Constant;
+            node.literal = literal->getValue().toString();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
+        {
+            node.kind = ExprNodeKind::Constant;
+            node.literal = literal->getValue().toString();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
+        {
+            node.kind = ExprNodeKind::Constant;
+            node.literal.assign(literal->getValue());
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            if (conversion->isImplicit())
+            {
+                return lowerExpression(conversion->operand());
+            }
+            reportUnsupported(expr, "Unsupported explicit conversion in expression");
+            return kInvalidPlanIndex;
+        }
+        if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
+        {
+            const auto opKind = mapUnaryOp(unary->op);
+            if (!opKind)
+            {
+                reportUnsupported(expr, "Unsupported unary operator");
+                return kInvalidPlanIndex;
+            }
+            ExprNodeId operand = lowerExpression(unary->operand());
+            if (operand == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = *opKind;
+            node.operands = {operand};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* binary = expr.as_if<slang::ast::BinaryExpression>())
+        {
+            const auto opKind = mapBinaryOp(binary->op);
+            if (!opKind)
+            {
+                reportUnsupported(expr, "Unsupported binary operator");
+                return kInvalidPlanIndex;
+            }
+            ExprNodeId lhs = lowerExpression(binary->left());
+            ExprNodeId rhs = lowerExpression(binary->right());
+            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = *opKind;
+            node.operands = {lhs, rhs};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* cond = expr.as_if<slang::ast::ConditionalExpression>())
+        {
+            if (cond->conditions.empty())
+            {
+                reportUnsupported(expr, "Conditional expression missing condition");
+                return kInvalidPlanIndex;
+            }
+            if (cond->conditions.size() > 1)
+            {
+                reportUnsupported(expr, "Conditional expression with patterns unsupported");
+            }
+            const slang::ast::Expression& condExpr = *cond->conditions.front().expr;
+            ExprNodeId condId = lowerExpression(condExpr);
+            ExprNodeId lhs = lowerExpression(cond->left());
+            ExprNodeId rhs = lowerExpression(cond->right());
+            if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
+                rhs == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kMux;
+            node.operands = {condId, lhs, rhs};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
+        {
+            std::vector<ExprNodeId> operands;
+            operands.reserve(concat->operands().size());
+            for (const slang::ast::Expression* operand : concat->operands())
+            {
+                if (!operand)
+                {
+                    continue;
+                }
+                ExprNodeId id = lowerExpression(*operand);
+                if (id == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                operands.push_back(id);
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kConcat;
+            node.operands = std::move(operands);
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* repl = expr.as_if<slang::ast::ReplicationExpression>())
+        {
+            ExprNodeId count = lowerExpression(repl->count());
+            ExprNodeId concat = lowerExpression(repl->concat());
+            if (count == kInvalidPlanIndex || concat == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kReplicate;
+            node.operands = {count, concat};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
+        {
+            ExprNodeId value = lowerExpression(select->value());
+            ExprNodeId index = lowerExpression(select->selector());
+            if (value == kInvalidPlanIndex || index == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kSliceDynamic;
+            node.operands = {value, index};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+        if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
+        {
+            ExprNodeId value = lowerExpression(range->value());
+            ExprNodeId left = lowerExpression(range->left());
+            ExprNodeId right = lowerExpression(range->right());
+            if (value == kInvalidPlanIndex || left == kInvalidPlanIndex ||
+                right == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kSliceDynamic;
+            node.operands = {value, left, right};
+            node.tempSymbol = makeTempSymbol();
+            return addNode(&expr, std::move(node));
+        }
+
+        reportUnsupported(expr, "Unsupported expression kind");
+        return kInvalidPlanIndex;
+    }
+
+    PlanSymbolId resolveLValueSymbol(const slang::ast::Expression& expr, bool& isPartial)
+    {
+        if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+        {
+            return plan.symbolTable.lookup(named->symbol.name);
+        }
+        if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+        {
+            return plan.symbolTable.lookup(hier->symbol.name);
+        }
+        if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
+        {
+            isPartial = true;
+            return resolveLValueSymbol(select->value(), isPartial);
+        }
+        if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
+        {
+            isPartial = true;
+            return resolveLValueSymbol(range->value(), isPartial);
+        }
+        return {};
+    }
+
+    void reportUnsupported(const slang::ast::Expression& expr, std::string_view message)
+    {
+        if (diagnostics)
+        {
+            diagnostics->todo(expr.sourceRange.start(), std::string(message));
+        }
+    }
+
+    void reportUnsupported(const slang::ast::Statement& stmt, std::string_view message)
+    {
+        if (diagnostics)
+        {
+            diagnostics->todo(stmt.sourceRange.start(), std::string(message));
+        }
+    }
+};
+
+void lowerStmtGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
+                            StmtLowererState& state);
+void lowerStmtGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                 StmtLowererState& state);
+
+void lowerStmtProceduralBlock(const slang::ast::ProceduralBlockSymbol& block,
+                              StmtLowererState& state)
+{
+    const ControlDomain saved = state.domain;
+    state.domain = classifyProceduralBlock(block);
+    state.visitStatement(block.getBody());
+    state.domain = saved;
+}
+
+void lowerStmtContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
+                               StmtLowererState& state)
+{
+    const ControlDomain saved = state.domain;
+    state.domain = ControlDomain::Combinational;
+    state.scanExpression(assign.getAssignment());
+    state.domain = saved;
+}
+
+void lowerStmtMemberSymbol(const slang::ast::Symbol& member, StmtLowererState& state)
+{
+    if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>())
+    {
+        lowerStmtContinuousAssign(*continuous, state);
+        return;
+    }
+    if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>())
+    {
+        lowerStmtProceduralBlock(*block, state);
+        return;
+    }
+    if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>())
+    {
+        lowerStmtGenerateBlock(*generateBlock, state);
+        return;
+    }
+    if (const auto* generateArray = member.as_if<slang::ast::GenerateBlockArraySymbol>())
+    {
+        lowerStmtGenerateBlockArray(*generateArray, state);
+        return;
+    }
+}
+
+void lowerStmtGenerateBlock(const slang::ast::GenerateBlockSymbol& block, StmtLowererState& state)
+{
+    if (block.isUninstantiated)
+    {
+        return;
+    }
+    for (const slang::ast::Symbol& member : block.members())
+    {
+        lowerStmtMemberSymbol(member, state);
+    }
+}
+
+void lowerStmtGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
+                                 StmtLowererState& state)
+{
+    for (const slang::ast::GenerateBlockSymbol* entry : array.entries)
+    {
+        if (!entry)
+        {
+            continue;
+        }
+        lowerStmtGenerateBlock(*entry, state);
     }
 }
 
@@ -2152,6 +3564,22 @@ LoweringPlan ExprLowererPass::lower(ModulePlan& plan)
     return std::move(state.lowering);
 }
 
+void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
+{
+    if (!plan.body)
+    {
+        return;
+    }
+
+    lowering.writes.clear();
+
+    StmtLowererState state(plan, context_.diagnostics, lowering);
+    for (const slang::ast::Symbol& member : plan.body->members())
+    {
+        lowerStmtMemberSymbol(member, state);
+    }
+}
+
 grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan)
 {
     std::string symbol;
@@ -2200,6 +3628,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     TypeResolverPass typeResolver(context);
     RWAnalyzerPass rwAnalyzer(context);
     ExprLowererPass exprLowerer(context);
+    StmtLowererPass stmtLowerer(context);
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
     {
         if (!topInstance)
@@ -2225,6 +3654,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         typeResolver.resolve(plan);
         rwAnalyzer.analyze(plan);
         LoweringPlan lowering = exprLowerer.lower(plan);
+        stmtLowerer.lower(plan, lowering);
         planCache_.setLoweringPlan(key, std::move(lowering));
         planCache_.storePlan(key, std::move(plan));
     }

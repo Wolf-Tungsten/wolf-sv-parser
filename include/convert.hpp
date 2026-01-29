@@ -327,10 +327,20 @@ struct LoweredRoot {
     slang::SourceLocation location{};
 };
 
+struct WriteIntent {
+    PlanSymbolId target;
+    ExprNodeId value = kInvalidPlanIndex;
+    ExprNodeId guard = kInvalidPlanIndex;
+    ControlDomain domain = ControlDomain::Unknown;
+    bool isNonBlocking = false;
+    slang::SourceLocation location{};
+};
+
 struct LoweringPlan {
     std::vector<ExprNode> values;
     std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
+    std::vector<WriteIntent> writes;
 };
 
 struct WriteBackPlan {
@@ -451,6 +461,16 @@ public:
     explicit ExprLowererPass(ConvertContext& context) : context_(context) {}
 
     LoweringPlan lower(ModulePlan& plan);
+
+private:
+    ConvertContext& context_;
+};
+
+class StmtLowererPass {
+public:
+    explicit StmtLowererPass(ConvertContext& context) : context_(context) {}
+
+    void lower(ModulePlan& plan, LoweringPlan& lowering);
 
 private:
     ConvertContext& context_;

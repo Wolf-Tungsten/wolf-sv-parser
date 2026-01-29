@@ -1832,6 +1832,14 @@ namespace grh::emit
                 return "==";
             case grh::ir::OperationKind::kNe:
                 return "!=";
+            case grh::ir::OperationKind::kCaseEq:
+                return "===";
+            case grh::ir::OperationKind::kCaseNe:
+                return "!==";
+            case grh::ir::OperationKind::kWildcardEq:
+                return "==?";
+            case grh::ir::OperationKind::kWildcardNe:
+                return "!=?";
             case grh::ir::OperationKind::kLt:
                 return "<";
             case grh::ir::OperationKind::kLe:
@@ -2303,6 +2311,10 @@ namespace grh::emit
                 case grh::ir::OperationKind::kMod:
                 case grh::ir::OperationKind::kEq:
                 case grh::ir::OperationKind::kNe:
+                case grh::ir::OperationKind::kCaseEq:
+                case grh::ir::OperationKind::kCaseNe:
+                case grh::ir::OperationKind::kWildcardEq:
+                case grh::ir::OperationKind::kWildcardNe:
                 case grh::ir::OperationKind::kLt:
                 case grh::ir::OperationKind::kLe:
                 case grh::ir::OperationKind::kGt:
@@ -4175,6 +4187,10 @@ namespace grh::emit
             case grh::ir::OperationKind::kMod:
             case grh::ir::OperationKind::kEq:
             case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
             case grh::ir::OperationKind::kLt:
             case grh::ir::OperationKind::kLe:
             case grh::ir::OperationKind::kGt:

@@ -2010,7 +2010,11 @@ namespace grh::ir
             "kDisplay",
             "kAssert",
             "kDpicImport",
-            "kDpicCall"};
+            "kDpicCall",
+            "kCaseEq",
+            "kCaseNe",
+            "kWildcardEq",
+            "kWildcardNe"};
 
         void writeAttributeValue(slang::JsonWriter &writer, const AttributeValue &value)
         {

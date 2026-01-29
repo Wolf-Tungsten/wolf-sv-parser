@@ -46,6 +46,10 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kMod:
             case grh::ir::OperationKind::kEq:
             case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
             case grh::ir::OperationKind::kLt:
             case grh::ir::OperationKind::kLe:
             case grh::ir::OperationKind::kGt:
@@ -226,6 +230,14 @@ namespace wolf_sv_parser::transform
                 return slang::SVInt(lhs == rhs);
             case grh::ir::OperationKind::kNe:
                 return slang::SVInt(lhs != rhs);
+            case grh::ir::OperationKind::kCaseEq:
+                return slang::SVInt(exactlyEqual(lhs, rhs));
+            case grh::ir::OperationKind::kCaseNe:
+                return slang::SVInt(!exactlyEqual(lhs, rhs));
+            case grh::ir::OperationKind::kWildcardEq:
+                return slang::SVInt(caseXWildcardEqual(lhs, rhs));
+            case grh::ir::OperationKind::kWildcardNe:
+                return slang::SVInt(!caseXWildcardEqual(lhs, rhs));
             case grh::ir::OperationKind::kLt:
                 return slang::SVInt(lhs < rhs);
             case grh::ir::OperationKind::kLe:
@@ -319,6 +331,10 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kMod:
             case grh::ir::OperationKind::kEq:
             case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
             case grh::ir::OperationKind::kLt:
             case grh::ir::OperationKind::kLe:
             case grh::ir::OperationKind::kGt:

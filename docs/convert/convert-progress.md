@@ -191,3 +191,102 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
+
+## STEP 0012 - Pass5 StmtLowerer 落地
+
+目标：
+- 实现 Pass5（StmtLowererPass），降级语句与控制流并生成写回意图
+- 扩展 LoweringPlan 以承载 guard 与写回意图
+- 增补测试覆盖 if/else 与连续赋值场景
+
+实施：
+- `include/convert.hpp` 新增 WriteIntent 与 `LoweringPlan.writes`
+- `src/convert.cpp` 实现 StmtLowererPass，支持 if/else guard 叠加与写回意图生成
+- ConvertDriver 接入 Pass5
+- 新增 `convert-stmt-lowerer` 测试与 fixture
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
+
+完成情况：已完成
+
+## STEP 0013 - Pass5 If/Else 链路完善
+
+目标：
+- 支持多条件 if/else if/else 语句链，保持 guard 组合语义正确
+- 对 pattern 条件给出明确诊断与回退策略
+- 增补 if/else 链路的单元测试与 fixture
+
+计划：
+- 扩展 StmtLowerer 的 Conditional 处理，支持多条件链遍历
+- Guard 组合规则明确化（`base && cond` / `base && !cond`）
+- 新增 `convert-stmt-lowerer` 对应用例与断言
+- 更新 workflow/architecture 文档描述
+
+实施：
+- StmtLowerer 支持多条件组合 guard 与 else/else-if 链路
+- 新增 if/else 链路测试覆盖
+
+完成情况：已完成
+
+## STEP 0014 - Pass5 Case 语句支持
+
+目标：
+- 支持普通 case/casez/casex 的 guard 构建与分支合并
+- 初期不强制 unique/priority，仅记录诊断提示
+- 增补 case 测试与 fixture
+
+计划：
+- 引入 case 比较 lowering（== / wildcard compare）
+- 将每个分支 guard 累积到 LoweringPlan.writes
+- default 分支与 full-case 行为明确
+- 更新 workflow/architecture 文档描述
+
+实施：
+- StmtLowerer 支持 case/casez/casex 的 guard 构建与 priorMatch 合并
+- 新增 case/casez/casex 测试覆盖
+
+完成情况：已完成
+
+## STEP 0015 - Pass5 可静态展开的循环支持
+
+目标：
+- 支持可静态求值的 for/repeat/foreach 循环展开
+- 不可静态求值的循环给出 TODO 诊断并保持安全回退
+- 增补循环相关测试与 fixture
+
+计划：
+- 借助 slang 常量求值能力判断循环边界
+- 仅对确定次数/范围的循环做语句展开
+- 保持 guard/写回语义与展开顺序一致
+- 更新 workflow/architecture 文档描述
+
+实施：
+- StmtLowerer 支持 repeat/for/foreach 的静态展开与安全回退
+- 新增 repeat/for/foreach 测试覆盖
+
+完成情况：已完成
+
+## STEP 0016 - Pass5 casez/casex 通配匹配语义
+
+目标：
+- 为 casez/casex 实现 X/Z 通配匹配语义，避免退化成 kEq
+- 对无法处理的 case item 给出清晰诊断并回退
+- 增补 casez/casex 通配位的测试覆盖
+
+计划：
+- 在 StmtLowerer 的 case item match 中区分 case/casez/casex
+- 对常量 case item 生成 mask：
+  - casez: Z / ? -> mask=0
+  - casex: X / Z / ? -> mask=0
+  - 其余位 mask=1
+- match 公式改为 `(control & mask) == (item & mask)`，组合逻辑仍按 priorMatch
+- 非常量 item 或无法提取 X/Z 时发出诊断，回退到 kCaseEq
+- 新增 casez/casex 夹带 X/Z/? 的 fixture 与断言，并更新 workflow/architecture 说明
+
+实施：
+- GRH 新增 `kCaseEq/kCaseNe/kWildcardEq/kWildcardNe`，并在 emit/verify/const_fold 接入
+- Convert 的二元运算映射拆分 case/wildcard equality 到新 op
+- StmtLowerer casez/casex 基于常量 item 生成 mask，使用 `kAnd + kEq` 构建 match
+- 普通 case 在 2-state + 常量无 X/Z 时用 `kEq`，否则回退 `kCaseEq` 并发 warning
+- 非常量 casez/casex 发出 warning 并回退 `kCaseEq`
+
+完成情况：已完成

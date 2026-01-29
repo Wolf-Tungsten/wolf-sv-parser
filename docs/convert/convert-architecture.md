@@ -348,6 +348,7 @@
   - `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
   - `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
   - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
+  - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
 - 类型别名说明：
   - `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
 - LoweringPlan 字段详解：
@@ -363,6 +364,11 @@
     - 作用：为操作节点分配稳定的临时名。
     - 建立：Pass4 每创建一个操作节点就追加一个 temp symbol。
     - 输出：供写回/生成阶段绑定临时值命名。
+  - `writes`：
+    - 作用：记录每条赋值语句的写回意图、guard 与控制域。
+    - 建立：Pass5 解析语句与控制流后追加。
+    - 输出：供 Pass6/Pass7 合并写回与 guard/mux 决策；静态展开的循环会追加多条写回意图。
+    - 说明：guard 本身以 `ExprNode` 形式保存在 `values`，`WriteIntent.guard` 仅保存对应节点索引。
 - ExprNode 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `ExprNodeKind` -> Constant/Symbol/Operation。
   - `op`: `grh::ir::OperationKind` -> 操作节点类型（仅 Operation 有效）。
@@ -401,17 +407,146 @@
     - 输出：作为每条 RHS 的入口。
   - `location`：
     - 作用：记录 root 的源码位置。
+- WriteIntent 字段总览（字段 -> 类型 -> 含义）：
+  - `target`: `PlanSymbolId` -> 写回目标符号。
+  - `value`: `ExprNodeId` -> RHS root 节点索引。
+  - `guard`: `ExprNodeId` -> guard 条件节点索引（无 guard 时为 invalid）。
+  - `domain`: `ControlDomain` -> 控制域（comb/seq/latch/unknown）。
+  - `isNonBlocking`: `bool` -> 是否非阻塞赋值。
+  - `location`: `slang::SourceLocation` -> 写回语句位置。
 - 举例说明：
-  - 表达式：`assign y = (a & b) ? ~c : (a | b);`
-  - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。
-  - `LoweredRoot.value`：指向 `kMux` 节点索引（RHS 顶层根）。
-  - `values`（示意顺序）：
-    - `Symbol(a)`, `Symbol(b)`, `Op(kAnd, [a,b])`,
-      `Symbol(c)`, `Op(kNot, [c])`, `Symbol(a)`, `Symbol(b)`,
-      `Op(kOr, [a,b])`, `Op(kMux, [and, not, or])`
-  - `roots`：`[kMux 节点索引]`
-  - `tempSymbols`：`[_expr_tmp_0, _expr_tmp_1, _expr_tmp_2, _expr_tmp_3]`（对应 and/not/or/mux）
-  - 说明：`a/b` 在 AST 中出现两次时会生成两个 `Symbol` 节点，因此 `values` 共 9 项。
+  - #### 表达式降级（Pass4）
+    - 输入：`assign y = (a & b) ? ~c : (a | b);`
+    - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。
+    - `LoweredRoot.value`：指向 `kMux` 节点索引（RHS 顶层根）。
+    - `values`（示意顺序）：
+      - `0: Symbol(a)`
+      - `1: Symbol(b)`
+      - `2: Op(kAnd, [0,1])`
+      - `3: Symbol(c)`
+      - `4: Op(kNot, [3])`
+      - `5: Symbol(a)`
+      - `6: Symbol(b)`
+      - `7: Op(kOr, [5,6])`
+      - `8: Op(kMux, [2,4,7])`
+    - `roots`：`[8]`
+    - `tempSymbols`：`[2->tmp0, 4->tmp1, 7->tmp2, 8->tmp3]`
+    - 说明：`a/b` 在 AST 中出现两次时会生成两个 `Symbol` 节点，因此 `values` 共 9 项。
+  - #### 分支语句（Pass5）
+    - if/else：
+      - 输入：
+        ```
+        always_comb begin
+          if (a) y = b; else y = c;
+        end
+        ```
+      - 输出（示意）：
+        - `values`（RHS + guard）：
+          - `0: Symbol(b)`  (rhs0)
+          - `1: Symbol(c)`  (rhs1)
+          - `2: Symbol(a)`  (g0)
+          - `3: Op(kLogicNot, [2])` (g1)
+        - `roots`：`[0, 1]`
+        - `writes`：
+          - `WriteIntent{target=y, value=0, guard=2}`
+          - `WriteIntent{target=y, value=1, guard=3}`
+    - if/else if/else：
+      - 输入：
+        ```
+        always_comb begin
+          if (a) y = b;
+          else if (c) y = d;
+          else y = e;
+        end
+        ```
+      - 输出（示意）：
+        - `values`（RHS + guard）：
+          - `0: Symbol(b)` (rhs0)
+          - `1: Symbol(d)` (rhs1)
+          - `2: Symbol(e)` (rhs2)
+          - `3: Symbol(a)` (g0)
+          - `4: Symbol(c)`
+          - `5: Op(kLogicNot, [3])` (not a)
+          - `6: Op(kLogicAnd, [5,4])` (g1)
+          - `7: Op(kLogicNot, [4])` (not c)
+          - `8: Op(kLogicAnd, [5,7])` (g2)
+        - `roots`：`[0, 1, 2]`
+        - `writes`：
+          - `WriteIntent{y, value=0, guard=3}`
+          - `WriteIntent{y, value=1, guard=6}`
+          - `WriteIntent{y, value=2, guard=8}`
+  - #### Case 语句（Pass5）
+    - 输入：
+      ```
+      case(sel)
+        2'b00,2'b01: y = a;
+        2'b10:       y = b;
+        default:     y = c;
+      endcase
+      ```
+    - 输出（示意）：
+      - `values`（RHS + match + guard）：
+        - `0: Symbol(a)` (rhs0)
+        - `1: Symbol(b)` (rhs1)
+        - `2: Symbol(c)` (rhs2)
+        - `3: Symbol(sel)`
+        - `4: Const(2'b00)`
+        - `5: Const(2'b01)`
+        - `6: Const(2'b10)`
+        - `7: Op(kCaseEq, [3,4])`
+        - `8: Op(kCaseEq, [3,5])`
+        - `9: Op(kLogicOr, [7,8])` (match0)
+        - `10: Op(kCaseEq, [3,6])` (match1)
+        - `11: Op(kLogicNot, [9])` (!match0)
+        - `12: Op(kLogicAnd, [10,11])` (guard1)
+        - `13: Op(kLogicOr, [9,10])` (anyMatch)
+        - `14: Op(kLogicNot, [13])` (default)
+      - `roots`：`[0, 1, 2]`
+      - `writes`：
+        - `WriteIntent{y, value=0, guard=9}`
+        - `WriteIntent{y, value=1, guard=12}`
+        - `WriteIntent{y, value=2, guard=14}`
+    - 说明：
+      - `casez/casex` 若 item 为常量，会构建 mask 并生成
+        `(sel & mask) == (item & mask)`；若 item 非常量无法生成 mask，则回退到 `===`
+        并发出 warning（可能不可综合）。
+  - #### 循环语句（Pass5 静态展开）
+    - repeat：
+      - 输入：`repeat(3) y = a;`
+      - 输出（示意）：
+        - `values`：
+          - `0: Symbol(a)` (rhs0)
+        - `roots`：`[0]`
+        - `writes`：
+          - `WriteIntent{y, value=0, guard=invalid}`
+          - `WriteIntent{y, value=0, guard=invalid}`
+          - `WriteIntent{y, value=0, guard=invalid}`
+    - for：
+      - 输入：
+        ```
+        for (int i = 0; i < 2; i = i + 1) y = a;
+        ```
+      - 输出（示意）：
+        - `values`：
+          - `0: Symbol(a)` (rhs0)
+        - `roots`：`[0]`
+        - `writes`：
+          - `WriteIntent{y, value=0, guard=invalid}`
+          - `WriteIntent{y, value=0, guard=invalid}`
+    - foreach：
+      - 输入：
+        ```
+        foreach (arr[i]) y = a; // arr 有 2 个元素
+        ```
+      - 输出（示意）：
+        - `values`：
+          - `0: Symbol(a)` (rhs0)
+        - `roots`：`[0]`
+        - `writes`：
+          - `WriteIntent{y, value=0, guard=invalid}`
+          - `WriteIntent{y, value=0, guard=invalid}`
+    - 说明：
+      - 仅对静态可求值循环做展开；`guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
 - 生成与使用约定：
   - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
   - 使用：Pass5~Pass6 读取 `loweringPlan`，不回扫 AST。

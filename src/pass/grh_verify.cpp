@@ -144,7 +144,9 @@ namespace wolf_sv_parser::transform
 
                 const std::vector binaryKinds = {
                     grh::ir::OperationKind::kAdd, grh::ir::OperationKind::kSub, grh::ir::OperationKind::kMul, grh::ir::OperationKind::kDiv, grh::ir::OperationKind::kMod,
-                    grh::ir::OperationKind::kEq, grh::ir::OperationKind::kNe, grh::ir::OperationKind::kLt, grh::ir::OperationKind::kLe, grh::ir::OperationKind::kGt, grh::ir::OperationKind::kGe,
+                    grh::ir::OperationKind::kEq, grh::ir::OperationKind::kNe, grh::ir::OperationKind::kCaseEq, grh::ir::OperationKind::kCaseNe,
+                    grh::ir::OperationKind::kWildcardEq, grh::ir::OperationKind::kWildcardNe,
+                    grh::ir::OperationKind::kLt, grh::ir::OperationKind::kLe, grh::ir::OperationKind::kGt, grh::ir::OperationKind::kGe,
                     grh::ir::OperationKind::kAnd, grh::ir::OperationKind::kOr, grh::ir::OperationKind::kXor, grh::ir::OperationKind::kXnor, grh::ir::OperationKind::kLogicAnd, grh::ir::OperationKind::kLogicOr,
                     grh::ir::OperationKind::kShl, grh::ir::OperationKind::kLShr, grh::ir::OperationKind::kAShr};
                 for (auto kind : binaryKinds)

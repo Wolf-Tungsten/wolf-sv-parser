@@ -82,7 +82,11 @@ enum class OperationKind {
     kDisplay,
     kAssert,
     kDpicImport,
-    kDpicCall
+    kDpicCall,
+    kCaseEq,
+    kCaseNe,
+    kWildcardEq,
+    kWildcardNe
 };
 
 std::string_view toString(OperationKind kind) noexcept;

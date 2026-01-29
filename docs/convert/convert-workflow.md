@@ -121,9 +121,67 @@
     - tempSymbols：`[_expr_tmp_0, _expr_tmp_1, _expr_tmp_2, _expr_tmp_3]`
 
 ## Pass5: StmtLowererPass
-- 功能：语句与控制流降级，形成 guard/mux 与写回意图。
+- 功能：语句与控制流降级，形成 guard 与写回意图。
 - 输入：`ModulePlan` + 语句 AST + `LoweringPlan` + ctx。
 - 输出形式：更新 `LoweringPlan`。
+- 顶层流程：
+  - 初始化 Pass5 状态（清空 `writes`，准备 guard 栈与 root 游标）。
+  - 遍历模块成员并递归遍历语句树，形成 guard 与写回意图。
+  - 将 guard 表达式节点写入 `LoweringPlan.values`，并追加 `WriteIntent`。
+- 步骤分解：
+  - 步骤 1：初始化与状态准备
+    - 清空 `LoweringPlan.writes`。
+    - 初始化 `guardStack`、`domain`、`nextRoot` 等状态。
+  - 步骤 2：模块成员遍历
+    - `ContinuousAssignSymbol`：设定 `domain=comb`，访问赋值表达式。
+    - `ProceduralBlockSymbol`：按过程块类型分类 `domain`，递归访问语句体。
+    - `GenerateBlockSymbol/GenerateBlockArraySymbol`：递归进入成员。
+  - 步骤 3：语句级递归遍历
+    - `StatementList/BlockStatement/TimedStatement/InvalidStatement`：递归进入子语句。
+    - `ExpressionStatement/ProceduralAssignStatement`：
+      - 提取 `AssignmentExpression`，消费 `LoweringPlan.roots` 对应 RHS；
+      - 读取当前 guard 与 domain，追加 `WriteIntent`。
+    - `ConditionalStatement`：
+      - 对多条件 `if` 链构建 `cond`（条件间 `logic-and`）；
+      - true guard = `base && cond`，false guard = `base && !cond`；
+      - 推入 guard 后递归访问分支语句。
+    - `CaseStatement`：
+      - 构建每个 item 的 match，并以 `logic-or` 聚合；
+      - guard = `base && match && !priorMatch`；
+      - default guard = `base && !priorMatch`；
+      - 判定规则：
+        - 普通 `case`：若 control 为 2-state 且 item 可常量求值且不含 X/Z -> `kEq`；
+          否则回退为 `kCaseEq` 并发出 warning（可能不可综合）。
+        - `casez/casex`：若 item 为常量，先生成 mask（casez 忽略 Z/?，casex 忽略 X/Z/?），
+          使用 `(control & mask) == (item & mask)` 生成 match（综合优先）；
+          item 非常量无法生成 mask 则回退 `kCaseEq` 并 warning。
+    - 循环语句：
+      - `repeat/for/foreach` 若可静态求值则展开多次访问 body；
+      - 不可静态求值则记录 TODO 并按一次访问回退。
+  - 步骤 4：guard 表达式降级
+    - guard 使用 Pass5 内部表达式降级逻辑追加到 `LoweringPlan.values`；
+    - guard 节点同样分配 `_expr_tmp_<n>` 临时名。
+    - 案例（if/else guard）：
+      - 输入：
+        ```
+        always_comb begin
+          if (a) y = b; else y = c;
+        end
+        ```
+      - guard 生成过程：
+        - 当前 guard 为空 -> base = invalid
+        - 条件 `a` 降级为 `Symbol(a)`，记为 `g0`
+        - true guard = `g0`，false guard = `!g0`
+      - `LoweringPlan.values`（示意）：
+        - `0: Symbol(b)` (rhs0)
+        - `1: Symbol(c)` (rhs1)
+        - `2: Symbol(a)` (g0)
+        - `3: Op(kLogicNot, [2])` (g1)
+      - `LoweringPlan.writes`：
+        - `WriteIntent{target=y, value=0, guard=2}`
+        - `WriteIntent{target=y, value=1, guard=3}`
+  - 步骤 5：写回意图生成
+    - 追加 `WriteIntent{target, value, guard, domain, isNonBlocking, location}`。
 
 ## Pass6: MemoryPortLowererPass
 - 功能：细化 memory 读写端口的 Lowering 描述。

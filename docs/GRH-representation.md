@@ -51,7 +51,7 @@ GRH 表示在编译流程中的功能定位如下：
 ## Operation 类型概览
 
 - 常量：`kConstant`
-- 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
+- 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kCaseEq`、`kCaseNe`、`kWildcardEq`、`kWildcardNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
 - 时序：`kLatch`、`kLatchArst`、`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryMaskWritePort`
 - 层次：`kInstance`、`kBlackbox`
@@ -200,9 +200,22 @@ assign ${res.symbol} = ${constValue}
 
 ## 组合逻辑操作
 
+### 四态语义约定
+
+- 值域：bit 取值 `{0, 1, X, Z}`，常量允许 `x/z` 字面量。
+- 约定：除比较类操作外，`Z` 默认按 `X` 处理（保守传播）。
+- `kEq`/`kNe`：对应 `==/!=`，若任一位含 `X/Z` 且不形成确定不等，则结果为 `X`。
+- `kCaseEq`/`kCaseNe`：对应 `===/!==`，按位全等比较，结果恒为 `0/1`。
+- `kWildcardEq`/`kWildcardNe`：对应 `==?/!=?`，任一操作数的 `X/Z` 视为 wildcard，结果恒为 `0/1`。
+- 位运算（`kAnd/kOr/kXor/kXnor/kNot`）：遵循 SV 四态真值表；`0`/`1` 优先确定，无法确定时返回 `X`。
+- 逻辑运算（`kLogicAnd/kLogicOr/kLogicNot`）：先将操作数规约为 1-bit 逻辑值 `{0,1,X}` 再计算，`X` 保持传播。
+- 归约运算（`kReduce*`）：任一位含 `X/Z` 且无法确定结果时返回 `X`。
+- 算术/移位（`kAdd`/`kSub`/`kMul`/`kDiv`/`kMod`/`kShl`/`kLShr`/`kAShr`）：任一操作数含 `X/Z` 时结果为全 `X`（保守语义）。
+- `kMux`：`sel=1` 取真分支，`sel=0` 取假分支；`sel=X/Z` 时逐位融合（`a[i]==b[i]` 则取该值，否则为 `X`）。
+
 ### 二元操作符
 
-包含 `kAdd`(+)、`kSub`(-)、`kMul`(*)、`kDiv`(/)、`kMod`(%)、`kEq`(==)、`kNe`(!=)、`kLt`(<)、`kLe`(<=)、`kGt`(>)、`kGe`(>=)、`kAnd`(&)、`kOr`(|)、`kXor`(^)、`kXnor`(~^)、`kLogicAnd`(&&)、`kLogicOr`(||)、、`kShl`(<<)、`kLShr`(>>)、`kAShr`(>>>)。
+包含 `kAdd`(+)、`kSub`(-)、`kMul`(*)、`kDiv`(/)、`kMod`(%)、`kEq`(==)、`kNe`(!=)、`kCaseEq`(===)、`kCaseNe`(!==)、`kWildcardEq`(==?)、`kWildcardNe`(!=?)、`kLt`(<)、`kLe`(<=)、`kGt`(>)、`kGe`(>=)、`kAnd`(&)、`kOr`(|)、`kXor`(^)、`kXnor`(~^)、`kLogicAnd`(&&)、`kLogicOr`(||)、`kShl`(<<)、`kLShr`(>>)、`kAShr`(>>>)。
 
 - operands：
     - op0：左侧操作数

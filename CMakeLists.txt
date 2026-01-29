@@ -593,6 +593,19 @@ target_compile_definitions(convert-expr-lowerer
 )
 
 register_test_exe(convert-expr-lowerer)
+# convert: stmt lowerer
+add_executable(convert-stmt-lowerer
+    tests/convert/test_convert_stmt_lowerer.cpp
+)
+target_link_libraries(convert-stmt-lowerer
+    PRIVATE
+        convert
+)
+target_compile_definitions(convert-stmt-lowerer
+    PRIVATE
+        WOLF_SV_CONVERT_STMT_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/stmt_lowerer.sv"
+)
+register_test_exe(convert-stmt-lowerer)
 
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)
