@@ -502,23 +502,62 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 目标：
 - 在 Pass5 识别并保留调试系统任务（例如 `$display/$info/$warning/$error/$fatal`）
-- 支持 DPI-C 导入函数/任务的语句调用，并对 `ref/out/inout` 参数建模读写依赖
+- 支持 DPI-C 导入函数的语句调用（仅 input/output 方向），并支持可选返回值
 - 保留语句顺序，emit 侧按 GRH 的调用/副作用 OP 规范化输出
-- 仅在 edge-sensitive 时钟驱动的过程块内生成 display/DPI 调用；否则丢弃并诊断
+- 仅在 edge-sensitive 触发列表内生成 display/DPI 调用；否则丢弃并诊断
 - 对不可识别的调用给出明确诊断，保持可综合路径不受影响
 
 计划：
-- 扩展 `LoweringPlan`，新增“副作用语句”记录结构（Call/SideEffect intent），
-  记录 kind/name/op、guard/domain/location、以及参数列表
-- 引入时钟绑定：在进入过程块时解析 edge-sensitive timing control，记录 `clk` 与 `clkPolarity`；
+- 扩展 `LoweringPlan`，新增统一 `LoweredStmt` 列表（Write/Display/Assert/DpiCall），
+  记录 kind/op、updateCond、location、eventEdge、event operands、以及参数列表
+- 引入事件绑定：在进入过程块时解析 edge-sensitive timing control，生成 event operands + eventEdge；
   若无法解析或非 edge-sensitive，display/DPI 调用按 GRH 要求丢弃并诊断
-- 参数建模：`in` -> `ExprNodeId`；`ref/out/inout` -> `LValueTarget + slices`，
-  `inout` 同时记录读入表达式与写回目标，形成读写依赖
-- 引入语句顺序：新增统一的有序 `LoweredStmt` 列表，Write/Call 统一按序存储
+- 参数建模：`in` -> `ExprNodeId`；`out` -> 结果 value；
+  可选返回值通过 `hasReturn` 与 `results[0]` 表示
 - StmtLowerer 在 `ExpressionStatement` 中识别系统任务与 DPI 调用，解析方向并生成 intent
 - 复用 Pass4 表达式降级生成实参值（仅语句级调用，不扩展 Pass4 表达式调用）
-- 新增 `stmt_lowerer` fixture 与断言覆盖 `$display` 与 DPI `ref/out/inout` 调用顺序
+- 新增 `stmt_lowerer` fixture 与断言覆盖 `$display` 与 DPI 调用顺序与返回值占位
 - 更新 workflow/architecture，补充 Pass5 处理“副作用语句”的流程与限制
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0028 - Pass6 状态写回合并与 kRegister/kLatch 建模
+
+目标：
+- 将顺序/锁存类写回统一为 `updateCond + nextValue` 形式，适配新的 kRegister/kLatch
+- 结合事件绑定（event operands + eventEdge）生成边沿触发更新语义
+- 保留语句顺序与 guard 优先级，生成稳定的 mux/nextValue 表达式
+
+计划：
+- 引入/扩展写回合并 pass（Pass6/Pass7），按 `target + domain + event` 聚合 Write 类语句
+- 基于 `LoweredStmt` 顺序合并 guard：`updateCond = OR(guards)`，
+  `nextValue = mux(guard_n, value_n, ..., oldValue)`（按原语句顺序）
+- 顺序 domain 使用 event operands + eventEdge；缺失 edge-sensitive 事件时诊断并跳过
+- 锁存 domain 生成 kLatch（无事件列表），仅使用 updateCond/nextValue
+- 更新 workflow/architecture，补充写回合并与 nextValue 构建流程
+- 新增回归用例覆盖 reset/enable 优先级与顺序稳定性
+
+实施：
+- 待实施
+
+完成情况：未开始
+
+## STEP 0029 - Pass6 MemoryPortLowerer 适配新 kMemoryReadPort/kMemoryWritePort
+
+目标：
+- 使用 `kMemoryReadPort` 表达组合读，使用 `kMemoryWritePort` + `updateCond`/mask 表达写入
+- 同步读通过 `kRegister` 捕获 `kMemoryReadPort` 输出建模
+- 复用 event operands + eventEdge 绑定时序端口
+
+计划：
+- 扩展 MemoryPortLowerer：为读端口生成 `kMemoryReadPort`，必要时插入 `kRegister`
+- 写端口生成 `kMemoryWritePort`，mask 为空时补常量全 1
+- 解析时序域的事件列表，缺失 edge-sensitive 事件则诊断并跳过
+- 更新 workflow/architecture 文档与示例
+- 增加 memory 读/写/掩码/同步读用例与断言
 
 实施：
 - 待实施

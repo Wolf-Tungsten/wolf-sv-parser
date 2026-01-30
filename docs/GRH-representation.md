@@ -53,7 +53,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kCaseEq`、`kCaseNe`、`kWildcardEq`、`kWildcardNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
-- 时序：`kLatch`、`kLatchArst`、`kRegister`、`kRegisterEn`、`kRegisterRst`、`kRegisterEnRst`、`kRegisterArst`、`kRegisterEnArst`、`kMemory`、`kMemoryAsyncReadPort`、`kMemorySyncReadPort`、`kMemorySyncReadPortRst`、`kMemorySyncReadPortArst`、`kMemoryWritePort`、`kMemoryMaskWritePort`
+- 时序：`kLatch`、`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
 - 层次：`kInstance`、`kBlackbox`
 - 调试：`kDisplay`、`kAssert`
 - DPI：`kDpicImport`、`kDpicCall`
@@ -356,232 +356,62 @@ assign ${res.symbol} = (sliceWidth == 1)
 GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
 
 ## 时序逻辑操作
-### 电平敏感锁存器 kLatch
+### 统一锁存器 kLatch
 
 kLatch 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
 
 - operands：
-    - en：使能信号，必须为 1 bit
-    - d：数据输入
+    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
+    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
 - result：
     - q：锁存器输出
-- attributes：
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
 
 生成语义：
 ```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
+reg ${nextValue.signed ? "signed" : ""} [${nextValue.width}-1:0] ${symbol};
 always_latch begin
-    if (en_active) begin
-        ${symbol} = ${d.symbol};
+    if (${updateCond.symbol}) begin
+        ${symbol} = ${nextValue.symbol};
     end
 end
 assign ${q.symbol} = ${symbol};
 ```
 
-### 带异步复位的锁存器 kLatchArst
+示例（异步低有效复位 + 使能）：
+- updateCond = (!rst_n) || en
+- nextValue = (!rst_n) ? resetValue : d
 
-kLatchArst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
-
-- operands：
-    - en：使能信号，必须为 1 bit
-    - rst：异步复位信号，必须为 1 bit
-    - resetValue：复位值，位宽需与数据输入一致
-    - d：数据输入
-- result：
-    - q：锁存器输出
-- attributes：
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always_latch begin
-    if (rst_active) begin
-        ${symbol} = ${resetValue.symbol};
-    end else if (en_active) begin
-        ${symbol} = ${d.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
-```
-
-### 无复位寄存器 kRegister
+### 统一寄存器 kRegister
 
 kRegister 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
 
 - operands：
-    - clk：时钟信号
-    - d：数据输入
+    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
+    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
+    - event0, event1, ...：触发事件信号（Value）
 - result：
     - q：寄存器输出
 - attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2）
+    - `eventOperands` = operands[2..]（按顺序与 `eventEdge` 配对）
 
 生成语义：
 ```
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    ${symbol} <= ${d.symbol};
-end
-assign ${q.symbol} = ${symbol};
-```
-
-### 同步复位寄存器 kRegisterRst
-
-kRegisterRst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
-
-- operands：
-    - clk：时钟信号
-    - rst：复位信号
-    - resetValue：复位值
-    - d：数据输入
-- result：
-    - q：寄存器输出
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性（Active high/Active low）
-
-生成语义：
-```
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (rst_active) begin
-        ${symbol} <= ${resetValue.symbol};
-    end else begin
-        ${symbol} <= ${d.symbol};
+reg ${nextValue.signed ? "signed" : ""} [${nextValue.width}-1:0] ${symbol};
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
+        ${symbol} <= ${nextValue.symbol};
     end
 end
 assign ${q.symbol} = ${symbol};
 ```
 
-### 异步复位寄存器 kRegisterArst
-
-kRegisterArst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
-
-- operands：
-    - clk：时钟信号
-    - rst：复位信号
-    - resetValue：复位值
-    - d：数据输入
-- result：
-    - q：寄存器输出
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性（Active high/Active low）
-
-生成语义：
-```
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstEdge} ${rst.symbol}) begin
-    if (rst_active) begin
-        ${symbol} <= ${resetValue.symbol};
-    end else begin
-        ${symbol} <= ${d.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
-```
-
-其中 `rstEdge = (rstPolarity == "high") ? "posedge" : "negedge"`。
-
-### 带使能寄存器 kRegisterEn
-
-kRegisterEn 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号的极性由 `enLevel` attribute 指定。
-
-- operands：
-    - clk：时钟信号
-    - en：使能信号
-    - d：数据输入
-- result：
-    - q：寄存器输出
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (en_active) begin
-        ${symbol} <= ${d.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
-```
-
-### 带使能同步复位寄存器 kRegisterEnRst
-
-kRegisterEnRst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号的极性由 `enLevel` attribute 指定。
-
-- operands：
-    - clk：时钟信号
-    - rst：复位信号
-    - en：使能信号
-    - resetValue：复位值
-    - d：数据输入
-- result：
-    - q：寄存器输出
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (rst_active) begin
-        ${symbol} <= ${resetValue.symbol};
-    end else if (en_active) begin
-        ${symbol} <= ${d.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
-```
-
-### 带使能异步复位寄存器 kRegisterEnArst
-
-kRegisterEnArst 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。使能信号的极性由 `enLevel` attribute 指定。
-
-- operands：
-    - clk：时钟信号
-    - rst：复位信号
-    - en：使能信号
-    - resetValue：复位值
-    - d：数据输入
-- result：
-    - q：寄存器输出
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - rstPolarity：string 类型，取值 `high` / `low`，指明复位信号的有效极性
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${d.signed ? "signed" : ""} [${d.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstEdge} ${rst.symbol}) begin
-    if (rst_active) begin
-        ${symbol} <= ${resetValue.symbol};
-    end else if (en_active) begin
-        ${symbol} <= ${d.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
-```
-
-其中 `rstEdge = (rstPolarity == "high") ? "posedge" : "negedge"`。
+示例（异步低有效复位 + 使能）：
+- eventOperands = [clk, rst_n]
+- eventEdge = ["posedge", "negedge"]
+- updateCond = (!rst_n) || en
+- nextValue = (!rst_n) ? resetValue : d
 
 ### 片上存储器 kMemory
 
@@ -599,7 +429,7 @@ kMemory 的 symbol 是必须定义的，且必须符合 verilog 标识符规范�
 reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol} [0:${row}-1];
 ```
 
-### 片上存储器异步读端口 kMemoryAsyncReadPort
+### 片上存储器读端口 kMemoryReadPort
 
 - operands：
     - addr：读地址信号
@@ -613,147 +443,34 @@ reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol} [0:${row}-1];
 assign ${data.symbol} = ${memSymbol}[${addr.symbol}];
 ```
 
-### 片上存储器同步读端口 kMemorySyncReadPort
-
-kMemorySyncReadPort 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
-
-读数据经过端口内部寄存器 `${symbol}` 输出；复位版本仅作用于该读寄存器，不影响 memory 内容。
-
-- operands：
-    - clk：读时钟信号
-    - addr：读地址信号
-    - en：读使能信号
-- results：
-    - data：读数据输出信号
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，生成语义中访问的 `memSymbol.isSigned`、`memSymbol.width` 等字段均来源于该 Operation。
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-reg ${memSymbol.isSigned ? "signed" : ""} [${memSymbol.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (en_active) begin
-        ${symbol} <= ${memSymbol}[${addr.symbol}];
-    end
-end
-assign ${data.symbol} = ${symbol};
-```
-
-### 片上存储器同步读端口（同步复位） kMemorySyncReadPortRst
-
-复位仅作用于读寄存器 `${symbol}`，不改写 `memSymbol` 的存储内容。
-
-- operands：
-    - clk：读时钟信号
-    - rst：复位信号
-    - addr：读地址信号
-    - en：读使能信号
-- results：
-    - data：读数据输出信号
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-    - memSymbol：指向目标 kMemory 的 symbol
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${memSymbol.isSigned ? "signed" : ""} [${memSymbol.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    // 复位作用于读寄存器，rst_active 时的复位值由 elaboration 显式提供
-    if (en_active) begin
-        ${symbol} <= ${memSymbol}[${addr.symbol}];
-    end
-end
-assign ${data.symbol} = ${symbol};
-```
-
-### 片上存储器同步读端口（异步复位） kMemorySyncReadPortArst
-
-复位仅作用于读寄存器 `${symbol}`，不改写 `memSymbol` 的存储内容。
-
-- operands：
-    - clk：读时钟信号
-    - rst：复位信号
-    - addr：读地址信号
-    - en：读使能信号
-- results：
-    - data：读数据输出信号
-- attributes：
-    - clkPolarity：string 类型，取值 posedge / negedge
-    - rstPolarity：string 类型，取值 `high` / `low`，决定 `rst` 的有效极性及敏感沿
-    - enLevel：string 类型，取值 `high` / `low`（默认 high）
-    - memSymbol：指向目标 kMemory 的 symbol
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-wire rst_active = (rstPolarity == "high") ? ${rst.symbol} : !${rst.symbol};
-reg ${memSymbol.isSigned ? "signed" : ""} [${memSymbol.width}-1:0] ${symbol};
-always @(${clkPolarity} ${clk.symbol} or ${rstPolarity == "high" ? "posedge" : "negedge"} ${rst.symbol}) begin
-    // 复位作用于读寄存器，rst_active 时的复位值由 elaboration 显式提供
-    if (en_active) begin
-        ${symbol} <= ${memSymbol}[${addr.symbol}];
-    end
-end
-assign ${data.symbol} = ${symbol};
-```
+说明：同步读端口使用 `kRegister` 捕获 `kMemoryReadPort` 的输出，
+在事件 operands 与 `eventEdge` 中声明时钟/复位事件，并通过 `updateCond/nextValue` 编码 enable/reset 语义。
 
 ### 片上存储器写端口 kMemoryWritePort
 
-写端口不提供复位语义；复位行为由上层逻辑显式控制 `en/data`，不自动改写 memory。
+写端口不提供复位语义；复位行为由上层逻辑显式控制 `updateCond/data`，不自动改写 memory。
 
 - operands：
-    - clk：写时钟信号
+    - updateCond：写入条件，必须为 1 bit
     - addr：写地址信号
-    - en：写使能信号
     - data：写数据输入信号
+    - mask：逐位写掩码信号，位宽必须与 `memSymbol.width` 一致；无掩码写入时使用常量全 1
+    - event0, event1, ...：触发事件信号（Value）
 - results：无
 - attributes：
     - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation。
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 4）
+    - `eventOperands` = operands[4..]（按顺序与 `eventEdge` 配对）
 
 生成语义：
 ```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (en_active) begin
-        ${memSymbol}[${addr.symbol}] <= ${data.symbol};
-    end
-end
-```
-
-### 片上存储器带掩码写端口 kMemoryMaskWritePort
-
-写端口不提供复位语义；复位行为由上层逻辑显式控制 `en/data/mask`，不自动改写 memory。
-
-- operands：
-    - clk：写时钟信号
-    - addr：写地址信号
-    - en：写使能信号
-    - data：写数据输入信号
-    - mask: 逐位写掩码信号，位宽必须与 `memSymbol.width` 一致
-- results：无
-- attributes：
-    - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，掩码逻辑按照该 Operation 的位宽展开。
-    - clkPolarity：string 类型，取值 posedge / negedge，指明时钟信号的触发沿
-    - enLevel：string 类型，取值 `high` / `low`，指明使能信号的有效极性（默认 high）
-
-生成语义：
-```
-wire en_active = (enLevel == "high") ? ${en.symbol} : !${en.symbol};
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (en_active) begin
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
         if (${mask.symbol} == {${memSymbol.width}{1'b1}}) begin
             ${memSymbol}[${addr.symbol}] <= ${data.symbol};
         end else begin
-            for (int i = 0; i < ${memSymbol.width }; i = i + 1) begin
+            for (int i = 0; i < ${memSymbol.width}; i = i + 1) begin
                 if (${mask.symbol}[i]) begin
                     ${memSymbol}[${addr.symbol}][i] <= ${data.symbol}[i];
                 end
@@ -853,18 +570,20 @@ assign ${inoutIn0.symbol} = ${inoutWire0};
 GRH 只建模包裹在有时钟驱动的过程块中的 display，其他情况在生成 GRH 的时候被丢弃。
 
 - operands:
-    - clk: 时钟信号
-    - enable：使能信号
+    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
     - var0，var1，... 可变数量的参与输出的变量, n 个
+    - event0, event1, ...：触发事件信号（Value）
 - attributes:
-    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 - n）
+    - `eventOperands` = operands[1 + n ..]（按顺序与 `eventEdge` 配对）
     - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
     - displayKind（string）：记录原始系统任务，取值 `display` / `write` / `strobe`；运行时可据此决定是否自动追加换行等语义差异
 
 生成语义：
 ```
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (${enable.symbol}) begin
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
         $display("${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
     end
 end
@@ -875,17 +594,20 @@ end
 GRH 只建模包裹在有时钟驱动的过程块中的 assert，其他情况在生成 GRH 的时候被丢弃。
 
 - operands:
-    - clk: 时钟信号
+    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
     - condition：断言条件
+    - event0, event1, ...：触发事件信号（Value）
 - attributes:
-    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2）
+    - `eventOperands` = operands[2..]（按顺序与 `eventEdge` 配对）
     - message（string，可选）：断言失败的提示文本，通常来自 `$fatal/$error` 参数或静态字符串
     - severity（string，可选）：记录断言级别，建议取值 fatal/error/warning
 
 生成语义：
 ```
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (!${condition.symbol}) begin
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol} && !${condition.symbol}) begin
         $fatal("Assertion failed at time %0t", $time);
     end
 end
@@ -895,87 +617,96 @@ end
 
 ### DPI 导入操作 kDpicImport
 
-GRH 目前只提供对 `import "DPI-C" function void svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向支持 input/output/inout，且返回类型必须为 `void`。
+GRH 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向仅支持 input/output；返回类型可选（void 或有返回值）。
 
 具有一个唯一标识符 symbol，供 kDpicCall 引用。
 
 - operands：无
 - results：无
 - attributes：
-    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output / inout
+    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output
     - argsWidth (vector<int64_t>，n个)：记录每个形参的位宽
     - argsName (vector<string>，n个)：记录每个形参的名称
+    - argsSigned (vector<bool>，n个)：记录每个形参是否为有符号
+    - hasReturn (bool)：是否有返回值；false 表示 void
+    - returnWidth (int64_t)：返回值位宽（hasReturn 为 true 时有效）
+    - returnSigned (bool)：返回值是否有符号（hasReturn 为 true 时有效）
+
+约束：
+- `hasReturn == true` 时，`returnWidth > 0` 且 `returnSigned` 有效
+- `argsSigned` 与 `argsName/argsDirection/argsWidth` 长度一致
 
 生成语义：
 ```
-import "DPI-C" function void ${symbol} (
-    ${argsDirection[0]} logic [${argsWidth[0]}-1:0] ${argsName[0]},
-    ${argsDirection[1]} logic [${argsWidth[1]}-1:0] ${argsName[1]},
+import "DPI-C" function ${hasReturn ? ("logic " + (returnSigned ? "signed " : "") +
+    "[" + (returnWidth-1) + ":0]") : "void"} ${symbol} (
+    ${argsDirection[0]} logic ${argsSigned[0] ? "signed " : ""}[${argsWidth[0]}-1:0] ${argsName[0]},
+    ${argsDirection[1]} logic ${argsSigned[1] ? "signed " : ""}[${argsWidth[1]}-1:0] ${argsName[1]},
     ...
-    ${argsDirection[n-1]} logic [${argsWidth[n-1]}-1:0] ${argsName[n-1]}
+    ${argsDirection[n-1]} logic ${argsSigned[n-1] ? "signed " : ""}[${argsWidth[n-1]}-1:0] ${argsName[n-1]}
 );
 ```
 
 ### DPI 调用操作 kDpicCall
 
 - operands：
-    - clk: 时钟信号
-    - enable：调用使能信号
+    - updateCond：调用触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
     - inArg0，inArg1，... 可变数量的输入参数, m 个
-    - inoutArg0，inoutArg1，... 可变数量的 inout 输入参数, q 个
+    - event0, event1, ...：触发事件信号（Value）
 - results:
+    - retVal（可选）：当 `hasReturn` 为 true 时，第一个 result 作为返回值
     - outArg0，outArg1，... 可变数量的输出参数, p 个
-    - inoutArg0，inoutArg1，... 可变数量的 inout 输出参数, q 个
 - attributes：
-    - clkPolarity（string）：取值 posedge / negedge，指明时钟信号的触发沿
-    - targetImportSymbol（string）：记录被调用 kDpicImport Operation 的 symbol。前端必须在当前 Netlist 中基于该 symbol 查找到唯一的 kDpicImport，将其 `argsName`、`argsDirection` 等元数据注入生成语义中引用的 `targetImportSymbol.*` 字段。
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - targetImportSymbol（string）：记录被调用 kDpicImport Operation 的 symbol
     - inArgName (vector<string>，m 个)：记录每个输入参数的名称
     - outArgName (vector<string>，p 个)：记录每个输出参数的名称
-    - inoutArgName (vector<string>，q 个)：记录每个 inout 参数的名称
-    - inoutArgName 与 inout operands/results 索引一一对应，且保持 import 声明中的形参顺序
+    - hasReturn (bool)：是否有返回值
+
+约束：
+- `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 - m）
+- `eventOperands` = operands[1 + m ..]（按顺序与 `eventEdge` 配对）
+- `targetImportSymbol` 必须在当前 Netlist 中解析到唯一的 kDpicImport；
+  前端需从该 Operation 注入 `argsName/argsDirection` 等元数据
+- `hasReturn == true` 时，`results[0]` 为返回值，`results[1..]` 为输出参数；
+  `hasReturn == false` 时，results 仅包含输出参数
 
 构图或变换流程在处理 `kDpicCall` 时，需使用 `targetImportSymbol` 字符串到 Netlist 中解析出对应的 `kDpicImport` Operation，并从该 Operation 的 attributes 中读取形参方向、位宽与名称等信息；若解析失败或发现多个候选项，必须立即报错。下文伪代码中的 `importOp` 表示解析得到的 kDpicImport Operation，`importOp.argsName` 等字段均来自该 Operation 的 attributes。
 
 生成语义：
 ```
+logic ${retVal.signed ? "signed" : ""} [${retVal.width}-1:0] ${retVal.symbol}_intm; // hasReturn 为 true 时生成
 logic [${outArg0.width}-1:0] ${outArg0.symbol}_intm;
 logic [${outArg1.width}-1:0] ${outArg1.symbol}_intm;
-logic [${inoutArg0.width}-1:0] ${inoutArg0.symbol}_intm;
 ...
 
-always @(${clkPolarity} ${clk.symbol}) begin
-    if (${enable.symbol}) begin
-        ${inoutArg0.symbol}_intm = ${inoutArg0_in.symbol};
-        ${inoutArg1.symbol}_intm = ${inoutArg1_in.symbol};
-        ...
-        ${targetImportSymbol} (
-            ${CommaSeparatedList(
-                for (size_t i = 0; i < importOp.argsName.size(); ++i)
-                    -> (importOp.argsDirection[i] == "input"
-                        ? inArgs[IndexOf(inArgName, importOp.argsName[i])].symbol
-                        : importOp.argsDirection[i] == "inout"
-                          ? inoutOutArgs[IndexOf(inoutArgName, importOp.argsName[i])].symbol + "_intm"
-                        : outArgs[IndexOf(outArgName, importOp.argsName[i])].symbol + "_intm")
-            )}
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
+        ${hasReturn ? (retVal.symbol + "_intm = ") : ""}${targetImportSymbol} (
+          ${CommaSeparatedList(
+              for (size_t i = 0; i < importOp.argsName.size(); ++i)
+                  -> (importOp.argsDirection[i] == "input"
+                      ? inArgs[IndexOf(inArgName, importOp.argsName[i])].symbol
+                      : outArgs[IndexOf(outArgName, importOp.argsName[i])].symbol + "_intm")
+          )}
         );
     end
 end
 
+${hasReturn ? ("assign " + retVal.symbol + " = " + retVal.symbol + "_intm;") : ""}
 assign ${outArg0.symbol} = ${outArg0.symbol}_intm;
 assign ${outArg1.symbol} = ${outArg1.symbol}_intm;
-assign ${inoutArg0.symbol} = ${inoutArg0.symbol}_intm;
-...
 
 ```
 
 其中：
 
 - `inArgs = {inArg0, inArg1, …, inArgm-1}` 与 `outArgs = {outArg0, outArg1, …, outArgp-1}`；
-- `inoutInArgs = {inoutArg0_in, inoutArg1_in, …}` 为 operands 中的 inout 输入参数；
-- `inoutOutArgs = {inoutArg0, inoutArg1, …}` 为 results 中的 inout 输出参数；
 - `IndexOf(nameList, formalName)` 返回满足 `nameList[k] == formalName` 的唯一索引 `k`；若不存在或存在多个匹配项，则构图逻辑立即报错；
-- `inArgName` / `outArgName` / `inoutArgName` 与对应的实参数组在索引维度一一对应；
-- 输出与 inout 实参在 DPI 函数调用处以 `_intm` 后缀的中间变量形式传入，其中 inout 会先用输入值初始化中间变量。
+- `inArgName` / `outArgName` 与对应的实参数组在索引维度一一对应；
+- 输出实参在 DPI 函数调用处以 `_intm` 后缀的中间变量形式传入。
+- 当 `hasReturn` 为 true 时，`results[0]` 视为返回值，`results[1..]` 对应输出参数；
+  返回值通过 `_intm` 中间变量写回。
 
 # 编译符号信息
 
