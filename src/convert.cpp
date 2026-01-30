@@ -117,6 +117,9 @@ std::string parameterValueToString(const slang::ConstantValue& value)
     return sanitized;
 }
 
+std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
+                                    ExprNodeId id);
+
 std::string typeParameterToString(const slang::ast::TypeParameterSymbol& param)
 {
     return sanitizeParamToken(param.getTypeAlias().toString());
@@ -1353,9 +1356,96 @@ struct ExprLowererState {
             {
                 return kInvalidPlanIndex;
             }
+            auto getWidthHint = [&](ExprNodeId id) -> int32_t {
+                if (id == kInvalidPlanIndex || id >= lowering.values.size())
+                {
+                    return 0;
+                }
+                return lowering.values[id].widthHint;
+            };
+            int32_t indexWidth = getWidthHint(left);
+            if (indexWidth <= 0)
+            {
+                indexWidth = getWidthHint(right);
+            }
+            if (indexWidth <= 0)
+            {
+                indexWidth = 32;
+            }
+            auto addConst = [&](int64_t literal) -> ExprNodeId {
+                ExprNode constNode;
+                constNode.kind = ExprNodeKind::Constant;
+                constNode.literal = std::to_string(literal);
+                constNode.location = range->sourceRange.start();
+                constNode.widthHint = indexWidth;
+                return addSyntheticNode(std::move(constNode));
+            };
+            auto addSub = [&](ExprNodeId lhs, ExprNodeId rhs) -> ExprNodeId {
+                ExprNode subNode;
+                subNode.kind = ExprNodeKind::Operation;
+                subNode.op = grh::ir::OperationKind::kSub;
+                subNode.operands = {lhs, rhs};
+                subNode.location = range->sourceRange.start();
+                subNode.tempSymbol = makeTempSymbol();
+                subNode.widthHint = indexWidth;
+                return addSyntheticNode(std::move(subNode));
+            };
+            ExprNodeId indexExpr = kInvalidPlanIndex;
+            switch (range->getSelectionKind())
+            {
+            case slang::ast::RangeSelectionKind::Simple: {
+                auto leftConst = evalConstInt(plan, lowering, left);
+                auto rightConst = evalConstInt(plan, lowering, right);
+                if (!leftConst || !rightConst)
+                {
+                    reportUnsupported(expr, "Dynamic range select is unsupported");
+                    return kInvalidPlanIndex;
+                }
+                const int64_t low = std::min(*leftConst, *rightConst);
+                indexExpr = addConst(low);
+                break;
+            }
+            case slang::ast::RangeSelectionKind::IndexedUp:
+                indexExpr = left;
+                break;
+            case slang::ast::RangeSelectionKind::IndexedDown: {
+                auto widthConst = evalConstInt(plan, lowering, right);
+                if (widthConst)
+                {
+                    if (*widthConst <= 0)
+                    {
+                        reportUnsupported(expr, "Indexed part-select width must be positive");
+                        return kInvalidPlanIndex;
+                    }
+                    if (*widthConst == 1)
+                    {
+                        indexExpr = left;
+                    }
+                    else
+                    {
+                        ExprNodeId offset = addConst(*widthConst - 1);
+                        indexExpr = addSub(left, offset);
+                    }
+                }
+                else
+                {
+                    ExprNodeId one = addConst(1);
+                    ExprNodeId widthMinus = addSub(right, one);
+                    indexExpr = addSub(left, widthMinus);
+                }
+                break;
+            }
+            default:
+                reportUnsupported(expr, "Unsupported range select kind");
+                return kInvalidPlanIndex;
+            }
+            if (indexExpr == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
-            node.operands = {value, left, right};
+            node.operands = {value, indexExpr};
             node.tempSymbol = makeTempSymbol();
             return addNode(expr, std::move(node));
         }
@@ -1406,6 +1496,13 @@ private:
         const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
         lowering.values.push_back(std::move(node));
         lowered.emplace(&expr, id);
+        return id;
+    }
+
+    ExprNodeId addSyntheticNode(ExprNode node)
+    {
+        const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
+        lowering.values.push_back(std::move(node));
         return id;
     }
 };
@@ -4040,6 +4137,19 @@ private:
         return addNode(nullptr, std::move(node));
     }
 
+    ExprNodeId makeSliceDynamic(ExprNodeId value, ExprNodeId index, int32_t width,
+                                slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Operation;
+        node.op = grh::ir::OperationKind::kSliceDynamic;
+        node.operands = {value, index};
+        node.location = location;
+        node.tempSymbol = makeTempSymbol();
+        node.widthHint = width > 0 ? width : 1;
+        return addNode(nullptr, std::move(node));
+    }
+
     PlanSymbolId makeDpiResultSymbol()
     {
         const std::string name = "_dpi_ret_" + std::to_string(nextDpiResult++);
@@ -4625,10 +4735,106 @@ private:
             {
                 return kInvalidPlanIndex;
             }
+            auto clampWidth = [](uint64_t width) -> int32_t {
+                if (width == 0)
+                {
+                    return 0;
+                }
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                        : static_cast<int32_t>(width);
+            };
+            int32_t indexWidth = clampWidth(computeExprWidth(range->left()));
+            if (indexWidth <= 0)
+            {
+                indexWidth = clampWidth(computeExprWidth(range->right()));
+            }
+            if (indexWidth <= 0)
+            {
+                indexWidth = 32;
+            }
+            int32_t sliceWidth = clampWidth(computeExprWidth(*range));
+            if (sliceWidth <= 0)
+            {
+                sliceWidth = 1;
+            }
+            auto addConst = [&](int64_t literal) -> ExprNodeId {
+                ExprNode constNode;
+                constNode.kind = ExprNodeKind::Constant;
+                constNode.literal = std::to_string(literal);
+                constNode.location = range->sourceRange.start();
+                constNode.widthHint = indexWidth;
+                return addNode(nullptr, std::move(constNode));
+            };
+            auto addSub = [&](ExprNodeId lhs, ExprNodeId rhs) -> ExprNodeId {
+                ExprNode subNode;
+                subNode.kind = ExprNodeKind::Operation;
+                subNode.op = grh::ir::OperationKind::kSub;
+                subNode.operands = {lhs, rhs};
+                subNode.location = range->sourceRange.start();
+                subNode.tempSymbol = makeTempSymbol();
+                subNode.widthHint = indexWidth;
+                return addNode(nullptr, std::move(subNode));
+            };
+            ExprNodeId indexExpr = kInvalidPlanIndex;
+            switch (range->getSelectionKind())
+            {
+            case slang::ast::RangeSelectionKind::Simple: {
+                auto leftConst = evalConstInt(plan, lowering, left);
+                auto rightConst = evalConstInt(plan, lowering, right);
+                if (!leftConst || !rightConst)
+                {
+                    reportUnsupported(expr, "Dynamic range select is unsupported");
+                    return kInvalidPlanIndex;
+                }
+                const int64_t low = std::min(*leftConst, *rightConst);
+                indexExpr = addConst(low);
+                break;
+            }
+            case slang::ast::RangeSelectionKind::IndexedUp:
+                indexExpr = left;
+                break;
+            case slang::ast::RangeSelectionKind::IndexedDown: {
+                auto widthConst = evalConstInt(plan, lowering, right);
+                if (widthConst)
+                {
+                    if (*widthConst <= 0)
+                    {
+                        reportUnsupported(expr, "Indexed part-select width must be positive");
+                        return kInvalidPlanIndex;
+                    }
+                    if (*widthConst == 1)
+                    {
+                        indexExpr = left;
+                    }
+                    else
+                    {
+                        ExprNodeId offset = addConst(*widthConst - 1);
+                        indexExpr = addSub(left, offset);
+                    }
+                }
+                else
+                {
+                    ExprNodeId one = addConst(1);
+                    ExprNodeId widthMinus = addSub(right, one);
+                    indexExpr = addSub(left, widthMinus);
+                }
+                break;
+            }
+            default:
+                reportUnsupported(expr, "Unsupported range select kind");
+                return kInvalidPlanIndex;
+            }
+            if (indexExpr == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
-            node.operands = {value, left, right};
+            node.operands = {value, indexExpr};
             node.tempSymbol = makeTempSymbol();
+            node.widthHint = sliceWidth;
             return addNode(&expr, std::move(node));
         }
 
@@ -4668,14 +4874,30 @@ private:
         {
             return kInvalidPlanIndex;
         }
-        if (high == low)
+        const uint64_t lo = std::min(high, low);
+        const uint64_t hi = std::max(high, low);
+        const uint64_t span = hi - lo + 1;
+        const uint64_t maxValue =
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        const int32_t width =
+            span > maxValue ? std::numeric_limits<int32_t>::max()
+                            : static_cast<int32_t>(span);
+        int32_t indexWidth = 0;
+        if (value < lowering.values.size())
         {
-            ExprNodeId index = addConstantLiteral(std::to_string(low), location);
-            return makeOperation(grh::ir::OperationKind::kSliceDynamic, {value, index}, location);
+            indexWidth = lowering.values[value].widthHint;
         }
-        ExprNodeId left = addConstantLiteral(std::to_string(high), location);
-        ExprNodeId right = addConstantLiteral(std::to_string(low), location);
-        return makeOperation(grh::ir::OperationKind::kSliceDynamic, {value, left, right}, location);
+        if (indexWidth <= 0)
+        {
+            indexWidth = 32;
+        }
+        ExprNode constNode;
+        constNode.kind = ExprNodeKind::Constant;
+        constNode.literal = std::to_string(lo);
+        constNode.location = location;
+        constNode.widthHint = indexWidth;
+        ExprNodeId index = addNode(nullptr, std::move(constNode));
+        return makeSliceDynamic(value, index, width, location);
     }
 
     bool resolveLValueTargets(const slang::ast::Expression& expr,
@@ -9220,9 +9442,96 @@ private:
                 {
                     return kInvalidPlanIndex;
                 }
+                auto getWidthHint = [&](ExprNodeId id) -> int32_t {
+                    if (id == kInvalidPlanIndex ||
+                        id >= state_.lowering_.values.size())
+                    {
+                        return 0;
+                    }
+                    return state_.lowering_.values[id].widthHint;
+                };
+                int32_t indexWidth = getWidthHint(left);
+                if (indexWidth <= 0)
+                {
+                    indexWidth = getWidthHint(right);
+                }
+                if (indexWidth <= 0)
+                {
+                    indexWidth = 32;
+                }
+                auto addConst = [&](int64_t literal) -> ExprNodeId {
+                    ExprNode constNode;
+                    constNode.kind = ExprNodeKind::Constant;
+                    constNode.literal = std::to_string(literal);
+                    constNode.location = range->sourceRange.start();
+                    constNode.widthHint = indexWidth;
+                    return addSyntheticNode(std::move(constNode));
+                };
+                auto addSub = [&](ExprNodeId lhs, ExprNodeId rhs) -> ExprNodeId {
+                    ExprNode subNode;
+                    subNode.kind = ExprNodeKind::Operation;
+                    subNode.op = grh::ir::OperationKind::kSub;
+                    subNode.operands = {lhs, rhs};
+                    subNode.location = range->sourceRange.start();
+                    subNode.widthHint = indexWidth;
+                    return addSyntheticNode(std::move(subNode));
+                };
+                ExprNodeId indexExpr = kInvalidPlanIndex;
+                switch (range->getSelectionKind())
+                {
+                case slang::ast::RangeSelectionKind::Simple: {
+                    auto leftConst = evalConstInt(state_.plan_, state_.lowering_, left);
+                    auto rightConst = evalConstInt(state_.plan_, state_.lowering_, right);
+                    if (!leftConst || !rightConst)
+                    {
+                        reportUnsupported(expr, "Dynamic range select is unsupported");
+                        return kInvalidPlanIndex;
+                    }
+                    const int64_t low = std::min(*leftConst, *rightConst);
+                    indexExpr = addConst(low);
+                    break;
+                }
+                case slang::ast::RangeSelectionKind::IndexedUp:
+                    indexExpr = left;
+                    break;
+                case slang::ast::RangeSelectionKind::IndexedDown: {
+                    auto widthConst = evalConstInt(state_.plan_, state_.lowering_, right);
+                    if (widthConst)
+                    {
+                        if (*widthConst <= 0)
+                        {
+                            reportUnsupported(expr, "Indexed part-select width must be positive");
+                            return kInvalidPlanIndex;
+                        }
+                        if (*widthConst == 1)
+                        {
+                            indexExpr = left;
+                        }
+                        else
+                        {
+                            ExprNodeId offset = addConst(*widthConst - 1);
+                            indexExpr = addSub(left, offset);
+                        }
+                    }
+                    else
+                    {
+                        ExprNodeId one = addConst(1);
+                        ExprNodeId widthMinus = addSub(right, one);
+                        indexExpr = addSub(left, widthMinus);
+                    }
+                    break;
+                }
+                default:
+                    reportUnsupported(expr, "Unsupported range select kind");
+                    return kInvalidPlanIndex;
+                }
+                if (indexExpr == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
                 node.kind = ExprNodeKind::Operation;
                 node.op = grh::ir::OperationKind::kSliceDynamic;
-                node.operands = {value, left, right};
+                node.operands = {value, indexExpr};
                 return addNode(expr, std::move(node));
             }
 
@@ -9257,6 +9566,15 @@ private:
             state_.lowering_.values.push_back(std::move(node));
             state_.registerExprNode();
             lowered_.emplace(&expr, id);
+            return id;
+        }
+
+        ExprNodeId addSyntheticNode(ExprNode node)
+        {
+            const ExprNodeId id =
+                static_cast<ExprNodeId>(state_.lowering_.values.size());
+            state_.lowering_.values.push_back(std::move(node));
+            state_.registerExprNode();
             return id;
         }
 
@@ -9371,12 +9689,72 @@ private:
 
         if (node.op == grh::ir::OperationKind::kSliceDynamic && operands.size() >= 2)
         {
+            const int32_t width = normalizeWidth(node.widthHint);
+            std::optional<int64_t> staticOffset;
+            if (width > 0)
+            {
+                const grh::ir::Value offsetValue = graph_.getValue(operands[1]);
+                const grh::ir::OperationId defOpId = offsetValue.definingOp();
+                if (defOpId.valid())
+                {
+                    const grh::ir::Operation defOp = graph_.getOperation(defOpId);
+                    if (defOp.kind() == grh::ir::OperationKind::kConstant)
+                    {
+                        if (auto literal = defOp.attr("constValue"))
+                        {
+                            if (auto text = std::get_if<std::string>(&*literal))
+                            {
+                                try
+                                {
+                                    slang::SVInt parsed = slang::SVInt::fromString(*text);
+                                    if (!parsed.hasUnknown())
+                                    {
+                                        if (auto offset = parsed.as<int64_t>())
+                                        {
+                                            staticOffset = *offset;
+                                        }
+                                    }
+                                }
+                                catch (const std::exception&)
+                                {
+                                    staticOffset.reset();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (staticOffset && *staticOffset >= 0)
+            {
+                const int64_t baseWidth = graph_.getValue(operands[0]).width();
+                const int64_t start = *staticOffset;
+                const int64_t end = start + static_cast<int64_t>(width) - 1;
+                if (baseWidth <= 0 || (end >= start && end < baseWidth))
+                {
+                    grh::ir::OperationId op =
+                        graph_.createOperation(grh::ir::OperationKind::kSliceStatic,
+                                               grh::ir::SymbolId::invalid());
+                    graph_.addOperand(op, operands[0]);
+                    graph_.setAttr(op, "sliceStart", start);
+                    graph_.setAttr(op, "sliceEnd", end);
+                    grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
+                    if (!sym.valid())
+                    {
+                        sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                    }
+                    grh::ir::ValueId result = graph_.createValue(sym, width, false);
+                    graph_.addResult(op, result);
+                    valueByExpr_[id] = result;
+                    return result;
+                }
+            }
+
             grh::ir::OperationId op =
                 graph_.createOperation(grh::ir::OperationKind::kSliceDynamic,
                                        grh::ir::SymbolId::invalid());
             graph_.addOperand(op, operands[0]);
             graph_.addOperand(op, operands[1]);
-            const int32_t width = normalizeWidth(node.widthHint);
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
             grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
             if (!sym.valid())
