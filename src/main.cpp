@@ -21,6 +21,7 @@
 #include "pass/demo_stats.hpp"
 #include "pass/const_fold.hpp"
 #include "pass/const_inline.hpp"
+#include "pass/output_assign_inline.hpp"
 #include "pass/dead_code_elim.hpp"
 
 using namespace slang::driver;
@@ -396,6 +397,7 @@ int main(int argc, char **argv)
     wolf_sv_parser::transform::PassManager passManager;
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstInlinePass>());
+    passManager.addPass(std::make_unique<wolf_sv_parser::transform::OutputAssignInlinePass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
     wolf_sv_parser::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
