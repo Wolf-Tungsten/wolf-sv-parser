@@ -2283,6 +2283,11 @@ private:
             dpi.results.insert(dpi.results.begin(), retSymbol);
         }
 
+        if (!recordDpiImport(subroutine, call.sourceRange.start()))
+        {
+            return true;
+        }
+
         LoweredStmt stmt;
         stmt.kind = LoweredStmtKind::DpiCall;
         stmt.op = grh::ir::OperationKind::kDpicCall;
@@ -2294,6 +2299,111 @@ private:
         stmt.dpiCall = std::move(dpi);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
+    }
+
+    bool recordDpiImport(const slang::ast::SubroutineSymbol& subroutine,
+                         slang::SourceLocation location)
+    {
+        auto info = buildDpiImportInfo(subroutine, location);
+        if (!info)
+        {
+            return false;
+        }
+        for (const auto& existing : lowering.dpiImports)
+        {
+            if (existing.symbol != info->symbol)
+            {
+                continue;
+            }
+            if (!dpiImportSignatureMatches(existing, *info))
+            {
+                if (diagnostics)
+                {
+                    diagnostics->error(
+                        location,
+                        std::string("Conflicting DPI import signature for ") + existing.symbol);
+                }
+                return false;
+            }
+            return true;
+        }
+        lowering.dpiImports.push_back(std::move(*info));
+        return true;
+    }
+
+    std::optional<DpiImportInfo> buildDpiImportInfo(
+        const slang::ast::SubroutineSymbol& subroutine,
+        slang::SourceLocation location)
+    {
+        DpiImportInfo info;
+        info.symbol = std::string(subroutine.name);
+        const auto formals = subroutine.getArguments();
+        info.argsDirection.reserve(formals.size());
+        info.argsWidth.reserve(formals.size());
+        info.argsName.reserve(formals.size());
+        info.argsSigned.reserve(formals.size());
+
+        for (const auto* formal : formals)
+        {
+            if (!formal)
+            {
+                if (diagnostics)
+                {
+                    diagnostics->error(location, "DPI import missing formal argument");
+                }
+                return std::nullopt;
+            }
+            std::string direction;
+            switch (formal->direction)
+            {
+            case slang::ast::ArgumentDirection::In:
+                direction = "input";
+                break;
+            case slang::ast::ArgumentDirection::Out:
+                direction = "output";
+                break;
+            default:
+                if (diagnostics)
+                {
+                    diagnostics->error(*formal,
+                                       "Unsupported DPI argument direction");
+                }
+                return std::nullopt;
+            }
+            const uint64_t widthRaw =
+                computeFixedWidth(formal->getType(), *formal, diagnostics);
+            const int32_t width =
+                clampWidth(widthRaw, *formal, diagnostics, "DPI argument");
+            info.argsDirection.push_back(std::move(direction));
+            info.argsWidth.push_back(static_cast<int64_t>(width));
+            info.argsName.push_back(std::string(formal->name));
+            info.argsSigned.push_back(formal->getType().isSigned());
+        }
+
+        const slang::ast::Type& returnType = subroutine.getReturnType();
+        if (!returnType.isVoid())
+        {
+            const uint64_t widthRaw =
+                computeFixedWidth(returnType, subroutine, diagnostics);
+            const int32_t width =
+                clampWidth(widthRaw, subroutine, diagnostics, "DPI return");
+            info.hasReturn = true;
+            info.returnWidth = static_cast<int64_t>(width);
+            info.returnSigned = returnType.isSigned();
+        }
+        return info;
+    }
+
+    static bool dpiImportSignatureMatches(const DpiImportInfo& lhs, const DpiImportInfo& rhs)
+    {
+        return lhs.symbol == rhs.symbol &&
+               lhs.argsDirection == rhs.argsDirection &&
+               lhs.argsWidth == rhs.argsWidth &&
+               lhs.argsName == rhs.argsName &&
+               lhs.argsSigned == rhs.argsSigned &&
+               lhs.hasReturn == rhs.hasReturn &&
+               lhs.returnWidth == rhs.returnWidth &&
+               lhs.returnSigned == rhs.returnSigned;
     }
 
     void recordWriteIntent(WriteIntent intent)
@@ -5698,6 +5808,7 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
     lowering.writes.clear();
     lowering.loweredStmts.clear();
+    lowering.dpiImports.clear();
 
     StmtLowererState state(plan, context_.diagnostics, lowering,
                            context_.options.maxLoopIterations);
@@ -7239,6 +7350,7 @@ public:
         createSignalValues();
         createMemoryOps();
         emitMemoryPorts();
+        emitSideEffects();
         emitWriteBack();
     }
 
@@ -7653,6 +7765,380 @@ private:
             }
             graph_.setAttr(op, "eventEdge", std::move(edges));
             graph_.setAttr(op, "memSymbol", std::string(memSymbol));
+        }
+    }
+
+    void emitSideEffects()
+    {
+        emitDpiImports();
+        for (const auto& stmt : lowering_.loweredStmts)
+        {
+            switch (stmt.kind)
+            {
+            case LoweredStmtKind::Display:
+                emitDisplay(stmt);
+                break;
+            case LoweredStmtKind::Assert:
+                emitAssert(stmt);
+                break;
+            case LoweredStmtKind::DpiCall:
+                emitDpiCall(stmt);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
+    const DpiImportInfo* findDpiImport(std::string_view symbol) const
+    {
+        for (const auto& info : lowering_.dpiImports)
+        {
+            if (info.symbol == symbol)
+            {
+                return &info;
+            }
+        }
+        return nullptr;
+    }
+
+    void emitDpiImports()
+    {
+        for (const auto& info : lowering_.dpiImports)
+        {
+            if (info.symbol.empty())
+            {
+                continue;
+            }
+            grh::ir::SymbolId sym = graph_.internSymbol(info.symbol);
+            grh::ir::OperationId existing = graph_.findOperation(sym);
+            if (existing.valid())
+            {
+                if (graph_.getOperation(existing).kind() != grh::ir::OperationKind::kDpicImport &&
+                    context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slang::SourceLocation{},
+                        std::string("Skipping DPI import with conflicting symbol ") +
+                            info.symbol);
+                }
+                continue;
+            }
+            if (graph_.findValue(sym).valid())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slang::SourceLocation{},
+                        std::string("Skipping DPI import with conflicting value ") +
+                            info.symbol);
+                }
+                continue;
+            }
+
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kDpicImport, sym);
+            graph_.setAttr(op, "argsDirection", info.argsDirection);
+            graph_.setAttr(op, "argsWidth", info.argsWidth);
+            graph_.setAttr(op, "argsName", info.argsName);
+            graph_.setAttr(op, "argsSigned", info.argsSigned);
+            graph_.setAttr(op, "hasReturn", info.hasReturn);
+            if (info.hasReturn)
+            {
+                graph_.setAttr(op, "returnWidth", info.returnWidth);
+                graph_.setAttr(op, "returnSigned", info.returnSigned);
+            }
+        }
+    }
+
+    void emitDisplay(const LoweredStmt& stmt)
+    {
+        if (stmt.eventEdges.size() != stmt.eventOperands.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping display with mismatched event binding");
+            }
+            return;
+        }
+        if (stmt.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping display without edge-sensitive timing");
+            }
+            return;
+        }
+
+        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
+        if (!updateCond.valid())
+        {
+            return;
+        }
+
+        grh::ir::OperationId op =
+            graph_.createOperation(grh::ir::OperationKind::kDisplay,
+                                   grh::ir::SymbolId::invalid());
+        graph_.addOperand(op, updateCond);
+
+        for (ExprNodeId argId : stmt.display.args)
+        {
+            grh::ir::ValueId arg = emitExpr(argId);
+            if (!arg.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, arg);
+        }
+        for (ExprNodeId evtId : stmt.eventOperands)
+        {
+            grh::ir::ValueId evt = emitExpr(evtId);
+            if (!evt.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, evt);
+        }
+
+        graph_.setAttr(op, "formatString", stmt.display.formatString);
+        graph_.setAttr(op, "displayKind", stmt.display.displayKind);
+        std::vector<std::string> edges;
+        edges.reserve(stmt.eventEdges.size());
+        for (EventEdge edge : stmt.eventEdges)
+        {
+            edges.push_back(edgeText(edge));
+        }
+        graph_.setAttr(op, "eventEdge", edges);
+        if (edges.size() == 1)
+        {
+            graph_.setAttr(op, "clkPolarity", edges.front());
+        }
+    }
+
+    void emitAssert(const LoweredStmt& stmt)
+    {
+        if (stmt.eventEdges.size() != stmt.eventOperands.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping assert with mismatched event binding");
+            }
+            return;
+        }
+        if (stmt.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping assert without edge-sensitive timing");
+            }
+            return;
+        }
+
+        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
+        grh::ir::ValueId condition = emitExpr(stmt.assertion.condition);
+        if (!updateCond.valid() || !condition.valid())
+        {
+            return;
+        }
+
+        grh::ir::OperationId op =
+            graph_.createOperation(grh::ir::OperationKind::kAssert,
+                                   grh::ir::SymbolId::invalid());
+        graph_.addOperand(op, updateCond);
+        graph_.addOperand(op, condition);
+        for (ExprNodeId evtId : stmt.eventOperands)
+        {
+            grh::ir::ValueId evt = emitExpr(evtId);
+            if (!evt.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, evt);
+        }
+
+        if (!stmt.assertion.message.empty())
+        {
+            graph_.setAttr(op, "message", stmt.assertion.message);
+        }
+        if (!stmt.assertion.severity.empty())
+        {
+            graph_.setAttr(op, "severity", stmt.assertion.severity);
+        }
+        std::vector<std::string> edges;
+        edges.reserve(stmt.eventEdges.size());
+        for (EventEdge edge : stmt.eventEdges)
+        {
+            edges.push_back(edgeText(edge));
+        }
+        graph_.setAttr(op, "eventEdge", edges);
+        if (edges.size() == 1)
+        {
+            graph_.setAttr(op, "clkPolarity", edges.front());
+        }
+    }
+
+    std::optional<std::pair<int64_t, bool>> findDpiArgType(
+        const DpiImportInfo& importInfo, std::string_view name,
+        std::string_view direction) const
+    {
+        for (std::size_t i = 0; i < importInfo.argsName.size(); ++i)
+        {
+            if (importInfo.argsName[i] != name)
+            {
+                continue;
+            }
+            if (i >= importInfo.argsDirection.size() || i >= importInfo.argsWidth.size() ||
+                i >= importInfo.argsSigned.size())
+            {
+                break;
+            }
+            if (!direction.empty() && importInfo.argsDirection[i] != direction)
+            {
+                break;
+            }
+            return std::pair<int64_t, bool>{importInfo.argsWidth[i], importInfo.argsSigned[i]};
+        }
+        return std::nullopt;
+    }
+
+    void emitDpiCall(const LoweredStmt& stmt)
+    {
+        if (stmt.eventEdges.size() != stmt.eventOperands.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping DPI call with mismatched event binding");
+            }
+            return;
+        }
+        if (stmt.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping DPI call without edge-sensitive timing");
+            }
+            return;
+        }
+
+        const DpiCallStmt& dpi = stmt.dpiCall;
+        const DpiImportInfo* importInfo = findDpiImport(dpi.targetImportSymbol);
+        if (!importInfo)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    stmt.location,
+                    std::string("Skipping DPI call without matching import ") +
+                        dpi.targetImportSymbol);
+            }
+            return;
+        }
+
+        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
+        if (!updateCond.valid())
+        {
+            return;
+        }
+
+        grh::ir::OperationId op =
+            graph_.createOperation(grh::ir::OperationKind::kDpicCall,
+                                   grh::ir::SymbolId::invalid());
+        graph_.addOperand(op, updateCond);
+        for (ExprNodeId argId : dpi.inArgs)
+        {
+            grh::ir::ValueId arg = emitExpr(argId);
+            if (!arg.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, arg);
+        }
+        for (ExprNodeId evtId : stmt.eventOperands)
+        {
+            grh::ir::ValueId evt = emitExpr(evtId);
+            if (!evt.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, evt);
+        }
+
+        graph_.setAttr(op, "targetImportSymbol", dpi.targetImportSymbol);
+        graph_.setAttr(op, "inArgName", dpi.inArgNames);
+        graph_.setAttr(op, "outArgName", dpi.outArgNames);
+        graph_.setAttr(op, "hasReturn", dpi.hasReturn);
+        std::vector<std::string> edges;
+        edges.reserve(stmt.eventEdges.size());
+        for (EventEdge edge : stmt.eventEdges)
+        {
+            edges.push_back(edgeText(edge));
+        }
+        graph_.setAttr(op, "eventEdge", edges);
+        if (edges.size() == 1)
+        {
+            graph_.setAttr(op, "clkPolarity", edges.front());
+        }
+
+        std::size_t resultOffset = 0;
+        if (dpi.hasReturn)
+        {
+            if (dpi.results.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(stmt.location,
+                                               "DPI call missing return result");
+                }
+                return;
+            }
+            PlanSymbolId retSymbol = dpi.results.front();
+            const int64_t width = importInfo->returnWidth > 0 ? importInfo->returnWidth : 1;
+            const bool isSigned = importInfo->returnSigned;
+            grh::ir::ValueId retValue = valueForSymbol(retSymbol);
+            if (!retValue.valid())
+            {
+                retValue = createValue(retSymbol, static_cast<int32_t>(width), isSigned);
+            }
+            if (!retValue.valid())
+            {
+                return;
+            }
+            graph_.addResult(op, retValue);
+            resultOffset = 1;
+        }
+
+        if (dpi.results.size() < resultOffset + dpi.outArgNames.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "DPI call result count mismatch");
+            }
+            return;
+        }
+
+        for (std::size_t i = 0; i < dpi.outArgNames.size(); ++i)
+        {
+            PlanSymbolId resultSymbol = dpi.results[resultOffset + i];
+            grh::ir::ValueId resultValue = valueForSymbol(resultSymbol);
+            if (!resultValue.valid())
+            {
+                auto meta = findDpiArgType(*importInfo, dpi.outArgNames[i], "output");
+                int64_t width = meta ? meta->first : 1;
+                bool isSigned = meta ? meta->second : false;
+                resultValue = createValue(resultSymbol, static_cast<int32_t>(width), isSigned);
+            }
+            if (!resultValue.valid())
+            {
+                return;
+            }
+            graph_.addResult(op, resultValue);
         }
     }
 

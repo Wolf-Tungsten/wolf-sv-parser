@@ -256,6 +256,7 @@ end
 - DPI 调用：  
   - 仅识别 `DPI-C import function` 的语句调用（input/output 方向）。  
   - `in` -> `ExprNodeId`，`out` -> `results`，可选返回值写入 `results[0]` 且 `hasReturn=true`。  
+  - 同步记录 `DpiImportInfo` 到 `LoweringPlan.dpiImports`，按 symbol 去重并校验签名一致。  
 - 事件绑定：进入过程块时解析 edge-sensitive timing control（`posedge/negedge`）；  
   若无法解析或非 edge-sensitive，display/DPI 调用丢弃并产生诊断。  
 - 参数表达式复用 Pass4/Pass5 的 `lowerExpression` 降级为 `ExprNodeId`。  
@@ -412,16 +413,25 @@ endmodule
        使用 `updateCond/eventEdges/eventOperands`；
      - memoryWrites：`kMemoryWritePort`，写入 updateCond/addr/data/mask/eventEdge；
      - 缺失 edge-sensitive 事件时发出诊断并跳过。
-  5. **表达式**：
+  5. **副作用语句与 DPI**：
+     - `Display` -> `kDisplay`：operands = `updateCond + args + eventOperands`；
+       attrs = `formatString/displayKind/eventEdge`。
+     - `Assert` -> `kAssert`：operands = `updateCond + condition + eventOperands`；
+       attrs = `message/severity/eventEdge`。
+     - `DpiCall` -> `kDpicCall`：operands = `updateCond + inArgs + eventOperands`，
+       results = `[ret?] + outArgs`；attrs = `targetImportSymbol/inArgName/outArgName/hasReturn/eventEdge`。
+     - `dpiImports` -> `kDpicImport`：attrs = `argsName/argsDirection/argsWidth/argsSigned`
+       与返回值 `hasReturn/returnWidth/returnSigned`。
+  6. **表达式**：
      - `Constant` -> `kConstant` + `constValue` attr；
      - `Symbol` -> 直接映射 `V(symbol)`；
      - `Operation` -> 对 operands 递归发射，创建同名 GRH op，并生成临时 Value。
      - `kReplicate` 需要常量 count；`kSliceDynamic` 使用 `sliceWidth` attr。
-  6. **写回**：
+  7. **写回**：
      - comb：`kAssign(nextValue)` 输出到目标 Value；
      - seq：`kRegister(updateCond, nextValue, eventOperands...)`，写 `eventEdge`；
      - latch：`kLatch(updateCond, nextValue)`。
-  7. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
+  8. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
 
 ### 案例讲解（基于核心数据结构的转换）
 示例输入（SystemVerilog）：

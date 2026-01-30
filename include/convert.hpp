@@ -394,6 +394,17 @@ struct DpiCallStmt {
     bool hasReturn = false;
 };
 
+struct DpiImportInfo {
+    std::string symbol;
+    std::vector<std::string> argsDirection;
+    std::vector<int64_t> argsWidth;
+    std::vector<std::string> argsName;
+    std::vector<bool> argsSigned;
+    bool hasReturn = false;
+    int64_t returnWidth = 0;
+    bool returnSigned = false;
+};
+
 enum class LoweredStmtKind {
     Write,
     Display,
@@ -445,6 +456,7 @@ struct LoweringPlan {
     std::vector<PlanSymbolId> tempSymbols;
     std::vector<WriteIntent> writes;
     std::vector<LoweredStmt> loweredStmts;
+    std::vector<DpiImportInfo> dpiImports;
     std::vector<MemoryReadPort> memoryReads;
     std::vector<MemoryWritePort> memoryWrites;
 };

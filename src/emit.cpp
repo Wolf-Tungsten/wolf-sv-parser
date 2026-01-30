@@ -2880,29 +2880,41 @@ namespace grh::emit
                 }
                 case grh::ir::OperationKind::kDisplay:
                 {
-                    if (operands.size() < 2)
+                    if (operands.size() < 1)
                     {
                         reportError("kDisplay missing operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
                     auto format = getAttribute<std::string>(*graph, op, "formatString");
-                    if (!clkPolarity || !format)
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (!format || !eventEdges)
                     {
-                        reportError("kDisplay missing clkPolarity or formatString", opContext);
+                        reportError("kDisplay missing eventEdge or formatString", opContext);
                         break;
                     }
-                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDisplay");
+                    if (eventEdges->empty())
+                    {
+                        reportError("kDisplay missing eventEdge entries", opContext);
+                        break;
+                    }
+                    if (operands.size() < 1 + eventEdges->size())
+                    {
+                        reportError("kDisplay operand count does not match eventEdge", opContext);
+                        break;
+                    }
+                    const std::size_t argCount = operands.size() - 1 - eventEdges->size();
+                    const std::size_t eventStart = 1 + argCount;
+                    auto seqKey = buildEventKey(op, eventStart);
                     if (!seqKey)
                     {
                         break;
                     }
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
                     stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
-                    for (std::size_t i = 2; i < operands.size(); ++i)
+                    for (std::size_t i = 0; i < argCount; ++i)
                     {
-                        stmt << ", " << valueName(operands[i]);
+                        stmt << ", " << valueName(operands[1 + i]);
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
@@ -2916,20 +2928,25 @@ namespace grh::emit
                         reportError("kAssert missing operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
-                    if (!clkPolarity)
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (!eventEdges)
                     {
-                        reportError("kAssert missing clkPolarity", opContext);
+                        reportError("kAssert missing eventEdge", opContext);
+                        break;
+                    }
+                    if (eventEdges->empty())
+                    {
+                        reportError("kAssert missing eventEdge entries", opContext);
                         break;
                     }
                     auto message = getAttribute<std::string>(*graph, op, "message").value_or(std::string("Assertion failed"));
-                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kAssert");
+                    auto seqKey = buildEventKey(op, 2);
                     if (!seqKey)
                     {
                         break;
                     }
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (!" + valueName(operands[1]) + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + " && !" + valueName(operands[1]) + ") begin");
                     appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
                     addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -2940,16 +2957,48 @@ namespace grh::emit
                     auto argsDir = getAttribute<std::vector<std::string>>(*graph, op, "argsDirection");
                     auto argsWidth = getAttribute<std::vector<int64_t>>(*graph, op, "argsWidth");
                     auto argsName = getAttribute<std::vector<std::string>>(*graph, op, "argsName");
-                    if (!argsDir || !argsWidth || !argsName || argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
+                    auto argsSigned = getAttribute<std::vector<bool>>(*graph, op, "argsSigned");
+                    auto hasReturn = getAttribute<bool>(*graph, op, "hasReturn").value_or(false);
+                    auto returnWidth = getAttribute<int64_t>(*graph, op, "returnWidth").value_or(0);
+                    auto returnSigned = getAttribute<bool>(*graph, op, "returnSigned").value_or(false);
+                    if (!argsDir || !argsWidth || !argsName ||
+                        argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                     {
                         reportError("kDpicImport missing or inconsistent arg metadata", opContext);
                         break;
                     }
+                    if (argsSigned && argsSigned->size() != argsDir->size())
+                    {
+                        reportError("kDpicImport argsSigned size mismatch", opContext);
+                        break;
+                    }
                     std::ostringstream decl;
-                    decl << "import \"DPI-C\" function void " << opContext << " (\n";
+                    decl << "import \"DPI-C\" function ";
+                    if (hasReturn)
+                    {
+                        const int64_t width = returnWidth > 0 ? returnWidth : 1;
+                        decl << "logic ";
+                        if (returnSigned)
+                        {
+                            decl << "signed ";
+                        }
+                        if (width > 1)
+                        {
+                            decl << "[" << (width - 1) << ":0] ";
+                        }
+                    }
+                    else
+                    {
+                        decl << "void ";
+                    }
+                    decl << opContext << " (\n";
                     for (std::size_t i = 0; i < argsDir->size(); ++i)
                     {
                         decl << "  " << (*argsDir)[i] << " logic ";
+                        if (argsSigned && (*argsSigned)[i])
+                        {
+                            decl << "signed ";
+                        }
                         if ((*argsWidth)[i] > 1)
                         {
                             decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
@@ -2963,33 +3012,52 @@ namespace grh::emit
                 }
                 case grh::ir::OperationKind::kDpicCall:
                 {
-                    if (operands.size() < 2)
+                    if (operands.empty())
                     {
-                        reportError("kDpicCall missing clk/enable operands", opContext);
+                        reportError("kDpicCall missing operands", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
                     auto targetImport = getAttribute<std::string>(*graph, op, "targetImportSymbol");
                     auto inArgName = getAttribute<std::vector<std::string>>(*graph, op, "inArgName");
                     auto outArgName = getAttribute<std::vector<std::string>>(*graph, op, "outArgName");
                     auto inoutArgName = getAttribute<std::vector<std::string>>(*graph, op, "inoutArgName");
-                    if (!clkPolarity || !targetImport || !inArgName || !outArgName)
+                    auto hasReturn = getAttribute<bool>(*graph, op, "hasReturn").value_or(false);
+                    if (!eventEdges || !targetImport || !inArgName || !outArgName)
                     {
                         reportError("kDpicCall missing metadata", opContext);
                         break;
                     }
+                    if (eventEdges->empty())
+                    {
+                        reportError("kDpicCall missing eventEdge entries", opContext);
+                        break;
+                    }
+                    if (operands.size() < 1 + eventEdges->size())
+                    {
+                        reportError("kDpicCall operand count does not match eventEdge", opContext);
+                        break;
+                    }
+                    const std::size_t eventStart = operands.size() - eventEdges->size();
+                    if (eventStart < 1)
+                    {
+                        reportError("kDpicCall missing updateCond operand", opContext);
+                        break;
+                    }
+                    const std::size_t argCount = eventStart - 1;
                     const std::size_t inoutCount = inoutArgName ? inoutArgName->size() : 0;
-                    if (operands.size() < 2 + inArgName->size() + inoutCount)
+                    if (argCount != inArgName->size() + inoutCount)
                     {
                         reportError("kDpicCall operand count does not match args", opContext);
                         break;
                     }
-                    if (results.size() < outArgName->size() + inoutCount)
+                    const std::size_t outputOffset = hasReturn ? 1 : 0;
+                    if (results.size() < outputOffset + outArgName->size() + inoutCount)
                     {
                         reportError("kDpicCall result count does not match args", opContext);
                         break;
                     }
-                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDpicCall");
+                    auto seqKey = buildEventKey(op, eventStart);
                     if (!seqKey)
                     {
                         break;
@@ -3021,13 +3089,13 @@ namespace grh::emit
 
                     bool callOk = true;
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
                     if (inoutArgName && !inoutArgName->empty())
                     {
                         for (std::size_t i = 0; i < inoutArgName->size(); ++i)
                         {
-                            const std::size_t operandIndex = 2 + inArgName->size() + i;
-                            const std::size_t resultIndex = outArgName->size() + i;
+                            const std::size_t operandIndex = 1 + inArgName->size() + i;
+                            const std::size_t resultIndex = outputOffset + outArgName->size() + i;
                             if (operandIndex >= operands.size() || resultIndex >= results.size())
                             {
                                 reportError("kDpicCall inout arg index out of range", opContext);
@@ -3042,7 +3110,12 @@ namespace grh::emit
                             break;
                         }
                     }
-                    stmt << std::string(kIndentSizeSv * 3, ' ') << *targetImport << "(";
+                    stmt << std::string(kIndentSizeSv * 3, ' ');
+                    if (hasReturn && !results.empty())
+                    {
+                        stmt << valueName(results[0]) << "_intm = ";
+                    }
+                    stmt << *targetImport << "(";
                     bool firstArg = true;
                     for (std::size_t i = 0; i < importArgs->size(); ++i)
                     {
@@ -3056,13 +3129,13 @@ namespace grh::emit
                         if (dir == "input")
                         {
                             int idx = findNameIndex(*inArgName, formal);
-                            if (idx < 0 || static_cast<std::size_t>(idx + 2) >= operands.size())
+                            if (idx < 0 || static_cast<std::size_t>(idx + 1) >= operands.size())
                             {
                                 reportError("kDpicCall missing matching input arg " + formal, opContext);
                                 callOk = false;
                                 break;
                             }
-                            stmt << valueName(operands[static_cast<std::size_t>(idx + 2)]);
+                            stmt << valueName(operands[static_cast<std::size_t>(idx + 1)]);
                         }
                         else if (dir == "inout")
                         {
@@ -3073,7 +3146,8 @@ namespace grh::emit
                                 break;
                             }
                             int idx = findNameIndex(*inoutArgName, formal);
-                            const std::size_t resultIndex = outArgName->size() + static_cast<std::size_t>(idx);
+                            const std::size_t resultIndex =
+                                outputOffset + outArgName->size() + static_cast<std::size_t>(idx);
                             if (idx < 0 || resultIndex >= results.size())
                             {
                                 reportError("kDpicCall missing matching inout arg " + formal, opContext);
@@ -3085,13 +3159,15 @@ namespace grh::emit
                         else
                         {
                             int idx = findNameIndex(*outArgName, formal);
-                            if (idx < 0 || static_cast<std::size_t>(idx) >= results.size())
+                            const std::size_t resultIndex =
+                                outputOffset + static_cast<std::size_t>(idx);
+                            if (idx < 0 || resultIndex >= results.size())
                             {
                                 reportError("kDpicCall missing matching output arg " + formal, opContext);
                                 callOk = false;
                                 break;
                             }
-                            stmt << valueName(results[static_cast<std::size_t>(idx)]) << "_intm";
+                            stmt << valueName(results[resultIndex]) << "_intm";
                         }
                     }
                     if (!callOk)
@@ -4402,29 +4478,45 @@ namespace grh::emit
             }
             case grh::ir::OperationKind::kDisplay:
             {
-                if (operands.size() < 2)
+                if (operands.size() < 1)
                 {
                     reportError("kDisplay missing operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                auto format = getAttribute<std::string>(view, opId, "format");
-                if (!clkPolarity || !format)
+                auto format = getAttribute<std::string>(view, opId, "formatString");
+                if (!format)
                 {
-                    reportError("kDisplay missing clkPolarity or format", context);
+                    format = getAttribute<std::string>(view, opId, "format");
+                }
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                if (!format || !eventEdges)
+                {
+                    reportError("kDisplay missing eventEdge or format", context);
                     break;
                 }
-                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDisplay");
+                if (eventEdges->empty())
+                {
+                    reportError("kDisplay missing eventEdge entries", context);
+                    break;
+                }
+                if (operands.size() < 1 + eventEdges->size())
+                {
+                    reportError("kDisplay operand count does not match eventEdge", context);
+                    break;
+                }
+                const std::size_t argCount = operands.size() - 1 - eventEdges->size();
+                const std::size_t eventStart = 1 + argCount;
+                auto seqKey = buildEventKey(eventStart);
                 if (!seqKey)
                 {
                     break;
                 }
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
                 stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
-                for (std::size_t i = 2; i < operands.size(); ++i)
+                for (std::size_t i = 0; i < argCount; ++i)
                 {
-                    stmt << ", " << valueName(operands[i]);
+                    stmt << ", " << valueName(operands[1 + i]);
                 }
                 stmt << ");\n";
                 appendIndented(stmt, 2, "end");
@@ -4438,21 +4530,26 @@ namespace grh::emit
                     reportError("kAssert missing operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                if (!clkPolarity)
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                if (!eventEdges)
                 {
-                    reportError("kAssert missing clkPolarity", context);
+                    reportError("kAssert missing eventEdge", context);
+                    break;
+                }
+                if (eventEdges->empty())
+                {
+                    reportError("kAssert missing eventEdge entries", context);
                     break;
                 }
                 auto message = getAttribute<std::string>(view, opId, "message")
                                    .value_or(std::string("Assertion failed"));
-                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kAssert");
+                auto seqKey = buildEventKey(2);
                 if (!seqKey)
                 {
                     break;
                 }
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (!" + valueName(operands[1]) + ") begin");
+                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + " && !" + valueName(operands[1]) + ") begin");
                 appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                 appendIndented(stmt, 2, "end");
                 addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -4463,10 +4560,19 @@ namespace grh::emit
                 auto argsDir = getAttribute<std::vector<std::string>>(view, opId, "argsDirection");
                 auto argsWidth = getAttribute<std::vector<int64_t>>(view, opId, "argsWidth");
                 auto argsName = getAttribute<std::vector<std::string>>(view, opId, "argsName");
+                auto argsSigned = getAttribute<std::vector<bool>>(view, opId, "argsSigned");
+                auto hasReturn = getAttribute<bool>(view, opId, "hasReturn").value_or(false);
+                auto returnWidth = getAttribute<int64_t>(view, opId, "returnWidth").value_or(0);
+                auto returnSigned = getAttribute<bool>(view, opId, "returnSigned").value_or(false);
                 if (!argsDir || !argsWidth || !argsName ||
                     argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                 {
                     reportError("kDpicImport missing or inconsistent arg metadata", context);
+                    break;
+                }
+                if (argsSigned && argsSigned->size() != argsDir->size())
+                {
+                    reportError("kDpicImport argsSigned size mismatch", context);
                     break;
                 }
                 const std::string &funcName = opName(opId);
@@ -4476,10 +4582,32 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream decl;
-                decl << "import \"DPI-C\" function void " << funcName << " (\n";
+                decl << "import \"DPI-C\" function ";
+                if (hasReturn)
+                {
+                    const int64_t width = returnWidth > 0 ? returnWidth : 1;
+                    decl << "logic ";
+                    if (returnSigned)
+                    {
+                        decl << "signed ";
+                    }
+                    if (width > 1)
+                    {
+                        decl << "[" << (width - 1) << ":0] ";
+                    }
+                }
+                else
+                {
+                    decl << "void ";
+                }
+                decl << funcName << " (\n";
                 for (std::size_t i = 0; i < argsDir->size(); ++i)
                 {
                     decl << "  " << (*argsDir)[i] << " logic ";
+                    if (argsSigned && (*argsSigned)[i])
+                    {
+                        decl << "signed ";
+                    }
                     if ((*argsWidth)[i] > 1)
                     {
                         decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
@@ -4493,33 +4621,52 @@ namespace grh::emit
             }
             case grh::ir::OperationKind::kDpicCall:
             {
-                if (operands.size() < 2)
+                if (operands.empty())
                 {
-                    reportError("kDpicCall missing clk/enable operands", context);
+                    reportError("kDpicCall missing operands", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
                 auto targetImport = getAttribute<std::string>(view, opId, "targetImportSymbol");
                 auto inArgName = getAttribute<std::vector<std::string>>(view, opId, "inArgName");
                 auto outArgName = getAttribute<std::vector<std::string>>(view, opId, "outArgName");
                 auto inoutArgName = getAttribute<std::vector<std::string>>(view, opId, "inoutArgName");
-                if (!clkPolarity || !targetImport || !inArgName || !outArgName)
+                auto hasReturn = getAttribute<bool>(view, opId, "hasReturn").value_or(false);
+                if (!eventEdges || !targetImport || !inArgName || !outArgName)
                 {
                     reportError("kDpicCall missing metadata", context);
                     break;
                 }
+                if (eventEdges->empty())
+                {
+                    reportError("kDpicCall missing eventEdge entries", context);
+                    break;
+                }
+                if (operands.size() < 1 + eventEdges->size())
+                {
+                    reportError("kDpicCall operand count does not match eventEdge", context);
+                    break;
+                }
+                const std::size_t eventStart = operands.size() - eventEdges->size();
+                if (eventStart < 1)
+                {
+                    reportError("kDpicCall missing updateCond operand", context);
+                    break;
+                }
+                const std::size_t argCount = eventStart - 1;
                 const std::size_t inoutCount = inoutArgName ? inoutArgName->size() : 0;
-                if (operands.size() < 2 + inArgName->size() + inoutCount)
+                if (argCount != inArgName->size() + inoutCount)
                 {
                     reportError("kDpicCall operand count does not match args", context);
                     break;
                 }
-                if (results.size() < outArgName->size() + inoutCount)
+                const std::size_t outputOffset = hasReturn ? 1 : 0;
+                if (results.size() < outputOffset + outArgName->size() + inoutCount)
                 {
                     reportError("kDpicCall result count does not match args", context);
                     break;
                 }
-                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDpicCall");
+                auto seqKey = buildEventKey(eventStart);
                 if (!seqKey)
                 {
                     break;
@@ -4553,13 +4700,13 @@ namespace grh::emit
 
                 bool callOk = true;
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
+                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
                 if (inoutArgName && !inoutArgName->empty())
                 {
                     for (std::size_t i = 0; i < inoutArgName->size(); ++i)
                     {
-                        const std::size_t operandIndex = 2 + inArgName->size() + i;
-                        const std::size_t resultIndex = outArgName->size() + i;
+                        const std::size_t operandIndex = 1 + inArgName->size() + i;
+                        const std::size_t resultIndex = outputOffset + outArgName->size() + i;
                         if (operandIndex >= operands.size() || resultIndex >= results.size())
                         {
                             reportError("kDpicCall inout arg index out of range", context);
@@ -4574,7 +4721,12 @@ namespace grh::emit
                         break;
                     }
                 }
-                stmt << std::string(kIndentSizeSv * 3, ' ') << *targetImport << "(";
+                stmt << std::string(kIndentSizeSv * 3, ' ');
+                if (hasReturn && !results.empty())
+                {
+                    stmt << valueName(results[0]) << "_intm = ";
+                }
+                stmt << *targetImport << "(";
                 bool firstArg = true;
                 for (std::size_t i = 0; i < importArgs->size(); ++i)
                 {
@@ -4588,13 +4740,13 @@ namespace grh::emit
                     if (dir == "input")
                     {
                         int idx = findNameIndex(*inArgName, formal);
-                        if (idx < 0 || static_cast<std::size_t>(idx + 2) >= operands.size())
+                        if (idx < 0 || static_cast<std::size_t>(idx + 1) >= operands.size())
                         {
                             reportError("kDpicCall missing matching input arg " + formal, context);
                             callOk = false;
                             break;
                         }
-                        stmt << valueName(operands[static_cast<std::size_t>(idx + 2)]);
+                        stmt << valueName(operands[static_cast<std::size_t>(idx + 1)]);
                     }
                     else if (dir == "inout")
                     {
@@ -4605,7 +4757,8 @@ namespace grh::emit
                             break;
                         }
                         int idx = findNameIndex(*inoutArgName, formal);
-                        const std::size_t resultIndex = outArgName->size() + static_cast<std::size_t>(idx);
+                        const std::size_t resultIndex =
+                            outputOffset + outArgName->size() + static_cast<std::size_t>(idx);
                         if (idx < 0 || resultIndex >= results.size())
                         {
                             reportError("kDpicCall missing matching inout arg " + formal, context);
@@ -4617,13 +4770,14 @@ namespace grh::emit
                     else
                     {
                         int idx = findNameIndex(*outArgName, formal);
-                        if (idx < 0 || static_cast<std::size_t>(idx) >= results.size())
+                        const std::size_t resultIndex = outputOffset + static_cast<std::size_t>(idx);
+                        if (idx < 0 || resultIndex >= results.size())
                         {
                             reportError("kDpicCall missing matching output arg " + formal, context);
                             callOk = false;
                             break;
                         }
-                        stmt << valueName(results[static_cast<std::size_t>(idx)]) << "_intm";
+                        stmt << valueName(results[resultIndex]) << "_intm";
                     }
                 }
                 if (!callOk)

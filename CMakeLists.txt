@@ -362,5 +362,20 @@ target_compile_definitions(convert-graph-assembly-memory
 )
 register_test_exe(convert-graph-assembly-memory)
 
+# convert: graph assembly dpi/display
+add_executable(convert-graph-assembly-dpi-display
+    tests/convert/test_convert_graph_assembly_dpi_display.cpp
+)
+target_link_libraries(convert-graph-assembly-dpi-display
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-dpi-display
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_DPI_DISPLAY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_dpi_display.sv"
+)
+register_test_exe(convert-graph-assembly-dpi-display)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

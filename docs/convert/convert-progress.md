@@ -756,7 +756,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 实施：待开始
 
-完成情况：未开始
+实施：
+- StmtLowerer 记录 `LoweringPlan.dpiImports` 并校验 DPI import 签名一致性
+- GraphAssembly 发射 kDisplay/kAssert/kDpicCall 与 kDpicImport，补齐 eventEdge/格式化/返回值元数据
+- Emit 支持 eventEdge 驱动 display/assert/dpi 调用，并解析 argsSigned/return 信息
+- 新增 `convert-graph-assembly-dpi-display` 测试与 `graph_assembly_dpi_display.sv` fixture
+- 更新 workflow/architecture 文档对齐 DPI/副作用语句组装规则
+
+完成情况：已完成
 
 ## STEP 0038 - Pass8 实例化与黑盒参数落地
 

@@ -394,6 +394,7 @@
 - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
 - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
 - `loweredStmts`: `std::vector<LoweredStmt>` -> 按语句顺序保存 Write/Display/Assert/DpiCall。
+- `dpiImports`: `std::vector<DpiImportInfo>` -> DPI import 元数据（参数方向/宽度/签名）。
 - `memoryReads`: `std::vector<MemoryReadPort>` -> 读端口降级条目。
 - `memoryWrites`: `std::vector<MemoryWritePort>` -> 写端口降级条目（含 mask）。
 
@@ -428,6 +429,10 @@
     - 作用：按语句顺序记录 Write/Display/Assert/DpiCall，保留副作用语句的相对顺序。
     - 建立：Pass5 在解析语句时追加；WriteIntent 会同时进入 `writes` 与 `loweredStmts`。
     - 输出：供 Pass6 写回合并与调试/DPI 转换使用；`loweredStmts` 是语句级顺序的唯一入口。
+  - `dpiImports`：
+    - 作用：记录本模块涉及的 DPI import 形参与返回信息。
+    - 建立：Pass5 在解析 DPI 调用时追加，按 symbol 去重并校验签名一致性。
+    - 输出：供 Pass8 生成 `kDpicImport`，并为 `kDpicCall` 结果补足宽度/符号。
   - `memoryReads`：
     - 作用：记录 memory 读端口的降级结果（地址/事件绑定）。
     - 建立：Pass7 从 `loweredStmts` 的表达式树中识别 `mem[addr]` 访问并追加。
@@ -524,6 +529,15 @@
   - `inArgs`: `std::vector<ExprNodeId>` -> 输入实参表达式。
   - `results`: `std::vector<PlanSymbolId>` -> 输出实参（可选的 return 位于索引 0）。
   - `hasReturn`: `bool` -> 是否有返回值。
+- DpiImportInfo 字段总览：
+  - `symbol`: `std::string` -> import function 名称。
+  - `argsDirection`: `std::vector<std::string>` -> 输入/输出方向列表（input/output）。
+  - `argsWidth`: `std::vector<int64_t>` -> 形参位宽列表。
+  - `argsName`: `std::vector<std::string>` -> 形参名称列表。
+  - `argsSigned`: `std::vector<bool>` -> 形参是否有符号列表。
+  - `hasReturn`: `bool` -> 是否有返回值。
+  - `returnWidth`: `int64_t` -> 返回值位宽（仅 `hasReturn` 为 true 时有效）。
+  - `returnSigned`: `bool` -> 返回值是否有符号（仅 `hasReturn` 为 true 时有效）。
 - 事件绑定约束：
   - 仅当过程块包含 edge-sensitive 事件列表时才会生成 Display/Assert/DpiCall；
     否则语句被丢弃并生成诊断。
