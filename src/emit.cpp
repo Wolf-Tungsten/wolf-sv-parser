@@ -1728,30 +1728,15 @@ namespace grh::emit
             std::optional<grh::ir::SrcLoc> debug;
         };
 
-        struct SeqKey
+        struct SeqEvent
         {
-            grh::ir::ValueId clk = grh::ir::ValueId::invalid();
-            std::string clkEdge;
-            grh::ir::ValueId asyncRst = grh::ir::ValueId::invalid();
-            std::string asyncEdge;
-            grh::ir::ValueId syncRst = grh::ir::ValueId::invalid();
-            std::string syncPolarity;
+            std::string edge;
+            grh::ir::ValueId signal = grh::ir::ValueId::invalid();
         };
 
-        struct SeqKeyLess
+        struct SeqKey
         {
-            bool operator()(const SeqKey &lhs, const SeqKey &rhs) const
-            {
-                auto idKey = [](const grh::ir::ValueId &id)
-                {
-                    return std::make_tuple(id.graph.index, id.graph.generation, id.index, id.generation);
-                };
-                auto lhsTuple = std::make_tuple(idKey(lhs.clk), lhs.clkEdge, idKey(lhs.asyncRst), lhs.asyncEdge,
-                                                idKey(lhs.syncRst), lhs.syncPolarity);
-                auto rhsTuple = std::make_tuple(idKey(rhs.clk), rhs.clkEdge, idKey(rhs.asyncRst), rhs.asyncEdge,
-                                                idKey(rhs.syncRst), rhs.syncPolarity);
-                return lhsTuple < rhsTuple;
-            }
+            std::vector<SeqEvent> events;
         };
 
         struct SeqBlock
@@ -1927,17 +1912,21 @@ namespace grh::emit
 
         std::string sensitivityList(const grh::ir::Graph &graph, const SeqKey &key)
         {
-            if (!key.clk.valid() || key.clkEdge.empty())
+            if (key.events.empty())
             {
                 return {};
             }
-            std::string out = "@(" + key.clkEdge + " " + std::string(graph.getValue(key.clk).symbolText());
-            if (key.asyncRst.valid() && !key.asyncEdge.empty())
+            std::string out = "@(";
+            for (std::size_t i = 0; i < key.events.size(); ++i)
             {
-                out.append(" or ");
-                out.append(key.asyncEdge);
+                if (i != 0)
+                {
+                    out.append(" or ");
+                }
+                const auto &event = key.events[i];
+                out.append(event.edge);
                 out.push_back(' ');
-                out.append(graph.getValue(key.asyncRst).symbolText());
+                out.append(graph.getValue(event.signal).symbolText());
             }
             out.push_back(')');
             return out;
@@ -2236,53 +2225,49 @@ namespace grh::emit
                 const auto &operands = op.operands();
                 const auto &results = op.results();
                 const std::string opContext = std::string(op.symbolText());
-                auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string>
+                auto buildEventKey = [&](const grh::ir::Operation &eventOp,
+                                         std::size_t eventStart) -> std::optional<SeqKey>
                 {
-                    if (!attr)
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, eventOp, "eventEdge");
+                    if (!eventEdges)
                     {
+                        reportError(std::string(grh::ir::toString(eventOp.kind())) + " missing eventEdge", opContext);
                         return std::nullopt;
                     }
-                    std::string v = *attr;
-                    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c)
-                                   { return static_cast<char>(std::tolower(c)); });
-                    return v;
+                    const std::size_t eventCount = operands.size() > eventStart ? operands.size() - eventStart : 0;
+                    if (eventCount == 0 || eventEdges->size() != eventCount)
+                    {
+                        reportError(std::string(grh::ir::toString(eventOp.kind())) + " eventEdge size mismatch",
+                                    opContext);
+                        return std::nullopt;
+                    }
+                    SeqKey key;
+                    key.events.reserve(eventCount);
+                    for (std::size_t i = 0; i < eventCount; ++i)
+                    {
+                        const grh::ir::ValueId signal = operands[eventStart + i];
+                        if (!signal.valid())
+                        {
+                            reportError(std::string(grh::ir::toString(eventOp.kind())) + " missing event operand",
+                                        opContext);
+                            return std::nullopt;
+                        }
+                        key.events.push_back(SeqEvent{(*eventEdges)[i], signal});
+                    }
+                    return key;
                 };
-                auto parsePolarityBool = [&](const std::optional<std::string> &attr,
-                                             std::string_view name) -> std::optional<bool>
+                auto buildSingleEventKey = [&](grh::ir::ValueId signal,
+                                               const std::optional<std::string> &edgeAttr,
+                                               std::string_view opName) -> std::optional<SeqKey>
                 {
-                    auto norm = normalizeLower(attr);
-                    if (!norm)
+                    if (!signal.valid() || !edgeAttr || edgeAttr->empty())
                     {
-                        reportError(std::string(name) + " missing", std::string(op.symbolText()));
+                        reportError(std::string(opName) + " missing clk/clkPolarity", opContext);
                         return std::nullopt;
                     }
-                    if (*norm == "high" || *norm == "1'b1")
-                    {
-                        return true;
-                    }
-                    if (*norm == "low" || *norm == "1'b0")
-                    {
-                        return false;
-                    }
-                    reportError("Unknown " + std::string(name) + " value: " + *attr, std::string(op.symbolText()));
-                    return std::nullopt;
-                };
-                auto formatEnableExpr = [&](grh::ir::ValueId enVal, std::string_view enLevel) -> std::optional<std::string>
-                {
-                    if (!enVal.valid())
-                    {
-                        return std::nullopt;
-                    }
-                    if (enLevel == "high")
-                    {
-                        return valueName(enVal);
-                    }
-                    if (enLevel == "low")
-                    {
-                        return "!(" + valueName(enVal) + ")";
-                    }
-                    reportError("Unknown enLevel: " + std::string(enLevel), std::string(op.symbolText()));
-                    return std::nullopt;
+                    SeqKey key;
+                    key.events.push_back(SeqEvent{*edgeAttr, signal});
+                    return key;
                 };
 
                 switch (op.kind())
@@ -2540,93 +2525,32 @@ namespace grh::emit
                     break;
                 }
                 case grh::ir::OperationKind::kLatch:
-                case grh::ir::OperationKind::kLatchArst:
                 {
                     if (operands.size() < 2 || results.empty())
                     {
-                        reportError("Latch operation missing operands or results", opContext);
+                        reportError("kLatch missing operands or results", opContext);
                         break;
                     }
-                    const grh::ir::ValueId en = operands[0];
-                    grh::ir::ValueId rst = grh::ir::ValueId::invalid();
-                    grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
-                    grh::ir::ValueId d = grh::ir::ValueId::invalid();
-
-                    if (op.kind() == grh::ir::OperationKind::kLatch)
+                    const grh::ir::ValueId updateCond = operands[0];
+                    const grh::ir::ValueId nextValue = operands[1];
+                    if (!updateCond.valid() || !nextValue.valid())
                     {
-                        if (operands.size() >= 2)
-                        {
-                            d = operands[1];
-                        }
-                    }
-                    else
-                    {
-                        if (operands.size() >= 4)
-                        {
-                            rst = operands[1];
-                            resetVal = operands[2];
-                            d = operands[3];
-                        }
-                    }
-
-                    if (!en.valid() || !d.valid())
-                    {
-                        reportError("Latch operation missing enable or data operand", opContext);
+                        reportError("kLatch missing updateCond/nextValue operands", opContext);
                         break;
                     }
-                    if (graph->getValue(en).width() != 1)
+                    if (graph->getValue(updateCond).width() != 1)
                     {
-                        reportError("Latch enable must be 1 bit", opContext);
+                        reportError("kLatch updateCond must be 1 bit", opContext);
                         break;
-                    }
-                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
-                    {
-                        if (!rst.valid() || !resetVal.valid())
-                        {
-                            reportError("kLatchArst missing reset operands", opContext);
-                            break;
-                        }
-                        if (graph->getValue(rst).width() != 1)
-                        {
-                            reportError("Latch reset must be 1 bit", opContext);
-                            break;
-                        }
-                    }
-
-                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
-                    const std::string enLevel =
-                        normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    auto enExpr = formatEnableExpr(en, enLevel);
-                    if (!enExpr)
-                    {
-                        break;
-                    }
-
-                    std::optional<bool> rstActiveHigh;
-                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
-                    {
-                        auto rstPolarityAttr = getAttribute<std::string>(*graph, op, "rstPolarity");
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity");
-                        if (!rstActiveHigh)
-                        {
-                            break;
-                        }
                     }
 
                     const grh::ir::ValueId q = results[0];
                     const std::string &valueSym = valueName(q);
-                    const std::string &opSym = opContext;
-                    const std::string &regName = !valueSym.empty() ? valueSym : opSym;
-                    const grh::ir::Value dValue = graph->getValue(d);
+                    const std::string &regName = !valueSym.empty() ? valueSym : opContext;
+                    const grh::ir::Value dValue = graph->getValue(nextValue);
                     if (graph->getValue(q).width() != dValue.width())
                     {
-                        reportError("Latch data/output width mismatch", opContext);
-                        break;
-                    }
-                    if (op.kind() == grh::ir::OperationKind::kLatchArst && resetVal.valid() &&
-                        graph->getValue(resetVal).width() != dValue.width())
-                    {
-                        reportError("Latch resetValue width mismatch", opContext);
+                        reportError("kLatch data/output width mismatch", opContext);
                         break;
                     }
                     ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
@@ -2642,28 +2566,9 @@ namespace grh::emit
                     }
 
                     std::ostringstream stmt;
-                    const int baseIndent = 2;
-                    if (op.kind() == grh::ir::OperationKind::kLatchArst)
-                    {
-                        if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                        {
-                            reportError("Latch with reset missing operands or polarity", opContext);
-                            break;
-                        }
-                        const std::string rstCond =
-                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
-                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(resetVal) + ";");
-                        appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
-                        appendIndented(stmt, baseIndent, "end");
-                    }
-                    else
-                    {
-                        appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
-                        appendIndented(stmt, baseIndent, "end");
-                    }
+                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                    appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                    appendIndented(stmt, 2, "end");
 
                     std::ostringstream block;
                     block << "  always_latch begin\n";
@@ -2673,103 +2578,44 @@ namespace grh::emit
                     break;
                 }
                 case grh::ir::OperationKind::kRegister:
-                case grh::ir::OperationKind::kRegisterEn:
-                case grh::ir::OperationKind::kRegisterRst:
-                case grh::ir::OperationKind::kRegisterEnRst:
-                case grh::ir::OperationKind::kRegisterArst:
-                case grh::ir::OperationKind::kRegisterEnArst:
                 {
-                    if (operands.empty() || results.empty())
+                    if (operands.size() < 3 || results.empty())
                     {
-                        reportError("Register operation missing operands or results", opContext);
+                        reportError("kRegister missing operands or results", opContext);
                         break;
                     }
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
-                    if (!clkPolarity)
+
+                    const grh::ir::ValueId updateCond = operands[0];
+                    const grh::ir::ValueId nextValue = operands[1];
+                    if (!updateCond.valid() || !nextValue.valid())
                     {
-                        reportError("Register operation missing clkPolarity", opContext);
+                        reportError("kRegister missing updateCond/nextValue operands", opContext);
+                        break;
+                    }
+                    if (graph->getValue(updateCond).width() != 1)
+                    {
+                        reportError("kRegister updateCond must be 1 bit", opContext);
+                        break;
+                    }
+
+                    auto seqKey = buildEventKey(op, 2);
+                    if (!seqKey)
+                    {
                         break;
                     }
 
                     const grh::ir::ValueId q = results[0];
                     const std::string &valueSym = valueName(q);
-                    const std::string &opSym = opContext;
-                    const std::string &regName = !valueSym.empty() ? valueSym : opSym;
-                    const grh::ir::ValueId clk = operands[0];
-                    grh::ir::ValueId rst = grh::ir::ValueId::invalid();
-                    grh::ir::ValueId en = grh::ir::ValueId::invalid();
-                    grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
-                    grh::ir::ValueId d = grh::ir::ValueId::invalid();
-
-                    if (op.kind() == grh::ir::OperationKind::kRegister)
+                    const std::string &regName = !valueSym.empty() ? valueSym : opContext;
+                    const grh::ir::Value dValue = graph->getValue(nextValue);
+                    if (graph->getValue(q).width() != dValue.width())
                     {
-                        if (operands.size() >= 2)
-                        {
-                            d = operands[1];
-                        }
-                    }
-                    else if (op.kind() == grh::ir::OperationKind::kRegisterEn)
-                    {
-                        if (operands.size() >= 3)
-                        {
-                            en = operands[1];
-                            d = operands[2];
-                        }
-                    }
-                    else if (op.kind() == grh::ir::OperationKind::kRegisterRst || op.kind() == grh::ir::OperationKind::kRegisterArst)
-                    {
-                        if (operands.size() >= 4)
-                        {
-                            rst = operands[1];
-                            resetVal = operands[2];
-                            d = operands[3];
-                        }
-                    }
-                    else if (op.kind() == grh::ir::OperationKind::kRegisterEnRst || op.kind() == grh::ir::OperationKind::kRegisterEnArst)
-                    {
-                        if (operands.size() >= 5)
-                        {
-                            rst = operands[1];
-                            en = operands[2];
-                            resetVal = operands[3];
-                            d = operands[4];
-                        }
-                    }
-
-                    if (!d.valid())
-                    {
-                        reportError("Register operation missing data operand", opContext);
+                        reportError("kRegister data/output width mismatch", opContext);
                         break;
                     }
 
-                    auto rstPolarityAttr = getAttribute<std::string>(*graph, op, "rstPolarity");
-                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
-                    const std::string enLevel =
-                        normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const auto enExpr = formatEnableExpr(en, enLevel);
-                    std::optional<bool> rstActiveHigh;
-                    std::string asyncEdge;
-                    if (op.kind() == grh::ir::OperationKind::kRegisterArst ||
-                        op.kind() == grh::ir::OperationKind::kRegisterEnArst) {
-                        if (rst.valid())
-                        {
-                            rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
-                            if (!rstActiveHigh)
-                            {
-                                break;
-                            }
-                            asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                        }
-                    } else if (rst.valid()) {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity");
-                        if (!rstActiveHigh) {
-                            break;
-                        }
-                    }
-
-                    const bool directDrive = valueName(q) == regName;
-                    const grh::ir::Value dValue = graph->getValue(d);
                     ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
+                    const bool directDrive = valueName(q) == regName;
                     if (directDrive)
                     {
                         markPortAsRegIfNeeded(q);
@@ -2780,92 +2626,11 @@ namespace grh::emit
                         addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                     }
 
-                    SeqKey key;
-                    key.clk = clk;
-                    key.clkEdge = *clkPolarity;
-                    if (!asyncEdge.empty())
-                    {
-                        key.asyncRst = rst;
-                        key.asyncEdge = asyncEdge;
-                    }
-                    else if (rst.valid() && rstActiveHigh)
-                    {
-                        key.syncRst = rst;
-                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                    }
-
                     std::ostringstream stmt;
-                    const int baseIndent = 2;
-                    bool emitted = true;
-                    switch (op.kind())
-                    {
-                    case grh::ir::OperationKind::kRegister:
-                        appendIndented(stmt, baseIndent, regName + " <= " + valueName(d) + ";");
-                        break;
-                    case grh::ir::OperationKind::kRegisterEn:
-                        if (!en.valid())
-                        {
-                            reportError("kRegisterEn missing enable operand", opContext);
-                            emitted = false;
-                            break;
-                        }
-                        if (!enExpr)
-                        {
-                            emitted = false;
-                            break;
-                        }
-                        appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                        appendIndented(stmt, baseIndent, "end");
-                        break;
-                    case grh::ir::OperationKind::kRegisterRst:
-                    case grh::ir::OperationKind::kRegisterArst: {
-                        if (!rst.valid() || !rstActiveHigh || !resetVal.valid())
-                        {
-                            reportError("Register with reset missing operand or rstPolarity", opContext);
-                            emitted = false;
-                            break;
-                        }
-                        const std::string rstCond =
-                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
-                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                        appendIndented(stmt, baseIndent, "end else begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                        appendIndented(stmt, baseIndent, "end");
-                        break;
-                    }
-                    case grh::ir::OperationKind::kRegisterEnRst:
-                    case grh::ir::OperationKind::kRegisterEnArst: {
-                        if (!rst.valid() || !rstActiveHigh || !resetVal.valid() || !en.valid())
-                        {
-                            reportError("kRegisterEnRst missing operands", opContext);
-                            emitted = false;
-                            break;
-                        }
-                        if (!enExpr)
-                        {
-                            emitted = false;
-                            break;
-                        }
-                        const std::string rstCond =
-                            *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
-                        appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                        appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                        appendIndented(stmt, baseIndent, "end");
-                        break;
-                    }
-                    default:
-                        emitted = false;
-                        break;
-                    }
-
-                    if (emitted)
-                    {
-                        addSequentialStmt(key, stmt.str(), opId);
-                    }
+                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                    appendIndented(stmt, 3, regName + " <= " + valueName(nextValue) + ";");
+                    appendIndented(stmt, 2, "end");
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 case grh::ir::OperationKind::kMemory:
@@ -2884,186 +2649,58 @@ namespace grh::emit
                     declaredNames.insert(opContext);
                     break;
                 }
-                case grh::ir::OperationKind::kMemoryAsyncReadPort:
+                case grh::ir::OperationKind::kMemoryReadPort:
                 {
                     if (operands.size() < 1 || results.empty())
                     {
-                        reportError("kMemoryAsyncReadPort missing operands or results", opContext);
+                        reportError("kMemoryReadPort missing operands or results", opContext);
                         break;
                     }
-                    auto memSymbol = getAttribute<std::string>(*graph, op, "memSymbol");
-                    if (!memSymbol)
+                    auto memSymbolAttr = resolveMemorySymbol(op);
+                    if (!memSymbolAttr)
                     {
-                        reportError("kMemoryAsyncReadPort missing memSymbol", opContext);
+                        reportError("kMemoryReadPort missing memSymbol", opContext);
                         break;
                     }
-                    addAssign("assign " + valueName(results[0]) + " = " + *memSymbol + "[" + valueName(operands[0]) + "];", opId);
+                    addAssign("assign " + valueName(results[0]) + " = " + *memSymbolAttr + "[" +
+                                  valueName(operands[0]) + "];",
+                              opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::ir::OperationKind::kMemorySyncReadPort:
-                case grh::ir::OperationKind::kMemorySyncReadPortRst:
-                case grh::ir::OperationKind::kMemorySyncReadPortArst:
-                {
-                    const bool hasReset =
-                        op.kind() == grh::ir::OperationKind::kMemorySyncReadPortRst ||
-                        op.kind() == grh::ir::OperationKind::kMemorySyncReadPortArst;
-                    const std::size_t expectedOperands = hasReset ? 4 : 3;
-                    if (operands.size() < expectedOperands || results.empty())
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands or results", opContext);
-                        break;
-                    }
-                    auto memSymbolAttr = resolveMemorySymbol(op);
-                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                    if (!addr.valid())
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands or results", opContext);
-                        break;
-                    }
-                    if (!memSymbolAttr)
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
-                        break;
-                    }
-                    const std::string &memSymbol = *memSymbolAttr;
-                    const grh::ir::ValueId data = results[0];
-                    ensureWireDecl(data);
-                    addAssign("assign " + valueName(data) + " = " + memSymbol + "[" + valueName(addr) + "];", opId);
-                    break;
-                }
                 case grh::ir::OperationKind::kMemoryWritePort:
-                case grh::ir::OperationKind::kMemoryWritePortRst:
-                case grh::ir::OperationKind::kMemoryWritePortArst:
                 {
-                    const bool hasReset =
-                        op.kind() == grh::ir::OperationKind::kMemoryWritePortRst ||
-                        op.kind() == grh::ir::OperationKind::kMemoryWritePortArst;
-                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemoryWritePortArst;
-                    const std::size_t expectedOperands = hasReset ? 5 : 4;
-                    if (operands.size() < expectedOperands)
+                    if (operands.size() < 5)
                     {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
+                        reportError("kMemoryWritePort missing operands", opContext);
+                        break;
+                    }
+                    const grh::ir::ValueId updateCond = operands[0];
+                    const grh::ir::ValueId addr = operands[1];
+                    const grh::ir::ValueId data = operands[2];
+                    const grh::ir::ValueId mask = operands[3];
+                    if (!updateCond.valid() || !addr.valid() || !data.valid() || !mask.valid())
+                    {
+                        reportError("kMemoryWritePort missing operands", opContext);
+                        break;
+                    }
+                    if (graph->getValue(updateCond).width() != 1)
+                    {
+                        reportError("kMemoryWritePort updateCond must be 1 bit", opContext);
                         break;
                     }
                     auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
-                    if (!clkPolarity)
-                    {
-                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
-                        clkPolarity = std::string("posedge");
-                    }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
-                                                    : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
-                    const std::string enLevel =
-                        normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::ir::ValueId clk = operands[0];
-                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
-                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                    const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
-                    if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || (hasReset && !rst.valid()))
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
-                        break;
-                    }
-                    auto enExpr = formatEnableExpr(en, enLevel);
-                    if (!enExpr)
-                    {
-                        break;
-                    }
-                    std::optional<bool> rstActiveHigh;
-                    if (hasReset)
-                    {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
-                        if (!rstActiveHigh)
-                        {
-                            break;
-                        }
-                    }
                     if (!memSymbolAttr)
                     {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
+                        reportError("kMemoryWritePort missing memSymbol", opContext);
                         break;
                     }
-                    const std::string &memSymbol = *memSymbolAttr;
-
-                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                    if (asyncReset && rst.valid() && rstActiveHigh)
+                    auto seqKey = buildEventKey(op, 4);
+                    if (!seqKey)
                     {
-                        key.asyncRst = rst;
-                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                    }
-                    else if (hasReset && rst.valid() && rstActiveHigh)
-                    {
-                        key.syncRst = rst;
-                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
+                        break;
                     }
 
-                    std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, 3, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                    appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
-                    break;
-                }
-                case grh::ir::OperationKind::kMemoryMaskWritePort:
-                case grh::ir::OperationKind::kMemoryMaskWritePortRst:
-                case grh::ir::OperationKind::kMemoryMaskWritePortArst:
-                {
-                    const bool hasReset =
-                        op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortRst ||
-                        op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortArst;
-                    const bool asyncReset = op.kind() == grh::ir::OperationKind::kMemoryMaskWritePortArst;
-                    const std::size_t expectedOperands = hasReset ? 6 : 5;
-                    if (operands.size() < expectedOperands)
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
-                        break;
-                    }
-                    auto memSymbolAttr = resolveMemorySymbol(op);
-                    auto clkPolarity = getAttribute<std::string>(*graph, op, "clkPolarity");
-                    if (!clkPolarity)
-                    {
-                        reportWarning(std::string(grh::ir::toString(op.kind())) + " missing clkPolarity, defaulting to posedge", opContext);
-                        clkPolarity = std::string("posedge");
-                    }
-                    auto rstPolarityAttr = hasReset ? getAttribute<std::string>(*graph, op, "rstPolarity")
-                                                    : std::optional<std::string>{};
-                    auto enLevelAttr = getAttribute<std::string>(*graph, op, "enLevel");
-                    const std::string enLevel =
-                        normalizeLower(enLevelAttr).value_or(std::string("high"));
-                    const grh::ir::ValueId clk = operands[0];
-                    const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
-                    const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                    const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                    const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
-                    const grh::ir::ValueId mask = operands[hasReset ? 5 : 4];
-                    if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || !mask.valid() || (hasReset && !rst.valid()))
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing operands", opContext);
-                        break;
-                    }
-                    auto enExpr = formatEnableExpr(en, enLevel);
-                    if (!enExpr)
-                    {
-                        break;
-                    }
-                    std::optional<bool> rstActiveHigh;
-                    if (hasReset)
-                    {
-                        rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity");
-                        if (!rstActiveHigh)
-                        {
-                            break;
-                        }
-                    }
-                    if (!memSymbolAttr)
-                    {
-                        reportError(std::string(grh::ir::toString(op.kind())) + " missing memSymbol or clkPolarity", opContext);
-                        break;
-                    }
                     const std::string &memSymbol = *memSymbolAttr;
                     const grh::ir::OperationId memOpId = graph->findOperation(memSymbol);
                     int64_t memWidth = 1;
@@ -3073,27 +2710,15 @@ namespace grh::emit
                         memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
                     }
 
-                    SeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                    if (asyncReset && rst.valid() && rstActiveHigh)
-                    {
-                        key.asyncRst = rst;
-                        key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                    }
-                    else if (hasReset && rst.valid() && rstActiveHigh)
-                    {
-                        key.syncRst = rst;
-                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                    }
-
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
                     if (memWidth <= 1)
                     {
                         appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
                         appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                         appendIndented(stmt, 3, "end");
                         appendIndented(stmt, 2, "end");
-                        addSequentialStmt(key, stmt.str(), opId);
+                        addSequentialStmt(*seqKey, stmt.str(), opId);
                         break;
                     }
                     appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
@@ -3107,7 +2732,7 @@ namespace grh::emit
                     appendIndented(stmt, 4, "end");
                     appendIndented(stmt, 3, "end");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 case grh::ir::OperationKind::kInstance:
@@ -3267,7 +2892,11 @@ namespace grh::emit
                         reportError("kDisplay missing clkPolarity or formatString", opContext);
                         break;
                     }
-                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDisplay");
+                    if (!seqKey)
+                    {
+                        break;
+                    }
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
                     stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
@@ -3277,7 +2906,7 @@ namespace grh::emit
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 case grh::ir::OperationKind::kAssert:
@@ -3294,12 +2923,16 @@ namespace grh::emit
                         break;
                     }
                     auto message = getAttribute<std::string>(*graph, op, "message").value_or(std::string("Assertion failed"));
-                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kAssert");
+                    if (!seqKey)
+                    {
+                        break;
+                    }
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (!" + valueName(operands[1]) + ") begin");
                     appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 case grh::ir::OperationKind::kDpicImport:
@@ -3356,6 +2989,11 @@ namespace grh::emit
                         reportError("kDpicCall result count does not match args", opContext);
                         break;
                     }
+                    auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDpicCall");
+                    if (!seqKey)
+                    {
+                        break;
+                    }
                     auto itImport = dpicImports.find(*targetImport);
                     if (itImport == dpicImports.end() || itImport->second.graph == nullptr)
                     {
@@ -3381,7 +3019,6 @@ namespace grh::emit
                         addAssign("assign " + std::string(resValue.symbolText()) + " = " + tempName + ";", opId);
                     }
 
-                    SeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                     bool callOk = true;
                     std::ostringstream stmt;
                     appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
@@ -3463,7 +3100,7 @@ namespace grh::emit
                     }
                     stmt << ");\n";
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 default:
@@ -3834,14 +3471,15 @@ namespace grh::emit
             }
         }
 
+        struct IrSeqEvent
+        {
+            std::string edge;
+            grh::ir::ValueId signal = grh::ir::ValueId::invalid();
+        };
+
         struct IrSeqKey
         {
-            grh::ir::ValueId clk = grh::ir::ValueId::invalid();
-            std::string clkEdge;
-            grh::ir::ValueId asyncRst = grh::ir::ValueId::invalid();
-            std::string asyncEdge;
-            grh::ir::ValueId syncRst = grh::ir::ValueId::invalid();
-            std::string syncPolarity;
+            std::vector<IrSeqEvent> events;
         };
 
         struct IrSeqBlock
@@ -4097,59 +3735,7 @@ namespace grh::emit
                 grh::ir::OperationId::invalid());
         }
 
-        auto normalizeLower = [](const std::optional<std::string> &attr) -> std::optional<std::string>
-        {
-            if (!attr)
-            {
-                return std::nullopt;
-            }
-            std::string v = *attr;
-            std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c)
-                           { return static_cast<char>(std::tolower(c)); });
-            return v;
-        };
-        auto parsePolarityBool = [&](const std::optional<std::string> &attr,
-                                     std::string_view name,
-                                     const std::string &context) -> std::optional<bool>
-        {
-            auto norm = normalizeLower(attr);
-            if (!norm)
-            {
-                reportError(std::string(name) + " missing", context);
-                return std::nullopt;
-            }
-            if (*norm == "high" || *norm == "1'b1")
-            {
-                return true;
-            }
-            if (*norm == "low" || *norm == "1'b0")
-            {
-                return false;
-            }
-            reportError("Unknown " + std::string(name) + " value: " + *attr, context);
-            return std::nullopt;
-        };
-        auto formatEnableExpr = [&](grh::ir::ValueId enVal,
-                                    std::string_view enLevel,
-                                    const std::string &context) -> std::optional<std::string>
-        {
-            const std::string &enName = valueName(enVal);
-            if (enName.empty())
-            {
-                reportError("Enable value missing symbol", context);
-                return std::nullopt;
-            }
-            if (enLevel == "high")
-            {
-                return enName;
-            }
-            if (enLevel == "low")
-            {
-                return "!(" + enName + ")";
-            }
-            reportError("Unknown enLevel: " + std::string(enLevel), context);
-            return std::nullopt;
-        };
+        // Event lists are modeled directly per operation in this emission path.
 
         // -------------------------
         // Operation traversal
@@ -4160,6 +3746,47 @@ namespace grh::emit
             const auto operands = view.opOperands(opId);
             const auto results = view.opResults(opId);
             const std::string context = opContext(opId);
+            auto buildEventKey = [&](std::size_t eventStart) -> std::optional<IrSeqKey>
+            {
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                if (!eventEdges)
+                {
+                    reportError(std::string(grh::ir::toString(kind)) + " missing eventEdge", context);
+                    return std::nullopt;
+                }
+                const std::size_t eventCount = operands.size() > eventStart ? operands.size() - eventStart : 0;
+                if (eventCount == 0 || eventEdges->size() != eventCount)
+                {
+                    reportError(std::string(grh::ir::toString(kind)) + " eventEdge size mismatch", context);
+                    return std::nullopt;
+                }
+                IrSeqKey key;
+                key.events.reserve(eventCount);
+                for (std::size_t i = 0; i < eventCount; ++i)
+                {
+                    const grh::ir::ValueId signal = operands[eventStart + i];
+                    if (!signal.valid())
+                    {
+                        reportError(std::string(grh::ir::toString(kind)) + " missing event operand", context);
+                        return std::nullopt;
+                    }
+                    key.events.push_back(IrSeqEvent{(*eventEdges)[i], signal});
+                }
+                return key;
+            };
+            auto buildSingleEventKey = [&](grh::ir::ValueId signal,
+                                           const std::optional<std::string> &edgeAttr,
+                                           std::string_view opName) -> std::optional<IrSeqKey>
+            {
+                if (!signal.valid() || !edgeAttr || edgeAttr->empty())
+                {
+                    reportError(std::string(opName) + " missing clk/clkPolarity", context);
+                    return std::nullopt;
+                }
+                IrSeqKey key;
+                key.events.push_back(IrSeqEvent{*edgeAttr, signal});
+                return key;
+            };
 
             switch (kind)
             {
@@ -4416,99 +4043,39 @@ namespace grh::emit
                 break;
             }
             case grh::ir::OperationKind::kLatch:
-            case grh::ir::OperationKind::kLatchArst:
             {
                 if (operands.size() < 2 || results.empty())
                 {
-                    reportError("Latch operation missing operands or results", context);
+                    reportError("kLatch missing operands or results", context);
                     break;
                 }
-                const grh::ir::ValueId en = operands[0];
-                grh::ir::ValueId rst = grh::ir::ValueId::invalid();
-                grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
-                grh::ir::ValueId d = grh::ir::ValueId::invalid();
-
-                if (kind == grh::ir::OperationKind::kLatch)
+                const grh::ir::ValueId updateCond = operands[0];
+                const grh::ir::ValueId nextValue = operands[1];
+                if (!updateCond.valid() || !nextValue.valid())
                 {
-                    if (operands.size() >= 2)
-                    {
-                        d = operands[1];
-                    }
-                }
-                else
-                {
-                    if (operands.size() >= 4)
-                    {
-                        rst = operands[1];
-                        resetVal = operands[2];
-                        d = operands[3];
-                    }
-                }
-
-                if (!en.valid() || !d.valid())
-                {
-                    reportError("Latch operation missing enable or data operand", context);
+                    reportError("kLatch missing updateCond/nextValue operands", context);
                     break;
                 }
-                if (view.valueWidth(en) != 1)
+                if (view.valueWidth(updateCond) != 1)
                 {
-                    reportError("Latch enable must be 1 bit", context);
+                    reportError("kLatch updateCond must be 1 bit", context);
                     break;
-                }
-                if (kind == grh::ir::OperationKind::kLatchArst)
-                {
-                    if (!rst.valid() || !resetVal.valid())
-                    {
-                        reportError("kLatchArst missing reset operands", context);
-                        break;
-                    }
-                    if (view.valueWidth(rst) != 1)
-                    {
-                        reportError("Latch reset must be 1 bit", context);
-                        break;
-                    }
-                }
-
-                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
-                const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
-                auto enExpr = formatEnableExpr(en, enLevel, context);
-                if (!enExpr)
-                {
-                    break;
-                }
-
-                std::optional<bool> rstActiveHigh;
-                if (kind == grh::ir::OperationKind::kLatchArst)
-                {
-                    auto rstPolarityAttr = getAttribute<std::string>(view, opId, "rstPolarity");
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Latch rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
                 }
 
                 const grh::ir::ValueId q = results[0];
                 const std::string &valueSym = valueName(q);
-                const std::string &opSym = opName(opId);
-                const std::string &regName = !valueSym.empty() ? valueSym : opSym;
+                const std::string &regName = !valueSym.empty() ? valueSym : opName(opId);
                 if (regName.empty())
                 {
-                    reportError("Latch operation missing symbol", context);
+                    reportError("kLatch missing symbol", context);
                     break;
                 }
-                if (view.valueWidth(q) != view.valueWidth(d))
+                if (view.valueWidth(q) != view.valueWidth(nextValue))
                 {
-                    reportError("Latch data/output width mismatch", context);
+                    reportError("kLatch data/output width mismatch", context);
                     break;
                 }
-                if (kind == grh::ir::OperationKind::kLatchArst && resetVal.valid() &&
-                    view.valueWidth(resetVal) != view.valueWidth(d))
-                {
-                    reportError("Latch resetValue width mismatch", context);
-                    break;
-                }
-                ensureRegDecl(regName, view.valueWidth(d), view.valueSigned(d), view.opSrcLoc(opId));
+                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue), view.opSrcLoc(opId));
                 const bool directDrive = valueName(q) == regName;
                 if (directDrive)
                 {
@@ -4521,28 +4088,9 @@ namespace grh::emit
                 }
 
                 std::ostringstream stmt;
-                const int baseIndent = 2;
-                if (kind == grh::ir::OperationKind::kLatchArst)
-                {
-                    if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                    {
-                        reportError("Latch with reset missing operands or polarity", context);
-                        break;
-                    }
-                    const std::string rstCond =
-                        *rstActiveHigh ? valueName(rst) : "!" + valueName(rst);
-                    appendIndented(stmt, baseIndent, "if (" + rstCond + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(resetVal) + ";");
-                    appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                }
-                else
-                {
-                    appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " = " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                }
+                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                appendIndented(stmt, 2, "end");
 
                 std::ostringstream block;
                 block << "  always_latch begin\n";
@@ -4552,118 +4100,46 @@ namespace grh::emit
                 break;
             }
             case grh::ir::OperationKind::kRegister:
-            case grh::ir::OperationKind::kRegisterEn:
-            case grh::ir::OperationKind::kRegisterRst:
-            case grh::ir::OperationKind::kRegisterEnRst:
-            case grh::ir::OperationKind::kRegisterArst:
-            case grh::ir::OperationKind::kRegisterEnArst:
             {
-                if (operands.empty() || results.empty())
+                if (operands.size() < 3 || results.empty())
                 {
-                    reportError("Register operation missing operands or results", context);
+                    reportError("kRegister missing operands or results", context);
                     break;
                 }
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                if (!clkPolarity)
+                const grh::ir::ValueId updateCond = operands[0];
+                const grh::ir::ValueId nextValue = operands[1];
+                if (!updateCond.valid() || !nextValue.valid())
                 {
-                    reportError("Register operation missing clkPolarity", context);
+                    reportError("kRegister missing updateCond/nextValue operands", context);
+                    break;
+                }
+                if (view.valueWidth(updateCond) != 1)
+                {
+                    reportError("kRegister updateCond must be 1 bit", context);
+                    break;
+                }
+
+                auto seqKey = buildEventKey(2);
+                if (!seqKey)
+                {
                     break;
                 }
 
                 const grh::ir::ValueId q = results[0];
                 const std::string &valueSym = valueName(q);
-                const std::string &opSym = opName(opId);
-                const std::string &regName = !valueSym.empty() ? valueSym : opSym;
+                const std::string &regName = !valueSym.empty() ? valueSym : opName(opId);
                 if (regName.empty())
                 {
-                    reportError("Register operation missing symbol", context);
+                    reportError("kRegister missing symbol", context);
                     break;
                 }
-                const grh::ir::ValueId clk = operands[0];
-                grh::ir::ValueId rst = grh::ir::ValueId::invalid();
-                grh::ir::ValueId en = grh::ir::ValueId::invalid();
-                grh::ir::ValueId resetVal = grh::ir::ValueId::invalid();
-                grh::ir::ValueId d = grh::ir::ValueId::invalid();
-
-                if (kind == grh::ir::OperationKind::kRegister)
+                if (view.valueWidth(q) != view.valueWidth(nextValue))
                 {
-                    if (operands.size() >= 2)
-                    {
-                        d = operands[1];
-                    }
-                }
-                else if (kind == grh::ir::OperationKind::kRegisterEn)
-                {
-                    if (operands.size() >= 3)
-                    {
-                        en = operands[1];
-                        d = operands[2];
-                    }
-                }
-                else if (kind == grh::ir::OperationKind::kRegisterRst || kind == grh::ir::OperationKind::kRegisterArst)
-                {
-                    if (operands.size() >= 4)
-                    {
-                        rst = operands[1];
-                        resetVal = operands[2];
-                        d = operands[3];
-                    }
-                }
-                else if (kind == grh::ir::OperationKind::kRegisterEnRst || kind == grh::ir::OperationKind::kRegisterEnArst)
-                {
-                    if (operands.size() >= 5)
-                    {
-                        rst = operands[1];
-                        en = operands[2];
-                        resetVal = operands[3];
-                        d = operands[4];
-                    }
-                }
-
-                if (!d.valid())
-                {
-                    reportError("Register operation missing data operand", context);
+                    reportError("kRegister data/output width mismatch", context);
                     break;
                 }
 
-                auto rstPolarityAttr = getAttribute<std::string>(view, opId, "rstPolarity");
-                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
-                const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
-                const auto enExpr = en.valid() ? formatEnableExpr(en, enLevel, context) : std::optional<std::string>{};
-                std::optional<bool> rstActiveHigh;
-                std::string asyncEdge;
-                if (kind == grh::ir::OperationKind::kRegisterArst ||
-                    kind == grh::ir::OperationKind::kRegisterEnArst)
-                {
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
-                    asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                }
-                else if (kind == grh::ir::OperationKind::kRegisterRst ||
-                         kind == grh::ir::OperationKind::kRegisterEnRst)
-                {
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "Register rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
-                }
-
-                if (view.valueWidth(q) != view.valueWidth(d))
-                {
-                    reportError("Register data/output width mismatch", context);
-                    break;
-                }
-                if (resetVal.valid() && view.valueWidth(resetVal) != view.valueWidth(d))
-                {
-                    reportError("Register resetValue width mismatch", context);
-                    break;
-                }
-
-                ensureRegDecl(regName, view.valueWidth(d), view.valueSigned(d), view.opSrcLoc(opId));
+                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue), view.opSrcLoc(opId));
                 const bool directDrive = valueName(q) == regName;
                 if (directDrive)
                 {
@@ -4675,129 +4151,11 @@ namespace grh::emit
                     addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                 }
 
-                IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                if (kind == grh::ir::OperationKind::kRegisterArst ||
-                    kind == grh::ir::OperationKind::kRegisterEnArst)
-                {
-                    if (rst.valid() && rstActiveHigh)
-                    {
-                        key.asyncRst = rst;
-                        key.asyncEdge = asyncEdge;
-                    }
-                }
-                else if (kind == grh::ir::OperationKind::kRegisterRst ||
-                         kind == grh::ir::OperationKind::kRegisterEnRst)
-                {
-                    if (rst.valid() && rstActiveHigh)
-                    {
-                        key.syncRst = rst;
-                        key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                    }
-                }
-
                 std::ostringstream stmt;
-                const int baseIndent = 2;
-                bool emitted = true;
-                switch (kind)
-                {
-                case grh::ir::OperationKind::kRegister:
-                    appendIndented(stmt, baseIndent, regName + " <= " + valueName(d) + ";");
-                    break;
-                case grh::ir::OperationKind::kRegisterEn:
-                    if (!enExpr)
-                    {
-                        emitted = false;
-                        break;
-                    }
-                    appendIndented(stmt, baseIndent, "if (" + *enExpr + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                    break;
-                case grh::ir::OperationKind::kRegisterRst:
-                    if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                    {
-                        reportError("Register reset missing operands or polarity", context);
-                        emitted = false;
-                        break;
-                    }
-                    if (*rstActiveHigh)
-                    {
-                        appendIndented(stmt, baseIndent, "if (" + valueName(rst) + ") begin");
-                    }
-                    else
-                    {
-                        appendIndented(stmt, baseIndent, "if (!" + valueName(rst) + ") begin");
-                    }
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                    appendIndented(stmt, baseIndent, "end else begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                    break;
-                case grh::ir::OperationKind::kRegisterEnRst:
-                    if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                    {
-                        reportError("Register reset missing operands or polarity", context);
-                        emitted = false;
-                        break;
-                    }
-                    if (!enExpr)
-                    {
-                        emitted = false;
-                        break;
-                    }
-                    if (*rstActiveHigh)
-                    {
-                        appendIndented(stmt, baseIndent, "if (" + valueName(rst) + ") begin");
-                    }
-                    else
-                    {
-                        appendIndented(stmt, baseIndent, "if (!" + valueName(rst) + ") begin");
-                    }
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                    appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                    break;
-                case grh::ir::OperationKind::kRegisterArst:
-                    if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                    {
-                        reportError("Register reset missing operands or polarity", context);
-                        emitted = false;
-                        break;
-                    }
-                    appendIndented(stmt, baseIndent, "if (" + (*rstActiveHigh ? valueName(rst) : "!" + valueName(rst)) + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                    appendIndented(stmt, baseIndent, "end else begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                    break;
-                case grh::ir::OperationKind::kRegisterEnArst:
-                    if (!rst.valid() || !resetVal.valid() || !rstActiveHigh)
-                    {
-                        reportError("Register reset missing operands or polarity", context);
-                        emitted = false;
-                        break;
-                    }
-                    if (!enExpr)
-                    {
-                        emitted = false;
-                        break;
-                    }
-                    appendIndented(stmt, baseIndent, "if (" + (*rstActiveHigh ? valueName(rst) : "!" + valueName(rst)) + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(resetVal) + ";");
-                    appendIndented(stmt, baseIndent, "end else if (" + *enExpr + ") begin");
-                    appendIndented(stmt, baseIndent + 1, regName + " <= " + valueName(d) + ";");
-                    appendIndented(stmt, baseIndent, "end");
-                    break;
-                default:
-                    emitted = false;
-                    break;
-                }
-
-                if (emitted)
-                {
-                    addSequentialStmt(key, stmt.str(), opId);
-                }
+                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                appendIndented(stmt, 3, regName + " <= " + valueName(nextValue) + ";");
+                appendIndented(stmt, 2, "end");
+                addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
             case grh::ir::OperationKind::kMemory:
@@ -4823,182 +4181,58 @@ namespace grh::emit
                 declaredNames.insert(memName);
                 break;
             }
-            case grh::ir::OperationKind::kMemoryAsyncReadPort:
+            case grh::ir::OperationKind::kMemoryReadPort:
             {
                 if (operands.size() < 1 || results.empty())
                 {
-                    reportError("kMemoryAsyncReadPort missing operands or results", context);
+                    reportError("kMemoryReadPort missing operands or results", context);
                     break;
                 }
-                auto memSymbol = getAttribute<std::string>(view, opId, "memSymbol");
-                if (!memSymbol)
+                auto memSymbolAttr = resolveMemorySymbol(opId);
+                if (!memSymbolAttr)
                 {
-                    reportError("kMemoryAsyncReadPort missing memSymbol", context);
+                    reportError("kMemoryReadPort missing memSymbol", context);
                     break;
                 }
-                addAssign("assign " + valueName(results[0]) + " = " + *memSymbol + "[" + valueName(operands[0]) + "];", opId);
+                addAssign("assign " + valueName(results[0]) + " = " + *memSymbolAttr + "[" +
+                              valueName(operands[0]) + "];",
+                          opId);
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::ir::OperationKind::kMemorySyncReadPort:
-            case grh::ir::OperationKind::kMemorySyncReadPortRst:
-            case grh::ir::OperationKind::kMemorySyncReadPortArst:
-            {
-                const bool hasReset = kind == grh::ir::OperationKind::kMemorySyncReadPortRst ||
-                                      kind == grh::ir::OperationKind::kMemorySyncReadPortArst;
-                const std::size_t expectedOperands = hasReset ? 4 : 3;
-                if (operands.size() < expectedOperands || results.empty())
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands or results", context);
-                    break;
-                }
-                auto memSymbolAttr = resolveMemorySymbol(opId);
-                const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                if (!addr.valid())
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands or results", context);
-                    break;
-                }
-                if (!memSymbolAttr)
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
-                    break;
-                }
-                const std::string &memSymbol = *memSymbolAttr;
-                const grh::ir::ValueId data = results[0];
-                ensureWireDecl(data);
-                addAssign("assign " + valueName(data) + " = " + memSymbol + "[" + valueName(addr) + "];", opId);
-                break;
-            }
             case grh::ir::OperationKind::kMemoryWritePort:
-            case grh::ir::OperationKind::kMemoryWritePortRst:
-            case grh::ir::OperationKind::kMemoryWritePortArst:
             {
-                const bool hasReset = kind == grh::ir::OperationKind::kMemoryWritePortRst ||
-                                      kind == grh::ir::OperationKind::kMemoryWritePortArst;
-                const bool asyncReset = kind == grh::ir::OperationKind::kMemoryWritePortArst;
-                const std::size_t expectedOperands = hasReset ? 5 : 4;
-                if (operands.size() < expectedOperands)
+                if (operands.size() < 5)
                 {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
+                    reportError("kMemoryWritePort missing operands", context);
+                    break;
+                }
+                const grh::ir::ValueId updateCond = operands[0];
+                const grh::ir::ValueId addr = operands[1];
+                const grh::ir::ValueId data = operands[2];
+                const grh::ir::ValueId mask = operands[3];
+                if (!updateCond.valid() || !addr.valid() || !data.valid() || !mask.valid())
+                {
+                    reportError("kMemoryWritePort missing operands", context);
+                    break;
+                }
+                if (view.valueWidth(updateCond) != 1)
+                {
+                    reportError("kMemoryWritePort updateCond must be 1 bit", context);
                     break;
                 }
                 auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                if (!clkPolarity)
-                {
-                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
-                    clkPolarity = std::string("posedge");
-                }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
-                                                : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
-                const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
-                const grh::ir::ValueId clk = operands[0];
-                const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
-                const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
-                if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || (hasReset && !rst.valid()))
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
-                    break;
-                }
-                auto enExpr = formatEnableExpr(en, enLevel, context);
-                if (!enExpr)
-                {
-                    break;
-                }
-                std::optional<bool> rstActiveHigh;
-                if (hasReset)
-                {
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
-                }
                 if (!memSymbolAttr)
                 {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
+                    reportError("kMemoryWritePort missing memSymbol", context);
                     break;
                 }
-                const std::string &memSymbol = *memSymbolAttr;
-
-                IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                if (asyncReset && rst.valid() && rstActiveHigh)
+                auto seqKey = buildEventKey(4);
+                if (!seqKey)
                 {
-                    key.asyncRst = rst;
-                    key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                }
-                else if (hasReset && rst.valid() && rstActiveHigh)
-                {
-                    key.syncRst = rst;
-                    key.syncPolarity = *rstActiveHigh ? "high" : "low";
+                    break;
                 }
 
-                std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
-                appendIndented(stmt, 3, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
-                break;
-            }
-            case grh::ir::OperationKind::kMemoryMaskWritePort:
-            case grh::ir::OperationKind::kMemoryMaskWritePortRst:
-            case grh::ir::OperationKind::kMemoryMaskWritePortArst:
-            {
-                const bool hasReset = kind == grh::ir::OperationKind::kMemoryMaskWritePortRst ||
-                                      kind == grh::ir::OperationKind::kMemoryMaskWritePortArst;
-                const bool asyncReset = kind == grh::ir::OperationKind::kMemoryMaskWritePortArst;
-                const std::size_t expectedOperands = hasReset ? 6 : 5;
-                if (operands.size() < expectedOperands)
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
-                    break;
-                }
-                auto memSymbolAttr = resolveMemorySymbol(opId);
-                auto clkPolarity = getAttribute<std::string>(view, opId, "clkPolarity");
-                if (!clkPolarity)
-                {
-                    reportWarning(std::string(grh::ir::toString(kind)) + " missing clkPolarity, defaulting to posedge", context);
-                    clkPolarity = std::string("posedge");
-                }
-                auto rstPolarityAttr = hasReset ? getAttribute<std::string>(view, opId, "rstPolarity")
-                                                : std::optional<std::string>{};
-                auto enLevelAttr = getAttribute<std::string>(view, opId, "enLevel");
-                const std::string enLevel = normalizeLower(enLevelAttr).value_or(std::string("high"));
-                const grh::ir::ValueId clk = operands[0];
-                const grh::ir::ValueId rst = hasReset ? operands[1] : grh::ir::ValueId::invalid();
-                const grh::ir::ValueId addr = operands[hasReset ? 2 : 1];
-                const grh::ir::ValueId en = operands[hasReset ? 3 : 2];
-                const grh::ir::ValueId data = operands[hasReset ? 4 : 3];
-                const grh::ir::ValueId mask = operands[hasReset ? 5 : 4];
-                if (!clk.valid() || !addr.valid() || !en.valid() || !data.valid() || !mask.valid() ||
-                    (hasReset && !rst.valid()))
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing operands", context);
-                    break;
-                }
-                auto enExpr = formatEnableExpr(en, enLevel, context);
-                if (!enExpr)
-                {
-                    break;
-                }
-                std::optional<bool> rstActiveHigh;
-                if (hasReset)
-                {
-                    rstActiveHigh = parsePolarityBool(rstPolarityAttr, "memory rstPolarity", context);
-                    if (!rstActiveHigh)
-                    {
-                        break;
-                    }
-                }
-                if (!memSymbolAttr)
-                {
-                    reportError(std::string(grh::ir::toString(kind)) + " missing memSymbol or clkPolarity", context);
-                    break;
-                }
                 const std::string &memSymbol = *memSymbolAttr;
                 int64_t memWidth = 1;
                 if (auto it = opByName.find(memSymbol); it != opByName.end())
@@ -5006,27 +4240,15 @@ namespace grh::emit
                     memWidth = getAttribute<int64_t>(view, it->second, "width").value_or(1);
                 }
 
-                IrSeqKey key{clk, *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
-                if (asyncReset && rst.valid() && rstActiveHigh)
-                {
-                    key.asyncRst = rst;
-                    key.asyncEdge = *rstActiveHigh ? "posedge" : "negedge";
-                }
-                else if (hasReset && rst.valid() && rstActiveHigh)
-                {
-                    key.syncRst = rst;
-                    key.syncPolarity = *rstActiveHigh ? "high" : "low";
-                }
-
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + *enExpr + ") begin");
+                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
                 if (memWidth <= 1)
                 {
                     appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
                     appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
                     appendIndented(stmt, 3, "end");
                     appendIndented(stmt, 2, "end");
-                    addSequentialStmt(key, stmt.str(), opId);
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
@@ -5040,7 +4262,7 @@ namespace grh::emit
                 appendIndented(stmt, 4, "end");
                 appendIndented(stmt, 3, "end");
                 appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
+                addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
             case grh::ir::OperationKind::kInstance:
@@ -5192,7 +4414,11 @@ namespace grh::emit
                     reportError("kDisplay missing clkPolarity or format", context);
                     break;
                 }
-                IrSeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDisplay");
+                if (!seqKey)
+                {
+                    break;
+                }
                 std::ostringstream stmt;
                 appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
                 stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
@@ -5202,7 +4428,7 @@ namespace grh::emit
                 }
                 stmt << ");\n";
                 appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
+                addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
             case grh::ir::OperationKind::kAssert:
@@ -5220,12 +4446,16 @@ namespace grh::emit
                 }
                 auto message = getAttribute<std::string>(view, opId, "message")
                                    .value_or(std::string("Assertion failed"));
-                IrSeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
+                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kAssert");
+                if (!seqKey)
+                {
+                    break;
+                }
                 std::ostringstream stmt;
                 appendIndented(stmt, 2, "if (!" + valueName(operands[1]) + ") begin");
                 appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                 appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
+                addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
             case grh::ir::OperationKind::kDpicImport:
@@ -5289,6 +4519,11 @@ namespace grh::emit
                     reportError("kDpicCall result count does not match args", context);
                     break;
                 }
+                auto seqKey = buildSingleEventKey(operands[0], clkPolarity, "kDpicCall");
+                if (!seqKey)
+                {
+                    break;
+                }
                 auto itImport = dpicImports.find(*targetImport);
                 if (itImport == dpicImports.end())
                 {
@@ -5316,7 +4551,6 @@ namespace grh::emit
                     addAssign("assign " + resName + " = " + tempName + ";", opId);
                 }
 
-                IrSeqKey key{operands[0], *clkPolarity, grh::ir::ValueId::invalid(), {}, grh::ir::ValueId::invalid(), {}};
                 bool callOk = true;
                 std::ostringstream stmt;
                 appendIndented(stmt, 2, "if (" + valueName(operands[1]) + ") begin");
@@ -5398,7 +4632,7 @@ namespace grh::emit
                 }
                 stmt << ");\n";
                 appendIndented(stmt, 2, "end");
-                addSequentialStmt(key, stmt.str(), opId);
+                addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
             default:
@@ -5581,17 +4815,21 @@ namespace grh::emit
 
         auto sensitivityList = [&](const IrSeqKey &key) -> std::string
         {
-            if (!key.clk.valid() || key.clkEdge.empty())
+            if (key.events.empty())
             {
                 return {};
             }
-            std::string out = "@(" + key.clkEdge + " " + valueName(key.clk);
-            if (key.asyncRst.valid() && !key.asyncEdge.empty())
+            std::string out = "@(";
+            for (std::size_t i = 0; i < key.events.size(); ++i)
             {
-                out.append(" or ");
-                out.append(key.asyncEdge);
+                if (i != 0)
+                {
+                    out.append(" or ");
+                }
+                const auto &event = key.events[i];
+                out.append(event.edge);
                 out.push_back(' ');
-                out.append(valueName(key.asyncRst));
+                out.append(valueName(event.signal));
             }
             out.push_back(')');
             return out;

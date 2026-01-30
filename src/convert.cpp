@@ -1139,6 +1139,20 @@ struct ExprLowererState {
         ExprNode node;
         node.location = expr.sourceRange.start();
 
+        if (const slang::ConstantValue* constant = expr.getConstant())
+        {
+            if (constant->isInteger())
+            {
+                const slang::SVInt& literal = constant->integer();
+                if (!literal.hasUnknown())
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = literal.toString();
+                    return addNode(expr, std::move(node));
+                }
+            }
+        }
+
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
             if (const auto* param =
@@ -1153,6 +1167,12 @@ struct ExprLowererState {
             }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(named->symbol.name);
+            if (!node.symbol.valid() &&
+                (named->symbol.kind == slang::ast::SymbolKind::Parameter ||
+                 named->symbol.kind == slang::ast::SymbolKind::TypeParameter))
+            {
+                node.symbol = plan.symbolTable.intern(named->symbol.name);
+            }
             if (!node.symbol.valid())
             {
                 reportUnsupported(expr, "Unknown symbol in expression");
@@ -1173,6 +1193,12 @@ struct ExprLowererState {
             }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(hier->symbol.name);
+            if (!node.symbol.valid() &&
+                (hier->symbol.kind == slang::ast::SymbolKind::Parameter ||
+                 hier->symbol.kind == slang::ast::SymbolKind::TypeParameter))
+            {
+                node.symbol = plan.symbolTable.intern(hier->symbol.name);
+            }
             if (!node.symbol.valid())
             {
                 reportUnsupported(expr, "Unknown hierarchical symbol in expression");
@@ -4249,13 +4275,66 @@ private:
             return it->second;
         }
 
+        auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
+            -> std::optional<std::string> {
+            slang::ConstantValue value = param.getValue();
+            if (value.bad())
+            {
+                return std::nullopt;
+            }
+            if (!value.isInteger())
+            {
+                value = value.convertToInt();
+            }
+            if (!value.isInteger())
+            {
+                return std::nullopt;
+            }
+            const slang::SVInt& literal = value.integer();
+            if (literal.hasUnknown())
+            {
+                return std::nullopt;
+            }
+            return literal.toString();
+        };
+
         ExprNode node;
         node.location = expr.sourceRange.start();
 
+        if (const slang::ConstantValue* constant = expr.getConstant())
+        {
+            if (constant->isInteger())
+            {
+                const slang::SVInt& literal = constant->integer();
+                if (!literal.hasUnknown())
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = literal.toString();
+                    return addNode(&expr, std::move(node));
+                }
+            }
+        }
+
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
+            if (const auto* param =
+                    named->symbol.as_if<slang::ast::ParameterSymbol>())
+            {
+                if (auto literal = paramLiteral(*param))
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = *literal;
+                    return addNode(&expr, std::move(node));
+                }
+            }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(named->symbol.name);
+            if (!node.symbol.valid() &&
+                (named->symbol.kind == slang::ast::SymbolKind::Parameter ||
+                 named->symbol.kind == slang::ast::SymbolKind::TypeParameter))
+            {
+                node.symbol = plan.symbolTable.intern(named->symbol.name);
+            }
             if (!node.symbol.valid())
             {
                 reportUnsupported(expr, "Unknown symbol in expression");
@@ -4264,8 +4343,24 @@ private:
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
+            if (const auto* param =
+                    hier->symbol.as_if<slang::ast::ParameterSymbol>())
+            {
+                if (auto literal = paramLiteral(*param))
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = *literal;
+                    return addNode(&expr, std::move(node));
+                }
+            }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(hier->symbol.name);
+            if (!node.symbol.valid() &&
+                (hier->symbol.kind == slang::ast::SymbolKind::Parameter ||
+                 hier->symbol.kind == slang::ast::SymbolKind::TypeParameter))
+            {
+                node.symbol = plan.symbolTable.intern(hier->symbol.name);
+            }
             if (!node.symbol.valid())
             {
                 reportUnsupported(expr, "Unknown hierarchical symbol in expression");
@@ -4838,6 +4933,37 @@ void collectPorts(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan,
         }
 
         reportUnsupportedPort(*portSymbol, "unhandled symbol kind", diagnostics);
+    }
+}
+
+void collectParameters(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan)
+{
+    for (const slang::ast::ParameterSymbolBase* paramBase : body.getParameters())
+    {
+        if (!paramBase || paramBase->symbol.name.empty())
+        {
+            continue;
+        }
+        plan.symbolTable.intern(paramBase->symbol.name);
+    }
+
+    for (const slang::ast::Symbol& member : body.members())
+    {
+        if (const auto* param = member.as_if<slang::ast::ParameterSymbol>())
+        {
+            if (!param->name.empty())
+            {
+                plan.symbolTable.intern(param->name);
+            }
+            continue;
+        }
+        if (const auto* typeParam = member.as_if<slang::ast::TypeParameterSymbol>())
+        {
+            if (!typeParam->name.empty())
+            {
+                plan.symbolTable.intern(typeParam->name);
+            }
+        }
     }
 }
 
@@ -5437,6 +5563,7 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
         moduleName = body.getDefinition().name;
     }
     plan.moduleSymbol = plan.symbolTable.intern(moduleName);
+    collectParameters(body, plan);
     collectPorts(body, plan, context_.diagnostics);
     collectSignals(body, plan, context_.diagnostics);
     collectInstances(body, plan, context_);
@@ -5983,25 +6110,49 @@ std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& 
             }
             return evalParamValue(*valueParam);
         }
+        if (const slang::ast::Symbol* symbol = plan.body->find(name))
+        {
+            if (const auto* param = symbol->as_if<slang::ast::ParameterSymbol>())
+            {
+                return evalParamValue(*param);
+            }
+        }
         const slang::ast::RootSymbol& root = plan.body->getCompilation().getRoot();
         const slang::ast::ParameterSymbol* matched = nullptr;
-        for (const auto& package : root.membersOfType<slang::ast::PackageSymbol>())
-        {
+        auto checkPackage = [&](const slang::ast::PackageSymbol& package) -> bool {
             const slang::ast::Symbol* symbol = package.findForImport(name);
             if (!symbol)
             {
-                continue;
+                return true;
             }
             const auto* param = symbol->as_if<slang::ast::ParameterSymbol>();
             if (!param)
             {
-                return std::nullopt;
+                return false;
             }
             if (matched && matched != param)
             {
-                return std::nullopt;
+                return false;
             }
             matched = param;
+            return true;
+        };
+        for (const auto& package : root.membersOfType<slang::ast::PackageSymbol>())
+        {
+            if (!checkPackage(package))
+            {
+                return std::nullopt;
+            }
+        }
+        for (const auto& unit : root.membersOfType<slang::ast::CompilationUnitSymbol>())
+        {
+            for (const auto& package : unit.membersOfType<slang::ast::PackageSymbol>())
+            {
+                if (!checkPackage(package))
+                {
+                    return std::nullopt;
+                }
+            }
         }
         if (matched)
         {

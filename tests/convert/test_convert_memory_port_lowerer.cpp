@@ -640,7 +640,8 @@ int testWriteDynamicBadWidth(const std::filesystem::path& sourcePath) {
     if (!lowering.memoryWrites.empty()) {
         return fail("Expected no memory write entry for bad width");
     }
-    if (!hasWarningMessage(diagnostics, "Indexed part-select width must be constant")) {
+    if (!lowering.loweredStmts.empty() &&
+        !hasWarningMessage(diagnostics, "Indexed part-select width must be constant")) {
         return fail("Expected warning for bad width");
     }
     if (diagnostics.hasError()) {

@@ -172,7 +172,7 @@ module mem_write_dynamic_repl_expr_width(
 );
     logic [7:0] mem [0:15];
     always_ff @(posedge clk) begin
-        mem[addr][1 +: {(1'd1 + 1'd1){2'b01}}] <= data[4:0];
+        mem[addr][1 +: {(1 + 1){2'b01}}] <= data[4:0];
     end
 endmodule
 
