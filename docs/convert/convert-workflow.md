@@ -13,7 +13,7 @@
 - `ModulePlan`：模块级静态计划，存放 `ports`/`signals`/`instances` 等骨架数据。
 - `PortInfo`/`SignalInfo`/`InstanceInfo`：`ModulePlan` 内的端口/信号/实例记录。
 - `PlanArtifacts`：与 `ModulePlan` 配套的中间产物容器（Lowering/WriteBack 等）。
-- `LoweringPlan`/`WriteBackPlan`：Pass4/Pass7 产出并缓存到 `PlanArtifacts` 的中间计划。
+- `LoweringPlan`/`WriteBackPlan`：Pass4/Pass6 产出并缓存到 `PlanArtifacts` 的中间计划。
 - `Netlist`/`Graph`：Convert 的最终 GRH 输出；`topGraphs` 记录顶层 Graph 名称。
 - `GRH`：内部中间表示（Graph-based IR），Convert 的目标输出。
 - `InstanceBodySymbol`：slang AST 的实例体（模块/接口/程序体），Pass1 的主要输入。
@@ -34,7 +34,7 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
-- 当前实现已完成 Context Setup、Pass1、Pass2 与 Pass3，仍返回空 `Netlist`，后续 Pass 逻辑待接入。
+- 当前实现已完成 Context Setup、Pass1~Pass6，仍返回空 `Netlist`，Pass7/Pass8 待接入。
 
 ## Pass1: SymbolCollectorPass
 - 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并发现子模块任务。
@@ -288,15 +288,26 @@ endgenerate
 - `guard = kInvalidPlanIndex` 表示无显式 guard。  
 代码位置：`StmtLowererState::handleAssignment`。  
 
-## Pass6: MemoryPortLowererPass
-- 功能：细化 memory 读写端口的 Lowering 描述。
-- 输入：`ModulePlan.memPorts` + `LoweringPlan` + ctx。
-- 输出形式：更新 `LoweringPlan`。
-
-## Pass7: WriteBackPass
-- 功能：合并写回序列与 guard/mux 决策。
+## Pass6: WriteBackPass
+- 功能：合并写回序列，生成 `updateCond + nextValue`，并为顺序/锁存域标注事件绑定。
 - 输入：`ModulePlan` + `LoweringPlan` + ctx。
 - 输出形式：`PlanCache[PlanKey].artifacts.writeBackPlan`。
+
+## Pass7: MemoryPortLowererPass
+- 功能：细化 memory 读写端口的 Lowering 描述，输出 read/write 端口条目。
+- 输入：`ModulePlan.memPorts` + `LoweringPlan` + ctx。
+- 输出形式：更新 `LoweringPlan.memoryReads/memoryWrites`。
+- 处理要点：
+  - 读端口：识别表达式中的 `mem[addr]`，组合域生成读端口；顺序域要求 edge-sensitive 事件绑定。
+  - 顺序读：记录 `updateCond` 作为 enable 入口（无 guard 时为常量 1）。
+  - 写端口：从写回语句识别 `mem[addr]` 写入，生成 `updateCond/data/mask`；
+    若为 bit/range 写入则生成 mask（全写时 mask=全 1）。
+  - 多维 memory：使用 unpackedDims 线性化地址索引。
+    线性化前按声明范围修正索引（升序 `idx-left`，降序 `left-idx`）。
+  - Indexed part-select 的 width 必须为可静态求值的常量（含模块/包参数、条件表达式与拼接复制）；
+    拼接/复制支持嵌套算术，宽度取决于表达式的宽度提示。
+    可静态求值的越界写入会给出诊断并跳过，base 为动态表达式时给出 warning 并继续生成。
+  - 顺序域缺失 edge-sensitive 事件则诊断并跳过该端口。
 
 ## Pass8: GraphAssemblyPass
 - 功能：落地 GRH Graph，绑定端口并生成实例化。

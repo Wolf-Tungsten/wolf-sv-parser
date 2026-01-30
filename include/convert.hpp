@@ -211,6 +211,12 @@ struct PortInfo {
     std::optional<InoutBinding> inoutSymbol;
 };
 
+struct UnpackedDimInfo {
+    int32_t extent = 1;
+    int32_t left = 0;
+    int32_t right = 0;
+};
+
 struct SignalInfo {
     PlanSymbolId symbol;
     SignalKind kind = SignalKind::Net;
@@ -218,7 +224,7 @@ struct SignalInfo {
     bool isSigned = false;
     int64_t memoryRows = 0;
     std::vector<int32_t> packedDims;
-    std::vector<int32_t> unpackedDims;
+    std::vector<UnpackedDimInfo> unpackedDims;
 };
 
 struct AccessSite {
@@ -320,6 +326,7 @@ struct ExprNode {
     PlanSymbolId tempSymbol;
     std::string literal;
     std::vector<ExprNodeId> operands;
+    int32_t widthHint = 0;
     slang::SourceLocation location{};
 };
 
@@ -407,16 +414,54 @@ struct LoweredStmt {
     DpiCallStmt dpiCall;
 };
 
+struct MemoryReadPort {
+    PlanSymbolId memory;
+    SignalId signal = kInvalidPlanIndex;
+    ExprNodeId address = kInvalidPlanIndex;
+    ExprNodeId data = kInvalidPlanIndex;
+    bool isSync = false;
+    ExprNodeId updateCond = kInvalidPlanIndex;
+    std::vector<EventEdge> eventEdges;
+    std::vector<ExprNodeId> eventOperands;
+    slang::SourceLocation location{};
+};
+
+struct MemoryWritePort {
+    PlanSymbolId memory;
+    SignalId signal = kInvalidPlanIndex;
+    ExprNodeId address = kInvalidPlanIndex;
+    ExprNodeId data = kInvalidPlanIndex;
+    ExprNodeId mask = kInvalidPlanIndex;
+    ExprNodeId updateCond = kInvalidPlanIndex;
+    bool isMasked = false;
+    std::vector<EventEdge> eventEdges;
+    std::vector<ExprNodeId> eventOperands;
+    slang::SourceLocation location{};
+};
+
 struct LoweringPlan {
     std::vector<ExprNode> values;
     std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
     std::vector<WriteIntent> writes;
     std::vector<LoweredStmt> loweredStmts;
+    std::vector<MemoryReadPort> memoryReads;
+    std::vector<MemoryWritePort> memoryWrites;
 };
 
 struct WriteBackPlan {
-    std::vector<SignalId> targets;
+    struct Entry {
+        PlanSymbolId target;
+        SignalId signal = kInvalidPlanIndex;
+        ControlDomain domain = ControlDomain::Unknown;
+        ExprNodeId updateCond = kInvalidPlanIndex;
+        ExprNodeId nextValue = kInvalidPlanIndex;
+        std::vector<EventEdge> eventEdges;
+        std::vector<ExprNodeId> eventOperands;
+        slang::SourceLocation location{};
+    };
+
+    std::vector<Entry> entries;
 };
 
 struct PlanArtifacts {
@@ -541,6 +586,26 @@ private:
 class StmtLowererPass {
 public:
     explicit StmtLowererPass(ConvertContext& context) : context_(context) {}
+
+    void lower(ModulePlan& plan, LoweringPlan& lowering);
+
+private:
+    ConvertContext& context_;
+};
+
+class WriteBackPass {
+public:
+    explicit WriteBackPass(ConvertContext& context) : context_(context) {}
+
+    WriteBackPlan lower(ModulePlan& plan, LoweringPlan& lowering);
+
+private:
+    ConvertContext& context_;
+};
+
+class MemoryPortLowererPass {
+public:
+    explicit MemoryPortLowererPass(ConvertContext& context) : context_(context) {}
 
     void lower(ModulePlan& plan, LoweringPlan& lowering);
 

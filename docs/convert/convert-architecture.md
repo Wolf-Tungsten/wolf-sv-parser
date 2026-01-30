@@ -25,6 +25,7 @@
     - 3.10.7. WriteIntent / WriteSlice
     - 3.10.8. LoweredStmt
     - 3.10.9. 举例说明
+    - 3.10.10. MemoryReadPort / MemoryWritePort
   - 3.11. WriteBackPlan
   - 3.12. Diagnostics / Logger
 - 4. Pass 中间数据结构
@@ -166,10 +167,10 @@
     - 输出：供 Pass2~Pass8 使用；失败时置空。
   - `artifacts`：
     - 作用：保存 Pass4~Pass7 的中间结果容器。
-    - 建立：在 `PlanEntry` 构造时默认存在；内容由 Pass4/Pass7 写入。
+    - 建立：在 `PlanEntry` 构造时默认存在；内容由 Pass4/Pass6 写入。
     - 子成员（字段 -> 类型 -> 含义）：
-      - `loweringPlan`: `std::optional<LoweringPlan>` -> Pass4/Pass5/Pass6 产物。
-      - `writeBackPlan`: `std::optional<WriteBackPlan>` -> Pass7 产物。
+      - `loweringPlan`: `std::optional<LoweringPlan>` -> Pass4/Pass5/Pass6/Pass7 产物。
+      - `writeBackPlan`: `std::optional<WriteBackPlan>` -> Pass6 产物。
     - 输出：供 Pass8 使用。
 - 关联结构（围绕 PlanEntry 的容器/索引）：
   - `PlanKey`：唯一标识参数特化模块（`body + paramSignature`）。
@@ -221,7 +222,7 @@
       - `isSigned`: `bool` -> 是否有符号（Pass2 填充）。
       - `memoryRows`: `int64_t` -> fixed unpacked 行数乘积。
       - `packedDims`: `std::vector<int32_t>` -> packed 维度（外到内）。
-      - `unpackedDims`: `std::vector<int32_t>` -> unpacked 维度（外到内）。
+      - `unpackedDims`: `std::vector<UnpackedDimInfo>` -> unpacked 维度（外到内，含 left/right/extent）。
 - 设计意图：
   - `ModulePlan` 放在顶层是为了保存“长期稳定事实”（符号、宽度、读写关系等），
     后续 Pass 都需要它作为共同基准。
@@ -309,7 +310,7 @@
 ### 3.8. MemoryPortInfo
 - 总览：
   - 定位：`ModulePlan.memPorts` 的单条 memory 端口记录，描述“某个 memory 在某类访问形态下需要的端口能力”。
-  - 角色：Pass6 细化 memory 端口与数量规划的输入。
+  - 角色：Pass7 细化 memory 端口与数量规划的输入。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `memory`: `SignalId` -> memory 信号索引（指向 `ModulePlan.signals`）。
   - `isRead`: `bool` -> 是否存在读访问。
@@ -322,11 +323,11 @@
   - `memory`：
     - 作用：绑定到具体 memory 信号条目，避免字符串查找。
     - 建立：RWAnalyzer 通过 `PlanSymbolId -> SignalId` 映射解析。
-    - 输出：供 Pass6 选择 memory lowering 策略与端口模板。
+    - 输出：供 Pass7 选择 memory lowering 策略与端口模板。
   - `isRead`/`isWrite`：
     - 作用：描述端口读写能力；`true/false` 组合表达只读/只写/读写口。
     - 建立：RWAnalyzer 在读/写访问被识别时记录。
-    - 输出：影响 Pass6 生成的端口类型与连接逻辑。
+    - 输出：影响 Pass7 生成的端口类型与连接逻辑。
   - `isMasked`：
     - 作用：标识写端口是否需要掩码能力（如 byte-enable）。
     - 建立：当前实现未推断掩码访问，固定为 false。
@@ -334,7 +335,7 @@
   - `isSync`：
     - 作用：标识端口是否为同步访问口。
     - 建立：RWAnalyzer 依据访问控制域推断（顺序域 = true）。
-    - 输出：影响 Pass6 选择 sync/async memory 端口形态。
+    - 输出：影响 Pass7 选择 sync/async memory 端口形态。
   - `hasReset`：
     - 作用：标识 memory 访问是否依赖显式 reset。
     - 建立：当前实现未推断 reset 语义，固定为 false。
@@ -342,12 +343,12 @@
   - `sites`：
     - 作用：保留每次访问的来源位置，用于推断多读口/多写口数量。
     - 建立：RWAnalyzer 在每次 memory 访问时追加 `AccessSite`。
-    - 输出：供 Pass6 或后续阶段决定端口个数与分配。
+    - 输出：供 Pass7 或后续阶段决定端口个数与分配。
 - 生成与归并约定：
   - 生成：Pass3 在识别到 `SignalInfo.memoryRows > 0` 的读/写访问时创建。
   - 归并：以 `memory + isRead + isWrite + isMasked + isSync + hasReset` 为 key 归并，
     访问点通过 `sites` 保留。
-  - 使用：Pass6 以 `memPorts` 为输入，不回扫 AST；端口数量与拆分策略在 Pass6 决定。
+  - 使用：Pass7 以 `memPorts` 为输入，不回扫 AST；端口数量与拆分策略在 Pass7 决定。
 
 ### 3.9. InstanceInfo
 - 总览：
@@ -384,8 +385,8 @@
 
 ### 3.10. LoweringPlan
 #### 3.10.1. 总览与角色
-- 定位：`LoweringPlan` 记录 Pass4~Pass6 的表达式降级结果。
-- 角色：`LoweringPlan` 为 StmtLowerer/MemoryPortLowerer 的共享输入。
+- 定位：`LoweringPlan` 记录 Pass4~Pass7 的表达式降级结果。
+- 角色：`LoweringPlan` 为 StmtLowerer/WriteBack/MemoryPortLowerer 的共享输入。
 
 #### 3.10.2. 字段总览
 - `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
@@ -393,6 +394,8 @@
 - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
 - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
 - `loweredStmts`: `std::vector<LoweredStmt>` -> 按语句顺序保存 Write/Display/Assert/DpiCall。
+- `memoryReads`: `std::vector<MemoryReadPort>` -> 读端口降级条目。
+- `memoryWrites`: `std::vector<MemoryWritePort>` -> 写端口降级条目（含 mask）。
 
 #### 3.10.3. 类型别名
 - `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
@@ -401,7 +404,7 @@
 - `values`：
   - 作用：保存降级后的表达式节点，节点之间通过索引引用。
   - 建立：Pass4 对 RHS 表达式树递归降级时追加。
-  - 输出：供 Pass5/Pass6 解析依赖关系与写回意图。
+  - 输出：供 Pass5~Pass7 解析依赖关系与写回意图。
   - `roots`：
     - 作用：标记每条 RHS 表达式的入口节点索引。
     - 建立：Pass4 处理赋值语句时收集 RHS 入口。
@@ -413,7 +416,7 @@
   - `writes`：
     - 作用：记录每条赋值语句的写回意图、guard 与控制域，并携带 LHS 切片信息。
     - 建立：Pass5 解析语句与控制流后追加。
-    - 输出：供 Pass6/Pass7 合并写回与 guard/mux 决策；静态展开的循环会追加多条写回意图。
+    - 输出：供 Pass6 合并写回与 guard/mux 决策；静态展开的循环会追加多条写回意图。
     - 说明：guard 本身以 `ExprNode` 形式保存在 `values`，`WriteIntent.guard` 仅保存对应节点索引；
       动态 break/continue 会额外生成 `loopAlive/flowGuard` 相关节点并参与 guard 组合，但不引入新结构字段。
     - loopAlive/flowGuard 存储方式：
@@ -424,7 +427,15 @@
   - `loweredStmts`：
     - 作用：按语句顺序记录 Write/Display/Assert/DpiCall，保留副作用语句的相对顺序。
     - 建立：Pass5 在解析语句时追加；WriteIntent 会同时进入 `writes` 与 `loweredStmts`。
-    - 输出：供后续写回合并与调试/DPI 转换使用；`loweredStmts` 是语句级顺序的唯一入口。
+    - 输出：供 Pass6 写回合并与调试/DPI 转换使用；`loweredStmts` 是语句级顺序的唯一入口。
+  - `memoryReads`：
+    - 作用：记录 memory 读端口的降级结果（地址/事件绑定）。
+    - 建立：Pass7 从 `loweredStmts` 的表达式树中识别 `mem[addr]` 访问并追加。
+    - 输出：供后续 GraphAssembly 生成 `kMemoryReadPort`/同步读寄存器。
+  - `memoryWrites`：
+    - 作用：记录 memory 写端口降级结果（`updateCond/data/mask/event`）。
+    - 建立：Pass7 从写回语句中识别 memory 写入并追加。
+    - 输出：供后续 GraphAssembly 生成 `kMemoryWritePort`/`kMemoryMaskWritePort`。
 
 #### 3.10.5. ExprNode
 - 字段总览（字段 -> 类型 -> 含义）：
@@ -438,7 +449,7 @@
 - 字段详解：
   - `kind`：
     - 作用：决定节点类型以及哪些字段有效。
-    - 输出：Pass5/Pass6 依据 kind 解析节点语义。
+    - 输出：Pass5~Pass7 依据 kind 解析节点语义。
   - `op`：
     - 作用：记录操作节点的 GRH 操作类型。
     - 约束：仅 `kind == Operation` 时有效。
@@ -553,7 +564,39 @@
         - `roots`：`[0, 1]`
         - `writes`：
           - `WriteIntent{target=y, value=0, guard=2}`
-          - `WriteIntent{target=y, value=1, guard=3}`
+      - `WriteIntent{target=y, value=1, guard=3}`
+
+#### 3.10.10. MemoryReadPort / MemoryWritePort
+- MemoryReadPort 字段总览（字段 -> 类型 -> 含义）：
+  - `memory`: `PlanSymbolId` -> memory 符号名。
+  - `signal`: `SignalId` -> memory 信号索引（未解析为 invalid）。
+  - `address`: `ExprNodeId` -> 读地址表达式。
+  - `data`: `ExprNodeId` -> 读数据表达式节点（`mem[addr]` 对应的 node）。
+  - `isSync`: `bool` -> 是否顺序域读端口。
+  - `updateCond`: `ExprNodeId` -> 顺序读的 enable 条件（无 guard 时为常量 1）。
+  - `eventEdges`: `std::vector<EventEdge>` -> 顺序域事件边沿。
+  - `eventOperands`: `std::vector<ExprNodeId>` -> 顺序域事件信号。
+  - `location`: `slang::SourceLocation` -> 访问位置。
+- MemoryWritePort 字段总览（字段 -> 类型 -> 含义）：
+  - `memory`: `PlanSymbolId` -> memory 符号名。
+  - `signal`: `SignalId` -> memory 信号索引（未解析为 invalid）。
+  - `address`: `ExprNodeId` -> 写地址表达式。
+  - `data`: `ExprNodeId` -> 写数据表达式（已按 bit/range 对齐）。
+  - `mask`: `ExprNodeId` -> 写掩码表达式（全写时为全 1 常量）。
+  - `updateCond`: `ExprNodeId` -> 写入条件（guard 合并，缺失时常量 1）。
+  - `isMasked`: `bool` -> 是否为部分写入（mask != 全 1）。
+  - `eventEdges`: `std::vector<EventEdge>` -> 顺序域事件边沿。
+  - `eventOperands`: `std::vector<ExprNodeId>` -> 顺序域事件信号。
+  - `location`: `slang::SourceLocation` -> 写入位置。
+ - 处理约定（总览）：
+  - 地址线性化：多维 unpacked memory 的地址使用
+    `idx0 * stride0 + idx1 * stride1 + ...` 线性化。
+    - 先做索引归一化：升序范围 `idx - left`，降序范围 `left - idx`。
+  - 掩码写：`[base +: width]` / `[base -: width]` 生成动态 mask 与 data shift；
+    简单范围在常量可求值时生成常量 mask。
+    - Indexed part-select 的 width 需可静态求值（常量/模块参数/显式包参数/条件表达式/拼接复制表达式）；
+      拼接/复制允许嵌套算术表达式，宽度以表达式宽度提示为准。
+      越界时发出诊断并跳过，base 为动态表达式时给出 warning 并继续生成。
     - if/else if/else：
       - 输入：
         ```
@@ -816,11 +859,65 @@
         - 实际节点索引由构建顺序决定，这里仅展示结构关系。
   - 生成与使用约定：
     - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
-    - 使用：Pass5~Pass6 读取 `loweringPlan`，不回扫 AST。
+    - 使用：Pass5~Pass7 读取 `loweringPlan`，不回扫 AST。
 
 ### 3.11. WriteBackPlan
-- 总览：
-  - 暂未展开，后续补充写回合并与 guard/mux 决策细节。
+- 总览（总）：
+  - 定位：记录写回合并结果（`updateCond + nextValue`），为后续 GraphAssembly
+    将 sequential/latch 语义映射到 `kRegister/kLatch` 提供直接输入。
+  - 生成：Pass6 WriteBackPass 从 `LoweringPlan.loweredStmts` 合并得到。
+  - 作用边界：只处理完整信号写回（无 LHS slices）；切片写回在此阶段报 TODO 并跳过。
+
+- 字段结构（分）：
+  - WriteBackPlan：
+    - `entries`: `std::vector<Entry>` -> 写回合并条目列表（按 target + domain 分组）。
+  - WriteBackPlan.Entry：
+    - `target`: `PlanSymbolId` -> 写回目标符号。
+    - `signal`: `SignalId` -> 目标信号索引（未映射时为 invalid）。
+    - `domain`: `ControlDomain` -> comb/seq/latch/unknown。
+    - `updateCond`: `ExprNodeId` -> 写回触发条件（guard OR 合并）。
+    - `nextValue`: `ExprNodeId` -> 合并后的 nextValue（按语句顺序构建 mux）。
+    - `eventEdges`: `std::vector<EventEdge>` -> 顺序域的事件边沿列表。
+    - `eventOperands`: `std::vector<ExprNodeId>` -> 顺序域事件信号表达式列表。
+    - `location`: `slang::SourceLocation` -> 首条写回语句位置（诊断锚点）。
+
+- 合并规则（分）：
+  - 分组键：`target + domain + eventEdges + eventOperands`。
+  - Guard 合并：
+    - 每条 Write 的 guard 缺失时视作常量 `1'b1`。
+    - `updateCond = OR(guard_i)`（按写回出现顺序聚合）。
+  - NextValue 合并：
+    - 初始化 `next = oldValue`（`oldValue` 即目标信号本身）。
+    - 依语句顺序构建 mux 链：`next = mux(guard_i, value_i, next)`。
+  - 顺序域约束：
+    - 缺少 edge-sensitive 事件列表 -> 发出 warning 并跳过该组。
+  - 锁存域约束：
+    - 事件列表为空，仅依赖 `updateCond/nextValue`。
+
+- 案例讲解（分）：
+  - 顺序写回（reset/enable 优先级）：
+    - 输入：
+      ```
+      always_ff @(posedge clk) begin
+        if (rst) q <= 1'b0;
+        else if (en) q <= d;
+      end
+      ```
+    - 合并（示意）：
+      - guards：`g0 = rst`，`g1 = (!rst) && en`。
+      - `updateCond = g0 || g1`
+      - `nextValue = mux(g0, 1'b0, mux(g1, d, q))`
+      - `eventEdges = [posedge]`，`eventOperands = [clk]`
+    - 说明：先写的 reset guard 优先级更高，mux 链保持语句顺序。
+  - 锁存写回：
+    - 输入：
+      ```
+      always_latch if (en) q <= d;
+      ```
+    - 合并（示意）：
+      - `updateCond = en`
+      - `nextValue = mux(en, d, q)`
+      - `eventEdges/eventOperands` 为空
 
 ### 3.12. Diagnostics / Logger
 - 总览：
@@ -868,10 +965,10 @@
       - `isSigned`: `bool` -> 符号性。
       - `memoryRows`: `int64_t` -> fixed unpacked 维度乘积。
       - `packedDims`: `std::vector<int32_t>` -> packed 维度（外到内）。
-      - `unpackedDims`: `std::vector<int32_t>` -> unpacked 维度（外到内）。
+      - `unpackedDims`: `std::vector<UnpackedDimInfo>` -> unpacked 维度（外到内，含 left/right/extent）。
     - 字段详解：
       - `width/isSigned`：写回端口与信号的最终基本类型属性。
-      - `packedDims/unpackedDims/memoryRows`：支撑 memory 判定与维度保留。
+      - `packedDims/unpackedDims/memoryRows`：支撑 memory 判定与维度/方向保留。
     - 建立：`analyzePortType`/`analyzeSignalType` 解析 `slang::ast::Type` 时生成。
     - 输出：写回 PortInfo/SignalInfo。
   - `PortIndexMap`（`std::vector<PortId>`）：
@@ -1000,9 +1097,9 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
   |
   +--> Pass5: StmtLowererPass     -> refine LoweringPlan (guards/write intents)
   |
-  +--> Pass6: MemoryPortLowererPass -> refine LoweringPlan (mem ports)
+  +--> Pass6: WriteBackPass       -> WriteBackPlan
   |
-  +--> Pass7: WriteBackPass       -> WriteBackPlan
+  +--> Pass7: MemoryPortLowererPass -> refine LoweringPlan (mem ports)
   |                               -> PlanCache[PlanKey].artifacts.writeBackPlan
   |
   +--> Pass8: GraphAssemblyPass   -> Graph (GRH Op/Value) -> Netlist

@@ -547,11 +547,17 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 新增回归用例覆盖 reset/enable 优先级与顺序稳定性
 
 实施：
-- 待实施
+- `WriteBackPlan` 扩展为 `Entry{target, signal, domain, updateCond, nextValue, eventEdges, eventOperands}` 结构
+- StmtLowerer 写回语句补齐 `updateCond` 与事件绑定信息
+- 新增 Pass6 WriteBackPass：按 `target + domain + event` 聚合写回，生成 `updateCond/nextValue`
+- 顺序域缺失 edge-sensitive 事件时给出 warning 并跳过写回
+- 写回合并暂不支持 LHS 切片，遇到切片写回记录 TODO
+- 新增 `tests/data/convert/write_back.sv` 与 `convert-write-back` 用例，覆盖顺序/锁存与缺失事件
+- 更新 workflow/architecture 文档对齐 Pass6 写回合并流程
 
-完成情况：未开始
+完成情况：已完成
 
-## STEP 0029 - Pass6 MemoryPortLowerer 适配新 kMemoryReadPort/kMemoryWritePort
+## STEP 0029 - Pass7 MemoryPortLowerer 适配新 kMemoryReadPort/kMemoryWritePort
 
 目标：
 - 使用 `kMemoryReadPort` 表达组合读，使用 `kMemoryWritePort` + `updateCond`/mask 表达写入
@@ -566,6 +572,124 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增加 memory 读/写/掩码/同步读用例与断言
 
 实施：
-- 待实施
+- `LoweringPlan` 新增 `MemoryReadPort/MemoryWritePort` 结构与存储列表
+- Pass7 MemoryPortLowerer：从 `loweredStmts` 中识别 `mem[addr]` 读写访问
+- 读端口：顺序域要求 edge-sensitive 事件绑定，缺失则 warning 丢弃
+- 写端口：支持全写与 bit/range 掩码写，生成 `updateCond/data/mask`
+- 新增 `memory_ports.sv` fixture 与 `convert-memory-port-lowerer` 断言
+- 更新 workflow/architecture 文档对齐 MemoryPortLowerer 输出
 
-完成情况：未开始
+完成情况：已完成
+
+## STEP 0030 - Pass7 MemoryPortLowerer 掩码写能力补强
+
+目标：
+- 支持 dynamic range 的掩码写（`[base +: width]` / `[base -: width]`）
+- 支持多维 unpacked memory 的地址线性化与端口降级
+- 对同步读补充 enable/reset 的建模入口（与 kRegister 结合）
+
+计划：
+- 扩展 MemoryPortLowerer：为 IndexedUp/IndexedDown 生成可组合 mask 与 data shift
+- 增加多维 memory 地址线性化策略（结合 `unpackedDims` 计算 row index）
+- 引入 read-enable/reset 识别规则，生成寄存器捕获输入
+- 更新 workflow/architecture 文档与示例
+- 新增覆盖 dynamic range、multi-dim memory、sync read enable/reset 的用例与断言
+
+实施：
+- MemoryPortLowerer 支持 IndexedUp/IndexedDown 动态掩码写，生成 mask/data shift 表达式
+- 多维 unpacked memory 支持地址线性化，按 `idx*stride` 聚合
+- 顺序读端口记录 `updateCond` 作为 enable 建模入口
+- 新增 `memory_ports.sv` 动态范围与多维写用例，扩展 `convert-memory-port-lowerer` 断言
+- 更新 workflow/architecture 文档对齐 MemoryPortLowerer 输出细节
+
+完成情况：已完成
+
+## STEP 0031 - Pass7 MemoryPortLowerer 语义约束与索引修正
+
+目标：
+- Indexed part-select 的 `width` 必须为常量表达式，非法时给出诊断
+- 动态范围写入做越界检测（base/width 超出 memory 宽度时给出诊断或 skip）
+- 多维 unpacked memory 线性化时考虑下界与方向（如 `[7:4]` / 降序范围）
+
+计划：
+- 扩展 MemoryPortLowerer：为 `[base +: width]` / `[base -: width]` 验证 `width` 常量
+- 引入 bounds 检查：对可静态求值的 base/width 做超界诊断；动态情况下生成 warning/skip 策略
+- 使用 `unpackedDims` 与 range metadata 修正线性化：加入 lower-bound 偏移与反向索引处理
+- 更新 workflow/architecture 文档与示例
+- 新增覆盖非法 width、越界、降序范围/非 0 起始下界的用例与断言
+
+实施：
+- `SignalInfo.unpackedDims` 引入 `UnpackedDimInfo{extent,left,right}`，TypeResolver 记录范围上下界
+- MemoryPortLowerer 线性化前按范围方向修正索引（升序 `idx-left`，降序 `left-idx`）
+- Indexed part-select width/越界检查加入 warning 诊断，非法写入直接跳过
+- 新增 `memory_ports.sv` 下界/降序、非法 width、越界动态范围用例
+- 扩展 `convert-memory-port-lowerer` 断言覆盖索引修正与诊断
+- 更新 workflow/architecture 文档对齐新约束
+
+完成情况：已完成
+
+## STEP 0032 - Pass7 MemoryPortLowerer 常量表达式求值与 bounds 统一
+
+目标：
+- Indexed part-select 的 `width` 支持参数/简单表达式常量求值
+- Simple range 与 Indexed range 的越界判断覆盖更多可静态求值场景
+- 无法静态判断时采用统一 warning + skip 策略
+
+计划：
+- 扩展 `evalConstInt`：支持参数符号与简单常量表达式折叠
+- 统一 bounds 检查逻辑：对可静态求值的 base/width/left/right 做越界诊断
+- 新增覆盖参数 width、表达式 width、简单范围越界的用例与断言
+- 更新 workflow/architecture 文档说明 const-eval 规则
+
+实施：
+- `evalConstInt` 支持参数符号 + 简单表达式常量折叠
+- Indexed part-select 宽度/越界检查覆盖参数与表达式常量
+- 新增 param/expr width 与 simple range 越界用例断言
+- 更新 workflow/architecture 文档说明 const-eval 范围
+
+完成情况：已完成
+
+## STEP 0033 - Pass7 MemoryPortLowerer 常量范围扩展与动态 bounds 提示
+
+目标：
+- 常量求值支持 package param / localparam / 更丰富的算术与比较表达式
+- 动态 base/width 提示更明确，便于定位无法静态 bounds 的写入
+- 补充 package param/动态 base 的用例与断言
+
+计划：
+- 扩展 `evalConstInt`：覆盖 package 参数与逻辑/比较运算折叠
+- Indexed range：base 为动态表达式时发出 warning 并继续生成
+- 新增 package width 与 dynamic base warning 用例
+- 更新 workflow/architecture 文档说明 const-eval 范围
+
+实施：
+- `evalConstInt` 支持包参数解析与逻辑/比较常量折叠
+- Indexed range base 动态时提示 warning 并继续生成
+- 新增 package width 与 dynamic base warning 用例
+- 更新 workflow/architecture 文档说明 const-eval 范围
+
+完成情况：已完成
+
+## STEP 0034 - Pass7 MemoryPortLowerer 显式包参数与复杂表达式求值
+
+目标：
+- 常量求值支持 `pkg::PARAM` 显式限定名
+- 扩展常量折叠覆盖更复杂表达式（如条件运算、拼接/复制与其内部算术）
+- 新增 explicit pkg::PARAM 与复杂表达式用例
+
+计划：
+- ExprLowerer 识别参数符号并直接下沉为常量节点
+- `evalConstInt` 支持 `kMux`（三目）与 `kConcat/kReplicate` 常量折叠
+- concat/replicate 允许嵌套算术表达式，width 推断依赖表达式宽度提示
+- 新增 `mem_write_dynamic_pkg_qualified` 与 `mem_write_dynamic_expr_complex` 用例
+- 新增 concat/replicate 宽度用例断言（含嵌套算术）
+- 更新 workflow/architecture 文档说明显式包参数与复杂常量折叠
+
+实施：
+- ExprLowerer 将参数符号降级为常量节点，覆盖显式 `pkg::PARAM`
+- ExprNode 增加 `widthHint`，在 ExprLowerer 中记录表达式宽度
+- `evalConstInt` 支持 `kMux`/`kConcat`/`kReplicate` 常量折叠与嵌套算术
+- 新增 explicit pkg::PARAM、复杂表达式、concat/replicate 宽度用例断言
+- 更新 workflow/architecture 文档说明 const-eval 范围
+
+完成情况：已完成

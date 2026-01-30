@@ -139,6 +139,21 @@ bool matchesDims(const std::vector<int32_t>& actual, std::initializer_list<int32
     return true;
 }
 
+bool matchesUnpackedDims(const std::vector<wolf_sv_parser::UnpackedDimInfo>& actual,
+                         std::initializer_list<int32_t> expected) {
+    if (actual.size() != expected.size()) {
+        return false;
+    }
+    std::size_t idx = 0;
+    for (int32_t value : expected) {
+        if (actual[idx].extent != value) {
+            return false;
+        }
+        ++idx;
+    }
+    return true;
+}
+
 int testPackedPorts(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "top_module");
     if (!bundle || !bundle->compilation) {
@@ -293,7 +308,7 @@ int testMemoryDims(const std::filesystem::path& sourcePath) {
     if (pht->width != 2 || pht->memoryRows != 128) {
         return fail("Expected signal 'PHT' width=2 memoryRows=128 in " + sourcePath.string());
     }
-    if (!matchesDims(pht->packedDims, {2}) || !matchesDims(pht->unpackedDims, {128})) {
+    if (!matchesDims(pht->packedDims, {2}) || !matchesUnpackedDims(pht->unpackedDims, {128})) {
         return fail("Expected signal 'PHT' packedDims={2} unpackedDims={128} in " +
                     sourcePath.string());
     }

@@ -255,7 +255,7 @@ struct TypeResolution {
     bool isSigned = false;
     int64_t memoryRows = 0;
     std::vector<int32_t> packedDims;
-    std::vector<int32_t> unpackedDims;
+    std::vector<UnpackedDimInfo> unpackedDims;
     bool hasUnpacked = false;
 };
 
@@ -470,6 +470,7 @@ TypeResolution analyzeSignalType(const slang::ast::Type& type, const slang::ast:
         {
             info.hasUnpacked = true;
             const auto& unpacked = canonical.as<slang::ast::FixedSizeUnpackedArrayType>();
+            const slang::ConstantRange range = unpacked.range;
             uint64_t extent = unpacked.range.fullWidth();
             if (extent == 0)
             {
@@ -480,8 +481,11 @@ TypeResolution analyzeSignalType(const slang::ast::Type& type, const slang::ast:
                 }
                 extent = 1;
             }
-            info.unpackedDims.push_back(
-                clampDim(extent, origin, diagnostics, "Unpacked array dimension"));
+            UnpackedDimInfo dim;
+            dim.extent = clampDim(extent, origin, diagnostics, "Unpacked array dimension");
+            dim.left = range.left;
+            dim.right = range.right;
+            info.unpackedDims.push_back(dim);
 
             constexpr uint64_t maxRows =
                 static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
@@ -1108,11 +1112,44 @@ struct ExprLowererState {
             return it->second;
         }
 
+        auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
+            -> std::optional<std::string> {
+            slang::ConstantValue value = param.getValue();
+            if (value.bad())
+            {
+                return std::nullopt;
+            }
+            if (!value.isInteger())
+            {
+                value = value.convertToInt();
+            }
+            if (!value.isInteger())
+            {
+                return std::nullopt;
+            }
+            const slang::SVInt& literal = value.integer();
+            if (literal.hasUnknown())
+            {
+                return std::nullopt;
+            }
+            return literal.toString();
+        };
+
         ExprNode node;
         node.location = expr.sourceRange.start();
 
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
+            if (const auto* param =
+                    named->symbol.as_if<slang::ast::ParameterSymbol>())
+            {
+                if (auto literal = paramLiteral(*param))
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = *literal;
+                    return addNode(expr, std::move(node));
+                }
+            }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(named->symbol.name);
             if (!node.symbol.valid())
@@ -1123,6 +1160,16 @@ struct ExprLowererState {
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
+            if (const auto* param =
+                    hier->symbol.as_if<slang::ast::ParameterSymbol>())
+            {
+                if (auto literal = paramLiteral(*param))
+                {
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = *literal;
+                    return addNode(expr, std::move(node));
+                }
+            }
             node.kind = ExprNodeKind::Symbol;
             node.symbol = plan.symbolTable.lookup(hier->symbol.name);
             if (!node.symbol.valid())
@@ -1310,6 +1357,25 @@ private:
 
     ExprNodeId addNode(const slang::ast::Expression& expr, ExprNode node)
     {
+        if (node.widthHint == 0)
+        {
+            uint64_t width = expr.getType().getBitstreamWidth();
+            if (width == 0)
+            {
+                if (auto effective = expr.getEffectiveWidth())
+                {
+                    width = *effective;
+                }
+            }
+            if (width > 0)
+            {
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                node.widthHint = width > maxValue
+                                     ? std::numeric_limits<int32_t>::max()
+                                     : static_cast<int32_t>(width);
+            }
+        }
         const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
         lowering.values.push_back(std::move(node));
         lowered.emplace(&expr, id);
@@ -2211,6 +2277,9 @@ private:
         stmt.op = grh::ir::OperationKind::kAssign;
         stmt.location = lowering.writes.back().location;
         stmt.write = lowering.writes.back();
+        stmt.updateCond = ensureGuardExpr(stmt.write.guard, stmt.location);
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
         lowering.loweredStmts.push_back(std::move(stmt));
     }
 
@@ -5510,6 +5579,1481 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
     }
 }
 
+namespace {
+
+class WriteBackBuilder {
+public:
+    WriteBackBuilder(ModulePlan& plan, LoweringPlan& lowering)
+        : plan_(plan), lowering_(lowering)
+    {
+        nextTemp_ = static_cast<uint32_t>(lowering_.tempSymbols.size());
+    }
+
+    ExprNodeId ensureGuardExpr(ExprNodeId guard, slang::SourceLocation location)
+    {
+        if (guard != kInvalidPlanIndex)
+        {
+            return guard;
+        }
+        if (constOne_.has_value())
+        {
+            return *constOne_;
+        }
+        ExprNodeId id = addConstantLiteral("1'b1", location);
+        constOne_ = id;
+        return id;
+    }
+
+    ExprNodeId makeLogicOr(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
+    {
+        if (lhs == kInvalidPlanIndex)
+        {
+            return rhs;
+        }
+        if (rhs == kInvalidPlanIndex)
+        {
+            return lhs;
+        }
+        return makeOperation(grh::ir::OperationKind::kLogicOr, {lhs, rhs}, location);
+    }
+
+    ExprNodeId makeMux(ExprNodeId cond, ExprNodeId lhs, ExprNodeId rhs,
+                       slang::SourceLocation location)
+    {
+        if (cond == kInvalidPlanIndex || lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kMux, {cond, lhs, rhs}, location);
+    }
+
+    ExprNodeId addSymbol(PlanSymbolId symbol, slang::SourceLocation location)
+    {
+        if (!symbol.valid())
+        {
+            return kInvalidPlanIndex;
+        }
+        ExprNode node;
+        node.kind = ExprNodeKind::Symbol;
+        node.symbol = symbol;
+        node.location = location;
+        return addNode(std::move(node));
+    }
+
+    ExprNodeId addConstantLiteral(std::string literal, slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Constant;
+        node.literal = std::move(literal);
+        node.location = location;
+        return addNode(std::move(node));
+    }
+
+private:
+    PlanSymbolId makeTempSymbol()
+    {
+        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
+        PlanSymbolId id = plan_.symbolTable.intern(name);
+        lowering_.tempSymbols.push_back(id);
+        return id;
+    }
+
+    ExprNodeId addNode(ExprNode node)
+    {
+        const ExprNodeId id = static_cast<ExprNodeId>(lowering_.values.size());
+        lowering_.values.push_back(std::move(node));
+        return id;
+    }
+
+    ExprNodeId makeOperation(grh::ir::OperationKind op, std::vector<ExprNodeId> operands,
+                             slang::SourceLocation location)
+    {
+        for (ExprNodeId operand : operands)
+        {
+            if (operand == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+        }
+        ExprNode node;
+        node.kind = ExprNodeKind::Operation;
+        node.op = op;
+        node.operands = std::move(operands);
+        node.location = location;
+        node.tempSymbol = makeTempSymbol();
+        return addNode(std::move(node));
+    }
+
+    ModulePlan& plan_;
+    LoweringPlan& lowering_;
+    uint32_t nextTemp_ = 0;
+    std::optional<ExprNodeId> constOne_;
+};
+
+struct WriteBackGroup {
+    PlanSymbolId target;
+    ControlDomain domain = ControlDomain::Unknown;
+    std::vector<EventEdge> eventEdges;
+    std::vector<ExprNodeId> eventOperands;
+    std::vector<const LoweredStmt*> writes;
+};
+
+bool matchWriteGroup(const WriteBackGroup& group, PlanSymbolId target, ControlDomain domain,
+                     const std::vector<EventEdge>& edges,
+                     const std::vector<ExprNodeId>& operands)
+{
+    return group.target.index == target.index && group.domain == domain &&
+           group.eventEdges == edges && group.eventOperands == operands;
+}
+
+} // namespace
+
+WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
+{
+    WriteBackPlan result;
+    if (!plan.body)
+    {
+        return result;
+    }
+
+    std::vector<SignalId> signalBySymbol(plan.symbolTable.size(), kInvalidPlanIndex);
+    for (SignalId i = 0; i < static_cast<SignalId>(plan.signals.size()); ++i)
+    {
+        const PlanSymbolId id = plan.signals[i].symbol;
+        if (id.valid() && id.index < signalBySymbol.size())
+        {
+            signalBySymbol[id.index] = i;
+        }
+    }
+
+    std::vector<WriteBackGroup> groups;
+    groups.reserve(lowering.loweredStmts.size());
+
+    for (const auto& stmt : lowering.loweredStmts)
+    {
+        if (stmt.kind != LoweredStmtKind::Write)
+        {
+            continue;
+        }
+        const WriteIntent& write = stmt.write;
+        if (!write.target.valid())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location, "Write-back target missing symbol");
+            }
+            continue;
+        }
+        SignalId signalId = kInvalidPlanIndex;
+        if (write.target.index < signalBySymbol.size())
+        {
+            signalId = signalBySymbol[write.target.index];
+        }
+        if (signalId != kInvalidPlanIndex && plan.signals[signalId].memoryRows > 0)
+        {
+            continue;
+        }
+        if (!write.slices.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location,
+                                           "Write-back merge with slices is unsupported");
+            }
+            continue;
+        }
+        if (write.value == kInvalidPlanIndex)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location, "Write-back missing RHS expression");
+            }
+            continue;
+        }
+        if (stmt.eventEdges.size() != stmt.eventOperands.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(write.location,
+                                           "Skipping write with mismatched event binding");
+            }
+            continue;
+        }
+        if (write.domain == ControlDomain::Sequential &&
+            (stmt.eventEdges.empty() || stmt.eventOperands.empty()))
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    write.location,
+                    "Skipping sequential write without edge-sensitive timing control");
+            }
+            continue;
+        }
+
+        bool matched = false;
+        for (auto& group : groups)
+        {
+            if (matchWriteGroup(group, write.target, write.domain,
+                                stmt.eventEdges, stmt.eventOperands))
+            {
+                group.writes.push_back(&stmt);
+                matched = true;
+                break;
+            }
+        }
+        if (!matched)
+        {
+            WriteBackGroup group;
+            group.target = write.target;
+            group.domain = write.domain;
+            group.eventEdges = stmt.eventEdges;
+            group.eventOperands = stmt.eventOperands;
+            group.writes.push_back(&stmt);
+            groups.push_back(std::move(group));
+        }
+    }
+
+    WriteBackBuilder builder(plan, lowering);
+    result.entries.reserve(groups.size());
+
+    for (const auto& group : groups)
+    {
+        if (group.writes.empty())
+        {
+            continue;
+        }
+
+        WriteBackPlan::Entry entry;
+        entry.target = group.target;
+        if (entry.target.valid() && entry.target.index < signalBySymbol.size())
+        {
+            entry.signal = signalBySymbol[entry.target.index];
+        }
+        entry.domain = group.domain;
+        entry.eventEdges = group.eventEdges;
+        entry.eventOperands = group.eventOperands;
+        entry.location = group.writes.front()->location;
+
+        ExprNodeId updateCond = kInvalidPlanIndex;
+        ExprNodeId baseValue = builder.addSymbol(group.target, entry.location);
+        ExprNodeId nextValue = baseValue;
+
+        for (const LoweredStmt* stmt : group.writes)
+        {
+            const WriteIntent& write = stmt->write;
+            ExprNodeId guard = builder.ensureGuardExpr(write.guard, write.location);
+            updateCond = builder.makeLogicOr(updateCond, guard, write.location);
+            nextValue = builder.makeMux(guard, write.value, nextValue, write.location);
+        }
+
+        if (updateCond == kInvalidPlanIndex || nextValue == kInvalidPlanIndex)
+        {
+            continue;
+        }
+
+        entry.updateCond = updateCond;
+        entry.nextValue = nextValue;
+        result.entries.push_back(std::move(entry));
+    }
+
+    return result;
+}
+
+namespace {
+
+class MemoryPortBuilder {
+public:
+    MemoryPortBuilder(ModulePlan& plan, LoweringPlan& lowering)
+        : plan_(plan), lowering_(lowering)
+    {
+        nextTemp_ = static_cast<uint32_t>(lowering_.tempSymbols.size());
+    }
+
+    ExprNodeId ensureGuardExpr(ExprNodeId guard, slang::SourceLocation location)
+    {
+        if (guard != kInvalidPlanIndex)
+        {
+            return guard;
+        }
+        if (constOne_.has_value())
+        {
+            return *constOne_;
+        }
+        ExprNodeId id = addConstantLiteral("1'b1", location);
+        constOne_ = id;
+        return id;
+    }
+
+    ExprNodeId addConstantLiteral(std::string literal, slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Constant;
+        node.literal = std::move(literal);
+        node.location = location;
+        return addNode(std::move(node));
+    }
+
+    ExprNodeId makeOperation(grh::ir::OperationKind op, std::vector<ExprNodeId> operands,
+                             slang::SourceLocation location)
+    {
+        for (ExprNodeId operand : operands)
+        {
+            if (operand == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+        }
+        ExprNode node;
+        node.kind = ExprNodeKind::Operation;
+        node.op = op;
+        node.operands = std::move(operands);
+        node.location = location;
+        node.tempSymbol = makeTempSymbol();
+        return addNode(std::move(node));
+    }
+
+private:
+    PlanSymbolId makeTempSymbol()
+    {
+        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
+        PlanSymbolId id = plan_.symbolTable.intern(name);
+        lowering_.tempSymbols.push_back(id);
+        return id;
+    }
+
+    ExprNodeId addNode(ExprNode node)
+    {
+        const ExprNodeId id = static_cast<ExprNodeId>(lowering_.values.size());
+        lowering_.values.push_back(std::move(node));
+        return id;
+    }
+
+    ModulePlan& plan_;
+    LoweringPlan& lowering_;
+    uint32_t nextTemp_ = 0;
+    std::optional<ExprNodeId> constOne_;
+};
+
+std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
+                                    ExprNodeId id)
+{
+    std::unordered_set<ExprNodeId> visited;
+    std::unordered_set<ExprNodeId> visitedSv;
+    auto evalParamValue = [](const slang::ast::ParameterSymbol& param)
+        -> std::optional<slang::SVInt> {
+        slang::ConstantValue value = param.getValue();
+        if (value.bad())
+        {
+            return std::nullopt;
+        }
+        if (!value.isInteger())
+        {
+            value = value.convertToInt();
+        }
+        if (!value.isInteger())
+        {
+            return std::nullopt;
+        }
+        const slang::SVInt& literal = value.integer();
+        if (literal.hasUnknown())
+        {
+            return std::nullopt;
+        }
+        return literal;
+    };
+    auto lookupParamValue = [&](std::string_view name) -> std::optional<slang::SVInt> {
+        if (!plan.body)
+        {
+            return std::nullopt;
+        }
+        for (const slang::ast::ParameterSymbolBase* paramBase :
+             plan.body->getParameters())
+        {
+            if (!paramBase || paramBase->symbol.name != name)
+            {
+                continue;
+            }
+            const auto* valueParam =
+                paramBase->symbol.as_if<slang::ast::ParameterSymbol>();
+            if (!valueParam)
+            {
+                return std::nullopt;
+            }
+            return evalParamValue(*valueParam);
+        }
+        const slang::ast::RootSymbol& root = plan.body->getCompilation().getRoot();
+        const slang::ast::ParameterSymbol* matched = nullptr;
+        for (const auto& package : root.membersOfType<slang::ast::PackageSymbol>())
+        {
+            const slang::ast::Symbol* symbol = package.findForImport(name);
+            if (!symbol)
+            {
+                continue;
+            }
+            const auto* param = symbol->as_if<slang::ast::ParameterSymbol>();
+            if (!param)
+            {
+                return std::nullopt;
+            }
+            if (matched && matched != param)
+            {
+                return std::nullopt;
+            }
+            matched = param;
+        }
+        if (matched)
+        {
+            return evalParamValue(*matched);
+        }
+        return std::nullopt;
+    };
+    auto evalConstSVInt = [&](auto&& self, ExprNodeId nodeId)
+        -> std::optional<slang::SVInt> {
+        if (nodeId == kInvalidPlanIndex || nodeId >= lowering.values.size())
+        {
+            return std::nullopt;
+        }
+        if (!visitedSv.insert(nodeId).second)
+        {
+            return std::nullopt;
+        }
+        const ExprNode& node = lowering.values[nodeId];
+        if (node.kind == ExprNodeKind::Constant)
+        {
+            slang::SVInt literal = slang::SVInt::fromString(node.literal);
+            if (literal.hasUnknown())
+            {
+                return std::nullopt;
+            }
+            if (node.widthHint > 0 &&
+                static_cast<uint64_t>(node.widthHint) != literal.getBitWidth())
+            {
+                literal = literal.resize(static_cast<slang::bitwidth_t>(node.widthHint));
+            }
+            return literal;
+        }
+        if (node.kind == ExprNodeKind::Symbol)
+        {
+            if (!node.symbol.valid())
+            {
+                return std::nullopt;
+            }
+            auto value = lookupParamValue(plan.symbolTable.text(node.symbol));
+            if (value && node.widthHint > 0 &&
+                static_cast<uint64_t>(node.widthHint) != value->getBitWidth())
+            {
+                *value = value->resize(static_cast<slang::bitwidth_t>(node.widthHint));
+            }
+            return value;
+        }
+        if (node.kind != ExprNodeKind::Operation)
+        {
+            return std::nullopt;
+        }
+        if (node.op == grh::ir::OperationKind::kMux && node.operands.size() == 3)
+        {
+            auto cond = self(self, node.operands[0]);
+            if (!cond)
+            {
+                return std::nullopt;
+            }
+            slang::logic_t condBit = cond->reductionOr();
+            if (condBit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            ExprNodeId branch = static_cast<bool>(condBit) ? node.operands[1] : node.operands[2];
+            return self(self, branch);
+        }
+        if (node.op == grh::ir::OperationKind::kConcat)
+        {
+            std::vector<slang::SVInt> operands;
+            operands.reserve(node.operands.size());
+            for (ExprNodeId operand : node.operands)
+            {
+                auto value = self(self, operand);
+                if (!value)
+                {
+                    return std::nullopt;
+                }
+                operands.push_back(*value);
+            }
+            if (operands.empty())
+            {
+                return std::nullopt;
+            }
+            slang::SVInt result = slang::SVInt::concat(operands);
+            if (node.widthHint > 0 &&
+                static_cast<uint64_t>(node.widthHint) != result.getBitWidth())
+            {
+                result = result.resize(static_cast<slang::bitwidth_t>(node.widthHint));
+            }
+            return result;
+        }
+        if (node.op == grh::ir::OperationKind::kReplicate &&
+            node.operands.size() >= 2)
+        {
+            auto countValue = self(self, node.operands[0]);
+            auto dataValue = self(self, node.operands[1]);
+            if (!countValue || !dataValue)
+            {
+                return std::nullopt;
+            }
+            auto countInt = countValue->as<int64_t>();
+            if (!countInt || *countInt < 0)
+            {
+                return std::nullopt;
+            }
+            slang::SVInt result = dataValue->replicate(*countValue);
+            if (node.widthHint > 0 &&
+                static_cast<uint64_t>(node.widthHint) != result.getBitWidth())
+            {
+                result = result.resize(static_cast<slang::bitwidth_t>(node.widthHint));
+            }
+            return result;
+        }
+        if (node.operands.size() == 1)
+        {
+            auto operand = self(self, node.operands.front());
+            if (!operand)
+            {
+                return std::nullopt;
+            }
+            switch (node.op)
+            {
+            case grh::ir::OperationKind::kNot:
+                return ~(*operand);
+            case grh::ir::OperationKind::kLogicNot:
+            {
+                slang::logic_t bit = operand->reductionOr();
+                if (bit.isUnknown())
+                {
+                    return std::nullopt;
+                }
+                return slang::SVInt(1, static_cast<uint64_t>(!static_cast<bool>(bit)),
+                                    false);
+            }
+            default:
+                break;
+            }
+            return std::nullopt;
+        }
+        if (node.operands.size() != 2)
+        {
+            return std::nullopt;
+        }
+        auto lhs = self(self, node.operands[0]);
+        auto rhs = self(self, node.operands[1]);
+        if (!lhs || !rhs)
+        {
+            return std::nullopt;
+        }
+        auto applyWidthHint = [&](slang::SVInt value) -> slang::SVInt {
+            if (node.widthHint > 0 &&
+                static_cast<uint64_t>(node.widthHint) != value.getBitWidth())
+            {
+                return value.resize(static_cast<slang::bitwidth_t>(node.widthHint));
+            }
+            return value;
+        };
+        switch (node.op)
+        {
+        case grh::ir::OperationKind::kAdd:
+            return applyWidthHint(*lhs + *rhs);
+        case grh::ir::OperationKind::kSub:
+            return applyWidthHint(*lhs - *rhs);
+        case grh::ir::OperationKind::kMul:
+            return applyWidthHint(*lhs * *rhs);
+        case grh::ir::OperationKind::kDiv:
+            return applyWidthHint(*lhs / *rhs);
+        case grh::ir::OperationKind::kMod:
+            return applyWidthHint(*lhs % *rhs);
+        case grh::ir::OperationKind::kAnd:
+            return applyWidthHint(*lhs & *rhs);
+        case grh::ir::OperationKind::kOr:
+            return applyWidthHint(*lhs | *rhs);
+        case grh::ir::OperationKind::kXor:
+            return applyWidthHint(*lhs ^ *rhs);
+        case grh::ir::OperationKind::kXnor:
+            return applyWidthHint(lhs->xnor(*rhs));
+        case grh::ir::OperationKind::kShl:
+            return applyWidthHint(lhs->shl(*rhs));
+        case grh::ir::OperationKind::kLShr:
+            return applyWidthHint(lhs->lshr(*rhs));
+        case grh::ir::OperationKind::kAShr:
+            return applyWidthHint(lhs->ashr(*rhs));
+        case grh::ir::OperationKind::kLogicAnd:
+        {
+            slang::logic_t bit = lhs->reductionOr() && rhs->reductionOr();
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kLogicOr:
+        {
+            slang::logic_t bit = lhs->reductionOr() || rhs->reductionOr();
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kEq:
+        case grh::ir::OperationKind::kCaseEq:
+        {
+            slang::logic_t bit = *lhs == *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kNe:
+        case grh::ir::OperationKind::kCaseNe:
+        {
+            slang::logic_t bit = *lhs != *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kLt:
+        {
+            slang::logic_t bit = *lhs < *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kLe:
+        {
+            slang::logic_t bit = *lhs <= *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kGt:
+        {
+            slang::logic_t bit = *lhs > *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        case grh::ir::OperationKind::kGe:
+        {
+            slang::logic_t bit = *lhs >= *rhs;
+            if (bit.isUnknown())
+            {
+                return std::nullopt;
+            }
+            return applyWidthHint(
+                slang::SVInt(1, static_cast<uint64_t>(static_cast<bool>(bit)), false));
+        }
+        default:
+            break;
+        }
+        return std::nullopt;
+    };
+    auto evalNode = [&](auto&& self, ExprNodeId nodeId) -> std::optional<int64_t> {
+        if (nodeId == kInvalidPlanIndex || nodeId >= lowering.values.size())
+        {
+            return std::nullopt;
+        }
+        if (!visited.insert(nodeId).second)
+        {
+            return std::nullopt;
+        }
+        const ExprNode& node = lowering.values[nodeId];
+        if (node.kind == ExprNodeKind::Constant)
+        {
+            slang::SVInt literal = slang::SVInt::fromString(node.literal);
+            if (literal.hasUnknown())
+            {
+                return std::nullopt;
+            }
+            return literal.as<int64_t>();
+        }
+        if (node.kind == ExprNodeKind::Symbol)
+        {
+            if (!node.symbol.valid() || !plan.body)
+            {
+                return std::nullopt;
+            }
+            const std::string_view name = plan.symbolTable.text(node.symbol);
+            auto value = lookupParamValue(name);
+            if (value)
+            {
+                return value->as<int64_t>();
+            }
+            return std::nullopt;
+        }
+        if (node.kind != ExprNodeKind::Operation)
+        {
+            return std::nullopt;
+        }
+        if (node.op == grh::ir::OperationKind::kMux && node.operands.size() == 3)
+        {
+            auto cond = self(self, node.operands[0]);
+            if (!cond)
+            {
+                return std::nullopt;
+            }
+            ExprNodeId branch = *cond != 0 ? node.operands[1] : node.operands[2];
+            return self(self, branch);
+        }
+        if (node.op == grh::ir::OperationKind::kConcat ||
+            node.op == grh::ir::OperationKind::kReplicate)
+        {
+            auto value = evalConstSVInt(evalConstSVInt, nodeId);
+            if (!value || value->hasUnknown())
+            {
+                return std::nullopt;
+            }
+            return value->as<int64_t>();
+        }
+        if (node.operands.empty())
+        {
+            return std::nullopt;
+        }
+        if (node.operands.size() == 1)
+        {
+            auto operand = self(self, node.operands.front());
+            if (!operand)
+            {
+                return std::nullopt;
+            }
+            switch (node.op)
+            {
+            case grh::ir::OperationKind::kNot:
+                return ~(*operand);
+            case grh::ir::OperationKind::kLogicNot:
+                return *operand == 0 ? 1 : 0;
+            default:
+                return std::nullopt;
+            }
+        }
+        if (node.operands.size() != 2)
+        {
+            return std::nullopt;
+        }
+        auto lhs = self(self, node.operands[0]);
+        if (!lhs)
+        {
+            return std::nullopt;
+        }
+        auto rhs = self(self, node.operands[1]);
+        if (!rhs)
+        {
+            return std::nullopt;
+        }
+        switch (node.op)
+        {
+        case grh::ir::OperationKind::kAdd:
+            return *lhs + *rhs;
+        case grh::ir::OperationKind::kSub:
+            return *lhs - *rhs;
+        case grh::ir::OperationKind::kMul:
+            return *lhs * *rhs;
+        case grh::ir::OperationKind::kDiv:
+            return *rhs == 0 ? std::nullopt : std::optional<int64_t>(*lhs / *rhs);
+        case grh::ir::OperationKind::kMod:
+            return *rhs == 0 ? std::nullopt : std::optional<int64_t>(*lhs % *rhs);
+        case grh::ir::OperationKind::kAnd:
+            return *lhs & *rhs;
+        case grh::ir::OperationKind::kOr:
+            return *lhs | *rhs;
+        case grh::ir::OperationKind::kXor:
+            return *lhs ^ *rhs;
+        case grh::ir::OperationKind::kXnor:
+            return ~(*lhs ^ *rhs);
+        case grh::ir::OperationKind::kLogicAnd:
+            return (*lhs != 0 && *rhs != 0) ? 1 : 0;
+        case grh::ir::OperationKind::kLogicOr:
+            return (*lhs != 0 || *rhs != 0) ? 1 : 0;
+        case grh::ir::OperationKind::kEq:
+        case grh::ir::OperationKind::kCaseEq:
+            return *lhs == *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kNe:
+        case grh::ir::OperationKind::kCaseNe:
+            return *lhs != *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kLt:
+            return *lhs < *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kLe:
+            return *lhs <= *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kGt:
+            return *lhs > *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kGe:
+            return *lhs >= *rhs ? 1 : 0;
+        case grh::ir::OperationKind::kShl:
+        {
+            if (*rhs < 0 || *rhs >= 63)
+            {
+                return std::nullopt;
+            }
+            return *lhs << *rhs;
+        }
+        case grh::ir::OperationKind::kLShr:
+        {
+            if (*rhs < 0 || *rhs >= 63)
+            {
+                return std::nullopt;
+            }
+            return static_cast<int64_t>(static_cast<uint64_t>(*lhs) >> *rhs);
+        }
+        case grh::ir::OperationKind::kAShr:
+        {
+            if (*rhs < 0 || *rhs >= 63)
+            {
+                return std::nullopt;
+            }
+            return *lhs >> *rhs;
+        }
+        default:
+            break;
+        }
+        return std::nullopt;
+    };
+    return evalNode(evalNode, id);
+}
+
+std::optional<std::string> makeMaskLiteral(int64_t width, int64_t lo, int64_t hi)
+{
+    if (width <= 0 || lo < 0 || hi < lo || hi >= width)
+    {
+        return std::nullopt;
+    }
+    std::string bits(static_cast<std::size_t>(width), '0');
+    for (int64_t i = lo; i <= hi; ++i)
+    {
+        const std::size_t index = static_cast<std::size_t>(width - 1 - i);
+        bits[index] = '1';
+    }
+    std::string literal;
+    literal.reserve(static_cast<std::size_t>(width) + 8);
+    literal.append(std::to_string(width));
+    literal.append("'b");
+    literal.append(bits);
+    return literal;
+}
+
+struct MemoryReadUse {
+    PlanSymbolId memory;
+    SignalId signal = kInvalidPlanIndex;
+    ExprNodeId data = kInvalidPlanIndex;
+    ControlDomain domain = ControlDomain::Unknown;
+    ExprNodeId updateCond = kInvalidPlanIndex;
+    std::vector<ExprNodeId> addressIndices;
+    std::vector<EventEdge> eventEdges;
+    std::vector<ExprNodeId> eventOperands;
+    slang::SourceLocation location{};
+};
+
+} // namespace
+
+void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
+{
+    if (!plan.body)
+    {
+        return;
+    }
+
+    lowering.memoryReads.clear();
+    lowering.memoryWrites.clear();
+
+    std::vector<SignalId> signalBySymbol(plan.symbolTable.size(), kInvalidPlanIndex);
+    for (SignalId i = 0; i < static_cast<SignalId>(plan.signals.size()); ++i)
+    {
+        const PlanSymbolId id = plan.signals[i].symbol;
+        if (id.valid() && id.index < signalBySymbol.size())
+        {
+            signalBySymbol[id.index] = i;
+        }
+    }
+
+    auto resolveMemorySignal = [&](PlanSymbolId symbol) -> SignalId {
+        if (!symbol.valid() || symbol.index >= signalBySymbol.size())
+        {
+            return kInvalidPlanIndex;
+        }
+        SignalId id = signalBySymbol[symbol.index];
+        if (id == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (plan.signals[id].memoryRows <= 0)
+        {
+            return kInvalidPlanIndex;
+        }
+        return id;
+    };
+
+    auto getMemoryReadCandidate = [&](ExprNodeId id, MemoryReadUse& out) -> bool {
+        if (id == kInvalidPlanIndex || id >= lowering.values.size())
+        {
+            return false;
+        }
+        ExprNodeId current = id;
+        std::vector<ExprNodeId> indices;
+        while (current != kInvalidPlanIndex && current < lowering.values.size())
+        {
+            const ExprNode& node = lowering.values[current];
+            if (node.kind != ExprNodeKind::Operation ||
+                node.op != grh::ir::OperationKind::kSliceDynamic ||
+                node.operands.size() < 2)
+            {
+                break;
+            }
+            if (node.operands.size() == 2)
+            {
+                indices.push_back(node.operands[1]);
+            }
+            current = node.operands[0];
+        }
+        if (current == kInvalidPlanIndex || current >= lowering.values.size())
+        {
+            return false;
+        }
+        const ExprNode& baseNode = lowering.values[current];
+        if (baseNode.kind != ExprNodeKind::Symbol)
+        {
+            return false;
+        }
+        SignalId signal = resolveMemorySignal(baseNode.symbol);
+        if (signal == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        if (!indices.empty())
+        {
+            std::reverse(indices.begin(), indices.end());
+        }
+        out.memory = baseNode.symbol;
+        out.signal = signal;
+        out.data = id;
+        out.addressIndices = std::move(indices);
+        out.location = baseNode.location.valid() ? baseNode.location : lowering.values[id].location;
+        return true;
+    };
+
+    std::vector<MemoryReadUse> readUses;
+    auto recordReadUse = [&](const MemoryReadUse& candidate) {
+        for (const auto& existing : readUses)
+        {
+            if (existing.memory.index == candidate.memory.index &&
+                existing.domain == candidate.domain &&
+                existing.updateCond == candidate.updateCond &&
+                existing.addressIndices == candidate.addressIndices &&
+                existing.eventEdges == candidate.eventEdges &&
+                existing.eventOperands == candidate.eventOperands)
+            {
+                return;
+            }
+        }
+        readUses.push_back(candidate);
+    };
+
+    auto visitExpr = [&](auto&& self, ExprNodeId id, ControlDomain domain,
+                         const std::vector<EventEdge>& edges,
+                         const std::vector<ExprNodeId>& operands,
+                         ExprNodeId updateCond,
+                         slang::SourceLocation location,
+                         std::unordered_set<ExprNodeId>& visited) -> void {
+        if (id == kInvalidPlanIndex || id >= lowering.values.size())
+        {
+            return;
+        }
+        if (!visited.insert(id).second)
+        {
+            return;
+        }
+        MemoryReadUse candidate;
+        if (getMemoryReadCandidate(id, candidate))
+        {
+            candidate.domain = domain;
+            candidate.updateCond = updateCond;
+            candidate.eventEdges = edges;
+            candidate.eventOperands = operands;
+            candidate.location = location;
+            recordReadUse(candidate);
+        }
+        const ExprNode& node = lowering.values[id];
+        if (node.kind == ExprNodeKind::Operation)
+        {
+            for (ExprNodeId operand : node.operands)
+            {
+                self(self, operand, domain, edges, operands, updateCond, location, visited);
+            }
+        }
+    };
+
+    MemoryPortBuilder builder(plan, lowering);
+
+    for (const auto& stmt : lowering.loweredStmts)
+    {
+        if (stmt.kind != LoweredStmtKind::Write)
+        {
+            continue;
+        }
+        std::unordered_set<ExprNodeId> visited;
+        const ControlDomain domain = stmt.write.domain;
+        ExprNodeId updateCond = kInvalidPlanIndex;
+        if (domain == ControlDomain::Sequential)
+        {
+            updateCond = builder.ensureGuardExpr(stmt.write.guard, stmt.location);
+        }
+        if (stmt.write.value != kInvalidPlanIndex)
+        {
+            visitExpr(visitExpr, stmt.write.value, domain, stmt.eventEdges,
+                      stmt.eventOperands, updateCond, stmt.location, visited);
+        }
+        if (stmt.write.guard != kInvalidPlanIndex)
+        {
+            visitExpr(visitExpr, stmt.write.guard, domain, stmt.eventEdges,
+                      stmt.eventOperands, updateCond, stmt.location, visited);
+        }
+    }
+
+    auto buildLinearAddress = [&](std::span<const ExprNodeId> indices,
+                                  std::span<const UnpackedDimInfo> dims,
+                                  slang::SourceLocation location) -> ExprNodeId {
+        if (indices.size() < dims.size() || dims.empty())
+        {
+            return kInvalidPlanIndex;
+        }
+        ExprNodeId address = kInvalidPlanIndex;
+        int64_t stride = 1;
+        std::vector<int64_t> strides(dims.size(), 1);
+        for (std::size_t i = dims.size(); i-- > 0;)
+        {
+            strides[i] = stride;
+            const int32_t extent = dims[i].extent;
+            if (extent > 0 && stride <= std::numeric_limits<int64_t>::max() / extent)
+            {
+                stride *= extent;
+            }
+        }
+        for (std::size_t i = 0; i < dims.size(); ++i)
+        {
+            ExprNodeId term = indices[i];
+            const UnpackedDimInfo& dim = dims[i];
+            if (dim.left < dim.right)
+            {
+                if (dim.left != 0)
+                {
+                    ExprNodeId offset =
+                        builder.addConstantLiteral(std::to_string(dim.left), location);
+                    term = builder.makeOperation(grh::ir::OperationKind::kSub,
+                                                 {term, offset}, location);
+                }
+            }
+            else
+            {
+                ExprNodeId offset =
+                    builder.addConstantLiteral(std::to_string(dim.left), location);
+                term = builder.makeOperation(grh::ir::OperationKind::kSub,
+                                             {offset, term}, location);
+            }
+            if (strides[i] != 1)
+            {
+                ExprNodeId strideId =
+                    builder.addConstantLiteral(std::to_string(strides[i]), location);
+                term = builder.makeOperation(grh::ir::OperationKind::kMul,
+                                             {term, strideId}, location);
+            }
+            if (address == kInvalidPlanIndex)
+            {
+                address = term;
+            }
+            else
+            {
+                address = builder.makeOperation(grh::ir::OperationKind::kAdd,
+                                                {address, term}, location);
+            }
+        }
+        return address;
+    };
+
+    for (const auto& use : readUses)
+    {
+        if (use.data == kInvalidPlanIndex)
+        {
+            continue;
+        }
+        if (use.domain == ControlDomain::Sequential && use.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(use.location,
+                                           "Skipping synchronous memory read without edge-sensitive timing control");
+            }
+            continue;
+        }
+        const auto& dims = plan.signals[use.signal].unpackedDims;
+        ExprNodeId address = kInvalidPlanIndex;
+        if (dims.empty())
+        {
+            if (!use.addressIndices.empty())
+            {
+                address = use.addressIndices.front();
+            }
+        }
+        else
+        {
+            address = buildLinearAddress(use.addressIndices, dims, use.location);
+        }
+        if (address == kInvalidPlanIndex)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(use.location,
+                                           "Memory read missing address indices");
+            }
+            continue;
+        }
+
+        MemoryReadPort entry;
+        entry.memory = use.memory;
+        entry.signal = use.signal;
+        entry.address = address;
+        entry.data = use.data;
+        entry.isSync = use.domain == ControlDomain::Sequential;
+        entry.updateCond = use.updateCond;
+        entry.eventEdges = use.eventEdges;
+        entry.eventOperands = use.eventOperands;
+        entry.location = use.location;
+        lowering.memoryReads.push_back(std::move(entry));
+    }
+
+    for (const auto& stmt : lowering.loweredStmts)
+    {
+        if (stmt.kind != LoweredStmtKind::Write)
+        {
+            continue;
+        }
+        const WriteIntent& write = stmt.write;
+        SignalId signal = resolveMemorySignal(write.target);
+        if (signal == kInvalidPlanIndex)
+        {
+            continue;
+        }
+        const auto& dims = plan.signals[signal].unpackedDims;
+        if (write.slices.size() < (dims.empty() ? 1 : dims.size()))
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location,
+                                           "Memory write missing address slices");
+            }
+            continue;
+        }
+        const int64_t memWidth = plan.signals[signal].width > 0 ? plan.signals[signal].width : 0;
+        if (memWidth <= 0)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location, "Memory write missing valid width");
+            }
+            continue;
+        }
+
+        std::vector<ExprNodeId> addressIndices;
+        const std::size_t addressCount = dims.empty() ? 1 : dims.size();
+        bool addressOk = true;
+        for (std::size_t i = 0; i < addressCount; ++i)
+        {
+            const WriteSlice& addrSlice = write.slices[i];
+            if (addrSlice.kind != WriteSliceKind::BitSelect ||
+                addrSlice.index == kInvalidPlanIndex)
+            {
+                addressOk = false;
+                break;
+            }
+            addressIndices.push_back(addrSlice.index);
+        }
+        if (!addressOk)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location,
+                                           "Unsupported memory address slice kind");
+            }
+            continue;
+        }
+        ExprNodeId address = kInvalidPlanIndex;
+        if (dims.empty())
+        {
+            address = addressIndices.front();
+        }
+        else
+        {
+            address = buildLinearAddress(addressIndices, dims, write.location);
+        }
+        if (address == kInvalidPlanIndex)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location,
+                                           "Memory write address linearization failed");
+            }
+            continue;
+        }
+        ExprNodeId data = write.value;
+        ExprNodeId mask = kInvalidPlanIndex;
+        bool isMasked = false;
+
+        const std::size_t packedStart = addressCount;
+        if (write.slices.size() == packedStart)
+        {
+            auto literal = makeMaskLiteral(memWidth, 0, memWidth - 1);
+            if (!literal)
+            {
+                continue;
+            }
+            mask = builder.addConstantLiteral(*literal, write.location);
+        }
+        else if (write.slices.size() == packedStart + 1)
+        {
+            const WriteSlice& dataSlice = write.slices[packedStart];
+            if (dataSlice.kind == WriteSliceKind::BitSelect)
+            {
+                isMasked = true;
+                const ExprNodeId bitIndex = dataSlice.index;
+                if (bitIndex == kInvalidPlanIndex)
+                {
+                    continue;
+                }
+                const std::string oneLiteral = std::to_string(memWidth) + "'b1";
+                ExprNodeId one = builder.addConstantLiteral(oneLiteral, write.location);
+                mask = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                             {one, bitIndex}, write.location);
+                if (bitIndex == kInvalidPlanIndex)
+                {
+                    continue;
+                }
+                data = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                             {write.value, bitIndex}, write.location);
+            }
+            else if (dataSlice.kind == WriteSliceKind::RangeSelect)
+            {
+                isMasked = true;
+                auto leftConst = evalConstInt(plan, lowering, dataSlice.left);
+                auto rightConst = evalConstInt(plan, lowering, dataSlice.right);
+                if (dataSlice.rangeKind == WriteRangeKind::Simple)
+                {
+                    if (!leftConst || !rightConst)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Memory range mask bounds must be constant");
+                        }
+                        continue;
+                    }
+                    int64_t lo = std::min(*leftConst, *rightConst);
+                    int64_t hi = std::max(*leftConst, *rightConst);
+                    if (lo < 0 || hi < lo || hi >= memWidth)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Memory range mask exceeds memory width");
+                        }
+                        continue;
+                    }
+                    auto literal = makeMaskLiteral(memWidth, lo, hi);
+                    if (!literal)
+                    {
+                        continue;
+                    }
+                    mask = builder.addConstantLiteral(*literal, write.location);
+                    if (lo != 0)
+                    {
+                        ExprNodeId shift =
+                            builder.addConstantLiteral(std::to_string(lo), write.location);
+                        data = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                                     {write.value, shift}, write.location);
+                    }
+                    else
+                    {
+                        data = write.value;
+                    }
+                }
+                else if (dataSlice.rangeKind == WriteRangeKind::IndexedUp ||
+                         dataSlice.rangeKind == WriteRangeKind::IndexedDown)
+                {
+                    ExprNodeId base = dataSlice.left;
+                    ExprNodeId width = dataSlice.right;
+                    if (base == kInvalidPlanIndex || width == kInvalidPlanIndex)
+                    {
+                        continue;
+                    }
+                    auto widthConst = evalConstInt(plan, lowering, width);
+                    if (!widthConst)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Indexed part-select width must be constant");
+                        }
+                        continue;
+                    }
+                    if (*widthConst <= 0)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Indexed part-select width must be positive");
+                        }
+                        continue;
+                    }
+                    if (*widthConst > memWidth)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Indexed part-select exceeds memory width");
+                        }
+                        continue;
+                    }
+                    auto baseConst = evalConstInt(plan, lowering, base);
+                    if (baseConst)
+                    {
+                        int64_t lo = 0;
+                        int64_t hi = 0;
+                        if (dataSlice.rangeKind == WriteRangeKind::IndexedUp)
+                        {
+                            lo = *baseConst;
+                            hi = *baseConst + *widthConst - 1;
+                        }
+                        else
+                        {
+                            lo = *baseConst - *widthConst + 1;
+                            hi = *baseConst;
+                        }
+                        if (lo < 0 || hi < lo || hi >= memWidth)
+                        {
+                            if (context_.diagnostics)
+                            {
+                                context_.diagnostics->warn(
+                                    write.location,
+                                    "Indexed part-select exceeds memory width");
+                            }
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                write.location,
+                                "Indexed part-select base is dynamic; bounds check skipped");
+                        }
+                    }
+                    ExprNodeId widthLiteral =
+                        builder.addConstantLiteral(std::to_string(*widthConst), write.location);
+                    ExprNodeId one = builder.addConstantLiteral("1", write.location);
+                    ExprNodeId shifted = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                                               {one, widthLiteral}, write.location);
+                    ExprNodeId ones =
+                        builder.makeOperation(grh::ir::OperationKind::kSub,
+                                              {shifted, one}, write.location);
+                    ExprNodeId shift = base;
+                    if (dataSlice.rangeKind == WriteRangeKind::IndexedDown)
+                    {
+                        ExprNodeId baseMinus =
+                            builder.makeOperation(grh::ir::OperationKind::kSub,
+                                                  {base, widthLiteral}, write.location);
+                        shift = builder.makeOperation(grh::ir::OperationKind::kAdd,
+                                                      {baseMinus, one}, write.location);
+                    }
+                    mask = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                                 {ones, shift}, write.location);
+                    data = builder.makeOperation(grh::ir::OperationKind::kShl,
+                                                 {write.value, shift}, write.location);
+                }
+                else
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->todo(write.location,
+                                                   "Dynamic memory range mask is unsupported");
+                    }
+                    continue;
+                }
+            }
+            else
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->todo(write.location,
+                                               "Unsupported memory write slice kind");
+                }
+                continue;
+            }
+        }
+        else
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(write.location,
+                                           "Multi-slice memory write is unsupported");
+            }
+            continue;
+        }
+
+        if (mask == kInvalidPlanIndex || data == kInvalidPlanIndex)
+        {
+            continue;
+        }
+
+        if (write.domain == ControlDomain::Sequential && stmt.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    write.location,
+                    "Skipping memory write without edge-sensitive timing control");
+            }
+            continue;
+        }
+
+        MemoryWritePort entry;
+        entry.memory = write.target;
+        entry.signal = signal;
+        entry.address = address;
+        entry.data = data;
+        entry.mask = mask;
+        entry.updateCond = builder.ensureGuardExpr(write.guard, write.location);
+        entry.isMasked = isMasked;
+        entry.eventEdges = stmt.eventEdges;
+        entry.eventOperands = stmt.eventOperands;
+        entry.location = write.location;
+        lowering.memoryWrites.push_back(std::move(entry));
+    }
+}
+
 grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan)
 {
     std::string symbol;
@@ -5559,6 +7103,8 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     RWAnalyzerPass rwAnalyzer(context);
     ExprLowererPass exprLowerer(context);
     StmtLowererPass stmtLowerer(context);
+    WriteBackPass writeBack(context);
+    MemoryPortLowererPass memoryPortLowerer(context);
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
     {
         if (!topInstance)
@@ -5585,7 +7131,10 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         rwAnalyzer.analyze(plan);
         LoweringPlan lowering = exprLowerer.lower(plan);
         stmtLowerer.lower(plan, lowering);
+        WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
+        memoryPortLowerer.lower(plan, lowering);
         planCache_.setLoweringPlan(key, std::move(lowering));
+        planCache_.setWriteBackPlan(key, std::move(writeBackPlan));
         planCache_.storePlan(key, std::move(plan));
     }
     return netlist;

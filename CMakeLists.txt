@@ -621,5 +621,33 @@ target_compile_definitions(convert-stmt-lowerer-errors
 )
 register_test_exe(convert-stmt-lowerer-errors)
 
+# convert: write-back
+add_executable(convert-write-back
+    tests/convert/test_convert_write_back.cpp
+)
+target_link_libraries(convert-write-back
+    PRIVATE
+        convert
+)
+target_compile_definitions(convert-write-back
+    PRIVATE
+        WOLF_SV_CONVERT_WRITE_BACK_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/write_back.sv"
+)
+register_test_exe(convert-write-back)
+
+# convert: memory port lowerer
+add_executable(convert-memory-port-lowerer
+    tests/convert/test_convert_memory_port_lowerer.cpp
+)
+target_link_libraries(convert-memory-port-lowerer
+    PRIVATE
+        convert
+)
+target_compile_definitions(convert-memory-port-lowerer
+    PRIVATE
+        WOLF_SV_CONVERT_MEMORY_PORT_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/memory_ports.sv"
+)
+register_test_exe(convert-memory-port-lowerer)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)
