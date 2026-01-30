@@ -649,5 +649,20 @@ target_compile_definitions(convert-memory-port-lowerer
 )
 register_test_exe(convert-memory-port-lowerer)
 
+# convert: graph assembly basic
+add_executable(convert-graph-assembly-basic
+    tests/convert/test_convert_graph_assembly_basic.cpp
+)
+target_link_libraries(convert-graph-assembly-basic
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-basic
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_basic.sv"
+)
+register_test_exe(convert-graph-assembly-basic)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

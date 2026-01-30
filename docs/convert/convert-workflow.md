@@ -293,6 +293,35 @@ endgenerate
 - 输入：`ModulePlan` + `LoweringPlan` + ctx。
 - 输出形式：`PlanCache[PlanKey].artifacts.writeBackPlan`。
 
+### 案例讲解（基于核心数据结构的转换）
+示例输入（SystemVerilog）：
+```
+module write_back_seq(
+    input  logic clk,
+    input  logic en,
+    input  logic d,
+    output logic q
+);
+    always_ff @(posedge clk) begin
+        if (en) q <= d;
+    end
+endmodule
+```
+
+给定（示意数据）：
+- `LoweringPlan.values`：
+  - `v0 = Symbol(d)`
+  - `v1 = Symbol(en)`
+  - `v2 = Symbol(clk)`
+- `LoweringPlan.loweredStmts`（Write 语句节选）：
+  - `LoweredStmt{kind=Write, updateCond=v1, eventEdges=[posedge], eventOperands=[v2],`
+    `write.target=q, write.value=v0, write.guard=v1, write.domain=seq}`
+
+输出（示意）：
+- `WriteBackPlan.entries`：
+  - `Entry{target=q, domain=seq, updateCond=v1, nextValue=v0,`
+    `eventEdges=[posedge], eventOperands=[v2]}`
+
 ## Pass7: MemoryPortLowererPass
 - 功能：细化 memory 读写端口的 Lowering 描述，输出 read/write 端口条目。
 - 输入：`ModulePlan.memPorts` + `LoweringPlan` + ctx。
@@ -309,10 +338,124 @@ endgenerate
     可静态求值的越界写入会给出诊断并跳过，base 为动态表达式时给出 warning 并继续生成。
   - 顺序域缺失 edge-sensitive 事件则诊断并跳过该端口。
 
+### 案例讲解（基于核心数据结构的转换）
+示例输入（SystemVerilog）：
+```
+module mem_port_basic(
+    input  logic clk,
+    input  logic en,
+    input  logic [3:0] addr,
+    input  logic [7:0] wdata,
+    output logic [7:0] rdata
+);
+    logic [7:0] mem [0:15];
+    always_ff @(posedge clk) if (en) mem[addr] <= wdata;
+    assign rdata = mem[addr];
+endmodule
+```
+
+给定（示意数据）：
+- `ModulePlan.memPorts`（来自 Pass3）：
+  - `MemoryPortInfo{memory=mem, isRead=true, isWrite=false, isSync=false,`
+    `sites=[{location=mem[addr], sequence=3}]}`  // 组合读
+  - `MemoryPortInfo{memory=mem, isRead=false, isWrite=true, isSync=true,`
+    `sites=[{location=mem[addr] <= wdata, sequence=7}]}`  // 顺序写
+- `LoweringPlan.values`：
+  - `v0 = Symbol(mem)`（目标符号，仅用于绑定）
+  - `v1 = Symbol(addr)`
+  - `v2 = Symbol(wdata)`
+  - `v3 = Symbol(en)`
+  - `v4 = Symbol(clk)`
+- `LoweringPlan.loweredStmts`（Write 语句节选）：
+  - `LoweredStmt{kind=Write, eventEdges=[posedge], eventOperands=[v4],`
+    `write.target=mem, write.slices=[BitSelect(index=v1)], write.value=v2,`
+    `write.guard=v3, write.domain=seq}`
+
+输出（示意）：
+- `LoweringPlan.memoryReads`：
+  - `MemoryReadPort{memory=mem, address=v1, data=<mem[addr] node>, isSync=false}`
+- `LoweringPlan.memoryWrites`：
+  - `MemoryWritePort{memory=mem, address=v1, data=v2, mask=all1, updateCond=v3,`
+    `eventEdges=[posedge], eventOperands=[v4]}`
+补充说明：
+- `isSync` 由 Pass3 的 `ControlDomain` 决定（seq -> true，comb -> false）；
+- `sites` 保留访问次序与位置，用于端口数推断；Pass7 仅消费其合并后的端口形态。
+
 ## Pass8: GraphAssemblyPass
-- 功能：落地 GRH Graph，绑定端口并生成实例化。
+- 功能：把计划与中间产物组装为 GRH Graph，生成端口、Value 与 op。
 - 输入：`ModulePlan` + `LoweringPlan` + `WriteBackPlan` + `Netlist` + ctx。
 - 输出形式：`Netlist` 中新增 `Graph` 与 topGraphs 标记。
+
+### 形式化描述
+- 记号：
+  - `P` 为 `ModulePlan`，`L` 为 `LoweringPlan`，`W` 为 `WriteBackPlan`。
+  - `S(x)` 表示 `PlanSymbolId -> GraphSymbolId` 的映射。
+  - `V(x)` 表示 `PlanSymbolId -> ValueId` 的映射。
+  - `E(i)` 表示 `ExprNodeId -> ValueId` 的映射。
+- 预条件：
+  - `P.ports` 与 `P.signals` 已完成宽度/签名解析；
+  - `L.values` 仅包含 Pass4/5 支持的节点；
+  - `W.entries` 不含切片写回（否则 Pass6 已过滤）。
+- 目标：
+  - 生成 `Graph G`，包含端口 Value、内部 Value、运算 op，并写入 `Netlist`；
+  - 保持 SSA：每个 Value 只由一个 op 定义。
+- 规则：
+  1. **Graph 命名**：`G.symbol = P.moduleSymbol`，冲突时追加后缀。
+  2. **端口**：
+     - input/output：为端口创建 Value，绑定到 Graph ports；
+     - inout：创建 `__in/__out/__oe` 三 Value 并绑定 inout port。
+  3. **信号**：为非 memory 信号创建 Value；memory 信号留待 Pass8 的 memory 子步骤。
+  4. **表达式**：
+     - `Constant` -> `kConstant` + `constValue` attr；
+     - `Symbol` -> 直接映射 `V(symbol)`；
+     - `Operation` -> 对 operands 递归发射，创建同名 GRH op，并生成临时 Value。
+     - `kReplicate` 需要常量 count；`kSliceDynamic` 使用 `sliceWidth` attr。
+  5. **写回**：
+     - comb：`kAssign(nextValue)` 输出到目标 Value；
+     - seq：`kRegister(updateCond, nextValue, eventOperands...)`，写 `eventEdge`；
+     - latch：`kLatch(updateCond, nextValue)`。
+  6. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
+
+### 案例讲解（基于核心数据结构的转换）
+示例输入（SystemVerilog）：
+```
+module graph_assembly_basic(
+    input  logic clk,
+    input  logic a,
+    input  logic b,
+    input  logic en,
+    output logic y,
+    output logic q,
+    output logic l
+);
+    assign y = a & b;
+    always_ff @(posedge clk) if (en) q <= a;
+    always_latch if (en) l <= b;
+endmodule
+```
+
+给定（示意数据）：
+- `ModulePlan.ports`：
+  - `clk/a/b/en`：input，`width=1`；
+  - `y/q/l`：output，`width=1`。
+- `LoweringPlan.values`（节选）：
+  - `v0 = Symbol(a)`
+  - `v1 = Symbol(b)`
+  - `v2 = Op(kAnd, [v0, v1])`
+  - `v3 = Symbol(en)`
+  - `v4 = Symbol(clk)`
+- `WriteBackPlan.entries`：
+  - `Entry{target=y, domain=comb, updateCond=invalid, nextValue=v2}`
+  - `Entry{target=q, domain=seq, updateCond=v3, nextValue=v0, eventEdges=[posedge], eventOperands=[v4]}`
+  - `Entry{target=l, domain=latch, updateCond=v3, nextValue=v1}`
+
+转换结果（示意）：
+- 端口：从 `ModulePlan.ports` 创建 `clk/a/b/en` 的 input Value 与 `y/q/l` 的 output Value。
+- 表达式：从 `LoweringPlan.values` 发射 `kAnd(a,b) -> t0`（对应 `v2`）。
+- 写回：
+  - comb：`kAssign(t0) -> y`
+  - seq：`kRegister(updateCond=en, nextValue=a, eventEdge=[posedge], eventOperands=[clk]) -> q`
+  - latch：`kLatch(updateCond=en, nextValue=b) -> l`
 
 ## 输出
 - 返回 `Netlist` 给 emit/transform 等下游，诊断信息交由 CLI 输出。

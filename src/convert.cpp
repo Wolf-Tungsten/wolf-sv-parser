@@ -35,6 +35,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -1359,7 +1360,7 @@ private:
     {
         if (node.widthHint == 0)
         {
-            uint64_t width = expr.getType().getBitstreamWidth();
+            uint64_t width = expr.type->getBitstreamWidth();
             if (width == 0)
             {
                 if (auto effective = expr.getEffectiveWidth())
@@ -6100,7 +6101,7 @@ std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& 
             {
                 return std::nullopt;
             }
-            auto countInt = countValue->as<int64_t>();
+            auto countInt = countValue->template as<int64_t>();
             if (!countInt || *countInt < 0)
             {
                 return std::nullopt;
@@ -7054,7 +7055,412 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
     }
 }
 
-grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan)
+class GraphAssemblyState {
+public:
+    GraphAssemblyState(ConvertContext& context, grh::ir::Graph& graph, const ModulePlan& plan,
+                       const LoweringPlan& lowering, const WriteBackPlan& writeBack)
+        : context_(context), graph_(graph), plan_(plan), lowering_(lowering),
+          writeBack_(writeBack)
+    {
+        symbolIds_.assign(plan_.symbolTable.size(), grh::ir::SymbolId::invalid());
+        valueBySymbol_.assign(plan_.symbolTable.size(), grh::ir::ValueId::invalid());
+        valueByExpr_.assign(lowering_.values.size(), grh::ir::ValueId::invalid());
+    }
+
+    void build()
+    {
+        createPortValues();
+        createSignalValues();
+        emitWriteBack();
+    }
+
+private:
+    static int32_t normalizeWidth(int32_t width) { return width > 0 ? width : 1; }
+
+    grh::ir::SymbolId symbolForPlan(PlanSymbolId id)
+    {
+        if (!id.valid() || id.index >= symbolIds_.size())
+        {
+            return grh::ir::SymbolId::invalid();
+        }
+        if (symbolIds_[id.index].valid())
+        {
+            return symbolIds_[id.index];
+        }
+        const std::string text(plan_.symbolTable.text(id));
+        if (text.empty())
+        {
+            return grh::ir::SymbolId::invalid();
+        }
+        symbolIds_[id.index] = graph_.internSymbol(text);
+        return symbolIds_[id.index];
+    }
+
+    grh::ir::ValueId valueForSymbol(PlanSymbolId id)
+    {
+        if (!id.valid() || id.index >= valueBySymbol_.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        return valueBySymbol_[id.index];
+    }
+
+    grh::ir::ValueId createValue(PlanSymbolId id, int32_t width, bool isSigned)
+    {
+        if (!id.valid() || id.index >= valueBySymbol_.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        if (valueBySymbol_[id.index].valid())
+        {
+            return valueBySymbol_[id.index];
+        }
+        grh::ir::SymbolId symbol = symbolForPlan(id);
+        if (!symbol.valid())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        const int32_t normalized = normalizeWidth(width);
+        grh::ir::ValueId value = graph_.createValue(symbol, normalized, isSigned);
+        valueBySymbol_[id.index] = value;
+        return value;
+    }
+
+    void createPortValues()
+    {
+        for (const auto& port : plan_.ports)
+        {
+            if (!port.symbol.valid())
+            {
+                continue;
+            }
+            const int32_t width = normalizeWidth(port.width);
+            if (port.direction == PortDirection::Input)
+            {
+                grh::ir::ValueId value = createValue(port.symbol, width, port.isSigned);
+                if (value.valid())
+                {
+                    graph_.bindInputPort(symbolForPlan(port.symbol), value);
+                }
+                continue;
+            }
+            if (port.direction == PortDirection::Output)
+            {
+                grh::ir::ValueId value = createValue(port.symbol, width, port.isSigned);
+                if (value.valid())
+                {
+                    graph_.bindOutputPort(symbolForPlan(port.symbol), value);
+                }
+                continue;
+            }
+            if (port.direction == PortDirection::Inout && port.inoutSymbol)
+            {
+                const auto& binding = *port.inoutSymbol;
+                grh::ir::ValueId inValue = createValue(binding.inSymbol, width, port.isSigned);
+                grh::ir::ValueId outValue = createValue(binding.outSymbol, width, port.isSigned);
+                grh::ir::ValueId oeValue = createValue(binding.oeSymbol, width, false);
+                if (inValue.valid() && outValue.valid() && oeValue.valid())
+                {
+                    graph_.bindInoutPort(symbolForPlan(port.symbol), inValue, outValue,
+                                         oeValue);
+                }
+                continue;
+            }
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    slang::SourceLocation{},
+                    "Skipping unsupported port direction in graph assembly");
+            }
+        }
+    }
+
+    void createSignalValues()
+    {
+        for (const auto& signal : plan_.signals)
+        {
+            if (!signal.symbol.valid())
+            {
+                continue;
+            }
+            if (signal.memoryRows > 0 || signal.kind == SignalKind::Memory)
+            {
+                continue;
+            }
+            const int32_t width = normalizeWidth(signal.width);
+            createValue(signal.symbol, width, signal.isSigned);
+        }
+    }
+
+    grh::ir::ValueId emitConstant(const ExprNode& node)
+    {
+        const std::string name = "__const_" + std::to_string(nextConstId_++);
+        grh::ir::SymbolId symbol = graph_.internSymbol(name);
+        const int32_t width = normalizeWidth(node.widthHint);
+        grh::ir::ValueId value = graph_.createValue(symbol, width, false);
+        grh::ir::OperationId op = graph_.createOperation(grh::ir::OperationKind::kConstant,
+                                                         grh::ir::SymbolId::invalid());
+        graph_.addResult(op, value);
+        graph_.setAttr(op, "constValue", node.literal);
+        return value;
+    }
+
+    grh::ir::ValueId emitExpr(ExprNodeId id)
+    {
+        if (id == kInvalidPlanIndex || id >= lowering_.values.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        if (valueByExpr_[id].valid())
+        {
+            return valueByExpr_[id];
+        }
+        const ExprNode& node = lowering_.values[id];
+        if (node.kind == ExprNodeKind::Constant)
+        {
+            grh::ir::ValueId value = emitConstant(node);
+            valueByExpr_[id] = value;
+            return value;
+        }
+        if (node.kind == ExprNodeKind::Symbol)
+        {
+            grh::ir::ValueId value = valueForSymbol(node.symbol);
+            if (!value.valid() && context_.diagnostics)
+            {
+                context_.diagnostics->warn(node.location,
+                                           "Graph assembly missing symbol value");
+            }
+            valueByExpr_[id] = value;
+            return value;
+        }
+        if (node.kind != ExprNodeKind::Operation)
+        {
+            return grh::ir::ValueId::invalid();
+        }
+
+        std::vector<grh::ir::ValueId> operands;
+        operands.reserve(node.operands.size());
+        for (ExprNodeId operandId : node.operands)
+        {
+            grh::ir::ValueId operandValue = emitExpr(operandId);
+            if (!operandValue.valid())
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            operands.push_back(operandValue);
+        }
+
+        if (node.op == grh::ir::OperationKind::kReplicate && operands.size() >= 2)
+        {
+            auto count = evalConstInt(plan_, lowering_, node.operands[0]);
+            if (!count || *count <= 0)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        node.location,
+                        "Replication count must be constant in graph assembly");
+                }
+                return grh::ir::ValueId::invalid();
+            }
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kReplicate,
+                                       grh::ir::SymbolId::invalid());
+            graph_.addOperand(op, operands[1]);
+            graph_.setAttr(op, "rep", static_cast<int64_t>(*count));
+            grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
+            if (!sym.valid())
+            {
+                sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            }
+            const int32_t width = normalizeWidth(node.widthHint);
+            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            graph_.addResult(op, result);
+            valueByExpr_[id] = result;
+            return result;
+        }
+
+        if (node.op == grh::ir::OperationKind::kSliceDynamic && operands.size() >= 2)
+        {
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kSliceDynamic,
+                                       grh::ir::SymbolId::invalid());
+            graph_.addOperand(op, operands[0]);
+            graph_.addOperand(op, operands[1]);
+            const int32_t width = normalizeWidth(node.widthHint);
+            graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
+            grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
+            if (!sym.valid())
+            {
+                sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            }
+            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            graph_.addResult(op, result);
+            valueByExpr_[id] = result;
+            return result;
+        }
+
+        grh::ir::OperationId op =
+            graph_.createOperation(node.op, grh::ir::SymbolId::invalid());
+        for (const auto& operand : operands)
+        {
+            graph_.addOperand(op, operand);
+        }
+
+        grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
+        if (!sym.valid())
+        {
+            sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+        }
+        int32_t width = node.widthHint;
+        if (width <= 0 && !operands.empty())
+        {
+            width = graph_.getValue(operands.front()).width();
+        }
+        width = normalizeWidth(width);
+        grh::ir::ValueId result = graph_.createValue(sym, width, false);
+        graph_.addResult(op, result);
+        valueByExpr_[id] = result;
+        return result;
+    }
+
+    static std::string edgeText(EventEdge edge)
+    {
+        switch (edge)
+        {
+        case EventEdge::Posedge:
+            return "posedge";
+        case EventEdge::Negedge:
+            return "negedge";
+        default:
+            return "posedge";
+        }
+    }
+
+    void emitWriteBack()
+    {
+        for (const auto& entry : writeBack_.entries)
+        {
+            if (!entry.target.valid())
+            {
+                continue;
+            }
+            grh::ir::ValueId targetValue = valueForSymbol(entry.target);
+            if (!targetValue.valid())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(entry.location,
+                                               "Write-back target missing value");
+                }
+                continue;
+            }
+            grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
+            grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
+            if (!nextValue.valid())
+            {
+                continue;
+            }
+
+            if (entry.domain == ControlDomain::Combinational)
+            {
+                grh::ir::OperationId op =
+                    graph_.createOperation(grh::ir::OperationKind::kAssign,
+                                           grh::ir::SymbolId::invalid());
+                graph_.addOperand(op, nextValue);
+                graph_.addResult(op, targetValue);
+                continue;
+            }
+
+            if (entry.domain == ControlDomain::Sequential)
+            {
+                if (!updateCond.valid())
+                {
+                    continue;
+                }
+                grh::ir::SymbolId sym = makeOpSymbol(entry.target, "register");
+                grh::ir::OperationId op =
+                    graph_.createOperation(grh::ir::OperationKind::kRegister, sym);
+                graph_.addOperand(op, updateCond);
+                graph_.addOperand(op, nextValue);
+                std::vector<std::string> edges;
+                edges.reserve(entry.eventEdges.size());
+                for (ExprNodeId evtId : entry.eventOperands)
+                {
+                    grh::ir::ValueId evt = emitExpr(evtId);
+                    if (!evt.valid())
+                    {
+                        continue;
+                    }
+                    graph_.addOperand(op, evt);
+                }
+                for (EventEdge edge : entry.eventEdges)
+                {
+                    edges.push_back(edgeText(edge));
+                }
+                graph_.setAttr(op, "eventEdge", std::move(edges));
+                graph_.addResult(op, targetValue);
+                continue;
+            }
+
+            if (entry.domain == ControlDomain::Latch)
+            {
+                if (!updateCond.valid())
+                {
+                    continue;
+                }
+                grh::ir::SymbolId sym = makeOpSymbol(entry.target, "latch");
+                grh::ir::OperationId op =
+                    graph_.createOperation(grh::ir::OperationKind::kLatch, sym);
+                graph_.addOperand(op, updateCond);
+                graph_.addOperand(op, nextValue);
+                graph_.addResult(op, targetValue);
+                continue;
+            }
+
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(entry.location,
+                                           "Skipping unsupported control domain");
+            }
+        }
+    }
+
+    ConvertContext& context_;
+    grh::ir::Graph& graph_;
+    const ModulePlan& plan_;
+    const LoweringPlan& lowering_;
+    const WriteBackPlan& writeBack_;
+    std::vector<grh::ir::SymbolId> symbolIds_;
+    std::vector<grh::ir::ValueId> valueBySymbol_;
+    std::vector<grh::ir::ValueId> valueByExpr_;
+    uint32_t nextConstId_ = 0;
+    uint32_t nextTempId_ = 0;
+    uint32_t nextOpId_ = 0;
+
+    grh::ir::SymbolId makeOpSymbol(PlanSymbolId id, std::string_view suffix)
+    {
+        std::string base;
+        if (id.valid())
+        {
+            base = std::string(plan_.symbolTable.text(id));
+        }
+        if (base.empty())
+        {
+            base = "__op";
+        }
+        std::string candidate = base + "__" + std::string(suffix);
+        while (graph_.symbols().contains(candidate))
+        {
+            candidate = base + "__" + std::string(suffix) + "_" +
+                        std::to_string(nextOpId_++);
+        }
+        return graph_.internSymbol(candidate);
+    }
+};
+
+grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan, const LoweringPlan& lowering,
+                                      const WriteBackPlan& writeBack)
 {
     std::string symbol;
     if (plan.moduleSymbol.valid())
@@ -7065,7 +7471,15 @@ grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan)
     {
         symbol = "convert_graph_" + std::to_string(nextAnonymousId_++);
     }
-    return netlist_.createGraph(std::move(symbol));
+    std::string finalSymbol = symbol;
+    if (netlist_.findGraph(finalSymbol))
+    {
+        finalSymbol += "_" + std::to_string(nextAnonymousId_++);
+    }
+    grh::ir::Graph& graph = netlist_.createGraph(std::move(finalSymbol));
+    GraphAssemblyState state(context_, graph, plan, lowering, writeBack);
+    state.build();
+    return graph;
 }
 
 ConvertDriver::ConvertDriver(ConvertOptions options)
@@ -7105,6 +7519,8 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     StmtLowererPass stmtLowerer(context);
     WriteBackPass writeBack(context);
     MemoryPortLowererPass memoryPortLowerer(context);
+    GraphAssembler graphAssembler(context, netlist);
+    std::unordered_set<PlanKey, PlanKeyHash> topKeys;
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
     {
         if (!topInstance)
@@ -7112,6 +7528,10 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
             continue;
         }
         ParameterSnapshot params = snapshotParameters(topInstance->body, nullptr);
+        PlanKey topKey;
+        topKey.body = &topInstance->body;
+        topKey.paramSignature = params.signature;
+        topKeys.insert(std::move(topKey));
         enqueuePlanKey(context, topInstance->body, std::move(params.signature));
     }
 
@@ -7133,6 +7553,11 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
         memoryPortLowerer.lower(plan, lowering);
+        grh::ir::Graph& graph = graphAssembler.build(plan, lowering, writeBackPlan);
+        if (topKeys.find(key) != topKeys.end())
+        {
+            netlist.markAsTop(graph.symbol());
+        }
         planCache_.setLoweringPlan(key, std::move(lowering));
         planCache_.setWriteBackPlan(key, std::move(writeBackPlan));
         planCache_.storePlan(key, std::move(plan));

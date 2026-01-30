@@ -618,7 +618,8 @@ public:
     explicit GraphAssembler(ConvertContext& context, grh::ir::Netlist& netlist)
         : context_(context), netlist_(netlist) {}
 
-    grh::ir::Graph& build(const ModulePlan& plan);
+    grh::ir::Graph& build(const ModulePlan& plan, const LoweringPlan& lowering,
+                          const WriteBackPlan& writeBack);
 
 private:
     ConvertContext& context_;

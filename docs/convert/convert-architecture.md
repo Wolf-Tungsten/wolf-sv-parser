@@ -1078,6 +1078,38 @@
   - `flowGuard`/`loopAlive` 相关的 `kLogicAnd/kLogicNot` 节点追加进
     `LoweringPlan.values`，其索引由 `WriteIntent.guard` 引用。
 
+### 4.5. Pass8: GraphAssembly 临时结构
+- 总览：
+  - 定位：仅在 GraphAssembly 构建期存在的缓存与索引表。
+  - 目的：将 `PlanSymbolId/ExprNodeId` 映射到 Graph 的 `ValueId/OperationId`。
+- 主要缓存：
+  - `symbolIds`: `PlanSymbolId -> GraphSymbolId` 缓存，避免重复驻留字符串。
+  - `valueBySymbol`: `PlanSymbolId -> ValueId`，端口/信号 Value 的快速查找表。
+  - `valueByExpr`: `ExprNodeId -> ValueId`，表达式节点的结果缓存。
+- 使用方式：
+  - 端口与信号先创建 Value 并填充 `valueBySymbol`。
+  - `emitExpr` 递归发射 ExprNode 并缓存 `valueByExpr`。
+  - `WriteBackPlan` 直接使用缓存生成 `kAssign/kRegister/kLatch`。
+
+### 4.6. Pass8: GraphAssembly 数据抽取视角
+- 总览：
+  - 关注点：从 `ModulePlan/LoweringPlan/WriteBackPlan` 中抽取必要信息，形成 Graph 组装输入。
+- 关键抽取点（分）：
+  - 端口与信号（来自 `ModulePlan`）：
+    - `ModulePlan.ports` -> 端口方向/位宽/符号名；
+    - `PortInfo.inoutSymbol` -> inout 三值（__in/__out/__oe）绑定名；
+    - `ModulePlan.signals` -> 非 memory 信号的宽度/签名与名称。
+  - 表达式节点（来自 `LoweringPlan`）：
+    - `LoweringPlan.values` -> ExprNode 图；
+    - `ExprNode.kind/op/operands/widthHint` -> op 类型、操作数索引、结果宽度；
+    - `ExprNode.symbol/tempSymbol` -> 命名 Value 的 symbol 源。
+  - 写回条目（来自 `WriteBackPlan`）：
+    - `WriteBackPlan.entries` -> 目标符号、控制域、updateCond、nextValue；
+    - `Entry.eventEdges/eventOperands` -> 顺序域触发信息；
+    - `Entry.signal` -> 目标信号索引（用于过滤 memory/非法目标）。
+  - 顶层标记（来自 `ConvertContext.root`）：
+    - `RootSymbol.topInstances` -> 顶层 PlanKey 集合，用于 `topGraphs` 标记。
+
 ## 5. Pass 与数据结构关系图
 ```
 Context Setup

@@ -693,3 +693,99 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture 文档说明 const-eval 范围
 
 完成情况：已完成
+
+## STEP 0035 - Pass8 GraphAssembly 基础落地
+
+目标：
+- 将 ModulePlan + LoweringPlan + WriteBackPlan 落地为 GRH Graph
+- 完成端口/信号/常量/组合逻辑的基础发射
+- ConvertDriver 接入 Pass8 并填充 Netlist/topGraphs
+
+计划：
+- GraphAssembler 建立 Graph 与符号表映射（PlanSymbolId -> ValueId/OperationId）
+- 端口 Value 建模：input/output/inout（__in/__out/__oe）并绑定 Graph ports
+- ExprNode 发射：kConstant/kAssign/逻辑运算/kMux/kSlice/kConcat/kReplicate 等
+- WriteBackPlan 发射：comb -> kAssign，seq -> kRegister，latch -> kLatch
+- ConvertDriver 在 Pass7 后调用 GraphAssembler，写入 Netlist 并标记顶层 Graph
+- 新增 `convert-graph-assembly-basic` 测试覆盖组合/时序/锁存基本路径
+- 更新 workflow/architecture 文档对齐 Pass8 基础流程
+
+实施：
+- GraphAssembler 落地 GraphAssemblyState，完成端口/信号 Value 与 ExprNode 发射
+- WriteBackPlan 落地为 kAssign/kRegister/kLatch，并生成 eventEdge 属性
+- ConvertDriver 接入 GraphAssembler 并标记顶层 graph
+- 新增 `convert-graph-assembly-basic` 测试与 `graph_assembly_basic.sv` fixture
+- 更新 workflow/architecture 文档对齐 Pass8 基础流程
+
+完成情况：已完成
+
+## STEP 0036 - Pass8 Memory 端口与 kMemory 落地
+
+目标：
+- 生成 kMemory/kMemoryReadPort/kMemoryWritePort 并串联同步读寄存器
+- 对接 Pass7 生成的 memoryReads/memoryWrites
+
+计划：
+- 为 memory 信号创建 kMemory op，填充 width/row/isSigned
+- memoryReads：kMemoryReadPort + (isSync ? kRegister : 直接返回)
+- memoryWrites：kMemoryWritePort，填充 updateCond/addr/data/mask/eventEdge
+- 缺失 edge-sensitive 事件时保持诊断与跳过策略
+- 新增 `convert-graph-assembly-memory` 测试覆盖 async/sync read 与 mask write
+- 更新 workflow/architecture 文档对齐 memory 组装策略
+
+实施：待开始
+
+完成情况：未开始
+
+## STEP 0037 - Pass8 副作用语句与 DPI 支持
+
+目标：
+- 落地 Display/Assert/DpiCall 为 GRH op
+- 生成 DPI import（kDpicImport）并保障 call 解析规则
+
+计划：
+- LoweredStmt(Display/Assert/DpiCall) 发射为 kDisplay/kAssert/kDpicCall
+- 建立 DPI import 扫描与 kDpicImport 生成（argsName/argsWidth/argsSigned 等）
+- kDpicCall 写入 targetImportSymbol/inArgName/outArgName/hasReturn/eventEdge
+- 新增 `convert-graph-assembly-dpi-display` 测试覆盖 display/assert/dpi 调用链路
+- 更新 workflow/architecture 文档对齐副作用语句与 DPI 约束
+
+实施：待开始
+
+完成情况：未开始
+
+## STEP 0038 - Pass8 实例化与黑盒参数落地
+
+目标：
+- 生成 kInstance/kBlackbox，完整保留层次与黑盒参数
+- 完成图名/alias 注册与实例连接规则
+
+计划：
+- 基于 PlanKey -> GraphName 建立映射，实例化时解析子模块目标图
+- kInstance：写入 moduleName/portName 列表，构建 operands/results 顺序
+- kBlackbox：附带 parameterNames/parameterValues
+- inout 端口采用 __in/__out/__oe 连接；不支持形态给出诊断并跳过
+- 顶层实例写入 topGraphs 与 alias（instance/definition 名）
+- 新增 `convert-graph-assembly-instance` 测试覆盖普通实例与黑盒参数
+- 更新 workflow/architecture 文档对齐实例化规则
+
+实施：待开始
+
+完成情况：未开始
+
+## STEP 0039 - LHS 切片写回的 WriteBack/GraphAssembly 支持
+
+目标：
+- 支持 bit/range/member select 的部分写回语义
+- 打通 WriteBack 与 GraphAssembly 对切片写回的完整链路
+
+计划：
+- WriteBackPass：允许 slices，生成目标值的 read/modify/write nextValue
+- GraphAssembly：使用 kSliceStatic/kSliceDynamic/kConcat 组装更新值
+- 多 slice 合并与 guard 优先级按语句顺序处理
+- 新增 `convert-write-back-slice` 与 `convert-graph-assembly-slice` 测试
+- 更新 workflow/architecture 文档对齐切片写回流程
+
+实施：待开始
+
+完成情况：未开始
