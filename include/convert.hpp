@@ -25,6 +25,7 @@ class Compilation;
 namespace slang::ast {
 class RootSymbol;
 class InstanceBodySymbol;
+class InstanceSymbol;
 class Symbol;
 } // namespace slang::ast
 
@@ -255,10 +256,12 @@ struct InstanceParameter {
 };
 
 struct InstanceInfo {
+    const slang::ast::InstanceSymbol* instance = nullptr;
     PlanSymbolId instanceSymbol;
     PlanSymbolId moduleSymbol;
     bool isBlackbox = false;
     std::vector<InstanceParameter> parameters;
+    std::string paramSignature;
 };
 
 struct ModulePlan {
@@ -630,13 +633,17 @@ public:
     explicit GraphAssembler(ConvertContext& context, grh::ir::Netlist& netlist)
         : context_(context), netlist_(netlist) {}
 
-    grh::ir::Graph& build(const ModulePlan& plan, const LoweringPlan& lowering,
+    const std::string& resolveGraphName(const PlanKey& key, std::string_view moduleName);
+
+    grh::ir::Graph& build(const PlanKey& key, const ModulePlan& plan, LoweringPlan& lowering,
                           const WriteBackPlan& writeBack);
 
 private:
     ConvertContext& context_;
     grh::ir::Netlist& netlist_;
     std::size_t nextAnonymousId_ = 0;
+    std::unordered_map<PlanKey, std::string, PlanKeyHash> graphNames_{};
+    std::unordered_set<std::string> reservedGraphNames_{};
 };
 
 class ConvertDriver {

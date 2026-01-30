@@ -422,16 +422,24 @@ endmodule
        results = `[ret?] + outArgs`；attrs = `targetImportSymbol/inArgName/outArgName/hasReturn/eventEdge`。
      - `dpiImports` -> `kDpicImport`：attrs = `argsName/argsDirection/argsWidth/argsSigned`
        与返回值 `hasReturn/returnWidth/returnSigned`。
-  6. **表达式**：
+  6. **实例化**：
+     - 普通实例：`kInstance`，attrs = `moduleName/inputPortName/outputPortName[/inoutPortName]/[instanceName]`。
+     - 黑盒实例：`kBlackbox`，attrs 额外包含 `parameterNames/parameterValues`。
+     - 输入端口连接：对连接表达式进行一次本地 ExprLowerer（仅支持基础表达式/选择/拼接）。
+     - 输出端口连接：必须是简单 symbol（禁止连接 inout 绑定、复杂表达式）。
+     - inout 端口连接：要求连接到 inout 端口，按 `__out/__oe` 作为 operands，
+       `__in` 作为 result。
+     - moduleName：非黑盒通过 `PlanKey.paramSignature` 映射到 Graph 名，黑盒使用模块定义名。
+  7. **表达式**：
      - `Constant` -> `kConstant` + `constValue` attr；
      - `Symbol` -> 直接映射 `V(symbol)`；
      - `Operation` -> 对 operands 递归发射，创建同名 GRH op，并生成临时 Value。
      - `kReplicate` 需要常量 count；`kSliceDynamic` 使用 `sliceWidth` attr。
-  7. **写回**：
+  8. **写回**：
      - comb：`kAssign(nextValue)` 输出到目标 Value；
      - seq：`kRegister(updateCond, nextValue, eventOperands...)`，写 `eventEdge`；
      - latch：`kLatch(updateCond, nextValue)`。
-  8. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
+  9. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`，并注册实例名/定义名 alias。
 
 ### 案例讲解（基于核心数据结构的转换）
 示例输入（SystemVerilog）：

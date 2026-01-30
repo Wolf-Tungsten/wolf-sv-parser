@@ -782,7 +782,17 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 实施：待开始
 
-完成情况：未开始
+实施：
+- `InstanceInfo` 记录 `InstanceSymbol` 与 `paramSignature`，保留参数特化信息与黑盒参数
+- `GraphAssembler` 增加 `PlanKey -> GraphName` 映射（含参数 hash），避免图名冲突
+- GraphAssembly 新增 `emitInstances`：生成 `kInstance/kBlackbox`、写入 moduleName/portName/instanceName
+- inout 连接使用 `__out/__oe` 操作数与 `__in` 结果；输出端口仅允许简单 symbol
+- 黑盒实例补齐 `parameterNames/parameterValues`，普通实例使用 GraphName 映射
+- 顶层实例注册 alias（instance/definition 名）并保留 topGraphs
+- 新增 `graph_assembly_instance.sv` fixture 与 `convert-graph-assembly-instance` 测试
+- 更新 workflow/architecture 文档对齐实例化规则
+
+完成情况：已完成
 
 ## STEP 0039 - LHS 切片写回的 WriteBack/GraphAssembly 支持
 

@@ -377,5 +377,20 @@ target_compile_definitions(convert-graph-assembly-dpi-display
 )
 register_test_exe(convert-graph-assembly-dpi-display)
 
+# convert: graph assembly instance
+add_executable(convert-graph-assembly-instance
+    tests/convert/test_convert_graph_assembly_instance.cpp
+)
+target_link_libraries(convert-graph-assembly-instance
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-instance
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_INSTANCE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_instance.sv"
+)
+register_test_exe(convert-graph-assembly-instance)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

@@ -1101,6 +1101,8 @@
   - `valueBySymbol`: `PlanSymbolId -> ValueId`，端口/信号 Value 的快速查找表。
   - `valueByExpr`: `ExprNodeId -> ValueId`，表达式节点的结果缓存。
   - `memoryReadIndexByExpr`: `ExprNodeId -> MemoryReadPort` 索引缓存，用于拦截 memory 读表达式。
+  - `graphNames`: `PlanKey -> std::string`，记录参数特化后的 graph 名称（含 hash 后缀）。
+  - `reservedGraphNames`: 已占用 graph 名称集合，用于避免命名冲突。
 - 使用方式：
   - 端口与信号先创建 Value 并填充 `valueBySymbol`。
   - `emitExpr` 递归发射 ExprNode 并缓存 `valueByExpr`。
@@ -1122,12 +1124,17 @@
     - `WriteBackPlan.entries` -> 目标符号、控制域、updateCond、nextValue；
     - `Entry.eventEdges/eventOperands` -> 顺序域触发信息；
     - `Entry.signal` -> 目标信号索引（用于过滤 memory/非法目标）。
+  - 实例（来自 `ModulePlan`）：
+    - `ModulePlan.instances` -> `InstanceInfo{instance,instanceSymbol,moduleSymbol,isBlackbox,parameters,paramSignature}`；
+    - `paramSignature` -> Graph 名映射的 hash 后缀（避免参数化实例合并）；
+    - `parameters` -> 仅黑盒实例保留，供 GRH 输出参数名和值。
   - Memory 端口（来自 `LoweringPlan`/`ModulePlan`）：
     - `LoweringPlan.memoryReads/memoryWrites` -> `kMemoryReadPort/kMemoryWritePort`；
     - `MemoryReadPort.isSync` -> 同步读额外生成 `kRegister`；
     - `ModulePlan.signals` 中 `memoryRows/width/isSigned` -> `kMemory` 属性。
   - 顶层标记（来自 `ConvertContext.root`）：
-    - `RootSymbol.topInstances` -> 顶层 PlanKey 集合，用于 `topGraphs` 标记。
+    - `RootSymbol.topInstances` -> 顶层 PlanKey 集合，用于 `topGraphs` 标记；
+    - 额外注册 alias：顶层实例名与模块定义名映射到最终 Graph 名。
 
 ## 5. Pass 与数据结构关系图
 ```

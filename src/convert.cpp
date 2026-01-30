@@ -5145,6 +5145,7 @@ void collectInstance(const slang::ast::InstanceSymbol& instance, ModulePlan& pla
     const slang::ast::InstanceBodySymbol& body = instance.body;
 
     InstanceInfo info;
+    info.instance = &instance;
     info.isBlackbox = isBlackboxBody(body, context.diagnostics);
     std::string_view instanceName = instance.name;
     if (instanceName.empty())
@@ -5164,6 +5165,7 @@ void collectInstance(const slang::ast::InstanceSymbol& instance, ModulePlan& pla
     {
         info.parameters = std::move(params.parameters);
     }
+    info.paramSignature = params.signature;
     plan.instances.push_back(std::move(info));
 
     enqueuePlanKey(context, body, std::move(params.signature));
@@ -7319,10 +7321,11 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
 class GraphAssemblyState {
 public:
-    GraphAssemblyState(ConvertContext& context, grh::ir::Graph& graph, const ModulePlan& plan,
-                       const LoweringPlan& lowering, const WriteBackPlan& writeBack)
-        : context_(context), graph_(graph), plan_(plan), lowering_(lowering),
-          writeBack_(writeBack)
+    GraphAssemblyState(ConvertContext& context, GraphAssembler& assembler, grh::ir::Graph& graph,
+                       const ModulePlan& plan, LoweringPlan& lowering,
+                       const WriteBackPlan& writeBack)
+        : context_(context), assembler_(assembler), graph_(graph), plan_(plan),
+          lowering_(lowering), writeBack_(writeBack), connectionLowerer_(*this)
     {
         symbolIds_.assign(plan_.symbolTable.size(), grh::ir::SymbolId::invalid());
         valueBySymbol_.assign(plan_.symbolTable.size(), grh::ir::ValueId::invalid());
@@ -7351,6 +7354,7 @@ public:
         createMemoryOps();
         emitMemoryPorts();
         emitSideEffects();
+        emitInstances();
         emitWriteBack();
     }
 
@@ -8142,6 +8146,617 @@ private:
         }
     }
 
+    void emitInstances()
+    {
+        for (const auto& instanceInfo : plan_.instances)
+        {
+            if (!instanceInfo.instance)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slang::SourceLocation{},
+                        "Skipping instance without symbol reference");
+                }
+                continue;
+            }
+
+            const slang::ast::InstanceSymbol& instance = *instanceInfo.instance;
+            const slang::ast::InstanceBodySymbol& body = instance.body;
+            std::vector<std::string> inputNames;
+            std::vector<std::string> outputNames;
+            std::vector<std::string> inoutNames;
+            std::vector<grh::ir::ValueId> operands;
+            std::vector<grh::ir::ValueId> results;
+            bool ok = true;
+
+            for (const slang::ast::Symbol* portSymbol : body.getPortList())
+            {
+                if (!portSymbol)
+                {
+                    continue;
+                }
+                const auto* port = portSymbol->as_if<slang::ast::PortSymbol>();
+                if (!port || port->name.empty() || port->isNullPort)
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            portSymbol->location,
+                            "Skipping instance with unsupported port declaration");
+                    }
+                    ok = false;
+                    break;
+                }
+
+                const slang::ast::PortConnection* connection =
+                    instance.getPortConnection(*port);
+                const slang::ast::Expression* expr =
+                    connection ? connection->getExpression() : nullptr;
+                if (!expr || expr->bad())
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            port->location,
+                            "Skipping instance with missing port connection");
+                    }
+                    ok = false;
+                    break;
+                }
+
+                switch (port->direction)
+                {
+                case slang::ast::ArgumentDirection::In: {
+                    inputNames.emplace_back(port->name);
+                    grh::ir::ValueId value = emitConnectionExpr(*expr);
+                    if (!value.valid())
+                    {
+                        ok = false;
+                        break;
+                    }
+                    operands.push_back(value);
+                    break;
+                }
+                case slang::ast::ArgumentDirection::Out: {
+                    outputNames.emplace_back(port->name);
+                    PlanSymbolId symbol = resolveSimpleSymbol(*expr);
+                    if (!symbol.valid())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with unsupported output connection");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    if (const PortInfo* inout = resolveInoutPort(symbol))
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance output connection to inout port");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    grh::ir::ValueId value = valueForSymbol(symbol);
+                    if (!value.valid())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with missing output binding");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    results.push_back(value);
+                    break;
+                }
+                case slang::ast::ArgumentDirection::InOut: {
+                    inoutNames.emplace_back(port->name);
+                    const PortInfo* inoutPort = resolveInoutPort(*expr);
+                    if (!inoutPort || !inoutPort->inoutSymbol)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with unsupported inout connection");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    const auto& binding = *inoutPort->inoutSymbol;
+                    grh::ir::ValueId inValue = valueForSymbol(binding.inSymbol);
+                    grh::ir::ValueId outValue = valueForSymbol(binding.outSymbol);
+                    grh::ir::ValueId oeValue = valueForSymbol(binding.oeSymbol);
+                    if (!inValue.valid() || !outValue.valid() || !oeValue.valid())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with incomplete inout binding");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    operands.push_back(outValue);
+                    operands.push_back(oeValue);
+                    results.push_back(inValue);
+                    break;
+                }
+                default:
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            port->location,
+                            "Skipping instance with unsupported port direction");
+                    }
+                    ok = false;
+                    break;
+                }
+
+                if (!ok)
+                {
+                    break;
+                }
+            }
+
+            if (!ok)
+            {
+                continue;
+            }
+
+            const std::string moduleNameText =
+                instanceInfo.moduleSymbol.valid()
+                    ? std::string(plan_.symbolTable.text(instanceInfo.moduleSymbol))
+                    : std::string();
+            std::string moduleName = moduleNameText;
+            if (!instanceInfo.isBlackbox)
+            {
+                PlanKey childKey;
+                childKey.body = &body;
+                childKey.paramSignature = instanceInfo.paramSignature;
+                moduleName = assembler_.resolveGraphName(childKey, moduleNameText);
+            }
+            if (moduleName.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        instance.location,
+                        "Skipping instance with empty module name");
+                }
+                continue;
+            }
+
+            grh::ir::OperationKind kind = instanceInfo.isBlackbox
+                                              ? grh::ir::OperationKind::kBlackbox
+                                              : grh::ir::OperationKind::kInstance;
+            grh::ir::OperationId op =
+                graph_.createOperation(kind, grh::ir::SymbolId::invalid());
+            for (const auto& operand : operands)
+            {
+                graph_.addOperand(op, operand);
+            }
+            for (const auto& result : results)
+            {
+                graph_.addResult(op, result);
+            }
+            graph_.setAttr(op, "moduleName", moduleName);
+            graph_.setAttr(op, "inputPortName", inputNames);
+            graph_.setAttr(op, "outputPortName", outputNames);
+            if (!inoutNames.empty())
+            {
+                graph_.setAttr(op, "inoutPortName", inoutNames);
+            }
+
+            if (instanceInfo.instanceSymbol.valid())
+            {
+                std::string_view name = plan_.symbolTable.text(instanceInfo.instanceSymbol);
+                if (!name.empty())
+                {
+                    graph_.setAttr(op, "instanceName", std::string(name));
+                }
+            }
+
+            if (instanceInfo.isBlackbox && !instanceInfo.parameters.empty())
+            {
+                std::vector<std::string> paramNames;
+                std::vector<std::string> paramValues;
+                paramNames.reserve(instanceInfo.parameters.size());
+                paramValues.reserve(instanceInfo.parameters.size());
+                for (const auto& param : instanceInfo.parameters)
+                {
+                    if (!param.symbol.valid())
+                    {
+                        continue;
+                    }
+                    std::string_view name = plan_.symbolTable.text(param.symbol);
+                    if (name.empty())
+                    {
+                        continue;
+                    }
+                    paramNames.emplace_back(name);
+                    paramValues.emplace_back(param.value);
+                }
+                if (!paramNames.empty() && paramNames.size() == paramValues.size())
+                {
+                    graph_.setAttr(op, "parameterNames", paramNames);
+                    graph_.setAttr(op, "parameterValues", paramValues);
+                }
+            }
+        }
+    }
+
+    grh::ir::ValueId emitConnectionExpr(const slang::ast::Expression& expr)
+    {
+        ExprNodeId id = connectionLowerer_.lowerExpression(expr);
+        if (id == kInvalidPlanIndex)
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        return emitExpr(id);
+    }
+
+    PlanSymbolId resolveSimpleSymbol(const slang::ast::Expression& expr) const
+    {
+        if (const auto* assign = expr.as_if<slang::ast::AssignmentExpression>())
+        {
+            if (assign->isLValueArg())
+            {
+                return resolveSimpleSymbol(assign->left());
+            }
+            return resolveSimpleSymbol(assign->right());
+        }
+        if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+        {
+            return plan_.symbolTable.lookup(named->symbol.name);
+        }
+        if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+        {
+            return plan_.symbolTable.lookup(hier->symbol.name);
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            return resolveSimpleSymbol(conversion->operand());
+        }
+        return {};
+    }
+
+    const PortInfo* resolveInoutPort(const slang::ast::Expression& expr) const
+    {
+        PlanSymbolId symbol = resolveSimpleSymbol(expr);
+        return resolveInoutPort(symbol);
+    }
+
+    const PortInfo* resolveInoutPort(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid())
+        {
+            return nullptr;
+        }
+        std::string_view name = plan_.symbolTable.text(symbol);
+        if (name.empty())
+        {
+            return nullptr;
+        }
+        const PortInfo* port = findPortByName(plan_, name);
+        if (!port)
+        {
+            port = findPortByInoutName(plan_, name);
+        }
+        if (!port || port->direction != PortDirection::Inout || !port->inoutSymbol)
+        {
+            return nullptr;
+        }
+        return port;
+    }
+
+    void registerExprNode()
+    {
+        valueByExpr_.push_back(grh::ir::ValueId::invalid());
+        memoryReadIndexByExpr_.push_back(kInvalidMemoryReadIndex);
+    }
+
+    class ConnectionExprLowerer {
+    public:
+        explicit ConnectionExprLowerer(GraphAssemblyState& state)
+            : state_(state)
+        {
+        }
+
+        ExprNodeId lowerExpression(const slang::ast::Expression& expr)
+        {
+            if (auto it = lowered_.find(&expr); it != lowered_.end())
+            {
+                return it->second;
+            }
+
+            auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
+                -> std::optional<std::string> {
+                slang::ConstantValue value = param.getValue();
+                if (value.bad())
+                {
+                    return std::nullopt;
+                }
+                if (!value.isInteger())
+                {
+                    value = value.convertToInt();
+                }
+                if (!value.isInteger())
+                {
+                    return std::nullopt;
+                }
+                const slang::SVInt& literal = value.integer();
+                if (literal.hasUnknown())
+                {
+                    return std::nullopt;
+                }
+                return literal.toString();
+            };
+
+            ExprNode node;
+            node.location = expr.sourceRange.start();
+
+            if (const slang::ConstantValue* constant = expr.getConstant())
+            {
+                if (constant->isInteger())
+                {
+                    const slang::SVInt& literal = constant->integer();
+                    if (!literal.hasUnknown())
+                    {
+                        node.kind = ExprNodeKind::Constant;
+                        node.literal = literal.toString();
+                        return addNode(expr, std::move(node));
+                    }
+                }
+            }
+
+            if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+            {
+                if (const auto* param =
+                        named->symbol.as_if<slang::ast::ParameterSymbol>())
+                {
+                    if (auto literal = paramLiteral(*param))
+                    {
+                        node.kind = ExprNodeKind::Constant;
+                        node.literal = *literal;
+                        return addNode(expr, std::move(node));
+                    }
+                }
+                node.kind = ExprNodeKind::Symbol;
+                node.symbol = state_.plan_.symbolTable.lookup(named->symbol.name);
+                if (const PortInfo* inout = state_.resolveInoutPort(node.symbol))
+                {
+                    node.symbol = inout->inoutSymbol->inSymbol;
+                }
+                if (!node.symbol.valid())
+                {
+                    reportUnsupported(expr, "Unknown symbol in connection expression");
+                }
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+            {
+                if (const auto* param =
+                        hier->symbol.as_if<slang::ast::ParameterSymbol>())
+                {
+                    if (auto literal = paramLiteral(*param))
+                    {
+                        node.kind = ExprNodeKind::Constant;
+                        node.literal = *literal;
+                        return addNode(expr, std::move(node));
+                    }
+                }
+                node.kind = ExprNodeKind::Symbol;
+                node.symbol = state_.plan_.symbolTable.lookup(hier->symbol.name);
+                if (const PortInfo* inout = state_.resolveInoutPort(node.symbol))
+                {
+                    node.symbol = inout->inoutSymbol->inSymbol;
+                }
+                if (!node.symbol.valid())
+                {
+                    reportUnsupported(expr, "Unknown hierarchical symbol in connection");
+                }
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
+            {
+                node.kind = ExprNodeKind::Constant;
+                node.literal = literal->getValue().toString();
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
+            {
+                node.kind = ExprNodeKind::Constant;
+                node.literal = literal->getValue().toString();
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+            {
+                return lowerExpression(conversion->operand());
+            }
+            if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
+            {
+                const auto opKind = mapUnaryOp(unary->op);
+                if (!opKind)
+                {
+                    reportUnsupported(expr, "Unsupported unary operator");
+                    return kInvalidPlanIndex;
+                }
+                ExprNodeId operand = lowerExpression(unary->operand());
+                if (operand == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = *opKind;
+                node.operands = {operand};
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* binary = expr.as_if<slang::ast::BinaryExpression>())
+            {
+                const auto opKind = mapBinaryOp(binary->op);
+                if (!opKind)
+                {
+                    reportUnsupported(expr, "Unsupported binary operator");
+                    return kInvalidPlanIndex;
+                }
+                ExprNodeId lhs = lowerExpression(binary->left());
+                ExprNodeId rhs = lowerExpression(binary->right());
+                if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = *opKind;
+                node.operands = {lhs, rhs};
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* cond = expr.as_if<slang::ast::ConditionalExpression>())
+            {
+                if (cond->conditions.empty())
+                {
+                    reportUnsupported(expr, "Conditional expression missing condition");
+                    return kInvalidPlanIndex;
+                }
+                if (cond->conditions.size() > 1)
+                {
+                    reportUnsupported(expr, "Conditional expression with patterns unsupported");
+                }
+                const slang::ast::Expression& condExpr = *cond->conditions.front().expr;
+                ExprNodeId condId = lowerExpression(condExpr);
+                ExprNodeId lhs = lowerExpression(cond->left());
+                ExprNodeId rhs = lowerExpression(cond->right());
+                if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
+                    rhs == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = grh::ir::OperationKind::kMux;
+                node.operands = {condId, lhs, rhs};
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
+            {
+                std::vector<ExprNodeId> operands;
+                operands.reserve(concat->operands().size());
+                for (const slang::ast::Expression* operand : concat->operands())
+                {
+                    if (!operand)
+                    {
+                        continue;
+                    }
+                    ExprNodeId id = lowerExpression(*operand);
+                    if (id == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                    operands.push_back(id);
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = grh::ir::OperationKind::kConcat;
+                node.operands = std::move(operands);
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* repl = expr.as_if<slang::ast::ReplicationExpression>())
+            {
+                ExprNodeId count = lowerExpression(repl->count());
+                ExprNodeId concat = lowerExpression(repl->concat());
+                if (count == kInvalidPlanIndex || concat == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = grh::ir::OperationKind::kReplicate;
+                node.operands = {count, concat};
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
+            {
+                ExprNodeId value = lowerExpression(select->value());
+                ExprNodeId index = lowerExpression(select->selector());
+                if (value == kInvalidPlanIndex || index == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = grh::ir::OperationKind::kSliceDynamic;
+                node.operands = {value, index};
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
+            {
+                ExprNodeId value = lowerExpression(range->value());
+                ExprNodeId left = lowerExpression(range->left());
+                ExprNodeId right = lowerExpression(range->right());
+                if (value == kInvalidPlanIndex || left == kInvalidPlanIndex ||
+                    right == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.kind = ExprNodeKind::Operation;
+                node.op = grh::ir::OperationKind::kSliceDynamic;
+                node.operands = {value, left, right};
+                return addNode(expr, std::move(node));
+            }
+
+            reportUnsupported(expr, "Unsupported connection expression");
+            return kInvalidPlanIndex;
+        }
+
+    private:
+        ExprNodeId addNode(const slang::ast::Expression& expr, ExprNode node)
+        {
+            if (node.widthHint == 0)
+            {
+                uint64_t width = expr.type->getBitstreamWidth();
+                if (width == 0)
+                {
+                    if (auto effective = expr.getEffectiveWidth())
+                    {
+                        width = *effective;
+                    }
+                }
+                if (width > 0)
+                {
+                    const uint64_t maxValue =
+                        static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                    node.widthHint = width > maxValue
+                                         ? std::numeric_limits<int32_t>::max()
+                                         : static_cast<int32_t>(width);
+                }
+            }
+            const ExprNodeId id =
+                static_cast<ExprNodeId>(state_.lowering_.values.size());
+            state_.lowering_.values.push_back(std::move(node));
+            state_.registerExprNode();
+            lowered_.emplace(&expr, id);
+            return id;
+        }
+
+        void reportUnsupported(const slang::ast::Expression& expr, std::string_view message)
+        {
+            if (!state_.context_.diagnostics)
+            {
+                return;
+            }
+            state_.context_.diagnostics->todo(expr.sourceRange.start(), std::string(message));
+        }
+
+        GraphAssemblyState& state_;
+        std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered_;
+    };
+
     grh::ir::ValueId emitConstant(const ExprNode& node)
     {
         const std::string name = "__const_" + std::to_string(nextConstId_++);
@@ -8385,9 +9000,10 @@ private:
     }
 
     ConvertContext& context_;
+    GraphAssembler& assembler_;
     grh::ir::Graph& graph_;
     const ModulePlan& plan_;
-    const LoweringPlan& lowering_;
+    LoweringPlan& lowering_;
     const WriteBackPlan& writeBack_;
     std::vector<grh::ir::SymbolId> symbolIds_;
     std::vector<grh::ir::ValueId> valueBySymbol_;
@@ -8395,6 +9011,7 @@ private:
     std::vector<grh::ir::OperationId> memoryOpBySymbol_;
     std::vector<std::string> memorySymbolName_;
     std::vector<int32_t> memoryReadIndexByExpr_;
+    ConnectionExprLowerer connectionLowerer_;
     uint32_t nextConstId_ = 0;
     uint32_t nextTempId_ = 0;
     uint32_t nextOpId_ = 0;
@@ -8422,25 +9039,46 @@ private:
     }
 };
 
-grh::ir::Graph& GraphAssembler::build(const ModulePlan& plan, const LoweringPlan& lowering,
-                                      const WriteBackPlan& writeBack)
+const std::string& GraphAssembler::resolveGraphName(const PlanKey& key,
+                                                    std::string_view moduleName)
 {
-    std::string symbol;
+    auto it = graphNames_.find(key);
+    if (it != graphNames_.end())
+    {
+        return it->second;
+    }
+
+    std::string base = moduleName.empty() ? std::string("convert_graph") : std::string(moduleName);
+    std::string candidate = base;
+    if (!key.paramSignature.empty())
+    {
+        const std::size_t hash = std::hash<std::string>{}(key.paramSignature);
+        candidate = base + "__p" + std::to_string(hash);
+    }
+    std::string finalName = candidate;
+    std::size_t suffix = 0;
+    while (reservedGraphNames_.find(finalName) != reservedGraphNames_.end() ||
+           netlist_.findGraph(finalName))
+    {
+        finalName = candidate + "_" + std::to_string(++suffix);
+    }
+
+    auto [inserted, added] = graphNames_.emplace(key, std::move(finalName));
+    reservedGraphNames_.insert(inserted->second);
+    return inserted->second;
+}
+
+grh::ir::Graph& GraphAssembler::build(const PlanKey& key, const ModulePlan& plan,
+                                      LoweringPlan& lowering, const WriteBackPlan& writeBack)
+{
+    std::string moduleName;
     if (plan.moduleSymbol.valid())
     {
-        symbol = std::string(plan.symbolTable.text(plan.moduleSymbol));
+        moduleName = std::string(plan.symbolTable.text(plan.moduleSymbol));
     }
-    if (symbol.empty())
-    {
-        symbol = "convert_graph_" + std::to_string(nextAnonymousId_++);
-    }
-    std::string finalSymbol = symbol;
-    if (netlist_.findGraph(finalSymbol))
-    {
-        finalSymbol += "_" + std::to_string(nextAnonymousId_++);
-    }
-    grh::ir::Graph& graph = netlist_.createGraph(std::move(finalSymbol));
-    GraphAssemblyState state(context_, graph, plan, lowering, writeBack);
+    const std::string& finalSymbol = resolveGraphName(key, moduleName);
+    grh::ir::Graph& graph = netlist_.createGraph(std::string(finalSymbol));
+    GraphAssemblyState state(context_, *this, graph, plan, lowering, writeBack);
     state.build();
     return graph;
 }
@@ -8484,6 +9122,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     MemoryPortLowererPass memoryPortLowerer(context);
     GraphAssembler graphAssembler(context, netlist);
     std::unordered_set<PlanKey, PlanKeyHash> topKeys;
+    std::unordered_map<PlanKey, std::vector<std::string>, PlanKeyHash> topAliases;
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
     {
         if (!topInstance)
@@ -8494,7 +9133,16 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         PlanKey topKey;
         topKey.body = &topInstance->body;
         topKey.paramSignature = params.signature;
-        topKeys.insert(std::move(topKey));
+        topKeys.insert(topKey);
+        std::vector<std::string>& aliases = topAliases[topKey];
+        if (!topInstance->name.empty())
+        {
+            aliases.emplace_back(topInstance->name);
+        }
+        if (!topInstance->getDefinition().name.empty())
+        {
+            aliases.emplace_back(topInstance->getDefinition().name);
+        }
         enqueuePlanKey(context, topInstance->body, std::move(params.signature));
     }
 
@@ -8516,10 +9164,33 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
         memoryPortLowerer.lower(plan, lowering);
-        grh::ir::Graph& graph = graphAssembler.build(plan, lowering, writeBackPlan);
+        grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
         if (topKeys.find(key) != topKeys.end())
         {
             netlist.markAsTop(graph.symbol());
+            auto aliasIt = topAliases.find(key);
+            if (aliasIt != topAliases.end())
+            {
+                for (const std::string& alias : aliasIt->second)
+                {
+                    if (alias.empty())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Graph* existing = netlist.findGraph(alias);
+                    if (existing && existing->symbol() != graph.symbol())
+                    {
+                        if (context.diagnostics)
+                        {
+                            context.diagnostics->warn(
+                                slang::SourceLocation{},
+                                "Skipping top alias conflict for " + alias);
+                        }
+                        continue;
+                    }
+                    netlist.registerGraphAlias(alias, graph);
+                }
+            }
         }
         planCache_.setLoweringPlan(key, std::move(lowering));
         planCache_.setWriteBackPlan(key, std::move(writeBackPlan));
