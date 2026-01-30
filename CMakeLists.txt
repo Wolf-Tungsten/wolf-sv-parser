@@ -205,6 +205,28 @@ target_link_libraries(transform-const-fold
 
 register_test_exe(transform-const-fold)
 
+add_executable(transform-const-inline
+    tests/transform/test_const_inline_pass.cpp
+)
+
+target_link_libraries(transform-const-inline
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-const-inline)
+
+add_executable(transform-dead-code-elim
+    tests/transform/test_dead_code_elim_pass.cpp
+)
+
+target_link_libraries(transform-dead-code-elim
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-dead-code-elim)
+
 # convert: symbol collector
 add_executable(convert-symbol-collector
     tests/convert/test_convert_symbol_collector.cpp

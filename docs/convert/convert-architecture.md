@@ -902,8 +902,10 @@
     - 每条 Write 的 guard 缺失时视作常量 `1'b1`。
     - `updateCond = OR(guard_i)`（按写回出现顺序聚合）。
   - NextValue 合并：
-    - 初始化 `next = oldValue`（`oldValue` 即目标信号本身）。
-    - 依语句顺序构建 mux 链：`next = mux(guard_i, value_i, next)`。
+    - 无切片写回以首条写入值作为 `next` 起点，后续语句按顺序构建
+      `next = mux(guard_i, value_i, next)`；无条件写回会直接覆盖 `next`。
+    - 带 slices 的写回以 `oldValue` 作为 read/modify/write 基底，确保未覆盖位保持原值。
+    - 组合域若无无条件写回，会提升为 latch 语义，由 `updateCond` 控制保持旧值。
   - 顺序域约束：
     - 缺少 edge-sensitive 事件列表 -> 发出 warning 并跳过该组。
   - 锁存域约束：
@@ -921,7 +923,7 @@
     - 合并（示意）：
       - guards：`g0 = rst`，`g1 = (!rst) && en`。
       - `updateCond = g0 || g1`
-      - `nextValue = mux(g0, 1'b0, mux(g1, d, q))`
+      - `nextValue = mux(g1, d, 1'b0)`
       - `eventEdges = [posedge]`，`eventOperands = [clk]`
     - 说明：先写的 reset guard 优先级更高，mux 链保持语句顺序。
   - 锁存写回：
@@ -931,7 +933,7 @@
       ```
     - 合并（示意）：
       - `updateCond = en`
-      - `nextValue = mux(en, d, q)`
+      - `nextValue = d`
       - `eventEdges/eventOperands` 为空
   - 切片写回（静态 bit/range）：
     - 输入：

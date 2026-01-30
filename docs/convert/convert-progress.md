@@ -834,3 +834,25 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture 文档补充 CLI 入口与 HDLBits 输出说明
 
 完成情况：已完成
+
+## STEP 0041 - HDLBits 输出简化与无条件写回修复
+
+目标：
+- 修复 comb 写回生成自引用 MUX（`cond ? new : old`）导致 HDLBits 001 多余 `__const_*`/`_expr_tmp_*`
+- 常量与表达式临时值尽量折叠，输出更接近原始语义（如 `assign one = 1'b1`）
+
+计划：
+- 追踪 `WriteBackPass` 构建 `nextValue` 的逻辑，确认无条件写入被 `baseValue` 兜底触发自引用 MUX
+- 在 WriteBack 阶段识别“单条无条件写”与“guard 恒真”场景：直接返回 `writeValue`，避免 `mux(guard, writeValue, baseValue)`
+- 对 comb 多写合并的 MUX 链避免引入 `baseValue` 自引用，必要时显式用 `X`/默认值替代
+~~- 在 GraphAssembly 或 const-fold 中折叠常量 MUX，并对相同常量值做缓存复用~~
+- 补充 HDLBits 001 相关测试/fixture（convert/emit），断言输出不含自引用 MUX 与重复常量
+- 若规则变化影响说明，更新 workflow/architecture 文档补充 comb 写回简化策略
+
+实施：
+- WriteBackPass 针对无切片写回：识别 guard 恒真/缺失，避免默认 `baseValue` 兜底 MUX；组合域缺少无条件写回时提升为 latch
+- 保留切片写回的 read/modify/write 基底（`oldValue`）以覆盖部分位
+- 新增 `write_back_comb` fixture 与测试，更新 latch 场景期望为直接 `nextValue`
+- 更新 workflow/architecture 文档说明写回简化与 comb->latch 规则
+
+完成情况：已完成

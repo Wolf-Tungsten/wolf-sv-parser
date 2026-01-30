@@ -304,7 +304,10 @@ endgenerate
 - 输入：`ModulePlan` + `LoweringPlan` + ctx。
 - 输出形式：`PlanCache[PlanKey].artifacts.writeBackPlan`。
 - 处理要点：
-  - 对无切片写回仍保持 `next = mux(guard, value, next)` 的合并策略。
+  - 无切片写回从首条写入值起步，后续语句按顺序用 `mux(guard, value, next)` 连接；
+    不再强制引入 `oldValue` 兜底，避免组合写回生成自引用 MUX。
+  - 组合域若不存在无条件写回（guard 恒真），WriteBack 会将该组合组提升为 latch 语义，
+    由 `updateCond` 负责保持旧值。
   - 对 LHS 带 slices 的写回执行 read/modify/write：
     - 静态 bit/range/member select：拆分为 `kSliceDynamic` + `kConcat` 组合的新值。
     - 动态 bit/part-select：生成 mask/shift 组合并保留诊断。

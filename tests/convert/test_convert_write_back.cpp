@@ -243,9 +243,45 @@ int testWriteBackLatch(const std::filesystem::path& sourcePath) {
         return fail("Missing latch write-back next value in " + sourcePath.string());
     }
     const auto& nextNode = lowering.values[entry.nextValue];
-    if (nextNode.kind != wolf_sv_parser::ExprNodeKind::Operation ||
-        nextNode.op != grh::ir::OperationKind::kMux) {
+    if (nextNode.kind != wolf_sv_parser::ExprNodeKind::Symbol ||
+        plan.symbolTable.text(nextNode.symbol) != std::string_view("d")) {
         return fail("Unexpected latch write-back next value in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testWriteBackComb(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    wolf_sv_parser::WriteBackPlan writeBack;
+    if (!buildWriteBackPlan(sourcePath, "write_back_comb", diagnostics, plan, lowering,
+                            writeBack)) {
+        return fail("Failed to build write-back comb plan for " + sourcePath.string());
+    }
+
+    if (writeBack.entries.size() != 1) {
+        return fail("Expected 1 comb write-back entry in " + sourcePath.string());
+    }
+    const auto& entry = writeBack.entries.front();
+    if (entry.domain != wolf_sv_parser::ControlDomain::Combinational) {
+        return fail("Unexpected comb write-back domain in " + sourcePath.string());
+    }
+    if (entry.updateCond == wolf_sv_parser::kInvalidPlanIndex ||
+        entry.updateCond >= lowering.values.size()) {
+        return fail("Missing comb write-back update condition in " + sourcePath.string());
+    }
+    if (entry.nextValue == wolf_sv_parser::kInvalidPlanIndex ||
+        entry.nextValue >= lowering.values.size()) {
+        return fail("Missing comb write-back next value in " + sourcePath.string());
+    }
+    const auto& nextNode = lowering.values[entry.nextValue];
+    if (nextNode.kind == wolf_sv_parser::ExprNodeKind::Operation &&
+        nextNode.op == grh::ir::OperationKind::kMux) {
+        return fail("Unexpected comb write-back mux next value in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -286,6 +322,9 @@ int main() {
         return result;
     }
     if (int result = testWriteBackLatch(sourcePath); result != 0) {
+        return result;
+    }
+    if (int result = testWriteBackComb(sourcePath); result != 0) {
         return result;
     }
     if (int result = testWriteBackMissingEdge(sourcePath); result != 0) {

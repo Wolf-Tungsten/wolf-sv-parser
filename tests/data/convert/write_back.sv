@@ -26,6 +26,12 @@ module write_back_latch(
     end
 endmodule
 
+module write_back_comb(
+    output logic one
+);
+    assign one = 1'b1;
+endmodule
+
 module write_back_bad_seq(
     input logic d,
     output logic q

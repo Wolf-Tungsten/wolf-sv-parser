@@ -6522,9 +6522,43 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         entry.eventOperands = group.eventOperands;
         entry.location = group.writes.front()->location;
 
+        bool hasSlices = false;
+        bool hasUnconditional = false;
+        for (const LoweredStmt* stmt : group.writes)
+        {
+            const WriteIntent& write = stmt->write;
+            if (!write.slices.empty())
+            {
+                hasSlices = true;
+            }
+            if (write.guard == kInvalidPlanIndex)
+            {
+                hasUnconditional = true;
+                continue;
+            }
+            if (auto guardConst = evalConstInt(plan, lowering, write.guard))
+            {
+                if (*guardConst != 0)
+                {
+                    hasUnconditional = true;
+                }
+            }
+        }
+
+        ControlDomain domain = entry.domain;
+        if (domain == ControlDomain::Combinational && !hasUnconditional)
+        {
+            domain = ControlDomain::Latch;
+        }
+        entry.domain = domain;
+
         ExprNodeId updateCond = kInvalidPlanIndex;
-        ExprNodeId baseValue = builder.addSymbol(group.target, entry.location);
-        ExprNodeId nextValue = baseValue;
+        ExprNodeId baseValue = kInvalidPlanIndex;
+        if (hasSlices)
+        {
+            baseValue = builder.addSymbol(group.target, entry.location);
+        }
+        ExprNodeId nextValue = hasSlices ? baseValue : kInvalidPlanIndex;
         const int64_t baseWidth =
             entry.target.valid() && entry.target.index < widthBySymbol.size()
                 ? widthBySymbol[entry.target.index]
@@ -6538,6 +6572,14 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             const WriteIntent& write = stmt->write;
             ExprNodeId guard = builder.ensureGuardExpr(write.guard, write.location);
+            bool guardAlwaysTrue = write.guard == kInvalidPlanIndex;
+            if (!guardAlwaysTrue)
+            {
+                if (auto guardConst = evalConstInt(plan, lowering, write.guard))
+                {
+                    guardAlwaysTrue = (*guardConst != 0);
+                }
+            }
             ExprNodeId writeValue = write.value;
             if (!write.slices.empty())
             {
@@ -6549,6 +6591,16 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 }
             }
             updateCond = builder.makeLogicOr(updateCond, guard, write.location);
+            if (guardAlwaysTrue)
+            {
+                nextValue = writeValue;
+                continue;
+            }
+            if (nextValue == kInvalidPlanIndex)
+            {
+                nextValue = writeValue;
+                continue;
+            }
             nextValue = builder.makeMux(guard, writeValue, nextValue, write.location);
         }
 
