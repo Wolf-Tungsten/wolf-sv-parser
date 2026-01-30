@@ -520,9 +520,15 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture，补充 Pass5 处理“副作用语句”的流程与限制
 
 实施：
-- 待实施
+- `LoweringPlan` 新增 `LoweredStmt` 列表与 Display/Assert/DpiCall 数据结构
+- StmtLowerer 进入过程块时解析 edge-sensitive timing control，填充 event operands/edges
+- `ExpressionStatement` 支持 `$display/$write/$strobe` 与 `$info/$warning/$error/$fatal` 降级
+- DPI-C import function 语句调用支持 input/output 方向与可选返回值占位
+- 非 edge-sensitive 事件调用丢弃并给出 warning 诊断
+- 新增 `stmt_lowerer_display/dpi` fixture 与 `convert-stmt-lowerer` 断言
+- `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0028 - Pass6 状态写回合并与 kRegister/kLatch 建模
 

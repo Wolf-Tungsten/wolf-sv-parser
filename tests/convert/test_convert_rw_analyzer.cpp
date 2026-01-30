@@ -75,7 +75,7 @@ const slang::ast::InstanceSymbol* findTopInstance(slang::ast::Compilation& compi
             return instance;
         }
     }
-    if (root.topInstances.size() == 1 && root.topInstances[0]) {
+    if (moduleName.empty() && root.topInstances.size() == 1 && root.topInstances[0]) {
         return root.topInstances[0];
     }
     if (const slang::ast::Symbol* symbol = root.find(moduleName)) {

@@ -123,7 +123,7 @@
 ## Pass5: StmtLowererPass
 - 功能：语句与控制流降级，生成 guard 与写回意图。
 - 输入：`ModulePlan` + 语句 AST + `LoweringPlan` + ctx。
-- 输出形式：更新 `LoweringPlan`（追加 guard 节点与 `WriteIntent`）。
+- 输出形式：更新 `LoweringPlan`（追加 guard 节点、`WriteIntent` 与 `LoweredStmt`）。
 
 ### 0. 总体脉络
 Pass5 以“入口类型”为一级结构：
@@ -248,7 +248,19 @@ end
   - `continue`：`flowGuard = flowGuard && !skip`。  
   - 写回 guard = `flowGuard && 当前分支 guard`，保证 stop/skip 为真时屏蔽后续语句与迭代。  
 
-##### 2.2.5 不支持语句
+##### 2.2.5 调试系统任务与 DPI 调用
+- `ExpressionStatement` 中识别调试系统任务与 DPI 调用，按语句顺序写入 `LoweredStmt`。  
+- 调试系统任务：  
+  - `$display/$write/$strobe` -> `LoweredStmt(Display)`，携带 `formatString/args`。  
+  - `$info/$warning/$error/$fatal` -> `LoweredStmt(Assert)`，携带 `message/severity`。  
+- DPI 调用：  
+  - 仅识别 `DPI-C import function` 的语句调用（input/output 方向）。  
+  - `in` -> `ExprNodeId`，`out` -> `results`，可选返回值写入 `results[0]` 且 `hasReturn=true`。  
+- 事件绑定：进入过程块时解析 edge-sensitive timing control（`posedge/negedge`）；  
+  若无法解析或非 edge-sensitive，display/DPI 调用丢弃并产生诊断。  
+- 参数表达式复用 Pass4/Pass5 的 `lowerExpression` 降级为 `ExprNodeId`。  
+
+##### 2.2.6 不支持语句
 - `PatternCaseStatement`：报错并跳过。  
 - `TimedStatement` / `wait` / `wait fork` / `wait order` / `event trigger` / `disable fork`：
   发出 warning，忽略 timing/并发语义，仅降低可执行的 body（若存在）。  

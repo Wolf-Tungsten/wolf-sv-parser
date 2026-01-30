@@ -361,11 +361,58 @@ struct WriteIntent {
     slang::SourceLocation location{};
 };
 
+enum class EventEdge {
+    Posedge,
+    Negedge
+};
+
+struct DisplayStmt {
+    std::string formatString;
+    std::string displayKind;
+    std::vector<ExprNodeId> args;
+};
+
+struct AssertStmt {
+    ExprNodeId condition = kInvalidPlanIndex;
+    std::string message;
+    std::string severity;
+};
+
+struct DpiCallStmt {
+    std::string targetImportSymbol;
+    std::vector<std::string> inArgNames;
+    std::vector<std::string> outArgNames;
+    std::vector<ExprNodeId> inArgs;
+    std::vector<PlanSymbolId> results;
+    bool hasReturn = false;
+};
+
+enum class LoweredStmtKind {
+    Write,
+    Display,
+    Assert,
+    DpiCall
+};
+
+struct LoweredStmt {
+    LoweredStmtKind kind = LoweredStmtKind::Write;
+    grh::ir::OperationKind op = grh::ir::OperationKind::kAssign;
+    ExprNodeId updateCond = kInvalidPlanIndex;
+    std::vector<EventEdge> eventEdges;
+    std::vector<ExprNodeId> eventOperands;
+    slang::SourceLocation location{};
+    WriteIntent write;
+    DisplayStmt display;
+    AssertStmt assertion;
+    DpiCallStmt dpiCall;
+};
+
 struct LoweringPlan {
     std::vector<ExprNode> values;
     std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
     std::vector<WriteIntent> writes;
+    std::vector<LoweredStmt> loweredStmts;
 };
 
 struct WriteBackPlan {

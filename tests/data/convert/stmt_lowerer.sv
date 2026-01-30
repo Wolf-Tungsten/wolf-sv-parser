@@ -471,3 +471,47 @@ module stmt_lowerer_for_break_case_dynamic(
         end
     end
 endmodule
+
+import "DPI-C" function void dpi_capture(input logic [3:0] in_val,
+                                         output logic [3:0] out_val);
+import "DPI-C" function int dpi_sum(input int a, input int b);
+
+module stmt_lowerer_display(
+    input logic clk,
+    input logic a,
+    input logic b,
+    output logic y
+);
+    always_ff @(posedge clk) begin
+        $display("a=%0d", a);
+        y <= b;
+    end
+endmodule
+
+module stmt_lowerer_display_comb(
+    input logic a
+);
+    always_comb begin
+        $display("comb=%0d", a);
+    end
+endmodule
+
+module stmt_lowerer_dpi(
+    input logic clk,
+    input logic [3:0] a,
+    output logic [3:0] y
+);
+    always_ff @(posedge clk) begin
+        dpi_capture(a, y);
+    end
+endmodule
+
+module stmt_lowerer_dpi_return(
+    input logic clk,
+    input int a,
+    input int b
+);
+    always_ff @(posedge clk) begin
+        dpi_sum(a, b);
+    end
+endmodule

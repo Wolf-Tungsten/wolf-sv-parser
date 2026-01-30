@@ -77,7 +77,7 @@ const slang::ast::InstanceSymbol* findTopInstance(slang::ast::Compilation& compi
             return instance;
         }
     }
-    if (root.topInstances.size() == 1 && root.topInstances[0]) {
+    if (moduleName.empty() && root.topInstances.size() == 1 && root.topInstances[0]) {
         return root.topInstances[0];
     }
     if (const slang::ast::Symbol* symbol = root.find(moduleName)) {
@@ -504,7 +504,8 @@ int testLhsConcat(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_lhs_concat, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
 
     std::unordered_map<std::string, int> targetCounts;
@@ -545,7 +546,8 @@ int testLhsStream(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_lhs_stream, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
 
     std::unordered_map<std::string, int> targetCounts;
@@ -586,7 +588,8 @@ int testLhsMemberSelect(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_lhs_member, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
 
     std::unordered_map<std::string, int> memberCounts;
@@ -764,7 +767,8 @@ int testTimedWaitOrder(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_timed_wait_order, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
     if (!hasWarningMessage(diagnostics, "Ignoring wait order")) {
         return fail("Expected wait order warning in " + sourcePath.string());
@@ -801,7 +805,8 @@ int testForLoop(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_for_stmt, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -818,7 +823,8 @@ int testForeachLoop(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_foreach_stmt, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -835,7 +841,17 @@ int testWhileLoopStatic(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        std::string detail;
+        for (const auto& message : diagnostics.messages()) {
+            if (!detail.empty()) {
+                detail.append(" | ");
+            }
+            detail.append(message.message);
+        }
+        return fail("Expected 2 write intents for stmt_lowerer_while_static, got " +
+                    std::to_string(lowering.writes.size()) + " (diag=" +
+                    std::to_string(diagnostics.messages().size()) + ", first=" + detail + ") in " +
+                    sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -940,7 +956,8 @@ int testForLoopBreak(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_for_break, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
     for (const auto& write : lowering.writes) {
         if (!write.target.valid() ||
@@ -986,7 +1003,8 @@ int testForeachLoopBreak(const std::filesystem::path& sourcePath) {
     }
 
     if (lowering.writes.size() != 2) {
-        return fail("Expected 2 write intents in " + sourcePath.string());
+        return fail("Expected 2 write intents for stmt_lowerer_foreach_break, got " +
+                    std::to_string(lowering.writes.size()) + " in " + sourcePath.string());
     }
     for (const auto& write : lowering.writes) {
         if (!write.target.valid() ||
@@ -1099,6 +1117,181 @@ int testForBreakCaseDynamic(const std::filesystem::path& sourcePath) {
     if (!hasOp(lowering, grh::ir::OperationKind::kLogicNot) ||
         !hasOp(lowering, grh::ir::OperationKind::kLogicAnd)) {
         return fail("Missing guard ops for case break in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testDisplayLowering(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_display", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    const wolf_sv_parser::LoweredStmt* displayStmt = nullptr;
+    for (const auto& stmt : lowering.loweredStmts) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
+            displayStmt = &stmt;
+            break;
+        }
+    }
+    if (!displayStmt) {
+        return fail("Missing display lowered statement in " + sourcePath.string());
+    }
+    if (displayStmt->display.formatString != "a=%0d") {
+        return fail("Unexpected display format string in " + sourcePath.string());
+    }
+    if (displayStmt->display.displayKind != "display") {
+        return fail("Unexpected display kind in " + sourcePath.string());
+    }
+    if (displayStmt->display.args.size() != 1) {
+        return fail("Unexpected display arg count in " + sourcePath.string());
+    }
+    if (displayStmt->display.args.front() >= lowering.values.size()) {
+        return fail("Display arg index out of range in " + sourcePath.string());
+    }
+    const auto& argNode = lowering.values[displayStmt->display.args.front()];
+    if (argNode.kind != wolf_sv_parser::ExprNodeKind::Symbol ||
+        plan.symbolTable.text(argNode.symbol) != std::string_view("a")) {
+        return fail("Unexpected display arg symbol in " + sourcePath.string());
+    }
+    if (displayStmt->eventEdges.size() != 1 || displayStmt->eventOperands.size() != 1) {
+        return fail("Unexpected display event binding in " + sourcePath.string());
+    }
+    if (displayStmt->eventEdges.front() != wolf_sv_parser::EventEdge::Posedge) {
+        return fail("Unexpected display event edge in " + sourcePath.string());
+    }
+    if (displayStmt->eventOperands.front() >= lowering.values.size()) {
+        return fail("Display event operand index out of range in " + sourcePath.string());
+    }
+    const auto& eventNode = lowering.values[displayStmt->eventOperands.front()];
+    if (eventNode.kind != wolf_sv_parser::ExprNodeKind::Symbol ||
+        plan.symbolTable.text(eventNode.symbol) != std::string_view("clk")) {
+        return fail("Unexpected display event operand in " + sourcePath.string());
+    }
+    if (displayStmt->updateCond == wolf_sv_parser::kInvalidPlanIndex) {
+        return fail("Missing display update condition in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testDisplayRequiresEdge(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_display_comb", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    std::size_t displayCount = 0;
+    for (const auto& stmt : lowering.loweredStmts) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
+            ++displayCount;
+        }
+    }
+    if (displayCount != 0) {
+        return fail("Expected display lowering to be dropped in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "edge-sensitive")) {
+        return fail("Expected display edge warning in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testDpiCallLowering(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_dpi", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    const wolf_sv_parser::LoweredStmt* dpiStmt = nullptr;
+    for (const auto& stmt : lowering.loweredStmts) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::DpiCall) {
+            dpiStmt = &stmt;
+            break;
+        }
+    }
+    if (!dpiStmt) {
+        std::string detail;
+        for (const auto& message : diagnostics.messages()) {
+            if (!detail.empty()) {
+                detail.append(" | ");
+            }
+            detail.append(message.message);
+        }
+        return fail("Missing DPI lowered statement (" + detail + ") in " +
+                    sourcePath.string());
+    }
+    if (dpiStmt->dpiCall.targetImportSymbol != "dpi_capture") {
+        return fail("Unexpected DPI import symbol in " + sourcePath.string());
+    }
+    if (dpiStmt->dpiCall.inArgNames.size() != 1 || dpiStmt->dpiCall.outArgNames.size() != 1) {
+        return fail("Unexpected DPI arg names in " + sourcePath.string());
+    }
+    if (dpiStmt->dpiCall.inArgNames.front() != "in_val" ||
+        dpiStmt->dpiCall.outArgNames.front() != "out_val") {
+        return fail("Unexpected DPI formal names in " + sourcePath.string());
+    }
+    if (dpiStmt->dpiCall.inArgs.size() != 1 || dpiStmt->dpiCall.results.size() != 1) {
+        return fail("Unexpected DPI arg counts in " + sourcePath.string());
+    }
+    if (dpiStmt->dpiCall.hasReturn) {
+        return fail("Unexpected DPI return value in " + sourcePath.string());
+    }
+    const auto resultSymbol = dpiStmt->dpiCall.results.front();
+    if (!resultSymbol.valid() ||
+        plan.symbolTable.text(resultSymbol) != std::string_view("y")) {
+        return fail("Unexpected DPI output symbol in " + sourcePath.string());
+    }
+    if (dpiStmt->eventEdges.size() != 1 || dpiStmt->eventOperands.size() != 1) {
+        return fail("Unexpected DPI event binding in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testDpiReturnLowering(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_dpi_return", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    const wolf_sv_parser::LoweredStmt* dpiStmt = nullptr;
+    for (const auto& stmt : lowering.loweredStmts) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::DpiCall) {
+            dpiStmt = &stmt;
+            break;
+        }
+    }
+    if (!dpiStmt) {
+        return fail("Missing DPI return lowered statement in " + sourcePath.string());
+    }
+    if (!dpiStmt->dpiCall.hasReturn || dpiStmt->dpiCall.results.size() != 1) {
+        return fail("Unexpected DPI return results in " + sourcePath.string());
+    }
+    const auto retSymbol = dpiStmt->dpiCall.results.front();
+    if (!retSymbol.valid()) {
+        return fail("Missing DPI return symbol in " + sourcePath.string());
+    }
+    const std::string_view retName = plan.symbolTable.text(retSymbol);
+    if (retName.find("_dpi_ret_") != 0) {
+        return fail("Unexpected DPI return symbol name in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -1221,5 +1414,17 @@ int main() {
     if (int status = testForContinueDynamic(sourcePath); status != 0) {
         return status;
     }
-    return testForBreakCaseDynamic(sourcePath);
+    if (int status = testForBreakCaseDynamic(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testDisplayLowering(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testDisplayRequiresEdge(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testDpiCallLowering(sourcePath); status != 0) {
+        return status;
+    }
+    return testDpiReturnLowering(sourcePath);
 }

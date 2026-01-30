@@ -23,7 +23,8 @@
     - 3.10.5. ExprNode
     - 3.10.6. LoweredRoot
     - 3.10.7. WriteIntent / WriteSlice
-    - 3.10.8. 举例说明
+    - 3.10.8. LoweredStmt
+    - 3.10.9. 举例说明
   - 3.11. WriteBackPlan
   - 3.12. Diagnostics / Logger
 - 4. Pass 中间数据结构
@@ -391,6 +392,7 @@
 - `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
 - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
 - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
+- `loweredStmts`: `std::vector<LoweredStmt>` -> 按语句顺序保存 Write/Display/Assert/DpiCall。
 
 #### 3.10.3. 类型别名
 - `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
@@ -419,6 +421,10 @@
         其节点索引通过 `WriteIntent.guard` 间接引用（例如 `guard = flowGuard && branchGuard`）。
       - Pass5 内部使用栈来维护 `loopAlive/flowGuard`，属于 Pass 内部临时状态，
         不会作为独立字段持久化到 `LoweringPlan`。
+  - `loweredStmts`：
+    - 作用：按语句顺序记录 Write/Display/Assert/DpiCall，保留副作用语句的相对顺序。
+    - 建立：Pass5 在解析语句时追加；WriteIntent 会同时进入 `writes` 与 `loweredStmts`。
+    - 输出：供后续写回合并与调试/DPI 转换使用；`loweredStmts` 是语句级顺序的唯一入口。
 
 #### 3.10.5. ExprNode
 - 字段总览（字段 -> 类型 -> 含义）：
@@ -480,7 +486,39 @@
   - `member`: `PlanSymbolId` -> 成员名（MemberSelect）。
   - `location`: `slang::SourceLocation` -> 片段选择位置。
 
-#### 3.10.8. 举例说明
+#### 3.10.8. LoweredStmt
+- LoweredStmt 字段总览（字段 -> 类型 -> 含义）：
+  - `kind`: `LoweredStmtKind` -> Write/Display/Assert/DpiCall。
+  - `op`: `grh::ir::OperationKind` -> 对应的 GRH 操作类型（Display/Assert/DpiCall）。
+  - `updateCond`: `ExprNodeId` -> 语句触发条件（无条件时为常量 `1'b1`）。
+  - `eventEdges`: `std::vector<EventEdge>` -> 触发事件边沿列表（posedge/negedge）。
+  - `eventOperands`: `std::vector<ExprNodeId>` -> 触发事件信号表达式列表。
+  - `location`: `slang::SourceLocation` -> 语句位置。
+  - `write`: `WriteIntent` -> Write 语句内容（仅 `kind == Write` 有效）。
+  - `display`: `DisplayStmt` -> 调试输出参数（仅 `kind == Display` 有效）。
+  - `assertion`: `AssertStmt` -> 断言信息（仅 `kind == Assert` 有效）。
+  - `dpiCall`: `DpiCallStmt` -> DPI 调用信息（仅 `kind == DpiCall` 有效）。
+- DisplayStmt 字段总览：
+  - `formatString`: `std::string` -> `$display/$write/$strobe` 的格式字符串。
+  - `displayKind`: `std::string` -> display/write/strobe。
+  - `args`: `std::vector<ExprNodeId>` -> 输出参数表达式。
+- AssertStmt 字段总览：
+  - `condition`: `ExprNodeId` -> 断言条件表达式。
+  - `message`: `std::string` -> 断言信息文本。
+  - `severity`: `std::string` -> fatal/error/warning/info。
+- DpiCallStmt 字段总览：
+  - `targetImportSymbol`: `std::string` -> 对应 `kDpicImport` 的 symbol 名称。
+  - `inArgNames`: `std::vector<std::string>` -> 输入形参名（按 formal 顺序）。
+  - `outArgNames`: `std::vector<std::string>` -> 输出形参名（按 formal 顺序）。
+  - `inArgs`: `std::vector<ExprNodeId>` -> 输入实参表达式。
+  - `results`: `std::vector<PlanSymbolId>` -> 输出实参（可选的 return 位于索引 0）。
+  - `hasReturn`: `bool` -> 是否有返回值。
+- 事件绑定约束：
+  - 仅当过程块包含 edge-sensitive 事件列表时才会生成 Display/Assert/DpiCall；
+    否则语句被丢弃并生成诊断。
+  - `eventEdges.size()` 必须与 `eventOperands.size()` 一致。
+
+#### 3.10.9. 举例说明
 - 表达式降级（Pass4）：
     - 输入：`assign y = (a & b) ? ~c : (a | b);`
     - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。

@@ -8,6 +8,7 @@
 #include "slang/ast/Symbol.h"
 #include "slang/ast/TimingControl.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/CallExpression.h"
 #include "slang/ast/expressions/ConversionExpression.h"
 #include "slang/ast/expressions/LiteralExpressions.h"
 #include "slang/ast/expressions/MiscExpressions.h"
@@ -24,6 +25,7 @@
 #include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/ParameterSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
+#include "slang/ast/symbols/SubroutineSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/text/SourceManager.h"
@@ -34,6 +36,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <variant>
 
 namespace wolf_sv_parser {
 
@@ -48,6 +51,15 @@ std::string toLowerCopy(std::string_view text)
         lowered.push_back(static_cast<char>(std::tolower(raw)));
     }
     return lowered;
+}
+
+std::string normalizeSystemTaskName(std::string_view name)
+{
+    if (!name.empty() && name.front() == '$')
+    {
+        name.remove_prefix(1);
+    }
+    return toLowerCopy(name);
 }
 
 std::string sanitizeParamToken(std::string_view text, bool allowLeadingDigit = false)
@@ -1137,6 +1149,10 @@ struct ExprLowererState {
             node.literal.assign(literal->getValue());
             return addNode(expr, std::move(node));
         }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            return lowerExpression(conversion->operand());
+        }
         if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
         {
             const auto opKind = mapUnaryOp(unary->op);
@@ -1399,12 +1415,19 @@ struct StmtLowererState {
     std::unordered_map<const slang::ast::AssignmentExpression*, ExprNodeId> assignmentRoots;
     uint32_t maxLoopIterations = 0;
     uint32_t nextTemp = 0;
+    uint32_t nextDpiResult = 0;
     std::size_t nextRoot = 0;
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
     std::vector<ExprNodeId> flowStack;
     struct LoopFlowContext {
         ExprNodeId loopAlive = kInvalidPlanIndex;
+    };
+    struct EventContext {
+        bool hasTiming = false;
+        bool edgeSensitive = false;
+        std::vector<EventEdge> edges;
+        std::vector<ExprNodeId> operands;
     };
     struct LValueTarget {
         PlanSymbolId target;
@@ -1418,6 +1441,7 @@ struct StmtLowererState {
     };
     std::vector<LoopFlowContext> loopFlowStack;
     std::optional<std::string> loopControlFailure;
+    EventContext eventContext;
 
     StmtLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics, LoweringPlan& lowering,
                      uint32_t maxLoopIterations)
@@ -1529,6 +1553,10 @@ struct StmtLowererState {
         }
         if (const auto* exprStmt = stmt.as_if<slang::ast::ExpressionStatement>())
         {
+            if (handleExpressionStatement(exprStmt->expr))
+            {
+                return;
+            }
             scanExpression(exprStmt->expr);
             return;
         }
@@ -1849,7 +1877,7 @@ struct StmtLowererState {
             intent.domain = domain;
             intent.isNonBlocking = expr.isNonBlocking();
             intent.location = expr.sourceRange.start();
-            lowering.writes.push_back(std::move(intent));
+            recordWriteIntent(std::move(intent));
             return;
         }
 
@@ -1883,7 +1911,7 @@ struct StmtLowererState {
             intent.domain = domain;
             intent.isNonBlocking = expr.isNonBlocking();
             intent.location = expr.sourceRange.start();
-            lowering.writes.push_back(std::move(intent));
+            recordWriteIntent(std::move(intent));
         };
 
         if (composite.reverseOrder)
@@ -1928,7 +1956,421 @@ struct StmtLowererState {
         StmtLowererState& state_;
     };
 
+    EventContext buildEventContext(const slang::ast::ProceduralBlockSymbol& block)
+    {
+        EventContext context;
+        const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
+        if (!timing)
+        {
+            return context;
+        }
+        context.hasTiming = true;
+        std::vector<EventEdge> edges;
+        std::vector<ExprNodeId> operands;
+        if (collectEdgeSensitiveEvents(*timing, edges, operands))
+        {
+            context.edgeSensitive = true;
+            context.edges = std::move(edges);
+            context.operands = std::move(operands);
+        }
+        return context;
+    }
+
 private:
+    bool handleExpressionStatement(const slang::ast::Expression& expr)
+    {
+        const auto* call = expr.as_if<slang::ast::CallExpression>();
+        if (!call)
+        {
+            return false;
+        }
+        if (call->isSystemCall())
+        {
+            if (handleSystemTaskCall(*call))
+            {
+                return true;
+            }
+            reportUnsupported(expr, "Unsupported system task call");
+            return true;
+        }
+
+        if (auto* subroutine = std::get_if<const slang::ast::SubroutineSymbol*>(&call->subroutine))
+        {
+            if (*subroutine && (*subroutine)->flags.has(slang::ast::MethodFlags::DPIImport))
+            {
+                return handleDpiCall(*call, **subroutine);
+            }
+        }
+
+        reportUnsupported(expr, "Unsupported subroutine call");
+        return true;
+    }
+
+    bool handleSystemTaskCall(const slang::ast::CallExpression& call)
+    {
+        const std::string name = normalizeSystemTaskName(call.getSubroutineName());
+        if (name == "display" || name == "write" || name == "strobe")
+        {
+            return emitDisplayCall(call, name);
+        }
+        if (name == "info" || name == "warning" || name == "error" || name == "fatal")
+        {
+            return emitAssertCall(call, name);
+        }
+        return false;
+    }
+
+    bool emitDisplayCall(const slang::ast::CallExpression& call, std::string_view displayKind)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "display"))
+        {
+            return true;
+        }
+        DisplayStmt display;
+        display.displayKind = std::string(displayKind);
+
+        const auto args = call.arguments();
+        std::size_t index = 0;
+        if (!args.empty())
+        {
+            auto literal = extractStringLiteral(*args.front());
+            if (!literal)
+            {
+                reportUnsupported(call, "Display format string must be a literal");
+                return true;
+            }
+            display.formatString = std::move(*literal);
+            index = 1;
+        }
+
+        for (; index < args.size(); ++index)
+        {
+            if (!args[index])
+            {
+                continue;
+            }
+            ExprNodeId argId = lowerExpression(*args[index]);
+            if (argId == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower display argument");
+                return true;
+            }
+            display.args.push_back(argId);
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Display;
+        stmt.op = grh::ir::OperationKind::kDisplay;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.display = std::move(display);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitAssertCall(const slang::ast::CallExpression& call, std::string_view severity)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "assert"))
+        {
+            return true;
+        }
+        AssertStmt assertion;
+        assertion.severity = std::string(severity);
+
+        const auto args = call.arguments();
+        if (!args.empty() && args.front())
+        {
+            std::optional<std::string> literal = extractStringLiteral(*args.front());
+            if (!literal && args.size() > 1 && args[1] && isIntegerLiteralExpr(*args.front()))
+            {
+                literal = extractStringLiteral(*args[1]);
+            }
+            if (literal)
+            {
+                assertion.message = std::move(*literal);
+            }
+            else
+            {
+                reportUnsupported(call, "Assert message must be a literal");
+                return true;
+            }
+        }
+
+        assertion.condition = addConstantLiteral("1'b0", call.sourceRange.start());
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Assert;
+        stmt.op = grh::ir::OperationKind::kAssert;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.assertion = std::move(assertion);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool handleDpiCall(const slang::ast::CallExpression& call,
+                       const slang::ast::SubroutineSymbol& subroutine)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "dpi"))
+        {
+            return true;
+        }
+        if (subroutine.subroutineKind != slang::ast::SubroutineKind::Function)
+        {
+            reportUnsupported(call, "DPI call supports only functions");
+            return true;
+        }
+
+        const auto args = call.arguments();
+        const auto formals = subroutine.getArguments();
+        if (args.size() != formals.size())
+        {
+            reportUnsupported(call, "DPI call argument count mismatch");
+            return true;
+        }
+
+        DpiCallStmt dpi;
+        dpi.targetImportSymbol = std::string(subroutine.name);
+
+        for (std::size_t i = 0; i < formals.size(); ++i)
+        {
+            const auto* formal = formals[i];
+            const auto* actual = args[i];
+            if (!formal || !actual)
+            {
+                reportUnsupported(call, "DPI call missing argument");
+                return true;
+            }
+
+            switch (formal->direction)
+            {
+            case slang::ast::ArgumentDirection::In: {
+                const slang::ast::Expression& actualExpr = unwrapDpiArgument(*actual, false);
+                ExprNodeId argId = lowerExpression(actualExpr);
+                if (argId == kInvalidPlanIndex)
+                {
+                    reportUnsupported(call, "Failed to lower DPI input argument");
+                    return true;
+                }
+                dpi.inArgNames.emplace_back(formal->name);
+                dpi.inArgs.push_back(argId);
+                break;
+            }
+            case slang::ast::ArgumentDirection::Out: {
+                const slang::ast::Expression& actualExpr = unwrapDpiArgument(*actual, true);
+                PlanSymbolId symbol = resolveSimpleSymbol(actualExpr);
+                if (!symbol.valid())
+                {
+                    std::string message("Unsupported DPI output argument kind: ");
+                    message.append(std::string(slang::ast::toString(actualExpr.kind)));
+                    reportUnsupported(call, std::move(message));
+                    return true;
+                }
+                dpi.outArgNames.emplace_back(formal->name);
+                dpi.results.push_back(symbol);
+                break;
+            }
+            default:
+                reportUnsupported(call, "DPI call supports only input/output arguments");
+                return true;
+            }
+        }
+
+        const bool hasReturn = subroutine.getReturnType().isVoid() == false;
+        dpi.hasReturn = hasReturn;
+        if (hasReturn)
+        {
+            PlanSymbolId retSymbol = makeDpiResultSymbol();
+            dpi.results.insert(dpi.results.begin(), retSymbol);
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::DpiCall;
+        stmt.op = grh::ir::OperationKind::kDpicCall;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.dpiCall = std::move(dpi);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    void recordWriteIntent(WriteIntent intent)
+    {
+        lowering.writes.push_back(std::move(intent));
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Write;
+        stmt.op = grh::ir::OperationKind::kAssign;
+        stmt.location = lowering.writes.back().location;
+        stmt.write = lowering.writes.back();
+        lowering.loweredStmts.push_back(std::move(stmt));
+    }
+
+    const slang::ast::Expression& unwrapDpiArgument(const slang::ast::Expression& expr,
+                                                    bool output) const
+    {
+        if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>())
+        {
+            return output ? assignment->left() : assignment->right();
+        }
+        return expr;
+    }
+
+    PlanSymbolId resolveSimpleSymbol(const slang::ast::Expression& expr)
+    {
+        if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+        {
+            return plan.symbolTable.lookup(named->symbol.name);
+        }
+        if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+        {
+            return plan.symbolTable.lookup(hier->symbol.name);
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            return resolveSimpleSymbol(conversion->operand());
+        }
+        return {};
+    }
+
+    std::optional<std::string> extractStringLiteral(const slang::ast::Expression& expr)
+    {
+        if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
+        {
+            return std::string(literal->getValue());
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            if (conversion->isImplicit())
+            {
+                return extractStringLiteral(conversion->operand());
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool isIntegerLiteralExpr(const slang::ast::Expression& expr)
+    {
+        if (expr.as_if<slang::ast::IntegerLiteral>() ||
+            expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
+        {
+            return true;
+        }
+        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+        {
+            if (conversion->isImplicit())
+            {
+                return isIntegerLiteralExpr(conversion->operand());
+            }
+        }
+        return false;
+    }
+
+    bool ensureEdgeSensitive(slang::SourceLocation location, std::string_view label)
+    {
+        if (eventContext.edgeSensitive && !eventContext.operands.empty())
+        {
+            return true;
+        }
+        if (diagnostics)
+        {
+            std::string message("Ignoring ");
+            message.append(label);
+            message.append(" call without edge-sensitive timing control");
+            diagnostics->warn(location, std::move(message));
+        }
+        return false;
+    }
+
+    bool collectEdgeSensitiveEvents(const slang::ast::TimingControl& timing,
+                                    std::vector<EventEdge>& edges,
+                                    std::vector<ExprNodeId>& operands)
+    {
+        std::vector<EventEdge> tempEdges;
+        std::vector<ExprNodeId> tempOperands;
+        if (!appendEdgeSensitiveEvents(timing, tempEdges, tempOperands))
+        {
+            return false;
+        }
+        if (tempEdges.empty())
+        {
+            return false;
+        }
+        edges = std::move(tempEdges);
+        operands = std::move(tempOperands);
+        return true;
+    }
+
+    bool appendEdgeSensitiveEvents(const slang::ast::TimingControl& timing,
+                                   std::vector<EventEdge>& edges,
+                                   std::vector<ExprNodeId>& operands)
+    {
+        using slang::ast::EdgeKind;
+        using slang::ast::TimingControlKind;
+        switch (timing.kind)
+        {
+        case TimingControlKind::SignalEvent: {
+            const auto& signal = timing.as<slang::ast::SignalEventControl>();
+            if (signal.edge == EdgeKind::None || signal.edge == EdgeKind::BothEdges)
+            {
+                return false;
+            }
+            if (signal.iffCondition)
+            {
+                if (diagnostics)
+                {
+                    diagnostics->warn(signal.sourceRange.start(),
+                                      "Ignoring event control with iff condition");
+                }
+                return false;
+            }
+            ExprNodeId operand = lowerExpression(signal.expr);
+            if (operand == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            EventEdge edge = signal.edge == EdgeKind::PosEdge ? EventEdge::Posedge
+                                                              : EventEdge::Negedge;
+            edges.push_back(edge);
+            operands.push_back(operand);
+            return true;
+        }
+        case TimingControlKind::EventList: {
+            const auto& list = timing.as<slang::ast::EventListControl>();
+            for (const slang::ast::TimingControl* child : list.events)
+            {
+                if (!child)
+                {
+                    continue;
+                }
+                if (!appendEdgeSensitiveEvents(*child, edges, operands))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case TimingControlKind::RepeatedEvent:
+        case TimingControlKind::ImplicitEvent:
+        case TimingControlKind::Delay:
+        case TimingControlKind::Delay3:
+        case TimingControlKind::OneStepDelay:
+        case TimingControlKind::CycleDelay:
+        case TimingControlKind::BlockEventList:
+        case TimingControlKind::Invalid:
+        default:
+            return false;
+        }
+    }
+
     ExprNodeId currentPathGuard() const
     {
         if (guardStack.empty())
@@ -3392,6 +3834,12 @@ private:
         return addNode(nullptr, std::move(node));
     }
 
+    PlanSymbolId makeDpiResultSymbol()
+    {
+        const std::string name = "_dpi_ret_" + std::to_string(nextDpiResult++);
+        return plan.symbolTable.intern(name);
+    }
+
     PlanSymbolId makeTempSymbol()
     {
         const std::string name = "_expr_tmp_" + std::to_string(nextTemp++);
@@ -3774,12 +4222,7 @@ private:
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
-            if (conversion->isImplicit())
-            {
-                return lowerExpression(conversion->operand());
-            }
-            reportUnsupported(expr, "Unsupported explicit conversion in expression");
-            return kInvalidPlanIndex;
+            return lowerExpression(conversion->operand());
         }
         if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
         {
@@ -4189,9 +4632,12 @@ void lowerStmtProceduralBlock(const slang::ast::ProceduralBlockSymbol& block,
                               StmtLowererState& state)
 {
     const ControlDomain saved = state.domain;
+    const StmtLowererState::EventContext savedEvent = state.eventContext;
     state.domain = classifyProceduralBlock(block);
+    state.eventContext = state.buildEventContext(block);
     state.visitStatement(block.getBody());
     state.domain = saved;
+    state.eventContext = savedEvent;
 }
 
 void lowerStmtContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
@@ -5054,6 +5500,7 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
     }
 
     lowering.writes.clear();
+    lowering.loweredStmts.clear();
 
     StmtLowererState state(plan, context_.diagnostics, lowering,
                            context_.options.maxLoopIterations);
