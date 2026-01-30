@@ -7216,17 +7216,35 @@ public:
         symbolIds_.assign(plan_.symbolTable.size(), grh::ir::SymbolId::invalid());
         valueBySymbol_.assign(plan_.symbolTable.size(), grh::ir::ValueId::invalid());
         valueByExpr_.assign(lowering_.values.size(), grh::ir::ValueId::invalid());
+        memoryOpBySymbol_.assign(plan_.symbolTable.size(), grh::ir::OperationId::invalid());
+        memorySymbolName_.assign(plan_.symbolTable.size(), std::string());
+        memoryReadIndexByExpr_.assign(lowering_.values.size(), kInvalidMemoryReadIndex);
+        for (std::size_t i = 0; i < lowering_.memoryReads.size(); ++i)
+        {
+            ExprNodeId data = lowering_.memoryReads[i].data;
+            if (data == kInvalidPlanIndex || data >= memoryReadIndexByExpr_.size())
+            {
+                continue;
+            }
+            if (memoryReadIndexByExpr_[data] == kInvalidMemoryReadIndex)
+            {
+                memoryReadIndexByExpr_[data] = static_cast<int32_t>(i);
+            }
+        }
     }
 
     void build()
     {
         createPortValues();
         createSignalValues();
+        createMemoryOps();
+        emitMemoryPorts();
         emitWriteBack();
     }
 
 private:
     static int32_t normalizeWidth(int32_t width) { return width > 0 ? width : 1; }
+    static constexpr int32_t kInvalidMemoryReadIndex = -1;
 
     grh::ir::SymbolId symbolForPlan(PlanSymbolId id)
     {
@@ -7343,6 +7361,301 @@ private:
         }
     }
 
+    const SignalInfo* memorySignal(SignalId signal) const
+    {
+        if (signal == kInvalidPlanIndex ||
+            signal >= static_cast<SignalId>(plan_.signals.size()))
+        {
+            return nullptr;
+        }
+        return &plan_.signals[signal];
+    }
+
+    bool ensureMemoryOp(PlanSymbolId memory, SignalId signal, slang::SourceLocation location)
+    {
+        if (!memory.valid() || memory.index >= memoryOpBySymbol_.size())
+        {
+            return false;
+        }
+        if (memoryOpBySymbol_[memory.index].valid())
+        {
+            return true;
+        }
+        const SignalInfo* info = memorySignal(signal);
+        if (!info)
+        {
+            return false;
+        }
+        if (info->memoryRows <= 0)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(location,
+                                           "Skipping memory op without valid row count");
+            }
+            return false;
+        }
+
+        std::string name(plan_.symbolTable.text(memory));
+        if (name.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(location,
+                                           "Skipping memory op without symbol name");
+            }
+            return false;
+        }
+        std::string finalName = name;
+        grh::ir::SymbolId sym = graph_.internSymbol(finalName);
+        if (graph_.findValue(sym).valid() || graph_.findOperation(sym).valid())
+        {
+            std::string base = name + "__mem";
+            std::size_t suffix = 0;
+            finalName = base;
+            while (graph_.symbols().contains(finalName))
+            {
+                finalName = base + "_" + std::to_string(++suffix);
+            }
+            sym = graph_.internSymbol(finalName);
+        }
+
+        const int64_t width = normalizeWidth(info->width);
+        if (info->width <= 0 && context_.diagnostics)
+        {
+            context_.diagnostics->warn(location, "Memory width missing, defaulting to 1");
+        }
+
+        grh::ir::OperationId op =
+            graph_.createOperation(grh::ir::OperationKind::kMemory, sym);
+        graph_.setAttr(op, "width", width);
+        graph_.setAttr(op, "row", static_cast<int64_t>(info->memoryRows));
+        graph_.setAttr(op, "isSigned", info->isSigned);
+        memoryOpBySymbol_[memory.index] = op;
+        memorySymbolName_[memory.index] = finalName;
+        return true;
+    }
+
+    std::string_view memorySymbolText(PlanSymbolId memory) const
+    {
+        if (!memory.valid() || memory.index >= memorySymbolName_.size())
+        {
+            return {};
+        }
+        return memorySymbolName_[memory.index];
+    }
+
+    void createMemoryOps()
+    {
+        for (SignalId i = 0; i < static_cast<SignalId>(plan_.signals.size()); ++i)
+        {
+            const auto& signal = plan_.signals[i];
+            if (!signal.symbol.valid())
+            {
+                continue;
+            }
+            if (signal.memoryRows <= 0 && signal.kind != SignalKind::Memory)
+            {
+                continue;
+            }
+            ensureMemoryOp(signal.symbol, i, slang::SourceLocation{});
+        }
+    }
+
+    void emitMemoryPorts()
+    {
+        for (const auto& entry : lowering_.memoryReads)
+        {
+            if (entry.data == kInvalidPlanIndex)
+            {
+                continue;
+            }
+            emitMemoryRead(entry.data);
+        }
+        emitMemoryWrites();
+    }
+
+    grh::ir::ValueId emitMemoryRead(ExprNodeId id)
+    {
+        if (id == kInvalidPlanIndex || id >= memoryReadIndexByExpr_.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        if (valueByExpr_[id].valid())
+        {
+            return valueByExpr_[id];
+        }
+        const int32_t readIndex = memoryReadIndexByExpr_[id];
+        if (readIndex == kInvalidMemoryReadIndex)
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        if (readIndex < 0 ||
+            static_cast<std::size_t>(readIndex) >= lowering_.memoryReads.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        const MemoryReadPort& entry = lowering_.memoryReads[readIndex];
+        if (entry.isSync && entry.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    entry.location,
+                    "Skipping synchronous memory read without edge-sensitive timing control");
+            }
+            return grh::ir::ValueId::invalid();
+        }
+        if (!ensureMemoryOp(entry.memory, entry.signal, entry.location))
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        const SignalInfo* info = memorySignal(entry.signal);
+        if (!info)
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        std::string_view memSymbol = memorySymbolText(entry.memory);
+        if (memSymbol.empty())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+
+        const int32_t width = normalizeWidth(info->width);
+        grh::ir::SymbolId dataSym = grh::ir::SymbolId::invalid();
+        if (id < lowering_.values.size())
+        {
+            const ExprNode& node = lowering_.values[id];
+            if (node.tempSymbol.valid())
+            {
+                dataSym = symbolForPlan(node.tempSymbol);
+            }
+        }
+        if (!dataSym.valid())
+        {
+            dataSym = graph_.internSymbol("__mem_data_" + std::to_string(nextMemValueId_++));
+        }
+        grh::ir::ValueId dataValue = graph_.createValue(dataSym, width, info->isSigned);
+
+        grh::ir::ValueId addressValue = emitExpr(entry.address);
+        if (!addressValue.valid())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+
+        grh::ir::SymbolId readSym = makeOpSymbol(entry.memory, "mem_read");
+        grh::ir::OperationId readOp =
+            graph_.createOperation(grh::ir::OperationKind::kMemoryReadPort, readSym);
+        graph_.addOperand(readOp, addressValue);
+        graph_.setAttr(readOp, "memSymbol", std::string(memSymbol));
+
+        if (!entry.isSync)
+        {
+            graph_.addResult(readOp, dataValue);
+            valueByExpr_[id] = dataValue;
+            return dataValue;
+        }
+
+        grh::ir::SymbolId readValueSym =
+            graph_.internSymbol("__mem_rd_" + std::to_string(nextMemReadValueId_++));
+        grh::ir::ValueId readValue =
+            graph_.createValue(readValueSym, width, info->isSigned);
+        graph_.addResult(readOp, readValue);
+
+        grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
+        if (!updateCond.valid())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        grh::ir::SymbolId regSym = makeOpSymbol(entry.memory, "mem_read_reg");
+        grh::ir::OperationId regOp =
+            graph_.createOperation(grh::ir::OperationKind::kRegister, regSym);
+        graph_.addOperand(regOp, updateCond);
+        graph_.addOperand(regOp, readValue);
+        for (ExprNodeId evtId : entry.eventOperands)
+        {
+            grh::ir::ValueId evt = emitExpr(evtId);
+            if (!evt.valid())
+            {
+                continue;
+            }
+            graph_.addOperand(regOp, evt);
+        }
+        std::vector<std::string> edges;
+        edges.reserve(entry.eventEdges.size());
+        for (EventEdge edge : entry.eventEdges)
+        {
+            edges.push_back(edgeText(edge));
+        }
+        graph_.setAttr(regOp, "eventEdge", std::move(edges));
+        graph_.addResult(regOp, dataValue);
+        valueByExpr_[id] = dataValue;
+        return dataValue;
+    }
+
+    void emitMemoryWrites()
+    {
+        for (const auto& entry : lowering_.memoryWrites)
+        {
+            if (!entry.memory.valid())
+            {
+                continue;
+            }
+            if (entry.eventEdges.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        entry.location,
+                        "Skipping memory write without edge-sensitive timing control");
+                }
+                continue;
+            }
+            if (!ensureMemoryOp(entry.memory, entry.signal, entry.location))
+            {
+                continue;
+            }
+            std::string_view memSymbol = memorySymbolText(entry.memory);
+            if (memSymbol.empty())
+            {
+                continue;
+            }
+            grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
+            grh::ir::ValueId address = emitExpr(entry.address);
+            grh::ir::ValueId data = emitExpr(entry.data);
+            grh::ir::ValueId mask = emitExpr(entry.mask);
+            if (!updateCond.valid() || !address.valid() || !data.valid() || !mask.valid())
+            {
+                continue;
+            }
+
+            grh::ir::SymbolId opSym = makeOpSymbol(entry.memory, "mem_write");
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kMemoryWritePort, opSym);
+            graph_.addOperand(op, updateCond);
+            graph_.addOperand(op, address);
+            graph_.addOperand(op, data);
+            graph_.addOperand(op, mask);
+            for (ExprNodeId evtId : entry.eventOperands)
+            {
+                grh::ir::ValueId evt = emitExpr(evtId);
+                if (!evt.valid())
+                {
+                    continue;
+                }
+                graph_.addOperand(op, evt);
+            }
+            std::vector<std::string> edges;
+            edges.reserve(entry.eventEdges.size());
+            for (EventEdge edge : entry.eventEdges)
+            {
+                edges.push_back(edgeText(edge));
+            }
+            graph_.setAttr(op, "eventEdge", std::move(edges));
+            graph_.setAttr(op, "memSymbol", std::string(memSymbol));
+        }
+    }
+
     grh::ir::ValueId emitConstant(const ExprNode& node)
     {
         const std::string name = "__const_" + std::to_string(nextConstId_++);
@@ -7365,6 +7678,14 @@ private:
         if (valueByExpr_[id].valid())
         {
             return valueByExpr_[id];
+        }
+        if (memoryReadIndexByExpr_[id] != kInvalidMemoryReadIndex)
+        {
+            grh::ir::ValueId value = emitMemoryRead(id);
+            if (value.valid())
+            {
+                return value;
+            }
         }
         const ExprNode& node = lowering_.values[id];
         if (node.kind == ExprNodeKind::Constant)
@@ -7585,9 +7906,14 @@ private:
     std::vector<grh::ir::SymbolId> symbolIds_;
     std::vector<grh::ir::ValueId> valueBySymbol_;
     std::vector<grh::ir::ValueId> valueByExpr_;
+    std::vector<grh::ir::OperationId> memoryOpBySymbol_;
+    std::vector<std::string> memorySymbolName_;
+    std::vector<int32_t> memoryReadIndexByExpr_;
     uint32_t nextConstId_ = 0;
     uint32_t nextTempId_ = 0;
     uint32_t nextOpId_ = 0;
+    uint32_t nextMemValueId_ = 0;
+    uint32_t nextMemReadValueId_ = 0;
 
     grh::ir::SymbolId makeOpSymbol(PlanSymbolId id, std::string_view suffix)
     {

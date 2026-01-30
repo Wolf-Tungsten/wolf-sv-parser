@@ -347,5 +347,20 @@ target_compile_definitions(convert-graph-assembly-basic
 )
 register_test_exe(convert-graph-assembly-basic)
 
+# convert: graph assembly memory
+add_executable(convert-graph-assembly-memory
+    tests/convert/test_convert_graph_assembly_memory.cpp
+)
+target_link_libraries(convert-graph-assembly-memory
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-memory
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_MEMORY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_memory.sv"
+)
+register_test_exe(convert-graph-assembly-memory)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

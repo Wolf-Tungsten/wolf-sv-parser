@@ -404,17 +404,24 @@ endmodule
   2. **端口**：
      - input/output：为端口创建 Value，绑定到 Graph ports；
      - inout：创建 `__in/__out/__oe` 三 Value 并绑定 inout port。
-  3. **信号**：为非 memory 信号创建 Value；memory 信号留待 Pass8 的 memory 子步骤。
-  4. **表达式**：
+  3. **信号**：
+     - 非 memory 信号创建 Value；
+     - memory 信号创建 `kMemory` op，写入 width/row/isSigned。
+  4. **Memory 端口**：
+     - memoryReads：`kMemoryReadPort`；顺序读（`isSync`）追加 `kRegister`，
+       使用 `updateCond/eventEdges/eventOperands`；
+     - memoryWrites：`kMemoryWritePort`，写入 updateCond/addr/data/mask/eventEdge；
+     - 缺失 edge-sensitive 事件时发出诊断并跳过。
+  5. **表达式**：
      - `Constant` -> `kConstant` + `constValue` attr；
      - `Symbol` -> 直接映射 `V(symbol)`；
      - `Operation` -> 对 operands 递归发射，创建同名 GRH op，并生成临时 Value。
      - `kReplicate` 需要常量 count；`kSliceDynamic` 使用 `sliceWidth` attr。
-  5. **写回**：
+  6. **写回**：
      - comb：`kAssign(nextValue)` 输出到目标 Value；
      - seq：`kRegister(updateCond, nextValue, eventOperands...)`，写 `eventEdge`；
      - latch：`kLatch(updateCond, nextValue)`。
-  6. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
+  7. **顶层标记**：对顶层 `PlanKey` 调用 `netlist.markAsTop()`。
 
 ### 案例讲解（基于核心数据结构的转换）
 示例输入（SystemVerilog）：

@@ -733,9 +733,13 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 新增 `convert-graph-assembly-memory` 测试覆盖 async/sync read 与 mask write
 - 更新 workflow/architecture 文档对齐 memory 组装策略
 
-实施：待开始
+实施：
+- GraphAssembly 支持 kMemory/kMemoryReadPort/kMemoryWritePort 与同步读寄存器
+- memoryReads/memoryWrites 依据 memSymbol 与 eventEdge 完成属性填充与诊断
+- 新增 `convert-graph-assembly-memory` 测试与 `graph_assembly_memory.sv` fixture
+- 更新 workflow/architecture 文档对齐 memory 组装策略
 
-完成情况：未开始
+完成情况：已完成
 
 ## STEP 0037 - Pass8 副作用语句与 DPI 支持
 
