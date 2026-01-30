@@ -754,8 +754,6 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 新增 `convert-graph-assembly-dpi-display` 测试覆盖 display/assert/dpi 调用链路
 - 更新 workflow/architecture 文档对齐副作用语句与 DPI 约束
 
-实施：待开始
-
 实施：
 - StmtLowerer 记录 `LoweringPlan.dpiImports` 并校验 DPI import 签名一致性
 - GraphAssembly 发射 kDisplay/kAssert/kDpicCall 与 kDpicImport，补齐 eventEdge/格式化/返回值元数据
@@ -779,8 +777,6 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 顶层实例写入 topGraphs 与 alias（instance/definition 名）
 - 新增 `convert-graph-assembly-instance` 测试覆盖普通实例与黑盒参数
 - 更新 workflow/architecture 文档对齐实例化规则
-
-实施：待开始
 
 实施：
 - `InstanceInfo` 记录 `InstanceSymbol` 与 `paramSignature`，保留参数特化信息与黑盒参数
@@ -809,4 +805,32 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 实施：待开始
 
-完成情况：未开始
+实施：
+- WriteBackPass 支持带 slices 的写回合并，按语句顺序进行 read/modify/write
+- 静态 bit/range/member select 使用 kSliceDynamic + kConcat 生成 nextValue
+- 动态 bit/part-select 使用 mask + shift 生成 nextValue，并保留诊断
+- 新增 `convert-write-back-slice` 与 `write_back_slice.sv` fixture 覆盖静态/动态/member
+- 新增 `convert-graph-assembly-slice` 与 `graph_assembly_slice.sv` fixture 覆盖图组装
+- 更新 workflow/architecture 文档对齐切片写回流程
+
+完成情况：已完成
+
+## STEP 0040 - CLI 主流程接入 Convert/Emit（HDLBits 预备）
+
+目标：
+- 在 `wolf-sv-parser` 主流程中接入 Convert + Transform + Emit
+- 支持 HDLBits 流程所需的 `--emit-sv/--emit-json/-o/--emit-out-dir` 参数
+
+计划：
+- 主流程创建 `ConvertDriver`，将 Convert 诊断/日志输出到 stderr
+- Convert 输出 Netlist 后运行 transform passes，再调用 JSON/SV emit
+- `-o` 同步输出目录与文件名规则，兼容 HDLBits `make run_hdlbits_test`
+- 更新 workflow/architecture 文档说明 CLI 接入与输出规则
+
+实施：
+- `src/main.cpp` 接入 `ConvertDriver`，按 CLI 参数配置日志与错误处理
+- Transform 阶段保持默认 passes（const-fold + stats），输出 Netlist
+- Emit 阶段支持 JSON/SV 输出与 `-o/--emit-out-dir` 目录重定向
+- 更新 workflow/architecture 文档补充 CLI 入口与 HDLBits 输出说明
+
+完成情况：已完成

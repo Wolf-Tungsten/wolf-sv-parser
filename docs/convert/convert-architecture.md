@@ -880,7 +880,8 @@
   - 定位：记录写回合并结果（`updateCond + nextValue`），为后续 GraphAssembly
     将 sequential/latch 语义映射到 `kRegister/kLatch` 提供直接输入。
   - 生成：Pass6 WriteBackPass 从 `LoweringPlan.loweredStmts` 合并得到。
-  - 作用边界：只处理完整信号写回（无 LHS slices）；切片写回在此阶段报 TODO 并跳过。
+  - 作用边界：支持带 LHS slices 的写回，按语句顺序执行 read/modify/write 合并；
+    静态切片使用 slice/concat，动态切片回退为 mask/shift 并保留诊断。
 
 - 字段结构（分）：
   - WriteBackPlan：
@@ -932,6 +933,18 @@
       - `updateCond = en`
       - `nextValue = mux(en, d, q)`
       - `eventEdges/eventOperands` 为空
+  - 切片写回（静态 bit/range）：
+    - 输入：
+      ```
+      always_comb begin
+        y[3] = a;
+        y[7:4] = b;
+      end
+      ```
+    - 合并（示意）：
+      - `nextValue = mux(g0, concat(y[7:4], a, y[2:0]), y)`
+      - `nextValue = mux(g1, concat(b, nextValue[3:0]), nextValue)`
+    - 说明：切片替换采用 slice/concat 构建 read/modify/write。
 
 ### 3.12. Diagnostics / Logger
 - 总览：
@@ -1196,3 +1209,4 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 - `include/convert.hpp`：Convert 核心数据结构与接口声明。
 - `src/convert.cpp`：Convert 骨架实现与默认行为。
 - `CMakeLists.txt`：新增 `convert` 静态库目标。
+- `src/main.cpp`：CLI 入口，驱动 Convert/Transform/Emit，并处理输出路径与诊断。

@@ -36,6 +36,16 @@
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
 - 当前实现已完成 Context Setup、Pass1~Pass6，仍返回空 `Netlist`，Pass7/Pass8 待接入。
 
+## CLI 主流程（wolf-sv-parser）
+- 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
+- 关键步骤：
+  - 根据 `--convert-log/--convert-log-level/--convert-log-tag` 配置 `ConvertDriver` 日志。
+  - 调用 `ConvertDriver::convert` 生成 `Netlist`，记录诊断并在 error 时停止。
+  - 执行 transform passes（const-fold + stats）。
+  - 根据 `--emit-json/--emit-sv` 选择输出 JSON/SV；`-o/--emit-out-dir` 控制路径。
+- HDLBits 流程：`make run_hdlbits_test` 会调用 `wolf-sv-parser --emit-sv --emit-json -o <dut>.v`，
+  产物写入 `build/hdlbits/<DUT>/` 并供 Verilator 使用。
+
 ## Pass1: SymbolCollectorPass
 - 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并发现子模块任务。
 - 输入：`InstanceBodySymbol` + ctx。
@@ -293,6 +303,12 @@ endgenerate
 - 功能：合并写回序列，生成 `updateCond + nextValue`，并为顺序/锁存域标注事件绑定。
 - 输入：`ModulePlan` + `LoweringPlan` + ctx。
 - 输出形式：`PlanCache[PlanKey].artifacts.writeBackPlan`。
+- 处理要点：
+  - 对无切片写回仍保持 `next = mux(guard, value, next)` 的合并策略。
+  - 对 LHS 带 slices 的写回执行 read/modify/write：
+    - 静态 bit/range/member select：拆分为 `kSliceDynamic` + `kConcat` 组合的新值。
+    - 动态 bit/part-select：生成 mask/shift 组合并保留诊断。
+  - 合并顺序严格按语句顺序，后出现的写回优先级更高。
 
 ### 案例讲解（基于核心数据结构的转换）
 示例输入（SystemVerilog）：
@@ -396,7 +412,7 @@ endmodule
 - 预条件：
   - `P.ports` 与 `P.signals` 已完成宽度/签名解析；
   - `L.values` 仅包含 Pass4/5 支持的节点；
-  - `W.entries` 不含切片写回（否则 Pass6 已过滤）。
+  - `W.entries` 已包含切片写回的 read/modify/write 结果。
 - 目标：
   - 生成 `Graph G`，包含端口 Value、内部 Value、运算 op，并写入 `Netlist`；
   - 保持 SSA：每个 Value 只由一个 op 定义。

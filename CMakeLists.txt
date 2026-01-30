@@ -318,6 +318,20 @@ target_compile_definitions(convert-write-back
 )
 register_test_exe(convert-write-back)
 
+# convert: write-back slice
+add_executable(convert-write-back-slice
+    tests/convert/test_convert_write_back_slice.cpp
+)
+target_link_libraries(convert-write-back-slice
+    PRIVATE
+        convert
+)
+target_compile_definitions(convert-write-back-slice
+    PRIVATE
+        WOLF_SV_CONVERT_WRITE_BACK_SLICE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/write_back_slice.sv"
+)
+register_test_exe(convert-write-back-slice)
+
 # convert: memory port lowerer
 add_executable(convert-memory-port-lowerer
     tests/convert/test_convert_memory_port_lowerer.cpp
@@ -361,6 +375,21 @@ target_compile_definitions(convert-graph-assembly-memory
         WOLF_SV_CONVERT_GRAPH_ASSEMBLY_MEMORY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_memory.sv"
 )
 register_test_exe(convert-graph-assembly-memory)
+
+# convert: graph assembly slice
+add_executable(convert-graph-assembly-slice
+    tests/convert/test_convert_graph_assembly_slice.cpp
+)
+target_link_libraries(convert-graph-assembly-slice
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-slice
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_SLICE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_slice.sv"
+)
+register_test_exe(convert-graph-assembly-slice)
 
 # convert: graph assembly dpi/display
 add_executable(convert-graph-assembly-dpi-display

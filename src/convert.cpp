@@ -5822,6 +5822,9 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
 namespace {
 
+std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
+                                    ExprNodeId id);
+
 class WriteBackBuilder {
 public:
     WriteBackBuilder(ModulePlan& plan, LoweringPlan& lowering)
@@ -5890,24 +5893,30 @@ public:
         return addNode(std::move(node));
     }
 
-private:
-    PlanSymbolId makeTempSymbol()
+    ExprNodeId addConstantLiteralWithWidth(std::string literal, int32_t widthHint,
+                                           slang::SourceLocation location)
     {
-        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
-        PlanSymbolId id = plan_.symbolTable.intern(name);
-        lowering_.tempSymbols.push_back(id);
-        return id;
-    }
-
-    ExprNodeId addNode(ExprNode node)
-    {
-        const ExprNodeId id = static_cast<ExprNodeId>(lowering_.values.size());
-        lowering_.values.push_back(std::move(node));
-        return id;
+        ExprNode node;
+        node.kind = ExprNodeKind::Constant;
+        node.literal = std::move(literal);
+        node.location = location;
+        if (widthHint > 0)
+        {
+            node.widthHint = widthHint;
+        }
+        return addNode(std::move(node));
     }
 
     ExprNodeId makeOperation(grh::ir::OperationKind op, std::vector<ExprNodeId> operands,
                              slang::SourceLocation location)
+    {
+        return makeOperationWithWidth(op, std::move(operands), 0, location);
+    }
+
+    ExprNodeId makeOperationWithWidth(grh::ir::OperationKind op,
+                                      std::vector<ExprNodeId> operands,
+                                      int32_t widthHint,
+                                      slang::SourceLocation location)
     {
         for (ExprNodeId operand : operands)
         {
@@ -5922,7 +5931,41 @@ private:
         node.operands = std::move(operands);
         node.location = location;
         node.tempSymbol = makeTempSymbol();
+        if (widthHint > 0)
+        {
+            node.widthHint = widthHint;
+        }
         return addNode(std::move(node));
+    }
+
+    ExprNodeId makeSliceDynamic(ExprNodeId value, ExprNodeId index, int32_t width,
+                                slang::SourceLocation location)
+    {
+        return makeOperationWithWidth(grh::ir::OperationKind::kSliceDynamic, {value, index},
+                                      width, location);
+    }
+
+    ExprNodeId makeConcat(std::vector<ExprNodeId> operands, int32_t width,
+                          slang::SourceLocation location)
+    {
+        return makeOperationWithWidth(grh::ir::OperationKind::kConcat, std::move(operands),
+                                      width, location);
+    }
+
+private:
+    PlanSymbolId makeTempSymbol()
+    {
+        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
+        PlanSymbolId id = plan_.symbolTable.intern(name);
+        lowering_.tempSymbols.push_back(id);
+        return id;
+    }
+
+    ExprNodeId addNode(ExprNode node)
+    {
+        const ExprNodeId id = static_cast<ExprNodeId>(lowering_.values.size());
+        lowering_.values.push_back(std::move(node));
+        return id;
     }
 
     ModulePlan& plan_;
@@ -5966,6 +6009,59 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             signalBySymbol[id.index] = i;
         }
     }
+    std::vector<int32_t> widthBySymbol(plan.symbolTable.size(), 0);
+    for (const auto& port : plan.ports)
+    {
+        if (!port.symbol.valid() || port.symbol.index >= widthBySymbol.size())
+        {
+            continue;
+        }
+        widthBySymbol[port.symbol.index] = port.width;
+    }
+    for (const auto& signal : plan.signals)
+    {
+        if (!signal.symbol.valid() || signal.symbol.index >= widthBySymbol.size())
+        {
+            continue;
+        }
+        if (widthBySymbol[signal.symbol.index] == 0)
+        {
+            widthBySymbol[signal.symbol.index] = signal.width;
+        }
+    }
+    std::vector<const slang::ast::Type*> typeBySymbol(plan.symbolTable.size(), nullptr);
+    for (const auto* portSymbol : plan.body->getPortList())
+    {
+        const auto* port = portSymbol ? portSymbol->as_if<slang::ast::PortSymbol>() : nullptr;
+        if (!port || port->name.empty())
+        {
+            continue;
+        }
+        const PlanSymbolId id = plan.symbolTable.lookup(port->name);
+        if (!id.valid() || id.index >= typeBySymbol.size())
+        {
+            continue;
+        }
+        typeBySymbol[id.index] = &port->getType();
+    }
+    for (const slang::ast::Symbol& member : plan.body->members())
+    {
+        const auto* net = member.as_if<slang::ast::NetSymbol>();
+        const auto* variable = member.as_if<slang::ast::VariableSymbol>();
+        const slang::ast::ValueSymbol* valueSymbol =
+            net ? static_cast<const slang::ast::ValueSymbol*>(net)
+                : static_cast<const slang::ast::ValueSymbol*>(variable);
+        if (!valueSymbol || valueSymbol->name.empty())
+        {
+            continue;
+        }
+        const PlanSymbolId id = plan.symbolTable.lookup(valueSymbol->name);
+        if (!id.valid() || id.index >= typeBySymbol.size())
+        {
+            continue;
+        }
+        typeBySymbol[id.index] = &valueSymbol->getType();
+    }
 
     std::vector<WriteBackGroup> groups;
     groups.reserve(lowering.loweredStmts.size());
@@ -5992,15 +6088,6 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
         if (signalId != kInvalidPlanIndex && plan.signals[signalId].memoryRows > 0)
         {
-            continue;
-        }
-        if (!write.slices.empty())
-        {
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->todo(write.location,
-                                           "Write-back merge with slices is unsupported");
-            }
             continue;
         }
         if (write.value == kInvalidPlanIndex)
@@ -6058,6 +6145,365 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
     WriteBackBuilder builder(plan, lowering);
     result.entries.reserve(groups.size());
 
+    struct SliceSelection {
+        bool isStatic = false;
+        ExprNodeId indexExpr = kInvalidPlanIndex;
+        int64_t low = 0;
+        int64_t width = 0;
+        const slang::ast::Type* subType = nullptr;
+        int64_t subWidth = 0;
+    };
+
+    auto resolveMemberSlice =
+        [&](const slang::ast::Type* baseType, PlanSymbolId member, SliceSelection& out) -> bool {
+        if (!baseType || !member.valid())
+        {
+            return false;
+        }
+        const slang::ast::Type& canonical = baseType->getCanonicalType();
+        const slang::ast::Scope* scope = nullptr;
+        if (canonical.kind == slang::ast::SymbolKind::PackedStructType)
+        {
+            scope = &canonical.as<slang::ast::PackedStructType>();
+        }
+        else if (canonical.kind == slang::ast::SymbolKind::PackedUnionType)
+        {
+            scope = &canonical.as<slang::ast::PackedUnionType>();
+        }
+        if (!scope)
+        {
+            return false;
+        }
+
+        std::string_view memberName = plan.symbolTable.text(member);
+        const slang::ast::FieldSymbol* field = nullptr;
+        for (const auto& candidate : scope->membersOfType<slang::ast::FieldSymbol>())
+        {
+            if (candidate.name == memberName)
+            {
+                field = &candidate;
+                break;
+            }
+        }
+        if (!field)
+        {
+            return false;
+        }
+
+        const uint64_t widthRaw = computeFixedWidth(field->getType(), *plan.body,
+                                                    context_.diagnostics);
+        const int32_t width = clampWidth(widthRaw, *plan.body, context_.diagnostics,
+                                         "Member select");
+        if (width <= 0)
+        {
+            return false;
+        }
+
+        out.isStatic = true;
+        out.low = static_cast<int64_t>(field->bitOffset);
+        out.width = width;
+        out.subType = &field->getType();
+        out.subWidth = width;
+        return true;
+    };
+
+    auto resolveSliceSelection =
+        [&](const WriteSlice& slice, const slang::ast::Type* baseType,
+            int64_t baseWidth, SliceSelection& out) -> bool {
+        out = {};
+        switch (slice.kind)
+        {
+        case WriteSliceKind::MemberSelect:
+            if (!resolveMemberSlice(baseType, slice.member, out))
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->todo(slice.location,
+                                               "Unsupported member select in write-back");
+                }
+                return false;
+            }
+            break;
+        case WriteSliceKind::BitSelect: {
+            if (slice.index == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            auto indexConst = evalConstInt(plan, lowering, slice.index);
+            out.width = 1;
+            out.subWidth = 1;
+            if (indexConst)
+            {
+                out.isStatic = true;
+                out.low = *indexConst;
+            }
+            else
+            {
+                out.indexExpr = slice.index;
+            }
+            break;
+        }
+        case WriteSliceKind::RangeSelect: {
+            if (slice.left == kInvalidPlanIndex || slice.right == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            if (slice.rangeKind == WriteRangeKind::Simple)
+            {
+                auto leftConst = evalConstInt(plan, lowering, slice.left);
+                auto rightConst = evalConstInt(plan, lowering, slice.right);
+                if (!leftConst || !rightConst)
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->todo(
+                            slice.location,
+                            "Dynamic range select in write-back is unsupported");
+                    }
+                    return false;
+                }
+                const int64_t lo = std::min(*leftConst, *rightConst);
+                const int64_t hi = std::max(*leftConst, *rightConst);
+                out.isStatic = true;
+                out.low = lo;
+                out.width = hi - lo + 1;
+                out.subWidth = out.width;
+                break;
+            }
+            auto widthConst = evalConstInt(plan, lowering, slice.right);
+            if (!widthConst || *widthConst <= 0)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->todo(
+                        slice.location,
+                        "Indexed part-select width must be constant in write-back");
+                }
+                return false;
+            }
+            out.width = *widthConst;
+            out.subWidth = out.width;
+            auto baseConst = evalConstInt(plan, lowering, slice.left);
+            if (baseConst)
+            {
+                out.isStatic = true;
+                if (slice.rangeKind == WriteRangeKind::IndexedUp)
+                {
+                    out.low = *baseConst;
+                }
+                else
+                {
+                    out.low = *baseConst - out.width + 1;
+                }
+            }
+            else
+            {
+                ExprNodeId indexExpr = slice.left;
+                if (slice.rangeKind == WriteRangeKind::IndexedDown && out.width > 1)
+                {
+                    ExprNodeId offset =
+                        builder.addConstantLiteral(std::to_string(out.width - 1),
+                                                   slice.location);
+                    indexExpr =
+                        builder.makeOperation(grh::ir::OperationKind::kSub,
+                                              {slice.left, offset}, slice.location);
+                }
+                out.indexExpr = indexExpr;
+            }
+            break;
+        }
+        default:
+            return false;
+        }
+
+        if (out.width <= 0)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(slice.location,
+                                           "Write-back slice width must be positive");
+            }
+            return false;
+        }
+        if (baseWidth > 0 && out.isStatic)
+        {
+            if (out.low < 0 || out.low + out.width > baseWidth)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slice.location,
+                        "Write-back slice exceeds target width; clamping is not supported");
+                }
+                return false;
+            }
+        }
+        if (!out.isStatic && out.indexExpr == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        if (!out.isStatic && baseWidth > 0 && out.width > baseWidth)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    slice.location,
+                    "Write-back slice width exceeds target width");
+            }
+        }
+        return true;
+    };
+
+    auto buildSliceExpr = [&](ExprNodeId base, const SliceSelection& slice,
+                              slang::SourceLocation location) -> ExprNodeId {
+        if (slice.width <= 0)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (slice.isStatic && slice.low == 0 && slice.width > 0)
+        {
+            // Optional fast path: slice covering full width handled by caller.
+        }
+        ExprNodeId indexExpr = slice.indexExpr;
+        if (slice.isStatic)
+        {
+            indexExpr = builder.addConstantLiteral(std::to_string(slice.low), location);
+        }
+        return builder.makeSliceDynamic(base, indexExpr,
+                                        static_cast<int32_t>(slice.width), location);
+    };
+
+    auto spliceStatic = [&](ExprNodeId base, const SliceSelection& slice, ExprNodeId value,
+                            int64_t baseWidth,
+                            slang::SourceLocation location) -> ExprNodeId {
+        if (slice.width == baseWidth && slice.low == 0)
+        {
+            return value;
+        }
+        const int64_t hi = slice.low + slice.width - 1;
+        const int64_t upperWidth = baseWidth - (hi + 1);
+        const int64_t lowerWidth = slice.low;
+        std::vector<ExprNodeId> operands;
+        operands.reserve(3);
+        if (upperWidth > 0)
+        {
+            ExprNodeId upperIndex =
+                builder.addConstantLiteral(std::to_string(hi + 1), location);
+            ExprNodeId upper =
+                builder.makeSliceDynamic(base, upperIndex,
+                                         static_cast<int32_t>(upperWidth), location);
+            operands.push_back(upper);
+        }
+        operands.push_back(value);
+        if (lowerWidth > 0)
+        {
+            ExprNodeId lowerIndex = builder.addConstantLiteral("0", location);
+            ExprNodeId lower =
+                builder.makeSliceDynamic(base, lowerIndex,
+                                         static_cast<int32_t>(lowerWidth), location);
+            operands.push_back(lower);
+        }
+        if (operands.size() == 1)
+        {
+            return operands.front();
+        }
+        return builder.makeConcat(std::move(operands),
+                                  static_cast<int32_t>(baseWidth), location);
+    };
+
+    auto spliceDynamic = [&](ExprNodeId base, const SliceSelection& slice, ExprNodeId value,
+                             int64_t baseWidth,
+                             slang::SourceLocation location) -> ExprNodeId {
+        int32_t widthHint = baseWidth > 0
+                                ? static_cast<int32_t>(
+                                      std::min<int64_t>(baseWidth,
+                                                        std::numeric_limits<int32_t>::max()))
+                                : 0;
+        ExprNodeId one = builder.addConstantLiteralWithWidth("1", widthHint, location);
+        ExprNodeId widthLiteral =
+            builder.addConstantLiteral(std::to_string(slice.width), location);
+        ExprNodeId shifted =
+            builder.makeOperation(grh::ir::OperationKind::kShl,
+                                  {one, widthLiteral}, location);
+        ExprNodeId ones =
+            builder.makeOperation(grh::ir::OperationKind::kSub,
+                                  {shifted, one}, location);
+        ExprNodeId mask =
+            builder.makeOperation(grh::ir::OperationKind::kShl,
+                                  {ones, slice.indexExpr}, location);
+        ExprNodeId inverted =
+            builder.makeOperation(grh::ir::OperationKind::kNot, {mask}, location);
+        ExprNodeId masked =
+            builder.makeOperation(grh::ir::OperationKind::kAnd, {base, inverted}, location);
+        ExprNodeId extendedValue = value;
+        if (baseWidth > slice.width)
+        {
+            const int64_t padWidth = baseWidth - slice.width;
+            const std::string zeroLiteral =
+                std::to_string(padWidth) + "'b0";
+            ExprNodeId zeros = builder.addConstantLiteralWithWidth(
+                zeroLiteral,
+                static_cast<int32_t>(std::min<int64_t>(
+                    padWidth, std::numeric_limits<int32_t>::max())),
+                location);
+            extendedValue = builder.makeConcat({zeros, value},
+                                               static_cast<int32_t>(baseWidth), location);
+        }
+        ExprNodeId shiftedValue =
+            builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                           {extendedValue, slice.indexExpr},
+                                           static_cast<int32_t>(baseWidth),
+                                           location);
+        return builder.makeOperation(grh::ir::OperationKind::kOr,
+                                     {masked, shiftedValue}, location);
+    };
+
+    std::function<ExprNodeId(ExprNodeId, const slang::ast::Type*, int64_t,
+                             const std::vector<WriteSlice>&, std::size_t, ExprNodeId,
+                             slang::SourceLocation)>
+        applySlices;
+    applySlices = [&](ExprNodeId base, const slang::ast::Type* baseType,
+                      int64_t baseWidth, const std::vector<WriteSlice>& slices,
+                      std::size_t start, ExprNodeId value,
+                      slang::SourceLocation location) -> ExprNodeId {
+        if (start >= slices.size())
+        {
+            return value;
+        }
+        if (baseWidth <= 0)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->todo(location,
+                                           "Write-back slice missing target width");
+            }
+            return kInvalidPlanIndex;
+        }
+        SliceSelection selection;
+        if (!resolveSliceSelection(slices[start], baseType, baseWidth, selection))
+        {
+            return kInvalidPlanIndex;
+        }
+
+        ExprNodeId subValue = buildSliceExpr(base, selection, location);
+        if (subValue == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        ExprNodeId updatedSub =
+            applySlices(subValue, selection.subType, selection.subWidth, slices,
+                        start + 1, value, location);
+        if (updatedSub == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (selection.isStatic)
+        {
+            return spliceStatic(base, selection, updatedSub, baseWidth, location);
+        }
+        return spliceDynamic(base, selection, updatedSub, baseWidth, location);
+    };
+
     for (const auto& group : groups)
     {
         if (group.writes.empty())
@@ -6079,13 +6525,31 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         ExprNodeId updateCond = kInvalidPlanIndex;
         ExprNodeId baseValue = builder.addSymbol(group.target, entry.location);
         ExprNodeId nextValue = baseValue;
+        const int64_t baseWidth =
+            entry.target.valid() && entry.target.index < widthBySymbol.size()
+                ? widthBySymbol[entry.target.index]
+                : 0;
+        const slang::ast::Type* baseType =
+            entry.target.valid() && entry.target.index < typeBySymbol.size()
+                ? typeBySymbol[entry.target.index]
+                : nullptr;
 
         for (const LoweredStmt* stmt : group.writes)
         {
             const WriteIntent& write = stmt->write;
             ExprNodeId guard = builder.ensureGuardExpr(write.guard, write.location);
+            ExprNodeId writeValue = write.value;
+            if (!write.slices.empty())
+            {
+                writeValue = applySlices(nextValue, baseType, baseWidth,
+                                         write.slices, 0, write.value, write.location);
+                if (writeValue == kInvalidPlanIndex)
+                {
+                    continue;
+                }
+            }
             updateCond = builder.makeLogicOr(updateCond, guard, write.location);
-            nextValue = builder.makeMux(guard, write.value, nextValue, write.location);
+            nextValue = builder.makeMux(guard, writeValue, nextValue, write.location);
         }
 
         if (updateCond == kInvalidPlanIndex || nextValue == kInvalidPlanIndex)
