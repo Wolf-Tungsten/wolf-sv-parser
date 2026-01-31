@@ -282,11 +282,20 @@ namespace wolf_sv_parser::transform
                                 continue;
                             }
                             const grh::ir::Operation defOp = graph.getOperation(defOpId);
-                            if (defOp.results().size() != 1)
+                            if (defOp.results().empty())
                             {
                                 continue;
                             }
-                            if (defOp.results()[0] != srcId)
+                            std::size_t defIndex = defOp.results().size();
+                            for (std::size_t i = 0; i < defOp.results().size(); ++i)
+                            {
+                                if (defOp.results()[i] == srcId)
+                                {
+                                    defIndex = i;
+                                    break;
+                                }
+                            }
+                            if (defIndex >= defOp.results().size())
                             {
                                 continue;
                             }
@@ -296,7 +305,7 @@ namespace wolf_sv_parser::transform
                             }
                             try
                             {
-                                graph.replaceResult(defOpId, 0, dstId);
+                                graph.replaceResult(defOpId, defIndex, dstId);
                                 graphChanged = true;
                                 progress = true;
                             }
