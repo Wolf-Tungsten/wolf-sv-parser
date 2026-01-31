@@ -669,6 +669,136 @@ namespace wolf_sv_parser::transform
             }
         }
 
+        bool simplifiedSlices = false;
+        for (const auto &graphEntry : netlist().graphs())
+        {
+            grh::ir::Graph &graph = *graphEntry.second;
+            std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(),
+                                                      graph.operations().end());
+            std::vector<grh::ir::OperationId> opsToErase;
+            for (const auto opId : opOrder)
+            {
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kSliceStatic)
+                {
+                    continue;
+                }
+                const auto &operands = op.operands();
+                const auto &results = op.results();
+                if (operands.size() != 1 || results.size() != 1)
+                {
+                    continue;
+                }
+                auto sliceStart = getIntAttr(graph, op, "sliceStart");
+                auto sliceEnd = getIntAttr(graph, op, "sliceEnd");
+                if (!sliceStart || !sliceEnd)
+                {
+                    continue;
+                }
+                const int64_t low = *sliceStart;
+                const int64_t high = *sliceEnd;
+                if (low < 0 || high < low)
+                {
+                    continue;
+                }
+                const grh::ir::ValueId baseValueId = operands[0];
+                if (!baseValueId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Value baseValue = graph.getValue(baseValueId);
+                const grh::ir::OperationId baseDefId = baseValue.definingOp();
+                if (!baseDefId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Operation baseDef = graph.getOperation(baseDefId);
+                if (baseDef.kind() != grh::ir::OperationKind::kConcat)
+                {
+                    continue;
+                }
+                const auto &concatOperands = baseDef.operands();
+                if (concatOperands.empty())
+                {
+                    continue;
+                }
+                std::vector<int64_t> widths;
+                widths.reserve(concatOperands.size());
+                int64_t totalWidth = 0;
+                bool widthsOk = true;
+                for (const auto operandId : concatOperands)
+                {
+                    if (!operandId.valid())
+                    {
+                        widthsOk = false;
+                        break;
+                    }
+                    const int64_t width = graph.getValue(operandId).width();
+                    if (width <= 0)
+                    {
+                        widthsOk = false;
+                        break;
+                    }
+                    widths.push_back(width);
+                    totalWidth += width;
+                }
+                if (!widthsOk || totalWidth <= 0)
+                {
+                    continue;
+                }
+                if (high >= totalWidth)
+                {
+                    continue;
+                }
+                const grh::ir::ValueId resultId = results[0];
+                if (!resultId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Value resultValue = graph.getValue(resultId);
+                int64_t cursor = totalWidth;
+                for (std::size_t i = 0; i < concatOperands.size(); ++i)
+                {
+                    const int64_t width = widths[i];
+                    const int64_t hi = cursor - 1;
+                    const int64_t lo = cursor - width;
+                    cursor = lo;
+                    if (lo != low || hi != high)
+                    {
+                        continue;
+                    }
+                    const grh::ir::ValueId operandId = concatOperands[i];
+                    if (!operandId.valid())
+                    {
+                        break;
+                    }
+                    const grh::ir::Value operandValue = graph.getValue(operandId);
+                    if (operandValue.width() != resultValue.width() ||
+                        operandValue.isSigned() != resultValue.isSigned())
+                    {
+                        break;
+                    }
+                    auto onError = [&](const std::string &msg)
+                    { this->error(graph, op, msg); failed = true; };
+                    replaceUsers(graph, resultId, operandId, onError);
+                    opsToErase.push_back(opId);
+                    simplifiedSlices = true;
+                    break;
+                }
+            }
+
+            for (const auto opId : opsToErase)
+            {
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (!graph.eraseOp(opId))
+                {
+                    error(graph, op, "Failed to erase simplified kSliceStatic op");
+                    failed = true;
+                }
+            }
+        }
+        result.changed = result.changed || simplifiedSlices;
+
         bool removedDeadConstants = false;
         for (const auto &graphEntry : netlist().graphs())
         {

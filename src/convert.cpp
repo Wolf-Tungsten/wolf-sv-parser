@@ -8548,6 +8548,75 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             zeroBaseForSlices = fullCoverage;
         }
 
+        ExprNodeId directConcatValue = kInvalidPlanIndex;
+        if (hasSlices && zeroBaseForSlices)
+        {
+            struct SliceAssignment
+            {
+                int64_t low = 0;
+                int64_t width = 0;
+                ExprNodeId value = kInvalidPlanIndex;
+            };
+            std::vector<SliceAssignment> assignments;
+            assignments.reserve(group.writes.size());
+            bool canConcat = true;
+            for (const LoweredStmt* stmt : group.writes)
+            {
+                const WriteIntent& write = stmt->write;
+                if (write.slices.size() != 1)
+                {
+                    canConcat = false;
+                    break;
+                }
+                SliceSelection selection;
+                if (!resolveSliceSelection(write.slices.front(), baseType, baseWidth,
+                                           selection) ||
+                    !selection.isStatic || selection.width <= 0)
+                {
+                    canConcat = false;
+                    break;
+                }
+                assignments.push_back(
+                    SliceAssignment{selection.low, selection.width, write.value});
+            }
+            if (canConcat)
+            {
+                std::sort(assignments.begin(), assignments.end(),
+                          [](const SliceAssignment& lhs, const SliceAssignment& rhs) {
+                              return lhs.low < rhs.low;
+                          });
+                int64_t expectedLow = 0;
+                for (const auto& assignment : assignments)
+                {
+                    if (assignment.low != expectedLow || assignment.width <= 0)
+                    {
+                        canConcat = false;
+                        break;
+                    }
+                    expectedLow = assignment.low + assignment.width;
+                }
+                if (canConcat && expectedLow == baseWidth)
+                {
+                    std::sort(assignments.begin(), assignments.end(),
+                              [](const SliceAssignment& lhs, const SliceAssignment& rhs) {
+                                  return lhs.low > rhs.low;
+                              });
+                    std::vector<ExprNodeId> operands;
+                    operands.reserve(assignments.size());
+                    for (const auto& assignment : assignments)
+                    {
+                        operands.push_back(assignment.value);
+                    }
+                    const int32_t widthHint =
+                        static_cast<int32_t>(std::min<int64_t>(
+                            baseWidth, std::numeric_limits<int32_t>::max()));
+                    directConcatValue =
+                        builder.makeConcat(std::move(operands), widthHint,
+                                           entry.location);
+                }
+            }
+        }
+
         ExprNodeId updateCond = kInvalidPlanIndex;
         ExprNodeId baseValue = kInvalidPlanIndex;
         if (hasSlices)
@@ -8570,6 +8639,15 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             }
         }
         ExprNodeId nextValue = hasSlices ? baseValue : kInvalidPlanIndex;
+
+        if (directConcatValue != kInvalidPlanIndex)
+        {
+            entry.updateCond =
+                builder.ensureGuardExpr(kInvalidPlanIndex, entry.location);
+            entry.nextValue = directConcatValue;
+            result.entries.push_back(std::move(entry));
+            continue;
+        }
 
         for (const LoweredStmt* stmt : group.writes)
         {

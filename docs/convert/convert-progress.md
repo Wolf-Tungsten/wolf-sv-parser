@@ -856,3 +856,31 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture 文档说明写回简化与 comb->latch 规则
 
 完成情况：已完成
+
+------
+
+## STEP 0042 - 逻辑操作数与切片拼接简化
+
+目标：
+- 逻辑运算（kLogicAnd/kLogicOr）输出仍对多位信号进行 reduction OR 归一
+- 简化 `concat -> slice` 的冗余链路，避免在 emit 里展开无意义的拼接/切片
+
+实施：
+- `src/emit.cpp` 恢复 `logicalOperand` 对多位信号包 `(|value)` 的输出形式
+- `src/pass/const_fold.cpp` 新增 `kSliceStatic` + `kConcat` 的窥孔简化：当切片范围完全覆盖某个 concat 片段时直接替换为该片段
+
+完成情况：已完成
+
+------
+
+## STEP 0043 - 写回切片全覆盖的直接拼接
+
+目标：
+- 在切片写回覆盖完整位宽且无重叠时，直接构造 concat，避免链式 slice/concat
+- 清理 HDLBits 017 输出中的冗余中间信号
+
+实施：
+- `src/convert.cpp` 在 WriteBack 生成阶段识别全覆盖静态切片，直接拼接 RHS 片段生成 `nextValue`
+- 保持非覆盖/有重叠/动态切片路径不变
+
+完成情况：已完成
