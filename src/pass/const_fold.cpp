@@ -34,6 +34,32 @@ namespace wolf_sv_parser::transform
         };
 
         using ConstantStore = std::unordered_map<grh::ir::ValueId, ConstantValue, grh::ir::ValueIdHash>;
+        struct ConstantKey
+        {
+            std::string literal;
+            int32_t width = 0;
+            bool isSigned = false;
+
+            bool operator==(const ConstantKey &other) const
+            {
+                return width == other.width &&
+                       isSigned == other.isSigned &&
+                       literal == other.literal;
+            }
+        };
+
+        struct ConstantKeyHash
+        {
+            std::size_t operator()(const ConstantKey &key) const
+            {
+                std::size_t seed = std::hash<std::string>{}(key.literal);
+                seed ^= std::hash<int32_t>{}(key.width) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+                seed ^= std::hash<bool>{}(key.isSigned) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+                return seed;
+            }
+        };
+
+        using ConstantPool = std::unordered_map<ConstantKey, grh::ir::ValueId, ConstantKeyHash>;
 
         bool isFoldable(grh::ir::OperationKind kind)
         {
@@ -473,8 +499,26 @@ namespace wolf_sv_parser::transform
             return value.toString(slang::LiteralBase::Hex, true, width);
         }
 
-        grh::ir::ValueId createConstant(grh::ir::Graph &graph, const grh::ir::Operation &sourceOp, std::size_t resultIndex, const slang::SVInt &value)
+        ConstantKey makeConstantKey(const grh::ir::Value &value, const slang::SVInt &sv)
         {
+            ConstantKey key;
+            key.width = value.width();
+            key.isSigned = value.isSigned();
+            key.literal = formatConstLiteral(sv);
+            return key;
+        }
+
+        grh::ir::ValueId createConstant(grh::ir::Graph &graph, ConstantPool &pool,
+                                        const grh::ir::Operation &sourceOp, std::size_t resultIndex,
+                                        const grh::ir::Value &resultValue,
+                                        const slang::SVInt &value)
+        {
+            ConstantKey key = makeConstantKey(resultValue, value);
+            if (auto it = pool.find(key); it != pool.end())
+            {
+                return it->second;
+            }
+
             std::ostringstream base;
             base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
             std::string valueName = makeUniqueSymbol(graph, base.str(), /*isOperation=*/false);
@@ -485,10 +529,16 @@ namespace wolf_sv_parser::transform
 
             const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
             const grh::ir::SymbolId opSym = graph.internSymbol(opName);
-            const grh::ir::ValueId newValue = graph.createValue(valueSym, static_cast<int32_t>(value.getBitWidth()), value.isSigned());
+            int32_t width = resultValue.width();
+            if (width <= 0)
+            {
+                width = static_cast<int32_t>(value.getBitWidth());
+            }
+            const grh::ir::ValueId newValue = graph.createValue(valueSym, width, resultValue.isSigned());
             const grh::ir::OperationId constOp = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(constOp, newValue);
             graph.setAttr(constOp, "constValue", formatConstLiteral(value));
+            pool.emplace(std::move(key), newValue);
             return newValue;
         }
 
@@ -553,9 +603,11 @@ namespace wolf_sv_parser::transform
         {
 
         // Seed constant table from existing kConstant ops.
+        std::unordered_map<const grh::ir::Graph *, ConstantPool> pools;
         for (const auto &graphEntry : netlist().graphs())
         {
             const grh::ir::Graph &graph = *graphEntry.second;
+            ConstantPool &pool = pools[&graph];
             for (const auto opId : graph.operations())
             {
                 const grh::ir::Operation op = graph.getOperation(opId);
@@ -584,6 +636,7 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     constants.emplace(resId, *parsed);
+                    pool.emplace(makeConstantKey(res, parsed->value), resId);
                 }
             }
         }
@@ -626,6 +679,7 @@ namespace wolf_sv_parser::transform
                     }
 
                     bool createdAllResults = true;
+                    ConstantPool &pool = pools[&graph];
                     for (std::size_t idx = 0; idx < folded->size(); ++idx)
                     {
                         const slang::SVInt &sv = (*folded)[idx];
@@ -637,7 +691,8 @@ namespace wolf_sv_parser::transform
                             createdAllResults = false;
                             continue;
                         }
-                        const grh::ir::ValueId newValue = createConstant(graph, op, idx, sv);
+                        const grh::ir::Value resValue = graph.getValue(resId);
+                        const grh::ir::ValueId newValue = createConstant(graph, pool, op, idx, resValue, sv);
                         replaceUsers(graph, resId, newValue, [&](const std::string &msg)
                                      { this->error(graph, op, msg); failed = true; });
                         constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
