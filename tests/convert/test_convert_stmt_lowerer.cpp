@@ -290,14 +290,17 @@ int testCase(const std::filesystem::path& sourcePath) {
     if (lowering.writes.size() != 3) {
         return fail("Expected 3 write intents in " + sourcePath.string());
     }
-    if (!hasOp(lowering, grh::ir::OperationKind::kCaseEq)) {
+    if (!hasOp(lowering, grh::ir::OperationKind::kEq)) {
+        return fail("Missing eq op in " + sourcePath.string());
+    }
+    if (hasOp(lowering, grh::ir::OperationKind::kCaseEq)) {
         std::size_t opCount = 0;
         for (const auto& value : lowering.values) {
             if (value.kind == wolf_sv_parser::ExprNodeKind::Operation) {
                 ++opCount;
             }
         }
-        return fail("Missing case-eq op (ops=" + std::to_string(opCount) + ") in " +
+        return fail("Unexpected case-eq op (ops=" + std::to_string(opCount) + ") in " +
                     sourcePath.string());
     }
     if (!hasOp(lowering, grh::ir::OperationKind::kLogicOr)) {
@@ -305,6 +308,26 @@ int testCase(const std::filesystem::path& sourcePath) {
     }
     if (!hasOp(lowering, grh::ir::OperationKind::kLogicNot)) {
         return fail("Missing logic-not op in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
+int testCaseIncomplete(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_case_incomplete_stmt", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    if (!hasOp(lowering, grh::ir::OperationKind::kCaseEq)) {
+        return fail("Missing case-eq op in " + sourcePath.string());
+    }
+    if (!hasWarningMessage(diagnostics, "4-state semantics")) {
+        return fail("Expected 4-state semantics warning in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
@@ -1316,6 +1339,9 @@ int main() {
         return status;
     }
     if (int status = testCase(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testCaseIncomplete(sourcePath); status != 0) {
         return status;
     }
     if (int status = testCaseZ(sourcePath); status != 0) {

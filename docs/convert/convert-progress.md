@@ -902,3 +902,25 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 保持非覆盖/有重叠/动态切片路径不变
 
 完成情况：已完成
+
+------
+
+## STEP 0044 - Case 二值优先与四值回退（综合友好）
+
+目标：
+- 对 case 语句优先按二值逻辑分析，若分支覆盖完整或存在 default，则输出纯组合逻辑
+- 若二值逻辑不完整，则回退到四值逻辑以保证语义完整，并提示可能不可综合
+
+计划：
+- 在 case 降低阶段引入“二值覆盖分析”，判断是否在二值语义下完整覆盖或含 default
+- 对二值覆盖完整的 case 生成组合逻辑（== 比较、无 latch），避免 === 与 always_latch
+- 对二值不完整的 case 保持四值语义（=== 与 latch），并输出警告提示“生成四值语义，可能不可综合”
+- 在诊断中标注源码位置，建议用户补齐 default 或完整覆盖以回到可综合输出
+
+实施：
+- `StmtLowererState` 新增二值覆盖分析与 case 降低模式（TwoState/FourState），默认优先二值匹配
+- 无 default 且二值覆盖不完整时回退 `kCaseEq`/mask+`kCaseEq`，并输出“4-state semantics”警告
+- 写回 `WriteIntent` 增加 `coversAllTwoState` 标记，WriteBack 在组合域判断无 latch 时纳入该标记
+- 新增/更新 convert fixtures 与测试：case 完整覆盖走 `kEq`，不完整 case 触发 warning
+
+完成情况：已完成

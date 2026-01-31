@@ -289,6 +289,37 @@ int testWriteBackComb(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testWriteBackCaseComb(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    wolf_sv_parser::WriteBackPlan writeBack;
+    if (!buildWriteBackPlan(sourcePath, "write_back_case_comb", diagnostics, plan, lowering,
+                            writeBack)) {
+        return fail("Failed to build write-back case comb plan for " + sourcePath.string());
+    }
+
+    if (writeBack.entries.size() != 1) {
+        return fail("Expected 1 case comb write-back entry in " + sourcePath.string());
+    }
+    const auto& entry = writeBack.entries.front();
+    if (entry.domain != wolf_sv_parser::ControlDomain::Combinational) {
+        return fail("Unexpected case comb write-back domain in " + sourcePath.string());
+    }
+    if (entry.updateCond == wolf_sv_parser::kInvalidPlanIndex ||
+        entry.updateCond >= lowering.values.size()) {
+        return fail("Missing case comb write-back update condition in " + sourcePath.string());
+    }
+    if (entry.nextValue == wolf_sv_parser::kInvalidPlanIndex ||
+        entry.nextValue >= lowering.values.size()) {
+        return fail("Missing case comb write-back next value in " + sourcePath.string());
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testWriteBackMissingEdge(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -325,6 +356,9 @@ int main() {
         return result;
     }
     if (int result = testWriteBackComb(sourcePath); result != 0) {
+        return result;
+    }
+    if (int result = testWriteBackCaseComb(sourcePath); result != 0) {
         return result;
     }
     if (int result = testWriteBackMissingEdge(sourcePath); result != 0) {

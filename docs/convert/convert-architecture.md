@@ -492,6 +492,7 @@
   - `guard`: `ExprNodeId` -> guard 条件节点索引（无 guard 时为 invalid）。
   - `domain`: `ControlDomain` -> 控制域（comb/seq/latch/unknown）。
   - `isNonBlocking`: `bool` -> 是否非阻塞赋值。
+  - `coversAllTwoState`: `bool` -> 来自二值覆盖完整/带 default 的 case 写回标记（仅用于组合写回判定）。
   - `location`: `slang::SourceLocation` -> 写回语句位置。
 - WriteSlice 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `WriteSliceKind` -> BitSelect/RangeSelect/MemberSelect。

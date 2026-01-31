@@ -1656,6 +1656,13 @@ struct StmtLowererState {
     class AssignmentExprVisitor;
 
     enum class LoopControlResult { None, Break, Continue, Unsupported };
+    enum class CaseLoweringMode { TwoState, FourState };
+
+    struct CaseTwoStateAnalysis {
+        bool hasDefault = false;
+        bool twoStateComplete = false;
+        bool canLowerTwoState = true;
+    };
 
     struct ForeachDimState {
         const slang::ast::ValueSymbol* loopVar = nullptr;
@@ -1678,6 +1685,7 @@ struct StmtLowererState {
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
     std::vector<ExprNodeId> flowStack;
+    std::vector<bool> caseCoverageStack;
     struct LoopFlowContext {
         ExprNodeId loopAlive = kInvalidPlanIndex;
     };
@@ -2152,21 +2160,41 @@ struct StmtLowererState {
         ExprNodeId baseGuard = currentPathGuard();
         ExprNodeId priorMatch = kInvalidPlanIndex;
 
-        bool warnedCaseEq = false;
+        CaseLoweringMode mode = CaseLoweringMode::TwoState;
+        bool caseCoversAll = false;
+        bool warnFourState = false;
+        if (stmt.condition != slang::ast::CaseStatementCondition::Inside)
+        {
+            CaseTwoStateAnalysis analysis = analyzeCaseTwoState(stmt);
+            caseCoversAll = analysis.hasDefault || analysis.twoStateComplete;
+            if (!caseCoversAll || !analysis.canLowerTwoState)
+            {
+                mode = CaseLoweringMode::FourState;
+                warnFourState = true;
+            }
+        }
+        else
+        {
+            caseCoversAll = stmt.defaultCase != nullptr;
+        }
+
+        if (warnFourState && diagnostics)
+        {
+            std::string originSymbol = describeFileLocation(stmt.sourceRange.start());
+            diagnostics->warn(stmt.sourceRange.start(),
+                              "Case lowered with 4-state semantics; may be unsynthesizable "
+                              "(add default or full 2-state coverage)",
+                              std::move(originSymbol));
+        }
+
+        const bool baseUnconditional = isUnconditionalGuard(baseGuard);
+        pushCaseCoverage(baseUnconditional && caseCoversAll);
+
         for (const auto& item : stmt.items)
         {
-            bool usedCaseEq = false;
             ExprNodeId itemMatch =
                 buildCaseItemMatch(control, stmt.expr, stmt.condition, item.expressions,
-                                   stmt.sourceRange.start(), usedCaseEq);
-            if (usedCaseEq && !warnedCaseEq && diagnostics)
-            {
-                std::string originSymbol = describeFileLocation(stmt.sourceRange.start());
-                diagnostics->warn(stmt.sourceRange.start(),
-                                  "Case match lowered with case-equality; may be unsynthesizable",
-                                  std::move(originSymbol));
-                warnedCaseEq = true;
-            }
+                                   stmt.sourceRange.start(), mode);
             if (itemMatch == kInvalidPlanIndex)
             {
                 reportUnsupported(stmt, "Failed to lower case item match");
@@ -2214,6 +2242,7 @@ struct StmtLowererState {
             visitStatement(*stmt.defaultCase);
             popGuard();
         }
+        popCaseCoverage();
     }
 
     void handleNetInitializer(const slang::ast::NetSymbol& net)
@@ -2839,6 +2868,10 @@ private:
 
     void recordWriteIntent(WriteIntent intent)
     {
+        if (currentCaseCoverage())
+        {
+            intent.coversAllTwoState = true;
+        }
         lowering.writes.push_back(std::move(intent));
         LoweredStmt stmt;
         stmt.kind = LoweredStmtKind::Write;
@@ -5277,6 +5310,269 @@ private:
         return addNode(nullptr, std::move(concatNode));
     }
 
+    static constexpr int32_t kMaxTwoStateCaseCoverageWidth = 16;
+
+    int32_t caseControlWidth(const slang::ast::Expression& expr) const
+    {
+        if (!expr.type)
+        {
+            return 0;
+        }
+        uint64_t width = expr.type->getBitstreamWidth();
+        if (width == 0)
+        {
+            if (auto effective = expr.getEffectiveWidth())
+            {
+                width = *effective;
+            }
+        }
+        if (width == 0)
+        {
+            return 0;
+        }
+        const uint64_t maxValue =
+            static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                : static_cast<int32_t>(width);
+    }
+
+    bool isUnconditionalGuard(ExprNodeId guard) const
+    {
+        if (guard == kInvalidPlanIndex)
+        {
+            return true;
+        }
+        if (auto guardConst = evalConstInt(plan, lowering, guard))
+        {
+            return *guardConst != 0;
+        }
+        return false;
+    }
+
+    bool currentCaseCoverage() const
+    {
+        return !caseCoverageStack.empty() && caseCoverageStack.back();
+    }
+
+    void pushCaseCoverage(bool coversAll)
+    {
+        caseCoverageStack.push_back(coversAll);
+    }
+
+    void popCaseCoverage()
+    {
+        if (!caseCoverageStack.empty())
+        {
+            caseCoverageStack.pop_back();
+        }
+    }
+
+    std::optional<slang::SVInt> alignCaseItemValue(const slang::ast::Expression& controlExpr,
+                                                   const slang::SVInt& itemValue,
+                                                   slang::bitwidth_t width) const
+    {
+        if (width == 0)
+        {
+            return std::nullopt;
+        }
+        const bool controlSigned = controlExpr.type && controlExpr.type->isSigned();
+        const bool bothSigned = controlSigned && itemValue.isSigned();
+        slang::SVInt aligned = itemValue;
+        aligned.setSigned(bothSigned);
+        if (width > aligned.getBitWidth())
+        {
+            aligned = aligned.extend(width, bothSigned);
+        }
+        return aligned;
+    }
+
+    std::optional<slang::SVInt> buildCaseWildcardMaskValue(
+        const slang::SVInt& aligned,
+        slang::ast::CaseStatementCondition condition) const
+    {
+        const slang::bitwidth_t width = aligned.getBitWidth();
+        if (width == 0)
+        {
+            return std::nullopt;
+        }
+        std::vector<slang::logic_t> digits;
+        digits.reserve(width);
+        for (int32_t i = static_cast<int32_t>(width); i-- > 0;)
+        {
+            const slang::logic_t bit = aligned[i];
+            bool wildcard = false;
+            if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ)
+            {
+                wildcard = bit.isUnknown();
+            }
+            else
+            {
+                wildcard = exactlyEqual(bit, slang::logic_t::z);
+            }
+            digits.push_back(wildcard ? slang::logic_t(0) : slang::logic_t(1));
+        }
+
+        return slang::SVInt::fromDigits(width, slang::LiteralBase::Binary,
+                                        false, false, digits);
+    }
+
+    CaseTwoStateAnalysis analyzeCaseTwoState(const slang::ast::CaseStatement& stmt)
+    {
+        CaseTwoStateAnalysis info{};
+        info.hasDefault = stmt.defaultCase != nullptr;
+
+        if (stmt.condition == slang::ast::CaseStatementCondition::Inside)
+        {
+            return info;
+        }
+
+        const bool isWildcard =
+            stmt.condition == slang::ast::CaseStatementCondition::WildcardXOrZ ||
+            stmt.condition == slang::ast::CaseStatementCondition::WildcardJustZ;
+
+        slang::ast::EvalContext ctx(*plan.body);
+        if (isWildcard)
+        {
+            for (const auto& item : stmt.items)
+            {
+                for (const slang::ast::Expression* expr : item.expressions)
+                {
+                    if (!expr)
+                    {
+                        continue;
+                    }
+                    if (!evalConstantValue(*expr, ctx))
+                    {
+                        info.canLowerTwoState = false;
+                        break;
+                    }
+                }
+                if (!info.canLowerTwoState)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (info.hasDefault)
+        {
+            return info;
+        }
+
+        const int32_t controlWidth = caseControlWidth(stmt.expr);
+        if (controlWidth <= 0 || controlWidth > kMaxTwoStateCaseCoverageWidth)
+        {
+            return info;
+        }
+
+        struct CasePattern
+        {
+            uint64_t mask = 0;
+            uint64_t value = 0;
+        };
+        std::vector<CasePattern> patterns;
+        patterns.reserve(stmt.items.size());
+
+        const slang::bitwidth_t width =
+            static_cast<slang::bitwidth_t>(controlWidth);
+        for (const auto& item : stmt.items)
+        {
+            for (const slang::ast::Expression* expr : item.expressions)
+            {
+                if (!expr)
+                {
+                    continue;
+                }
+                std::optional<slang::SVInt> raw = evalConstantValue(*expr, ctx);
+                if (!raw)
+                {
+                    return info;
+                }
+                std::optional<slang::SVInt> alignedOpt =
+                    alignCaseItemValue(stmt.expr, *raw, width);
+                if (!alignedOpt)
+                {
+                    return info;
+                }
+                const slang::SVInt& aligned = *alignedOpt;
+
+                CasePattern pattern{};
+                if (!isWildcard)
+                {
+                    if (aligned.hasUnknown())
+                    {
+                        return info;
+                    }
+                    pattern.mask =
+                        width >= 64 ? std::numeric_limits<uint64_t>::max()
+                                    : ((1ULL << width) - 1ULL);
+                    uint64_t value = 0;
+                    for (int32_t i = 0; i < controlWidth; ++i)
+                    {
+                        if (exactlyEqual(aligned[i], slang::logic_t(true)))
+                        {
+                            value |= (1ULL << i);
+                        }
+                    }
+                    pattern.value = value & pattern.mask;
+                }
+                else
+                {
+                    uint64_t mask = 0;
+                    uint64_t value = 0;
+                    for (int32_t i = 0; i < controlWidth; ++i)
+                    {
+                        const slang::logic_t bit = aligned[i];
+                        const bool wildcard =
+                            stmt.condition ==
+                                    slang::ast::CaseStatementCondition::WildcardXOrZ
+                                ? bit.isUnknown()
+                                : exactlyEqual(bit, slang::logic_t::z);
+                        if (wildcard)
+                        {
+                            continue;
+                        }
+                        if (bit.isUnknown())
+                        {
+                            return info;
+                        }
+                        mask |= (1ULL << i);
+                        if (exactlyEqual(bit, slang::logic_t(true)))
+                        {
+                            value |= (1ULL << i);
+                        }
+                    }
+                    pattern.mask = mask;
+                    pattern.value = value & mask;
+                }
+                patterns.push_back(pattern);
+            }
+        }
+
+        if (patterns.empty())
+        {
+            return info;
+        }
+
+        const uint64_t total = 1ULL << controlWidth;
+        std::vector<bool> covered(total, false);
+        for (uint64_t value = 0; value < total; ++value)
+        {
+            for (const auto& pattern : patterns)
+            {
+                if ((value & pattern.mask) == pattern.value)
+                {
+                    covered[value] = true;
+                    break;
+                }
+            }
+        }
+        info.twoStateComplete =
+            std::all_of(covered.begin(), covered.end(),
+                        [](bool value) { return value; });
+        return info;
+    }
+
     struct CaseMaskInfo {
         ExprNodeId mask = kInvalidPlanIndex;
     };
@@ -5304,35 +5600,19 @@ private:
             return info;
         }
 
-        const bool controlSigned = controlExpr.type->isSigned();
-        const bool bothSigned = controlSigned && itemValue->isSigned();
-        slang::SVInt aligned = *itemValue;
-        aligned.setSigned(bothSigned);
-        if (width > aligned.getBitWidth())
+        std::optional<slang::SVInt> aligned =
+            alignCaseItemValue(controlExpr, *itemValue, width);
+        if (!aligned)
         {
-            aligned = aligned.extend(width, bothSigned);
+            return info;
         }
-
-        std::vector<slang::logic_t> digits;
-        digits.reserve(width);
-        for (int32_t i = static_cast<int32_t>(width); i-- > 0;)
+        std::optional<slang::SVInt> mask =
+            buildCaseWildcardMaskValue(*aligned, condition);
+        if (!mask)
         {
-            const slang::logic_t bit = aligned[i];
-            bool wildcard = false;
-            if (condition == slang::ast::CaseStatementCondition::WildcardXOrZ)
-            {
-                wildcard = bit.isUnknown();
-            }
-            else
-            {
-                wildcard = exactlyEqual(bit, slang::logic_t::z);
-            }
-            digits.push_back(wildcard ? slang::logic_t(0) : slang::logic_t(1));
+            return info;
         }
-
-        slang::SVInt mask = slang::SVInt::fromDigits(width, slang::LiteralBase::Binary,
-                                                     false, false, digits);
-        std::string literal = mask.toString(slang::LiteralBase::Binary, true);
+        std::string literal = mask->toString(slang::LiteralBase::Binary, true);
         info.mask = addConstantLiteral(std::move(literal), location);
         return info;
     }
@@ -5463,34 +5743,13 @@ private:
                                   slang::ast::CaseStatementCondition condition,
                                   std::span<const slang::ast::Expression* const> items,
                                   slang::SourceLocation location,
-                                  bool& usedCaseEq)
+                                  CaseLoweringMode mode)
     {
         if (control == kInvalidPlanIndex)
         {
             return kInvalidPlanIndex;
         }
-        auto controlWidth = [&]() -> int32_t {
-            if (!controlExpr.type)
-            {
-                return 0;
-            }
-            uint64_t width = controlExpr.type->getBitstreamWidth();
-            if (width == 0)
-            {
-                if (auto effective = controlExpr.getEffectiveWidth())
-                {
-                    width = *effective;
-                }
-            }
-            if (width == 0)
-            {
-                return 0;
-            }
-            const uint64_t maxValue =
-                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
-            return width > maxValue ? std::numeric_limits<int32_t>::max()
-                                    : static_cast<int32_t>(width);
-        }();
+        const int32_t controlWidth = caseControlWidth(controlExpr);
         if (condition == slang::ast::CaseStatementCondition::Inside)
         {
             ExprNodeId combined = kInvalidPlanIndex;
@@ -5518,7 +5777,6 @@ private:
             }
             return combined;
         }
-        const bool controlTwoState = isTwoStateExpr(controlExpr);
         ExprNodeId combined = kInvalidPlanIndex;
         for (const slang::ast::Expression* expr : items)
         {
@@ -5552,8 +5810,9 @@ private:
                 {
                     reportUnsupported(*expr,
                                       "Wildcard case item not constant; fallback to case equality");
-                    term = makeCaseEq(control, itemId, location);
-                    usedCaseEq = true;
+                    term = mode == CaseLoweringMode::FourState
+                               ? makeCaseEq(control, itemId, location)
+                               : makeEq(control, itemId, location);
                 }
                 else
                 {
@@ -5563,29 +5822,18 @@ private:
                     ExprNodeId maskedItem =
                         makeOperation(grh::ir::OperationKind::kAnd, {itemId, maskInfo.mask},
                                       location);
-                    term = makeEq(maskedControl, maskedItem, location);
+                    const grh::ir::OperationKind eqOp =
+                        mode == CaseLoweringMode::FourState
+                            ? grh::ir::OperationKind::kCaseEq
+                            : grh::ir::OperationKind::kEq;
+                    term = makeOperation(eqOp, {maskedControl, maskedItem}, location);
                 }
             }
             else
             {
-                bool preferSynth = false;
-                if (controlTwoState)
-                {
-                    slang::ast::EvalContext ctx(*plan.body);
-                    if (auto value = evalConstantValue(*expr, ctx))
-                    {
-                        preferSynth = !value->hasUnknown();
-                    }
-                }
-                if (preferSynth)
-                {
-                    term = makeEq(control, itemId, location);
-                }
-                else
-                {
-                    term = makeCaseEq(control, itemId, location);
-                    usedCaseEq = true;
-                }
+                term = mode == CaseLoweringMode::FourState
+                           ? makeCaseEq(control, itemId, location)
+                           : makeEq(control, itemId, location);
             }
 
             if (combined == kInvalidPlanIndex)
@@ -8502,6 +8750,11 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             if (!write.slices.empty())
             {
                 hasSlices = true;
+            }
+            if (write.coversAllTwoState && write.slices.empty())
+            {
+                hasUnconditional = true;
+                continue;
             }
             if (write.guard == kInvalidPlanIndex)
             {

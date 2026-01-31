@@ -32,6 +32,22 @@ module write_back_comb(
     assign one = 1'b1;
 endmodule
 
+module write_back_case_comb(
+    input logic [1:0] sel,
+    input logic a,
+    input logic b,
+    input logic c,
+    output logic y
+);
+    always_comb begin
+        case (sel)
+            2'b00: y = a;
+            2'b01: y = b;
+            default: y = c;
+        endcase
+    end
+endmodule
+
 module write_back_bad_seq(
     input logic d,
     output logic q

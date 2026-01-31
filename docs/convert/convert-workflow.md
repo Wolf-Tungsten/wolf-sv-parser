@@ -204,8 +204,9 @@ if (a) y = b; else y = c;
 
 ##### 2.2.3 分支语句（case / casez / casex / case inside）
 - item guard = `base && match && !priorMatch`；default guard = `base && !priorMatch`。  
-- 普通 `case`：2-state + 常量无 X/Z -> `kEq`；否则回退 `kCaseEq` 并 warning。  
-- `casez/casex`：常量 item 生成 mask，用 `(control & mask) == (item & mask)`。  
+- `case/casez/casex`：  
+  - 先按二值逻辑评估分支覆盖：若二值覆盖完整或存在 default -> 使用二值比较（`kEq` / mask+`kEq`），并标记为组合完整覆盖。  
+  - 二值覆盖不完整或无法按二值降低（例如 casez/casex item 非常量） -> 使用 `kCaseEq`（或 mask+`kCaseEq`）保留四值语义，并给出 warning。  
 - `case inside`：  
   - `ValueRange`：`[a:b]` / `[a +/- b]` / `[a +%- b]` 按范围匹配公式生成。  
   - 普通表达式：integral -> `kWildcardEq`，否则 `kEq`。  
@@ -295,7 +296,7 @@ endgenerate
 - 输出：若实例化，等价于一次 ContinuousAssign 入口处理。  
 
 ### 4. 写回意图落地
-- 形态：`WriteIntent{target, slices, value, guard, domain, isNonBlocking, location}`（`slices` 支持 member select）。  
+- 形态：`WriteIntent{target, slices, value, guard, domain, isNonBlocking, coversAllTwoState, location}`（`slices` 支持 member select）。  
 - `guard = kInvalidPlanIndex` 表示无显式 guard。  
 代码位置：`StmtLowererState::handleAssignment`。  
 
@@ -308,6 +309,8 @@ endgenerate
     不再强制引入 `oldValue` 兜底，避免组合写回生成自引用 MUX。
   - 组合域若不存在无条件写回（guard 恒真），WriteBack 会将该组合组提升为 latch 语义，
     由 `updateCond` 负责保持旧值。
+  - 若写回来自二值覆盖完整或带 default 的 case 且处于无条件 guard 下，会视为覆盖完整，
+    保持组合域不降为 latch。
   - 对 LHS 带 slices 的写回执行 read/modify/write：
     - 静态 bit/range/member select：拆分为 `kSliceDynamic` + `kConcat` 组合的新值。
     - 动态 bit/part-select：生成 mask/shift 组合并保留诊断。

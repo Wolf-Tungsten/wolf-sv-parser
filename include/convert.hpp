@@ -369,6 +369,7 @@ struct WriteIntent {
     ExprNodeId guard = kInvalidPlanIndex;
     ControlDomain domain = ControlDomain::Unknown;
     bool isNonBlocking = false;
+    bool coversAllTwoState = false;
     slang::SourceLocation location{};
 };
 

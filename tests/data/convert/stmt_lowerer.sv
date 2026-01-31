@@ -51,6 +51,20 @@ module stmt_lowerer_case_stmt(
     end
 endmodule
 
+module stmt_lowerer_case_incomplete_stmt(
+    input logic [1:0] sel,
+    input logic a,
+    input logic b,
+    output logic y
+);
+    always_comb begin
+        case (sel)
+            2'b00: y = a;
+            2'b01: y = b;
+        endcase
+    end
+endmodule
+
 module stmt_lowerer_casez_stmt(
     input logic [1:0] sel,
     input logic a,
