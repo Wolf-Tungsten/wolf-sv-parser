@@ -205,28 +205,6 @@ target_link_libraries(transform-const-fold
 
 register_test_exe(transform-const-fold)
 
-add_executable(transform-const-inline
-    tests/transform/test_const_inline_pass.cpp
-)
-
-target_link_libraries(transform-const-inline
-    PRIVATE
-        transform
-)
-
-register_test_exe(transform-const-inline)
-
-add_executable(transform-output-assign-inline
-    tests/transform/test_output_assign_inline_pass.cpp
-)
-
-target_link_libraries(transform-output-assign-inline
-    PRIVATE
-        transform
-)
-
-register_test_exe(transform-output-assign-inline)
-
 add_executable(transform-dead-code-elim
     tests/transform/test_dead_code_elim_pass.cpp
 )

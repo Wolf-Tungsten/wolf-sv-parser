@@ -45,6 +45,24 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
+------
+
+## STEP 0044 - Transform pass 合并与冗余清理
+
+目标：
+- 合并 `const_inline`/`output_assign_inline`/`redundant_elim` 为单次遍历的 peephole pass
+- 清理旧 pass 与测试目标，减少编译与遍历开销
+
+实施：
+- `RedundantElimPass` 承接常量输出内联、输出端口 assign 内联、单输入 concat/assign 链与 NOT/XOR 折叠
+- 移除 `const_inline`/`output_assign_inline` 的源码、头文件与测试目标
+- Transform pipeline 仅保留 `const_fold -> redundant_elim -> dead_code_elim -> stats`
+
+测试：
+- HDLBits 全量测试（用户执行）
+
+完成情况：已完成
+
 ## STEP 0002 - 制定 Convert 新架构与工作流方案
 
 目标：
