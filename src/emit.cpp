@@ -2118,6 +2118,135 @@ namespace grh::emit
                 latchBlocks.emplace_back(std::move(stmt), sourceOp);
             };
 
+            auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                const int64_t width = graph->getValue(valueId).width();
+                const std::string name = valueName(valueId);
+                if (width == 1)
+                {
+                    return name;
+                }
+                return "(|" + name + ")";
+            };
+            auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                const int64_t width = value.width();
+                const std::string name = valueName(valueId);
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                if (value.isSigned())
+                {
+                    return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            };
+            auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    return false;
+                }
+                auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
+                if (!constValue)
+                {
+                    return false;
+                }
+                std::string text = *constValue;
+                text.erase(std::remove_if(text.begin(), text.end(),
+                                          [](unsigned char ch)
+                                          { return std::isspace(ch) || ch == '_'; }),
+                           text.end());
+                if (text == "1")
+                {
+                    return true;
+                }
+                if (text.size() >= 3 && text.back() == '1')
+                {
+                    const std::size_t quote = text.find('\'');
+                    if (quote != std::string::npos && quote + 1 < text.size())
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            auto isLogicNotOf = [&](grh::ir::ValueId maybeNot,
+                                    grh::ir::ValueId operand) -> bool
+            {
+                if (!maybeNot.valid() || !operand.valid())
+                {
+                    return false;
+                }
+                const grh::ir::OperationId defOpId =
+                    graph->getValue(maybeNot).definingOp();
+                if (!defOpId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kLogicNot &&
+                    defOp.kind() != grh::ir::OperationKind::kNot)
+                {
+                    return false;
+                }
+                const auto &ops = defOp.operands();
+                return !ops.empty() && ops.front() == operand;
+            };
+            auto isAlwaysTrue = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (isConstOne(valueId))
+                {
+                    return true;
+                }
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::OperationId defOpId =
+                    graph->getValue(valueId).definingOp();
+                if (!defOpId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kLogicOr)
+                {
+                    return false;
+                }
+                const auto &ops = defOp.operands();
+                for (std::size_t i = 0; i < ops.size(); ++i)
+                {
+                    for (std::size_t j = i + 1; j < ops.size(); ++j)
+                    {
+                        if (isLogicNotOf(ops[i], ops[j]) ||
+                            isLogicNotOf(ops[j], ops[i]))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
             auto markPortAsRegIfNeeded = [&](grh::ir::ValueId valueId)
             {
                 const std::string name = valueName(valueId);
@@ -2289,11 +2418,6 @@ namespace grh::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::ir::OperationKind::kAdd:
-                case grh::ir::OperationKind::kSub:
-                case grh::ir::OperationKind::kMul:
-                case grh::ir::OperationKind::kDiv:
-                case grh::ir::OperationKind::kMod:
                 case grh::ir::OperationKind::kEq:
                 case grh::ir::OperationKind::kNe:
                 case grh::ir::OperationKind::kCaseEq:
@@ -2304,12 +2428,30 @@ namespace grh::emit
                 case grh::ir::OperationKind::kLe:
                 case grh::ir::OperationKind::kGt:
                 case grh::ir::OperationKind::kGe:
+                {
+                    if (operands.size() < 2 || results.empty())
+                    {
+                        reportError("Binary operation missing operands or results", opContext);
+                        break;
+                    }
+                    int64_t resultWidth =
+                        std::max(graph->getValue(operands[0]).width(),
+                                 graph->getValue(operands[1]).width());
+                    const std::string tok = binOpToken(op.kind());
+                    const std::string lhs = resultWidth > 0
+                                                ? extendOperand(operands[0], resultWidth)
+                                                : valueName(operands[0]);
+                    const std::string rhs = resultWidth > 0
+                                                ? extendOperand(operands[1], resultWidth)
+                                                : valueName(operands[1]);
+                    addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";", opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
                 case grh::ir::OperationKind::kAnd:
                 case grh::ir::OperationKind::kOr:
                 case grh::ir::OperationKind::kXor:
                 case grh::ir::OperationKind::kXnor:
-                case grh::ir::OperationKind::kLogicAnd:
-                case grh::ir::OperationKind::kLogicOr:
                 case grh::ir::OperationKind::kShl:
                 case grh::ir::OperationKind::kLShr:
                 case grh::ir::OperationKind::kAShr:
@@ -2326,8 +2468,47 @@ namespace grh::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
+                case grh::ir::OperationKind::kAdd:
+                case grh::ir::OperationKind::kSub:
+                case grh::ir::OperationKind::kMul:
+                case grh::ir::OperationKind::kDiv:
+                case grh::ir::OperationKind::kMod:
+                {
+                    if (operands.size() < 2 || results.empty())
+                    {
+                        reportError("Binary operation missing operands or results", opContext);
+                        break;
+                    }
+                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    if (resultWidth <= 0)
+                    {
+                        resultWidth = std::max(graph->getValue(operands[0]).width(),
+                                               graph->getValue(operands[1]).width());
+                    }
+                    const std::string tok = binOpToken(op.kind());
+                    addAssign("assign " + valueName(results[0]) + " = " +
+                                  extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                                  extendOperand(operands[1], resultWidth) + ";",
+                              opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
+                case grh::ir::OperationKind::kLogicAnd:
+                case grh::ir::OperationKind::kLogicOr:
+                {
+                    if (operands.size() < 2 || results.empty())
+                    {
+                        reportError("Binary operation missing operands or results", opContext);
+                        break;
+                    }
+                    const std::string tok = binOpToken(op.kind());
+                    addAssign("assign " + valueName(results[0]) + " = " + logicalOperand(operands[0]) + " " + tok +
+                                  " " + logicalOperand(operands[1]) + ";",
+                              opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
                 case grh::ir::OperationKind::kNot:
-                case grh::ir::OperationKind::kLogicNot:
                 case grh::ir::OperationKind::kReduceAnd:
                 case grh::ir::OperationKind::kReduceOr:
                 case grh::ir::OperationKind::kReduceXor:
@@ -2345,6 +2526,17 @@ namespace grh::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
+                case grh::ir::OperationKind::kLogicNot:
+                {
+                    if (operands.empty() || results.empty())
+                    {
+                        reportError("Unary operation missing operands or results", opContext);
+                        break;
+                    }
+                    addAssign("assign " + valueName(results[0]) + " = !" + logicalOperand(operands[0]) + ";", opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
                 case grh::ir::OperationKind::kMux:
                 {
                     if (operands.size() < 3 || results.empty())
@@ -2352,8 +2544,11 @@ namespace grh::emit
                         reportError("kMux missing operands or results", opContext);
                         break;
                     }
+                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    const std::string lhs = extendOperand(operands[1], resultWidth);
+                    const std::string rhs = extendOperand(operands[2], resultWidth);
                     addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + " ? " +
-                                  valueName(operands[1]) + " : " + valueName(operands[2]) + ";",
+                                  lhs + " : " + rhs + ";",
                               opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2365,15 +2560,23 @@ namespace grh::emit
                         reportError("kAssign missing operands or results", opContext);
                         break;
                     }
-                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    const std::string rhs = extendOperand(operands[0], resultWidth);
+                    addAssign("assign " + valueName(results[0]) + " = " + rhs + ";", opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
                 case grh::ir::OperationKind::kConcat:
                 {
-                    if (operands.size() < 2 || results.empty())
+                    if (operands.empty() || results.empty())
                     {
                         reportError("kConcat missing operands or results", opContext);
+                        break;
+                    }
+                    if (operands.size() == 1)
+                    {
+                        addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                        ensureWireDecl(results[0]);
                         break;
                     }
                     std::ostringstream expr;
@@ -2565,15 +2768,23 @@ namespace grh::emit
                         addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                     }
 
-                    std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                    appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
-                    appendIndented(stmt, 2, "end");
-
                     std::ostringstream block;
-                    block << "  always_latch begin\n";
-                    block << stmt.str();
-                    block << "  end";
+                    if (isAlwaysTrue(updateCond))
+                    {
+                        appendIndented(block, 1, "always @* begin");
+                        appendIndented(block, 2, regName + " = " + valueName(nextValue) + ";");
+                        appendIndented(block, 1, "end");
+                    }
+                    else
+                    {
+                        std::ostringstream stmt;
+                        appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                        appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                        appendIndented(stmt, 2, "end");
+                        block << "  always_latch begin\n";
+                        block << stmt.str();
+                        block << "  end";
+                    }
                     addLatchBlock(block.str(), opId);
                     break;
                 }
@@ -3723,6 +3934,130 @@ namespace grh::emit
             latchBlocks.emplace_back(std::move(stmt), sourceOp);
         };
 
+        auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            const int64_t width = view.valueWidth(valueId);
+            const std::string &name = valueName(valueId);
+            if (width == 1)
+            {
+                return name;
+            }
+            return "(|" + name + ")";
+        };
+        auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+        {
+            const int64_t width = view.valueWidth(valueId);
+            const std::string &name = valueName(valueId);
+            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+            {
+                return name;
+            }
+            const int64_t diff = targetWidth - width;
+            if (diff <= 0)
+            {
+                return name;
+            }
+            if (view.valueSigned(valueId))
+            {
+                return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+            }
+            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+        };
+        auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            if (view.opKind(defOpId) != grh::ir::OperationKind::kConstant)
+            {
+                return false;
+            }
+            auto constValue = getAttribute<std::string>(view, defOpId, "constValue");
+            if (!constValue)
+            {
+                return false;
+            }
+            std::string text = *constValue;
+            text.erase(std::remove_if(text.begin(), text.end(),
+                                      [](unsigned char ch)
+                                      { return std::isspace(ch) || ch == '_'; }),
+                       text.end());
+            if (text == "1")
+            {
+                return true;
+            }
+            if (text.size() >= 3 && text.back() == '1')
+            {
+                const std::size_t quote = text.find('\'');
+                if (quote != std::string::npos && quote + 1 < text.size())
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        auto isLogicNotOf = [&](grh::ir::ValueId maybeNot,
+                                grh::ir::ValueId operand) -> bool
+        {
+            if (!maybeNot.valid() || !operand.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(maybeNot);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationKind kind = view.opKind(defOpId);
+            if (kind != grh::ir::OperationKind::kLogicNot &&
+                kind != grh::ir::OperationKind::kNot)
+            {
+                return false;
+            }
+            const auto ops = view.opOperands(defOpId);
+            return !ops.empty() && ops.front() == operand;
+        };
+        auto isAlwaysTrue = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (isConstOne(valueId))
+            {
+                return true;
+            }
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            if (view.opKind(defOpId) != grh::ir::OperationKind::kLogicOr)
+            {
+                return false;
+            }
+            const auto ops = view.opOperands(defOpId);
+            for (std::size_t i = 0; i < ops.size(); ++i)
+            {
+                for (std::size_t j = i + 1; j < ops.size(); ++j)
+                {
+                    const grh::ir::ValueId a = ops[i];
+                    const grh::ir::ValueId b = ops[j];
+                    if (isLogicNotOf(a, b) || isLogicNotOf(b, a))
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
         auto markPortAsRegIfNeeded = [&](grh::ir::ValueId value)
         {
             const std::string &name = valueName(value);
@@ -3883,11 +4218,6 @@ namespace grh::emit
                 ensureWireDecl(results[0]);
                 break;
             }
-            case grh::ir::OperationKind::kAdd:
-            case grh::ir::OperationKind::kSub:
-            case grh::ir::OperationKind::kMul:
-            case grh::ir::OperationKind::kDiv:
-            case grh::ir::OperationKind::kMod:
             case grh::ir::OperationKind::kEq:
             case grh::ir::OperationKind::kNe:
             case grh::ir::OperationKind::kCaseEq:
@@ -3898,12 +4228,31 @@ namespace grh::emit
             case grh::ir::OperationKind::kLe:
             case grh::ir::OperationKind::kGt:
             case grh::ir::OperationKind::kGe:
+            {
+                if (operands.size() < 2 || results.empty())
+                {
+                    reportError("Binary operation missing operands or results", context);
+                    break;
+                }
+                int64_t resultWidth =
+                    std::max(view.valueWidth(operands[0]),
+                             view.valueWidth(operands[1]));
+                const std::string tok = binOpToken(kind);
+                const std::string lhs = resultWidth > 0
+                                            ? extendOperand(operands[0], resultWidth)
+                                            : valueName(operands[0]);
+                const std::string rhs = resultWidth > 0
+                                            ? extendOperand(operands[1], resultWidth)
+                                            : valueName(operands[1]);
+                addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";",
+                          opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
             case grh::ir::OperationKind::kAnd:
             case grh::ir::OperationKind::kOr:
             case grh::ir::OperationKind::kXor:
             case grh::ir::OperationKind::kXnor:
-            case grh::ir::OperationKind::kLogicAnd:
-            case grh::ir::OperationKind::kLogicOr:
             case grh::ir::OperationKind::kShl:
             case grh::ir::OperationKind::kLShr:
             case grh::ir::OperationKind::kAShr:
@@ -3920,8 +4269,47 @@ namespace grh::emit
                 ensureWireDecl(results[0]);
                 break;
             }
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+            {
+                if (operands.size() < 2 || results.empty())
+                {
+                    reportError("Binary operation missing operands or results", context);
+                    break;
+                }
+                int64_t resultWidth = view.valueWidth(results[0]);
+                if (resultWidth <= 0)
+                {
+                    resultWidth = std::max(view.valueWidth(operands[0]),
+                                           view.valueWidth(operands[1]));
+                }
+                const std::string tok = binOpToken(kind);
+                addAssign("assign " + valueName(results[0]) + " = " +
+                              extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                              extendOperand(operands[1], resultWidth) + ";",
+                          opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            {
+                if (operands.size() < 2 || results.empty())
+                {
+                    reportError("Binary operation missing operands or results", context);
+                    break;
+                }
+                const std::string tok = binOpToken(kind);
+                addAssign("assign " + valueName(results[0]) + " = " + logicalOperand(operands[0]) +
+                              " " + tok + " " + logicalOperand(operands[1]) + ";",
+                          opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
             case grh::ir::OperationKind::kNot:
-            case grh::ir::OperationKind::kLogicNot:
             case grh::ir::OperationKind::kReduceAnd:
             case grh::ir::OperationKind::kReduceOr:
             case grh::ir::OperationKind::kReduceXor:
@@ -3939,6 +4327,17 @@ namespace grh::emit
                 ensureWireDecl(results[0]);
                 break;
             }
+            case grh::ir::OperationKind::kLogicNot:
+            {
+                if (operands.empty() || results.empty())
+                {
+                    reportError("Unary operation missing operands or results", context);
+                    break;
+                }
+                addAssign("assign " + valueName(results[0]) + " = !" + logicalOperand(operands[0]) + ";", opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
             case grh::ir::OperationKind::kMux:
             {
                 if (operands.size() < 3 || results.empty())
@@ -3946,8 +4345,11 @@ namespace grh::emit
                     reportError("kMux missing operands or results", context);
                     break;
                 }
+                int64_t resultWidth = view.valueWidth(results[0]);
+                const std::string lhs = extendOperand(operands[1], resultWidth);
+                const std::string rhs = extendOperand(operands[2], resultWidth);
                 addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) +
-                              " ? " + valueName(operands[1]) + " : " + valueName(operands[2]) + ";",
+                              " ? " + lhs + " : " + rhs + ";",
                           opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -3959,15 +4361,23 @@ namespace grh::emit
                     reportError("kAssign missing operands or results", context);
                     break;
                 }
-                addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                int64_t resultWidth = view.valueWidth(results[0]);
+                const std::string rhs = extendOperand(operands[0], resultWidth);
+                addAssign("assign " + valueName(results[0]) + " = " + rhs + ";", opId);
                 ensureWireDecl(results[0]);
                 break;
             }
             case grh::ir::OperationKind::kConcat:
             {
-                if (operands.size() < 2 || results.empty())
+                if (operands.empty() || results.empty())
                 {
                     reportError("kConcat missing operands or results", context);
+                    break;
+                }
+                if (operands.size() == 1)
+                {
+                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                    ensureWireDecl(results[0]);
                     break;
                 }
                 std::ostringstream expr;
@@ -4163,15 +4573,23 @@ namespace grh::emit
                     addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
                 }
 
-                std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
-                appendIndented(stmt, 2, "end");
-
                 std::ostringstream block;
-                block << "  always_latch begin\n";
-                block << stmt.str();
-                block << "  end";
+                if (isAlwaysTrue(updateCond))
+                {
+                    appendIndented(block, 1, "always @* begin");
+                    appendIndented(block, 2, regName + " = " + valueName(nextValue) + ";");
+                    appendIndented(block, 1, "end");
+                }
+                else
+                {
+                    std::ostringstream stmt;
+                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                    appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                    appendIndented(stmt, 2, "end");
+                    block << "  always_latch begin\n";
+                    block << stmt.str();
+                    block << "  end";
+                }
                 addLatchBlock(block.str(), opId);
                 break;
             }

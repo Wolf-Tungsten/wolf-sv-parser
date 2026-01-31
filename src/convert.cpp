@@ -1116,6 +1116,50 @@ struct ExprLowererState {
             return it->second;
         }
 
+        auto adjustPackedIndex =
+            [&](const slang::ast::Type* baseType, ExprNodeId index,
+                slang::SourceLocation location) -> ExprNodeId {
+            if (!baseType || index == kInvalidPlanIndex)
+            {
+                return index;
+            }
+            const auto& canonical = baseType->getCanonicalType();
+            if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
+            {
+                return index;
+            }
+            const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+            const int64_t offset =
+                std::min<int64_t>(packed.range.left, packed.range.right);
+            if (offset == 0)
+            {
+                return index;
+            }
+            int32_t widthHint = 0;
+            if (index < lowering.values.size())
+            {
+                widthHint = lowering.values[index].widthHint;
+            }
+            if (widthHint <= 0)
+            {
+                widthHint = 32;
+            }
+            ExprNode constNode;
+            constNode.kind = ExprNodeKind::Constant;
+            constNode.literal = std::to_string(offset);
+            constNode.location = location;
+            constNode.widthHint = widthHint;
+            ExprNodeId offsetId = addSyntheticNode(std::move(constNode));
+            ExprNode subNode;
+            subNode.kind = ExprNodeKind::Operation;
+            subNode.op = grh::ir::OperationKind::kSub;
+            subNode.operands = {index, offsetId};
+            subNode.location = location;
+            subNode.tempSymbol = makeTempSymbol();
+            subNode.widthHint = widthHint;
+            return addSyntheticNode(std::move(subNode));
+        };
+
         auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
             -> std::optional<std::string> {
             slang::ConstantValue value = param.getValue();
@@ -1156,6 +1200,11 @@ struct ExprLowererState {
             }
         }
 
+        auto isProceduralLocal = [](const slang::ast::Symbol& symbol) -> bool {
+            const slang::ast::Scope* scope = symbol.getParentScope();
+            return scope && scope->isProceduralContext();
+        };
+
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
             if (const auto* param =
@@ -1176,7 +1225,7 @@ struct ExprLowererState {
             {
                 node.symbol = plan.symbolTable.intern(named->symbol.name);
             }
-            if (!node.symbol.valid())
+            if (!node.symbol.valid() && !isProceduralLocal(named->symbol))
             {
                 reportUnsupported(expr, "Unknown symbol in expression");
             }
@@ -1202,7 +1251,7 @@ struct ExprLowererState {
             {
                 node.symbol = plan.symbolTable.intern(hier->symbol.name);
             }
-            if (!node.symbol.valid())
+            if (!node.symbol.valid() && !isProceduralLocal(hier->symbol))
             {
                 reportUnsupported(expr, "Unknown hierarchical symbol in expression");
             }
@@ -1282,6 +1331,21 @@ struct ExprLowererState {
             }
             const slang::ast::Expression& condExpr = *cond->conditions.front().expr;
             ExprNodeId condId = lowerExpression(condExpr);
+            if (condId != kInvalidPlanIndex && condId < lowering.values.size())
+            {
+                const int32_t condWidth = lowering.values[condId].widthHint;
+                if (condWidth > 1)
+                {
+                    ExprNode logicNode;
+                    logicNode.kind = ExprNodeKind::Operation;
+                    logicNode.op = grh::ir::OperationKind::kReduceOr;
+                    logicNode.operands = {condId};
+                    logicNode.location = condExpr.sourceRange.start();
+                    logicNode.tempSymbol = makeTempSymbol();
+                    logicNode.widthHint = 1;
+                    condId = addSyntheticNode(std::move(logicNode));
+                }
+            }
             ExprNodeId lhs = lowerExpression(cond->left());
             ExprNodeId rhs = lowerExpression(cond->right());
             if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
@@ -1340,6 +1404,8 @@ struct ExprLowererState {
             {
                 return kInvalidPlanIndex;
             }
+            index = adjustPackedIndex(select->value().type, index,
+                                      select->sourceRange.start());
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
             node.operands = {value, index};
@@ -1603,6 +1669,8 @@ struct StmtLowererState {
     LoweringPlan& lowering;
     std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
     std::unordered_map<const slang::ast::AssignmentExpression*, ExprNodeId> assignmentRoots;
+    std::unordered_set<const slang::ast::AssignmentExpression*> loopLocalAssignments;
+    int32_t widthContext = 0;
     uint32_t maxLoopIterations = 0;
     uint32_t nextTemp = 0;
     uint32_t nextDpiResult = 0;
@@ -1613,12 +1681,44 @@ struct StmtLowererState {
     struct LoopFlowContext {
         ExprNodeId loopAlive = kInvalidPlanIndex;
     };
+    struct LoopLocalScope {
+        StmtLowererState& state;
+        explicit LoopLocalScope(StmtLowererState& state,
+                                std::vector<const slang::ast::ValueSymbol*> vars)
+            : state(state)
+        {
+            state.pushLoopLocals(std::move(vars));
+        }
+        ~LoopLocalScope()
+        {
+            state.popLoopLocals();
+        }
+    };
+    struct WidthContextScope {
+        StmtLowererState& state;
+        int32_t saved = 0;
+
+        WidthContextScope(StmtLowererState& state, int32_t width)
+            : state(state), saved(state.widthContext)
+        {
+            state.widthContext = width;
+        }
+
+        ~WidthContextScope()
+        {
+            state.widthContext = saved;
+        }
+    };
     struct EventContext {
         bool hasTiming = false;
         bool edgeSensitive = false;
         std::vector<EventEdge> edges;
         std::vector<ExprNodeId> operands;
     };
+    std::vector<std::unordered_map<const slang::ast::ValueSymbol*, int64_t>>
+        loopLocalStack;
+    std::vector<std::vector<const slang::ast::ValueSymbol*>> loopVarStack;
+    std::vector<std::unordered_map<PlanIndex, ExprNodeId>> proceduralValueStack;
     struct LValueTarget {
         PlanSymbolId target;
         std::vector<WriteSlice> slices;
@@ -1750,12 +1850,26 @@ struct StmtLowererState {
             scanExpression(exprStmt->expr);
             return;
         }
+        if (const auto* varDecl = stmt.as_if<slang::ast::VariableDeclStatement>())
+        {
+            if (const slang::ast::Expression* init = varDecl->symbol.getInitializer())
+            {
+                scanExpression(*init);
+            }
+            return;
+        }
         if (const auto* procAssign = stmt.as_if<slang::ast::ProceduralAssignStatement>())
         {
             scanExpression(procAssign->assignment);
             return;
         }
-        if (const auto* forLoop = stmt.as_if<slang::ast::ForLoopStatement>())
+        const slang::ast::ForLoopStatement* forLoop =
+            stmt.as_if<slang::ast::ForLoopStatement>();
+        if (!forLoop && stmt.kind == slang::ast::StatementKind::ForLoop)
+        {
+            forLoop = &static_cast<const slang::ast::ForLoopStatement&>(stmt);
+        }
+        if (forLoop)
         {
             scanForLoopControl(*forLoop);
             const bool hasLoopControl = containsLoopControl(forLoop->body);
@@ -1935,18 +2049,83 @@ struct StmtLowererState {
 
         ExprNodeId baseGuard = currentPathGuard();
         ExprNodeId trueGuard = combineGuard(baseGuard, combinedCond, stmt.sourceRange.start());
-        pushGuard(trueGuard);
-        visitStatement(stmt.ifTrue);
-        popGuard();
+        if (!hasProceduralValues())
+        {
+            pushGuard(trueGuard);
+            visitStatement(stmt.ifTrue);
+            popGuard();
 
+            if (stmt.ifFalse)
+            {
+                ExprNodeId notCond = makeLogicNot(combinedCond, stmt.sourceRange.start());
+                ExprNodeId falseGuard = combineGuard(baseGuard, notCond, stmt.sourceRange.start());
+                pushGuard(falseGuard);
+                visitStatement(*stmt.ifFalse);
+                popGuard();
+            }
+            return;
+        }
+
+        std::unordered_map<PlanIndex, ExprNodeId> baseValues = proceduralValueStack.back();
+        auto runBranch = [&](ExprNodeId guard, const slang::ast::Statement& branch)
+            -> std::unordered_map<PlanIndex, ExprNodeId> {
+            proceduralValueStack.back() = baseValues;
+            pushGuard(guard);
+            visitStatement(branch);
+            popGuard();
+            return proceduralValueStack.back();
+        };
+
+        auto getValue = [&](const std::unordered_map<PlanIndex, ExprNodeId>& values,
+                            PlanIndex index) -> ExprNodeId {
+            auto it = values.find(index);
+            if (it != values.end())
+            {
+                return it->second;
+            }
+            ExprNode node;
+            node.kind = ExprNodeKind::Symbol;
+            node.symbol = PlanSymbolId{index};
+            node.location = stmt.sourceRange.start();
+            return addNode(nullptr, std::move(node));
+        };
+
+        std::unordered_map<PlanIndex, ExprNodeId> trueValues = runBranch(trueGuard, stmt.ifTrue);
+        std::unordered_map<PlanIndex, ExprNodeId> falseValues = baseValues;
         if (stmt.ifFalse)
         {
             ExprNodeId notCond = makeLogicNot(combinedCond, stmt.sourceRange.start());
             ExprNodeId falseGuard = combineGuard(baseGuard, notCond, stmt.sourceRange.start());
-            pushGuard(falseGuard);
-            visitStatement(*stmt.ifFalse);
-            popGuard();
+            falseValues = runBranch(falseGuard, *stmt.ifFalse);
         }
+
+        std::unordered_map<PlanIndex, ExprNodeId> merged = baseValues;
+        std::unordered_set<PlanIndex> keys;
+        keys.reserve(trueValues.size() + falseValues.size());
+        for (const auto& entry : trueValues)
+        {
+            keys.insert(entry.first);
+        }
+        for (const auto& entry : falseValues)
+        {
+            keys.insert(entry.first);
+        }
+        for (PlanIndex index : keys)
+        {
+            ExprNodeId lhs = getValue(trueValues, index);
+            ExprNodeId rhs = getValue(falseValues, index);
+            if (lhs == rhs)
+            {
+                merged[index] = lhs;
+                continue;
+            }
+            ExprNodeId mux = makeMux(combinedCond, lhs, rhs, stmt.sourceRange.start());
+            if (mux != kInvalidPlanIndex)
+            {
+                merged[index] = mux;
+            }
+        }
+        proceduralValueStack.back() = std::move(merged);
     }
 
     void visitCase(const slang::ast::CaseStatement& stmt)
@@ -2037,9 +2216,54 @@ struct StmtLowererState {
         }
     }
 
+    void handleNetInitializer(const slang::ast::NetSymbol& net)
+    {
+        const slang::ast::Expression* init = net.getInitializer();
+        if (!init || net.name.empty())
+        {
+            return;
+        }
+        const ControlDomain saved = domain;
+        domain = ControlDomain::Combinational;
+        int32_t targetWidth = 0;
+        const uint64_t widthRaw =
+            computeFixedWidth(net.getType(), net, diagnostics);
+        if (widthRaw > 0)
+        {
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            targetWidth = widthRaw > maxValue
+                              ? std::numeric_limits<int32_t>::max()
+                              : static_cast<int32_t>(widthRaw);
+        }
+        WidthContextScope widthScope(*this, targetWidth);
+        ExprNodeId value = lowerExpression(*init);
+        if (targetWidth > 0)
+        {
+            const bool signExtend = net.getType().isSigned();
+            value = resizeValueToWidth(value, targetWidth, signExtend,
+                                       init->sourceRange.start());
+        }
+        if (value != kInvalidPlanIndex)
+        {
+            PlanSymbolId target = plan.symbolTable.lookup(net.name);
+            if (target.valid())
+            {
+                WriteIntent intent;
+                intent.target = target;
+                intent.value = value;
+                intent.guard = currentGuard(init->sourceRange.start());
+                intent.domain = domain;
+                intent.isNonBlocking = false;
+                intent.location = init->sourceRange.start();
+                recordWriteIntent(std::move(intent));
+            }
+        }
+        domain = saved;
+    }
+
     void handleAssignment(const slang::ast::AssignmentExpression& expr)
     {
-        ExprNodeId value = resolveAssignmentRoot(expr);
         std::vector<LValueTarget> targets;
         LValueCompositeInfo composite;
         if (!resolveLValueTargets(expr.left(), targets, composite))
@@ -2051,9 +2275,129 @@ struct StmtLowererState {
             reportUnsupported(expr, "Unsupported LHS in assignment");
             return;
         }
+
+        uint64_t totalWidth = 0;
+        if (composite.isComposite || targets.size() > 1)
+        {
+            for (const auto& target : targets)
+            {
+                if (target.width == 0)
+                {
+                    reportUnsupported(expr, "Unsupported LHS width in assignment");
+                    return;
+                }
+                totalWidth += target.width;
+            }
+            if (totalWidth == 0)
+            {
+                reportUnsupported(expr, "Unsupported LHS width in assignment");
+                return;
+            }
+        }
+
+        auto clampWidth = [](uint64_t width) -> int32_t {
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                    : static_cast<int32_t>(width);
+        };
+        int32_t targetWidth = 0;
+        if (composite.isComposite || targets.size() > 1)
+        {
+            targetWidth = clampWidth(totalWidth);
+        }
+        else if (targets.front().width > 0)
+        {
+            targetWidth = clampWidth(targets.front().width);
+        }
+        bool signExtend = false;
+        if (!composite.isComposite && targets.size() == 1 && expr.left().type)
+        {
+            signExtend = expr.left().type->isSigned();
+        }
+
+        ExprNodeId value = kInvalidPlanIndex;
+        const bool usesDynamic = exprUsesLoopLocal(expr) ||
+                                 exprUsesUnknownSymbol(expr) ||
+                                 exprUsesProceduralValue(expr);
+        {
+            WidthContextScope widthScope(*this, targetWidth);
+            const bool useLocalLowering = usesDynamic || targetWidth > 0;
+            if (useLocalLowering)
+            {
+                if (usesDynamic)
+                {
+                    if (loopLocalAssignments.emplace(&expr).second)
+                    {
+                        takeNextRoot(expr.sourceRange.start());
+                    }
+                }
+                else
+                {
+                    takeNextRoot(expr.sourceRange.start());
+                }
+                if (expr.op)
+                {
+                    const auto opKind = mapBinaryOp(*expr.op);
+                    if (!opKind)
+                    {
+                        reportUnsupported(expr, "Unsupported compound assignment operator");
+                        return;
+                    }
+                    ExprNodeId lhs = lowerExpression(expr.left());
+                    ExprNodeId rhs = lowerExpression(expr.right());
+                    if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+                    {
+                        return;
+                    }
+                    ExprNode node;
+                    node.kind = ExprNodeKind::Operation;
+                    node.op = *opKind;
+                    node.operands = {lhs, rhs};
+                    node.location = expr.sourceRange.start();
+                    node.tempSymbol = makeTempSymbol();
+                    value = addNode(nullptr, std::move(node));
+                }
+                else
+                {
+                    value = lowerExpression(expr.right());
+                }
+            }
+            else
+            {
+                value = resolveAssignmentRoot(expr);
+            }
+        }
         if (value == kInvalidPlanIndex)
         {
             return;
+        }
+        if (targetWidth > 0)
+        {
+            value = resizeValueToWidth(value, targetWidth, signExtend,
+                                       expr.sourceRange.start());
+        }
+        if (value == kInvalidPlanIndex)
+        {
+            return;
+        }
+        if (!expr.isNonBlocking() && hasProceduralValues() && targets.size() == 1 &&
+            !composite.isComposite)
+        {
+            if (targets.front().slices.empty())
+            {
+                updateProceduralValue(targets.front().target, value);
+            }
+            else
+            {
+                ExprNodeId updated = applyProceduralSliceUpdate(
+                    targets.front().target, targets.front().slices, value,
+                    expr.sourceRange.start());
+                if (updated != kInvalidPlanIndex)
+                {
+                    updateProceduralValue(targets.front().target, updated);
+                }
+            }
         }
 
         ExprNodeId guard = currentGuard(expr.sourceRange.start());
@@ -2071,16 +2415,6 @@ struct StmtLowererState {
             return;
         }
 
-        uint64_t totalWidth = 0;
-        for (const auto& target : targets)
-        {
-            if (target.width == 0)
-            {
-                reportUnsupported(expr, "Unsupported LHS width in assignment");
-                return;
-            }
-            totalWidth += target.width;
-        }
         if (totalWidth == 0)
         {
             reportUnsupported(expr, "Unsupported LHS width in assignment");
@@ -2770,6 +3104,295 @@ private:
         }
     }
 
+    void pushLoopLocals(std::vector<const slang::ast::ValueSymbol*> vars)
+    {
+        loopLocalStack.emplace_back();
+        loopVarStack.emplace_back(std::move(vars));
+    }
+
+    void popLoopLocals()
+    {
+        if (!loopLocalStack.empty())
+        {
+            loopLocalStack.pop_back();
+        }
+        if (!loopVarStack.empty())
+        {
+            loopVarStack.pop_back();
+        }
+    }
+
+    void syncLoopLocals(slang::ast::EvalContext& ctx)
+    {
+        if (loopLocalStack.empty() || loopVarStack.empty())
+        {
+            return;
+        }
+        auto& locals = loopLocalStack.back();
+        locals.clear();
+        for (const slang::ast::ValueSymbol* symbol : loopVarStack.back())
+        {
+            if (!symbol)
+            {
+                continue;
+            }
+            if (const slang::ConstantValue* value = ctx.findLocal(symbol))
+            {
+                if (value->isInteger() && !value->hasUnknown())
+                {
+                    if (auto raw = value->integer().as<int64_t>())
+                    {
+                        locals.emplace(symbol, *raw);
+                    }
+                }
+            }
+        }
+    }
+
+    bool isLoopLocalSymbol(const slang::ast::ValueSymbol& symbol) const
+    {
+        for (auto it = loopVarStack.rbegin(); it != loopVarStack.rend(); ++it)
+        {
+            for (const slang::ast::ValueSymbol* entry : *it)
+            {
+                if (entry == &symbol)
+                {
+                    return true;
+                }
+                if (!entry)
+                {
+                    continue;
+                }
+                if (!symbol.name.empty() && entry->name == symbol.name)
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    std::optional<int64_t> lookupLoopLocal(const slang::ast::Symbol& symbol) const
+    {
+        const auto* valueSymbol = symbol.as_if<slang::ast::ValueSymbol>();
+        if (!valueSymbol)
+        {
+            return std::nullopt;
+        }
+        auto localsIt = loopLocalStack.rbegin();
+        auto varsIt = loopVarStack.rbegin();
+        for (; localsIt != loopLocalStack.rend() && varsIt != loopVarStack.rend();
+             ++localsIt, ++varsIt)
+        {
+            if (auto found = localsIt->find(valueSymbol); found != localsIt->end())
+            {
+                return found->second;
+            }
+            if (valueSymbol->name.empty())
+            {
+                continue;
+            }
+            for (const slang::ast::ValueSymbol* entry : *varsIt)
+            {
+                if (!entry || entry->name != valueSymbol->name)
+                {
+                    continue;
+                }
+                if (auto found = localsIt->find(entry); found != localsIt->end())
+                {
+                    return found->second;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+public:
+    void pushProceduralValues()
+    {
+        proceduralValueStack.emplace_back();
+    }
+
+    void popProceduralValues()
+    {
+        if (!proceduralValueStack.empty())
+        {
+            proceduralValueStack.pop_back();
+        }
+    }
+
+    bool hasProceduralValues() const
+    {
+        return !proceduralValueStack.empty();
+    }
+
+    std::optional<ExprNodeId> lookupProceduralValue(const slang::ast::Symbol& symbol) const
+    {
+        if (proceduralValueStack.empty())
+        {
+            return std::nullopt;
+        }
+        const auto* valueSymbol = symbol.as_if<slang::ast::ValueSymbol>();
+        if (!valueSymbol || valueSymbol->name.empty())
+        {
+            return std::nullopt;
+        }
+        PlanSymbolId id = plan.symbolTable.lookup(valueSymbol->name);
+        if (!id.valid())
+        {
+            return std::nullopt;
+        }
+        for (auto it = proceduralValueStack.rbegin(); it != proceduralValueStack.rend(); ++it)
+        {
+            if (auto found = it->find(id.index); found != it->end())
+            {
+                return found->second;
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<ExprNodeId> lookupProceduralValue(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid() || proceduralValueStack.empty())
+        {
+            return std::nullopt;
+        }
+        for (auto it = proceduralValueStack.rbegin(); it != proceduralValueStack.rend();
+             ++it)
+        {
+            if (auto found = it->find(symbol.index); found != it->end())
+            {
+                return found->second;
+            }
+        }
+        return std::nullopt;
+    }
+
+    void updateProceduralValue(PlanSymbolId symbol, ExprNodeId value)
+    {
+        if (!symbol.valid() || proceduralValueStack.empty())
+        {
+            return;
+        }
+        proceduralValueStack.back()[symbol.index] = value;
+    }
+
+private:
+
+    bool exprUsesLoopLocal(const slang::ast::Expression& expr) const
+    {
+        if (loopVarStack.empty())
+        {
+            return false;
+        }
+        struct LoopLocalVisitor
+            : public slang::ast::ASTVisitor<LoopLocalVisitor, true, true> {
+            explicit LoopLocalVisitor(const StmtLowererState& state) : state_(state) {}
+
+            void handle(const slang::ast::NamedValueExpression& expr)
+            {
+                if (state_.isLoopLocalSymbol(expr.symbol))
+                {
+                    found_ = true;
+                }
+            }
+
+            void handle(const slang::ast::HierarchicalValueExpression& expr)
+            {
+                if (state_.isLoopLocalSymbol(expr.symbol))
+                {
+                    found_ = true;
+                }
+            }
+
+            const StmtLowererState& state_;
+            bool found_ = false;
+        };
+
+        LoopLocalVisitor visitor(*this);
+        expr.visit(visitor);
+        return visitor.found_;
+    }
+
+    bool exprUsesProceduralValue(const slang::ast::Expression& expr) const
+    {
+        if (proceduralValueStack.empty())
+        {
+            return false;
+        }
+        struct ProcValueVisitor
+            : public slang::ast::ASTVisitor<ProcValueVisitor, true, true> {
+            explicit ProcValueVisitor(const StmtLowererState& state) : state_(state) {}
+
+            void handle(const slang::ast::NamedValueExpression& expr)
+            {
+                if (state_.lookupProceduralValue(expr.symbol))
+                {
+                    found_ = true;
+                }
+            }
+
+            void handle(const slang::ast::HierarchicalValueExpression& expr)
+            {
+                if (state_.lookupProceduralValue(expr.symbol))
+                {
+                    found_ = true;
+                }
+            }
+
+            const StmtLowererState& state_;
+            bool found_ = false;
+        };
+
+        ProcValueVisitor visitor(*this);
+        expr.visit(visitor);
+        return visitor.found_;
+    }
+
+    bool exprUsesUnknownSymbol(const slang::ast::Expression& expr) const
+    {
+        struct UnknownSymbolVisitor
+            : public slang::ast::ASTVisitor<UnknownSymbolVisitor, true, true> {
+            explicit UnknownSymbolVisitor(const StmtLowererState& state) : state_(state) {}
+
+            void handle(const slang::ast::NamedValueExpression& expr)
+            {
+                if (expr.symbol.kind == slang::ast::SymbolKind::Parameter ||
+                    expr.symbol.kind == slang::ast::SymbolKind::TypeParameter)
+                {
+                    return;
+                }
+                PlanSymbolId id = state_.plan.symbolTable.lookup(expr.symbol.name);
+                if (!id.valid())
+                {
+                    found_ = true;
+                }
+            }
+
+            void handle(const slang::ast::HierarchicalValueExpression& expr)
+            {
+                if (expr.symbol.kind == slang::ast::SymbolKind::Parameter ||
+                    expr.symbol.kind == slang::ast::SymbolKind::TypeParameter)
+                {
+                    return;
+                }
+                PlanSymbolId id = state_.plan.symbolTable.lookup(expr.symbol.name);
+                if (!id.valid())
+                {
+                    found_ = true;
+                }
+            }
+
+            const StmtLowererState& state_;
+            bool found_ = false;
+        };
+
+        UnknownSymbolVisitor visitor(*this);
+        expr.visit(visitor);
+        return visitor.found_;
+    }
+
     bool handleLoopBreak(const slang::ast::Statement& stmt)
     {
         if (!inDynamicLoop())
@@ -2861,6 +3484,16 @@ private:
             return kInvalidPlanIndex;
         }
         return makeOperation(grh::ir::OperationKind::kLogicNot, {operand}, location);
+    }
+
+    ExprNodeId makeMux(ExprNodeId cond, ExprNodeId lhs, ExprNodeId rhs,
+                       slang::SourceLocation location)
+    {
+        if (cond == kInvalidPlanIndex || lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        return makeOperation(grh::ir::OperationKind::kMux, {cond, lhs, rhs}, location);
     }
 
     ExprNodeId makeEq(ExprNodeId lhs, ExprNodeId rhs, slang::SourceLocation location)
@@ -3002,6 +3635,39 @@ private:
         }
     }
 
+    std::vector<const slang::ast::ValueSymbol*>
+    collectForLoopVars(const slang::ast::ForLoopStatement& stmt) const
+    {
+        std::vector<const slang::ast::ValueSymbol*> vars;
+        if (!stmt.loopVars.empty())
+        {
+            for (const slang::ast::VariableSymbol* var : stmt.loopVars)
+            {
+                if (var)
+                {
+                    vars.push_back(var);
+                }
+            }
+            return vars;
+        }
+
+        for (const slang::ast::Expression* initExpr : stmt.initializers)
+        {
+            const auto* assign = initExpr ? initExpr->as_if<slang::ast::AssignmentExpression>()
+                                          : nullptr;
+            if (!assign)
+            {
+                continue;
+            }
+            if (const slang::ast::ValueSymbol* symbol =
+                    resolveAssignedValueSymbol(assign->left()))
+            {
+                vars.push_back(symbol);
+            }
+        }
+        return vars;
+    }
+
     bool tryUnrollRepeat(const slang::ast::RepeatLoopStatement& stmt)
     {
         if (maxLoopIterations == 0)
@@ -3134,6 +3800,7 @@ private:
         }
 
         const bool hasLoopControl = containsLoopControl(stmt.body);
+        LoopLocalScope loopScope(*this, collectForLoopVars(stmt));
         if (!hasLoopControl)
         {
             slang::ast::EvalContext ctx(*plan.body);
@@ -3141,6 +3808,7 @@ private:
             {
                 return false;
             }
+            syncLoopLocals(ctx);
 
             uint32_t iterations = 0;
             while (iterations < maxLoopIterations)
@@ -3155,12 +3823,14 @@ private:
                     return true;
                 }
 
+                syncLoopLocals(ctx);
                 visitStatement(stmt.body);
 
                 if (!executeForLoopSteps(stmt, ctx))
                 {
                     return false;
                 }
+                syncLoopLocals(ctx);
                 ++iterations;
             }
             return false;
@@ -3199,6 +3869,17 @@ private:
             setLoopControlFailure("foreach has no loop dimensions");
             return false;
         }
+
+        std::vector<const slang::ast::ValueSymbol*> loopVars;
+        loopVars.reserve(stmt.loopDims.size());
+        for (const auto& dim : stmt.loopDims)
+        {
+            if (dim.loopVar)
+            {
+                loopVars.push_back(dim.loopVar);
+            }
+        }
+        LoopLocalScope loopScope(*this, std::move(loopVars));
 
         if (maxLoopIterations == 0)
         {
@@ -3505,6 +4186,7 @@ private:
                 return LoopControlResult::None;
             }
 
+            syncLoopLocals(ctx);
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
             if (result == LoopControlResult::Unsupported)
             {
@@ -3521,6 +4203,7 @@ private:
                     setLoopControlFailure("for-loop step is not statically evaluable");
                     return LoopControlResult::Unsupported;
                 }
+                syncLoopLocals(ctx);
                 ++iterations;
                 continue;
             }
@@ -3530,6 +4213,7 @@ private:
                 setLoopControlFailure("for-loop step is not statically evaluable");
                 return LoopControlResult::Unsupported;
             }
+            syncLoopLocals(ctx);
             ++iterations;
         }
 
@@ -3651,6 +4335,8 @@ private:
             return false;
         }
 
+        LoopLocalScope loopScope(*this, collectForLoopVars(stmt));
+        syncLoopLocals(ctx);
         pushLoopContext(stmt.sourceRange.start());
         uint32_t iterations = 0;
         while (iterations < maxLoopIterations)
@@ -3670,6 +4356,7 @@ private:
 
             ExprNodeId iterGuard = currentLoopAlive();
             pushFlowGuard(iterGuard);
+            syncLoopLocals(ctx);
             visitStatement(stmt.body);
             popFlowGuard();
 
@@ -3679,6 +4366,7 @@ private:
                 popLoopContext();
                 return false;
             }
+            syncLoopLocals(ctx);
             ++iterations;
         }
 
@@ -3800,7 +4488,7 @@ private:
     }
 
     bool setLoopLocal(const slang::ast::ValueSymbol& symbol, int64_t value,
-                      slang::ast::EvalContext& ctx) const
+                      slang::ast::EvalContext& ctx)
     {
         const slang::ast::Type& type = symbol.getType();
         if (!type.isIntegral())
@@ -3817,9 +4505,21 @@ private:
         if (slang::ConstantValue* slot = ctx.findLocal(&symbol))
         {
             *slot = std::move(stored);
+            if (!loopLocalStack.empty())
+            {
+                loopLocalStack.back()[&symbol] = value;
+            }
             return true;
         }
-        return ctx.createLocal(&symbol, std::move(stored)) != nullptr;
+        if (ctx.createLocal(&symbol, std::move(stored)) != nullptr)
+        {
+            if (!loopLocalStack.empty())
+            {
+                loopLocalStack.back()[&symbol] = value;
+            }
+            return true;
+        }
+        return false;
     }
 
     std::optional<bool> evalConstantBool(const slang::ast::Expression& expr,
@@ -3870,6 +4570,113 @@ private:
             return std::nullopt;
         }
         return value.integer();
+    }
+
+    bool setEvalLocal(const slang::ast::ValueSymbol& symbol, int64_t value,
+                      slang::ast::EvalContext& ctx) const
+    {
+        const slang::ast::Type& type = symbol.getType();
+        if (!type.isIntegral())
+        {
+            return false;
+        }
+        const int64_t rawWidth = static_cast<int64_t>(type.getBitstreamWidth());
+        const slang::bitwidth_t width =
+            static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+        slang::SVInt literal(value);
+        slang::SVInt resized = literal.resize(width);
+        resized.setSigned(type.isSigned());
+        slang::ConstantValue stored(resized);
+        if (slang::ConstantValue* slot = ctx.findLocal(&symbol))
+        {
+            *slot = std::move(stored);
+            return true;
+        }
+        return ctx.createLocal(&symbol, std::move(stored)) != nullptr;
+    }
+
+    std::optional<int64_t> evalLoopLocalInt(const slang::ast::Expression& expr) const
+    {
+        if (loopLocalStack.empty())
+        {
+            return std::nullopt;
+        }
+        std::unordered_map<std::string_view, int64_t> nameValues;
+        for (auto it = loopLocalStack.rbegin(); it != loopLocalStack.rend(); ++it)
+        {
+            for (const auto& entry : *it)
+            {
+                const slang::ast::ValueSymbol* symbol = entry.first;
+                if (!symbol || symbol->name.empty())
+                {
+                    continue;
+                }
+                if (nameValues.find(symbol->name) == nameValues.end())
+                {
+                    nameValues.emplace(symbol->name, entry.second);
+                }
+            }
+        }
+        if (nameValues.empty())
+        {
+            return std::nullopt;
+        }
+
+        slang::ast::EvalContext ctx(*plan.body);
+        struct LoopEvalVisitor
+            : public slang::ast::ASTVisitor<LoopEvalVisitor, true, true> {
+            LoopEvalVisitor(const StmtLowererState& state,
+                            const std::unordered_map<std::string_view, int64_t>& values,
+                            slang::ast::EvalContext& ctx)
+                : state_(state), values_(values), ctx_(ctx)
+            {
+            }
+
+            void handle(const slang::ast::NamedValueExpression& expr)
+            {
+                maybeSet(expr.symbol);
+            }
+
+            void handle(const slang::ast::HierarchicalValueExpression& expr)
+            {
+                maybeSet(expr.symbol);
+            }
+
+            void maybeSet(const slang::ast::Symbol& symbol)
+            {
+                const auto* valueSymbol = symbol.as_if<slang::ast::ValueSymbol>();
+                if (!valueSymbol || valueSymbol->name.empty())
+                {
+                    return;
+                }
+                auto it = values_.find(valueSymbol->name);
+                if (it == values_.end())
+                {
+                    return;
+                }
+                state_.setEvalLocal(*valueSymbol, it->second, ctx_);
+                any_ = true;
+            }
+
+            const StmtLowererState& state_;
+            const std::unordered_map<std::string_view, int64_t>& values_;
+            slang::ast::EvalContext& ctx_;
+            bool any_ = false;
+        };
+
+        LoopEvalVisitor visitor(*this, nameValues, ctx);
+        expr.visit(visitor);
+        if (!visitor.any_)
+        {
+            return std::nullopt;
+        }
+
+        slang::ConstantValue value = expr.eval(ctx);
+        if (!value || !value.isInteger() || value.hasUnknown())
+        {
+            return std::nullopt;
+        }
+        return value.integer().as<int64_t>();
     }
 
     const slang::ast::ValueSymbol*
@@ -4184,6 +4991,292 @@ private:
         return addNode(nullptr, std::move(node));
     }
 
+    ExprNodeId resizeValueToWidth(ExprNodeId value, int32_t targetWidth,
+                                  bool signExtend, slang::SourceLocation location)
+    {
+        if (value == kInvalidPlanIndex || targetWidth <= 0)
+        {
+            return value;
+        }
+        int32_t sourceWidth = 0;
+        if (value < lowering.values.size())
+        {
+            sourceWidth = lowering.values[value].widthHint;
+        }
+        if (sourceWidth <= 0 || sourceWidth == targetWidth)
+        {
+            return value;
+        }
+        if (targetWidth < sourceWidth)
+        {
+            ExprNodeId zeroIndex = addConstantLiteral("0", location);
+            return makeSliceDynamic(value, zeroIndex, targetWidth, location);
+        }
+        const int32_t padWidth = targetWidth - sourceWidth;
+        ExprNodeId pad = kInvalidPlanIndex;
+        if (signExtend && sourceWidth > 0)
+        {
+            ExprNodeId signIndex =
+                addConstantLiteral(std::to_string(sourceWidth - 1), location);
+            ExprNodeId signBit = makeSliceDynamic(value, signIndex, 1, location);
+            ExprNode countNode;
+            countNode.kind = ExprNodeKind::Constant;
+            countNode.literal = std::to_string(padWidth);
+            countNode.location = location;
+            countNode.widthHint = 32;
+            ExprNodeId countId = addNode(nullptr, std::move(countNode));
+            ExprNode repNode;
+            repNode.kind = ExprNodeKind::Operation;
+            repNode.op = grh::ir::OperationKind::kReplicate;
+            repNode.operands = {countId, signBit};
+            repNode.location = location;
+            repNode.tempSymbol = makeTempSymbol();
+            repNode.widthHint = padWidth;
+            pad = addNode(nullptr, std::move(repNode));
+        }
+        else
+        {
+            ExprNode padNode;
+            padNode.kind = ExprNodeKind::Constant;
+            padNode.literal = std::to_string(padWidth) + "'b0";
+            padNode.location = location;
+            padNode.widthHint = padWidth;
+            pad = addNode(nullptr, std::move(padNode));
+        }
+        if (pad == kInvalidPlanIndex)
+        {
+            return value;
+        }
+        ExprNode concatNode;
+        concatNode.kind = ExprNodeKind::Operation;
+        concatNode.op = grh::ir::OperationKind::kConcat;
+        concatNode.operands = {pad, value};
+        concatNode.location = location;
+        concatNode.tempSymbol = makeTempSymbol();
+        concatNode.widthHint = targetWidth;
+        return addNode(nullptr, std::move(concatNode));
+    }
+
+    const slang::ast::Type* lookupSymbolType(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid() || !plan.body)
+        {
+            return nullptr;
+        }
+        const std::string_view name = plan.symbolTable.text(symbol);
+        if (name.empty())
+        {
+            return nullptr;
+        }
+        const slang::ast::Symbol* sym = plan.body->find(name);
+        if (!sym)
+        {
+            return nullptr;
+        }
+        if (const auto* value = sym->as_if<slang::ast::ValueSymbol>())
+        {
+            return &value->getType();
+        }
+        return nullptr;
+    }
+
+    int64_t getPackedIndexOffset(const slang::ast::Type* baseType) const
+    {
+        if (!baseType)
+        {
+            return 0;
+        }
+        const auto& canonical = baseType->getCanonicalType();
+        if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
+        {
+            return 0;
+        }
+        const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+        return std::min<int64_t>(packed.range.left, packed.range.right);
+    }
+
+    ExprNodeId applyProceduralSliceUpdate(PlanSymbolId target,
+                                          const std::vector<WriteSlice>& slices,
+                                          ExprNodeId value,
+                                          slang::SourceLocation location)
+    {
+        if (!target.valid() || slices.empty() || value == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (slices.size() != 1)
+        {
+            return kInvalidPlanIndex;
+        }
+        const slang::ast::Type* baseType = lookupSymbolType(target);
+        if (!baseType || !plan.body)
+        {
+            return kInvalidPlanIndex;
+        }
+        const uint64_t baseWidthRaw =
+            computeFixedWidth(*baseType, *plan.body, diagnostics);
+        if (baseWidthRaw == 0)
+        {
+            return kInvalidPlanIndex;
+        }
+        const int64_t baseWidth =
+            baseWidthRaw > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())
+                ? static_cast<int64_t>(std::numeric_limits<int32_t>::max())
+                : static_cast<int64_t>(baseWidthRaw);
+        if (baseWidth <= 0)
+        {
+            return kInvalidPlanIndex;
+        }
+
+        const WriteSlice& slice = slices.front();
+        int64_t low = 0;
+        int64_t width = 0;
+        switch (slice.kind)
+        {
+        case WriteSliceKind::BitSelect: {
+            auto indexConst = evalConstInt(plan, lowering, slice.index);
+            if (!indexConst)
+            {
+                return kInvalidPlanIndex;
+            }
+            low = *indexConst;
+            width = 1;
+            break;
+        }
+        case WriteSliceKind::RangeSelect: {
+            if (slice.left == kInvalidPlanIndex || slice.right == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            if (slice.rangeKind == WriteRangeKind::Simple)
+            {
+                auto leftConst = evalConstInt(plan, lowering, slice.left);
+                auto rightConst = evalConstInt(plan, lowering, slice.right);
+                if (!leftConst || !rightConst)
+                {
+                    return kInvalidPlanIndex;
+                }
+                low = std::min(*leftConst, *rightConst);
+                width = std::max(*leftConst, *rightConst) - low + 1;
+                break;
+            }
+            auto widthConst = evalConstInt(plan, lowering, slice.right);
+            auto baseConst = evalConstInt(plan, lowering, slice.left);
+            if (!widthConst || !baseConst || *widthConst <= 0)
+            {
+                return kInvalidPlanIndex;
+            }
+            width = *widthConst;
+            if (slice.rangeKind == WriteRangeKind::IndexedUp)
+            {
+                low = *baseConst;
+            }
+            else
+            {
+                low = *baseConst - width + 1;
+            }
+            break;
+        }
+        default:
+            return kInvalidPlanIndex;
+        }
+
+        const int64_t packedOffset = getPackedIndexOffset(baseType);
+        if (packedOffset != 0)
+        {
+            low -= packedOffset;
+        }
+        if (width <= 0 || low < 0)
+        {
+            return kInvalidPlanIndex;
+        }
+        if (baseWidth > 0 && low + width > baseWidth)
+        {
+            return kInvalidPlanIndex;
+        }
+
+        ExprNodeId base = kInvalidPlanIndex;
+        if (auto existing = lookupProceduralValue(target))
+        {
+            base = *existing;
+        }
+        else
+        {
+            ExprNode baseNode;
+            baseNode.kind = ExprNodeKind::Symbol;
+            baseNode.symbol = target;
+            baseNode.location = location;
+            base = addNode(nullptr, std::move(baseNode));
+        }
+        if (base == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+
+        int32_t widthHint = 0;
+        if (width > 0)
+        {
+            widthHint =
+                width > static_cast<int64_t>(std::numeric_limits<int32_t>::max())
+                    ? std::numeric_limits<int32_t>::max()
+                    : static_cast<int32_t>(width);
+        }
+        ExprNodeId sliceValue = value;
+        if (widthHint > 0)
+        {
+            sliceValue = resizeValueToWidth(value, widthHint, false, location);
+        }
+        if (sliceValue == kInvalidPlanIndex)
+        {
+            return kInvalidPlanIndex;
+        }
+
+        const int64_t hi = low + width - 1;
+        const int64_t upperWidth = baseWidth - (hi + 1);
+        std::vector<ExprNodeId> operands;
+        operands.reserve(3);
+        if (upperWidth > 0)
+        {
+            ExprNodeId upperIndex =
+                addConstantLiteral(std::to_string(hi + 1), location);
+            ExprNodeId upper = makeSliceDynamic(
+                base, upperIndex,
+                static_cast<int32_t>(std::min<int64_t>(
+                    upperWidth, std::numeric_limits<int32_t>::max())),
+                location);
+            operands.push_back(upper);
+        }
+        operands.push_back(sliceValue);
+        if (low > 0)
+        {
+            ExprNodeId lowerIndex = addConstantLiteral("0", location);
+            ExprNodeId lower = makeSliceDynamic(
+                base, lowerIndex,
+                static_cast<int32_t>(std::min<int64_t>(
+                    low, std::numeric_limits<int32_t>::max())),
+                location);
+            operands.push_back(lower);
+        }
+        if (operands.size() == 1)
+        {
+            return operands.front();
+        }
+        ExprNode concatNode;
+        concatNode.kind = ExprNodeKind::Operation;
+        concatNode.op = grh::ir::OperationKind::kConcat;
+        concatNode.operands = std::move(operands);
+        concatNode.location = location;
+        concatNode.tempSymbol = makeTempSymbol();
+        if (baseWidth > 0)
+        {
+            concatNode.widthHint =
+                baseWidth > static_cast<int64_t>(std::numeric_limits<int32_t>::max())
+                    ? std::numeric_limits<int32_t>::max()
+                    : static_cast<int32_t>(baseWidth);
+        }
+        return addNode(nullptr, std::move(concatNode));
+    }
+
     struct CaseMaskInfo {
         ExprNodeId mask = kInvalidPlanIndex;
     };
@@ -4376,6 +5469,28 @@ private:
         {
             return kInvalidPlanIndex;
         }
+        auto controlWidth = [&]() -> int32_t {
+            if (!controlExpr.type)
+            {
+                return 0;
+            }
+            uint64_t width = controlExpr.type->getBitstreamWidth();
+            if (width == 0)
+            {
+                if (auto effective = controlExpr.getEffectiveWidth())
+                {
+                    width = *effective;
+                }
+            }
+            if (width == 0)
+            {
+                return 0;
+            }
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                    : static_cast<int32_t>(width);
+        }();
         if (condition == slang::ast::CaseStatementCondition::Inside)
         {
             ExprNodeId combined = kInvalidPlanIndex;
@@ -4416,6 +5531,15 @@ private:
             if (itemId == kInvalidPlanIndex)
             {
                 return kInvalidPlanIndex;
+            }
+            if (controlWidth > 0 && itemId < lowering.values.size() &&
+                isIntegerLiteralExpr(*expr))
+            {
+                int32_t& hint = lowering.values[itemId].widthHint;
+                if (hint <= 0 || hint < controlWidth)
+                {
+                    hint = controlWidth;
+                }
             }
 
             ExprNodeId term = kInvalidPlanIndex;
@@ -4490,10 +5614,148 @@ private:
 
     ExprNodeId lowerExpression(const slang::ast::Expression& expr)
     {
-        if (auto it = lowered.find(&expr); it != lowered.end())
+        const bool usesLoopLocal = exprUsesLoopLocal(expr);
+        const bool usesProcedural = exprUsesProceduralValue(expr);
+        const bool cacheable =
+            !(usesLoopLocal || usesProcedural || widthContext > 0);
+        auto addNodeForExpr = [&](ExprNode node) -> ExprNodeId {
+            return addNode(cacheable ? &expr : nullptr, std::move(node));
+        };
+        if (cacheable)
         {
-            return it->second;
+            if (auto it = lowered.find(&expr); it != lowered.end())
+            {
+                return it->second;
+            }
         }
+
+        auto adjustPackedIndex =
+            [&](const slang::ast::Type* baseType, ExprNodeId index,
+                slang::SourceLocation location) -> ExprNodeId {
+            if (!baseType || index == kInvalidPlanIndex)
+            {
+                return index;
+            }
+            const auto& canonical = baseType->getCanonicalType();
+            if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
+            {
+                return index;
+            }
+            const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+            const int64_t offset =
+                std::min<int64_t>(packed.range.left, packed.range.right);
+            if (offset == 0)
+            {
+                return index;
+            }
+            int32_t widthHint = 0;
+            if (index < lowering.values.size())
+            {
+                widthHint = lowering.values[index].widthHint;
+            }
+            if (widthHint <= 0)
+            {
+                widthHint = 32;
+            }
+            ExprNode constNode;
+            constNode.kind = ExprNodeKind::Constant;
+            constNode.literal = std::to_string(offset);
+            constNode.location = location;
+            constNode.widthHint = widthHint;
+            ExprNodeId offsetId = addNode(nullptr, std::move(constNode));
+            ExprNode subNode;
+            subNode.kind = ExprNodeKind::Operation;
+            subNode.op = grh::ir::OperationKind::kSub;
+            subNode.operands = {index, offsetId};
+            subNode.location = location;
+            subNode.tempSymbol = makeTempSymbol();
+            subNode.widthHint = widthHint;
+            return addNode(nullptr, std::move(subNode));
+        };
+
+        auto applyConversion =
+            [&](ExprNodeId value, const slang::ast::Type* targetType,
+                slang::SourceLocation location) -> ExprNodeId {
+            if (value == kInvalidPlanIndex || !targetType)
+            {
+                return value;
+            }
+            uint64_t widthRaw = targetType->getBitstreamWidth();
+            if (widthRaw == 0)
+            {
+                return value;
+            }
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            const int32_t targetWidth =
+                widthRaw > maxValue ? std::numeric_limits<int32_t>::max()
+                                    : static_cast<int32_t>(widthRaw);
+            if (targetWidth <= 0)
+            {
+                return value;
+            }
+            int32_t sourceWidth = 0;
+            if (value < lowering.values.size())
+            {
+                sourceWidth = lowering.values[value].widthHint;
+            }
+            if (sourceWidth <= 0)
+            {
+                sourceWidth = targetWidth;
+            }
+            if (sourceWidth == targetWidth)
+            {
+                return value;
+            }
+            if (targetWidth < sourceWidth)
+            {
+                ExprNodeId zeroIndex = addConstantLiteral("0", location);
+                return makeSliceDynamic(value, zeroIndex, targetWidth, location);
+            }
+            const int32_t padWidth = targetWidth - sourceWidth;
+            ExprNodeId pad = kInvalidPlanIndex;
+            if (targetType->isSigned() && sourceWidth > 0)
+            {
+                ExprNodeId signIndex =
+                    addConstantLiteral(std::to_string(sourceWidth - 1), location);
+                ExprNodeId signBit = makeSliceDynamic(value, signIndex, 1, location);
+                ExprNode countNode;
+                countNode.kind = ExprNodeKind::Constant;
+                countNode.literal = std::to_string(padWidth);
+                countNode.location = location;
+                countNode.widthHint = 32;
+                ExprNodeId countId = addNode(nullptr, std::move(countNode));
+                ExprNode repNode;
+                repNode.kind = ExprNodeKind::Operation;
+                repNode.op = grh::ir::OperationKind::kReplicate;
+                repNode.operands = {countId, signBit};
+                repNode.location = location;
+                repNode.tempSymbol = makeTempSymbol();
+                repNode.widthHint = padWidth;
+                pad = addNode(nullptr, std::move(repNode));
+            }
+            else
+            {
+                ExprNode padNode;
+                padNode.kind = ExprNodeKind::Constant;
+                padNode.literal = std::to_string(padWidth) + "'b0";
+                padNode.location = location;
+                padNode.widthHint = padWidth;
+                pad = addNode(nullptr, std::move(padNode));
+            }
+            if (pad == kInvalidPlanIndex)
+            {
+                return value;
+            }
+            ExprNode concatNode;
+            concatNode.kind = ExprNodeKind::Operation;
+            concatNode.op = grh::ir::OperationKind::kConcat;
+            concatNode.operands = {pad, value};
+            concatNode.location = location;
+            concatNode.tempSymbol = makeTempSymbol();
+            concatNode.widthHint = targetWidth;
+            return addNode(nullptr, std::move(concatNode));
+        };
 
         auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
             -> std::optional<std::string> {
@@ -4521,22 +5783,77 @@ private:
         ExprNode node;
         node.location = expr.sourceRange.start();
 
-        if (const slang::ConstantValue* constant = expr.getConstant())
-        {
-            if (constant->isInteger())
+        auto applyExprWidthHint = [&](ExprNode& out) {
+            if (out.widthHint != 0)
             {
-                const slang::SVInt& literal = constant->integer();
-                if (!literal.hasUnknown())
+                return;
+            }
+            uint64_t width = computeExprWidth(expr);
+            if (width > 0)
+            {
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                out.widthHint = width > maxValue
+                                    ? std::numeric_limits<int32_t>::max()
+                                    : static_cast<int32_t>(width);
+            }
+        };
+
+        if (auto loopConst = evalLoopLocalInt(expr))
+        {
+            node.kind = ExprNodeKind::Constant;
+            node.literal = std::to_string(*loopConst);
+            uint64_t width = computeExprWidth(expr);
+            if (width > 0)
+            {
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                node.widthHint = width > maxValue
+                                     ? std::numeric_limits<int32_t>::max()
+                                     : static_cast<int32_t>(width);
+            }
+            return addNodeForExpr(std::move(node));
+        }
+
+        if (!usesLoopLocal)
+        {
+            if (const slang::ConstantValue* constant = expr.getConstant())
+            {
+                if (constant->isInteger())
                 {
-                    node.kind = ExprNodeKind::Constant;
-                    node.literal = literal.toString();
-                    return addNode(&expr, std::move(node));
+                    const slang::SVInt& literal = constant->integer();
+                    if (!literal.hasUnknown())
+                    {
+                        node.kind = ExprNodeKind::Constant;
+                        node.literal = literal.toString();
+                        applyExprWidthHint(node);
+                        return addNodeForExpr(std::move(node));
+                    }
                 }
             }
         }
 
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
+            if (auto procValue = lookupProceduralValue(named->symbol))
+            {
+                return *procValue;
+            }
+            if (auto loopValue = lookupLoopLocal(named->symbol))
+            {
+                node.kind = ExprNodeKind::Constant;
+                node.literal = std::to_string(*loopValue);
+                uint64_t width = named->symbol.getType().getBitstreamWidth();
+                if (width > 0)
+                {
+                    const uint64_t maxValue =
+                        static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                    node.widthHint = width > maxValue
+                                         ? std::numeric_limits<int32_t>::max()
+                                         : static_cast<int32_t>(width);
+                }
+                return addNodeForExpr(std::move(node));
+            }
             if (const auto* param =
                     named->symbol.as_if<slang::ast::ParameterSymbol>())
             {
@@ -4544,7 +5861,8 @@ private:
                 {
                     node.kind = ExprNodeKind::Constant;
                     node.literal = *literal;
-                    return addNode(&expr, std::move(node));
+                    applyExprWidthHint(node);
+                    return addNodeForExpr(std::move(node));
                 }
             }
             node.kind = ExprNodeKind::Symbol;
@@ -4559,7 +5877,8 @@ private:
             {
                 reportUnsupported(expr, "Unknown symbol in expression");
             }
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
@@ -4570,7 +5889,8 @@ private:
                 {
                     node.kind = ExprNodeKind::Constant;
                     node.literal = *literal;
-                    return addNode(&expr, std::move(node));
+                    applyExprWidthHint(node);
+                    return addNodeForExpr(std::move(node));
                 }
             }
             node.kind = ExprNodeKind::Symbol;
@@ -4585,29 +5905,67 @@ private:
             {
                 reportUnsupported(expr, "Unknown hierarchical symbol in expression");
             }
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
             node.literal = literal->getValue().toString();
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
             node.literal = literal->getValue().toString();
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
             node.literal.assign(literal->getValue());
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
+        }
+        if (const auto* call = expr.as_if<slang::ast::CallExpression>())
+        {
+            if (call->isSystemCall())
+            {
+                const std::string name =
+                    normalizeSystemTaskName(call->getSubroutineName());
+                if (name == "bits")
+                {
+                    const auto args = call->arguments();
+                    const slang::ast::Expression* arg =
+                        (!args.empty() ? args.front() : nullptr);
+                    if (arg && arg->type)
+                    {
+                        uint64_t width = arg->type->getBitstreamWidth();
+                        if (width == 0)
+                        {
+                            if (auto effective = arg->getEffectiveWidth())
+                            {
+                                width = *effective;
+                            }
+                        }
+                        if (width > 0)
+                        {
+                            node.kind = ExprNodeKind::Constant;
+                            node.literal = std::to_string(width);
+                            return addNodeForExpr(std::move(node));
+                        }
+                    }
+                    reportUnsupported(expr, "$bits argument width is unknown");
+                    return kInvalidPlanIndex;
+                }
+            }
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
-            return lowerExpression(conversion->operand());
+            ExprNodeId operand = lowerExpression(conversion->operand());
+            return applyConversion(operand, conversion->type, expr.sourceRange.start());
         }
         if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
         {
@@ -4625,8 +5983,17 @@ private:
             node.kind = ExprNodeKind::Operation;
             node.op = *opKind;
             node.operands = {operand};
+            if (*opKind == grh::ir::OperationKind::kReduceAnd ||
+                *opKind == grh::ir::OperationKind::kReduceOr ||
+                *opKind == grh::ir::OperationKind::kReduceXor ||
+                *opKind == grh::ir::OperationKind::kReduceNand ||
+                *opKind == grh::ir::OperationKind::kReduceNor ||
+                *opKind == grh::ir::OperationKind::kReduceXnor)
+            {
+                node.widthHint = 1;
+            }
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* binary = expr.as_if<slang::ast::BinaryExpression>())
         {
@@ -4642,11 +6009,80 @@ private:
             {
                 return kInvalidPlanIndex;
             }
+            const bool isArithmetic =
+                (*opKind == grh::ir::OperationKind::kAdd ||
+                 *opKind == grh::ir::OperationKind::kSub ||
+                 *opKind == grh::ir::OperationKind::kMul ||
+                 *opKind == grh::ir::OperationKind::kDiv ||
+                 *opKind == grh::ir::OperationKind::kMod);
+            const bool isBitwise =
+                (*opKind == grh::ir::OperationKind::kAnd ||
+                 *opKind == grh::ir::OperationKind::kOr ||
+                 *opKind == grh::ir::OperationKind::kXor ||
+                 *opKind == grh::ir::OperationKind::kXnor);
+            auto operandWidth = [&](ExprNodeId id) -> int32_t {
+                if (id == kInvalidPlanIndex || id >= lowering.values.size())
+                {
+                    return 0;
+                }
+                return lowering.values[id].widthHint;
+            };
+            int32_t targetWidth = 0;
+            if ((isArithmetic || isBitwise) && widthContext > 0)
+            {
+                targetWidth = widthContext;
+            }
+            const int32_t lhsWidth = operandWidth(lhs);
+            const int32_t rhsWidth = operandWidth(rhs);
+            if ((isArithmetic || isBitwise) && targetWidth == 0 && lhsWidth > 0 && rhsWidth > 0)
+            {
+                if (*opKind == grh::ir::OperationKind::kMul)
+                {
+                    const int64_t combined =
+                        static_cast<int64_t>(lhsWidth) + static_cast<int64_t>(rhsWidth);
+                    const int64_t maxValue =
+                        static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+                    targetWidth = combined > maxValue
+                                      ? std::numeric_limits<int32_t>::max()
+                                      : static_cast<int32_t>(combined);
+                }
+                else
+                {
+                    targetWidth = std::max(lhsWidth, rhsWidth);
+                }
+            }
+            if ((isArithmetic || isBitwise) && targetWidth > 0)
+            {
+                const bool signExtendLeft =
+                    isBitwise
+                        ? (binary->left().type ? binary->left().type->isSigned() : false)
+                        : (expr.type ? expr.type->isSigned() : false);
+                const bool signExtendRight =
+                    isBitwise
+                        ? (binary->right().type ? binary->right().type->isSigned() : false)
+                        : (expr.type ? expr.type->isSigned() : false);
+                lhs = resizeValueToWidth(lhs, targetWidth, signExtendLeft,
+                                         expr.sourceRange.start());
+                rhs = resizeValueToWidth(rhs, targetWidth, signExtendRight,
+                                         expr.sourceRange.start());
+                if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+            }
             node.kind = ExprNodeKind::Operation;
             node.op = *opKind;
             node.operands = {lhs, rhs};
+            if ((isArithmetic || isBitwise) && targetWidth > 0)
+            {
+                node.widthHint = targetWidth;
+            }
+            if (node.widthHint == 0)
+            {
+                applyExprWidthHint(node);
+            }
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* cond = expr.as_if<slang::ast::ConditionalExpression>())
         {
@@ -4661,6 +6097,21 @@ private:
             }
             const slang::ast::Expression& condExpr = *cond->conditions.front().expr;
             ExprNodeId condId = lowerExpression(condExpr);
+            if (condId != kInvalidPlanIndex && condId < lowering.values.size())
+            {
+                const int32_t condWidth = lowering.values[condId].widthHint;
+                if (condWidth > 1)
+                {
+                    ExprNode logicNode;
+                    logicNode.kind = ExprNodeKind::Operation;
+                    logicNode.op = grh::ir::OperationKind::kReduceOr;
+                    logicNode.operands = {condId};
+                    logicNode.location = condExpr.sourceRange.start();
+                    logicNode.tempSymbol = makeTempSymbol();
+                    logicNode.widthHint = 1;
+                    condId = addNode(nullptr, std::move(logicNode));
+                }
+            }
             ExprNodeId lhs = lowerExpression(cond->left());
             ExprNodeId rhs = lowerExpression(cond->right());
             if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
@@ -4668,39 +6119,61 @@ private:
             {
                 return kInvalidPlanIndex;
             }
+            if (widthContext > 0)
+            {
+                const bool signExtend = expr.type ? expr.type->isSigned() : false;
+                lhs = resizeValueToWidth(lhs, widthContext, signExtend,
+                                         expr.sourceRange.start());
+                rhs = resizeValueToWidth(rhs, widthContext, signExtend,
+                                         expr.sourceRange.start());
+                if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                node.widthHint = widthContext;
+            }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kMux;
             node.operands = {condId, lhs, rhs};
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
         {
             std::vector<ExprNodeId> operands;
             operands.reserve(concat->operands().size());
-            for (const slang::ast::Expression* operand : concat->operands())
             {
-                if (!operand)
+                WidthContextScope widthScope(*this, 0);
+                for (const slang::ast::Expression* operand : concat->operands())
                 {
-                    continue;
+                    if (!operand)
+                    {
+                        continue;
+                    }
+                    ExprNodeId id = lowerExpression(*operand);
+                    if (id == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                    operands.push_back(id);
                 }
-                ExprNodeId id = lowerExpression(*operand);
-                if (id == kInvalidPlanIndex)
-                {
-                    return kInvalidPlanIndex;
-                }
-                operands.push_back(id);
             }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kConcat;
             node.operands = std::move(operands);
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* repl = expr.as_if<slang::ast::ReplicationExpression>())
         {
-            ExprNodeId count = lowerExpression(repl->count());
-            ExprNodeId concat = lowerExpression(repl->concat());
+            ExprNodeId count = kInvalidPlanIndex;
+            ExprNodeId concat = kInvalidPlanIndex;
+            {
+                WidthContextScope widthScope(*this, 0);
+                count = lowerExpression(repl->count());
+                concat = lowerExpression(repl->concat());
+            }
             if (count == kInvalidPlanIndex || concat == kInvalidPlanIndex)
             {
                 return kInvalidPlanIndex;
@@ -4709,32 +6182,50 @@ private:
             node.op = grh::ir::OperationKind::kReplicate;
             node.operands = {count, concat};
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {
             ExprNodeId value = lowerExpression(select->value());
-            ExprNodeId index = lowerExpression(select->selector());
+            ExprNodeId index = kInvalidPlanIndex;
+            auto clampWidth = [](uint64_t width) -> int32_t {
+                if (width == 0)
+                {
+                    return 0;
+                }
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                        : static_cast<int32_t>(width);
+            };
+            int32_t indexWidth = clampWidth(computeExprWidth(select->selector()));
+            if (indexWidth <= 0)
+            {
+                indexWidth = 32;
+            }
+            {
+                WidthContextScope widthScope(*this, indexWidth);
+                index = lowerExpression(select->selector());
+            }
             if (value == kInvalidPlanIndex || index == kInvalidPlanIndex)
             {
                 return kInvalidPlanIndex;
             }
+            index = adjustPackedIndex(select->value().type, index,
+                                      select->sourceRange.start());
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
             node.operands = {value, index};
             node.tempSymbol = makeTempSymbol();
-            return addNode(&expr, std::move(node));
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
         }
         if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
         {
             ExprNodeId value = lowerExpression(range->value());
-            ExprNodeId left = lowerExpression(range->left());
-            ExprNodeId right = lowerExpression(range->right());
-            if (value == kInvalidPlanIndex || left == kInvalidPlanIndex ||
-                right == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
+            ExprNodeId left = kInvalidPlanIndex;
+            ExprNodeId right = kInvalidPlanIndex;
             auto clampWidth = [](uint64_t width) -> int32_t {
                 if (width == 0)
                 {
@@ -4753,6 +6244,16 @@ private:
             if (indexWidth <= 0)
             {
                 indexWidth = 32;
+            }
+            {
+                WidthContextScope widthScope(*this, indexWidth);
+                left = lowerExpression(range->left());
+                right = lowerExpression(range->right());
+            }
+            if (value == kInvalidPlanIndex || left == kInvalidPlanIndex ||
+                right == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
             }
             int32_t sliceWidth = clampWidth(computeExprWidth(*range));
             if (sliceWidth <= 0)
@@ -4830,12 +6331,26 @@ private:
             {
                 return kInvalidPlanIndex;
             }
+            indexExpr =
+                adjustPackedIndex(range->value().type, indexExpr,
+                                  range->sourceRange.start());
+            if (indexExpr == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            indexExpr =
+                adjustPackedIndex(range->value().type, indexExpr,
+                                  range->sourceRange.start());
+            if (indexExpr == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
             node.operands = {value, indexExpr};
             node.tempSymbol = makeTempSymbol();
             node.widthHint = sliceWidth;
-            return addNode(&expr, std::move(node));
+            return addNodeForExpr(std::move(node));
         }
 
         reportUnsupported(expr, "Unsupported expression kind");
@@ -5014,7 +6529,11 @@ private:
             {
                 return {};
             }
-            ExprNodeId index = lowerExpression(select->selector());
+            ExprNodeId index = kInvalidPlanIndex;
+            {
+                WidthContextScope widthScope(*this, 0);
+                index = lowerExpression(select->selector());
+            }
             if (index == kInvalidPlanIndex)
             {
                 return {};
@@ -5033,8 +6552,13 @@ private:
             {
                 return {};
             }
-            ExprNodeId left = lowerExpression(range->left());
-            ExprNodeId right = lowerExpression(range->right());
+            ExprNodeId left = kInvalidPlanIndex;
+            ExprNodeId right = kInvalidPlanIndex;
+            {
+                WidthContextScope widthScope(*this, 0);
+                left = lowerExpression(range->left());
+                right = lowerExpression(range->right());
+            }
             if (left == kInvalidPlanIndex || right == kInvalidPlanIndex)
             {
                 return {};
@@ -5132,7 +6656,19 @@ void lowerStmtProceduralBlock(const slang::ast::ProceduralBlockSymbol& block,
     const StmtLowererState::EventContext savedEvent = state.eventContext;
     state.domain = classifyProceduralBlock(block);
     state.eventContext = state.buildEventContext(block);
+    const bool trackTemps =
+        (state.domain == ControlDomain::Combinational ||
+         state.domain == ControlDomain::Latch ||
+         state.domain == ControlDomain::Sequential);
+    if (trackTemps)
+    {
+        state.pushProceduralValues();
+    }
     state.visitStatement(block.getBody());
+    if (trackTemps)
+    {
+        state.popProceduralValues();
+    }
     state.domain = saved;
     state.eventContext = savedEvent;
 }
@@ -5148,6 +6684,14 @@ void lowerStmtContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
 
 void lowerStmtMemberSymbol(const slang::ast::Symbol& member, StmtLowererState& state)
 {
+    if (const auto* net = member.as_if<slang::ast::NetSymbol>())
+    {
+        if (net->getInitializer())
+        {
+            state.handleNetInitializer(*net);
+            return;
+        }
+    }
     if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>())
     {
         lowerStmtContinuousAssign(*continuous, state);
@@ -6044,6 +7588,12 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
 namespace {
 
+void ensureUniqueTempSymbols(ModulePlan& plan, LoweringPlan& lowering)
+{
+    (void)plan;
+    (void)lowering;
+}
+
 std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
                                     ExprNodeId id);
 
@@ -6429,10 +7979,48 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return true;
     };
 
+    auto getPackedIndexOffset = [&](const slang::ast::Type* baseType) -> int64_t {
+        if (!baseType)
+        {
+            return 0;
+        }
+        const auto& canonical = baseType->getCanonicalType();
+        if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
+        {
+            return 0;
+        }
+        const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+        return std::min<int64_t>(packed.range.left, packed.range.right);
+    };
+
+    auto applyPackedIndexOffset = [&](ExprNodeId indexExpr, int64_t offset,
+                                      slang::SourceLocation location) -> ExprNodeId {
+        if (indexExpr == kInvalidPlanIndex || offset == 0)
+        {
+            return indexExpr;
+        }
+        int32_t widthHint = 0;
+        if (indexExpr < lowering.values.size())
+        {
+            widthHint = lowering.values[indexExpr].widthHint;
+        }
+        if (widthHint <= 0)
+        {
+            widthHint = 32;
+        }
+        ExprNodeId offsetId =
+            builder.addConstantLiteralWithWidth(std::to_string(offset), widthHint,
+                                                location);
+        return builder.makeOperationWithWidth(grh::ir::OperationKind::kSub,
+                                              {indexExpr, offsetId}, widthHint,
+                                              location);
+    };
+
     auto resolveSliceSelection =
         [&](const WriteSlice& slice, const slang::ast::Type* baseType,
             int64_t baseWidth, SliceSelection& out) -> bool {
         out = {};
+        const int64_t packedOffset = getPackedIndexOffset(baseType);
         switch (slice.kind)
         {
         case WriteSliceKind::MemberSelect:
@@ -6536,6 +8124,25 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
         default:
             return false;
+        }
+
+        if ((slice.kind == WriteSliceKind::BitSelect ||
+             slice.kind == WriteSliceKind::RangeSelect) &&
+            packedOffset != 0)
+        {
+            if (out.isStatic)
+            {
+                out.low -= packedOffset;
+            }
+            else
+            {
+                out.indexExpr =
+                    applyPackedIndexOffset(out.indexExpr, packedOffset, slice.location);
+                if (out.indexExpr == kInvalidPlanIndex)
+                {
+                    return false;
+                }
+            }
         }
 
         if (out.width <= 0)
@@ -6726,6 +8333,134 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return spliceDynamic(base, selection, updatedSub, baseWidth, location);
     };
 
+    auto replaceSymbolWithValue =
+        [&](ExprNodeId root, PlanSymbolId target, ExprNodeId replacement) -> ExprNodeId {
+        if (root == kInvalidPlanIndex || replacement == kInvalidPlanIndex)
+        {
+            return root;
+        }
+        std::unordered_map<ExprNodeId, ExprNodeId> memo;
+        std::function<ExprNodeId(ExprNodeId)> visit = [&](ExprNodeId id) -> ExprNodeId {
+            if (id == kInvalidPlanIndex)
+            {
+                return id;
+            }
+            if (id == replacement)
+            {
+                return id;
+            }
+            if (auto it = memo.find(id); it != memo.end())
+            {
+                return it->second;
+            }
+            if (id >= lowering.values.size())
+            {
+                memo[id] = id;
+                return id;
+            }
+            const ExprNode& node = lowering.values[id];
+            if (node.kind == ExprNodeKind::Symbol &&
+                node.symbol.index == target.index)
+            {
+                memo[id] = replacement;
+                return replacement;
+            }
+            if (node.kind != ExprNodeKind::Operation)
+            {
+                memo[id] = id;
+                return id;
+            }
+            bool changed = false;
+            std::vector<ExprNodeId> newOperands;
+            newOperands.reserve(node.operands.size());
+            for (ExprNodeId operand : node.operands)
+            {
+                ExprNodeId next = visit(operand);
+                if (next != operand)
+                {
+                    changed = true;
+                }
+                newOperands.push_back(next);
+            }
+            if (!changed)
+            {
+                memo[id] = id;
+                return id;
+            }
+            ExprNodeId replaced =
+                builder.makeOperationWithWidth(node.op, std::move(newOperands),
+                                               node.widthHint, node.location);
+            memo[id] = replaced;
+            return replaced;
+        };
+        return visit(root);
+    };
+
+    auto slicesCoverFullWidth =
+        [&](const std::vector<const LoweredStmt*>& writes, int64_t baseWidth,
+            const slang::ast::Type* baseType, PlanSymbolId target) -> bool {
+        if (baseWidth <= 0)
+        {
+            return false;
+        }
+        std::vector<std::pair<int64_t, int64_t>> ranges;
+        ranges.reserve(writes.size());
+        for (const LoweredStmt* stmt : writes)
+        {
+            const WriteIntent& write = stmt->write;
+            if (write.slices.empty())
+            {
+                ranges.clear();
+                ranges.emplace_back(0, baseWidth - 1);
+                continue;
+            }
+            SliceSelection selection;
+            if (!resolveSliceSelection(write.slices.front(), baseType, baseWidth,
+                                       selection) ||
+                !selection.isStatic || selection.width <= 0)
+            {
+                return false;
+            }
+            const int64_t low = selection.low;
+            const int64_t high = selection.low + selection.width - 1;
+            ranges.emplace_back(low, high);
+        }
+        if (ranges.empty())
+        {
+            return false;
+        }
+        std::sort(ranges.begin(), ranges.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      if (lhs.first != rhs.first)
+                      {
+                          return lhs.first < rhs.first;
+                      }
+                      return lhs.second < rhs.second;
+                  });
+        int64_t coveredLow = ranges.front().first;
+        int64_t coveredHigh = ranges.front().second;
+        if (coveredLow > 0)
+        {
+            return false;
+        }
+        for (std::size_t i = 1; i < ranges.size(); ++i)
+        {
+            if (ranges[i].first > coveredHigh + 1)
+            {
+                return false;
+            }
+            if (ranges[i].second > coveredHigh)
+            {
+                coveredHigh = ranges[i].second;
+                if (coveredHigh >= baseWidth - 1)
+                {
+                    return true;
+                }
+            }
+        }
+        return coveredHigh >= baseWidth - 1;
+    };
+
     for (const auto& group : groups)
     {
         if (group.writes.empty())
@@ -6774,13 +8509,6 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
         entry.domain = domain;
 
-        ExprNodeId updateCond = kInvalidPlanIndex;
-        ExprNodeId baseValue = kInvalidPlanIndex;
-        if (hasSlices)
-        {
-            baseValue = builder.addSymbol(group.target, entry.location);
-        }
-        ExprNodeId nextValue = hasSlices ? baseValue : kInvalidPlanIndex;
         const int64_t baseWidth =
             entry.target.valid() && entry.target.index < widthBySymbol.size()
                 ? widthBySymbol[entry.target.index]
@@ -6789,6 +8517,59 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             entry.target.valid() && entry.target.index < typeBySymbol.size()
                 ? typeBySymbol[entry.target.index]
                 : nullptr;
+        bool zeroBaseForSlices = false;
+        if (hasSlices && baseWidth > 0)
+        {
+            bool allUnconditional = true;
+            for (const LoweredStmt* stmt : group.writes)
+            {
+                const WriteIntent& write = stmt->write;
+                if (write.slices.empty())
+                {
+                    continue;
+                }
+                bool guardAlwaysTrue = write.guard == kInvalidPlanIndex;
+                if (!guardAlwaysTrue)
+                {
+                    if (auto guardConst = evalConstInt(plan, lowering, write.guard))
+                    {
+                        guardAlwaysTrue = (*guardConst != 0);
+                    }
+                }
+                if (!guardAlwaysTrue)
+                {
+                    allUnconditional = false;
+                    break;
+                }
+            }
+            const bool fullCoverage =
+                allUnconditional &&
+                slicesCoverFullWidth(group.writes, baseWidth, baseType, entry.target);
+            zeroBaseForSlices = fullCoverage;
+        }
+
+        ExprNodeId updateCond = kInvalidPlanIndex;
+        ExprNodeId baseValue = kInvalidPlanIndex;
+        if (hasSlices)
+        {
+            if (zeroBaseForSlices)
+            {
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                const int32_t widthHint =
+                    baseWidth > 0
+                        ? static_cast<int32_t>(
+                              std::min<int64_t>(baseWidth, maxValue))
+                        : 0;
+                baseValue = builder.addConstantLiteralWithWidth("0", widthHint,
+                                                                entry.location);
+            }
+            else
+            {
+                baseValue = builder.addSymbol(group.target, entry.location);
+            }
+        }
+        ExprNodeId nextValue = hasSlices ? baseValue : kInvalidPlanIndex;
 
         for (const LoweredStmt* stmt : group.writes)
         {
@@ -6811,6 +8592,12 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 {
                     continue;
                 }
+            }
+            if (!write.isNonBlocking && domain != ControlDomain::Sequential &&
+                nextValue != kInvalidPlanIndex)
+            {
+                writeValue =
+                    replaceSymbolWithValue(writeValue, group.target, nextValue);
             }
             updateCond = builder.makeLogicOr(updateCond, guard, write.location);
             if (guardAlwaysTrue)
@@ -7571,6 +9358,53 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         readUses.push_back(candidate);
     };
 
+    MemoryPortBuilder builder(plan, lowering);
+
+    auto exprDependsOn = [&](ExprNodeId root, ExprNodeId needle) -> bool {
+        if (root == kInvalidPlanIndex || needle == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        if (root == needle)
+        {
+            return true;
+        }
+        std::unordered_set<ExprNodeId> seen;
+        std::vector<ExprNodeId> stack;
+        stack.push_back(root);
+        while (!stack.empty())
+        {
+            const ExprNodeId current = stack.back();
+            stack.pop_back();
+            if (current == needle)
+            {
+                return true;
+            }
+            if (!seen.insert(current).second)
+            {
+                continue;
+            }
+            if (current == kInvalidPlanIndex ||
+                current >= static_cast<ExprNodeId>(lowering.values.size()))
+            {
+                continue;
+            }
+            const ExprNode& node = lowering.values[current];
+            if (node.kind != ExprNodeKind::Operation)
+            {
+                continue;
+            }
+            for (ExprNodeId operand : node.operands)
+            {
+                if (operand != kInvalidPlanIndex)
+                {
+                    stack.push_back(operand);
+                }
+            }
+        }
+        return false;
+    };
+
     auto visitExpr = [&](auto&& self, ExprNodeId id, ControlDomain domain,
                          const std::vector<EventEdge>& edges,
                          const std::vector<ExprNodeId>& operands,
@@ -7593,6 +9427,12 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             candidate.eventEdges = edges;
             candidate.eventOperands = operands;
             candidate.location = location;
+            if (candidate.domain == ControlDomain::Sequential &&
+                exprDependsOn(candidate.updateCond, candidate.data))
+            {
+                candidate.updateCond =
+                    builder.ensureGuardExpr(kInvalidPlanIndex, candidate.location);
+            }
             recordReadUse(candidate);
         }
         const ExprNode& node = lowering.values[id];
@@ -7604,8 +9444,6 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             }
         }
     };
-
-    MemoryPortBuilder builder(plan, lowering);
 
     for (const auto& stmt : lowering.loweredStmts)
     {
@@ -8093,6 +9931,7 @@ public:
         emitMemoryPorts();
         emitSideEffects();
         emitInstances();
+        emitInstanceSliceWrites();
         emitWriteBack();
     }
 
@@ -8376,19 +10215,8 @@ private:
         }
 
         const int32_t width = normalizeWidth(info->width);
-        grh::ir::SymbolId dataSym = grh::ir::SymbolId::invalid();
-        if (id < lowering_.values.size())
-        {
-            const ExprNode& node = lowering_.values[id];
-            if (node.tempSymbol.valid())
-            {
-                dataSym = symbolForPlan(node.tempSymbol);
-            }
-        }
-        if (!dataSym.valid())
-        {
-            dataSym = graph_.internSymbol("__mem_data_" + std::to_string(nextMemValueId_++));
-        }
+        grh::ir::SymbolId dataSym =
+            graph_.internSymbol("__mem_data_" + std::to_string(nextMemValueId_++));
         grh::ir::ValueId dataValue = graph_.createValue(dataSym, width, info->isSigned);
 
         grh::ir::ValueId addressValue = emitExpr(entry.address);
@@ -8886,6 +10714,94 @@ private:
 
     void emitInstances()
     {
+        struct OutputBinding {
+            PlanSymbolId target;
+            int64_t low = 0;
+            int64_t width = 0;
+            slang::SourceLocation location{};
+        };
+
+        auto resolveOutputBinding = [&](auto&& self,
+                                        const slang::ast::Expression& expr,
+                                        int64_t portWidth,
+                                        OutputBinding& out) -> bool {
+            if (const auto* assign = expr.as_if<slang::ast::AssignmentExpression>())
+            {
+                if (assign->isLValueArg())
+                {
+                    return self(self, assign->left(), portWidth, out);
+                }
+                return self(self, assign->right(), portWidth, out);
+            }
+            if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+            {
+                if (conversion->isImplicit())
+                {
+                    return self(self, conversion->operand(), portWidth, out);
+                }
+                return false;
+            }
+            if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+            {
+                out.target = plan_.symbolTable.lookup(named->symbol.name);
+                out.low = 0;
+                out.width = portWidth;
+                out.location = expr.sourceRange.start();
+                return out.target.valid();
+            }
+            if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
+            {
+                out.target = plan_.symbolTable.lookup(hier->symbol.name);
+                out.low = 0;
+                out.width = portWidth;
+                out.location = expr.sourceRange.start();
+                return out.target.valid();
+            }
+            if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
+            {
+                OutputBinding base;
+                if (!self(self, select->value(), portWidth, base))
+                {
+                    return false;
+                }
+                ExprNodeId index = connectionLowerer_.lowerExpression(select->selector());
+                auto indexConst = evalConstInt(plan_, lowering_, index);
+                if (!indexConst)
+                {
+                    return false;
+                }
+                out.target = base.target;
+                out.low = *indexConst;
+                out.width = 1;
+                out.location = select->sourceRange.start();
+                return out.target.valid();
+            }
+            if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
+            {
+                OutputBinding base;
+                if (!self(self, range->value(), portWidth, base))
+                {
+                    return false;
+                }
+                ExprNodeId left = connectionLowerer_.lowerExpression(range->left());
+                ExprNodeId right = connectionLowerer_.lowerExpression(range->right());
+                auto leftConst = evalConstInt(plan_, lowering_, left);
+                auto rightConst = evalConstInt(plan_, lowering_, right);
+                if (!leftConst || !rightConst)
+                {
+                    return false;
+                }
+                const int64_t lo = std::min(*leftConst, *rightConst);
+                const int64_t hi = std::max(*leftConst, *rightConst);
+                out.target = base.target;
+                out.low = lo;
+                out.width = hi - lo + 1;
+                out.location = range->sourceRange.start();
+                return out.target.valid();
+            }
+            return false;
+        };
+
         for (const auto& instanceInfo : plan_.instances)
         {
             if (!instanceInfo.instance)
@@ -8931,21 +10847,21 @@ private:
                     instance.getPortConnection(*port);
                 const slang::ast::Expression* expr =
                     connection ? connection->getExpression() : nullptr;
-                if (!expr || expr->bad())
-                {
-                    if (context_.diagnostics)
-                    {
-                        context_.diagnostics->warn(
-                            port->location,
-                            "Skipping instance with missing port connection");
-                    }
-                    ok = false;
-                    break;
-                }
 
                 switch (port->direction)
                 {
                 case slang::ast::ArgumentDirection::In: {
+                    if (!expr || expr->bad())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with missing port connection");
+                        }
+                        ok = false;
+                        break;
+                    }
                     inputNames.emplace_back(port->name);
                     grh::ir::ValueId value = emitConnectionExpr(*expr);
                     if (!value.valid())
@@ -8957,9 +10873,30 @@ private:
                     break;
                 }
                 case slang::ast::ArgumentDirection::Out: {
+                    if (!expr || expr->bad())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping unconnected output port on instance");
+                        }
+                        outputNames.emplace_back(port->name);
+                        const int64_t portWidth =
+                            static_cast<int64_t>(port->getType().getBitstreamWidth());
+                        const int64_t width = portWidth > 0 ? portWidth : 1;
+                        grh::ir::SymbolId tempSym =
+                            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                        grh::ir::ValueId tempValue =
+                            graph_.createValue(tempSym, width, false);
+                        results.push_back(tempValue);
+                        break;
+                    }
                     outputNames.emplace_back(port->name);
-                    PlanSymbolId symbol = resolveSimpleSymbol(*expr);
-                    if (!symbol.valid())
+                    const int64_t portWidth =
+                        static_cast<int64_t>(port->getType().getBitstreamWidth());
+                    OutputBinding binding;
+                    if (!resolveOutputBinding(resolveOutputBinding, *expr, portWidth, binding))
                     {
                         if (context_.diagnostics)
                         {
@@ -8970,7 +10907,7 @@ private:
                         ok = false;
                         break;
                     }
-                    if (const PortInfo* inout = resolveInoutPort(symbol))
+                    if (const PortInfo* inout = resolveInoutPort(binding.target))
                     {
                         if (context_.diagnostics)
                         {
@@ -8981,8 +10918,8 @@ private:
                         ok = false;
                         break;
                     }
-                    grh::ir::ValueId value = valueForSymbol(symbol);
-                    if (!value.valid())
+                    grh::ir::ValueId targetValue = valueForSymbol(binding.target);
+                    if (!targetValue.valid())
                     {
                         if (context_.diagnostics)
                         {
@@ -8993,10 +10930,53 @@ private:
                         ok = false;
                         break;
                     }
-                    results.push_back(value);
+                    const int64_t targetWidth = graph_.getValue(targetValue).width();
+                    if (binding.low < 0 || binding.width <= 0 ||
+                        (targetWidth > 0 && binding.low + binding.width > targetWidth))
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with out-of-range output slice");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    if (portWidth > 0 && binding.width != portWidth)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with mismatched output slice width");
+                        }
+                        ok = false;
+                        break;
+                    }
+                    grh::ir::SymbolId tempSym =
+                        graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                    grh::ir::ValueId tempValue =
+                        graph_.createValue(tempSym, binding.width, false);
+                    results.push_back(tempValue);
+                    instanceSliceWrites_[binding.target.index].push_back(
+                        InstanceSliceWrite{binding.target, binding.low,
+                                           binding.width, tempValue,
+                                           binding.location});
                     break;
                 }
                 case slang::ast::ArgumentDirection::InOut: {
+                    if (!expr || expr->bad())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                port->location,
+                                "Skipping instance with missing port connection");
+                        }
+                        ok = false;
+                        break;
+                    }
                     inoutNames.emplace_back(port->name);
                     const PortInfo* inoutPort = resolveInoutPort(*expr);
                     if (!inoutPort || !inoutPort->inoutSymbol)
@@ -9131,6 +11111,190 @@ private:
                     graph_.setAttr(op, "parameterValues", paramValues);
                 }
             }
+        }
+    }
+
+    void emitInstanceSliceWrites()
+    {
+        if (instanceSliceWrites_.empty())
+        {
+            return;
+        }
+
+        auto makeSliceStatic = [&](grh::ir::ValueId base,
+                                   int64_t low,
+                                   int64_t high) -> grh::ir::ValueId {
+            const int64_t width = high - low + 1;
+            if (width <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kSliceStatic,
+                                       grh::ir::SymbolId::invalid());
+            graph_.addOperand(op, base);
+            graph_.setAttr(op, "sliceStart", low);
+            graph_.setAttr(op, "sliceEnd", high);
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            graph_.addResult(op, result);
+            return result;
+        };
+
+        for (auto& [targetIndex, writes] : instanceSliceWrites_)
+        {
+            if (writes.empty())
+            {
+                continue;
+            }
+            PlanSymbolId target;
+            target.index = targetIndex;
+            grh::ir::ValueId targetValue = valueForSymbol(target);
+            if (!targetValue.valid())
+            {
+                continue;
+            }
+            const int64_t targetWidth = graph_.getValue(targetValue).width();
+            if (targetWidth <= 0)
+            {
+                continue;
+            }
+            grh::ir::ValueId baseValue = targetValue;
+            int64_t baseWidth = targetWidth;
+            for (const auto& entry : writeBack_.entries)
+            {
+                if (entry.target.index != targetIndex ||
+                    entry.domain != ControlDomain::Combinational)
+                {
+                    continue;
+                }
+                grh::ir::ValueId mergedBase = emitExpr(entry.nextValue);
+                if (mergedBase.valid())
+                {
+                    baseValue = mergedBase;
+                    baseWidth = graph_.getValue(baseValue).width();
+                    instanceMergedTargets_.insert(targetIndex);
+                }
+                break;
+            }
+            if (baseWidth != targetWidth)
+            {
+                baseValue = targetValue;
+                baseWidth = targetWidth;
+            }
+
+            std::sort(writes.begin(), writes.end(),
+                      [](const InstanceSliceWrite& lhs, const InstanceSliceWrite& rhs) {
+                          return lhs.low < rhs.low;
+                      });
+
+            bool overlap = false;
+            int64_t cursor = 0;
+            struct Segment {
+                int64_t low = 0;
+                int64_t high = 0;
+                grh::ir::ValueId value = grh::ir::ValueId::invalid();
+                bool fromBase = false;
+            };
+            std::vector<Segment> segments;
+            for (const auto& write : writes)
+            {
+                if (write.low < cursor || write.low + write.width > targetWidth)
+                {
+                    overlap = true;
+                    break;
+                }
+                if (write.low > cursor)
+                {
+                    segments.push_back(Segment{cursor, write.low - 1,
+                                               baseValue, true});
+                }
+                segments.push_back(Segment{write.low,
+                                           write.low + write.width - 1,
+                                           write.value, false});
+                cursor = write.low + write.width;
+            }
+            if (overlap)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        writes.front().location,
+                        "Skipping instance output merge with overlapping slices");
+                }
+                continue;
+            }
+            if (cursor < targetWidth)
+            {
+                segments.push_back(Segment{cursor, targetWidth - 1,
+                                           baseValue, true});
+            }
+
+            std::vector<grh::ir::ValueId> concatOperands;
+            concatOperands.reserve(segments.size());
+            for (auto it = segments.rbegin(); it != segments.rend(); ++it)
+            {
+                const Segment& seg = *it;
+                grh::ir::ValueId segValue = seg.value;
+                const int64_t segWidth = seg.high - seg.low + 1;
+                if (seg.fromBase)
+                {
+                    if (!(seg.low == 0 && seg.high == baseWidth - 1))
+                    {
+                        segValue = makeSliceStatic(baseValue, seg.low, seg.high);
+                    }
+                }
+                else
+                {
+                    const int64_t valWidth = graph_.getValue(segValue).width();
+                    if (valWidth != segWidth)
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->warn(
+                                writes.front().location,
+                                "Skipping instance output merge with width mismatch");
+                        }
+                        concatOperands.clear();
+                        break;
+                    }
+                }
+                if (!segValue.valid())
+                {
+                    concatOperands.clear();
+                    break;
+                }
+                concatOperands.push_back(segValue);
+            }
+            if (concatOperands.empty())
+            {
+                continue;
+            }
+
+            grh::ir::ValueId merged = concatOperands.front();
+            if (concatOperands.size() > 1)
+            {
+                grh::ir::OperationId op =
+                    graph_.createOperation(grh::ir::OperationKind::kConcat,
+                                           grh::ir::SymbolId::invalid());
+                for (const auto& operand : concatOperands)
+                {
+                    graph_.addOperand(op, operand);
+                }
+                grh::ir::SymbolId sym =
+                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                grh::ir::ValueId result =
+                    graph_.createValue(sym, targetWidth, false);
+                graph_.addResult(op, result);
+                merged = result;
+            }
+
+            grh::ir::OperationId assignOp =
+                graph_.createOperation(grh::ir::OperationKind::kAssign,
+                                       grh::ir::SymbolId::invalid());
+            graph_.addOperand(assignOp, merged);
+            graph_.addResult(assignOp, targetValue);
         }
     }
 
@@ -9595,7 +11759,23 @@ private:
     {
         const std::string name = "__const_" + std::to_string(nextConstId_++);
         grh::ir::SymbolId symbol = graph_.internSymbol(name);
-        const int32_t width = normalizeWidth(node.widthHint);
+        int32_t width = node.widthHint;
+        if (width <= 0)
+        {
+            try
+            {
+                slang::SVInt parsed = slang::SVInt::fromString(node.literal);
+                if (!parsed.hasUnknown())
+                {
+                    width = static_cast<int32_t>(parsed.getBitWidth());
+                }
+            }
+            catch (const std::exception&)
+            {
+                width = 0;
+            }
+        }
+        width = normalizeWidth(width);
         grh::ir::ValueId value = graph_.createValue(symbol, width, false);
         grh::ir::OperationId op = graph_.createOperation(grh::ir::OperationKind::kConstant,
                                                          grh::ir::SymbolId::invalid());
@@ -9675,11 +11855,8 @@ private:
                                        grh::ir::SymbolId::invalid());
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "rep", static_cast<int64_t>(*count));
-            grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
-            if (!sym.valid())
-            {
-                sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            }
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             const int32_t width = normalizeWidth(node.widthHint);
             grh::ir::ValueId result = graph_.createValue(sym, width, false);
             graph_.addResult(op, result);
@@ -9738,11 +11915,8 @@ private:
                     graph_.addOperand(op, operands[0]);
                     graph_.setAttr(op, "sliceStart", start);
                     graph_.setAttr(op, "sliceEnd", end);
-                    grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
-                    if (!sym.valid())
-                    {
-                        sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-                    }
+                    grh::ir::SymbolId sym =
+                        graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                     grh::ir::ValueId result = graph_.createValue(sym, width, false);
                     graph_.addResult(op, result);
                     valueByExpr_[id] = result;
@@ -9756,11 +11930,8 @@ private:
             graph_.addOperand(op, operands[0]);
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
-            grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
-            if (!sym.valid())
-            {
-                sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            }
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             grh::ir::ValueId result = graph_.createValue(sym, width, false);
             graph_.addResult(op, result);
             valueByExpr_[id] = result;
@@ -9774,15 +11945,51 @@ private:
             graph_.addOperand(op, operand);
         }
 
-        grh::ir::SymbolId sym = symbolForPlan(node.tempSymbol);
-        if (!sym.valid())
-        {
-            sym = graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-        }
+        grh::ir::SymbolId sym =
+            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
         int32_t width = node.widthHint;
-        if (width <= 0 && !operands.empty())
+        if (width <= 0)
         {
-            width = graph_.getValue(operands.front()).width();
+            switch (node.op)
+            {
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+                width = 1;
+                break;
+            case grh::ir::OperationKind::kMux:
+                if (operands.size() > 1)
+                {
+                    width = graph_.getValue(operands[1]).width();
+                }
+                break;
+            case grh::ir::OperationKind::kConcat:
+            {
+                int32_t sum = 0;
+                for (const auto& operand : operands)
+                {
+                    sum += graph_.getValue(operand).width();
+                }
+                width = sum;
+                break;
+            }
+            default:
+                if (!operands.empty())
+                {
+                    width = graph_.getValue(operands.front()).width();
+                }
+                break;
+            }
         }
         width = normalizeWidth(width);
         grh::ir::ValueId result = graph_.createValue(sym, width, false);
@@ -9806,9 +12013,172 @@ private:
 
     void emitWriteBack()
     {
-        for (const auto& entry : writeBack_.entries)
+        std::vector<bool> merged(writeBack_.entries.size(), false);
+        auto sameEventOperand = [&](ExprNodeId lhs, ExprNodeId rhs) -> bool {
+            if (lhs == rhs)
+            {
+                return true;
+            }
+            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            if (lhs >= lowering_.values.size() || rhs >= lowering_.values.size())
+            {
+                return false;
+            }
+            const ExprNode& left = lowering_.values[lhs];
+            const ExprNode& right = lowering_.values[rhs];
+            return left.kind == ExprNodeKind::Symbol &&
+                   right.kind == ExprNodeKind::Symbol &&
+                   left.symbol.index == right.symbol.index;
+        };
+        auto makeConstOne = [&]() -> grh::ir::ValueId {
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__const_one_" + std::to_string(nextConstId_++));
+            grh::ir::ValueId value = graph_.createValue(sym, 1, false);
+            grh::ir::OperationId op =
+                graph_.createOperation(grh::ir::OperationKind::kConstant,
+                                       grh::ir::SymbolId::invalid());
+            graph_.addResult(op, value);
+            graph_.setAttr(op, "constValue", "1'b1");
+            return value;
+        };
+        for (std::size_t i = 0; i < writeBack_.entries.size(); ++i)
         {
+            if (merged[i])
+            {
+                continue;
+            }
+            const auto& entry = writeBack_.entries[i];
+            if (entry.domain != ControlDomain::Sequential || !entry.target.valid())
+            {
+                continue;
+            }
+            if (instanceMergedTargets_.find(entry.target.index) !=
+                instanceMergedTargets_.end())
+            {
+                continue;
+            }
+            if (entry.eventEdges.size() != 1 || entry.eventOperands.size() != 1)
+            {
+                continue;
+            }
+            for (std::size_t j = i + 1; j < writeBack_.entries.size(); ++j)
+            {
+                if (merged[j])
+                {
+                    continue;
+                }
+                const auto& other = writeBack_.entries[j];
+                if (other.domain != ControlDomain::Sequential ||
+                    other.target.index != entry.target.index)
+                {
+                    continue;
+                }
+                if (other.eventEdges.size() != 1 || other.eventOperands.size() != 1)
+                {
+                    continue;
+                }
+                if (!sameEventOperand(entry.eventOperands.front(),
+                                      other.eventOperands.front()))
+                {
+                    continue;
+                }
+                const EventEdge edgeA = entry.eventEdges.front();
+                const EventEdge edgeB = other.eventEdges.front();
+                if (!((edgeA == EventEdge::Posedge && edgeB == EventEdge::Negedge) ||
+                      (edgeA == EventEdge::Negedge && edgeB == EventEdge::Posedge)))
+                {
+                    continue;
+                }
+
+                const auto& posEntry = (edgeA == EventEdge::Posedge) ? entry : other;
+                const auto& negEntry = (edgeA == EventEdge::Posedge) ? other : entry;
+
+                grh::ir::ValueId targetValue = valueForSymbol(entry.target);
+                if (!targetValue.valid())
+                {
+                    continue;
+                }
+                grh::ir::ValueId condValue = emitExpr(entry.eventOperands.front());
+                if (!condValue.valid())
+                {
+                    continue;
+                }
+                grh::ir::ValueId posNext = emitExpr(posEntry.nextValue);
+                grh::ir::ValueId negNext = emitExpr(negEntry.nextValue);
+                if (!posNext.valid() || !negNext.valid())
+                {
+                    continue;
+                }
+
+                int32_t muxWidth = graph_.getValue(posNext).width();
+                grh::ir::OperationId muxOp =
+                    graph_.createOperation(grh::ir::OperationKind::kMux,
+                                           grh::ir::SymbolId::invalid());
+                graph_.addOperand(muxOp, condValue);
+                graph_.addOperand(muxOp, posNext);
+                graph_.addOperand(muxOp, negNext);
+                grh::ir::SymbolId muxSym =
+                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                grh::ir::ValueId muxValue =
+                    graph_.createValue(muxSym, normalizeWidth(muxWidth), false);
+                graph_.addResult(muxOp, muxValue);
+
+                grh::ir::ValueId posGuard = emitExpr(posEntry.updateCond);
+                grh::ir::ValueId negGuard = emitExpr(negEntry.updateCond);
+                if (!posGuard.valid())
+                {
+                    posGuard = makeConstOne();
+                }
+                if (!negGuard.valid())
+                {
+                    negGuard = makeConstOne();
+                }
+                int32_t guardWidth = graph_.getValue(posGuard).width();
+                grh::ir::OperationId guardMuxOp =
+                    graph_.createOperation(grh::ir::OperationKind::kMux,
+                                           grh::ir::SymbolId::invalid());
+                graph_.addOperand(guardMuxOp, condValue);
+                graph_.addOperand(guardMuxOp, posGuard);
+                graph_.addOperand(guardMuxOp, negGuard);
+                grh::ir::SymbolId guardSym =
+                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                grh::ir::ValueId guardValue =
+                    graph_.createValue(guardSym, normalizeWidth(guardWidth), false);
+                graph_.addResult(guardMuxOp, guardValue);
+
+                grh::ir::SymbolId regSym = makeOpSymbol(entry.target, "register");
+                grh::ir::OperationId regOp =
+                    graph_.createOperation(grh::ir::OperationKind::kRegister, regSym);
+                graph_.addOperand(regOp, guardValue);
+                graph_.addOperand(regOp, muxValue);
+                graph_.addOperand(regOp, condValue);
+                graph_.addOperand(regOp, condValue);
+                graph_.setAttr(regOp, "eventEdge",
+                               std::vector<std::string>{edgeText(EventEdge::Posedge),
+                                                        edgeText(EventEdge::Negedge)});
+                graph_.addResult(regOp, targetValue);
+
+                merged[i] = true;
+                merged[j] = true;
+                break;
+            }
+        }
+
+        for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
+        {
+            if (merged[idx])
+            {
+                continue;
+            }
+            const auto& entry = writeBack_.entries[idx];
             if (!entry.target.valid())
+            {
+                continue;
+            }
+            if (instanceMergedTargets_.find(entry.target.index) != instanceMergedTargets_.end())
             {
                 continue;
             }
@@ -9906,6 +12276,15 @@ private:
     std::vector<std::string> memorySymbolName_;
     std::vector<int32_t> memoryReadIndexByExpr_;
     ConnectionExprLowerer connectionLowerer_;
+    struct InstanceSliceWrite {
+        PlanSymbolId target;
+        int64_t low = 0;
+        int64_t width = 0;
+        grh::ir::ValueId value = grh::ir::ValueId::invalid();
+        slang::SourceLocation location{};
+    };
+    std::unordered_map<uint32_t, std::vector<InstanceSliceWrite>> instanceSliceWrites_;
+    std::unordered_set<uint32_t> instanceMergedTargets_;
     uint32_t nextConstId_ = 0;
     uint32_t nextTempId_ = 0;
     uint32_t nextOpId_ = 0;
@@ -10058,6 +12437,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
         memoryPortLowerer.lower(plan, lowering);
+        ensureUniqueTempSymbols(plan, lowering);
         grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
         if (topKeys.find(key) != topKeys.end())
         {
