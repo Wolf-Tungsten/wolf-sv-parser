@@ -870,6 +870,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - WriteBackPass 针对无切片写回：识别 guard 恒真/缺失，避免默认 `baseValue` 兜底 MUX；组合域缺少无条件写回时提升为 latch
 - 保留切片写回的 read/modify/write 基底（`oldValue`）以覆盖部分位
+- 识别 `cond || !cond` 等恒真 guard 且 RHS 非自引用时保持 comb，避免 HDLBits 031 生成多余 `always`
 - 新增 `write_back_comb` fixture 与测试，更新 latch 场景期望为直接 `nextValue`
 - 更新 workflow/architecture 文档说明写回简化与 comb->latch 规则
 

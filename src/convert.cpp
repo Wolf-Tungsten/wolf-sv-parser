@@ -8711,6 +8711,52 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return visit(root);
     };
 
+    auto exprUsesSymbol = [&](ExprNodeId root, PlanSymbolId target) -> bool {
+        if (root == kInvalidPlanIndex || !target.valid())
+        {
+            return false;
+        }
+        if (root >= static_cast<ExprNodeId>(lowering.values.size()))
+        {
+            return false;
+        }
+        std::unordered_set<ExprNodeId> seen;
+        std::vector<ExprNodeId> stack;
+        stack.push_back(root);
+        while (!stack.empty())
+        {
+            const ExprNodeId current = stack.back();
+            stack.pop_back();
+            if (current == kInvalidPlanIndex ||
+                current >= static_cast<ExprNodeId>(lowering.values.size()))
+            {
+                continue;
+            }
+            if (!seen.insert(current).second)
+            {
+                continue;
+            }
+            const ExprNode& node = lowering.values[current];
+            if (node.kind == ExprNodeKind::Symbol &&
+                node.symbol.index == target.index)
+            {
+                return true;
+            }
+            if (node.kind != ExprNodeKind::Operation)
+            {
+                continue;
+            }
+            for (ExprNodeId operand : node.operands)
+            {
+                if (operand != kInvalidPlanIndex)
+                {
+                    stack.push_back(operand);
+                }
+            }
+        }
+        return false;
+    };
+
     auto slicesCoverFullWidth =
         [&](const std::vector<const LoweredStmt*>& writes, int64_t baseWidth,
             const slang::ast::Type* baseType, PlanSymbolId target) -> bool {
@@ -8776,6 +8822,81 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return coveredHigh >= baseWidth - 1;
     };
 
+    auto isLogicNotOfExpr = [&](ExprNodeId maybeNot, ExprNodeId operand) -> bool {
+        if (maybeNot == kInvalidPlanIndex || operand == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        if (maybeNot >= static_cast<ExprNodeId>(lowering.values.size()))
+        {
+            return false;
+        }
+        const ExprNode& node = lowering.values[maybeNot];
+        if (node.kind != ExprNodeKind::Operation)
+        {
+            return false;
+        }
+        if (node.op != grh::ir::OperationKind::kLogicNot &&
+            node.op != grh::ir::OperationKind::kNot)
+        {
+            return false;
+        }
+        return !node.operands.empty() && node.operands.front() == operand;
+    };
+
+    std::function<bool(ExprNodeId)> isAlwaysTrueExpr;
+    isAlwaysTrueExpr = [&](ExprNodeId id) -> bool {
+        if (id == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        if (auto literal = evalConstInt(plan, lowering, id))
+        {
+            return *literal != 0;
+        }
+        if (id >= static_cast<ExprNodeId>(lowering.values.size()))
+        {
+            return false;
+        }
+        const ExprNode& node = lowering.values[id];
+        if (node.kind != ExprNodeKind::Operation ||
+            node.op != grh::ir::OperationKind::kLogicOr)
+        {
+            return false;
+        }
+        for (std::size_t i = 0; i < node.operands.size(); ++i)
+        {
+            const ExprNodeId lhs = node.operands[i];
+            if (isAlwaysTrueExpr(lhs))
+            {
+                return true;
+            }
+            for (std::size_t j = i + 1; j < node.operands.size(); ++j)
+            {
+                const ExprNodeId rhs = node.operands[j];
+                if (isLogicNotOfExpr(lhs, rhs) || isLogicNotOfExpr(rhs, lhs))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    auto finalizeDomain =
+        [&](ControlDomain domain, bool hasUnconditional, ExprNodeId updateCond,
+            bool usesTarget) -> ControlDomain {
+        if (domain == ControlDomain::Combinational && !hasUnconditional)
+        {
+            const bool alwaysTrue = isAlwaysTrueExpr(updateCond);
+            if (!alwaysTrue || usesTarget)
+            {
+                return ControlDomain::Latch;
+            }
+        }
+        return domain;
+    };
+
     for (const auto& group : groups)
     {
         if (group.writes.empty())
@@ -8821,13 +8942,6 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 }
             }
         }
-
-        ControlDomain domain = entry.domain;
-        if (domain == ControlDomain::Combinational && !hasUnconditional)
-        {
-            domain = ControlDomain::Latch;
-        }
-        entry.domain = domain;
 
         const int64_t baseWidth =
             entry.target.valid() && entry.target.index < widthBySymbol.size()
@@ -8965,10 +9079,14 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             entry.updateCond =
                 builder.ensureGuardExpr(kInvalidPlanIndex, entry.location);
             entry.nextValue = directConcatValue;
+            const bool usesTarget = exprUsesSymbol(entry.nextValue, entry.target);
+            entry.domain = finalizeDomain(entry.domain, hasUnconditional, entry.updateCond,
+                                          usesTarget);
             result.entries.push_back(std::move(entry));
             continue;
         }
 
+        const ControlDomain domain = entry.domain;
         for (const LoweredStmt* stmt : group.writes)
         {
             const WriteIntent& write = stmt->write;
@@ -9016,6 +9134,8 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             continue;
         }
 
+        const bool usesTarget = exprUsesSymbol(nextValue, entry.target);
+        entry.domain = finalizeDomain(entry.domain, hasUnconditional, updateCond, usesTarget);
         entry.updateCond = updateCond;
         entry.nextValue = nextValue;
         result.entries.push_back(std::move(entry));
