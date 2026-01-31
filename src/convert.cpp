@@ -5314,6 +5314,58 @@ private:
 
     int32_t caseControlWidth(const slang::ast::Expression& expr) const
     {
+        const slang::ast::Expression* current = &expr;
+        while (current)
+        {
+            if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+            {
+                if (conversion->isImplicit())
+                {
+                    current = &conversion->operand();
+                    continue;
+                }
+            }
+            if (const auto* named = current->as_if<slang::ast::NamedValueExpression>())
+            {
+                uint64_t width = named->symbol.getType().getBitstreamWidth();
+                if (width == 0)
+                {
+                    if (auto effective = named->getEffectiveWidth())
+                    {
+                        width = *effective;
+                    }
+                }
+                if (width == 0)
+                {
+                    return 0;
+                }
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                        : static_cast<int32_t>(width);
+            }
+            if (const auto* hier = current->as_if<slang::ast::HierarchicalValueExpression>())
+            {
+                uint64_t width = hier->symbol.getType().getBitstreamWidth();
+                if (width == 0)
+                {
+                    if (auto effective = hier->getEffectiveWidth())
+                    {
+                        width = *effective;
+                    }
+                }
+                if (width == 0)
+                {
+                    return 0;
+                }
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                        : static_cast<int32_t>(width);
+            }
+            break;
+        }
+
         if (!expr.type)
         {
             return 0;

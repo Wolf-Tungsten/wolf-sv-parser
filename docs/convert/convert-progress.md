@@ -922,5 +922,6 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 无 default 且二值覆盖不完整时回退 `kCaseEq`/mask+`kCaseEq`，并输出“4-state semantics”警告
 - 写回 `WriteIntent` 增加 `coversAllTwoState` 标记，WriteBack 在组合域判断无 latch 时纳入该标记
 - 新增/更新 convert fixtures 与测试：case 完整覆盖走 `kEq`，不完整 case 触发 warning
+- 修复 case 控制表达式宽度判定：剥离隐式转换，优先使用原始信号位宽，避免无尺寸常量抬宽导致误判不完整覆盖
 
 完成情况：已完成
