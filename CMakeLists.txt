@@ -432,5 +432,20 @@ target_compile_definitions(convert-graph-assembly-instance
 )
 register_test_exe(convert-graph-assembly-instance)
 
+# convert: graph assembly instance dedup
+add_executable(convert-graph-assembly-instance-dedup
+    tests/convert/test_convert_graph_assembly_instance_dedup.cpp
+)
+target_link_libraries(convert-graph-assembly-instance-dedup
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-instance-dedup
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_INSTANCE_DEDUP_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_instance_dedup.sv"
+)
+register_test_exe(convert-graph-assembly-instance-dedup)
+
 # Installation rules
 install(TARGETS wolf-sv-parser DESTINATION bin)

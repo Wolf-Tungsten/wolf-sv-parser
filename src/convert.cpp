@@ -6664,7 +6664,21 @@ void lowerStmtProceduralBlock(const slang::ast::ProceduralBlockSymbol& block,
     {
         state.pushProceduralValues();
     }
-    state.visitStatement(block.getBody());
+    if (const auto* timed = block.getBody().as_if<slang::ast::TimedStatement>())
+    {
+        if (state.eventContext.edgeSensitive && !state.eventContext.operands.empty())
+        {
+            state.visitStatement(timed->stmt);
+        }
+        else
+        {
+            state.visitStatement(block.getBody());
+        }
+    }
+    else
+    {
+        state.visitStatement(block.getBody());
+    }
     if (trackTemps)
     {
         state.popProceduralValues();
@@ -6900,6 +6914,7 @@ void enqueuePlanKey(ConvertContext& context, const slang::ast::InstanceBodySymbo
         return;
     }
     PlanKey key;
+    key.definition = &body.getDefinition();
     key.body = &body;
     key.paramSignature = std::move(paramSignature);
     context.planQueue->push(std::move(key));
@@ -11118,6 +11133,7 @@ private:
             if (!instanceInfo.isBlackbox)
             {
                 PlanKey childKey;
+                childKey.definition = &body.getDefinition();
                 childKey.body = &body;
                 childKey.paramSignature = instanceInfo.paramSignature;
                 moduleName = assembler_.resolveGraphName(childKey, moduleNameText);
@@ -12482,6 +12498,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         }
         ParameterSnapshot params = snapshotParameters(topInstance->body, nullptr);
         PlanKey topKey;
+        topKey.definition = &topInstance->body.getDefinition();
         topKey.body = &topInstance->body;
         topKey.paramSignature = params.signature;
         topKeys.insert(topKey);
@@ -12503,6 +12520,10 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         if (!key.body)
         {
             continue;
+        }
+        if (!key.definition)
+        {
+            key.definition = &key.body->getDefinition();
         }
         if (!planCache_.tryClaim(key))
         {

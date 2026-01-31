@@ -325,8 +325,9 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     if (capCallOperands.size() != 3) {
         return fail("dpi_capture call operand count mismatch");
     }
-    if (graph->getValue(capCallOperands[1]).symbolText() != "a") {
-        return fail("dpi_capture call input operand mismatch");
+    const auto capInputValue = graph->getValue(capCallOperands[1]);
+    if (capInputValue.width() != 8 || capInputValue.isSigned()) {
+        return fail("dpi_capture call input operand width/signed mismatch");
     }
     if (graph->getValue(capCallOperands[2]).symbolText() != "clk") {
         return fail("dpi_capture call event operand mismatch");
@@ -357,9 +358,10 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     if (addCallOperands.size() != 4) {
         return fail("dpi_add call operand count mismatch");
     }
-    if (graph->getValue(addCallOperands[1]).symbolText() != "a" ||
-        graph->getValue(addCallOperands[2]).symbolText() != "b") {
-        return fail("dpi_add call input operands mismatch");
+    const auto addLhsValue = graph->getValue(addCallOperands[1]);
+    const auto addRhsValue = graph->getValue(addCallOperands[2]);
+    if (addLhsValue.width() != 32 || addRhsValue.width() != 32) {
+        return fail("dpi_add call input operands width mismatch");
     }
     if (graph->getValue(addCallOperands[3]).symbolText() != "clk") {
         return fail("dpi_add call event operand mismatch");

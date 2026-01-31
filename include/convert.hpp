@@ -26,6 +26,7 @@ namespace slang::ast {
 class RootSymbol;
 class InstanceBodySymbol;
 class InstanceSymbol;
+class DefinitionSymbol;
 class Symbol;
 } // namespace slang::ast
 
@@ -485,17 +486,23 @@ struct PlanArtifacts {
 };
 
 struct PlanKey {
+    const slang::ast::DefinitionSymbol* definition = nullptr;
     const slang::ast::InstanceBodySymbol* body = nullptr;
     std::string paramSignature;
 
     bool operator==(const PlanKey& other) const noexcept {
+        if (definition || other.definition) {
+            return definition == other.definition && paramSignature == other.paramSignature;
+        }
         return body == other.body && paramSignature == other.paramSignature;
     }
 };
 
 struct PlanKeyHash {
     std::size_t operator()(const PlanKey& key) const noexcept {
-        const std::size_t h1 = std::hash<const void*>{}(key.body);
+        const void* defKey = key.definition ? static_cast<const void*>(key.definition)
+                                            : static_cast<const void*>(key.body);
+        const std::size_t h1 = std::hash<const void*>{}(defKey);
         const std::size_t h2 = std::hash<std::string>{}(key.paramSignature);
         return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
     }

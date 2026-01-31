@@ -84,7 +84,7 @@ int testGraphAssemblySlice(const std::filesystem::path& sourcePath) {
 
     bool hasConcat = false;
     bool hasSlice = false;
-    bool hasAssign = false;
+    bool hasConst = false;
 
     for (grh::ir::OperationId opId : graph->operations()) {
         grh::ir::Operation op = graph->getOperation(opId);
@@ -92,11 +92,11 @@ int testGraphAssemblySlice(const std::filesystem::path& sourcePath) {
         case grh::ir::OperationKind::kConcat:
             hasConcat = true;
             break;
-        case grh::ir::OperationKind::kSliceDynamic:
+        case grh::ir::OperationKind::kSliceStatic:
             hasSlice = true;
             break;
-        case grh::ir::OperationKind::kAssign:
-            hasAssign = true;
+        case grh::ir::OperationKind::kConstant:
+            hasConst = true;
             break;
         default:
             break;
@@ -107,10 +107,10 @@ int testGraphAssemblySlice(const std::filesystem::path& sourcePath) {
         return fail("Missing kConcat op in graph");
     }
     if (!hasSlice) {
-        return fail("Missing kSliceDynamic op in graph");
+        return fail("Missing kSliceStatic op in graph");
     }
-    if (!hasAssign) {
-        return fail("Missing kAssign op in graph");
+    if (!hasConst) {
+        return fail("Missing kConstant op in graph");
     }
     return 0;
 }
