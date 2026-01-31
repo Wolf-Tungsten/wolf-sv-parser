@@ -602,11 +602,12 @@ namespace wolf_sv_parser::transform
         try
         {
 
-        // Seed constant table from existing kConstant ops.
+        // Seed constant table from existing kConstant ops and dedupe identical constants.
+        bool dedupedConstants = false;
         std::unordered_map<const grh::ir::Graph *, ConstantPool> pools;
         for (const auto &graphEntry : netlist().graphs())
         {
-            const grh::ir::Graph &graph = *graphEntry.second;
+            grh::ir::Graph &graph = *graphEntry.second;
             ConstantPool &pool = pools[&graph];
             for (const auto opId : graph.operations())
             {
@@ -636,10 +637,21 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     constants.emplace(resId, *parsed);
-                    pool.emplace(makeConstantKey(res, parsed->value), resId);
+                    ConstantKey key = makeConstantKey(res, parsed->value);
+                    if (auto it = pool.find(key); it != pool.end())
+                    {
+                        if (it->second != resId && !res.isInput() && !res.isInout())
+                        {
+                            replaceUsers(graph, resId, it->second, reportError);
+                            dedupedConstants = true;
+                        }
+                        continue;
+                    }
+                    pool.emplace(std::move(key), resId);
                 }
             }
         }
+        result.changed = result.changed || dedupedConstants;
 
         std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;
         FoldOptions foldOpts{options_.allowXPropagation};

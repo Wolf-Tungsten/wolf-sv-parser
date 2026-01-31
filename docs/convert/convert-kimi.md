@@ -298,6 +298,108 @@ struct WriteIntent {
 - `isNonBlocking`：是否非阻塞赋值
 - `coversAllTwoState`：二值覆盖完整标记
 
+**WriteSlice**：描述单次切片操作，定义在第 355-363 行
+
+```cpp
+struct WriteSlice {
+    WriteSliceKind kind = WriteSliceKind::None;      // 切片类型
+    WriteRangeKind rangeKind = WriteRangeKind::Simple; // 范围选择子类型
+    ExprNodeId index = kInvalidPlanIndex;            // bit-select 索引
+    ExprNodeId left = kInvalidPlanIndex;             // range 左边界
+    ExprNodeId right = kInvalidPlanIndex;            // range 右边界
+    PlanSymbolId member;                             // 成员名（member-select）
+    slang::SourceLocation location{};
+};
+```
+
+WriteSliceKind 枚举（第 342-347 行）：
+- `None`：无切片（整信号写回）
+- `BitSelect`：位选择，如 `y[3]`
+- `RangeSelect`：范围选择，如 `y[7:4]` 或 `y[base +: width]`
+- `MemberSelect`：成员选择，如 `struct_signal.member`
+
+WriteRangeKind 枚举（第 349-353 行）：
+- `Simple`：固定范围，如 `[7:4]`
+- `IndexedUp`：向上索引，如 `[base +: width]`
+- `IndexedDown`：向下索引，如 `[base -: width]`
+
+**例子**：位选择与范围选择
+
+SystemVerilog 源码：
+
+```systemverilog
+always_comb begin
+    y[3] = a;           // BitSelect
+    y[7:4] = b;         // RangeSelect (Simple)
+    y[idx +: 2] = c;    // RangeSelect (IndexedUp)
+end
+```
+
+生成的 writes：
+
+```cpp
+writes = {
+    {
+        target = "y",
+        slices = {
+            {kind=BitSelect, index=Constant(3)}
+        },
+        value = Symbol("a"),
+        guard = invalid,
+        domain = Combinational
+    },
+    {
+        target = "y",
+        slices = {
+            {kind=RangeSelect, rangeKind=Simple, left=Constant(7), right=Constant(4)}
+        },
+        value = Symbol("b"),
+        guard = invalid,
+        domain = Combinational
+    },
+    {
+        target = "y",
+        slices = {
+            {kind=RangeSelect, rangeKind=IndexedUp, index=Symbol("idx"), right=Constant(2)}
+        },
+        value = Symbol("c"),
+        guard = invalid,
+        domain = Combinational
+    }
+};
+```
+
+**例子**：嵌套切片（数组索引 + 成员选择）
+
+SystemVerilog 源码：
+
+```systemverilog
+typedef struct packed { logic [3:0] hi; logic [3:0] lo; } pair_t;
+pair_t mem [0:3];
+
+always_ff @(posedge clk) begin
+    mem[idx].hi <= a;
+end
+```
+
+生成的 WriteIntent：
+
+```cpp
+{
+    target = "mem",
+    slices = {
+        {kind=BitSelect, index=Symbol("idx")},      // 数组索引
+        {kind=MemberSelect, member="hi"}            // 成员选择
+    },
+    value = Symbol("a"),
+    guard = invalid,
+    domain = Sequential,
+    isNonBlocking = true
+}
+```
+
+slices 按访问顺序排列，先 element select 后 member select。
+
 **例子**：if/else 链路的写回意图生成
 
 SystemVerilog 源码：
