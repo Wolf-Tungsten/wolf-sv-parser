@@ -922,6 +922,10 @@ namespace grh::ir
             throw std::runtime_error(message);
         }
         data.definingOp = op;
+        if (!data.srcLoc && operations_[opIdx].srcLoc)
+        {
+            data.srcLoc = operations_[opIdx].srcLoc;
+        }
         operations_[opIdx].results.push_back(value);
     }
 

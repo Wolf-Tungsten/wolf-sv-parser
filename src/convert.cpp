@@ -9363,7 +9363,9 @@ public:
                        const ModulePlan& plan, LoweringPlan& lowering,
                        const WriteBackPlan& writeBack)
         : context_(context), assembler_(assembler), graph_(graph), plan_(plan),
-          lowering_(lowering), writeBack_(writeBack), connectionLowerer_(*this)
+          lowering_(lowering), writeBack_(writeBack),
+          sourceManager_(context.compilation ? context.compilation->getSourceManager() : nullptr),
+          connectionLowerer_(*this)
     {
         symbolIds_.assign(plan_.symbolTable.size(), grh::ir::SymbolId::invalid());
         valueBySymbol_.assign(plan_.symbolTable.size(), grh::ir::ValueId::invalid());
@@ -9400,6 +9402,40 @@ public:
 private:
     static int32_t normalizeWidth(int32_t width) { return width > 0 ? width : 1; }
     static constexpr int32_t kInvalidMemoryReadIndex = -1;
+
+    std::optional<grh::ir::SrcLoc> resolveSrcLoc(slang::SourceLocation location) const
+    {
+        if (!location.valid() || !sourceManager_)
+        {
+            return std::nullopt;
+        }
+        const auto loc = sourceManager_->getFullyOriginalLoc(location);
+        if (!loc.valid() || !sourceManager_->isFileLoc(loc))
+        {
+            return std::nullopt;
+        }
+        grh::ir::SrcLoc out{};
+        out.file = std::string(sourceManager_->getFileName(loc));
+        out.line = static_cast<uint32_t>(sourceManager_->getLineNumber(loc));
+        out.column = static_cast<uint32_t>(sourceManager_->getColumnNumber(loc));
+        return out;
+    }
+
+    void maybeSetOpSrcLoc(grh::ir::OperationId op, slang::SourceLocation location)
+    {
+        if (auto loc = resolveSrcLoc(location))
+        {
+            graph_.setOpSrcLoc(op, std::move(*loc));
+        }
+    }
+
+    grh::ir::OperationId createOp(grh::ir::OperationKind kind, grh::ir::SymbolId symbol,
+                                  slang::SourceLocation location)
+    {
+        grh::ir::OperationId op = graph_.createOperation(kind, symbol);
+        maybeSetOpSrcLoc(op, location);
+        return op;
+    }
 
     grh::ir::SymbolId symbolForPlan(PlanSymbolId id)
     {
@@ -9582,7 +9618,7 @@ private:
         }
 
         grh::ir::OperationId op =
-            graph_.createOperation(grh::ir::OperationKind::kMemory, sym);
+            createOp(grh::ir::OperationKind::kMemory, sym, location);
         graph_.setAttr(op, "width", width);
         graph_.setAttr(op, "row", static_cast<int64_t>(info->memoryRows));
         graph_.setAttr(op, "isSigned", info->isSigned);
@@ -9689,7 +9725,7 @@ private:
 
         grh::ir::SymbolId readSym = makeOpSymbol(entry.memory, "mem_read");
         grh::ir::OperationId readOp =
-            graph_.createOperation(grh::ir::OperationKind::kMemoryReadPort, readSym);
+            createOp(grh::ir::OperationKind::kMemoryReadPort, readSym, entry.location);
         graph_.addOperand(readOp, addressValue);
         graph_.setAttr(readOp, "memSymbol", std::string(memSymbol));
 
@@ -9713,7 +9749,7 @@ private:
         }
         grh::ir::SymbolId regSym = makeOpSymbol(entry.memory, "mem_read_reg");
         grh::ir::OperationId regOp =
-            graph_.createOperation(grh::ir::OperationKind::kRegister, regSym);
+            createOp(grh::ir::OperationKind::kRegister, regSym, entry.location);
         graph_.addOperand(regOp, updateCond);
         graph_.addOperand(regOp, readValue);
         for (ExprNodeId evtId : entry.eventOperands)
@@ -9775,7 +9811,7 @@ private:
 
             grh::ir::SymbolId opSym = makeOpSymbol(entry.memory, "mem_write");
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kMemoryWritePort, opSym);
+                createOp(grh::ir::OperationKind::kMemoryWritePort, opSym, entry.location);
             graph_.addOperand(op, updateCond);
             graph_.addOperand(op, address);
             graph_.addOperand(op, data);
@@ -9869,7 +9905,7 @@ private:
             }
 
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kDpicImport, sym);
+                createOp(grh::ir::OperationKind::kDpicImport, sym, slang::SourceLocation{});
             graph_.setAttr(op, "argsDirection", info.argsDirection);
             graph_.setAttr(op, "argsWidth", info.argsWidth);
             graph_.setAttr(op, "argsName", info.argsName);
@@ -9911,8 +9947,9 @@ private:
         }
 
         grh::ir::OperationId op =
-            graph_.createOperation(grh::ir::OperationKind::kDisplay,
-                                   grh::ir::SymbolId::invalid());
+            createOp(grh::ir::OperationKind::kDisplay,
+                     grh::ir::SymbolId::invalid(),
+                     stmt.location);
         graph_.addOperand(op, updateCond);
 
         for (ExprNodeId argId : stmt.display.args)
@@ -9978,8 +10015,9 @@ private:
         }
 
         grh::ir::OperationId op =
-            graph_.createOperation(grh::ir::OperationKind::kAssert,
-                                   grh::ir::SymbolId::invalid());
+            createOp(grh::ir::OperationKind::kAssert,
+                     grh::ir::SymbolId::invalid(),
+                     stmt.location);
         graph_.addOperand(op, updateCond);
         graph_.addOperand(op, condition);
         for (ExprNodeId evtId : stmt.eventOperands)
@@ -10079,8 +10117,9 @@ private:
         }
 
         grh::ir::OperationId op =
-            graph_.createOperation(grh::ir::OperationKind::kDpicCall,
-                                   grh::ir::SymbolId::invalid());
+            createOp(grh::ir::OperationKind::kDpicCall,
+                     grh::ir::SymbolId::invalid(),
+                     stmt.location);
         graph_.addOperand(op, updateCond);
         for (ExprNodeId argId : dpi.inArgs)
         {
@@ -10522,7 +10561,7 @@ private:
                                               ? grh::ir::OperationKind::kBlackbox
                                               : grh::ir::OperationKind::kInstance;
             grh::ir::OperationId op =
-                graph_.createOperation(kind, grh::ir::SymbolId::invalid());
+                createOp(kind, grh::ir::SymbolId::invalid(), instance.location);
             for (const auto& operand : operands)
             {
                 graph_.addOperand(op, operand);
@@ -10583,15 +10622,17 @@ private:
 
         auto makeSliceStatic = [&](grh::ir::ValueId base,
                                    int64_t low,
-                                   int64_t high) -> grh::ir::ValueId {
+                                   int64_t high,
+                                   slang::SourceLocation location) -> grh::ir::ValueId {
             const int64_t width = high - low + 1;
             if (width <= 0)
             {
                 return grh::ir::ValueId::invalid();
             }
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kSliceStatic,
-                                       grh::ir::SymbolId::invalid());
+                createOp(grh::ir::OperationKind::kSliceStatic,
+                         grh::ir::SymbolId::invalid(),
+                         location);
             graph_.addOperand(op, base);
             graph_.setAttr(op, "sliceStart", low);
             graph_.setAttr(op, "sliceEnd", high);
@@ -10608,6 +10649,7 @@ private:
             {
                 continue;
             }
+            slang::SourceLocation writeLoc = writes.front().location;
             PlanSymbolId target;
             target.index = targetIndex;
             grh::ir::ValueId targetValue = valueForSymbol(target);
@@ -10702,7 +10744,7 @@ private:
                 {
                     if (!(seg.low == 0 && seg.high == baseWidth - 1))
                     {
-                        segValue = makeSliceStatic(baseValue, seg.low, seg.high);
+                        segValue = makeSliceStatic(baseValue, seg.low, seg.high, writeLoc);
                     }
                 }
                 else
@@ -10736,8 +10778,9 @@ private:
             if (concatOperands.size() > 1)
             {
                 grh::ir::OperationId op =
-                    graph_.createOperation(grh::ir::OperationKind::kConcat,
-                                           grh::ir::SymbolId::invalid());
+                    createOp(grh::ir::OperationKind::kConcat,
+                             grh::ir::SymbolId::invalid(),
+                             writeLoc);
                 for (const auto& operand : concatOperands)
                 {
                     graph_.addOperand(op, operand);
@@ -10751,8 +10794,9 @@ private:
             }
 
             grh::ir::OperationId assignOp =
-                graph_.createOperation(grh::ir::OperationKind::kAssign,
-                                       grh::ir::SymbolId::invalid());
+                createOp(grh::ir::OperationKind::kAssign,
+                         grh::ir::SymbolId::invalid(),
+                         writeLoc);
             graph_.addOperand(assignOp, merged);
             graph_.addResult(assignOp, targetValue);
         }
@@ -11237,8 +11281,10 @@ private:
         }
         width = normalizeWidth(width);
         grh::ir::ValueId value = graph_.createValue(symbol, width, false);
-        grh::ir::OperationId op = graph_.createOperation(grh::ir::OperationKind::kConstant,
-                                                         grh::ir::SymbolId::invalid());
+        grh::ir::OperationId op =
+            createOp(grh::ir::OperationKind::kConstant,
+                     grh::ir::SymbolId::invalid(),
+                     node.location);
         graph_.addResult(op, value);
         graph_.setAttr(op, "constValue", node.literal);
         return value;
@@ -11311,8 +11357,9 @@ private:
                 return grh::ir::ValueId::invalid();
             }
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kReplicate,
-                                       grh::ir::SymbolId::invalid());
+                createOp(grh::ir::OperationKind::kReplicate,
+                         grh::ir::SymbolId::invalid(),
+                         node.location);
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "rep", static_cast<int64_t>(*count));
             grh::ir::SymbolId sym =
@@ -11370,8 +11417,9 @@ private:
                 if (baseWidth <= 0 || (end >= start && end < baseWidth))
                 {
                     grh::ir::OperationId op =
-                        graph_.createOperation(grh::ir::OperationKind::kSliceStatic,
-                                               grh::ir::SymbolId::invalid());
+                        createOp(grh::ir::OperationKind::kSliceStatic,
+                                 grh::ir::SymbolId::invalid(),
+                                 node.location);
                     graph_.addOperand(op, operands[0]);
                     graph_.setAttr(op, "sliceStart", start);
                     graph_.setAttr(op, "sliceEnd", end);
@@ -11385,8 +11433,9 @@ private:
             }
 
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kSliceDynamic,
-                                       grh::ir::SymbolId::invalid());
+                createOp(grh::ir::OperationKind::kSliceDynamic,
+                         grh::ir::SymbolId::invalid(),
+                         node.location);
             graph_.addOperand(op, operands[0]);
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
@@ -11399,7 +11448,7 @@ private:
         }
 
         grh::ir::OperationId op =
-            graph_.createOperation(node.op, grh::ir::SymbolId::invalid());
+            createOp(node.op, grh::ir::SymbolId::invalid(), node.location);
         for (const auto& operand : operands)
         {
             graph_.addOperand(op, operand);
@@ -11493,13 +11542,14 @@ private:
                    right.kind == ExprNodeKind::Symbol &&
                    left.symbol.index == right.symbol.index;
         };
-        auto makeConstOne = [&]() -> grh::ir::ValueId {
+        auto makeConstOne = [&](slang::SourceLocation location) -> grh::ir::ValueId {
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__const_one_" + std::to_string(nextConstId_++));
             grh::ir::ValueId value = graph_.createValue(sym, 1, false);
             grh::ir::OperationId op =
-                graph_.createOperation(grh::ir::OperationKind::kConstant,
-                                       grh::ir::SymbolId::invalid());
+                createOp(grh::ir::OperationKind::kConstant,
+                         grh::ir::SymbolId::invalid(),
+                         location);
             graph_.addResult(op, value);
             graph_.setAttr(op, "constValue", "1'b1");
             return value;
@@ -11574,9 +11624,12 @@ private:
                 }
 
                 int32_t muxWidth = graph_.getValue(posNext).width();
+                slang::SourceLocation mergeLoc =
+                    posEntry.location.valid() ? posEntry.location : negEntry.location;
                 grh::ir::OperationId muxOp =
-                    graph_.createOperation(grh::ir::OperationKind::kMux,
-                                           grh::ir::SymbolId::invalid());
+                    createOp(grh::ir::OperationKind::kMux,
+                             grh::ir::SymbolId::invalid(),
+                             mergeLoc);
                 graph_.addOperand(muxOp, condValue);
                 graph_.addOperand(muxOp, posNext);
                 graph_.addOperand(muxOp, negNext);
@@ -11590,16 +11643,17 @@ private:
                 grh::ir::ValueId negGuard = emitExpr(negEntry.updateCond);
                 if (!posGuard.valid())
                 {
-                    posGuard = makeConstOne();
+                    posGuard = makeConstOne(posEntry.location);
                 }
                 if (!negGuard.valid())
                 {
-                    negGuard = makeConstOne();
+                    negGuard = makeConstOne(negEntry.location);
                 }
                 int32_t guardWidth = graph_.getValue(posGuard).width();
                 grh::ir::OperationId guardMuxOp =
-                    graph_.createOperation(grh::ir::OperationKind::kMux,
-                                           grh::ir::SymbolId::invalid());
+                    createOp(grh::ir::OperationKind::kMux,
+                             grh::ir::SymbolId::invalid(),
+                             mergeLoc);
                 graph_.addOperand(guardMuxOp, condValue);
                 graph_.addOperand(guardMuxOp, posGuard);
                 graph_.addOperand(guardMuxOp, negGuard);
@@ -11611,7 +11665,7 @@ private:
 
                 grh::ir::SymbolId regSym = makeOpSymbol(entry.target, "register");
                 grh::ir::OperationId regOp =
-                    graph_.createOperation(grh::ir::OperationKind::kRegister, regSym);
+                    createOp(grh::ir::OperationKind::kRegister, regSym, mergeLoc);
                 graph_.addOperand(regOp, guardValue);
                 graph_.addOperand(regOp, muxValue);
                 graph_.addOperand(regOp, condValue);
@@ -11662,8 +11716,9 @@ private:
             if (entry.domain == ControlDomain::Combinational)
             {
                 grh::ir::OperationId op =
-                    graph_.createOperation(grh::ir::OperationKind::kAssign,
-                                           grh::ir::SymbolId::invalid());
+                    createOp(grh::ir::OperationKind::kAssign,
+                             grh::ir::SymbolId::invalid(),
+                             entry.location);
                 graph_.addOperand(op, nextValue);
                 graph_.addResult(op, targetValue);
                 continue;
@@ -11677,7 +11732,7 @@ private:
                 }
                 grh::ir::SymbolId sym = makeOpSymbol(entry.target, "register");
                 grh::ir::OperationId op =
-                    graph_.createOperation(grh::ir::OperationKind::kRegister, sym);
+                    createOp(grh::ir::OperationKind::kRegister, sym, entry.location);
                 graph_.addOperand(op, updateCond);
                 graph_.addOperand(op, nextValue);
                 std::vector<std::string> edges;
@@ -11708,7 +11763,7 @@ private:
                 }
                 grh::ir::SymbolId sym = makeOpSymbol(entry.target, "latch");
                 grh::ir::OperationId op =
-                    graph_.createOperation(grh::ir::OperationKind::kLatch, sym);
+                    createOp(grh::ir::OperationKind::kLatch, sym, entry.location);
                 graph_.addOperand(op, updateCond);
                 graph_.addOperand(op, nextValue);
                 graph_.addResult(op, targetValue);
@@ -11729,6 +11784,7 @@ private:
     const ModulePlan& plan_;
     LoweringPlan& lowering_;
     const WriteBackPlan& writeBack_;
+    const slang::SourceManager* sourceManager_ = nullptr;
     std::vector<grh::ir::SymbolId> symbolIds_;
     std::vector<grh::ir::ValueId> valueBySymbol_;
     std::vector<grh::ir::ValueId> valueByExpr_;
