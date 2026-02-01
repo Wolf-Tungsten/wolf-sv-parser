@@ -7895,6 +7895,46 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             entry.target.valid() && entry.target.index < typeBySymbol.size()
                 ? typeBySymbol[entry.target.index]
                 : nullptr;
+        if (!group.writes.empty() && baseWidth > 0)
+        {
+            bool sliceOk = true;
+            bool hasRef = false;
+            SliceSelection ref{};
+            for (const LoweredStmt* stmt : group.writes)
+            {
+                const WriteIntent& write = stmt->write;
+                if (write.slices.size() != 1)
+                {
+                    sliceOk = false;
+                    break;
+                }
+                SliceSelection selection;
+                if (!resolveSliceSelection(write.slices.front(), baseType, baseWidth,
+                                           selection) ||
+                    !selection.isStatic || selection.width <= 0)
+                {
+                    sliceOk = false;
+                    break;
+                }
+                if (!hasRef)
+                {
+                    ref = selection;
+                    hasRef = true;
+                    continue;
+                }
+                if (selection.low != ref.low || selection.width != ref.width)
+                {
+                    sliceOk = false;
+                    break;
+                }
+            }
+            if (sliceOk && hasRef)
+            {
+                entry.hasStaticSlice = true;
+                entry.sliceLow = ref.low;
+                entry.sliceWidth = ref.width;
+            }
+        }
         bool zeroBaseForSlices = false;
         if (hasSlices && baseWidth > 0)
         {
@@ -11678,6 +11718,249 @@ private:
                 merged[i] = true;
                 merged[j] = true;
                 break;
+            }
+        }
+
+        auto makeSliceStatic = [&](grh::ir::ValueId base,
+                                   int64_t low,
+                                   int64_t high,
+                                   slang::SourceLocation location) -> grh::ir::ValueId {
+            const int64_t width = high - low + 1;
+            if (width <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kSliceStatic,
+                         grh::ir::SymbolId::invalid(),
+                         location);
+            graph_.addOperand(op, base);
+            graph_.setAttr(op, "sliceStart", low);
+            graph_.setAttr(op, "sliceEnd", high);
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            graph_.addResult(op, result);
+            return result;
+        };
+
+        auto makeSliceSymbol = [&](PlanSymbolId target,
+                                   int64_t low,
+                                   int64_t width) -> grh::ir::SymbolId {
+            std::string base;
+            if (target.valid())
+            {
+                base = std::string(plan_.symbolTable.text(target));
+            }
+            if (base.empty())
+            {
+                base = "__slice";
+            }
+            std::string candidate = base + "__slice_" + std::to_string(low) + "_" +
+                                    std::to_string(width);
+            while (graph_.symbols().contains(candidate))
+            {
+                candidate = base + "__slice_" + std::to_string(low) + "_" +
+                            std::to_string(width) + "_" + std::to_string(nextTempId_++);
+            }
+            return graph_.internSymbol(candidate);
+        };
+
+        std::unordered_map<uint32_t, std::vector<std::size_t>> sliceGroups;
+        for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
+        {
+            if (merged[idx])
+            {
+                continue;
+            }
+            const auto& entry = writeBack_.entries[idx];
+            if (entry.domain != ControlDomain::Sequential || !entry.target.valid())
+            {
+                continue;
+            }
+            if (!entry.hasStaticSlice)
+            {
+                continue;
+            }
+            if (instanceMergedTargets_.find(entry.target.index) !=
+                instanceMergedTargets_.end())
+            {
+                continue;
+            }
+            sliceGroups[entry.target.index].push_back(idx);
+        }
+
+        for (auto& [targetIndex, indices] : sliceGroups)
+        {
+            if (indices.size() < 2)
+            {
+                continue;
+            }
+            bool hasOther = false;
+            for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
+            {
+                if (merged[idx])
+                {
+                    continue;
+                }
+                const auto& entry = writeBack_.entries[idx];
+                if (entry.domain != ControlDomain::Sequential ||
+                    !entry.target.valid() ||
+                    entry.target.index != targetIndex)
+                {
+                    continue;
+                }
+                if (!entry.hasStaticSlice)
+                {
+                    hasOther = true;
+                    break;
+                }
+            }
+            if (hasOther)
+            {
+                continue;
+            }
+
+            PlanSymbolId target;
+            target.index = targetIndex;
+            grh::ir::ValueId targetValue = valueForSymbol(target);
+            if (!targetValue.valid())
+            {
+                continue;
+            }
+            const int64_t targetWidth = graph_.getValue(targetValue).width();
+            if (targetWidth <= 0)
+            {
+                continue;
+            }
+
+            struct SliceEntry {
+                std::size_t index;
+                int64_t low;
+                int64_t width;
+                grh::ir::ValueId regValue;
+            };
+            std::vector<SliceEntry> slices;
+            slices.reserve(indices.size());
+            bool invalid = false;
+            for (std::size_t idx : indices)
+            {
+                const auto& entry = writeBack_.entries[idx];
+                if (!entry.hasStaticSlice || entry.sliceWidth <= 0)
+                {
+                    invalid = true;
+                    break;
+                }
+                if (entry.sliceLow < 0 ||
+                    entry.sliceLow + entry.sliceWidth > targetWidth)
+                {
+                    invalid = true;
+                    break;
+                }
+                slices.push_back(SliceEntry{idx, entry.sliceLow, entry.sliceWidth,
+                                            grh::ir::ValueId::invalid()});
+            }
+            if (invalid)
+            {
+                continue;
+            }
+            std::sort(slices.begin(), slices.end(),
+                      [](const SliceEntry& lhs, const SliceEntry& rhs) {
+                          return lhs.low < rhs.low;
+                      });
+            int64_t cursor = 0;
+            for (const auto& slice : slices)
+            {
+                if (slice.low != cursor)
+                {
+                    invalid = true;
+                    break;
+                }
+                cursor = slice.low + slice.width;
+            }
+            if (invalid || cursor != targetWidth)
+            {
+                continue;
+            }
+
+            for (auto& slice : slices)
+            {
+                const auto& entry = writeBack_.entries[slice.index];
+                grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
+                grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
+                if (!updateCond.valid() || !nextValue.valid())
+                {
+                    invalid = true;
+                    break;
+                }
+                grh::ir::ValueId sliceNext =
+                    makeSliceStatic(nextValue, slice.low,
+                                    slice.low + slice.width - 1,
+                                    entry.location);
+                if (!sliceNext.valid())
+                {
+                    invalid = true;
+                    break;
+                }
+
+                grh::ir::SymbolId sliceSym =
+                    makeSliceSymbol(entry.target, slice.low, slice.width);
+                grh::ir::ValueId sliceValue =
+                    graph_.createValue(sliceSym,
+                                       normalizeWidth(static_cast<int32_t>(slice.width)),
+                                       false);
+                grh::ir::SymbolId regSym =
+                    makeOpSymbol(entry.target, "slice_register");
+                grh::ir::OperationId op =
+                    createOp(grh::ir::OperationKind::kRegister, regSym, entry.location);
+                graph_.addOperand(op, updateCond);
+                graph_.addOperand(op, sliceNext);
+                std::vector<std::string> edges;
+                edges.reserve(entry.eventEdges.size());
+                for (ExprNodeId evtId : entry.eventOperands)
+                {
+                    grh::ir::ValueId evt = emitExpr(evtId);
+                    if (!evt.valid())
+                    {
+                        continue;
+                    }
+                    graph_.addOperand(op, evt);
+                }
+                for (EventEdge edge : entry.eventEdges)
+                {
+                    edges.push_back(edgeText(edge));
+                }
+                graph_.setAttr(op, "eventEdge", std::move(edges));
+                graph_.addResult(op, sliceValue);
+                slice.regValue = sliceValue;
+            }
+            if (invalid)
+            {
+                continue;
+            }
+
+            grh::ir::OperationId concatOp =
+                createOp(grh::ir::OperationKind::kConcat,
+                         grh::ir::SymbolId::invalid(),
+                         writeBack_.entries[slices.front().index].location);
+            for (auto it = slices.rbegin(); it != slices.rend(); ++it)
+            {
+                if (!it->regValue.valid())
+                {
+                    invalid = true;
+                    break;
+                }
+                graph_.addOperand(concatOp, it->regValue);
+            }
+            if (invalid)
+            {
+                continue;
+            }
+            graph_.addResult(concatOp, targetValue);
+
+            for (const auto& slice : slices)
+            {
+                merged[slice.index] = true;
             }
         }
 

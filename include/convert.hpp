@@ -442,6 +442,9 @@ struct WriteBackPlan {
         ControlDomain domain = ControlDomain::Unknown;
         ExprNodeId updateCond = kInvalidPlanIndex;
         ExprNodeId nextValue = kInvalidPlanIndex;
+        bool hasStaticSlice = false;
+        int64_t sliceLow = 0;
+        int64_t sliceWidth = 0;
         std::vector<EventEdge> eventEdges;
         std::vector<ExprNodeId> eventOperands;
         slang::SourceLocation location{};

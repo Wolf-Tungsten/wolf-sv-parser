@@ -431,8 +431,35 @@ namespace grh::emit
             const uint32_t endLine = srcLoc->endLine ? srcLoc->endLine : startLine;
             const uint32_t endCol = srcLoc->endColumn ? srcLoc->endColumn : startCol;
 
+            std::string file = srcLoc->file;
+            for (char &ch : file)
+            {
+                if (ch == '\n' || ch == '\r')
+                {
+                    ch = ' ';
+                }
+            }
+            std::string sanitized;
+            sanitized.reserve(file.size() + 8);
+            for (std::size_t i = 0; i < file.size(); ++i)
+            {
+                if (i + 1 < file.size() && file[i] == '*' && file[i + 1] == '/')
+                {
+                    sanitized.append("* /");
+                    ++i;
+                    continue;
+                }
+                if (i + 1 < file.size() && file[i] == '/' && file[i + 1] == '*')
+                {
+                    sanitized.append("/ *");
+                    ++i;
+                    continue;
+                }
+                sanitized.push_back(file[i]);
+            }
+
             std::ostringstream oss;
-            oss << "(* src = \"" << srcLoc->file << ":" << startLine;
+            oss << "/* src: " << sanitized << ":" << startLine;
             if (startCol != 0)
             {
                 oss << "." << startCol;
@@ -445,7 +472,7 @@ namespace grh::emit
                     oss << "." << endCol;
                 }
             }
-            oss << "\" *)";
+            oss << " */";
             return oss.str();
         }
 
