@@ -117,6 +117,11 @@ std::string parameterValueToString(const slang::ConstantValue& value)
     return sanitized;
 }
 
+std::string formatIntegerLiteral(const slang::SVInt& value)
+{
+    return value.toString(slang::SVInt::MAX_BITS);
+}
+
 std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
                                     ExprNodeId id);
 
@@ -5150,7 +5155,7 @@ private:
             {
                 return std::nullopt;
             }
-            return literal.toString();
+            return formatIntegerLiteral(literal);
         };
 
         ExprNode node;
@@ -5198,7 +5203,7 @@ private:
                     if (!literal.hasUnknown())
                     {
                         node.kind = ExprNodeKind::Constant;
-                        node.literal = literal.toString();
+                        node.literal = formatIntegerLiteral(literal);
                         applyExprWidthHint(node);
                         return addNodeForExpr(std::move(node));
                     }
@@ -5284,14 +5289,14 @@ private:
         if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
-            node.literal = literal->getValue().toString();
+            node.literal = formatIntegerLiteral(literal->getValue());
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
         if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
-            node.literal = literal->getValue().toString();
+            node.literal = formatIntegerLiteral(literal->getValue());
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
@@ -10976,7 +10981,7 @@ private:
                 {
                     return std::nullopt;
                 }
-                return literal.toString();
+                return formatIntegerLiteral(literal);
             };
 
             ExprNode node;
@@ -10990,7 +10995,7 @@ private:
                     if (!literal.hasUnknown())
                     {
                         node.kind = ExprNodeKind::Constant;
-                        node.literal = literal.toString();
+                        node.literal = formatIntegerLiteral(literal);
                         return addNode(expr, std::move(node));
                     }
                 }
@@ -11047,13 +11052,13 @@ private:
             if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
             {
                 node.kind = ExprNodeKind::Constant;
-                node.literal = literal->getValue().toString();
+                node.literal = formatIntegerLiteral(literal->getValue());
                 return addNode(expr, std::move(node));
             }
             if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
             {
                 node.kind = ExprNodeKind::Constant;
-                node.literal = literal->getValue().toString();
+                node.literal = formatIntegerLiteral(literal->getValue());
                 return addNode(expr, std::move(node));
             }
             if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
