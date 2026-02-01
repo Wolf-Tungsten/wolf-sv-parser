@@ -18,11 +18,10 @@
    - 3.1 ConvertDriver：入口与主流程
    - 3.2 Pass1：符号收集
    - 3.3 Pass2：类型解析
-   - 3.4 Pass4：表达式降级
-   - 3.5 Pass5：语句降级
-   - 3.6 Pass6：写回合并
-   - 3.7 Pass7：内存端口处理
-   - 3.8 Pass8：图组装
+   - 3.4 Pass5：表达式/语句降级（合并 Pass4/Pass5）
+   - 3.5 Pass6：写回合并
+   - 3.6 Pass7：内存端口处理
+   - 3.7 Pass8：图组装
 4. 完整示例
    - 4.1 示例源码
    - 4.2 各阶段数据结构状态
@@ -261,7 +260,7 @@ entry.plan.ports[0].width = 8
 entry.plan.ports[1].width = 8
 entry.plan.ports[2].width = 8
 
-// Pass4-5 后（ExprLowerer / StmtLowerer）
+// Pass5 后（StmtLowerer，含表达式降级）
 entry.status = Done
 entry.artifacts.loweringPlan = LoweringPlan{
     values = {
@@ -269,7 +268,6 @@ entry.artifacts.loweringPlan = LoweringPlan{
         [1] = {kind=Symbol, symbol="b"},
         [2] = {kind=Operation, op=kAdd, operands={0,1}}
     },
-    roots = {[0]={value=2}},
     writes = {
         [0] = {target="y", value=2, guard=kInvalidPlanIndex}
     }
@@ -370,12 +368,11 @@ entry.plan.ports[1].width = 8
 
 ### 2.4 LoweringPlan：降级计划
 
-LoweringPlan 记录 Pass4-Pass7 的降级结果，包含表达式节点图、写回意图、内存端口等。定义在 `include/convert.hpp` 第 432-440 行：
+LoweringPlan 记录 Pass5-Pass7 的降级结果，包含表达式节点图、写回意图、内存端口等。定义在 `include/convert.hpp` 第 432-440 行：
 
 ```cpp
 struct LoweringPlan {
     std::vector<ExprNode> values;
-    std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
     std::vector<WriteIntent> writes;
     std::vector<LoweredStmt> loweredStmts;
@@ -387,7 +384,6 @@ struct LoweringPlan {
 
 **字段说明**：
 - `values`：表达式节点序列（ExprNode 数组）
-- `roots`：每条 RHS 的根节点入口（LoweredRoot 数组）
 - `tempSymbols`：操作节点的临时符号名（PlanSymbolId 数组）
 - `writes`：写回意图列表（WriteIntent 数组）
 - `loweredStmts`：按序语句列表（LoweredStmt 数组）
@@ -403,7 +399,7 @@ SystemVerilog 源码：
 assign y = (a & b) ? ~c : (a | b);
 ```
 
-Pass4 执行后：
+Pass5 执行后：
 
 ```cpp
 PlanEntry entry = {
@@ -421,9 +417,6 @@ PlanEntry entry = {
                 [6] = {kind=Symbol, symbol="b"},
                 [7] = {kind=Operation, op=kOr, operands={5,6}, tempSymbol="_expr_tmp_2"},
                 [8] = {kind=Operation, op=kMux, operands={2,4,7}, tempSymbol="_expr_tmp_3"}
-            },
-            roots = {
-                [0] = {value=8, location=@line1}
             },
             tempSymbols = {
                 [0] = "_expr_tmp_0",
@@ -763,14 +756,11 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
         TypeResolverPass pass2(ctx);
         pass2.resolve(/* plan from cache */);
         
-        // Pass4: ExprLowerer
-        ExprLowererPass pass4(ctx);
-        LoweringPlan lowering = pass4.lower(/* plan */);
-        planCache_.setLoweringPlan(key, std::move(lowering));
-        
-        // Pass5: StmtLowerer
+        // Pass5: StmtLowerer（含表达式降级）
         StmtLowererPass pass5(ctx);
+        LoweringPlan lowering;
         pass5.lower(/* plan, lowering */);
+        planCache_.setLoweringPlan(key, std::move(lowering));
         
         // Pass6: WriteBack
         WriteBackPass pass6(ctx);
@@ -798,8 +788,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
 AST (slang) 
     → Pass1 (SymbolCollector) → ModulePlan (骨架) → 存入 PlanEntry.plan
     → Pass2 (TypeResolver)    → ModulePlan (类型填充)
-    → Pass4 (ExprLowerer)     → LoweringPlan (values/roots) → 存入 PlanEntry.artifacts.loweringPlan
-    → Pass5 (StmtLowerer)     → LoweringPlan (+writes)
+    → Pass5 (StmtLowerer)     → LoweringPlan (values/writes) → 存入 PlanEntry.artifacts.loweringPlan
     → Pass6 (WriteBack)       → WriteBackPlan (entries) → 存入 PlanEntry.artifacts.writeBackPlan
     → Pass7 (MemoryPort)      → LoweringPlan (+memoryReads/Writes)
     → Pass8 (GraphAssembly)   → Netlist/Graph (GRH)
@@ -913,13 +902,13 @@ entry.plan.signals[0].isSigned = false
 
 ---
 
-### 3.4 Pass4：表达式降级
+### 3.4 Pass5：表达式/语句降级（合并 Pass4/Pass5）
 
-**输入**：PlanEntry.plan（ModulePlan）+ 表达式 AST
+**输入**：PlanEntry.plan（ModulePlan）+ 语句 AST
 
-**输出**：PlanEntry.artifacts.loweringPlan（values/roots/tempSymbols）
+**输出**：PlanEntry.artifacts.loweringPlan（values/tempSymbols/writes/loweredStmts）
 
-**算法**：递归下降 + 节点缓存
+**算法**：递归下降 + 节点缓存（StmtLowerer 内部调用 `lowerExpression`）
 
 伪代码：
 
@@ -974,7 +963,6 @@ lowerExpression("a + b")
         → return 1
     → node.operands = {0, 1}
     → entry.artifacts.loweringPlan.values[2] = node
-    → entry.artifacts.loweringPlan.roots[0] = {value=2}
     → return 2
 ```
 
@@ -987,7 +975,6 @@ entry.artifacts.loweringPlan = {
         [1] = {kind=Symbol, symbol="b"},
         [2] = {kind=Operation, op=kAdd, operands={0,1}, tempSymbol="_expr_tmp_0"}
     },
-    roots = {[0]={value=2}},
     tempSymbols = {[0]="_expr_tmp_0"},
     writes = {},
     loweredStmts = {},
@@ -999,11 +986,11 @@ entry.artifacts.loweringPlan = {
 
 ---
 
-### 3.5 Pass5：语句降级
+#### 3.4.1 语句降级
 
-**输入**：PlanEntry.plan（ModulePlan）+ PlanEntry.artifacts.loweringPlan
+**输入**：PlanEntry.plan（ModulePlan）+ LoweringPlan（Pass5 内部创建并填充）
 
-**输出**：更新的 PlanEntry.artifacts.loweringPlan（追加 guard 节点、WriteIntent、LoweredStmt）
+**输出**：PlanEntry.artifacts.loweringPlan（写入 guard 节点、WriteIntent、LoweredStmt）
 
 **核心机制**：Guard 栈
 
@@ -1085,7 +1072,7 @@ entry.artifacts.loweringPlan = {
 
 ---
 
-### 3.6 Pass6：写回合并
+### 3.5 Pass6：写回合并
 
 **输入**：PlanEntry.plan（ModulePlan）+ PlanEntry.artifacts.loweringPlan
 
@@ -1169,7 +1156,7 @@ entry.artifacts.writeBackPlan = {
 
 ---
 
-### 3.7 Pass7：内存端口处理
+### 3.6 Pass7：内存端口处理
 
 **输入**：PlanEntry.plan + PlanEntry.artifacts.loweringPlan
 
@@ -1223,7 +1210,7 @@ entry.artifacts.loweringPlan.memoryWrites[0] = {
 
 ---
 
-### 3.8 Pass8：图组装
+### 3.7 Pass8：图组装
 
 **输入**：PlanEntry（包含 plan、loweringPlan、writeBackPlan）+ Netlist
 
@@ -1329,7 +1316,7 @@ entry.plan.ports[2].width = 1
 entry.plan.ports[3].width = 4
 ```
 
-#### Pass4-5 后：PlanEntry.artifacts.loweringPlan
+#### Pass5 后：PlanEntry.artifacts.loweringPlan
 
 ```cpp
 entry.artifacts.loweringPlan = {
@@ -1343,10 +1330,6 @@ entry.artifacts.loweringPlan = {
         [6] = {kind=Symbol, symbol="clk"},
         [7] = {kind=Operation, op=kLogicNot, operands={0}},
         [8] = {kind=Operation, op=kLogicAnd, operands={7,2}}
-    },
-    roots = {
-        [0] = {value=1},
-        [1] = {value=5}
     },
     writes = {
         [0] = {target="count", value=1, guard=0, domain=Sequential, isNonBlocking=true},
@@ -1377,7 +1360,6 @@ entry.artifacts = {
             [9] = {kind=Operation, op=kLogicOr, operands={0,8}},
             [10] = {kind=Operation, op=kMux, operands={8,5,1}}
         },
-        roots = {...},
         writes = {...},
         memoryReads = {},
         memoryWrites = {}
@@ -1456,8 +1438,7 @@ Graph "counter" {
 | ConvertDriver | 621 | 入口类 |
 | ModulePlanner | 543 | Pass1：符号收集 |
 | TypeResolverPass | 553 | Pass2：类型解析 |
-| ExprLowererPass | 563 | Pass4：表达式降级 |
-| StmtLowererPass | 573 | Pass5：语句降级 |
+| StmtLowererPass | 573 | Pass5：表达式/语句降级 |
 | WriteBackPass | 583 | Pass6：写回合并 |
 | MemoryPortLowererPass | 593 | Pass7：内存端口处理 |
 | GraphAssembler | 603 | Pass8：图组装 |
@@ -1499,9 +1480,6 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body);
 
 // Pass2
 void TypeResolverPass::resolve(ModulePlan& plan);
-
-// Pass4
-LoweringPlan ExprLowererPass::lower(ModulePlan& plan);
 
 // Pass5
 void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);

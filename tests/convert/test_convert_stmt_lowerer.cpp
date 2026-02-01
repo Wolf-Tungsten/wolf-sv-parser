@@ -128,12 +128,11 @@ bool buildLoweringPlan(const std::filesystem::path& sourcePath, std::string_view
 
     wolf_sv_parser::ModulePlanner planner(context);
     wolf_sv_parser::TypeResolverPass typeResolver(context);
-    wolf_sv_parser::ExprLowererPass exprLowerer(context);
     wolf_sv_parser::StmtLowererPass stmtLowerer(context);
 
     outPlan = planner.plan(top->body);
     typeResolver.resolve(outPlan);
-    outPlanLowering = exprLowerer.lower(outPlan);
+    outPlanLowering = {};
     stmtLowerer.lower(outPlan, outPlanLowering);
     return true;
 }
@@ -242,8 +241,7 @@ int testIfChain(const std::filesystem::path& sourcePath) {
 
     if (lowering.writes.size() != 2) {
         return fail("Expected 2 write intents, got " +
-                    std::to_string(lowering.writes.size()) + " (roots=" +
-                    std::to_string(lowering.roots.size()) + ") in " +
+                    std::to_string(lowering.writes.size()) + " in " +
                     sourcePath.string());
     }
 

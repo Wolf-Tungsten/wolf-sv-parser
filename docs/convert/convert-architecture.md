@@ -18,11 +18,10 @@
     - 3.7.3. 类型别名
     - 3.7.4. 字段详解
     - 3.7.5. ExprNode
-    - 3.7.6. LoweredRoot
-    - 3.7.7. WriteIntent / WriteSlice
-    - 3.7.8. LoweredStmt
-    - 3.7.9. 举例说明
-    - 3.7.10. MemoryReadPort / MemoryWritePort
+    - 3.7.6. WriteIntent / WriteSlice
+    - 3.7.7. LoweredStmt
+    - 3.7.8. 举例说明
+    - 3.7.9. MemoryReadPort / MemoryWritePort
   - 3.8. WriteBackPlan
   - 3.9. Diagnostics / Logger
 - 4. Pass 中间数据结构
@@ -30,6 +29,8 @@
   - 4.2. Pass2: TypeResolver
   - 4.3. Pass5: StmtLowerer 内部临时结构
     - 4.3.1. 动态 break/continue 完整示例（分 + 案例）
+  - 4.4. Pass8: GraphAssembly 临时结构
+  - 4.5. Pass8: GraphAssembly 数据抽取视角
 - 5. Pass 与数据结构关系图
 - 6. 并行化策略（以模块为粒度）
   - 6.1. 并行边界
@@ -64,7 +65,7 @@
 ### 3.1. ConvertContext
 - 总览：
   - 定位：转换期共享状态容器，仅承载指针与配置（不持有资源所有权）。
-  - 角色：为 Pass1~Pass8 提供编译期信息与缓存/队列入口。
+- 角色：为 Pass1/Pass2/Pass5~Pass8 提供编译期信息与缓存/队列入口。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `compilation`: `const slang::ast::Compilation*` -> 访问全局类型/语义信息。
   - `root`: `const slang::ast::RootSymbol*` -> 访问 `topInstances` 等根级符号。
@@ -77,7 +78,7 @@
   - `compilation`：
     - 作用：提供类型系统与语义查询入口。
     - 建立：`ConvertDriver::convert` 中从 `root.getCompilation()` 取得。
-    - 输出：供 Pass1~Pass8 读取，不在 Context 内写回。
+    - 输出：供 Pass1/Pass2/Pass5~Pass8 读取，不在 Context 内写回。
   - `root`：
     - 作用：根符号视图，承载顶层实例列表。
     - 建立：`ConvertDriver::convert` 传入。
@@ -113,7 +114,7 @@
     - 子成员（内部状态 -> 类型 -> 含义）：
       - `entries_`: `std::unordered_map<PlanKey, PlanEntry>` -> 计划状态与产物集合。
       - `mutex_`: `std::mutex` -> 并行访问保护。
-    - 输出：供 Pass1~Pass7 写入与读取 `ModulePlan`/`PlanArtifacts`。
+    - 输出：供 Pass1/Pass2/Pass5~Pass7 写入与读取 `ModulePlan`/`PlanArtifacts`。
   - `planQueue`：
     - 作用：模块计划任务队列，驱动模块级流水线。
     - 建立：指向 `ConvertDriver::planQueue_`。
@@ -150,7 +151,7 @@
 - 字段总览（字段 -> 类型 -> 含义）：
   - `status`: `PlanStatus` -> 计划处理阶段状态。
   - `plan`: `std::optional<ModulePlan>` -> 模块计划（Pass1~Pass2 写入）。
-  - `artifacts`: `PlanArtifacts` -> Pass4~Pass7 的中间产物占位。
+  - `artifacts`: `PlanArtifacts` -> Pass5~Pass7 的中间产物占位。
 - 字段详解：
   - `status`：
     - 作用：描述计划生命周期状态（`Pending/Planning/Done/Failed`）。
@@ -160,12 +161,12 @@
   - `plan`：
     - 作用：保存 `ModulePlan`（端口/信号/实例/读写等计划信息）。
     - 建立：`ModulePlanner::plan` 生成后由 `PlanCache::storePlan` 写入。
-    - 输出：供 Pass2~Pass8 使用；失败时置空。
+    - 输出：供 Pass2/Pass5~Pass8 使用；失败时置空。
   - `artifacts`：
-    - 作用：保存 Pass4~Pass7 的中间结果容器。
-    - 建立：在 `PlanEntry` 构造时默认存在；内容由 Pass4/Pass6 写入。
+    - 作用：保存 Pass5~Pass7 的中间结果容器。
+    - 建立：在 `PlanEntry` 构造时默认存在；内容由 Pass5/Pass6 写入。
     - 子成员（字段 -> 类型 -> 含义）：
-      - `loweringPlan`: `std::optional<LoweringPlan>` -> Pass4/Pass5/Pass6/Pass7 产物。
+      - `loweringPlan`: `std::optional<LoweringPlan>` -> Pass5/Pass6/Pass7 产物。
       - `writeBackPlan`: `std::optional<WriteBackPlan>` -> Pass6 产物。
     - 输出：供 Pass8 使用。
 - 关联结构（围绕 PlanEntry 的容器/索引）：
@@ -176,7 +177,7 @@
 ### 3.4. ModulePlan
 - 总览：
   - 定位：模块级静态计划，集中记录端口/信号/实例/读写关系等“长期稳定事实”。
-  - 角色：Pass1~Pass7 的共享输入与写入目标。
+- 角色：Pass1/Pass2/Pass5~Pass7 的共享输入与写入目标。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `body`: `const slang::ast::InstanceBodySymbol*` -> 模块实例体指针。
   - `symbolTable`: `PlanSymbolTable` -> 模块内符号驻留表。
@@ -188,7 +189,7 @@
   - `body`：
     - 作用：提供 AST 成员遍历入口。
     - 建立：`ModulePlanner::plan` 绑定。
-    - 输出：供 Pass1~Pass7 遍历 AST。
+    - 输出：供 Pass1/Pass2/Pass5~Pass7 遍历 AST。
   - `symbolTable`：
     - 作用：统一管理模块内符号名与 `PlanSymbolId`。
     - 建立：Pass1 在收集端口/信号/实例时调用 `intern`。
@@ -275,7 +276,7 @@
     - 作用：标记该实例是否只有接口而无实现。
     - 建立：Pass1 调用黑盒判定逻辑：若 body 无实现成员则视为 blackbox；
       若显式标注 blackbox 但仍有实现，记录 error 并按普通模块处理。
-    - 输出：影响 Pass4~Pass7 是否展开实例内部逻辑。
+    - 输出：影响 Pass5~Pass7 是否展开实例内部逻辑。
   - `parameters`：
     - 作用：保留 blackbox 的参数化信息，供 GRH 记录/导出。
     - 建立：Pass1 从 `InstanceBodySymbol.getParameters()` 读取（跳过 localparam），
@@ -284,16 +285,15 @@
 - 生成与使用约定：
   - 生成：Pass1 在扫描 `InstanceSymbol/InstanceArraySymbol/GenerateBlock*` 时创建记录。
   - 任务发现：每条 `InstanceInfo` 关联一个子模块 PlanKey，由 Pass1 递归投递到队列。
-  - 使用：Pass4~Pass7 消费 `instances` 构建实例层级与连接关系，不回扫 AST。
+  - 使用：Pass5~Pass7 消费 `instances` 构建实例层级与连接关系，不回扫 AST。
 
 ### 3.7. LoweringPlan
 #### 3.7.1. 总览与角色
-- 定位：`LoweringPlan` 记录 Pass4~Pass7 的表达式降级结果。
+- 定位：`LoweringPlan` 记录 Pass5~Pass7 的表达式与语句降级结果。
 - 角色：`LoweringPlan` 为 StmtLowerer/WriteBack/MemoryPortLowerer 的共享输入。
 
 #### 3.7.2. 字段总览
 - `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
-- `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
 - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
 - `writes`: `std::vector<WriteIntent>` -> 赋值写回意图与 guard 信息。
 - `loweredStmts`: `std::vector<LoweredStmt>` -> 按语句顺序保存 Write/Display/Assert/DpiCall。
@@ -307,15 +307,11 @@
 #### 3.7.4. 字段详解
 - `values`：
   - 作用：保存降级后的表达式节点，节点之间通过索引引用。
-  - 建立：Pass4 对 RHS 表达式树递归降级时追加。
-  - 输出：供 Pass5~Pass7 解析依赖关系与写回意图。
-  - `roots`：
-    - 作用：标记每条 RHS 表达式的入口节点索引。
-    - 建立：Pass4 处理赋值语句时收集 RHS 入口。
-    - 输出：供后续 pass 以 root 为起点回溯依赖。
+  - 建立：Pass5 在语句降级过程中直接生成 RHS 与 guard 表达式。
+  - 输出：供 Pass6~Pass7 解析依赖关系与写回意图。
   - `tempSymbols`：
     - 作用：为操作节点分配稳定的临时名。
-    - 建立：Pass4 每创建一个操作节点就追加一个 temp symbol。
+    - 建立：Pass5 每创建一个操作节点就追加一个 temp symbol。
     - 输出：供写回/生成阶段绑定临时值命名。
   - `writes`：
     - 作用：记录每条赋值语句的写回意图、guard 与控制域，并携带 LHS 切片信息。
@@ -376,18 +372,7 @@
   - `location`：
     - 作用：保留源码位置信息，便于诊断与日志。
 
-#### 3.7.6. LoweredRoot
-- 字段总览（字段 -> 类型 -> 含义）：
-  - `value`: `ExprNodeId` -> 根节点索引。
-  - `location`: `slang::SourceLocation` -> 源码位置。
-- 字段详解：
-  - `value`：
-    - 作用：指向 `values` 中的根节点。
-    - 输出：作为每条 RHS 的入口。
-  - `location`：
-    - 作用：记录 root 的源码位置。
-
-#### 3.7.7. WriteIntent / WriteSlice
+#### 3.7.6. WriteIntent / WriteSlice
 - WriteIntent 字段总览（字段 -> 类型 -> 含义）：
   - `target`: `PlanSymbolId` -> 写回目标符号。
   - `slices`: `std::vector<WriteSlice>` -> LHS 位选/范围选链路；为空表示整信号写回。
@@ -406,7 +391,7 @@
   - `member`: `PlanSymbolId` -> 成员名（MemberSelect）。
   - `location`: `slang::SourceLocation` -> 片段选择位置。
 
-#### 3.7.8. LoweredStmt
+#### 3.7.7. LoweredStmt
 - LoweredStmt 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `LoweredStmtKind` -> Write/Display/Assert/DpiCall。
   - `op`: `grh::ir::OperationKind` -> 对应的 GRH 操作类型（Display/Assert/DpiCall）。
@@ -447,11 +432,11 @@
     否则语句被丢弃并生成诊断。
   - `eventEdges.size()` 必须与 `eventOperands.size()` 一致。
 
-#### 3.7.9. 举例说明
-- 表达式降级（Pass4）：
+#### 3.7.8. 举例说明
+- 表达式降级（Pass5）：
     - 输入：`assign y = (a & b) ? ~c : (a | b);`
     - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。
-    - `LoweredRoot.value`：指向 `kMux` 节点索引（RHS 顶层根）。
+    - 写回入口：对应赋值语句的 `WriteIntent.value` 指向 `kMux` 节点索引（RHS 顶层根）。
     - `values`（示意顺序）：
       - `0: Symbol(a)`
       - `1: Symbol(b)`
@@ -462,7 +447,6 @@
       - `6: Symbol(b)`
       - `7: Op(kOr, [5,6])`
       - `8: Op(kMux, [2,4,7])`
-    - `roots`：`[8]`
     - `tempSymbols`：`[2->tmp0, 4->tmp1, 7->tmp2, 8->tmp3]`
     - 说明：`a/b` 在 AST 中出现两次时会生成两个 `Symbol` 节点，因此 `values` 共 9 项。
 - 分支语句（Pass5）：
@@ -479,12 +463,11 @@
           - `1: Symbol(c)`  (rhs1)
           - `2: Symbol(a)`  (g0)
           - `3: Op(kLogicNot, [2])` (g1)
-        - `roots`：`[0, 1]`
         - `writes`：
           - `WriteIntent{target=y, value=0, guard=2}`
-      - `WriteIntent{target=y, value=1, guard=3}`
+          - `WriteIntent{target=y, value=1, guard=3}`
 
-#### 3.7.10. MemoryReadPort / MemoryWritePort
+#### 3.7.9. MemoryReadPort / MemoryWritePort
 - MemoryReadPort 字段总览（字段 -> 类型 -> 含义）：
   - `memory`: `PlanSymbolId` -> memory 符号名。
   - `signal`: `SignalId` -> memory 信号索引（未解析为 invalid）。
@@ -535,7 +518,6 @@
           - `6: Op(kLogicAnd, [5,4])` (g1)
           - `7: Op(kLogicNot, [4])` (not c)
           - `8: Op(kLogicAnd, [5,7])` (g2)
-        - `roots`：`[0, 1, 2]`
         - `writes`：
           - `WriteIntent{y, value=0, guard=3}`
           - `WriteIntent{y, value=1, guard=6}`
@@ -642,7 +624,6 @@
         - `12: Op(kLogicAnd, [10,11])` (guard1)
         - `13: Op(kLogicOr, [9,10])` (anyMatch)
         - `14: Op(kLogicNot, [13])` (default)
-      - `roots`：`[0, 1, 2]`
       - `writes`：
         - `WriteIntent{y, value=0, guard=9}`
         - `WriteIntent{y, value=1, guard=12}`
@@ -692,7 +673,6 @@
       - 输出（示意）：
         - `values`：
           - `0: Symbol(a)` (rhs0)
-        - `roots`：`[0]`
         - `writes`：
           - `WriteIntent{y, value=0, guard=invalid}`
           - `WriteIntent{y, value=0, guard=invalid}`
@@ -705,7 +685,6 @@
       - 输出（示意）：
         - `values`：
           - `0: Symbol(a)` (rhs0)
-        - `roots`：`[0]`
         - `writes`：
           - `WriteIntent{y, value=0, guard=invalid}`
           - `WriteIntent{y, value=0, guard=invalid}`
@@ -717,7 +696,6 @@
       - 输出（示意）：
         - `values`：
           - `0: Symbol(a)` (rhs0)
-        - `roots`：`[0]`
         - `writes`：
           - `WriteIntent{y, value=0, guard=invalid}`
           - `WriteIntent{y, value=0, guard=invalid}`
@@ -776,7 +754,7 @@
           `WriteIntent.guard` 保存其索引。
         - 实际节点索引由构建顺序决定，这里仅展示结构关系。
   - 生成与使用约定：
-    - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
+    - 生成：Pass5 扫描过程块与连续赋值，降级 RHS/guard 并写入 `PlanArtifacts.loweringPlan`。
     - 使用：Pass5~Pass7 读取 `loweringPlan`，不回扫 AST。
 
 ### 3.8. WriteBackPlan
@@ -923,7 +901,7 @@
   - `guardStack`：分支路径 guard 栈（if/case 的 path guard）。
   - `flowStack`：迭代内 flow guard 栈（动态 break/continue 使用）。
   - `loopFlowStack`：循环上下文栈，保存当前循环的 `loopAlive`。
-  - `nextRoot/nextTemp`：消费 RHS root 与分配临时符号的游标。
+  - `nextTemp`：分配临时符号的游标。
   - `loopControlFailure`：静态展开失败原因（诊断信息来源）。
 - 数据落位（分）：
   - `guardStack/flowStack/loopFlowStack` 只存在于 Pass5，退出 Pass5 后即销毁。
@@ -976,7 +954,7 @@
   - `flowGuard`/`loopAlive` 相关的 `kLogicAnd/kLogicNot` 节点追加进
     `LoweringPlan.values`，其索引由 `WriteIntent.guard` 引用。
 
-### 4.5. Pass8: GraphAssembly 临时结构
+### 4.4. Pass8: GraphAssembly 临时结构
 - 总览：
   - 定位：仅在 GraphAssembly 构建期存在的缓存与索引表。
   - 目的：将 `PlanSymbolId/ExprNodeId` 映射到 Graph 的 `ValueId/OperationId`。
@@ -992,7 +970,7 @@
   - `emitExpr` 递归发射 ExprNode 并缓存 `valueByExpr`。
   - `WriteBackPlan` 直接使用缓存生成 `kAssign/kRegister/kLatch`。
 
-### 4.6. Pass8: GraphAssembly 数据抽取视角
+### 4.5. Pass8: GraphAssembly 数据抽取视角
 - 总览：
   - 关注点：从 `ModulePlan/LoweringPlan/WriteBackPlan` 中抽取必要信息，形成 Graph 组装输入。
 - 关键抽取点（分）：
@@ -1032,10 +1010,8 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
   |
   +--> Pass2: TypeResolverPass    -> update ModulePlan (width/signed/dims)
   |
-  +--> Pass4: ExprLowererPass     -> LoweringPlan
+  +--> Pass5: StmtLowererPass     -> LoweringPlan (expr + stmt)
   |                               -> PlanCache[PlanKey].artifacts.loweringPlan
-  |
-  +--> Pass5: StmtLowererPass     -> refine LoweringPlan (guards/write intents)
   |
   +--> Pass6: WriteBackPass       -> WriteBackPlan
   |
@@ -1048,7 +1024,7 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 ## 6. 并行化策略（以模块为粒度）
 ### 6.1. 并行边界
 - 一个参数特化模块对应一个任务流水线。
-- Pass1/Pass2/Pass4~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
+- Pass1/Pass2/Pass5~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
 
 ### 6.2. 任务与调度
 - 任务 key：`PlanKey = body + paramSignature`。

@@ -517,7 +517,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 参数建模：`in` -> `ExprNodeId`；`out` -> 结果 value；
   可选返回值通过 `hasReturn` 与 `results[0]` 表示
 - StmtLowerer 在 `ExpressionStatement` 中识别系统任务与 DPI 调用，解析方向并生成 intent
-- 复用 Pass4 表达式降级生成实参值（仅语句级调用，不扩展 Pass4 表达式调用）
+- 复用 Pass5 表达式降级生成实参值（仅语句级调用，不扩展独立表达式调用）
 - 新增 `stmt_lowerer` fixture 与断言覆盖 `$display` 与 DPI 调用顺序与返回值占位
 - 更新 workflow/architecture，补充 Pass5 处理“副作用语句”的流程与限制
 
@@ -974,9 +974,10 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 清理测试/fixtures（若有依赖 Pass4 行为的断言）
 
 实施：
-- 将 Pass5 的表达式降级作为唯一实现，统一处理 `widthContext`、conversion、packed index 调整等逻辑
-- 新增或调整缓存策略以替代 `roots` 顺序：对 assignment RHS 直接 `lowerExpression` 并在 Pass5 内去重
-- 维护 temp symbol 命名的可预期顺序（与现有输出一致或更新 fixture）
-- 删除 `ExprLowererPass` 类与相关声明
+- 移除 `ExprLowererPass`/`ExprLowererState` 与 `LoweredRoot`/`LoweringPlan.roots` 相关实现与声明
+- StmtLowerer 直接调用 `lowerExpression` 降级 RHS，删除 `takeNextRoot/resolveAssignmentRoot` 等跨 Pass 依赖
+- StmtLowerer 负责初始化 `LoweringPlan`（values/tempSymbols/writes 等），ConvertDriver 仅执行 Pass5
+- 清理 `convert-expr-lowerer` 测试与 fixture，更新其余测试仅依赖 StmtLowerer
+- 同步更新 convert-architecture/workflow/kimi 文档对齐合并后的 Pass5
 
-完成情况：未开始
+完成情况：已完成

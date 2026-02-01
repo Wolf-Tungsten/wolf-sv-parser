@@ -13,7 +13,7 @@
 - `ModulePlan`：模块级静态计划，存放 `ports`/`signals`/`instances` 等骨架数据。
 - `PortInfo`/`SignalInfo`/`InstanceInfo`：`ModulePlan` 内的端口/信号/实例记录。
 - `PlanArtifacts`：与 `ModulePlan` 配套的中间产物容器（Lowering/WriteBack 等）。
-- `LoweringPlan`/`WriteBackPlan`：Pass4/Pass6 产出并缓存到 `PlanArtifacts` 的中间计划。
+- `LoweringPlan`/`WriteBackPlan`：Pass5/Pass6 产出并缓存到 `PlanArtifacts` 的中间计划。
 - `Netlist`/`Graph`：Convert 的最终 GRH 输出；`topGraphs` 记录顶层 Graph 名称。
 - `GRH`：内部中间表示（Graph-based IR），Convert 的目标输出。
 - `InstanceBodySymbol`：slang AST 的实例体（模块/接口/程序体），Pass1 的主要输入。
@@ -34,7 +34,7 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
-- 当前实现已完成 Context Setup 与 Pass1~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
+- 当前实现已完成 Context Setup 与 Pass1/Pass2/Pass5~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
 
 ## CLI 主流程（wolf-sv-parser）
 - 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
@@ -82,38 +82,10 @@
   - 约束：不定宽度或动态/关联/队列数组会记录诊断并回退为 1-bit。
   - 边界：宽度与维度在超出 GRH 表示范围时 clamp 到上限。
 
-## Pass4: ExprLowererPass
-- 功能：将 RHS 表达式树归一化为 LoweringPlan 中的表达式节点图。
-- 输入：`ModulePlan` + 表达式 AST + ctx。
-- 输出形式：`PlanCache[PlanKey].artifacts.loweringPlan`。
-- 形式化定义：
-  - LoweringPlan.values：表达式节点序列，节点类型为 `ExprNode{kind, op, operands, symbol, literal, location}`。
-  - LoweringPlan.roots：每条 RHS 表达式对应一个 root，指向其顶层 `ExprNodeId`。
-  - LoweringPlan.tempSymbols：每个 `Operation` 节点分配一个临时名 `_expr_tmp_<n>`。
-- 处理规则：
-  - 输入集合：模块内全部 `AssignmentExpression` 的 RHS；复合赋值 `lhs op= rhs` 转为
-    `op(lhs, rhs)` 后作为 RHS root。
-  - 终结节点：
-    - Named/Hierarchical value -> `ExprNode{kind=Symbol, symbol=PlanSymbolId}`。
-    - Integer/unsized literal/string -> `ExprNode{kind=Constant, literal=...}`。
-  - 复合节点：
-    - Unary/Binary/Conditional/Concat/Replicate/Select -> `ExprNode{kind=Operation, op=...}`，
-      `operands` 按源 AST 的子表达式顺序填入其 `ExprNodeId`。
-  - 失败策略：不支持的表达式记录 TODO 诊断并跳过该子树。
-- 案例：
-  - 输入：`assign y = (a & b) ? ~c : (a | b);`
-  - 输出（示意）：
-    - values：
-      `Symbol(a)`, `Symbol(b)`, `Op(kAnd, [a,b])`,
-      `Symbol(c)`, `Op(kNot, [c])`, `Symbol(a)`, `Symbol(b)`,
-      `Op(kOr, [a,b])`, `Op(kMux, [and, not, or])`
-    - roots：`[kMux 节点索引]`
-    - tempSymbols：`[_expr_tmp_0, _expr_tmp_1, _expr_tmp_2, _expr_tmp_3]`
-
 ## Pass5: StmtLowererPass
-- 功能：语句与控制流降级，生成 guard 与写回意图。
-- 输入：`ModulePlan` + 语句 AST + `LoweringPlan` + ctx。
-- 输出形式：更新 `LoweringPlan`（追加 guard 节点、`WriteIntent` 与 `LoweredStmt`）。
+- 功能：表达式 + 语句与控制流降级，生成 guard 与写回意图。
+- 输入：`ModulePlan` + 语句 AST + ctx。
+- 输出形式：生成 `LoweringPlan`（values/writes/loweredStmts/dpiImports 等）。
 
 ### 0. 总体脉络
 Pass5 以“入口类型”为一级结构：
@@ -125,7 +97,7 @@ Pass5 以“入口类型”为一级结构：
 ### 1. 连续赋值入口（ContinuousAssignSymbol）
 #### 1.1 入口流程
 1) 设置 `domain = comb`。  
-2) 访问赋值表达式并消费 RHS root（来自 Pass4）。  
+2) 访问赋值表达式并调用 `lowerExpression` 生成 RHS ExprNodeId。  
 3) 解析 LHS -> `targets + slices`（支持 concat/streaming concat、bit/range/member select）。  
 4) 若 LHS 为复合目标则按位宽拆分 RHS 并生成多条 `WriteIntent`；否则生成单条。  
 5) 右到左 streaming（slice_size > 0）与 with-clause 当前仍报 TODO。  
@@ -158,7 +130,7 @@ assign y = a & b;
 
 ##### 2.2.1 赋值类语句
 - `ExpressionStatement/ProceduralAssignStatement`：  
-  - 消费 RHS root；解析 LHS（支持 concat/streaming/member）；生成 `WriteIntent`（复合 LHS 拆分）。  
+  - 生成 RHS ExprNodeId；解析 LHS（支持 concat/streaming/member）；生成 `WriteIntent`（复合 LHS 拆分）。  
 代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::handleAssignment`。  
 
 示例：  
@@ -250,7 +222,7 @@ end
   - 同步记录 `DpiImportInfo` 到 `LoweringPlan.dpiImports`，按 symbol 去重并校验签名一致。  
 - 事件绑定：进入过程块时解析 edge-sensitive timing control（`posedge/negedge`）；  
   若无法解析或非 edge-sensitive，display/DPI 调用丢弃并产生诊断。  
-- 参数表达式复用 Pass4/Pass5 的 `lowerExpression` 降级为 `ExprNodeId`。  
+- 参数表达式复用 Pass5 的 `lowerExpression` 降级为 `ExprNodeId`。  
 
 ##### 2.2.6 不支持语句
 - `PatternCaseStatement`：报错并跳过。  
@@ -392,7 +364,7 @@ endmodule
   - `E(i)` 表示 `ExprNodeId -> ValueId` 的映射。
 - 预条件：
   - `P.ports` 与 `P.signals` 已完成宽度/签名解析；
-  - `L.values` 仅包含 Pass4/5 支持的节点；
+  - `L.values` 仅包含 Pass5 支持的节点；
   - `W.entries` 已包含切片写回的 read/modify/write 结果。
 - 目标：
   - 生成 `Graph G`，包含端口 Value、内部 Value、运算 op，并写入 `Netlist`；
@@ -422,7 +394,7 @@ endmodule
   6. **实例化**：
      - 普通实例：`kInstance`，attrs = `moduleName/inputPortName/outputPortName[/inoutPortName]/[instanceName]`。
      - 黑盒实例：`kBlackbox`，attrs 额外包含 `parameterNames/parameterValues`。
-     - 输入端口连接：对连接表达式进行一次本地 ExprLowerer（仅支持基础表达式/选择/拼接）。
+     - 输入端口连接：对连接表达式进行一次本地表达式降级（ConnectionExprLowerer，仅支持基础表达式/选择/拼接）。
      - 输出端口连接：必须是简单 symbol（禁止连接 inout 绑定、复杂表达式）。
      - inout 端口连接：要求连接到 inout 端口，按 `__out/__oe` 作为 operands，
        `__in` 作为 result。

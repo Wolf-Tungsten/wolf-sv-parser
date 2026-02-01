@@ -777,604 +777,6 @@ std::optional<grh::ir::OperationKind> mapBinaryOp(slang::ast::BinaryOperator op)
     return std::nullopt;
 }
 
-struct ExprLowererState {
-    ModulePlan& plan;
-    ConvertDiagnostics* diagnostics;
-    LoweringPlan lowering;
-    std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
-    uint32_t nextTemp = 0;
-
-    ExprLowererState(ModulePlan& plan, ConvertDiagnostics* diagnostics)
-        : plan(plan), diagnostics(diagnostics) {}
-
-    void lowerRoot(const slang::ast::Expression& expr)
-    {
-        ExprNodeId id = lowerExpression(expr);
-        if (id == kInvalidPlanIndex)
-        {
-            return;
-        }
-        LoweredRoot root;
-        root.value = id;
-        root.location = expr.sourceRange.start();
-        lowering.roots.push_back(std::move(root));
-    }
-
-    void lowerAssignment(const slang::ast::AssignmentExpression& expr)
-    {
-        if (expr.op)
-        {
-            const auto opKind = mapBinaryOp(*expr.op);
-            if (!opKind)
-            {
-                reportUnsupported(expr, "Unsupported compound assignment operator");
-                return;
-            }
-            ExprNodeId lhs = lowerExpression(expr.left());
-            ExprNodeId rhs = lowerExpression(expr.right());
-            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
-            {
-                return;
-            }
-            ExprNode value;
-            value.kind = ExprNodeKind::Operation;
-            value.op = *opKind;
-            value.operands = {lhs, rhs};
-            value.location = expr.sourceRange.start();
-            value.tempSymbol = makeTempSymbol();
-            ExprNodeId id = addNode(expr, std::move(value));
-            LoweredRoot root;
-            root.value = id;
-            root.location = expr.sourceRange.start();
-            lowering.roots.push_back(std::move(root));
-            return;
-        }
-        lowerRoot(expr.right());
-    }
-
-    ExprNodeId lowerExpression(const slang::ast::Expression& expr)
-    {
-        if (auto it = lowered.find(&expr); it != lowered.end())
-        {
-            return it->second;
-        }
-
-        auto adjustPackedIndex =
-            [&](const slang::ast::Type* baseType, ExprNodeId index,
-                slang::SourceLocation location) -> ExprNodeId {
-            if (!baseType || index == kInvalidPlanIndex)
-            {
-                return index;
-            }
-            const auto& canonical = baseType->getCanonicalType();
-            if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
-            {
-                return index;
-            }
-            const auto& packed = canonical.as<slang::ast::PackedArrayType>();
-            const int64_t offset =
-                std::min<int64_t>(packed.range.left, packed.range.right);
-            if (offset == 0)
-            {
-                return index;
-            }
-            int32_t widthHint = 0;
-            if (index < lowering.values.size())
-            {
-                widthHint = lowering.values[index].widthHint;
-            }
-            if (widthHint <= 0)
-            {
-                widthHint = 32;
-            }
-            ExprNode constNode;
-            constNode.kind = ExprNodeKind::Constant;
-            constNode.literal = std::to_string(offset);
-            constNode.location = location;
-            constNode.widthHint = widthHint;
-            ExprNodeId offsetId = addSyntheticNode(std::move(constNode));
-            ExprNode subNode;
-            subNode.kind = ExprNodeKind::Operation;
-            subNode.op = grh::ir::OperationKind::kSub;
-            subNode.operands = {index, offsetId};
-            subNode.location = location;
-            subNode.tempSymbol = makeTempSymbol();
-            subNode.widthHint = widthHint;
-            return addSyntheticNode(std::move(subNode));
-        };
-
-        auto paramLiteral = [](const slang::ast::ParameterSymbol& param)
-            -> std::optional<std::string> {
-            slang::ConstantValue value = param.getValue();
-            if (value.bad())
-            {
-                return std::nullopt;
-            }
-            if (!value.isInteger())
-            {
-                value = value.convertToInt();
-            }
-            if (!value.isInteger())
-            {
-                return std::nullopt;
-            }
-            const slang::SVInt& literal = value.integer();
-            if (literal.hasUnknown())
-            {
-                return std::nullopt;
-            }
-            return literal.toString();
-        };
-
-        ExprNode node;
-        node.location = expr.sourceRange.start();
-
-        if (const slang::ConstantValue* constant = expr.getConstant())
-        {
-            if (constant->isInteger())
-            {
-                const slang::SVInt& literal = constant->integer();
-                if (!literal.hasUnknown())
-                {
-                    node.kind = ExprNodeKind::Constant;
-                    node.literal = literal.toString();
-                    return addNode(expr, std::move(node));
-                }
-            }
-        }
-
-        auto isProceduralLocal = [](const slang::ast::Symbol& symbol) -> bool {
-            const slang::ast::Scope* scope = symbol.getParentScope();
-            return scope && scope->isProceduralContext();
-        };
-
-        if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
-        {
-            if (const auto* param =
-                    named->symbol.as_if<slang::ast::ParameterSymbol>())
-            {
-                if (auto literal = paramLiteral(*param))
-                {
-                    node.kind = ExprNodeKind::Constant;
-                    node.literal = *literal;
-                    return addNode(expr, std::move(node));
-                }
-            }
-            node.kind = ExprNodeKind::Symbol;
-            node.symbol = plan.symbolTable.lookup(named->symbol.name);
-            if (!node.symbol.valid() &&
-                (named->symbol.kind == slang::ast::SymbolKind::Parameter ||
-                 named->symbol.kind == slang::ast::SymbolKind::TypeParameter))
-            {
-                node.symbol = plan.symbolTable.intern(named->symbol.name);
-            }
-            if (!node.symbol.valid() && !isProceduralLocal(named->symbol))
-            {
-                reportUnsupported(expr, "Unknown symbol in expression");
-            }
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
-        {
-            if (const auto* param =
-                    hier->symbol.as_if<slang::ast::ParameterSymbol>())
-            {
-                if (auto literal = paramLiteral(*param))
-                {
-                    node.kind = ExprNodeKind::Constant;
-                    node.literal = *literal;
-                    return addNode(expr, std::move(node));
-                }
-            }
-            node.kind = ExprNodeKind::Symbol;
-            node.symbol = plan.symbolTable.lookup(hier->symbol.name);
-            if (!node.symbol.valid() &&
-                (hier->symbol.kind == slang::ast::SymbolKind::Parameter ||
-                 hier->symbol.kind == slang::ast::SymbolKind::TypeParameter))
-            {
-                node.symbol = plan.symbolTable.intern(hier->symbol.name);
-            }
-            if (!node.symbol.valid() && !isProceduralLocal(hier->symbol))
-            {
-                reportUnsupported(expr, "Unknown hierarchical symbol in expression");
-            }
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* literal = expr.as_if<slang::ast::IntegerLiteral>())
-        {
-            node.kind = ExprNodeKind::Constant;
-            node.literal = literal->getValue().toString();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
-        {
-            node.kind = ExprNodeKind::Constant;
-            node.literal = literal->getValue().toString();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
-        {
-            node.kind = ExprNodeKind::Constant;
-            node.literal.assign(literal->getValue());
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
-        {
-            return lowerExpression(conversion->operand());
-        }
-        if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
-        {
-            const auto opKind = mapUnaryOp(unary->op);
-            if (!opKind)
-            {
-                reportUnsupported(expr, "Unsupported unary operator");
-                return kInvalidPlanIndex;
-            }
-            ExprNodeId operand = lowerExpression(unary->operand());
-            if (operand == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = *opKind;
-            node.operands = {operand};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* binary = expr.as_if<slang::ast::BinaryExpression>())
-        {
-            const auto opKind = mapBinaryOp(binary->op);
-            if (!opKind)
-            {
-                reportUnsupported(expr, "Unsupported binary operator");
-                return kInvalidPlanIndex;
-            }
-            ExprNodeId lhs = lowerExpression(binary->left());
-            ExprNodeId rhs = lowerExpression(binary->right());
-            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = *opKind;
-            node.operands = {lhs, rhs};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* cond = expr.as_if<slang::ast::ConditionalExpression>())
-        {
-            if (cond->conditions.empty())
-            {
-                reportUnsupported(expr, "Conditional expression missing condition");
-                return kInvalidPlanIndex;
-            }
-            if (cond->conditions.size() > 1)
-            {
-                reportUnsupported(expr, "Conditional expression with patterns unsupported");
-            }
-            const slang::ast::Expression& condExpr = *cond->conditions.front().expr;
-            ExprNodeId condId = lowerExpression(condExpr);
-            if (condId != kInvalidPlanIndex && condId < lowering.values.size())
-            {
-                const int32_t condWidth = lowering.values[condId].widthHint;
-                if (condWidth > 1)
-                {
-                    ExprNode logicNode;
-                    logicNode.kind = ExprNodeKind::Operation;
-                    logicNode.op = grh::ir::OperationKind::kReduceOr;
-                    logicNode.operands = {condId};
-                    logicNode.location = condExpr.sourceRange.start();
-                    logicNode.tempSymbol = makeTempSymbol();
-                    logicNode.widthHint = 1;
-                    condId = addSyntheticNode(std::move(logicNode));
-                }
-            }
-            ExprNodeId lhs = lowerExpression(cond->left());
-            ExprNodeId rhs = lowerExpression(cond->right());
-            if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
-                rhs == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = grh::ir::OperationKind::kMux;
-            node.operands = {condId, lhs, rhs};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
-        {
-            std::vector<ExprNodeId> operands;
-            operands.reserve(concat->operands().size());
-            for (const slang::ast::Expression* operand : concat->operands())
-            {
-                if (!operand)
-                {
-                    continue;
-                }
-                ExprNodeId id = lowerExpression(*operand);
-                if (id == kInvalidPlanIndex)
-                {
-                    return kInvalidPlanIndex;
-                }
-                operands.push_back(id);
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = grh::ir::OperationKind::kConcat;
-            node.operands = std::move(operands);
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* repl = expr.as_if<slang::ast::ReplicationExpression>())
-        {
-            ExprNodeId count = lowerExpression(repl->count());
-            ExprNodeId concat = lowerExpression(repl->concat());
-            if (count == kInvalidPlanIndex || concat == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = grh::ir::OperationKind::kReplicate;
-            node.operands = {count, concat};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
-        {
-            ExprNodeId value = lowerExpression(select->value());
-            ExprNodeId index = lowerExpression(select->selector());
-            if (value == kInvalidPlanIndex || index == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            index = adjustPackedIndex(select->value().type, index,
-                                      select->sourceRange.start());
-            node.kind = ExprNodeKind::Operation;
-            node.op = grh::ir::OperationKind::kSliceDynamic;
-            node.operands = {value, index};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-        if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
-        {
-            ExprNodeId value = lowerExpression(range->value());
-            ExprNodeId left = lowerExpression(range->left());
-            ExprNodeId right = lowerExpression(range->right());
-            if (value == kInvalidPlanIndex || left == kInvalidPlanIndex ||
-                right == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            auto getWidthHint = [&](ExprNodeId id) -> int32_t {
-                if (id == kInvalidPlanIndex || id >= lowering.values.size())
-                {
-                    return 0;
-                }
-                return lowering.values[id].widthHint;
-            };
-            int32_t indexWidth = getWidthHint(left);
-            if (indexWidth <= 0)
-            {
-                indexWidth = getWidthHint(right);
-            }
-            if (indexWidth <= 0)
-            {
-                indexWidth = 32;
-            }
-            auto addConst = [&](int64_t literal) -> ExprNodeId {
-                ExprNode constNode;
-                constNode.kind = ExprNodeKind::Constant;
-                constNode.literal = std::to_string(literal);
-                constNode.location = range->sourceRange.start();
-                constNode.widthHint = indexWidth;
-                return addSyntheticNode(std::move(constNode));
-            };
-            auto addSub = [&](ExprNodeId lhs, ExprNodeId rhs) -> ExprNodeId {
-                ExprNode subNode;
-                subNode.kind = ExprNodeKind::Operation;
-                subNode.op = grh::ir::OperationKind::kSub;
-                subNode.operands = {lhs, rhs};
-                subNode.location = range->sourceRange.start();
-                subNode.tempSymbol = makeTempSymbol();
-                subNode.widthHint = indexWidth;
-                return addSyntheticNode(std::move(subNode));
-            };
-            ExprNodeId indexExpr = kInvalidPlanIndex;
-            switch (range->getSelectionKind())
-            {
-            case slang::ast::RangeSelectionKind::Simple: {
-                auto leftConst = evalConstInt(plan, lowering, left);
-                auto rightConst = evalConstInt(plan, lowering, right);
-                if (!leftConst || !rightConst)
-                {
-                    reportUnsupported(expr, "Dynamic range select is unsupported");
-                    return kInvalidPlanIndex;
-                }
-                const int64_t low = std::min(*leftConst, *rightConst);
-                indexExpr = addConst(low);
-                break;
-            }
-            case slang::ast::RangeSelectionKind::IndexedUp:
-                indexExpr = left;
-                break;
-            case slang::ast::RangeSelectionKind::IndexedDown: {
-                auto widthConst = evalConstInt(plan, lowering, right);
-                if (widthConst)
-                {
-                    if (*widthConst <= 0)
-                    {
-                        reportUnsupported(expr, "Indexed part-select width must be positive");
-                        return kInvalidPlanIndex;
-                    }
-                    if (*widthConst == 1)
-                    {
-                        indexExpr = left;
-                    }
-                    else
-                    {
-                        ExprNodeId offset = addConst(*widthConst - 1);
-                        indexExpr = addSub(left, offset);
-                    }
-                }
-                else
-                {
-                    ExprNodeId one = addConst(1);
-                    ExprNodeId widthMinus = addSub(right, one);
-                    indexExpr = addSub(left, widthMinus);
-                }
-                break;
-            }
-            default:
-                reportUnsupported(expr, "Unsupported range select kind");
-                return kInvalidPlanIndex;
-            }
-            if (indexExpr == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
-            node.kind = ExprNodeKind::Operation;
-            node.op = grh::ir::OperationKind::kSliceDynamic;
-            node.operands = {value, indexExpr};
-            node.tempSymbol = makeTempSymbol();
-            return addNode(expr, std::move(node));
-        }
-
-        reportUnsupported(expr, "Unsupported expression kind");
-        return kInvalidPlanIndex;
-    }
-
-private:
-    void reportUnsupported(const slang::ast::Expression& expr, std::string_view message)
-    {
-        if (!diagnostics)
-        {
-            return;
-        }
-        diagnostics->todo(expr.sourceRange.start(), std::string(message));
-    }
-
-    PlanSymbolId makeTempSymbol()
-    {
-        const std::string name = "_expr_tmp_" + std::to_string(nextTemp++);
-        PlanSymbolId id = plan.symbolTable.intern(name);
-        lowering.tempSymbols.push_back(id);
-        return id;
-    }
-
-    ExprNodeId addNode(const slang::ast::Expression& expr, ExprNode node)
-    {
-        if (node.widthHint == 0)
-        {
-            uint64_t width = expr.type->getBitstreamWidth();
-            if (width == 0)
-            {
-                if (auto effective = expr.getEffectiveWidth())
-                {
-                    width = *effective;
-                }
-            }
-            if (width > 0)
-            {
-                const uint64_t maxValue =
-                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
-                node.widthHint = width > maxValue
-                                     ? std::numeric_limits<int32_t>::max()
-                                     : static_cast<int32_t>(width);
-            }
-        }
-        const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
-        lowering.values.push_back(std::move(node));
-        lowered.emplace(&expr, id);
-        return id;
-    }
-
-    ExprNodeId addSyntheticNode(ExprNode node)
-    {
-        const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
-        lowering.values.push_back(std::move(node));
-        return id;
-    }
-};
-
-class ExprLowererVisitor : public slang::ast::ASTVisitor<ExprLowererVisitor, true, true> {
-public:
-    explicit ExprLowererVisitor(ExprLowererState& state) : state_(state) {}
-
-    void handle(const slang::ast::AssignmentExpression& expr)
-    {
-        state_.lowerAssignment(expr);
-    }
-
-private:
-    ExprLowererState& state_;
-};
-
-void lowerGenerateBlock(const slang::ast::GenerateBlockSymbol& block, ExprLowererState& state);
-void lowerGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
-                             ExprLowererState& state);
-
-void lowerProceduralBlock(const slang::ast::ProceduralBlockSymbol& block, ExprLowererState& state)
-{
-    ExprLowererVisitor visitor(state);
-    block.getBody().visit(visitor);
-}
-
-void lowerContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
-                           ExprLowererState& state)
-{
-    ExprLowererVisitor visitor(state);
-    assign.getAssignment().visit(visitor);
-}
-
-void lowerMemberSymbol(const slang::ast::Symbol& member, ExprLowererState& state)
-{
-    if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>())
-    {
-        lowerContinuousAssign(*continuous, state);
-        return;
-    }
-    if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>())
-    {
-        lowerProceduralBlock(*block, state);
-        return;
-    }
-    if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>())
-    {
-        lowerGenerateBlock(*generateBlock, state);
-        return;
-    }
-    if (const auto* generateArray = member.as_if<slang::ast::GenerateBlockArraySymbol>())
-    {
-        lowerGenerateBlockArray(*generateArray, state);
-        return;
-    }
-}
-
-void lowerGenerateBlock(const slang::ast::GenerateBlockSymbol& block, ExprLowererState& state)
-{
-    if (block.isUninstantiated)
-    {
-        return;
-    }
-    for (const slang::ast::Symbol& member : block.members())
-    {
-        lowerMemberSymbol(member, state);
-    }
-}
-
-void lowerGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
-                             ExprLowererState& state)
-{
-    for (const slang::ast::GenerateBlockSymbol* entry : array.entries)
-    {
-        if (!entry)
-        {
-            continue;
-        }
-        lowerGenerateBlock(*entry, state);
-    }
-}
-
 struct StmtLowererState {
     class AssignmentExprVisitor;
 
@@ -1398,13 +800,10 @@ struct StmtLowererState {
     ConvertDiagnostics* diagnostics;
     LoweringPlan& lowering;
     std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
-    std::unordered_map<const slang::ast::AssignmentExpression*, ExprNodeId> assignmentRoots;
-    std::unordered_set<const slang::ast::AssignmentExpression*> loopLocalAssignments;
     int32_t widthContext = 0;
     uint32_t maxLoopIterations = 0;
     uint32_t nextTemp = 0;
     uint32_t nextDpiResult = 0;
-    std::size_t nextRoot = 0;
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
     std::vector<ExprNodeId> flowStack;
@@ -2069,55 +1468,33 @@ struct StmtLowererState {
         }
 
         ExprNodeId value = kInvalidPlanIndex;
-        const bool usesDynamic = exprUsesLoopLocal(expr) ||
-                                 exprUsesUnknownSymbol(expr) ||
-                                 exprUsesProceduralValue(expr);
         {
             WidthContextScope widthScope(*this, targetWidth);
-            const bool useLocalLowering = usesDynamic || targetWidth > 0;
-            if (useLocalLowering)
+            if (expr.op)
             {
-                if (usesDynamic)
+                const auto opKind = mapBinaryOp(*expr.op);
+                if (!opKind)
                 {
-                    if (loopLocalAssignments.emplace(&expr).second)
-                    {
-                        takeNextRoot(expr.sourceRange.start());
-                    }
+                    reportUnsupported(expr, "Unsupported compound assignment operator");
+                    return;
                 }
-                else
+                ExprNodeId lhs = lowerExpression(expr.left());
+                ExprNodeId rhs = lowerExpression(expr.right());
+                if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
                 {
-                    takeNextRoot(expr.sourceRange.start());
+                    return;
                 }
-                if (expr.op)
-                {
-                    const auto opKind = mapBinaryOp(*expr.op);
-                    if (!opKind)
-                    {
-                        reportUnsupported(expr, "Unsupported compound assignment operator");
-                        return;
-                    }
-                    ExprNodeId lhs = lowerExpression(expr.left());
-                    ExprNodeId rhs = lowerExpression(expr.right());
-                    if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
-                    {
-                        return;
-                    }
-                    ExprNode node;
-                    node.kind = ExprNodeKind::Operation;
-                    node.op = *opKind;
-                    node.operands = {lhs, rhs};
-                    node.location = expr.sourceRange.start();
-                    node.tempSymbol = makeTempSymbol();
-                    value = addNode(nullptr, std::move(node));
-                }
-                else
-                {
-                    value = lowerExpression(expr.right());
-                }
+                ExprNode node;
+                node.kind = ExprNodeKind::Operation;
+                node.op = *opKind;
+                node.operands = {lhs, rhs};
+                node.location = expr.sourceRange.start();
+                node.tempSymbol = makeTempSymbol();
+                value = addNode(nullptr, std::move(node));
             }
             else
             {
-                value = resolveAssignmentRoot(expr);
+                value = lowerExpression(expr.right());
             }
         }
         if (value == kInvalidPlanIndex)
@@ -3176,22 +2553,6 @@ private:
         return true;
     }
 
-    ExprNodeId takeNextRoot(slang::SourceLocation location)
-    {
-        if (nextRoot >= lowering.roots.size())
-        {
-            if (diagnostics)
-            {
-                diagnostics->todo(location, "Missing lowered root for assignment");
-            }
-            ++nextRoot;
-            return kInvalidPlanIndex;
-        }
-        ExprNodeId value = lowering.roots[nextRoot].value;
-        ++nextRoot;
-        return value;
-    }
-
     ExprNodeId combineGuard(ExprNodeId base, ExprNodeId extra,
                             slang::SourceLocation location)
     {
@@ -3472,7 +2833,8 @@ private:
         return unrollRepeatDynamic(stmt, *count);
     }
 
-    bool tryUnrollWhile(const slang::ast::WhileLoopStatement& stmt)
+    template <typename Runner>
+    bool tryUnrollWithControl(Runner runner)
     {
         if (maxLoopIterations == 0)
         {
@@ -3481,11 +2843,11 @@ private:
         }
 
         slang::ast::EvalContext dryCtx(*plan.body);
-        LoopControlResult dryRun = runWhileWithControl(stmt, dryCtx, false);
+        LoopControlResult dryRun = runner(dryCtx, false);
         if (dryRun != LoopControlResult::Unsupported)
         {
             slang::ast::EvalContext emitCtx(*plan.body);
-            LoopControlResult result = runWhileWithControl(stmt, emitCtx, true);
+            LoopControlResult result = runner(emitCtx, true);
             if (result != LoopControlResult::Unsupported)
             {
                 return true;
@@ -3493,52 +2855,30 @@ private:
         }
 
         return false;
+    }
+
+    bool tryUnrollWhile(const slang::ast::WhileLoopStatement& stmt)
+    {
+        return tryUnrollWithControl(
+            [&](slang::ast::EvalContext& ctx, bool emit) {
+                return runWhileWithControl(stmt, ctx, emit);
+            });
     }
 
     bool tryUnrollDoWhile(const slang::ast::DoWhileLoopStatement& stmt)
     {
-        if (maxLoopIterations == 0)
-        {
-            setLoopControlFailure("maxLoopIterations is 0");
-            return false;
-        }
-
-        slang::ast::EvalContext dryCtx(*plan.body);
-        LoopControlResult dryRun = runDoWhileWithControl(stmt, dryCtx, false);
-        if (dryRun != LoopControlResult::Unsupported)
-        {
-            slang::ast::EvalContext emitCtx(*plan.body);
-            LoopControlResult result = runDoWhileWithControl(stmt, emitCtx, true);
-            if (result != LoopControlResult::Unsupported)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return tryUnrollWithControl(
+            [&](slang::ast::EvalContext& ctx, bool emit) {
+                return runDoWhileWithControl(stmt, ctx, emit);
+            });
     }
 
     bool tryUnrollForever(const slang::ast::ForeverLoopStatement& stmt)
     {
-        if (maxLoopIterations == 0)
-        {
-            setLoopControlFailure("maxLoopIterations is 0");
-            return false;
-        }
-
-        slang::ast::EvalContext dryCtx(*plan.body);
-        LoopControlResult dryRun = runForeverWithControl(stmt, dryCtx, false);
-        if (dryRun != LoopControlResult::Unsupported)
-        {
-            slang::ast::EvalContext emitCtx(*plan.body);
-            LoopControlResult result = runForeverWithControl(stmt, emitCtx, true);
-            if (result != LoopControlResult::Unsupported)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return tryUnrollWithControl(
+            [&](slang::ast::EvalContext& ctx, bool emit) {
+                return runForeverWithControl(stmt, ctx, emit);
+            });
     }
 
     bool tryUnrollFor(const slang::ast::ForLoopStatement& stmt)
@@ -3904,6 +3244,15 @@ private:
         return LoopControlResult::None;
     }
 
+    std::optional<LoopControlResult> stopOnUnsupportedOrBreak(LoopControlResult result) const
+    {
+        if (result == LoopControlResult::Unsupported || result == LoopControlResult::Break)
+        {
+            return result;
+        }
+        return std::nullopt;
+    }
+
     LoopControlResult runRepeatWithControl(const slang::ast::RepeatLoopStatement& stmt,
                                            int64_t count,
                                            slang::ast::EvalContext& ctx,
@@ -3912,13 +3261,9 @@ private:
         for (int64_t i = 0; i < count; ++i)
         {
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
-            if (result == LoopControlResult::Unsupported)
+            if (auto stop = stopOnUnsupportedOrBreak(result))
             {
-                return result;
-            }
-            if (result == LoopControlResult::Break)
-            {
-                return result;
+                return *stop;
             }
         }
         return LoopControlResult::None;
@@ -3944,13 +3289,9 @@ private:
 
             syncLoopLocals(ctx);
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
-            if (result == LoopControlResult::Unsupported)
+            if (auto stop = stopOnUnsupportedOrBreak(result))
             {
-                return result;
-            }
-            if (result == LoopControlResult::Break)
-            {
-                return result;
+                return *stop;
             }
             if (result == LoopControlResult::Continue)
             {
@@ -3996,13 +3337,9 @@ private:
             }
 
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
-            if (result == LoopControlResult::Unsupported)
+            if (auto stop = stopOnUnsupportedOrBreak(result))
             {
-                return result;
-            }
-            if (result == LoopControlResult::Break)
-            {
-                return result;
+                return *stop;
             }
             ++iterations;
         }
@@ -4019,13 +3356,9 @@ private:
         while (iterations < maxLoopIterations)
         {
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
-            if (result == LoopControlResult::Unsupported)
+            if (auto stop = stopOnUnsupportedOrBreak(result))
             {
-                return result;
-            }
-            if (result == LoopControlResult::Break)
-            {
-                return result;
+                return *stop;
             }
             ++iterations;
 
@@ -4053,13 +3386,9 @@ private:
         while (iterations < maxLoopIterations)
         {
             LoopControlResult result = visitStatementWithControl(stmt.body, ctx, emit);
-            if (result == LoopControlResult::Unsupported)
+            if (auto stop = stopOnUnsupportedOrBreak(result))
             {
-                return result;
-            }
-            if (result == LoopControlResult::Break)
-            {
-                return result;
+                return *stop;
             }
             ++iterations;
         }
@@ -5624,18 +4953,6 @@ private:
             }
         }
         return combined;
-    }
-
-    ExprNodeId resolveAssignmentRoot(const slang::ast::AssignmentExpression& expr)
-    {
-        auto it = assignmentRoots.find(&expr);
-        if (it != assignmentRoots.end())
-        {
-            return it->second;
-        }
-        ExprNodeId value = takeNextRoot(expr.sourceRange.start());
-        assignmentRoots.emplace(&expr, value);
-        return value;
     }
 
     ExprNodeId lowerExpression(const slang::ast::Expression& expr)
@@ -7576,21 +6893,6 @@ void TypeResolverPass::resolve(ModulePlan& plan)
     }
 }
 
-LoweringPlan ExprLowererPass::lower(ModulePlan& plan)
-{
-    if (!plan.body)
-    {
-        return {};
-    }
-
-    ExprLowererState state(plan, context_.diagnostics);
-    for (const slang::ast::Symbol& member : plan.body->members())
-    {
-        lowerMemberSymbol(member, state);
-    }
-    return std::move(state.lowering);
-}
-
 void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 {
     if (!plan.body)
@@ -7598,9 +6900,13 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return;
     }
 
+    lowering.values.clear();
+    lowering.tempSymbols.clear();
     lowering.writes.clear();
     lowering.loweredStmts.clear();
     lowering.dpiImports.clear();
+    lowering.memoryReads.clear();
+    lowering.memoryWrites.clear();
 
     StmtLowererState state(plan, context_.diagnostics, lowering,
                            context_.options.maxLoopIterations);
@@ -12616,7 +11922,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
 
     ModulePlanner planner(context);
     TypeResolverPass typeResolver(context);
-    ExprLowererPass exprLowerer(context);
     StmtLowererPass stmtLowerer(context);
     WriteBackPass writeBack(context);
     MemoryPortLowererPass memoryPortLowerer(context);
@@ -12664,7 +11969,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         }
         ModulePlan plan = planner.plan(*key.body);
         typeResolver.resolve(plan);
-        LoweringPlan lowering = exprLowerer.lower(plan);
+        LoweringPlan lowering;
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
         memoryPortLowerer.lower(plan, lowering);

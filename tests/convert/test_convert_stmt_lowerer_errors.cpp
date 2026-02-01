@@ -127,12 +127,11 @@ bool buildLoweringPlan(const std::filesystem::path& sourcePath, std::string_view
 
     wolf_sv_parser::ModulePlanner planner(context);
     wolf_sv_parser::TypeResolverPass typeResolver(context);
-    wolf_sv_parser::ExprLowererPass exprLowerer(context);
     wolf_sv_parser::StmtLowererPass stmtLowerer(context);
 
     outPlan = planner.plan(top->body);
     typeResolver.resolve(outPlan);
-    outPlanLowering = exprLowerer.lower(outPlan);
+    outPlanLowering = {};
     stmtLowerer.lower(outPlan, outPlanLowering);
     return true;
 }

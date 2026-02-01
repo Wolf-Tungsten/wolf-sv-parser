@@ -308,10 +308,6 @@ struct ExprNode {
     slang::SourceLocation location{};
 };
 
-struct LoweredRoot {
-    ExprNodeId value = kInvalidPlanIndex;
-    slang::SourceLocation location{};
-};
 
 enum class WriteSliceKind {
     None,
@@ -431,7 +427,6 @@ struct MemoryWritePort {
 
 struct LoweringPlan {
     std::vector<ExprNode> values;
-    std::vector<LoweredRoot> roots;
     std::vector<PlanSymbolId> tempSymbols;
     std::vector<WriteIntent> writes;
     std::vector<LoweredStmt> loweredStmts;
@@ -555,16 +550,6 @@ public:
     explicit TypeResolverPass(ConvertContext& context) : context_(context) {}
 
     void resolve(ModulePlan& plan);
-
-private:
-    ConvertContext& context_;
-};
-
-class ExprLowererPass {
-public:
-    explicit ExprLowererPass(ConvertContext& context) : context_(context) {}
-
-    LoweringPlan lower(ModulePlan& plan);
 
 private:
     ConvertContext& context_;
