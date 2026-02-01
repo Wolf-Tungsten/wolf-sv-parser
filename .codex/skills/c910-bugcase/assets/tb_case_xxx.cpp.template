@@ -1,0 +1,63 @@
+#include "V__DUT_TOP__.h"
+#include "verilated.h"
+#if VM_COVERAGE
+#include "verilated_cov.h"
+#endif
+
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+
+static void tick(VerilatedContext *ctx, V__DUT_TOP__ *dut) {
+    // TODO: rename clk/reset to match DUT ports.
+    dut->clk = 0;
+    dut->eval();
+    ctx->timeInc(1);
+    dut->clk = 1;
+    dut->eval();
+    ctx->timeInc(1);
+}
+
+int main(int argc, char **argv) {
+    Verilated::commandArgs(argc, argv);
+    auto *ctx = new VerilatedContext();
+    ctx->traceEverOn(false);
+
+    auto *dut = new V__DUT_TOP__(ctx);
+
+    // TODO: connect/reset default inputs before running.
+    dut->reset = 1;
+    for (int i = 0; i < 5; ++i) {
+        tick(ctx, dut);
+    }
+    dut->reset = 0;
+
+    // TODO: drive inputs and check outputs deterministically.
+    // Example:
+    // dut->in_valid = 1;
+    // tick(ctx, dut);
+    // if (dut->out_valid != 1) {
+    //     std::cerr << "[TB] output mismatch" << std::endl;
+    //     return 1;
+    // }
+
+    for (int i = 0; i < 10; ++i) {
+        tick(ctx, dut);
+        if (ctx->gotFinish()) {
+            break;
+        }
+    }
+
+#if VM_COVERAGE
+    const char *covPath = std::getenv("VERILATOR_COV_FILE");
+    if (covPath == nullptr || covPath[0] == '\0') {
+        covPath = "coverage.dat";
+    }
+    VerilatedCov::write(covPath);
+#endif
+
+    dut->final();
+    delete dut;
+    delete ctx;
+    return 0;
+}

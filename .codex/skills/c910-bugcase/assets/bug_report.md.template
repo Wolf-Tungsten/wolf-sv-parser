@@ -1,0 +1,29 @@
+# case_CASE_ID - <short title>
+
+## Error file
+- Path: <ERROR_FILE>
+- Snippet:
+
+```
+<paste error snippet here>
+```
+
+## Repro
+
+1. `make -C tests/data/openc910/bug_cases/case_CASE_ID run`
+2. `make -C tests/data/openc910/bug_cases/case_CASE_ID run_c910_bug_case_ref`
+3. `make -C tests/data/openc910/bug_cases/case_CASE_ID run_c910_bug_case`
+
+## Expected
+
+- <expected behavior>
+
+## Actual
+
+- <actual behavior>
+
+## Minimization notes
+
+- Kept modules: <list>
+- Stubs added: <list or none>
+- Rationale: <why these were needed>

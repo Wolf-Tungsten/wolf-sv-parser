@@ -35,8 +35,8 @@ HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
 C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
 C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
-.PHONY: all run_hdlbits_test run_c910_test run_c910_test_ref build_wolf_parser \
-	run_c910_bug_case run_all_c910_bug_cases clean check-id
+.PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test build_wolf_parser \
+	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case clean check-id
 
 all: run_hdlbits_test
 
@@ -78,37 +78,57 @@ run_c910_test:
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 		TOOL_EXTENSION="$$TOOL_EXTENSION"
 
-run_c910_test_ref: SMART_SIM=verilator_ref
-run_c910_test_ref: run_c910_test
+run_c910_ref_test: SMART_SIM=verilator_ref
+run_c910_ref_test: run_c910_test
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 C910_BUG_CASE_DEPS := build_wolf_parser
 endif
 
 run_c910_bug_case: $(C910_BUG_CASE_DEPS)
-ifneq ($(strip $(BUG_CASE)),)
-	@if [ ! -d "$(C910_BUG_CASES_DIR)/$(BUG_CASE)" ]; then \
-		echo "BUG_CASE not found: $(BUG_CASE)"; \
+	@case_name="$(CASE)"; \
+	if [ -z "$$case_name" ]; then \
+		echo "CASE not set; use CASE=case_XXX (available: $(C910_BUG_CASES))"; \
+		exit 1; \
+	fi; \
+	if [[ "$$case_name" != case_* ]]; then \
+		case_name="case_$$case_name"; \
+	fi; \
+	if [ ! -d "$(C910_BUG_CASES_DIR)/$$case_name" ]; then \
+		echo "CASE not found: $$case_name"; \
 		echo "Available: $(C910_BUG_CASES)"; \
 		exit 1; \
-	fi
-	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) clean
-	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) run_verilator
-	@$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$(BUG_CASE) run_wolf_sv_parser_verilator
-else
-	@echo "BUG_CASE not set; running all available cases: $(C910_BUG_CASES)"
-	@$(MAKE) --no-print-directory run_all_c910_bug_cases SKIP_WOLF_BUILD=1
-endif
+	fi; \
+	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name clean; \
+	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name \
+		COVERAGE=1 run_c910_bug_case
 
-.PHONY: run_all_c910_bug_cases
+run_c910_bug_case_ref:
+	@case_name="$(CASE)"; \
+	if [ -z "$$case_name" ]; then \
+		echo "CASE not set; use CASE=case_XXX (available: $(C910_BUG_CASES))"; \
+		exit 1; \
+	fi; \
+	if [[ "$$case_name" != case_* ]]; then \
+		case_name="case_$$case_name"; \
+	fi; \
+	if [ ! -d "$(C910_BUG_CASES_DIR)/$$case_name" ]; then \
+		echo "CASE not found: $$case_name"; \
+		echo "Available: $(C910_BUG_CASES)"; \
+		exit 1; \
+	fi; \
+	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name clean; \
+	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name \
+		COVERAGE=1 run_c910_bug_case_ref
+
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 C910_BUG_CASE_ALL_DEPS := build_wolf_parser
 endif
 
-run_all_c910_bug_cases: $(C910_BUG_CASE_ALL_DEPS)
+run_c910_all_bug_case: $(C910_BUG_CASE_ALL_DEPS)
 	@for bug_case in $(C910_BUG_CASES); do \
-		echo "==== Running BUG_CASE=$$bug_case ===="; \
-		$(MAKE) --no-print-directory run_c910_bug_case BUG_CASE=$$bug_case \
+		echo "==== Running CASE=$$bug_case ===="; \
+		$(MAKE) --no-print-directory run_c910_bug_case CASE=$$bug_case \
 			SKIP_WOLF_BUILD=1 || exit $$?; \
 	done
 
