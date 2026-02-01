@@ -6149,6 +6149,10 @@ void collectPorts(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan,
                     plan.symbolTable.intern(base + "__oe")};
             }
 
+            TypeResolution typeInfo = analyzePortType(port->getType(), *port, diagnostics);
+            info.width = typeInfo.width;
+            info.isSigned = typeInfo.isSigned;
+
             plan.ports.push_back(std::move(info));
             continue;
         }
@@ -6218,6 +6222,12 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
             SignalInfo info;
             info.symbol = plan.symbolTable.intern(net->name);
             info.kind = SignalKind::Net;
+            TypeResolution typeInfo = analyzeSignalType(net->getType(), *net, diagnostics);
+            info.width = typeInfo.width;
+            info.isSigned = typeInfo.isSigned;
+            info.memoryRows = typeInfo.memoryRows;
+            info.packedDims = std::move(typeInfo.packedDims);
+            info.unpackedDims = std::move(typeInfo.unpackedDims);
             plan.signals.push_back(std::move(info));
             continue;
         }
@@ -6243,6 +6253,12 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
             SignalInfo info;
             info.symbol = plan.symbolTable.intern(variable->name);
             info.kind = SignalKind::Variable;
+            TypeResolution typeInfo = analyzeSignalType(variable->getType(), *variable, diagnostics);
+            info.width = typeInfo.width;
+            info.isSigned = typeInfo.isSigned;
+            info.memoryRows = typeInfo.memoryRows;
+            info.packedDims = std::move(typeInfo.packedDims);
+            info.unpackedDims = std::move(typeInfo.unpackedDims);
             plan.signals.push_back(std::move(info));
             continue;
         }
@@ -6804,93 +6820,6 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
     collectSignals(body, plan, context_.diagnostics);
     collectInstances(body, plan, context_);
     return plan;
-}
-
-void TypeResolverPass::resolve(ModulePlan& plan)
-{
-    if (!plan.body)
-    {
-        return;
-    }
-
-    std::vector<PortId> portBySymbol(plan.symbolTable.size(), kInvalidPlanIndex);
-    for (PortId i = 0; i < static_cast<PortId>(plan.ports.size()); ++i)
-    {
-        const PlanSymbolId id = plan.ports[i].symbol;
-        if (id.valid() && id.index < portBySymbol.size())
-        {
-            portBySymbol[id.index] = i;
-        }
-    }
-
-    std::vector<SignalId> signalBySymbol(plan.symbolTable.size(), kInvalidPlanIndex);
-    for (SignalId i = 0; i < static_cast<SignalId>(plan.signals.size()); ++i)
-    {
-        const PlanSymbolId id = plan.signals[i].symbol;
-        if (id.valid() && id.index < signalBySymbol.size())
-        {
-            signalBySymbol[id.index] = i;
-        }
-    }
-
-    for (const slang::ast::Symbol* portSymbol : plan.body->getPortList())
-    {
-        if (!portSymbol)
-        {
-            continue;
-        }
-        const auto* port = portSymbol->as_if<slang::ast::PortSymbol>();
-        if (!port || port->name.empty())
-        {
-            continue;
-        }
-        const PlanSymbolId id = plan.symbolTable.lookup(port->name);
-        if (!id.valid() || id.index >= portBySymbol.size())
-        {
-            continue;
-        }
-        const PortId index = portBySymbol[id.index];
-        if (index == kInvalidPlanIndex)
-        {
-            continue;
-        }
-        TypeResolution info = analyzePortType(port->getType(), *port, context_.diagnostics);
-        PortInfo& portInfo = plan.ports[index];
-        portInfo.width = info.width;
-        portInfo.isSigned = info.isSigned;
-    }
-
-    for (const slang::ast::Symbol& member : plan.body->members())
-    {
-        const auto* net = member.as_if<slang::ast::NetSymbol>();
-        const auto* variable = member.as_if<slang::ast::VariableSymbol>();
-        const slang::ast::ValueSymbol* valueSymbol =
-            net ? static_cast<const slang::ast::ValueSymbol*>(net)
-                : static_cast<const slang::ast::ValueSymbol*>(variable);
-        if (!valueSymbol || valueSymbol->name.empty())
-        {
-            continue;
-        }
-
-        const PlanSymbolId id = plan.symbolTable.lookup(valueSymbol->name);
-        if (!id.valid() || id.index >= signalBySymbol.size())
-        {
-            continue;
-        }
-        const SignalId index = signalBySymbol[id.index];
-        if (index == kInvalidPlanIndex)
-        {
-            continue;
-        }
-        TypeResolution info =
-            analyzeSignalType(valueSymbol->getType(), *valueSymbol, context_.diagnostics);
-        SignalInfo& signal = plan.signals[index];
-        signal.width = info.width;
-        signal.isSigned = info.isSigned;
-        signal.memoryRows = info.memoryRows;
-        signal.packedDims = std::move(info.packedDims);
-        signal.unpackedDims = std::move(info.unpackedDims);
-    }
 }
 
 void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
@@ -11918,7 +11847,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     context.planQueue = &planQueue_;
 
     ModulePlanner planner(context);
-    TypeResolverPass typeResolver(context);
     StmtLowererPass stmtLowerer(context);
     WriteBackPass writeBack(context);
     MemoryPortLowererPass memoryPortLowerer(context);
@@ -11965,7 +11893,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
             continue;
         }
         ModulePlan plan = planner.plan(*key.body);
-        typeResolver.resolve(plan);
         LoweringPlan lowering;
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);

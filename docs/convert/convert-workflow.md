@@ -34,7 +34,7 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
-- 当前实现已完成 Context Setup 与 Pass1/Pass2/Pass5~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
+- 当前实现已完成 Context Setup 与 Pass1（含类型解析）/Pass5~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
 
 ## CLI 主流程（wolf-sv-parser）
 - 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
@@ -46,36 +46,30 @@
 - HDLBits 流程：`make run_hdlbits_test` 会调用 `wolf-sv-parser --emit-sv --emit-json -o <dut>.v`，
   产物写入 `build/hdlbits/<DUT>/` 并供 Verilator 使用。
 
-## Pass1: SymbolCollectorPass
-- 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并发现子模块任务。
+## Pass1: ModulePlanner（符号收集 + 类型解析）
+- 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并在收集时补齐类型信息，
+  同时发现子模块任务。
 - 输入：`InstanceBodySymbol` + ctx。
 - 输出形式：`PlanCache[PlanKey].plan`（包含 ports/signals/instances）。
 - 运行步骤：
   - 初始化 `ModulePlan`：设置 `plan.body`，根据 `body.name`/`definition.name` 生成 `plan.moduleSymbol`。
   - 端口收集：
-    - 遍历 `body.getPortList()`，只处理 `PortSymbol`，并记录 `PortInfo{symbol,direction}`。
+    - 遍历 `body.getPortList()`，只处理 `PortSymbol`，并记录 `PortInfo{symbol,direction,width,isSigned}`。
     - inout 通过 `PortInfo.inoutSymbol` 记录 `__in/__out/__oe` 名称；`Ref` 方向与匿名/空端口报告 error。
     - `MultiPortSymbol`/`InterfacePortSymbol` 当前视为不支持并记录 error。
   - 信号收集：
     - 扫描 `body.members()` 中的 `NetSymbol`/`VariableSymbol`。
-    - Pass1 仅填 `SignalInfo{symbol,kind}`，宽度/维度由 Pass2 补齐。
+    - 直接填 `SignalInfo{symbol,kind,width,isSigned,packedDims,unpackedDims,memoryRows}`。
     - 匿名符号跳过并记录 warn。
   - 实例收集与任务发现：
     - 扫描 `InstanceSymbol`/`InstanceArraySymbol`/`GenerateBlockSymbol`/`GenerateBlockArraySymbol`。
     - 记录 `InstanceInfo{instanceSymbol,moduleSymbol,isBlackbox}`；黑盒实例额外记录参数绑定。
     - 为每个子实例体投递 `PlanKey{body}` 到 `PlanTaskQueue`。
 - 当前实现由 `ConvertDriver::convert` 先投递顶层实例，再 drain 队列并写入 `PlanCache`。
-
-## Pass2: TypeResolverPass
-- 功能：计算位宽、签名、packed/unpacked 维度与 memory 行数。
-- 输入：`ModulePlan` + `slang::ast::Type` + ctx。
-- 输出形式：原地更新 `ModulePlan`。
-- 运行步骤：
-  - 预处理：根据 `PlanSymbolTable` 建立端口/信号名到索引的映射表。
-  - 端口：回扫 `PortSymbol` 获取类型，剥离 type alias 并计算固定宽度，
-    填充 `PortInfo.width/isSigned`；端口出现 unpacked 维度时记录 warn 并忽略其数组维度。
-  - 信号：回扫 `NetSymbol`/`VariableSymbol` 获取类型，剥离 type alias；
-    若存在 fixed unpacked 维度则按外到内顺序记录 `unpackedDims`，
+- 类型解析细节（合并在 Pass1 内）：
+  - 端口：剥离 type alias 并计算固定宽度，填充 `PortInfo.width/isSigned`；
+    端口出现 unpacked 维度时记录 warn 并忽略其数组维度。
+  - 信号：剥离 type alias；若存在 fixed unpacked 维度则按外到内顺序记录 `unpackedDims`，
     同时累乘写入 `memoryRows`，并继续下探到元素类型。
   - packed 维度：在元素类型上收集 packed array 维度并写入 `packedDims`。
   - 宽度/签名：对最终元素类型计算固定宽度并写入 `SignalInfo.width/isSigned`。

@@ -545,16 +545,6 @@ private:
     ConvertContext& context_;
 };
 
-class TypeResolverPass {
-public:
-    explicit TypeResolverPass(ConvertContext& context) : context_(context) {}
-
-    void resolve(ModulePlan& plan);
-
-private:
-    ConvertContext& context_;
-};
-
 class StmtLowererPass {
 public:
     explicit StmtLowererPass(ConvertContext& context) : context_(context) {}

@@ -981,3 +981,30 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 同步更新 convert-architecture/workflow/kimi 文档对齐合并后的 Pass5
 
 完成情况：已完成
+
+
+
+## STEP 0048 - 合并 Pass1/Pass2（符号收集 + 类型解析）
+
+目标：
+- 将类型解析并入 Pass1，减少重复 AST 扫描
+- 移除 `TypeResolverPass` 与相关调度，统一由 `ModulePlanner` 产出完整 ModulePlan
+- 同步测试与文档，保持架构/流程一致
+
+计划：
+- 在 Pass1 端口/信号收集时直接填充宽度/维度/符号信息
+- 删除 `TypeResolverPass` 声明与实现，移除 `ConvertDriver` 调度
+- 更新 convert 测试（移除 TypeResolverPass 调用）
+- 更新文档：`convert-workflow`/`convert-architecture`/`convert-kimi`
+
+实施：
+- `collectPorts/collectSignals` 直接调用类型解析逻辑并填充 `PortInfo/SignalInfo`
+- 删除 `TypeResolverPass` 声明/实现与 `ConvertDriver` 调度
+- 更新 convert 测试仅依赖 `ModulePlanner` 生成完整 ModulePlan
+- 同步更新 convert-architecture/workflow/kimi 文档
+
+测试：
+- `cmake --build build -j$(nproc)`
+- `ctest --test-dir build --output-on-failure`
+
+完成情况：已完成

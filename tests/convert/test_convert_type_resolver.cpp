@@ -182,9 +182,7 @@ int testPackedPorts(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
-    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
-    resolver.resolve(plan);
 
     const auto* in = findPort(plan, "in");
     if (!in || in->width != 100 || in->isSigned) {
@@ -236,9 +234,7 @@ int testPackedSignalDims(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
-    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
-    resolver.resolve(plan);
 
     const auto* y = findPort(plan, "y");
     if (!y || y->width != 3) {
@@ -297,9 +293,7 @@ int testMemoryDims(const std::filesystem::path& sourcePath) {
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
-    wolf_sv_parser::TypeResolverPass resolver(context);
     wolf_sv_parser::ModulePlan plan = planner.plan(top->body);
-    resolver.resolve(plan);
 
     const auto* pht = findSignal(plan, "PHT");
     if (!pht) {

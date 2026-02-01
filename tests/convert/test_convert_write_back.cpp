@@ -125,12 +125,10 @@ bool buildWriteBackPlan(const std::filesystem::path& sourcePath, std::string_vie
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
-    wolf_sv_parser::TypeResolverPass typeResolver(context);
     wolf_sv_parser::StmtLowererPass stmtLowerer(context);
     wolf_sv_parser::WriteBackPass writeBack(context);
 
     outPlan = planner.plan(top->body);
-    typeResolver.resolve(outPlan);
     outLowering = {};
     stmtLowerer.lower(outPlan, outLowering);
     outWriteBack = writeBack.lower(outPlan, outLowering);

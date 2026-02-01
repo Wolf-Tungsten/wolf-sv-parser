@@ -25,8 +25,8 @@
   - 3.8. WriteBackPlan
   - 3.9. Diagnostics / Logger
 - 4. Pass 中间数据结构
-  - 4.1. Pass1: SymbolCollector
-  - 4.2. Pass2: TypeResolver
+  - 4.1. Pass1: ModulePlanner（符号收集 + 类型解析）
+  - 4.2. 类型解析（已合并到 Pass1）
   - 4.3. Pass5: StmtLowerer 内部临时结构
     - 4.3.1. 动态 break/continue 完整示例（分 + 案例）
   - 4.4. Pass8: GraphAssembly 临时结构
@@ -65,7 +65,7 @@
 ### 3.1. ConvertContext
 - 总览：
   - 定位：转换期共享状态容器，仅承载指针与配置（不持有资源所有权）。
-- 角色：为 Pass1/Pass2/Pass5~Pass8 提供编译期信息与缓存/队列入口。
+- 角色：为 Pass1（含类型解析）/Pass5~Pass8 提供编译期信息与缓存/队列入口。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `compilation`: `const slang::ast::Compilation*` -> 访问全局类型/语义信息。
   - `root`: `const slang::ast::RootSymbol*` -> 访问 `topInstances` 等根级符号。
@@ -78,7 +78,7 @@
   - `compilation`：
     - 作用：提供类型系统与语义查询入口。
     - 建立：`ConvertDriver::convert` 中从 `root.getCompilation()` 取得。
-    - 输出：供 Pass1/Pass2/Pass5~Pass8 读取，不在 Context 内写回。
+    - 输出：供 Pass1/Pass5~Pass8 读取，不在 Context 内写回。
   - `root`：
     - 作用：根符号视图，承载顶层实例列表。
     - 建立：`ConvertDriver::convert` 传入。
@@ -114,7 +114,7 @@
     - 子成员（内部状态 -> 类型 -> 含义）：
       - `entries_`: `std::unordered_map<PlanKey, PlanEntry>` -> 计划状态与产物集合。
       - `mutex_`: `std::mutex` -> 并行访问保护。
-    - 输出：供 Pass1/Pass2/Pass5~Pass7 写入与读取 `ModulePlan`/`PlanArtifacts`。
+    - 输出：供 Pass1/Pass5~Pass7 写入与读取 `ModulePlan`/`PlanArtifacts`。
   - `planQueue`：
     - 作用：模块计划任务队列，驱动模块级流水线。
     - 建立：指向 `ConvertDriver::planQueue_`。
@@ -150,7 +150,7 @@
   - 角色：PlanCache 的 value，控制并发去重与产物落地。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `status`: `PlanStatus` -> 计划处理阶段状态。
-  - `plan`: `std::optional<ModulePlan>` -> 模块计划（Pass1~Pass2 写入）。
+  - `plan`: `std::optional<ModulePlan>` -> 模块计划（Pass1 写入）。
   - `artifacts`: `PlanArtifacts` -> Pass5~Pass7 的中间产物占位。
 - 字段详解：
   - `status`：
@@ -161,7 +161,7 @@
   - `plan`：
     - 作用：保存 `ModulePlan`（端口/信号/实例/读写等计划信息）。
     - 建立：`ModulePlanner::plan` 生成后由 `PlanCache::storePlan` 写入。
-    - 输出：供 Pass2/Pass5~Pass8 使用；失败时置空。
+    - 输出：供 Pass5~Pass8 使用；失败时置空。
   - `artifacts`：
     - 作用：保存 Pass5~Pass7 的中间结果容器。
     - 建立：在 `PlanEntry` 构造时默认存在；内容由 Pass5/Pass6 写入。
@@ -177,7 +177,7 @@
 ### 3.4. ModulePlan
 - 总览：
   - 定位：模块级静态计划，集中记录端口/信号/实例/读写关系等“长期稳定事实”。
-- 角色：Pass1/Pass2/Pass5~Pass7 的共享输入与写入目标。
+- 角色：Pass1/Pass5~Pass7 的共享输入与写入目标。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `body`: `const slang::ast::InstanceBodySymbol*` -> 模块实例体指针。
   - `symbolTable`: `PlanSymbolTable` -> 模块内符号驻留表。
@@ -189,7 +189,7 @@
   - `body`：
     - 作用：提供 AST 成员遍历入口。
     - 建立：`ModulePlanner::plan` 绑定。
-    - 输出：供 Pass1/Pass2/Pass5~Pass7 遍历 AST。
+    - 输出：供 Pass1/Pass5~Pass7 遍历 AST。
   - `symbolTable`：
     - 作用：统一管理模块内符号名与 `PlanSymbolId`。
     - 建立：Pass1 在收集端口/信号/实例时调用 `intern`。
@@ -200,21 +200,21 @@
     - 输出：供 Pass8/日志使用。
   - `ports`（`PortInfo`）：
     - 作用：承载端口方向与类型信息。
-    - 建立：Pass1 创建 `symbol/direction`，Pass2 补齐 `width/isSigned`。
+    - 建立：Pass1 创建 `symbol/direction/width/isSigned`。
     - 子成员（字段 -> 含义）：
       - `symbol`: `PlanSymbolId` -> 端口名。
       - `direction`: `PortDirection` -> in/out/inout。
-      - `width`: `int32_t` -> 位宽（Pass2 填充）。
-      - `isSigned`: `bool` -> 是否有符号（Pass2 填充）。
+      - `width`: `int32_t` -> 位宽（Pass1 填充）。
+      - `isSigned`: `bool` -> 是否有符号（Pass1 填充）。
       - `inoutSymbol`: `optional<InoutBinding>` -> `__in/__out/__oe` 派生名。
   - `signals`（`SignalInfo`）：
     - 作用：承载信号类型、位宽与维度信息。
-    - 建立：Pass1 创建 `symbol/kind`，Pass2 补齐宽度/维度。
+    - 建立：Pass1 创建 `symbol/kind/width/isSigned/维度`。
     - 子成员（字段 -> 含义）：
       - `symbol`: `PlanSymbolId` -> 信号名。
       - `kind`: `SignalKind` -> Net/Variable/Memory/Port。
-      - `width`: `int32_t` -> 位宽（Pass2 填充）。
-      - `isSigned`: `bool` -> 是否有符号（Pass2 填充）。
+      - `width`: `int32_t` -> 位宽（Pass1 填充）。
+      - `isSigned`: `bool` -> 是否有符号（Pass1 填充）。
       - `memoryRows`: `int64_t` -> fixed unpacked 行数乘积。
       - `packedDims`: `std::vector<int32_t>` -> packed 维度（外到内）。
       - `unpackedDims`: `std::vector<UnpackedDimInfo>` -> unpacked 维度（外到内，含 left/right/extent）。
@@ -248,7 +248,7 @@
   - `size()`: 当前驻留的符号数量。
 - 使用约定：
   - 生成：Pass1 在收集端口/信号/实例名时调用 `intern`。
-  - 访问：Pass2 与后续 Pass 通过 `lookup` 将 AST 名称映射到索引。
+  - 访问：后续 Pass 通过 `lookup` 将 AST 名称映射到索引。
   - 输出：诊断与日志通过 `text(id)` 获取稳定名称。
 - 索引化主键：
   - `PlanSymbolId` 作为主键；`PortId/SignalId` 等均是 `std::vector` 索引。
@@ -840,11 +840,10 @@
   - 定位：单个 Pass 内部的临时结构/索引/去重表，不进入 `ModulePlan` 或 `PlanArtifacts`。
   - 目的：降低跨 Pass 的耦合与状态污染，便于并行与复用。
 - 归属（Pass -> 中间结构）：
-  - Pass1：ParameterSnapshot
-  - Pass2：TypeResolution / PortIndexMap / SignalIndexMap
+  - Pass1：ParameterSnapshot / TypeResolution
   - Pass5：StmtLowererState（guardStack/flowStack/loopFlowStack 等临时状态）
 
-### 4.1. Pass1: SymbolCollector
+### 4.1. Pass1: ModulePlanner（符号收集 + 类型解析）
 - 总览：
   - 作用：在符号收集阶段提取参数绑定快照，支撑参数特化与黑盒参数记录。
   - 输出：PlanKey.paramSignature 与 InstanceInfo.parameters。
@@ -863,10 +862,10 @@
       - `signature` -> PlanKey.paramSignature。
       - `parameters` -> InstanceInfo.parameters（仅黑盒实例保留）。
 
-### 4.2. Pass2: TypeResolver
+### 4.2. 类型解析（已合并到 Pass1）
 - 总览：
-  - 作用：用临时分析结果与索引表支撑类型解析，避免对 ModulePlan 进行半成品写入。
-  - 输出：回写 PortInfo/SignalInfo 的宽度、符号与维度信息。
+  - 作用：在 Pass1 收集端口/信号时解析 `slang::ast::Type` 并直接填充 ModulePlan。
+  - 输出：PortInfo/SignalInfo 的宽度、符号与维度信息。
 - 子结构：
   - `TypeResolution`：
     - 作用：承载单个端口/信号的类型分析结果。
@@ -881,16 +880,6 @@
       - `packedDims/unpackedDims/memoryRows`：支撑 memory 判定与维度/方向保留。
     - 建立：`analyzePortType`/`analyzeSignalType` 解析 `slang::ast::Type` 时生成。
     - 输出：写回 PortInfo/SignalInfo。
-  - `PortIndexMap`（`std::vector<PortId>`）：
-    - 作用：`PlanSymbolId -> PortId` 映射，避免 O(n^2) 查找。
-    - 说明：`PortId` 即 `ModulePlan.ports` 的下标索引。
-    - 建立：遍历 `ModulePlan.ports` 构建。
-    - 输出：仅在 Pass2 内部使用。
-  - `SignalIndexMap`（`std::vector<SignalId>`）：
-    - 作用：`PlanSymbolId -> SignalId` 映射。
-    - 说明：`SignalId` 即 `ModulePlan.signals` 的下标索引。
-    - 建立：遍历 `ModulePlan.signals` 构建。
-    - 输出：仅在 Pass2 内部使用。
 
 ### 4.3. Pass5: StmtLowerer 内部临时结构
 - 总览（总）：
@@ -1005,10 +994,8 @@ Context Setup
   v
 PlanCache (PlanKey -> PlanEntry{plan, artifacts})
   |
-  +--> Pass1: SymbolCollectorPass -> ModulePlan(ports/signals/instances)
+  +--> Pass1: ModulePlanner       -> ModulePlan(ports/signals/instances + width/dims)
   |                               -> store in PlanCache[PlanKey].plan
-  |
-  +--> Pass2: TypeResolverPass    -> update ModulePlan (width/signed/dims)
   |
   +--> Pass5: StmtLowererPass     -> LoweringPlan (expr + stmt)
   |                               -> PlanCache[PlanKey].artifacts.loweringPlan
@@ -1024,7 +1011,7 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 ## 6. 并行化策略（以模块为粒度）
 ### 6.1. 并行边界
 - 一个参数特化模块对应一个任务流水线。
-- Pass1/Pass2/Pass5~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
+- Pass1/Pass5~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
 
 ### 6.2. 任务与调度
 - 任务 key：`PlanKey = body + paramSignature`。

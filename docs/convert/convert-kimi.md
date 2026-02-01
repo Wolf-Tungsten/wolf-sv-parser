@@ -16,8 +16,8 @@
    - 2.6 WriteBackPlan：写回合并结果
 3. 算法流程（动态处理）
    - 3.1 ConvertDriver：入口与主流程
-   - 3.2 Pass1：符号收集
-   - 3.3 Pass2：类型解析
+   - 3.2 Pass1：符号收集 + 类型解析
+   - 3.3 类型解析（已合并到 Pass1）
    - 3.4 Pass5：表达式/语句降级（合并 Pass4/Pass5）
    - 3.5 Pass6：写回合并
    - 3.6 Pass7：内存端口处理
@@ -240,25 +240,20 @@ PlanEntry entry = {
     }
 }
 
-// Pass1 后（SymbolCollector）
+// Pass1 后（SymbolCollector + Type）
 entry.status = Planning
 entry.plan = ModulePlan{
     body = &adder_body,
     symbolTable = {"a", "b", "y"},
     moduleSymbol = "adder",
     ports = {
-        [0] = {symbol="a", direction=Input, width=0},
-        [1] = {symbol="b", direction=Input, width=0},
-        [2] = {symbol="y", direction=Output, width=0}
+        [0] = {symbol="a", direction=Input, width=8},
+        [1] = {symbol="b", direction=Input, width=8},
+        [2] = {symbol="y", direction=Output, width=8}
     },
     signals = {},
     instances = {}
 }
-
-// Pass2 后（TypeResolver）
-entry.plan.ports[0].width = 8
-entry.plan.ports[1].width = 8
-entry.plan.ports[2].width = 8
 
 // Pass5 后（StmtLowerer，含表达式降级）
 entry.status = Done
@@ -357,12 +352,7 @@ PlanEntry entry = {
 }
 ```
 
-Pass2 执行后（类型填充）：
-
-```cpp
-entry.plan.ports[0].width = 8
-entry.plan.ports[1].width = 8
-```
+Pass1 内部完成端口类型填充（同上所示）。
 
 ---
 
@@ -679,7 +669,7 @@ PlanEntry entry = {
 
 ### 3.1 ConvertDriver：入口与主流程
 
-ConvertDriver 是 Convert 流程的入口类，封装了整个转换过程。定义在 `include/convert.hpp` 第 621-636 行：
+ConvertDriver 是 Convert 流程的入口类，封装了整个转换过程。定义在 `include/convert.hpp` 第 596-611 行：
 
 ```cpp
 class ConvertDriver {
@@ -747,14 +737,10 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
         // 获取或创建 PlanEntry
         planCache_.tryClaim(key);
         
-        // Pass1: SymbolCollector
+        // Pass1: SymbolCollector + Type
         ModulePlanner planner(ctx);
         ModulePlan plan = planner.plan(*key.body);
         planCache_.storePlan(key, std::move(plan));
-        
-        // Pass2: TypeResolver
-        TypeResolverPass pass2(ctx);
-        pass2.resolve(/* plan from cache */);
         
         // Pass5: StmtLowerer（含表达式降级）
         StmtLowererPass pass5(ctx);
@@ -786,8 +772,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
 
 ```
 AST (slang) 
-    → Pass1 (SymbolCollector) → ModulePlan (骨架) → 存入 PlanEntry.plan
-    → Pass2 (TypeResolver)    → ModulePlan (类型填充)
+    → Pass1 (SymbolCollector + Type) → ModulePlan (骨架+类型) → 存入 PlanEntry.plan
     → Pass5 (StmtLowerer)     → LoweringPlan (values/writes) → 存入 PlanEntry.artifacts.loweringPlan
     → Pass6 (WriteBack)       → WriteBackPlan (entries) → 存入 PlanEntry.artifacts.writeBackPlan
     → Pass7 (MemoryPort)      → LoweringPlan (+memoryReads/Writes)
@@ -796,7 +781,7 @@ AST (slang)
 
 ---
 
-### 3.2 Pass1：符号收集
+### 3.2 Pass1：符号收集 + 类型解析
 
 **输入**：InstanceBodySymbol（slang AST）
 
@@ -805,8 +790,8 @@ AST (slang)
 **算法步骤**：
 
 1. 初始化 ModulePlan，绑定 body 指针
-2. 遍历 body.getPortList()，为每个 PortSymbol 创建 PortInfo
-3. 遍历 body.members()，为 NetSymbol/VariableSymbol 创建 SignalInfo
+2. 遍历 body.getPortList()，为每个 PortSymbol 创建 PortInfo，并解析端口类型
+3. 遍历 body.members()，为 NetSymbol/VariableSymbol 创建 SignalInfo，并解析信号类型
 4. 遍历实例符号（InstanceSymbol/InstanceArraySymbol），创建 InstanceInfo
 5. 递归处理 GenerateBlock，将发现的子模块投递到 PlanTaskQueue
 
@@ -850,7 +835,7 @@ entry.plan.ports[1] = {
 
 ---
 
-### 3.3 Pass2：类型解析
+### 3.3 类型解析（已合并到 Pass1）
 
 **输入**：PlanEntry.plan（Pass1 输出的 ModulePlan）
 
@@ -1307,7 +1292,7 @@ PlanEntry entry = {
 }
 ```
 
-#### Pass2 后：PlanEntry.plan 更新
+#### Pass1 内：PlanEntry.plan 类型填充
 
 ```cpp
 entry.plan.ports[0].width = 1
@@ -1435,17 +1420,16 @@ Graph "counter" {
 
 | 名称 | 行号 | 说明 |
 |------|------|------|
-| ConvertDriver | 621 | 入口类 |
-| ModulePlanner | 543 | Pass1：符号收集 |
-| TypeResolverPass | 553 | Pass2：类型解析 |
-| StmtLowererPass | 573 | Pass5：表达式/语句降级 |
-| WriteBackPass | 583 | Pass6：写回合并 |
-| MemoryPortLowererPass | 593 | Pass7：内存端口处理 |
-| GraphAssembler | 603 | Pass8：图组装 |
+| ConvertDriver | 596 | 入口类 |
+| ModulePlanner | 538 | Pass1：符号收集 + 类型解析 |
+| StmtLowererPass | 548 | Pass5：表达式/语句降级 |
+| WriteBackPass | 558 | Pass6：写回合并 |
+| MemoryPortLowererPass | 568 | Pass7：内存端口处理 |
+| GraphAssembler | 578 | Pass8：图组装 |
 
 ### 5.3 函数入口
 
-**ConvertDriver**（`include/convert.hpp` 第 621-636 行）：
+**ConvertDriver**（`include/convert.hpp` 第 596-611 行）：
 
 ```cpp
 // 构造函数
@@ -1478,8 +1462,8 @@ std::optional<WriteBackPlan> getWriteBackPlan(const PlanKey& key) const;
 // Pass1
 ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body);
 
-// Pass2
-void TypeResolverPass::resolve(ModulePlan& plan);
+// Pass1 内部调用
+TypeResolution analyzePortType(...);
 
 // Pass5
 void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);

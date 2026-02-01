@@ -125,12 +125,10 @@ bool buildMemoryPlan(const std::filesystem::path& sourcePath, std::string_view t
     context.planQueue = &planQueue;
 
     wolf_sv_parser::ModulePlanner planner(context);
-    wolf_sv_parser::TypeResolverPass typeResolver(context);
     wolf_sv_parser::StmtLowererPass stmtLowerer(context);
     wolf_sv_parser::MemoryPortLowererPass memLowerer(context);
 
     outPlan = planner.plan(top->body);
-    typeResolver.resolve(outPlan);
     outLowering = {};
     stmtLowerer.lower(outPlan, outLowering);
     memLowerer.lower(outPlan, outLowering);
