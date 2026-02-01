@@ -7,15 +7,14 @@
 ## 目录
 
 1. 数据结构（静态骨架）
-   - 1.1 PlanCache、PlanKey 与 PlanEntry
-   - 1.2 ModulePlan：模块骨架
-   - 1.3 LoweringPlan：降级计划
-   - 1.4 WriteIntent：写回意图
-   - 1.5 WriteBackPlan：写回合并结果
-   - 1.6 ConvertContext：共享状态
-   - 1.7 ConvertDriver：入口类
+   - 1.1 ConvertContext：共享状态
+   - 1.2 PlanCache、PlanKey 与 PlanEntry
+   - 1.3 ModulePlan：模块骨架
+   - 1.4 LoweringPlan：降级计划
+   - 1.5 WriteIntent / WriteSlice：写回意图
+   - 1.6 WriteBackPlan：写回合并结果
 2. 算法流程（动态处理）
-   - 2.1 总体流程
+   - 2.1 ConvertDriver：入口与主流程
    - 2.2 Pass1：符号收集
    - 2.3 Pass2：类型解析
    - 2.4 Pass3：读写分析
@@ -35,7 +34,36 @@
 
 数据结构是 Convert 流程的静态骨架，保存从 AST 提取的各种信息。算法（Pass）读取、转换、写入这些数据结构，逐步将 SystemVerilog 转换为 GRH。
 
-### 1.1 PlanCache、PlanKey 与 PlanEntry
+### 1.1 ConvertContext：共享状态
+
+ConvertContext 是贯穿转换流程的共享状态容器，为 Pass1-Pass8 提供编译期信息与缓存/队列入口。定义在 `include/convert.hpp` 第 166-174 行：
+
+```cpp
+struct ConvertContext {
+    const slang::ast::Compilation* compilation = nullptr;
+    const slang::ast::RootSymbol* root = nullptr;
+    ConvertOptions options{};
+    ConvertDiagnostics* diagnostics = nullptr;
+    ConvertLogger* logger = nullptr;
+    PlanCache* planCache = nullptr;
+    PlanTaskQueue* planQueue = nullptr;
+};
+```
+
+字段说明：
+- `compilation`：访问全局类型/语义信息
+- `root`：访问顶层实例列表
+- `options`：转换选项（abortOnError、maxLoopIterations 等）
+- `diagnostics`：诊断收集器指针
+- `logger`：日志收集器指针
+- `planCache`：模块计划缓存指针
+- `planQueue`：模块任务队列指针
+
+生命周期：在 ConvertDriver::convert 中栈上临时构造，传递给各 Pass。
+
+---
+
+### 1.2 PlanCache、PlanKey 与 PlanEntry
 
 这三个概念共同构成模块计划的存储与索引体系。
 
@@ -123,7 +151,7 @@ PlanCache (全局单例，在 ConvertDriver 中实例化)
 
 ---
 
-### 1.2 ModulePlan：模块骨架
+### 1.3 ModulePlan：模块骨架
 
 ModulePlan 是模块级的静态计划，保存端口、信号、实例、读写关系等长期稳定事实。定义在 `include/convert.hpp` 第 268-277 行：
 
@@ -183,7 +211,7 @@ plan.ports[1].width = 8;
 
 ---
 
-### 1.3 LoweringPlan：降级计划
+### 1.4 LoweringPlan：降级计划
 
 LoweringPlan 记录 Pass4-Pass7 的降级结果，包含表达式节点图、写回意图、内存端口等。定义在 `include/convert.hpp` 第 458-467 行：
 
@@ -272,7 +300,7 @@ roots = {LoweredRoot{value=8}};
 
 ---
 
-### 1.4 WriteIntent：写回意图
+### 1.5 WriteIntent / WriteSlice：写回意图
 
 WriteIntent 描述单次赋值操作的完整信息。定义在 `include/convert.hpp` 第 365-374 行：
 
@@ -458,7 +486,7 @@ writes = {
 
 ---
 
-### 1.5 WriteBackPlan：写回合并结果
+### 1.6 WriteBackPlan：写回合并结果
 
 WriteBackPlan 将多条 WriteIntent 按 (target + domain + event) 分组合并，生成 updateCond + nextValue 形式。定义在 `include/convert.hpp` 第 469-482 行：
 
@@ -532,36 +560,11 @@ entries = {
 
 ---
 
-### 1.6 ConvertContext：共享状态
+## 2. 算法流程（动态处理）
 
-ConvertContext 是贯穿转换流程的共享状态容器，为 Pass1-Pass8 提供编译期信息与缓存/队列入口。定义在 `include/convert.hpp` 第 166-174 行：
+算法遍历、转换、合并数据结构，完成从 AST 到 GRH 的转换。
 
-```cpp
-struct ConvertContext {
-    const slang::ast::Compilation* compilation = nullptr;
-    const slang::ast::RootSymbol* root = nullptr;
-    ConvertOptions options{};
-    ConvertDiagnostics* diagnostics = nullptr;
-    ConvertLogger* logger = nullptr;
-    PlanCache* planCache = nullptr;
-    PlanTaskQueue* planQueue = nullptr;
-};
-```
-
-字段说明：
-- `compilation`：访问全局类型/语义信息
-- `root`：访问顶层实例列表
-- `options`：转换选项（abortOnError、maxLoopIterations 等）
-- `diagnostics`：诊断收集器指针
-- `logger`：日志收集器指针
-- `planCache`：模块计划缓存指针
-- `planQueue`：模块任务队列指针
-
-生命周期：在 ConvertDriver::convert 中栈上临时构造，传递给各 Pass。
-
----
-
-### 1.7 ConvertDriver：入口类
+### 2.1 ConvertDriver：入口与主流程
 
 ConvertDriver 是 Convert 流程的入口类，封装了整个转换过程。定义在 `include/convert.hpp` 第 657-672 行：
 
@@ -674,15 +677,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
 }
 ```
 
----
-
-## 2. 算法流程（动态处理）
-
-算法遍历、转换、合并数据结构，完成从 AST 到 GRH 的转换。
-
-### 2.1 总体流程
-
-Convert 流程分为 8 个 Pass，每个 Pass 读取输入数据结构，产生输出数据结构：
+**Pass 流水线**：
 
 ```
 AST (slang) 
@@ -695,6 +690,8 @@ AST (slang)
     → Pass7 (MemoryPort)      → LoweringPlan (+memoryReads/Writes)
     → Pass8 (GraphAssembly)   → Netlist/Graph (GRH)
 ```
+
+---
 
 ### 2.2 Pass1：符号收集
 
@@ -1308,6 +1305,7 @@ Graph "counter" {
 
 | 名称 | 类型 | 行号 | 说明 |
 |------|------|------|------|
+| ConvertContext | struct | 166 | 共享状态容器 |
 | PlanCache | class | 525 | 模块计划缓存 |
 | PlanKey | struct | 489 | 模块标识键 |
 | PlanKeyHash | struct | 502 | PlanKey 哈希函数 |
@@ -1315,14 +1313,14 @@ Graph "counter" {
 | ModulePlan | struct | 268 | 模块骨架 |
 | LoweringPlan | struct | 458 | 降级计划 |
 | WriteIntent | struct | 365 | 写回意图 |
+| WriteSlice | struct | 355 | 切片描述 |
 | WriteBackPlan | struct | 469 | 写回合并结果 |
-| ConvertContext | struct | 166 | 共享状态 |
-| ConvertDriver | class | 657 | 入口类 |
 
 **Pass 类**（`include/convert.hpp`）：
 
 | 名称 | 行号 | 说明 |
 |------|------|------|
+| ConvertDriver | 657 | 入口类 |
 | ModulePlanner | 569 | Pass1：符号收集 |
 | TypeResolverPass | 579 | Pass2：类型解析 |
 | RWAnalyzerPass | 589 | Pass3：读写分析 |

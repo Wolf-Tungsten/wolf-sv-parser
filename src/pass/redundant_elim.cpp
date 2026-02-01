@@ -7,6 +7,9 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace wolf_sv_parser::transform
@@ -14,6 +17,134 @@ namespace wolf_sv_parser::transform
 
     namespace
     {
+        std::size_t hashCombine(std::size_t seed, std::size_t value)
+        {
+            return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2));
+        }
+
+        std::size_t hashAttributeValue(const grh::ir::AttributeValue &value)
+        {
+            const std::size_t typeTag = value.index();
+            const std::size_t payload = std::visit(
+                [](const auto &val) -> std::size_t
+                {
+                    using T = std::decay_t<decltype(val)>;
+                    if constexpr (std::is_same_v<T, bool>)
+                    {
+                        return std::hash<bool>{}(val);
+                    }
+                    else if constexpr (std::is_same_v<T, int64_t>)
+                    {
+                        return std::hash<int64_t>{}(val);
+                    }
+                    else if constexpr (std::is_same_v<T, double>)
+                    {
+                        return std::hash<double>{}(val);
+                    }
+                    else if constexpr (std::is_same_v<T, std::string>)
+                    {
+                        return std::hash<std::string>{}(val);
+                    }
+                    else if constexpr (std::is_same_v<T, std::vector<bool>>)
+                    {
+                        std::size_t seed = 0;
+                        for (const bool bit : val)
+                        {
+                            seed = hashCombine(seed, std::hash<bool>{}(bit));
+                        }
+                        return seed;
+                    }
+                    else if constexpr (std::is_same_v<T, std::vector<int64_t>>)
+                    {
+                        std::size_t seed = 0;
+                        for (const int64_t item : val)
+                        {
+                            seed = hashCombine(seed, std::hash<int64_t>{}(item));
+                        }
+                        return seed;
+                    }
+                    else if constexpr (std::is_same_v<T, std::vector<double>>)
+                    {
+                        std::size_t seed = 0;
+                        for (const double item : val)
+                        {
+                            seed = hashCombine(seed, std::hash<double>{}(item));
+                        }
+                        return seed;
+                    }
+                    else if constexpr (std::is_same_v<T, std::vector<std::string>>)
+                    {
+                        std::size_t seed = 0;
+                        for (const auto &item : val)
+                        {
+                            seed = hashCombine(seed, std::hash<std::string>{}(item));
+                        }
+                        return seed;
+                    }
+                    else
+                    {
+                        return 0U;
+                    }
+                },
+                value);
+            return hashCombine(typeTag, payload);
+        }
+
+        struct OpSignature
+        {
+            grh::ir::OperationKind kind = grh::ir::OperationKind::kConstant;
+            std::vector<grh::ir::ValueId> operands;
+            std::vector<grh::ir::AttrKV> attrs;
+            int32_t width = 0;
+            bool isSigned = false;
+
+            bool operator==(const OpSignature &other) const
+            {
+                if (kind != other.kind || width != other.width || isSigned != other.isSigned)
+                {
+                    return false;
+                }
+                if (operands != other.operands)
+                {
+                    return false;
+                }
+                if (attrs.size() != other.attrs.size())
+                {
+                    return false;
+                }
+                for (std::size_t i = 0; i < attrs.size(); ++i)
+                {
+                    if (attrs[i].key != other.attrs[i].key || attrs[i].value != other.attrs[i].value)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        };
+
+        struct OpSignatureHash
+        {
+            std::size_t operator()(const OpSignature &sig) const
+            {
+                std::size_t seed = static_cast<std::size_t>(sig.kind);
+                seed = hashCombine(seed, std::hash<int32_t>{}(sig.width));
+                seed = hashCombine(seed, std::hash<bool>{}(sig.isSigned));
+                seed = hashCombine(seed, std::hash<std::size_t>{}(sig.operands.size()));
+                for (const auto &operand : sig.operands)
+                {
+                    seed = hashCombine(seed, grh::ir::ValueIdHash{}(operand));
+                }
+                seed = hashCombine(seed, std::hash<std::size_t>{}(sig.attrs.size()));
+                for (const auto &attr : sig.attrs)
+                {
+                    seed = hashCombine(seed, std::hash<std::string>{}(attr.key));
+                    seed = hashCombine(seed, hashAttributeValue(attr.value));
+                }
+                return seed;
+            }
+        };
+
         bool isOutputPortValue(const grh::ir::Value &value)
         {
             return value.isOutput() && !value.isInput() && !value.isInout();
@@ -44,6 +175,79 @@ namespace wolf_sv_parser::transform
                 return true;
             }
             return false;
+        }
+
+        bool isSideEffectFreeOp(grh::ir::OperationKind kind)
+        {
+            switch (kind)
+            {
+            case grh::ir::OperationKind::kMemory:
+            case grh::ir::OperationKind::kMemoryReadPort:
+            case grh::ir::OperationKind::kMemoryWritePort:
+            case grh::ir::OperationKind::kLatch:
+            case grh::ir::OperationKind::kRegister:
+            case grh::ir::OperationKind::kInstance:
+            case grh::ir::OperationKind::kBlackbox:
+            case grh::ir::OperationKind::kDisplay:
+            case grh::ir::OperationKind::kAssert:
+            case grh::ir::OperationKind::kDpicImport:
+            case grh::ir::OperationKind::kDpicCall:
+                return false;
+            default:
+                return true;
+            }
+        }
+
+        bool isCseCandidate(const grh::ir::Graph &graph,
+                            const grh::ir::Operation &op)
+        {
+            if (!isSideEffectFreeOp(op.kind()))
+            {
+                return false;
+            }
+            if (op.results().size() != 1)
+            {
+                return false;
+            }
+            const grh::ir::ValueId resultId = op.results()[0];
+            if (!resultId.valid())
+            {
+                return false;
+            }
+            const grh::ir::Value resultValue = graph.getValue(resultId);
+            if (resultValue.isInput() || resultValue.isOutput() || resultValue.isInout())
+            {
+                return false;
+            }
+            if (!isTemporarySymbol(resultValue))
+            {
+                return false;
+            }
+            for (const auto operandId : op.operands())
+            {
+                if (!operandId.valid())
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        OpSignature makeSignature(const grh::ir::Graph &graph,
+                                  const grh::ir::Operation &op)
+        {
+            OpSignature sig;
+            sig.kind = op.kind();
+            sig.operands.assign(op.operands().begin(), op.operands().end());
+            sig.attrs.assign(op.attrs().begin(), op.attrs().end());
+            std::stable_sort(sig.attrs.begin(), sig.attrs.end(),
+                             [](const grh::ir::AttrKV &lhs, const grh::ir::AttrKV &rhs)
+                             { return lhs.key < rhs.key; });
+            const grh::ir::ValueId resultId = op.results()[0];
+            const grh::ir::Value resultValue = graph.getValue(resultId);
+            sig.width = resultValue.width();
+            sig.isSigned = resultValue.isSigned();
+            return sig;
         }
 
         bool isSingleUser(const grh::ir::Value &value, grh::ir::OperationId user)
@@ -437,6 +641,44 @@ namespace wolf_sv_parser::transform
                                         std::string("Failed to fold NOT/XOR: ") + ex.what());
                         }
                         continue;
+                    }
+                }
+
+                struct CseEntry
+                {
+                    grh::ir::OperationId op;
+                    grh::ir::ValueId value;
+                };
+
+                std::unordered_map<OpSignature, CseEntry, OpSignatureHash> seen;
+                std::vector<grh::ir::OperationId> cseOps(graph.operations().begin(),
+                                                          graph.operations().end());
+                for (const auto opId : cseOps)
+                {
+                    const grh::ir::Operation op = graph.getOperation(opId);
+                    if (!isCseCandidate(graph, op))
+                    {
+                        continue;
+                    }
+                    const grh::ir::ValueId resultId = op.results()[0];
+                    OpSignature sig = makeSignature(graph, op);
+                    auto [it, inserted] = seen.emplace(std::move(sig), CseEntry{opId, resultId});
+                    if (inserted)
+                    {
+                        continue;
+                    }
+                    const grh::ir::ValueId canonicalValue = it->second.value;
+                    if (canonicalValue == resultId)
+                    {
+                        continue;
+                    }
+                    auto onError = [&](const std::string &msg)
+                    { this->error(graph, op, msg); };
+                    replaceUsers(graph, resultId, canonicalValue, onError);
+                    if (graph.eraseOp(opId))
+                    {
+                        graphChanged = true;
+                        progress = true;
                     }
                 }
             }

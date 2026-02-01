@@ -45,23 +45,11 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
+## 本次修改记录
+
+- 2026-02-01：整理 STEP 顺序并将“Transform pass 合并与冗余清理”调整为 STEP 0045；记录本次为 redundant_elim 增加无副作用冗余 op 消除；构建通过（`cmake --build build -j$(nproc)`），未运行 CTest。
+
 ------
-
-## STEP 0044 - Transform pass 合并与冗余清理
-
-目标：
-- 合并 `const_inline`/`output_assign_inline`/`redundant_elim` 为单次遍历的 peephole pass
-- 清理旧 pass 与测试目标，减少编译与遍历开销
-
-实施：
-- `RedundantElimPass` 承接常量输出内联、输出端口 assign 内联、单输入 concat/assign 链与 NOT/XOR 折叠
-- 移除 `const_inline`/`output_assign_inline` 的源码、头文件与测试目标
-- Transform pipeline 仅保留 `const_fold -> redundant_elim -> dead_code_elim -> stats`
-
-测试：
-- HDLBits 全量测试（用户执行）
-
-完成情况：已完成
 
 ## STEP 0002 - 制定 Convert 新架构与工作流方案
 
@@ -924,5 +912,21 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 写回 `WriteIntent` 增加 `coversAllTwoState` 标记，WriteBack 在组合域判断无 latch 时纳入该标记
 - 新增/更新 convert fixtures 与测试：case 完整覆盖走 `kEq`，不完整 case 触发 warning
 - 修复 case 控制表达式宽度判定：剥离隐式转换，优先使用原始信号位宽，避免无尺寸常量抬宽导致误判不完整覆盖
+
+完成情况：已完成
+
+## STEP 0045 - Transform pass 合并与冗余清理
+
+目标：
+- 合并 `const_inline`/`output_assign_inline`/`redundant_elim` 为单次遍历的 peephole pass
+- 清理旧 pass 与测试目标，减少编译与遍历开销
+
+实施：
+- `RedundantElimPass` 承接常量输出内联、输出端口 assign 内联、单输入 concat/assign 链与 NOT/XOR 折叠
+- 移除 `const_inline`/`output_assign_inline` 的源码、头文件与测试目标
+- Transform pipeline 仅保留 `const_fold -> redundant_elim -> dead_code_elim -> stats`
+
+测试：
+- HDLBits 全量测试（用户执行）
 
 完成情况：已完成
