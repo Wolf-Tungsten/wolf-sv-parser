@@ -845,6 +845,7 @@ struct StmtLowererState {
         std::vector<EventEdge> edges;
         std::vector<ExprNodeId> operands;
     };
+    bool suppressAssignmentWrites = false;
     std::vector<std::unordered_map<const slang::ast::ValueSymbol*, int64_t>>
         loopLocalStack;
     std::vector<std::vector<const slang::ast::ValueSymbol*>> loopVarStack;
@@ -858,6 +859,21 @@ struct StmtLowererState {
     struct LValueCompositeInfo {
         bool isComposite = false;
         bool reverseOrder = false;
+    };
+    struct AssignmentSuppressScope {
+        StmtLowererState& state;
+        bool saved = false;
+
+        AssignmentSuppressScope(StmtLowererState& state, bool enable)
+            : state(state), saved(state.suppressAssignmentWrites)
+        {
+            state.suppressAssignmentWrites = enable;
+        }
+
+        ~AssignmentSuppressScope()
+        {
+            state.suppressAssignmentWrites = saved;
+        }
     };
     std::vector<LoopFlowContext> loopFlowStack;
     std::optional<std::string> loopControlFailure;
@@ -1426,6 +1442,13 @@ struct StmtLowererState {
             reportUnsupported(expr, "Unsupported LHS in assignment");
             return;
         }
+        if (const auto* assigned = resolveAssignedValueSymbol(expr.left()))
+        {
+            if (isLoopLocalSymbol(*assigned))
+            {
+                return;
+            }
+        }
 
         uint64_t totalWidth = 0;
         if (composite.isComposite || targets.size() > 1)
@@ -1602,6 +1625,12 @@ struct StmtLowererState {
 
         void handle(const slang::ast::AssignmentExpression& expr)
         {
+            if (state_.suppressAssignmentWrites)
+            {
+                expr.left().visit(*this);
+                expr.right().visit(*this);
+                return;
+            }
             state_.handleAssignment(expr);
         }
 
@@ -2712,6 +2741,7 @@ private:
 
     void scanForLoopControl(const slang::ast::ForLoopStatement& stmt)
     {
+        AssignmentSuppressScope suppress(*this, true);
         AssignmentExprVisitor visitor(*this);
         if (!stmt.loopVars.empty())
         {
