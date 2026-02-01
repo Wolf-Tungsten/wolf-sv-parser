@@ -88,6 +88,247 @@ namespace grh::emit
             out.append(static_cast<std::size_t>(indent * kIndentSize), ' ');
         }
 
+        std::optional<std::vector<uint8_t>> parseConstMaskBits(std::string_view literal,
+                                                               int64_t targetWidth)
+        {
+            if (targetWidth <= 0)
+            {
+                return std::nullopt;
+            }
+
+            std::string text;
+            text.reserve(literal.size());
+            for (char ch : literal)
+            {
+                if (ch == '_' || std::isspace(static_cast<unsigned char>(ch)))
+                {
+                    continue;
+                }
+                text.push_back(ch);
+            }
+            if (text.empty() || text.front() == '-')
+            {
+                return std::nullopt;
+            }
+
+            bool isSigned = false;
+            int64_t literalWidth = -1;
+            char base = 'd';
+            std::string digits;
+
+            const std::size_t quotePos = text.find('\'');
+            if (quotePos != std::string::npos)
+            {
+                const std::string widthText = text.substr(0, quotePos);
+                if (!widthText.empty())
+                {
+                    for (char ch : widthText)
+                    {
+                        if (!std::isdigit(static_cast<unsigned char>(ch)))
+                        {
+                            return std::nullopt;
+                        }
+                    }
+                    try
+                    {
+                        literalWidth = std::stoll(widthText);
+                    }
+                    catch (const std::exception &)
+                    {
+                        return std::nullopt;
+                    }
+                    if (literalWidth <= 0)
+                    {
+                        return std::nullopt;
+                    }
+                }
+                std::size_t basePos = quotePos + 1;
+                if (basePos >= text.size())
+                {
+                    return std::nullopt;
+                }
+                if (text[basePos] == 's' || text[basePos] == 'S')
+                {
+                    isSigned = true;
+                    basePos++;
+                }
+                if (basePos >= text.size())
+                {
+                    return std::nullopt;
+                }
+                bool unbasedLiteral = false;
+                const char unbased = text[basePos];
+                if ((unbased == '0' || unbased == '1') && basePos + 1 == text.size())
+                {
+                    base = 'b';
+                    literalWidth = targetWidth;
+                    digits.assign(1, unbased);
+                    unbasedLiteral = true;
+                }
+                if (!unbasedLiteral)
+                {
+                    base = static_cast<char>(std::tolower(static_cast<unsigned char>(text[basePos])));
+                    basePos++;
+                    digits = text.substr(basePos);
+                }
+            }
+            else
+            {
+                digits = text;
+            }
+
+            if (digits.empty())
+            {
+                return std::nullopt;
+            }
+
+            std::vector<uint8_t> bits;
+            switch (base)
+            {
+            case 'b':
+            {
+                bits.reserve(digits.size());
+                for (auto it = digits.rbegin(); it != digits.rend(); ++it)
+                {
+                    const char ch = *it;
+                    if (ch == '0' || ch == '1')
+                    {
+                        bits.push_back(static_cast<uint8_t>(ch - '0'));
+                    }
+                    else
+                    {
+                        return std::nullopt;
+                    }
+                }
+                break;
+            }
+            case 'h':
+            {
+                bits.reserve(digits.size() * 4);
+                for (auto it = digits.rbegin(); it != digits.rend(); ++it)
+                {
+                    const char ch = *it;
+                    int value = 0;
+                    if (ch >= '0' && ch <= '9')
+                    {
+                        value = ch - '0';
+                    }
+                    else if (ch >= 'a' && ch <= 'f')
+                    {
+                        value = 10 + (ch - 'a');
+                    }
+                    else if (ch >= 'A' && ch <= 'F')
+                    {
+                        value = 10 + (ch - 'A');
+                    }
+                    else
+                    {
+                        return std::nullopt;
+                    }
+                    for (int bit = 0; bit < 4; ++bit)
+                    {
+                        bits.push_back(static_cast<uint8_t>((value >> bit) & 1));
+                    }
+                }
+                break;
+            }
+            case 'o':
+            {
+                bits.reserve(digits.size() * 3);
+                for (auto it = digits.rbegin(); it != digits.rend(); ++it)
+                {
+                    const char ch = *it;
+                    if (ch < '0' || ch > '7')
+                    {
+                        return std::nullopt;
+                    }
+                    const int value = ch - '0';
+                    for (int bit = 0; bit < 3; ++bit)
+                    {
+                        bits.push_back(static_cast<uint8_t>((value >> bit) & 1));
+                    }
+                }
+                break;
+            }
+            case 'd':
+            {
+                for (char ch : digits)
+                {
+                    if (!std::isdigit(static_cast<unsigned char>(ch)))
+                    {
+                        return std::nullopt;
+                    }
+                }
+                std::string dec = digits;
+                if (dec == "0")
+                {
+                    bits.push_back(0);
+                    break;
+                }
+                while (!(dec.size() == 1 && dec[0] == '0'))
+                {
+                    int carry = 0;
+                    std::string next;
+                    next.reserve(dec.size());
+                    for (char ch : dec)
+                    {
+                        const int digit = ch - '0';
+                        const int value = carry * 10 + digit;
+                        const int q = value / 2;
+                        carry = value % 2;
+                        if (!next.empty() || q != 0)
+                        {
+                            next.push_back(static_cast<char>('0' + q));
+                        }
+                    }
+                    bits.push_back(static_cast<uint8_t>(carry));
+                    if (next.empty())
+                    {
+                        next = "0";
+                    }
+                    dec = std::move(next);
+                }
+                break;
+            }
+            default:
+                return std::nullopt;
+            }
+
+            if (bits.empty())
+            {
+                bits.push_back(0);
+            }
+
+            auto resizeBits = [&](int64_t width, bool signedExtend)
+            {
+                if (width <= 0)
+                {
+                    return;
+                }
+                uint8_t fill = 0;
+                if (signedExtend && !bits.empty())
+                {
+                    fill = bits.back();
+                }
+                if (static_cast<int64_t>(bits.size()) > width)
+                {
+                    bits.resize(static_cast<std::size_t>(width));
+                }
+                else if (static_cast<int64_t>(bits.size()) < width)
+                {
+                    bits.resize(static_cast<std::size_t>(width), fill);
+                }
+            };
+
+            if (literalWidth > 0)
+            {
+                resizeBits(literalWidth, isSigned);
+            }
+            resizeBits(targetWidth, isSigned);
+
+            return bits;
+        }
+
         std::vector<const grh::ir::Graph *> graphsSortedByName(const grh::ir::Netlist &netlist)
         {
             std::vector<const grh::ir::Graph *> graphs;
@@ -3104,10 +3345,61 @@ namespace grh::emit
 
                     const bool guardUpdate = !isConstOne(updateCond);
                     const int baseIndent = guardUpdate ? 3 : 2;
+                    std::optional<std::vector<uint8_t>> maskBits;
+                    if (auto maskLiteral = constLiteralFor(mask))
+                    {
+                        maskBits = parseConstMaskBits(*maskLiteral, memWidth);
+                    }
+                    auto maskAll = [&](uint8_t value) -> bool
+                    {
+                        if (!maskBits)
+                        {
+                            return false;
+                        }
+                        for (uint8_t bit : *maskBits)
+                        {
+                            if (bit != value)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
                     std::ostringstream stmt;
                     if (guardUpdate)
                     {
                         appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                    }
+                    if (maskBits)
+                    {
+                        const bool allZero = maskAll(0);
+                        const bool allOnes = maskAll(1);
+                        if (allZero)
+                        {
+                            break;
+                        }
+                        if (allOnes || memWidth <= 1)
+                        {
+                            appendIndented(stmt, baseIndent, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                        }
+                        else
+                        {
+                            for (int64_t bit = 0; bit < memWidth; ++bit)
+                            {
+                                if ((*maskBits)[static_cast<std::size_t>(bit)] != 0)
+                                {
+                                    appendIndented(stmt, baseIndent,
+                                                   memSymbol + "[" + valueExpr(addr) + "][" + std::to_string(bit) + "] <= " +
+                                                       valueExpr(data) + "[" + std::to_string(bit) + "];");
+                                }
+                            }
+                        }
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                        addSequentialStmt(*seqKey, stmt.str(), opId);
+                        break;
                     }
                     if (memWidth <= 1)
                     {
@@ -5129,10 +5421,61 @@ namespace grh::emit
 
                 const bool guardUpdate = !isConstOne(updateCond);
                 const int baseIndent = guardUpdate ? 3 : 2;
+                std::optional<std::vector<uint8_t>> maskBits;
+                if (auto maskLiteral = constLiteralFor(mask))
+                {
+                    maskBits = parseConstMaskBits(*maskLiteral, memWidth);
+                }
+                auto maskAll = [&](uint8_t value) -> bool
+                {
+                    if (!maskBits)
+                    {
+                        return false;
+                    }
+                    for (uint8_t bit : *maskBits)
+                    {
+                        if (bit != value)
+                        {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
                 std::ostringstream stmt;
                 if (guardUpdate)
                 {
                     appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                }
+                if (maskBits)
+                {
+                    const bool allZero = maskAll(0);
+                    const bool allOnes = maskAll(1);
+                    if (allZero)
+                    {
+                        break;
+                    }
+                    if (allOnes || memWidth <= 1)
+                    {
+                        appendIndented(stmt, baseIndent, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                    }
+                    else
+                    {
+                        for (int64_t bit = 0; bit < memWidth; ++bit)
+                        {
+                            if ((*maskBits)[static_cast<std::size_t>(bit)] != 0)
+                            {
+                                appendIndented(stmt, baseIndent,
+                                               memSymbol + "[" + valueExpr(addr) + "][" + std::to_string(bit) + "] <= " +
+                                                   valueExpr(data) + "[" + std::to_string(bit) + "];");
+                            }
+                        }
+                    }
+                    if (guardUpdate)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
                 }
                 if (memWidth <= 1)
                 {
