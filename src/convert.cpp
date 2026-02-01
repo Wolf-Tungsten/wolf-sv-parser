@@ -692,283 +692,6 @@ ControlDomain classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& b
     return ControlDomain::Unknown;
 }
 
-uint64_t encodeRWKey(SignalId id, ControlDomain domain, bool isWrite)
-{
-    return (static_cast<uint64_t>(id) << 3) |
-           (static_cast<uint64_t>(domain) << 1) |
-           (isWrite ? 1ULL : 0ULL);
-}
-
-uint64_t encodeMemKey(SignalId id, bool isRead, bool isWrite, bool isMasked, bool isSync,
-                      bool hasReset)
-{
-    uint64_t key = static_cast<uint64_t>(id) << 5;
-    key |= (isRead ? 1ULL : 0ULL) << 0;
-    key |= (isWrite ? 1ULL : 0ULL) << 1;
-    key |= (isMasked ? 1ULL : 0ULL) << 2;
-    key |= (isSync ? 1ULL : 0ULL) << 3;
-    key |= (hasReset ? 1ULL : 0ULL) << 4;
-    return key;
-}
-
-struct RWAnalyzerState {
-    ModulePlan& plan;
-    ConvertDiagnostics* diagnostics;
-    std::vector<SignalId> signalBySymbol;
-    std::unordered_map<uint64_t, RWOpId> rwKeys;
-    std::unordered_map<uint64_t, MemoryPortId> memKeys;
-    uint32_t nextSite = 0;
-
-    explicit RWAnalyzerState(ModulePlan& plan, ConvertDiagnostics* diagnostics)
-        : plan(plan), diagnostics(diagnostics)
-    {
-        signalBySymbol.assign(plan.symbolTable.size(), kInvalidPlanIndex);
-        for (SignalId i = 0; i < static_cast<SignalId>(plan.signals.size()); ++i)
-        {
-            const PlanSymbolId id = plan.signals[i].symbol;
-            if (id.valid() && id.index < signalBySymbol.size())
-            {
-                signalBySymbol[id.index] = i;
-            }
-        }
-    }
-
-    SignalId resolveSignal(const slang::ast::ValueSymbol& symbol) const
-    {
-        if (symbol.name.empty())
-        {
-            return kInvalidPlanIndex;
-        }
-        const PlanSymbolId id = plan.symbolTable.lookup(symbol.name);
-        if (!id.valid() || id.index >= signalBySymbol.size())
-        {
-            return kInvalidPlanIndex;
-        }
-        return signalBySymbol[id.index];
-    }
-
-    void recordRead(const slang::ast::ValueSymbol& symbol, ControlDomain domain,
-                    slang::SourceLocation location)
-    {
-        recordAccess(resolveSignal(symbol), domain, false, location);
-    }
-
-    void recordWrite(const slang::ast::ValueSymbol& symbol, ControlDomain domain,
-                     slang::SourceLocation location)
-    {
-        recordAccess(resolveSignal(symbol), domain, true, location);
-    }
-
-private:
-    void recordAccess(SignalId id, ControlDomain domain, bool isWrite,
-                      slang::SourceLocation location)
-    {
-        if (id == kInvalidPlanIndex)
-        {
-            return;
-        }
-        const uint64_t key = encodeRWKey(id, domain, isWrite);
-        AccessSite site{location, nextSite++};
-        auto [rwIt, inserted] = rwKeys.emplace(key, static_cast<RWOpId>(plan.rwOps.size()));
-        if (inserted)
-        {
-            plan.rwOps.push_back(RWOp{id, domain, isWrite});
-        }
-        RWOp& op = plan.rwOps[rwIt->second];
-        op.sites.push_back(site);
-
-        if (plan.signals[id].memoryRows > 0)
-        {
-            if (isWrite)
-            {
-                recordMemoryPort(id, false, true, domain, site);
-            }
-            else
-            {
-                recordMemoryPort(id, true, false, domain, site);
-            }
-        }
-    }
-
-    void recordMemoryPort(SignalId id, bool isRead, bool isWrite, ControlDomain domain,
-                          const AccessSite& site)
-    {
-        const bool isSync = domain == ControlDomain::Sequential;
-        const bool isMasked = false;
-        const bool hasReset = false;
-        const uint64_t key = encodeMemKey(id, isRead, isWrite, isMasked, isSync, hasReset);
-        auto [memIt, inserted] = memKeys.emplace(
-            key, static_cast<MemoryPortId>(plan.memPorts.size()));
-        if (inserted)
-        {
-            MemoryPortInfo info;
-            info.memory = id;
-            info.isRead = isRead;
-            info.isWrite = isWrite;
-            info.isMasked = isMasked;
-            info.isSync = isSync;
-            info.hasReset = hasReset;
-            plan.memPorts.push_back(std::move(info));
-        }
-        MemoryPortInfo& info = plan.memPorts[memIt->second];
-        info.sites.push_back(site);
-    }
-};
-
-class RWVisitor : public slang::ast::ASTVisitor<RWVisitor, true, true> {
-public:
-    RWVisitor(RWAnalyzerState& state, ControlDomain domain)
-        : state_(state), domain_(domain) {}
-
-    void handle(const slang::ast::AssignmentExpression& expr)
-    {
-        const bool saved = inLValue_;
-        inLValue_ = true;
-        expr.left().visit(*this);
-        inLValue_ = false;
-        expr.right().visit(*this);
-        inLValue_ = saved;
-    }
-
-    void handle(const slang::ast::UnaryExpression& expr)
-    {
-        if (!slang::ast::OpInfo::isLValue(expr.op))
-        {
-            visitDefault(expr);
-            return;
-        }
-        const bool saved = inLValue_;
-        inLValue_ = true;
-        expr.operand().visit(*this);
-        inLValue_ = false;
-        expr.operand().visit(*this);
-        inLValue_ = saved;
-    }
-
-    void handle(const slang::ast::ElementSelectExpression& expr)
-    {
-        if (!inLValue_)
-        {
-            visitDefault(expr);
-            return;
-        }
-        const bool saved = inLValue_;
-        expr.value().visit(*this);
-        inLValue_ = false;
-        expr.selector().visit(*this);
-        inLValue_ = saved;
-    }
-
-    void handle(const slang::ast::RangeSelectExpression& expr)
-    {
-        if (!inLValue_)
-        {
-            visitDefault(expr);
-            return;
-        }
-        const bool saved = inLValue_;
-        expr.value().visit(*this);
-        inLValue_ = false;
-        expr.left().visit(*this);
-        expr.right().visit(*this);
-        inLValue_ = saved;
-    }
-
-    void handle(const slang::ast::NamedValueExpression& expr)
-    {
-        recordSymbol(expr.symbol, expr.sourceRange.start());
-    }
-
-    void handle(const slang::ast::HierarchicalValueExpression& expr)
-    {
-        recordSymbol(expr.symbol, expr.sourceRange.start());
-    }
-
-private:
-    void recordSymbol(const slang::ast::ValueSymbol& symbol, slang::SourceLocation location)
-    {
-        if (inLValue_)
-        {
-            state_.recordWrite(symbol, domain_, location);
-        }
-        else
-        {
-            state_.recordRead(symbol, domain_, location);
-        }
-    }
-
-    RWAnalyzerState& state_;
-    ControlDomain domain_;
-    bool inLValue_ = false;
-};
-
-void analyzeGenerateBlock(const slang::ast::GenerateBlockSymbol& block, RWAnalyzerState& state);
-void analyzeGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
-                               RWAnalyzerState& state);
-
-void analyzeProceduralBlock(const slang::ast::ProceduralBlockSymbol& block, RWAnalyzerState& state)
-{
-    const ControlDomain domain = classifyProceduralBlock(block);
-    RWVisitor visitor(state, domain);
-    block.getBody().visit(visitor);
-}
-
-void analyzeContinuousAssign(const slang::ast::ContinuousAssignSymbol& assign,
-                             RWAnalyzerState& state)
-{
-    RWVisitor visitor(state, ControlDomain::Combinational);
-    assign.getAssignment().visit(visitor);
-}
-
-void analyzeMemberSymbol(const slang::ast::Symbol& member, RWAnalyzerState& state)
-{
-    if (const auto* continuous = member.as_if<slang::ast::ContinuousAssignSymbol>())
-    {
-        analyzeContinuousAssign(*continuous, state);
-        return;
-    }
-    if (const auto* block = member.as_if<slang::ast::ProceduralBlockSymbol>())
-    {
-        analyzeProceduralBlock(*block, state);
-        return;
-    }
-    if (const auto* generateBlock = member.as_if<slang::ast::GenerateBlockSymbol>())
-    {
-        analyzeGenerateBlock(*generateBlock, state);
-        return;
-    }
-    if (const auto* generateArray = member.as_if<slang::ast::GenerateBlockArraySymbol>())
-    {
-        analyzeGenerateBlockArray(*generateArray, state);
-        return;
-    }
-}
-
-void analyzeGenerateBlock(const slang::ast::GenerateBlockSymbol& block, RWAnalyzerState& state)
-{
-    if (block.isUninstantiated)
-    {
-        return;
-    }
-    for (const slang::ast::Symbol& member : block.members())
-    {
-        analyzeMemberSymbol(member, state);
-    }
-}
-
-void analyzeGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& array,
-                               RWAnalyzerState& state)
-{
-    for (const slang::ast::GenerateBlockSymbol* entry : array.entries)
-    {
-        if (!entry)
-        {
-            continue;
-        }
-        analyzeGenerateBlock(*entry, state);
-    }
-}
-
 std::optional<grh::ir::OperationKind> mapUnaryOp(slang::ast::UnaryOperator op)
 {
     switch (op)
@@ -5627,6 +5350,7 @@ private:
 
     struct CaseMaskInfo {
         ExprNodeId mask = kInvalidPlanIndex;
+        ExprNodeId maskedValue = kInvalidPlanIndex;
     };
 
     CaseMaskInfo buildCaseWildcardMask(const slang::ast::Expression& controlExpr,
@@ -5666,6 +5390,10 @@ private:
         }
         std::string literal = mask->toString(slang::LiteralBase::Binary, true);
         info.mask = addConstantLiteral(std::move(literal), location);
+        slang::SVInt maskedValue = *aligned & *mask;
+        std::string maskedLiteral =
+            maskedValue.toString(slang::LiteralBase::Binary, true);
+        info.maskedValue = addConstantLiteral(std::move(maskedLiteral), location);
         return info;
     }
 
@@ -5858,7 +5586,8 @@ private:
             {
                 CaseMaskInfo maskInfo =
                     buildCaseWildcardMask(controlExpr, *expr, condition, location);
-                if (maskInfo.mask == kInvalidPlanIndex)
+                if (maskInfo.mask == kInvalidPlanIndex ||
+                    maskInfo.maskedValue == kInvalidPlanIndex)
                 {
                     reportUnsupported(*expr,
                                       "Wildcard case item not constant; fallback to case equality");
@@ -5871,14 +5600,11 @@ private:
                     ExprNodeId maskedControl =
                         makeOperation(grh::ir::OperationKind::kAnd, {control, maskInfo.mask},
                                       location);
-                    ExprNodeId maskedItem =
-                        makeOperation(grh::ir::OperationKind::kAnd, {itemId, maskInfo.mask},
-                                      location);
                     const grh::ir::OperationKind eqOp =
                         mode == CaseLoweringMode::FourState
                             ? grh::ir::OperationKind::kCaseEq
                             : grh::ir::OperationKind::kEq;
-                    term = makeOperation(eqOp, {maskedControl, maskedItem}, location);
+                    term = makeOperation(eqOp, {maskedControl, maskInfo.maskedValue}, location);
                 }
             }
             else
@@ -7847,23 +7573,6 @@ void TypeResolverPass::resolve(ModulePlan& plan)
         signal.memoryRows = info.memoryRows;
         signal.packedDims = std::move(info.packedDims);
         signal.unpackedDims = std::move(info.unpackedDims);
-    }
-}
-
-void RWAnalyzerPass::analyze(ModulePlan& plan)
-{
-    if (!plan.body)
-    {
-        return;
-    }
-
-    plan.rwOps.clear();
-    plan.memPorts.clear();
-
-    RWAnalyzerState state(plan, context_.diagnostics);
-    for (const slang::ast::Symbol& member : plan.body->members())
-    {
-        analyzeMemberSymbol(member, state);
     }
 }
 
@@ -12907,7 +12616,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
 
     ModulePlanner planner(context);
     TypeResolverPass typeResolver(context);
-    RWAnalyzerPass rwAnalyzer(context);
     ExprLowererPass exprLowerer(context);
     StmtLowererPass stmtLowerer(context);
     WriteBackPass writeBack(context);
@@ -12956,7 +12664,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         }
         ModulePlan plan = planner.plan(*key.body);
         typeResolver.resolve(plan);
-        rwAnalyzer.analyze(plan);
         LoweringPlan lowering = exprLowerer.lower(plan);
         stmtLowerer.lower(plan, lowering);
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);

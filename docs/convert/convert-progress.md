@@ -44,6 +44,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 已补充四态逻辑语义说明
 
 完成情况：已完成
+~~备注：Pass3（RWAnalyzer）已在 STEP 0046 移除~~
 
 ## STEP 0002 - 制定 Convert 新架构与工作流方案
 
@@ -186,7 +187,8 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - `include/convert.hpp` 增补 LoweringPlan 节点结构与 ExprLowererPass 声明
 - `src/convert.cpp` 实现 ExprLowererPass，覆盖常见 unary/binary/conditional/concat/replicate/select
-- ConvertDriver 在 Pass3 后生成并缓存 `loweringPlan`
+- ~~ConvertDriver 在 Pass3 后生成并缓存 `loweringPlan`~~
+- ConvertDriver 在 Pass2 后生成并缓存 `loweringPlan`
 - 新增 `convert-expr-lowerer` 测试与 fixture
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
@@ -940,12 +942,20 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新文档：`docs/convert/convert-architecture.md`、`docs/convert/convert-workflow.md`、`docs/convert/convert-kimi.md` 中的 Pass3/RWOp/memPorts 描述
 
 实施：
-- 删除 ConvertDriver 中对 `RWAnalyzerPass` 的构建与调用
-- 清理 convert 头/源中遗留的类型与字段引用
-- 删除对应测试与 fixture 引用，确保 CTest 配置无悬挂目标
-- 文档同步：移除 Pass3 章节与数据结构说明，必要时补充“RWAnalyzer 已移除”的变更说明
+- 删除 `RWAnalyzerPass`、`RWAnalyzerState`、`RWVisitor` 与相关辅助函数
+- `ModulePlan` 移除 `rwOps/memPorts` 与相关类型定义
+- ConvertDriver 移除 Pass3 构建与调用链路
+- 删除 `convert-rw-analyzer` 测试目标与源码
+- 更新 convert 相关测试，移除对 Pass3 的依赖
+- 同步更新 convert-architecture/workflow/kimi 文档
+- 修复 casez/casex 通配匹配的常量掩码复用问题（避免 HDLBits 035 输出错误）
 
-完成情况：未开始
+测试：
+- `cmake --build build -j$(nproc)`
+- `make run_hdlbits_test DUT=035`
+- `make run_hdlbits_test`
+
+完成情况：已完成
 
 
 

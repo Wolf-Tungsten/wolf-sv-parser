@@ -11,29 +11,25 @@
   - 3.3. PlanEntry（核心结构）
   - 3.4. ModulePlan
   - 3.5. PlanSymbolTable
-  - 3.6. AccessSite
-  - 3.7. RWOp
-  - 3.8. MemoryPortInfo
-  - 3.9. InstanceInfo
-  - 3.10. LoweringPlan
-    - 3.10.1. 总览与角色
-    - 3.10.2. 字段总览
-    - 3.10.3. 类型别名
-    - 3.10.4. 字段详解
-    - 3.10.5. ExprNode
-    - 3.10.6. LoweredRoot
-    - 3.10.7. WriteIntent / WriteSlice
-    - 3.10.8. LoweredStmt
-    - 3.10.9. 举例说明
-    - 3.10.10. MemoryReadPort / MemoryWritePort
-  - 3.11. WriteBackPlan
-  - 3.12. Diagnostics / Logger
+  - 3.6. InstanceInfo
+  - 3.7. LoweringPlan
+    - 3.7.1. 总览与角色
+    - 3.7.2. 字段总览
+    - 3.7.3. 类型别名
+    - 3.7.4. 字段详解
+    - 3.7.5. ExprNode
+    - 3.7.6. LoweredRoot
+    - 3.7.7. WriteIntent / WriteSlice
+    - 3.7.8. LoweredStmt
+    - 3.7.9. 举例说明
+    - 3.7.10. MemoryReadPort / MemoryWritePort
+  - 3.8. WriteBackPlan
+  - 3.9. Diagnostics / Logger
 - 4. Pass 中间数据结构
   - 4.1. Pass1: SymbolCollector
   - 4.2. Pass2: TypeResolver
-  - 4.3. Pass3: RWAnalyzer
-  - 4.4. Pass5: StmtLowerer 内部临时结构
-    - 4.4.1. 动态 break/continue 完整示例（分 + 案例）
+  - 4.3. Pass5: StmtLowerer 内部临时结构
+    - 4.3.1. 动态 break/continue 完整示例（分 + 案例）
 - 5. Pass 与数据结构关系图
 - 6. 并行化策略（以模块为粒度）
   - 6.1. 并行边界
@@ -53,7 +49,7 @@
 ## 2. 设计原则
 - 分阶段：先收集与分析，再生成 IR，避免边扫边写导致状态纠缠。
 - 以 slang 类型系统为源：宽度、符号、packed/unpacked 维度、参数值均从 `slang::ast::Type` 与常量求值获取。
-- 显式的数据模型：使用 Plan/Info 结构保存信号、端口、读写关系与控制域，降低隐式 memo。
+- 显式的数据模型：使用 Plan/Info 结构保存信号、端口与降级产物，降低隐式 memo。
 - SSA 与四态：GRH 以 SSA 表达，四态逻辑语义保持从 slang 到 GRH 一致。
 - 模块粒度隔离：每个 `InstanceBodySymbol` 形成独立的 ModulePlan 与 Graph，顶层与子实例一致处理。
 - 层次保留：不做全局扁平化，实例关系通过 kInstance 维护。
@@ -62,8 +58,8 @@
 ## 3. 核心数据结构
 - 总览：
   - 定位：描述 Convert 的核心模型与共享状态，定义模块计划、符号索引与访问关系的稳定形态。
-  - 结构清单：PlanKey、ConvertContext、PlanEntry、ModulePlan、PlanSymbolTable、AccessSite、
-    RWOp、MemoryPortInfo、InstanceInfo、LoweringPlan/WriteBackPlan、Diagnostics/Logger。
+  - 结构清单：PlanKey、ConvertContext、PlanEntry、ModulePlan、PlanSymbolTable、InstanceInfo、
+    LoweringPlan/WriteBackPlan、Diagnostics/Logger。
 
 ### 3.1. ConvertContext
 - 总览：
@@ -153,7 +149,7 @@
   - 角色：PlanCache 的 value，控制并发去重与产物落地。
 - 字段总览（字段 -> 类型 -> 含义）：
   - `status`: `PlanStatus` -> 计划处理阶段状态。
-  - `plan`: `std::optional<ModulePlan>` -> 模块计划（Pass1~Pass3 写入）。
+  - `plan`: `std::optional<ModulePlan>` -> 模块计划（Pass1~Pass2 写入）。
   - `artifacts`: `PlanArtifacts` -> Pass4~Pass7 的中间产物占位。
 - 字段详解：
   - `status`：
@@ -187,14 +183,12 @@
   - `moduleSymbol`: `PlanSymbolId` -> 模块名（或回退名）的 intern 结果。
   - `ports`: `std::vector<PortInfo>` -> 端口骨架记录。
   - `signals`: `std::vector<SignalInfo>` -> 信号骨架记录。
-  - `rwOps`: `std::vector<RWOp>` -> 读写访问记录（详见 RWOp）。
-  - `memPorts`: `std::vector<MemoryPortInfo>` -> memory 端口记录（详见 MemoryPortInfo）。
   - `instances`: `std::vector<InstanceInfo>` -> 子实例记录（详见 InstanceInfo）。
 - 字段详解：
   - `body`：
     - 作用：提供 AST 成员遍历入口。
     - 建立：`ModulePlanner::plan` 绑定。
-    - 输出：供 Pass1~Pass3 遍历 AST。
+    - 输出：供 Pass1~Pass7 遍历 AST。
   - `symbolTable`：
     - 作用：统一管理模块内符号名与 `PlanSymbolId`。
     - 建立：Pass1 在收集端口/信号/实例时调用 `intern`。
@@ -223,8 +217,8 @@
       - `memoryRows`: `int64_t` -> fixed unpacked 行数乘积。
       - `packedDims`: `std::vector<int32_t>` -> packed 维度（外到内）。
       - `unpackedDims`: `std::vector<UnpackedDimInfo>` -> unpacked 维度（外到内，含 left/right/extent）。
-- 设计意图：
-  - `ModulePlan` 放在顶层是为了保存“长期稳定事实”（符号、宽度、读写关系等），
+  - 设计意图：
+  - `ModulePlan` 放在顶层是为了保存“长期稳定事实”（符号、宽度等），
     后续 Pass 都需要它作为共同基准。
   - `LoweringPlan/WriteBackPlan` 被包在 `PlanArtifacts` 中是为了标识“阶段性产物”，
     可按需生成、缓存或释放，避免与稳定骨架耦合。
@@ -253,104 +247,13 @@
   - `size()`: 当前驻留的符号数量。
 - 使用约定：
   - 生成：Pass1 在收集端口/信号/实例名时调用 `intern`。
-  - 访问：Pass2/Pass3 通过 `lookup` 将 AST 名称映射到索引。
+  - 访问：Pass2 与后续 Pass 通过 `lookup` 将 AST 名称映射到索引。
   - 输出：诊断与日志通过 `text(id)` 获取稳定名称。
 - 索引化主键：
   - `PlanSymbolId` 作为主键；`PortId/SignalId` 等均是 `std::vector` 索引。
   - 访问模式只追加写入，避免中途删除带来的引用失效。
 
-### 3.6. AccessSite
-- 总览：
-  - 定位：单次访问点的最小描述，用于保留访问次数与顺序信息。
-  - 角色：为端口数量推断与写入优先级分析提供原始依据。
-  - 说明：只保存源码位置与序号，不直接保存 slang AST 节点指针。
-- 字段总览（字段 -> 类型 -> 含义）：
-  - `location`: `slang::SourceLocation` -> 访问点源码位置（表达式起点）。
-  - `sequence`: `uint32_t` -> RWAnalyzer 访问序号（遍历顺序）。
-- 字段详解：
-  - `location`：
-    - 作用：标记访问来源，便于调试与后续端口分配。
-    - 建立：RWAnalyzer 取 `expr.sourceRange.start()`。
-    - 输出：用于日志/诊断或端口分配策略；如需定位 AST，需额外索引或通过 SourceManager 反查。
-  - `sequence`：
-    - 作用：保留遍历顺序，支持写入优先级分析。
-    - 建立：RWAnalyzer 内部递增计数生成。
-    - 输出：供后续阶段排序/优先级判断。
-
-### 3.7. RWOp
-- 总览：
-  - 定位：`ModulePlan.rwOps` 的单条读写记录，描述“哪个信号在什么控制域发生读/写”。
-  - 角色：下游做读写归因、写回策略与端口数量分析的输入。
-- 字段总览（字段 -> 类型 -> 含义）：
-  - `target`: `SignalId` -> 目标信号索引（指向 `ModulePlan.signals`）。
-  - `domain`: `ControlDomain` -> 控制域语义（comb/seq/latch/unknown）。
-  - `isWrite`: `bool` -> 是否为写访问（false 表示读）。
-  - `sites`: `std::vector<AccessSite>` -> 访问点列表（用于端口数量/写入优先级分析）。
-- 字段详解：
-  - `target`：
-    - 作用：绑定具体信号条目，避免重复字符串解析。
-    - 建立：RWAnalyzer 通过 `PlanSymbolId -> SignalId` 映射解析。
-    - 输出：供 Pass4~Pass7 做读写归因与冲突检测。
-  - `domain`：
-    - 作用：标注读写发生的控制域，用于区分 combinational 与 sequential 语义。
-    - 建立：RWAnalyzer 依据 `ProceduralBlockSymbol` 与 timing control 分类。
-    - 输出：影响后续写回策略、memory 端口同步推断。
-  - `isWrite`：
-    - 作用：区分读/写访问；与 `target/domain` 共同构成归并键。
-    - 建立：RWAnalyzer 在遍历 LHS/RHS 时决定。
-    - 输出：指导后续 Pass 在生成 Value/Op 时使用正确的数据流方向。
-  - `sites`：
-    - 作用：保留所有访问点，避免归并后丢失访问次数与位置。
-    - 建立：RWAnalyzer 在每次访问时追加 `AccessSite{location, sequence}`。
-    - 输出：用于端口数量推断与寄存器写入优先级分析。
-- 生成与使用约定：
-  - 生成：Pass3 负责填充并按 `(target, domain, isWrite)` 归并；访问点以 `sites` 保留。
-  - 使用：Pass4~Pass7 以 `rwOps` 作为读写关系输入，不直接回扫 AST。
-
-### 3.8. MemoryPortInfo
-- 总览：
-  - 定位：`ModulePlan.memPorts` 的单条 memory 端口记录，描述“某个 memory 在某类访问形态下需要的端口能力”。
-  - 角色：Pass7 细化 memory 端口与数量规划的输入。
-- 字段总览（字段 -> 类型 -> 含义）：
-  - `memory`: `SignalId` -> memory 信号索引（指向 `ModulePlan.signals`）。
-  - `isRead`: `bool` -> 是否存在读访问。
-  - `isWrite`: `bool` -> 是否存在写访问。
-  - `isMasked`: `bool` -> 是否带字节/位写掩码（当前版本恒为 false，预留）。
-  - `isSync`: `bool` -> 是否同步端口（顺序域访问为 true）。
-  - `hasReset`: `bool` -> 是否带显式 reset 语义（当前版本恒为 false，预留）。
-  - `sites`: `std::vector<AccessSite>` -> 访问点列表（用于端口数量推断）。
-- 字段详解：
-  - `memory`：
-    - 作用：绑定到具体 memory 信号条目，避免字符串查找。
-    - 建立：RWAnalyzer 通过 `PlanSymbolId -> SignalId` 映射解析。
-    - 输出：供 Pass7 选择 memory lowering 策略与端口模板。
-  - `isRead`/`isWrite`：
-    - 作用：描述端口读写能力；`true/false` 组合表达只读/只写/读写口。
-    - 建立：RWAnalyzer 在读/写访问被识别时记录。
-    - 输出：影响 Pass7 生成的端口类型与连接逻辑。
-  - `isMasked`：
-    - 作用：标识写端口是否需要掩码能力（如 byte-enable）。
-    - 建立：当前实现未推断掩码访问，固定为 false。
-    - 输出：保留给后续支持掩码写的 lowering。
-  - `isSync`：
-    - 作用：标识端口是否为同步访问口。
-    - 建立：RWAnalyzer 依据访问控制域推断（顺序域 = true）。
-    - 输出：影响 Pass7 选择 sync/async memory 端口形态。
-  - `hasReset`：
-    - 作用：标识 memory 访问是否依赖显式 reset。
-    - 建立：当前实现未推断 reset 语义，固定为 false。
-    - 输出：预留给后续带 reset 端口的 lowering。
-  - `sites`：
-    - 作用：保留每次访问的来源位置，用于推断多读口/多写口数量。
-    - 建立：RWAnalyzer 在每次 memory 访问时追加 `AccessSite`。
-    - 输出：供 Pass7 或后续阶段决定端口个数与分配。
-- 生成与归并约定：
-  - 生成：Pass3 在识别到 `SignalInfo.memoryRows > 0` 的读/写访问时创建。
-  - 归并：以 `memory + isRead + isWrite + isMasked + isSync + hasReset` 为 key 归并，
-    访问点通过 `sites` 保留。
-  - 使用：Pass7 以 `memPorts` 为输入，不回扫 AST；端口数量与拆分策略在 Pass7 决定。
-
-### 3.9. InstanceInfo
+### 3.6. InstanceInfo
 - 总览：
   - 定位：`ModulePlan.instances` 的单条子实例记录，描述“当前模块里包含哪些实例、它们指向哪个 module 体、是否黑盒”。
   - 角色：实例层次保留、任务发现与黑盒记录。
@@ -383,12 +286,12 @@
   - 任务发现：每条 `InstanceInfo` 关联一个子模块 PlanKey，由 Pass1 递归投递到队列。
   - 使用：Pass4~Pass7 消费 `instances` 构建实例层级与连接关系，不回扫 AST。
 
-### 3.10. LoweringPlan
-#### 3.10.1. 总览与角色
+### 3.7. LoweringPlan
+#### 3.7.1. 总览与角色
 - 定位：`LoweringPlan` 记录 Pass4~Pass7 的表达式降级结果。
 - 角色：`LoweringPlan` 为 StmtLowerer/WriteBack/MemoryPortLowerer 的共享输入。
 
-#### 3.10.2. 字段总览
+#### 3.7.2. 字段总览
 - `values`: `std::vector<ExprNode>` -> 降级后的表达式节点。
 - `roots`: `std::vector<LoweredRoot>` -> 每个 RHS root 的入口。
 - `tempSymbols`: `std::vector<PlanSymbolId>` -> 操作节点分配的临时名。
@@ -398,10 +301,10 @@
 - `memoryReads`: `std::vector<MemoryReadPort>` -> 读端口降级条目。
 - `memoryWrites`: `std::vector<MemoryWritePort>` -> 写端口降级条目（含 mask）。
 
-#### 3.10.3. 类型别名
+#### 3.7.3. 类型别名
 - `ExprNodeId`：等同于 `PlanIndex`，用于索引 `LoweringPlan.values`。
 
-#### 3.10.4. 字段详解
+#### 3.7.4. 字段详解
 - `values`：
   - 作用：保存降级后的表达式节点，节点之间通过索引引用。
   - 建立：Pass4 对 RHS 表达式树递归降级时追加。
@@ -442,7 +345,7 @@
     - 建立：Pass7 从写回语句中识别 memory 写入并追加。
     - 输出：供后续 GraphAssembly 生成 `kMemoryWritePort`/`kMemoryMaskWritePort`。
 
-#### 3.10.5. ExprNode
+#### 3.7.5. ExprNode
 - 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `ExprNodeKind` -> Constant/Symbol/Operation。
   - `op`: `grh::ir::OperationKind` -> 操作节点类型（仅 Operation 有效）。
@@ -473,7 +376,7 @@
   - `location`：
     - 作用：保留源码位置信息，便于诊断与日志。
 
-#### 3.10.6. LoweredRoot
+#### 3.7.6. LoweredRoot
 - 字段总览（字段 -> 类型 -> 含义）：
   - `value`: `ExprNodeId` -> 根节点索引。
   - `location`: `slang::SourceLocation` -> 源码位置。
@@ -484,7 +387,7 @@
   - `location`：
     - 作用：记录 root 的源码位置。
 
-#### 3.10.7. WriteIntent / WriteSlice
+#### 3.7.7. WriteIntent / WriteSlice
 - WriteIntent 字段总览（字段 -> 类型 -> 含义）：
   - `target`: `PlanSymbolId` -> 写回目标符号。
   - `slices`: `std::vector<WriteSlice>` -> LHS 位选/范围选链路；为空表示整信号写回。
@@ -503,7 +406,7 @@
   - `member`: `PlanSymbolId` -> 成员名（MemberSelect）。
   - `location`: `slang::SourceLocation` -> 片段选择位置。
 
-#### 3.10.8. LoweredStmt
+#### 3.7.8. LoweredStmt
 - LoweredStmt 字段总览（字段 -> 类型 -> 含义）：
   - `kind`: `LoweredStmtKind` -> Write/Display/Assert/DpiCall。
   - `op`: `grh::ir::OperationKind` -> 对应的 GRH 操作类型（Display/Assert/DpiCall）。
@@ -544,7 +447,7 @@
     否则语句被丢弃并生成诊断。
   - `eventEdges.size()` 必须与 `eventOperands.size()` 一致。
 
-#### 3.10.9. 举例说明
+#### 3.7.9. 举例说明
 - 表达式降级（Pass4）：
     - 输入：`assign y = (a & b) ? ~c : (a | b);`
     - 操作节点：`kAnd(a,b)`、`kNot(c)`、`kOr(a,b)`、`kMux(cond, lhs, rhs)`。
@@ -581,7 +484,7 @@
           - `WriteIntent{target=y, value=0, guard=2}`
       - `WriteIntent{target=y, value=1, guard=3}`
 
-#### 3.10.10. MemoryReadPort / MemoryWritePort
+#### 3.7.10. MemoryReadPort / MemoryWritePort
 - MemoryReadPort 字段总览（字段 -> 类型 -> 含义）：
   - `memory`: `PlanSymbolId` -> memory 符号名。
   - `signal`: `SignalId` -> memory 信号索引（未解析为 invalid）。
@@ -876,7 +779,7 @@
     - 生成：Pass4 扫描过程块与连续赋值，降级 RHS 并写入 `PlanArtifacts.loweringPlan`。
     - 使用：Pass5~Pass7 读取 `loweringPlan`，不回扫 AST。
 
-### 3.11. WriteBackPlan
+### 3.8. WriteBackPlan
 - 总览（总）：
   - 定位：记录写回合并结果（`updateCond + nextValue`），为后续 GraphAssembly
     将 sequential/latch 语义映射到 `kRegister/kLatch` 提供直接输入。
@@ -949,7 +852,7 @@
       - `nextValue = mux(g1, concat(b, nextValue[3:0]), nextValue)`
     - 说明：切片替换采用 slice/concat 构建 read/modify/write。
 
-### 3.12. Diagnostics / Logger
+### 3.9. Diagnostics / Logger
 - 总览：
   - `ConvertDiagnostics`：统一收集 todo/error/warn，保留源码位置信息。
   - `ConvertLogger`：level/tag 过滤的可控日志接口。
@@ -961,7 +864,6 @@
 - 归属（Pass -> 中间结构）：
   - Pass1：ParameterSnapshot
   - Pass2：TypeResolution / PortIndexMap / SignalIndexMap
-  - Pass3：RWAnalyzerState / RWVisitor
   - Pass5：StmtLowererState（guardStack/flowStack/loopFlowStack 等临时状态）
 
 ### 4.1. Pass1: SymbolCollector
@@ -1012,41 +914,7 @@
     - 建立：遍历 `ModulePlan.signals` 构建。
     - 输出：仅在 Pass2 内部使用。
 
-### 4.3. Pass3: RWAnalyzer
-- 总览：
-  - 作用：在读写分析阶段集中维护索引、归并与 AST 访问入口。
-  - 输出：`ModulePlan.rwOps` 与 `ModulePlan.memPorts`（并保留访问点）。
-- 生命周期：
-  - 实例粒度：每个模块仅创建一个 `RWAnalyzerState`，贯穿该模块的 Pass3 扫描。
-  - 存储位置：仅在 Pass3 内部作为局部对象存在，不写入 `ModulePlan`；
-    访问结果写入 `ModulePlan.rwOps`/`ModulePlan.memPorts`。
-- 子结构：
-  - `RWAnalyzerState`：
-    - 数据类型：`struct`（定义于 `src/convert.cpp`，仅 Pass3 内部可见）。
-    - 作用：保存索引表与去重索引，统一管理读写记录生成。
-    - 字段总览（字段 -> 类型 -> 含义）：
-      - `signalBySymbol`: `std::vector<SignalId>` -> `PlanSymbolId -> SignalId` 映射。
-      - `rwKeys`: `std::unordered_map<uint64_t, RWOpId>` -> 读写记录 key 到 `rwOps` 索引。
-      - `memKeys`: `std::unordered_map<uint64_t, MemoryPortId>` -> memory 端口 key 到 `memPorts` 索引。
-      - `nextSite`: `uint32_t` -> 访问点递增序号。
-    - 字段详解：
-      - `signalBySymbol`：定位目标信号的快速映射表。
-      - `rwKeys`：
-        - key 语义：`(SignalId, ControlDomain, isWrite)`。
-        - 编码：`encodeRWKey` 将 `id<<3 | domain<<1 | isWrite` 写入 `uint64_t`。
-      - `memKeys`：
-        - key 语义：`(SignalId, isRead, isWrite, isMasked, isSync, hasReset)`。
-        - 编码：`encodeMemKey` 将 `id<<5` 与 5 个标志位打包进 `uint64_t`。
-      - `nextSite`：为每次访问分配顺序号，便于后续优先级分析。
-    - 建立：扫描 `ModulePlan.signals` 构建 `signalBySymbol` 并初始化去重索引。
-    - 输出：通过 `recordRead/recordWrite` 写入 `rwOps`/`memPorts`，并追加 `AccessSite`。
-  - `RWVisitor`：
-    - 数据类型：`class`（继承 `slang::ast::ASTVisitor`，定义于 `src/convert.cpp`）。
-    - 作用：区分 LHS/RHS，并将 NamedValue 记为读/写访问。
-    - 建立：每个过程块/连续赋值构造一个 visitor，绑定当前 `ControlDomain`。
-    - 输出：调用 `RWAnalyzerState` 写入访问记录。
-
-### 4.4. Pass5: StmtLowerer 内部临时结构
+### 4.3. Pass5: StmtLowerer 内部临时结构
 - 总览（总）：
   - 定位：仅在 Pass5 运行期使用的临时状态，服务于语句递归、guard 组合与 loop 控制流传播。
   - 目标：不新增持久化字段的前提下，完成 if/case/loop 的 guard 叠加与 break/continue 的语义还原。
@@ -1068,7 +936,7 @@
   - 代码位置：`StmtLowererState::pushGuard/popGuard`，`pushFlowGuard/popFlowGuard`，
     `pushLoopContext/popLoopContext`，`handleLoopBreak/handleLoopContinue`。
 
-#### 4.4.1. 动态 break/continue 完整示例（分 + 案例）
+#### 4.3.1. 动态 break/continue 完整示例（分 + 案例）
 - 输入：
   ```
   for (int i = 0; i < 3; i++) begin
@@ -1164,8 +1032,6 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
   |
   +--> Pass2: TypeResolverPass    -> update ModulePlan (width/signed/dims)
   |
-  +--> Pass3: RWAnalyzerPass      -> update ModulePlan (rwOps/memPorts)
-  |
   +--> Pass4: ExprLowererPass     -> LoweringPlan
   |                               -> PlanCache[PlanKey].artifacts.loweringPlan
   |
@@ -1182,7 +1048,7 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 ## 6. 并行化策略（以模块为粒度）
 ### 6.1. 并行边界
 - 一个参数特化模块对应一个任务流水线。
-- Pass1~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
+- Pass1/Pass2/Pass4~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
 
 ### 6.2. 任务与调度
 - 任务 key：`PlanKey = body + paramSignature`。

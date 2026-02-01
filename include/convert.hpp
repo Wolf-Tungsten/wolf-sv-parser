@@ -196,8 +196,6 @@ enum class ControlDomain {
 using PortId = PlanIndex;
 using SignalId = PlanIndex;
 using InstanceId = PlanIndex;
-using RWOpId = PlanIndex;
-using MemoryPortId = PlanIndex;
 using ExprNodeId = PlanIndex;
 
 struct PortInfo {
@@ -229,28 +227,6 @@ struct SignalInfo {
     std::vector<UnpackedDimInfo> unpackedDims;
 };
 
-struct AccessSite {
-    slang::SourceLocation location{};
-    uint32_t sequence = 0;
-};
-
-struct RWOp {
-    SignalId target = kInvalidPlanIndex;
-    ControlDomain domain = ControlDomain::Unknown;
-    bool isWrite = false;
-    std::vector<AccessSite> sites;
-};
-
-struct MemoryPortInfo {
-    SignalId memory = kInvalidPlanIndex;
-    bool isRead = false;
-    bool isWrite = false;
-    bool isMasked = false;
-    bool isSync = false;
-    bool hasReset = false;
-    std::vector<AccessSite> sites;
-};
-
 struct InstanceParameter {
     PlanSymbolId symbol;
     std::string value;
@@ -271,8 +247,6 @@ struct ModulePlan {
     PlanSymbolId moduleSymbol;
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
-    std::vector<RWOp> rwOps;
-    std::vector<MemoryPortInfo> memPorts;
     std::vector<InstanceInfo> instances;
 };
 
@@ -581,16 +555,6 @@ public:
     explicit TypeResolverPass(ConvertContext& context) : context_(context) {}
 
     void resolve(ModulePlan& plan);
-
-private:
-    ConvertContext& context_;
-};
-
-class RWAnalyzerPass {
-public:
-    explicit RWAnalyzerPass(ConvertContext& context) : context_(context) {}
-
-    void analyze(ModulePlan& plan);
 
 private:
     ConvertContext& context_;

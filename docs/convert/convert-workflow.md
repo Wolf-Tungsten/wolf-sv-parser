@@ -34,7 +34,7 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
-- 当前实现已完成 Context Setup、Pass1~Pass6，仍返回空 `Netlist`，Pass7/Pass8 待接入。
+- 当前实现已完成 Context Setup 与 Pass1~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
 
 ## CLI 主流程（wolf-sv-parser）
 - 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
@@ -81,26 +81,6 @@
   - 宽度/签名：对最终元素类型计算固定宽度并写入 `SignalInfo.width/isSigned`。
   - 约束：不定宽度或动态/关联/队列数组会记录诊断并回退为 1-bit。
   - 边界：宽度与维度在超出 GRH 表示范围时 clamp 到上限。
-
-## Pass3: RWAnalyzerPass
-- 功能：建立读写关系、控制域语义，并记录访问点用于端口数量/优先级分析。
-- 输入：`ModulePlan` + 过程块/连续赋值 AST + ctx。
-- 输出形式：原地更新 `ModulePlan.rwOps`/`ModulePlan.memPorts`，并写入 `RWOp.sites`/`MemoryPortInfo.sites`。
-- 运行步骤：
-  - 预处理：建立 `PlanSymbolId -> SignalId` 映射，清空 `rwOps`/`memPorts`，初始化 `RWAnalyzerState`（每模块一个）。
-  - 过程块扫描：遍历 `ProceduralBlockSymbol`，根据 `procedureKind` 与 timing control
-    分类 `ControlDomain`（comb/seq/latch/unknown）。
-  - 连续赋值扫描：遍历 `ContinuousAssignSymbol`，固定为 combinational 域。
-  - 语句遍历：
-    - assignment expression：LHS 递归标记为写，RHS/条件/索引标记为读。
-    - pre/post increment/decrement：同一目标同时记读与写。
-    - 其余表达式按读取路径遍历。
-  - 访问点记录：每次访问追加 `AccessSite{location, sequence}`；
-    `location` 取 `expr.sourceRange.start()`，不直接保存 AST 节点。
-  - Memory 端口生成：对 `SignalInfo.memoryRows > 0` 的访问生成 `MemoryPortInfo`；
-    sequential 域推断 `isSync=true`，comb 域为 `false`。
-  - 归并：按 `(signal, domain, isWrite)` 与 `(memory, flags)` 归并形态，
-    重复访问不丢弃，改为追加 `sites`。
 
 ## Pass4: ExprLowererPass
 - 功能：将 RHS 表达式树归一化为 LoweringPlan 中的表达式节点图。
@@ -347,7 +327,7 @@ endmodule
 
 ## Pass7: MemoryPortLowererPass
 - 功能：细化 memory 读写端口的 Lowering 描述，输出 read/write 端口条目。
-- 输入：`ModulePlan.memPorts` + `LoweringPlan` + ctx。
+- 输入：`ModulePlan` + `LoweringPlan` + ctx。
 - 输出形式：更新 `LoweringPlan.memoryReads/memoryWrites`。
 - 处理要点：
   - 读端口：识别表达式中的 `mem[addr]`，组合域生成读端口；顺序域要求 edge-sensitive 事件绑定。
@@ -378,11 +358,6 @@ endmodule
 ```
 
 给定（示意数据）：
-- `ModulePlan.memPorts`（来自 Pass3）：
-  - `MemoryPortInfo{memory=mem, isRead=true, isWrite=false, isSync=false,`
-    `sites=[{location=mem[addr], sequence=3}]}`  // 组合读
-  - `MemoryPortInfo{memory=mem, isRead=false, isWrite=true, isSync=true,`
-    `sites=[{location=mem[addr] <= wdata, sequence=7}]}`  // 顺序写
 - `LoweringPlan.values`：
   - `v0 = Symbol(mem)`（目标符号，仅用于绑定）
   - `v1 = Symbol(addr)`
@@ -401,8 +376,8 @@ endmodule
   - `MemoryWritePort{memory=mem, address=v1, data=v2, mask=all1, updateCond=v3,`
     `eventEdges=[posedge], eventOperands=[v4]}`
 补充说明：
-- `isSync` 由 Pass3 的 `ControlDomain` 决定（seq -> true，comb -> false）；
-- `sites` 保留访问次序与位置，用于端口数推断；Pass7 仅消费其合并后的端口形态。
+- `isSync` 由写回语句的 `ControlDomain` 与事件绑定决定（seq -> true，comb -> false）；
+- 端口合并在 Pass7 内按访问形态完成，不再依赖额外的访问点记录。
 
 ## Pass8: GraphAssemblyPass
 - 功能：把计划与中间产物组装为 GRH Graph，生成端口、Value 与 op。

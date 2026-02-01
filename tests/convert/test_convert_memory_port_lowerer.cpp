@@ -126,14 +126,12 @@ bool buildMemoryPlan(const std::filesystem::path& sourcePath, std::string_view t
 
     wolf_sv_parser::ModulePlanner planner(context);
     wolf_sv_parser::TypeResolverPass typeResolver(context);
-    wolf_sv_parser::RWAnalyzerPass rwAnalyzer(context);
     wolf_sv_parser::ExprLowererPass exprLowerer(context);
     wolf_sv_parser::StmtLowererPass stmtLowerer(context);
     wolf_sv_parser::MemoryPortLowererPass memLowerer(context);
 
     outPlan = planner.plan(top->body);
     typeResolver.resolve(outPlan);
-    rwAnalyzer.analyze(outPlan);
     outLowering = exprLowerer.lower(outPlan);
     stmtLowerer.lower(outPlan, outLowering);
     memLowerer.lower(outPlan, outLowering);

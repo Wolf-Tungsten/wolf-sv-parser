@@ -18,12 +18,11 @@
    - 3.1 ConvertDriver：入口与主流程
    - 3.2 Pass1：符号收集
    - 3.3 Pass2：类型解析
-   - 3.4 Pass3：读写分析
-   - 3.5 Pass4：表达式降级
-   - 3.6 Pass5：语句降级
-   - 3.7 Pass6：写回合并
-   - 3.8 Pass7：内存端口处理
-   - 3.9 Pass8：图组装
+   - 3.4 Pass4：表达式降级
+   - 3.5 Pass5：语句降级
+   - 3.6 Pass6：写回合并
+   - 3.7 Pass7：内存端口处理
+   - 3.8 Pass8：图组装
 4. 完整示例
    - 4.1 示例源码
    - 4.2 各阶段数据结构状态
@@ -192,7 +191,7 @@ ctx = {
 
 这三个概念共同构成模块计划的存储与索引体系。
 
-**PlanCache** 是全局缓存，存储所有模块的计划数据。它内部维护一个哈希表，定义在 `include/convert.hpp` 第 525-552 行：
+**PlanCache** 是全局缓存，存储所有模块的计划数据。它内部维护一个哈希表，定义在 `include/convert.hpp` 第 499-526 行：
 
 ```cpp
 class PlanCache {
@@ -254,19 +253,13 @@ entry.plan = ModulePlan{
         [2] = {symbol="y", direction=Output, width=0}
     },
     signals = {},
-    rwOps = {},
-    memPorts = {},
     instances = {}
 }
 
-// Pass2-3 后（TypeResolver / RWAnalyzer）
+// Pass2 后（TypeResolver）
 entry.plan.ports[0].width = 8
 entry.plan.ports[1].width = 8
 entry.plan.ports[2].width = 8
-entry.plan.rwOps = {
-    [0] = {target="a", domain=Combinational, isWrite=false},
-    [1] = {target="y", domain=Combinational, isWrite=true}
-}
 
 // Pass4-5 后（ExprLowerer / StmtLowerer）
 entry.status = Done
@@ -304,7 +297,7 @@ PlanCache (ConvertDriver 成员)
 
 ### 2.3 ModulePlan：模块骨架
 
-ModulePlan 是模块级的静态计划，保存端口、信号、实例、读写关系等长期稳定事实。定义在 `include/convert.hpp` 第 268-277 行：
+ModulePlan 是模块级的静态计划，保存端口、信号、实例等长期稳定事实。定义在 `include/convert.hpp`：
 
 ```cpp
 struct ModulePlan {
@@ -313,8 +306,6 @@ struct ModulePlan {
     PlanSymbolId moduleSymbol;
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
-    std::vector<RWOp> rwOps;
-    std::vector<MemoryPortInfo> memPorts;
     std::vector<InstanceInfo> instances;
 };
 ```
@@ -325,8 +316,6 @@ struct ModulePlan {
 - `moduleSymbol`：模块名索引（PlanSymbolId）
 - `ports`：端口信息列表（PortInfo 数组）
 - `signals`：信号信息列表（SignalInfo 数组）
-- `rwOps`：读写访问记录（RWOp 数组）
-- `memPorts`：内存端口记录（MemoryPortInfo 数组）
 - `instances`：子实例记录（InstanceInfo 数组）
 
 **例子**：端口收集（以 PlanEntry 为起点）
@@ -364,8 +353,6 @@ PlanEntry entry = {
             }
         },
         signals = {},
-        rwOps = {},
-        memPorts = {},
         instances = {}
     },
     artifacts = {}
@@ -383,7 +370,7 @@ entry.plan.ports[1].width = 8
 
 ### 2.4 LoweringPlan：降级计划
 
-LoweringPlan 记录 Pass4-Pass7 的降级结果，包含表达式节点图、写回意图、内存端口等。定义在 `include/convert.hpp` 第 458-467 行：
+LoweringPlan 记录 Pass4-Pass7 的降级结果，包含表达式节点图、写回意图、内存端口等。定义在 `include/convert.hpp` 第 432-440 行：
 
 ```cpp
 struct LoweringPlan {
@@ -459,7 +446,7 @@ PlanEntry entry = {
 
 ### 2.5 WriteIntent / WriteSlice：写回意图
 
-WriteIntent 描述单次赋值操作的完整信息。定义在 `include/convert.hpp` 第 365-374 行：
+WriteIntent 描述单次赋值操作的完整信息。定义在 `include/convert.hpp` 第 339-348 行：
 
 ```cpp
 struct WriteIntent {
@@ -603,7 +590,7 @@ slices 按访问顺序排列，先 element select 后 member select。
 
 ### 2.6 WriteBackPlan：写回合并结果
 
-WriteBackPlan 将多条 WriteIntent 按 (target + domain + event) 分组合并，生成 updateCond + nextValue 形式。定义在 `include/convert.hpp` 第 469-482 行：
+WriteBackPlan 将多条 WriteIntent 按 (target + domain + event) 分组合并，生成 updateCond + nextValue 形式。定义在 `include/convert.hpp` 第 443-456 行：
 
 ```cpp
 struct WriteBackPlan {
@@ -699,7 +686,7 @@ PlanEntry entry = {
 
 ### 3.1 ConvertDriver：入口与主流程
 
-ConvertDriver 是 Convert 流程的入口类，封装了整个转换过程。定义在 `include/convert.hpp` 第 657-672 行：
+ConvertDriver 是 Convert 流程的入口类，封装了整个转换过程。定义在 `include/convert.hpp` 第 621-636 行：
 
 ```cpp
 class ConvertDriver {
@@ -776,10 +763,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
         TypeResolverPass pass2(ctx);
         pass2.resolve(/* plan from cache */);
         
-        // Pass3: RWAnalyzer
-        RWAnalyzerPass pass3(ctx);
-        pass3.analyze(/* plan from cache */);
-        
         // Pass4: ExprLowerer
         ExprLowererPass pass4(ctx);
         LoweringPlan lowering = pass4.lower(/* plan */);
@@ -815,7 +798,6 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
 AST (slang) 
     → Pass1 (SymbolCollector) → ModulePlan (骨架) → 存入 PlanEntry.plan
     → Pass2 (TypeResolver)    → ModulePlan (类型填充)
-    → Pass3 (RWAnalyzer)      → ModulePlan (rwOps/memPorts)
     → Pass4 (ExprLowerer)     → LoweringPlan (values/roots) → 存入 PlanEntry.artifacts.loweringPlan
     → Pass5 (StmtLowerer)     → LoweringPlan (+writes)
     → Pass6 (WriteBack)       → WriteBackPlan (entries) → 存入 PlanEntry.artifacts.writeBackPlan
@@ -851,8 +833,6 @@ PlanEntry entry = {
         symbolTable = {},
         ports = {},
         signals = {},
-        rwOps = {},
-        memPorts = {},
         instances = {}
     }
 }
@@ -933,60 +913,7 @@ entry.plan.signals[0].isSigned = false
 
 ---
 
-### 3.4 Pass3：读写分析
-
-**输入**：PlanEntry.plan（ModulePlan + AST）
-
-**输出**：原地更新 PlanEntry.plan.rwOps 和 PlanEntry.plan.memPorts
-
-**算法步骤**：
-
-1. 建立 PlanSymbolId -> SignalId 映射
-2. 初始化 RWAnalyzerState（访问计数器）
-3. 遍历 ProceduralBlockSymbol，根据 procedureKind 分类 ControlDomain
-4. 遍历 ContinuousAssignSymbol，固定为 Combinational 域
-5. AST 访问者模式遍历语句：
-   - LHS 递归标记为写
-   - RHS/条件/索引标记为读
-   - 每次访问追加 AccessSite{location, sequence}
-6. Memory 访问识别（memoryRows > 0），生成 MemoryPortInfo
-
-**例子**：读写关系的数据结构更新
-
-SystemVerilog 源码：
-
-```systemverilog
-always_ff @(posedge clk) begin
-    if (en) q <= d;
-end
-```
-
-访问者遍历过程：
-
-```cpp
-// 访问 NamedValueExpression "d" 在 RHS
-recordRead(target="d", domain=Sequential, location=@line2)
-
-// 访问 NamedValueExpression "en" 在条件
-recordRead(target="en", domain=Sequential, location=@line1)
-
-// 访问 NamedValueExpression "q" 在 LHS
-recordWrite(target="q", domain=Sequential, location=@line2)
-```
-
-PlanEntry 更新后：
-
-```cpp
-entry.plan.rwOps = {
-    [0] = {target="d", domain=Sequential, isWrite=false, sites={[@line2, seq=0]}},
-    [1] = {target="en", domain=Sequential, isWrite=false, sites={[@line1, seq=1]}},
-    [2] = {target="q", domain=Sequential, isWrite=true, sites={[@line2, seq=2]}}
-}
-```
-
----
-
-### 3.5 Pass4：表达式降级
+### 3.4 Pass4：表达式降级
 
 **输入**：PlanEntry.plan（ModulePlan）+ 表达式 AST
 
@@ -1072,7 +999,7 @@ entry.artifacts.loweringPlan = {
 
 ---
 
-### 3.6 Pass5：语句降级
+### 3.5 Pass5：语句降级
 
 **输入**：PlanEntry.plan（ModulePlan）+ PlanEntry.artifacts.loweringPlan
 
@@ -1158,7 +1085,7 @@ entry.artifacts.loweringPlan = {
 
 ---
 
-### 3.7 Pass6：写回合并
+### 3.6 Pass6：写回合并
 
 **输入**：PlanEntry.plan（ModulePlan）+ PlanEntry.artifacts.loweringPlan
 
@@ -1242,9 +1169,9 @@ entry.artifacts.writeBackPlan = {
 
 ---
 
-### 3.8 Pass7：内存端口处理
+### 3.7 Pass7：内存端口处理
 
-**输入**：PlanEntry.plan.memPorts + PlanEntry.artifacts.loweringPlan
+**输入**：PlanEntry.plan + PlanEntry.artifacts.loweringPlan
 
 **输出**：更新 PlanEntry.artifacts.loweringPlan.memoryReads 和 memoryWrites
 
@@ -1267,7 +1194,7 @@ always_ff @(posedge clk)
     if (en) mem[addr] <= wdata;        // 写
 ```
 
-PlanEntry 更新（假设已有 PlanEntry.plan.memPorts）：
+PlanEntry 更新：
 
 ```cpp
 // 读端口识别
@@ -1296,7 +1223,7 @@ entry.artifacts.loweringPlan.memoryWrites[0] = {
 
 ---
 
-### 3.9 Pass8：图组装
+### 3.8 Pass8：图组装
 
 **输入**：PlanEntry（包含 plan、loweringPlan、writeBackPlan）+ Netlist
 
@@ -1387,8 +1314,6 @@ PlanEntry entry = {
             [3] = {symbol=id(3), direction=Output, width=0, isSigned=false}
         },
         signals = {},
-        rwOps = {},
-        memPorts = {},
         instances = {}
     },
     artifacts = {}
@@ -1402,17 +1327,6 @@ entry.plan.ports[0].width = 1
 entry.plan.ports[1].width = 1
 entry.plan.ports[2].width = 1
 entry.plan.ports[3].width = 4
-```
-
-#### Pass3 后：PlanEntry.plan.rwOps 更新
-
-```cpp
-entry.plan.rwOps = {
-    [0] = {target=1, domain=Sequential, isWrite=false, sites={[loc=@line7, seq=0]}},   // rst
-    [1] = {target=2, domain=Sequential, isWrite=false, sites={[loc=@line9, seq=1]}},   // en
-    [2] = {target=3, domain=Sequential, isWrite=false, sites={[loc=@line9, seq=2]}},   // count (RHS)
-    [3] = {target=3, domain=Sequential, isWrite=true, sites={[loc=@line8, seq=3], [loc=@line9, seq=4]}}  // count (LHS)
-}
 ```
 
 #### Pass4-5 后：PlanEntry.artifacts.loweringPlan
@@ -1525,33 +1439,32 @@ Graph "counter" {
 | 名称 | 类型 | 行号 | 说明 |
 |------|------|------|------|
 | ConvertContext | struct | 166 | 共享状态容器 |
-| PlanCache | class | 525 | 模块计划缓存 |
-| PlanKey | struct | 489 | 模块标识键 |
-| PlanKeyHash | struct | 502 | PlanKey 哈希函数 |
-| PlanEntry | struct | 519 | 计划条目 |
-| ModulePlan | struct | 268 | 模块骨架 |
-| LoweringPlan | struct | 458 | 降级计划 |
-| WriteIntent | struct | 365 | 写回意图 |
-| WriteSlice | struct | 355 | 切片描述 |
-| WriteBackPlan | struct | 469 | 写回合并结果 |
+| PlanCache | class | 499 | 模块计划缓存 |
+| PlanKey | struct | 463 | 模块标识键 |
+| PlanKeyHash | struct | 476 | PlanKey 哈希函数 |
+| PlanEntry | struct | 493 | 计划条目 |
+| ModulePlan | struct | 244 | 模块骨架 |
+| LoweringPlan | struct | 432 | 降级计划 |
+| WriteIntent | struct | 339 | 写回意图 |
+| WriteSlice | struct | 329 | 切片描述 |
+| WriteBackPlan | struct | 443 | 写回合并结果 |
 
 **Pass 类**（`include/convert.hpp`）：
 
 | 名称 | 行号 | 说明 |
 |------|------|------|
-| ConvertDriver | 657 | 入口类 |
-| ModulePlanner | 569 | Pass1：符号收集 |
-| TypeResolverPass | 579 | Pass2：类型解析 |
-| RWAnalyzerPass | 589 | Pass3：读写分析 |
-| ExprLowererPass | 599 | Pass4：表达式降级 |
-| StmtLowererPass | 609 | Pass5：语句降级 |
-| WriteBackPass | 619 | Pass6：写回合并 |
-| MemoryPortLowererPass | 629 | Pass7：内存端口处理 |
-| GraphAssembler | 639 | Pass8：图组装 |
+| ConvertDriver | 621 | 入口类 |
+| ModulePlanner | 543 | Pass1：符号收集 |
+| TypeResolverPass | 553 | Pass2：类型解析 |
+| ExprLowererPass | 563 | Pass4：表达式降级 |
+| StmtLowererPass | 573 | Pass5：语句降级 |
+| WriteBackPass | 583 | Pass6：写回合并 |
+| MemoryPortLowererPass | 593 | Pass7：内存端口处理 |
+| GraphAssembler | 603 | Pass8：图组装 |
 
 ### 5.3 函数入口
 
-**ConvertDriver**（`include/convert.hpp` 第 657-672 行）：
+**ConvertDriver**（`include/convert.hpp` 第 621-636 行）：
 
 ```cpp
 // 构造函数
@@ -1586,9 +1499,6 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body);
 
 // Pass2
 void TypeResolverPass::resolve(ModulePlan& plan);
-
-// Pass3
-void RWAnalyzerPass::analyze(ModulePlan& plan);
 
 // Pass4
 LoweringPlan ExprLowererPass::lower(ModulePlan& plan);

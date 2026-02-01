@@ -252,24 +252,6 @@ target_compile_definitions(convert-type-resolver
 
 register_test_exe(convert-type-resolver)
 
-# convert: rw analyzer
-add_executable(convert-rw-analyzer
-    tests/convert/test_convert_rw_analyzer.cpp
-)
-
-target_link_libraries(convert-rw-analyzer
-    PRIVATE
-        convert
-        grh
-)
-
-target_compile_definitions(convert-rw-analyzer
-    PRIVATE
-        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
-)
-
-register_test_exe(convert-rw-analyzer)
-
 # convert: expr lowerer
 add_executable(convert-expr-lowerer
     tests/convert/test_convert_expr_lowerer.cpp
