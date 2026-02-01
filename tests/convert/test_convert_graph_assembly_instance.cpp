@@ -148,8 +148,8 @@ int testGraphAssemblyInstance(const std::filesystem::path& sourcePath) {
                 if (!expectStrings(getAttrStrings(op, "outputPortName"), {"y"})) {
                     return fail("child instance outputPortName mismatch");
                 }
-                if (getAttrStrings(op, "inoutPortName")) {
-                    return fail("child instance should not have inoutPortName");
+                if (!expectStrings(getAttrStrings(op, "inoutPortName"), {})) {
+                    return fail("child instance inoutPortName mismatch");
                 }
                 if (op.operands().size() != 1 || op.results().size() != 1) {
                     return fail("child instance operand/result count mismatch");

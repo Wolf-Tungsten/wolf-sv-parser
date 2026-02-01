@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <sstream>
 #include <system_error>
@@ -207,6 +208,20 @@ namespace grh::emit
             return oss.str();
         }
 
+        std::string opSymbolOrFallback(const grh::ir::Operation &op)
+        {
+            std::string sym(op.symbolText());
+            if (!sym.empty())
+            {
+                return sym;
+            }
+            if (op.id().valid())
+            {
+                return "op_" + std::to_string(op.id().index);
+            }
+            return {};
+        }
+
         void writeUsersInline(std::string &out, const grh::ir::Graph &graph, std::span<const grh::ir::ValueUser> users, JsonPrintMode mode)
         {
             const char *comma = commaToken(mode);
@@ -224,7 +239,7 @@ namespace grh::emit
                                            {
                                                if (user.operation.valid())
                                                {
-                                                   appendQuotedString(out, graph.getOperation(user.operation).symbolText());
+                                                   appendQuotedString(out, opSymbolOrFallback(graph.getOperation(user.operation)));
                                                }
                                                else
                                                {
@@ -390,7 +405,7 @@ namespace grh::emit
                                   if (value.definingOp())
                                   {
                                       prop("def", [&]
-                                           { appendQuotedString(out, graph.getOperation(value.definingOp()).symbolText()); });
+                                           { appendQuotedString(out, opSymbolOrFallback(graph.getOperation(value.definingOp()))); });
                                   }
                                   prop("users", [&]
                                        { writeUsersInline(out, graph, value.users(), mode); });
@@ -418,7 +433,7 @@ namespace grh::emit
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, op.symbolText()); });
+                                       { appendQuotedString(out, opSymbolOrFallback(op)); });
                                   prop("kind", [&]
                                        { appendQuotedString(out, grh::ir::toString(op.kind())); });
                                   prop("in", [&]
@@ -2011,6 +2026,153 @@ namespace grh::emit
                 grh::ir::Operation op = graph->getOperation(opId);
                 return std::string(op.symbolText());
             };
+            auto isPortValue = [&](grh::ir::ValueId valueId) -> bool
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                return value.isInput() || value.isOutput() || value.isInout();
+            };
+            auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+            {
+                if (!valueId.valid())
+                {
+                    return std::nullopt;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    return std::nullopt;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    return std::nullopt;
+                }
+                return getAttribute<std::string>(*graph, defOp, "constValue");
+            };
+            auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
+            {
+                if (!valueId.valid())
+                {
+                    return std::nullopt;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    return std::nullopt;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kAssign)
+                {
+                    return std::nullopt;
+                }
+                const auto &ops = defOp.operands();
+                if (ops.empty())
+                {
+                    return std::nullopt;
+                }
+                return ops.front();
+            };
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> materializeValues;
+            materializeValues.reserve(graph->operations().size());
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                switch (op.kind())
+                {
+                case grh::ir::OperationKind::kSliceStatic:
+                case grh::ir::OperationKind::kSliceDynamic:
+                case grh::ir::OperationKind::kSliceArray:
+                    if (!op.operands().empty())
+                    {
+                        materializeValues.insert(op.operands().front());
+                    }
+                    break;
+                case grh::ir::OperationKind::kMemoryWritePort:
+                    if (op.operands().size() > 3)
+                    {
+                        materializeValues.insert(op.operands()[2]);
+                        materializeValues.insert(op.operands()[3]);
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> resolvingExpr;
+            std::function<std::string(grh::ir::ValueId)> valueExpr =
+                [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (!valueId.valid())
+                {
+                    return {};
+                }
+                if (materializeValues.find(valueId) != materializeValues.end())
+                {
+                    return valueName(valueId);
+                }
+                if (!resolvingExpr.insert(valueId).second)
+                {
+                    return valueName(valueId);
+                }
+                if (!isPortValue(valueId))
+                {
+                    if (auto literal = constLiteralFor(valueId))
+                    {
+                        resolvingExpr.erase(valueId);
+                        return *literal;
+                    }
+                    if (auto source = assignSourceFor(valueId))
+                    {
+                        std::string resolved = valueExpr(*source);
+                        resolvingExpr.erase(valueId);
+                        return resolved;
+                    }
+                }
+                resolvingExpr.erase(valueId);
+                return valueName(valueId);
+            };
+            auto isSimpleIdentifier = [](std::string_view expr) -> bool
+            {
+                if (expr.empty())
+                {
+                    return false;
+                }
+                const auto isIdentStart = [](char ch) -> bool
+                {
+                    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+                };
+                const auto isIdentChar = [](char ch) -> bool
+                {
+                    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                        (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
+                };
+                if (!isIdentStart(expr.front()))
+                {
+                    return false;
+                }
+                for (std::size_t i = 1; i < expr.size(); ++i)
+                {
+                    if (!isIdentChar(expr[i]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            auto parenIfNeeded = [&](const std::string &expr) -> std::string
+            {
+                if (expr.empty() || isSimpleIdentifier(expr))
+                {
+                    return expr;
+                }
+                if (expr.front() == '(' && expr.back() == ')')
+                {
+                    return expr;
+                }
+                return "(" + expr + ")";
+            };
 
             // -------------------------
             // Ports
@@ -2121,7 +2283,7 @@ namespace grh::emit
             auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
             {
                 const int64_t width = graph->getValue(valueId).width();
-                const std::string name = valueName(valueId);
+                const std::string name = valueExpr(valueId);
                 if (width == 1)
                 {
                     return name;
@@ -2132,7 +2294,7 @@ namespace grh::emit
             {
                 const grh::ir::Value value = graph->getValue(valueId);
                 const int64_t width = value.width();
-                const std::string name = valueName(valueId);
+                const std::string name = valueExpr(valueId);
                 if (targetWidth <= 0 || width <= 0 || width == targetWidth)
                 {
                     return name;
@@ -2331,8 +2493,6 @@ namespace grh::emit
                 }
                 const std::string portName = std::string(graph->symbolText(port.name));
                 const std::string inName = valueName(port.in);
-                const std::string outName = valueName(port.out);
-                const std::string oeName = valueName(port.oe);
                 const int64_t width = graph->getValue(port.out).width();
                 ensureWireDecl(port.in);
                 ensureWireDecl(port.out);
@@ -2340,7 +2500,7 @@ namespace grh::emit
                 portBindingStmts.emplace_back(
                     "assign " + inName + " = " + portName + ";", grh::ir::OperationId::invalid());
                 portBindingStmts.emplace_back(
-                    "assign " + portName + " = " + oeName + " ? " + outName + " : {" +
+                    "assign " + portName + " = " + valueExpr(port.oe) + " ? " + valueExpr(port.out) + " : {" +
                         std::to_string(width) + "{1'bz}};",
                     grh::ir::OperationId::invalid());
             }
@@ -2408,6 +2568,11 @@ namespace grh::emit
                         reportError("kConstant missing result", opContext);
                         break;
                     }
+                    if (!isPortValue(results[0]) &&
+                        materializeValues.find(results[0]) == materializeValues.end())
+                    {
+                        break;
+                    }
                     auto constValue = getAttribute<std::string>(*graph, op, "constValue");
                     if (!constValue)
                     {
@@ -2440,10 +2605,10 @@ namespace grh::emit
                     const std::string tok = binOpToken(op.kind());
                     const std::string lhs = resultWidth > 0
                                                 ? extendOperand(operands[0], resultWidth)
-                                                : valueName(operands[0]);
+                                                : valueExpr(operands[0]);
                     const std::string rhs = resultWidth > 0
                                                 ? extendOperand(operands[1], resultWidth)
-                                                : valueName(operands[1]);
+                                                : valueExpr(operands[1]);
                     addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";", opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2462,8 +2627,8 @@ namespace grh::emit
                         break;
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + " " + tok + " " +
-                                  valueName(operands[1]) + ";",
+                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " " + tok + " " +
+                                  valueExpr(operands[1]) + ";",
                               opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2522,7 +2687,7 @@ namespace grh::emit
                         break;
                     }
                     const std::string tok = unaryOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + tok + valueName(operands[0]) + ";", opId);
+                    addAssign("assign " + valueName(results[0]) + " = " + tok + valueExpr(operands[0]) + ";", opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -2547,7 +2712,7 @@ namespace grh::emit
                     int64_t resultWidth = graph->getValue(results[0]).width();
                     const std::string lhs = extendOperand(operands[1], resultWidth);
                     const std::string rhs = extendOperand(operands[2], resultWidth);
-                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + " ? " +
+                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " ? " +
                                   lhs + " : " + rhs + ";",
                               opId);
                     ensureWireDecl(results[0]);
@@ -2558,6 +2723,11 @@ namespace grh::emit
                     if (operands.empty() || results.empty())
                     {
                         reportError("kAssign missing operands or results", opContext);
+                        break;
+                    }
+                    if (!isPortValue(results[0]) &&
+                        materializeValues.find(results[0]) == materializeValues.end())
+                    {
                         break;
                     }
                     int64_t resultWidth = graph->getValue(results[0]).width();
@@ -2575,7 +2745,7 @@ namespace grh::emit
                     }
                     if (operands.size() == 1)
                     {
-                        addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                        addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + ";", opId);
                         ensureWireDecl(results[0]);
                         break;
                     }
@@ -2587,7 +2757,7 @@ namespace grh::emit
                         {
                             expr << ", ";
                         }
-                        expr << valueName(operands[i]);
+                        expr << valueExpr(operands[i]);
                     }
                     expr << "};";
                     addAssign(expr.str(), opId);
@@ -2608,7 +2778,7 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueName(operands[0]) << "}};";
+                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueExpr(operands[0]) << "}};";
                     addAssign(expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2636,11 +2806,11 @@ namespace grh::emit
                         {
                             reportError("kSliceStatic index out of range for scalar", opContext);
                         }
-                        expr << valueName(operands[0]);
+                        expr << valueExpr(operands[0]);
                     }
                     else
                     {
-                        expr << valueName(operands[0]) << "[";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "[";
                         if (*sliceStart == *sliceEnd)
                         {
                             expr << *sliceStart;
@@ -2678,15 +2848,15 @@ namespace grh::emit
                         {
                             reportError("kSliceDynamic width exceeds scalar", opContext);
                         }
-                        expr << valueName(operands[0]);
+                        expr << valueExpr(operands[0]);
                     }
                     else if (*width == 1)
                     {
-                        expr << valueName(operands[0]) << "[" << valueName(operands[1]) << "]";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << "]";
                     }
                     else
                     {
-                        expr << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "]";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
                     }
                     expr << ";";
                     addAssign(expr.str(), opId);
@@ -2711,18 +2881,18 @@ namespace grh::emit
                     expr << "assign " << valueName(results[0]) << " = ";
                     if (*width == 1 && operandWidth == 1)
                     {
-                        expr << valueName(operands[0]);
+                        expr << valueExpr(operands[0]);
                     }
                     else
                     {
-                        expr << valueName(operands[0]) << "[";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "[";
                         if (*width == 1)
                         {
-                            expr << valueName(operands[1]);
+                            expr << parenIfNeeded(valueExpr(operands[1]));
                         }
                         else
                         {
-                            expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                            expr << parenIfNeeded(valueExpr(operands[1])) << " * " << *width << " +: " << *width;
                         }
                         expr << "]";
                     }
@@ -2776,14 +2946,14 @@ namespace grh::emit
                     if (isAlwaysTrue(updateCond))
                     {
                         appendIndented(block, 1, "always @* begin");
-                        appendIndented(block, 2, regName + " = " + valueName(nextValue) + ";");
+                        appendIndented(block, 2, regName + " = " + valueExpr(nextValue) + ";");
                         appendIndented(block, 1, "end");
                     }
                     else
                     {
                         std::ostringstream stmt;
-                        appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                        appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                        appendIndented(stmt, 3, regName + " = " + valueExpr(nextValue) + ";");
                         appendIndented(stmt, 2, "end");
                         block << "  always_latch begin\n";
                         block << stmt.str();
@@ -2842,9 +3012,16 @@ namespace grh::emit
                     }
 
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                    appendIndented(stmt, 3, regName + " <= " + valueName(nextValue) + ";");
-                    appendIndented(stmt, 2, "end");
+                    if (isConstOne(updateCond))
+                    {
+                        appendIndented(stmt, 2, regName + " <= " + valueExpr(nextValue) + ";");
+                    }
+                    else
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                        appendIndented(stmt, 3, regName + " <= " + valueExpr(nextValue) + ";");
+                        appendIndented(stmt, 2, "end");
+                    }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
@@ -2878,7 +3055,7 @@ namespace grh::emit
                         break;
                     }
                     addAssign("assign " + valueName(results[0]) + " = " + *memSymbolAttr + "[" +
-                                  valueName(operands[0]) + "];",
+                                  valueExpr(operands[0]) + "];",
                               opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -2925,28 +3102,39 @@ namespace grh::emit
                         memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
                     }
 
+                    const bool guardUpdate = !isConstOne(updateCond);
+                    const int baseIndent = guardUpdate ? 3 : 2;
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                    if (guardUpdate)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                    }
                     if (memWidth <= 1)
                     {
-                        appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
-                        appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                        appendIndented(stmt, 3, "end");
-                        appendIndented(stmt, 2, "end");
+                        appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + ") begin");
+                        appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                        appendIndented(stmt, baseIndent, "end");
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
                         addSequentialStmt(*seqKey, stmt.str(), opId);
                         break;
                     }
-                    appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                    appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                    appendIndented(stmt, 3, "end else begin");
-                    appendIndented(stmt, 4, "integer i;");
-                    appendIndented(stmt, 4, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
-                    appendIndented(stmt, 5, "if (" + valueName(mask) + "[i]) begin");
-                    appendIndented(stmt, 6, memSymbol + "[" + valueName(addr) + "][i] <= " + valueName(data) + "[i];");
-                    appendIndented(stmt, 5, "end");
-                    appendIndented(stmt, 4, "end");
-                    appendIndented(stmt, 3, "end");
-                    appendIndented(stmt, 2, "end");
+                    appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
+                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                    appendIndented(stmt, baseIndent, "end else begin");
+                    appendIndented(stmt, baseIndent + 1, "integer i;");
+                    appendIndented(stmt, baseIndent + 1, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
+                    appendIndented(stmt, baseIndent + 2, "if (" + valueExpr(mask) + "[i]) begin");
+                    appendIndented(stmt, baseIndent + 3, memSymbol + "[" + valueExpr(addr) + "][i] <= " + valueExpr(data) + "[i];");
+                    appendIndented(stmt, baseIndent + 2, "end");
+                    appendIndented(stmt, baseIndent + 1, "end");
+                    appendIndented(stmt, baseIndent, "end");
+                    if (guardUpdate)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
@@ -3010,7 +3198,7 @@ namespace grh::emit
                     {
                         if (i < operands.size())
                         {
-                            connections.emplace_back((*inputNames)[i], valueName(operands[i]));
+                            connections.emplace_back((*inputNames)[i], valueExpr(operands[i]));
                         }
                     }
                     for (std::size_t i = 0; i < outputNames->size(); ++i)
@@ -3063,8 +3251,8 @@ namespace grh::emit
                             ensureWireDecl(operands[oeIndex]);
                             ensureWireDecl(results[inIndex]);
                             portBindingStmts.emplace_back(
-                                "assign " + wireName + " = " + valueName(operands[oeIndex]) + " ? " +
-                                    valueName(operands[outIndex]) + " : {" + std::to_string(width) +
+                                "assign " + wireName + " = " + valueExpr(operands[oeIndex]) + " ? " +
+                                    valueExpr(operands[outIndex]) + " : {" + std::to_string(width) +
                                     "{1'bz}};",
                                 opId);
                             portBindingStmts.emplace_back(
@@ -3124,15 +3312,23 @@ namespace grh::emit
                     {
                         break;
                     }
+                    const bool guardDisplay = !isConstOne(operands[0]);
+                    const int baseIndent = guardDisplay ? 3 : 2;
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
-                    stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
+                    if (guardDisplay)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                    }
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$display(\"" << *format << "\"";
                     for (std::size_t i = 0; i < argCount; ++i)
                     {
-                        stmt << ", " << valueName(operands[1 + i]);
+                        stmt << ", " << valueExpr(operands[1 + i]);
                     }
                     stmt << ");\n";
-                    appendIndented(stmt, 2, "end");
+                    if (guardDisplay)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
@@ -3161,7 +3357,14 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + " && !" + valueName(operands[1]) + ") begin");
+                    if (isConstOne(operands[0]))
+                    {
+                        appendIndented(stmt, 2, "if (!" + valueExpr(operands[1]) + ") begin");
+                    }
+                    else
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
+                    }
                     appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
                     addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -3303,8 +3506,13 @@ namespace grh::emit
                     }
 
                     bool callOk = true;
+                    const bool guardCall = !isConstOne(operands[0]);
+                    const int baseIndent = guardCall ? 3 : 2;
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
+                    if (guardCall)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                    }
                     if (inoutArgName && !inoutArgName->empty())
                     {
                         for (std::size_t i = 0; i < inoutArgName->size(); ++i)
@@ -3318,14 +3526,14 @@ namespace grh::emit
                                 break;
                             }
                             const std::string tempName = valueName(results[resultIndex]) + "_intm";
-                            appendIndented(stmt, 3, tempName + " = " + valueName(operands[operandIndex]) + ";");
+                            appendIndented(stmt, baseIndent, tempName + " = " + valueExpr(operands[operandIndex]) + ";");
                         }
                         if (!callOk)
                         {
                             break;
                         }
                     }
-                    stmt << std::string(kIndentSizeSv * 3, ' ');
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ');
                     if (hasReturn && !results.empty())
                     {
                         stmt << valueName(results[0]) << "_intm = ";
@@ -3350,7 +3558,7 @@ namespace grh::emit
                                 callOk = false;
                                 break;
                             }
-                            stmt << valueName(operands[static_cast<std::size_t>(idx + 1)]);
+                            stmt << valueExpr(operands[static_cast<std::size_t>(idx + 1)]);
                         }
                         else if (dir == "inout")
                         {
@@ -3390,7 +3598,10 @@ namespace grh::emit
                         break;
                     }
                     stmt << ");\n";
-                    appendIndented(stmt, 2, "end");
+                    if (guardCall)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
@@ -3404,9 +3615,25 @@ namespace grh::emit
             for (const auto valueId : graph->values())
             {
                 const grh::ir::Value val = graph->getValue(valueId);
-                if (val.isInput() || val.isOutput())
+                if (val.isInput() || val.isOutput() || val.isInout())
                 {
                     continue;
+                }
+                if (!isPortValue(valueId))
+                {
+                    const grh::ir::OperationId defOpId = val.definingOp();
+                    if (defOpId.valid())
+                    {
+                        const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                        if (defOp.kind() == grh::ir::OperationKind::kConstant ||
+                            defOp.kind() == grh::ir::OperationKind::kAssign)
+                        {
+                            if (materializeValues.find(valueId) == materializeValues.end())
+                            {
+                                continue;
+                            }
+                        }
+                    }
                 }
                 ensureWireDecl(valueId);
             }
@@ -3716,6 +3943,147 @@ namespace grh::emit
             }
             return opNames[opId.index - 1];
         };
+        auto isPortValue = [&](grh::ir::ValueId valueId) -> bool
+        {
+            return view.valueIsInput(valueId) || view.valueIsOutput(valueId) || view.valueIsInout(valueId);
+        };
+        auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+        {
+            if (!valueId.valid())
+            {
+                return std::nullopt;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            if (view.opKind(defOpId) != grh::ir::OperationKind::kConstant)
+            {
+                return std::nullopt;
+            }
+            return getAttribute<std::string>(view, defOpId, "constValue");
+        };
+        auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
+        {
+            if (!valueId.valid())
+            {
+                return std::nullopt;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            if (view.opKind(defOpId) != grh::ir::OperationKind::kAssign)
+            {
+                return std::nullopt;
+            }
+            auto operands = view.opOperands(defOpId);
+            if (operands.empty())
+            {
+                return std::nullopt;
+            }
+            return operands.front();
+        };
+        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> materializeValues;
+        materializeValues.reserve(view.operations().size());
+        for (const auto opId : view.operations())
+        {
+            const auto kind = view.opKind(opId);
+            if (kind == grh::ir::OperationKind::kSliceStatic ||
+                kind == grh::ir::OperationKind::kSliceDynamic ||
+                kind == grh::ir::OperationKind::kSliceArray)
+            {
+                const auto operands = view.opOperands(opId);
+                if (!operands.empty())
+                {
+                    materializeValues.insert(operands.front());
+                }
+            }
+            else if (kind == grh::ir::OperationKind::kMemoryWritePort)
+            {
+                const auto operands = view.opOperands(opId);
+                if (operands.size() > 3)
+                {
+                    materializeValues.insert(operands[2]);
+                    materializeValues.insert(operands[3]);
+                }
+            }
+        }
+        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> resolvingExpr;
+        std::function<std::string(grh::ir::ValueId)> valueExpr =
+            [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (!valueId.valid())
+            {
+                return {};
+            }
+            if (materializeValues.find(valueId) != materializeValues.end())
+            {
+                return valueName(valueId);
+            }
+            if (!resolvingExpr.insert(valueId).second)
+            {
+                return valueName(valueId);
+            }
+            if (!isPortValue(valueId))
+            {
+                if (auto literal = constLiteralFor(valueId))
+                {
+                    resolvingExpr.erase(valueId);
+                    return *literal;
+                }
+                if (auto source = assignSourceFor(valueId))
+                {
+                    std::string resolved = valueExpr(*source);
+                    resolvingExpr.erase(valueId);
+                    return resolved;
+                }
+            }
+            resolvingExpr.erase(valueId);
+            return valueName(valueId);
+        };
+        auto isSimpleIdentifier = [](std::string_view expr) -> bool
+        {
+            if (expr.empty())
+            {
+                return false;
+            }
+            const auto isIdentStart = [](char ch) -> bool
+            {
+                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+            };
+            const auto isIdentChar = [](char ch) -> bool
+            {
+                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
+            };
+            if (!isIdentStart(expr.front()))
+            {
+                return false;
+            }
+            for (std::size_t i = 1; i < expr.size(); ++i)
+            {
+                if (!isIdentChar(expr[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto parenIfNeeded = [&](const std::string &expr) -> std::string
+        {
+            if (expr.empty() || isSimpleIdentifier(expr))
+            {
+                return expr;
+            }
+            if (expr.front() == '(' && expr.back() == ')')
+            {
+                return expr;
+            }
+            return "(" + expr + ")";
+        };
         auto opContext = [&](grh::ir::OperationId opId) -> std::string
         {
             if (!opId.valid())
@@ -3941,7 +4309,7 @@ namespace grh::emit
         auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
         {
             const int64_t width = view.valueWidth(valueId);
-            const std::string &name = valueName(valueId);
+            const std::string name = valueExpr(valueId);
             if (width == 1)
             {
                 return name;
@@ -3951,7 +4319,7 @@ namespace grh::emit
         auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
         {
             const int64_t width = view.valueWidth(valueId);
-            const std::string &name = valueName(valueId);
+            const std::string name = valueExpr(valueId);
             if (targetWidth <= 0 || width <= 0 || width == targetWidth)
             {
                 return name;
@@ -4145,7 +4513,7 @@ namespace grh::emit
                 "assign " + inName + " = " + port.name + ";",
                 grh::ir::OperationId::invalid());
             portBindingStmts.emplace_back(
-                "assign " + port.name + " = " + oeName + " ? " + outName + " : {" +
+                "assign " + port.name + " = " + valueExpr(port.oe) + " ? " + valueExpr(port.out) + " : {" +
                     std::to_string(port.width) + "{1'bz}};",
                 grh::ir::OperationId::invalid());
         }
@@ -4212,6 +4580,11 @@ namespace grh::emit
                     reportError("kConstant missing result", context);
                     break;
                 }
+                if (!isPortValue(results[0]) &&
+                    materializeValues.find(results[0]) == materializeValues.end())
+                {
+                    break;
+                }
                 auto constValue = getAttribute<std::string>(view, opId, "constValue");
                 if (!constValue)
                 {
@@ -4244,10 +4617,10 @@ namespace grh::emit
                 const std::string tok = binOpToken(kind);
                 const std::string lhs = resultWidth > 0
                                             ? extendOperand(operands[0], resultWidth)
-                                            : valueName(operands[0]);
+                                            : valueExpr(operands[0]);
                 const std::string rhs = resultWidth > 0
                                             ? extendOperand(operands[1], resultWidth)
-                                            : valueName(operands[1]);
+                                            : valueExpr(operands[1]);
                 addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";",
                           opId);
                 ensureWireDecl(results[0]);
@@ -4267,8 +4640,8 @@ namespace grh::emit
                     break;
                 }
                 const std::string tok = binOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) +
-                              " " + tok + " " + valueName(operands[1]) + ";",
+                addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) +
+                              " " + tok + " " + valueExpr(operands[1]) + ";",
                           opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -4327,7 +4700,7 @@ namespace grh::emit
                     break;
                 }
                 const std::string tok = unaryOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " + tok + valueName(operands[0]) + ";", opId);
+                addAssign("assign " + valueName(results[0]) + " = " + tok + valueExpr(operands[0]) + ";", opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -4352,7 +4725,7 @@ namespace grh::emit
                 int64_t resultWidth = view.valueWidth(results[0]);
                 const std::string lhs = extendOperand(operands[1], resultWidth);
                 const std::string rhs = extendOperand(operands[2], resultWidth);
-                addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) +
+                addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) +
                               " ? " + lhs + " : " + rhs + ";",
                           opId);
                 ensureWireDecl(results[0]);
@@ -4363,6 +4736,11 @@ namespace grh::emit
                 if (operands.empty() || results.empty())
                 {
                     reportError("kAssign missing operands or results", context);
+                    break;
+                }
+                if (!isPortValue(results[0]) &&
+                    materializeValues.find(results[0]) == materializeValues.end())
+                {
                     break;
                 }
                 int64_t resultWidth = view.valueWidth(results[0]);
@@ -4380,7 +4758,7 @@ namespace grh::emit
                 }
                 if (operands.size() == 1)
                 {
-                    addAssign("assign " + valueName(results[0]) + " = " + valueName(operands[0]) + ";", opId);
+                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + ";", opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -4392,7 +4770,7 @@ namespace grh::emit
                     {
                         expr << ", ";
                     }
-                    expr << valueName(operands[i]);
+                    expr << valueExpr(operands[i]);
                 }
                 expr << "};";
                 addAssign(expr.str(), opId);
@@ -4413,7 +4791,7 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueName(operands[0]) << "}};";
+                expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueExpr(operands[0]) << "}};";
                 addAssign(expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -4441,11 +4819,11 @@ namespace grh::emit
                     {
                         reportError("kSliceStatic index out of range for scalar", context);
                     }
-                    expr << valueName(operands[0]);
+                    expr << valueExpr(operands[0]);
                 }
                 else
                 {
-                    expr << valueName(operands[0]) << "[";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "[";
                     if (*sliceStart == *sliceEnd)
                     {
                         expr << *sliceStart;
@@ -4483,15 +4861,15 @@ namespace grh::emit
                     {
                         reportError("kSliceDynamic width exceeds scalar", context);
                     }
-                    expr << valueName(operands[0]);
+                    expr << valueExpr(operands[0]);
                 }
                 else if (*width == 1)
                 {
-                    expr << valueName(operands[0]) << "[" << valueName(operands[1]) << "]";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << "]";
                 }
                 else
                 {
-                    expr << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "]";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
                 }
                 expr << ";";
                 addAssign(expr.str(), opId);
@@ -4516,18 +4894,18 @@ namespace grh::emit
                 expr << "assign " << valueName(results[0]) << " = ";
                 if (*width == 1 && operandWidth == 1)
                 {
-                    expr << valueName(operands[0]);
+                    expr << valueExpr(operands[0]);
                 }
                 else
                 {
-                    expr << valueName(operands[0]) << "[";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "[";
                     if (*width == 1)
                     {
-                        expr << valueName(operands[1]);
+                        expr << parenIfNeeded(valueExpr(operands[1]));
                     }
                     else
                     {
-                        expr << valueName(operands[1]) << " * " << *width << " +: " << *width;
+                        expr << parenIfNeeded(valueExpr(operands[1])) << " * " << *width << " +: " << *width;
                     }
                     expr << "]";
                 }
@@ -4585,14 +4963,14 @@ namespace grh::emit
                 if (isAlwaysTrue(updateCond))
                 {
                     appendIndented(block, 1, "always @* begin");
-                    appendIndented(block, 2, regName + " = " + valueName(nextValue) + ";");
+                    appendIndented(block, 2, regName + " = " + valueExpr(nextValue) + ";");
                     appendIndented(block, 1, "end");
                 }
                 else
                 {
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                    appendIndented(stmt, 3, regName + " = " + valueName(nextValue) + ";");
+                    appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                    appendIndented(stmt, 3, regName + " = " + valueExpr(nextValue) + ";");
                     appendIndented(stmt, 2, "end");
                     block << "  always_latch begin\n";
                     block << stmt.str();
@@ -4654,9 +5032,16 @@ namespace grh::emit
                 }
 
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
-                appendIndented(stmt, 3, regName + " <= " + valueName(nextValue) + ";");
-                appendIndented(stmt, 2, "end");
+                if (isConstOne(updateCond))
+                {
+                    appendIndented(stmt, 2, regName + " <= " + valueExpr(nextValue) + ";");
+                }
+                else
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                    appendIndented(stmt, 3, regName + " <= " + valueExpr(nextValue) + ";");
+                    appendIndented(stmt, 2, "end");
+                }
                 addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
@@ -4697,7 +5082,7 @@ namespace grh::emit
                     break;
                 }
                 addAssign("assign " + valueName(results[0]) + " = " + *memSymbolAttr + "[" +
-                              valueName(operands[0]) + "];",
+                              valueExpr(operands[0]) + "];",
                           opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -4742,28 +5127,39 @@ namespace grh::emit
                     memWidth = getAttribute<int64_t>(view, it->second, "width").value_or(1);
                 }
 
+                const bool guardUpdate = !isConstOne(updateCond);
+                const int baseIndent = guardUpdate ? 3 : 2;
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(updateCond) + ") begin");
+                if (guardUpdate)
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                }
                 if (memWidth <= 1)
                 {
-                    appendIndented(stmt, 3, "if (" + valueName(mask) + ") begin");
-                    appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                    appendIndented(stmt, 3, "end");
-                    appendIndented(stmt, 2, "end");
+                    appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + ") begin");
+                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                    appendIndented(stmt, baseIndent, "end");
+                    if (guardUpdate)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
-                appendIndented(stmt, 3, "if (" + valueName(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                appendIndented(stmt, 4, memSymbol + "[" + valueName(addr) + "] <= " + valueName(data) + ";");
-                appendIndented(stmt, 3, "end else begin");
-                appendIndented(stmt, 4, "integer i;");
-                appendIndented(stmt, 4, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
-                appendIndented(stmt, 5, "if (" + valueName(mask) + "[i]) begin");
-                appendIndented(stmt, 6, memSymbol + "[" + valueName(addr) + "][i] <= " + valueName(data) + "[i];");
-                appendIndented(stmt, 5, "end");
-                appendIndented(stmt, 4, "end");
-                appendIndented(stmt, 3, "end");
-                appendIndented(stmt, 2, "end");
+                appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
+                appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                appendIndented(stmt, baseIndent, "end else begin");
+                appendIndented(stmt, baseIndent + 1, "integer i;");
+                appendIndented(stmt, baseIndent + 1, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
+                appendIndented(stmt, baseIndent + 2, "if (" + valueExpr(mask) + "[i]) begin");
+                appendIndented(stmt, baseIndent + 3, memSymbol + "[" + valueExpr(addr) + "][i] <= " + valueExpr(data) + "[i];");
+                appendIndented(stmt, baseIndent + 2, "end");
+                appendIndented(stmt, baseIndent + 1, "end");
+                appendIndented(stmt, baseIndent, "end");
+                if (guardUpdate)
+                {
+                    appendIndented(stmt, 2, "end");
+                }
                 addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
@@ -4826,7 +5222,7 @@ namespace grh::emit
                 {
                     if (i < operands.size())
                     {
-                        connections.emplace_back((*inputNames)[i], valueName(operands[i]));
+                        connections.emplace_back((*inputNames)[i], valueExpr(operands[i]));
                     }
                 }
                 for (std::size_t i = 0; i < outputNames->size(); ++i)
@@ -4879,8 +5275,8 @@ namespace grh::emit
                         ensureWireDecl(operands[oeIndex]);
                         ensureWireDecl(results[inIndex]);
                         portBindingStmts.emplace_back(
-                            "assign " + wireName + " = " + valueName(operands[oeIndex]) + " ? " +
-                                valueName(operands[outIndex]) + " : {" + std::to_string(width) +
+                            "assign " + wireName + " = " + valueExpr(operands[oeIndex]) + " ? " +
+                                valueExpr(operands[outIndex]) + " : {" + std::to_string(width) +
                                 "{1'bz}};",
                             opId);
                         portBindingStmts.emplace_back(
@@ -4937,15 +5333,23 @@ namespace grh::emit
                 {
                     break;
                 }
+                const bool guardDisplay = !isConstOne(operands[0]);
+                const int baseIndent = guardDisplay ? 3 : 2;
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
-                stmt << std::string(kIndentSizeSv * 3, ' ') << "$display(\"" << *format << "\"";
+                if (guardDisplay)
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                }
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$display(\"" << *format << "\"";
                 for (std::size_t i = 0; i < argCount; ++i)
                 {
-                    stmt << ", " << valueName(operands[1 + i]);
+                    stmt << ", " << valueExpr(operands[1 + i]);
                 }
                 stmt << ");\n";
-                appendIndented(stmt, 2, "end");
+                if (guardDisplay)
+                {
+                    appendIndented(stmt, 2, "end");
+                }
                 addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
@@ -4975,7 +5379,14 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + " && !" + valueName(operands[1]) + ") begin");
+                if (isConstOne(operands[0]))
+                {
+                    appendIndented(stmt, 2, "if (!" + valueExpr(operands[1]) + ") begin");
+                }
+                else
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
+                }
                 appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
                 appendIndented(stmt, 2, "end");
                 addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -5125,8 +5536,13 @@ namespace grh::emit
                 }
 
                 bool callOk = true;
+                const bool guardCall = !isConstOne(operands[0]);
+                const int baseIndent = guardCall ? 3 : 2;
                 std::ostringstream stmt;
-                appendIndented(stmt, 2, "if (" + valueName(operands[0]) + ") begin");
+                if (guardCall)
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                }
                 if (inoutArgName && !inoutArgName->empty())
                 {
                     for (std::size_t i = 0; i < inoutArgName->size(); ++i)
@@ -5140,14 +5556,14 @@ namespace grh::emit
                             break;
                         }
                         const std::string tempName = valueName(results[resultIndex]) + "_intm";
-                        appendIndented(stmt, 3, tempName + " = " + valueName(operands[operandIndex]) + ";");
+                        appendIndented(stmt, baseIndent, tempName + " = " + valueExpr(operands[operandIndex]) + ";");
                     }
                     if (!callOk)
                     {
                         break;
                     }
                 }
-                stmt << std::string(kIndentSizeSv * 3, ' ');
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ');
                 if (hasReturn && !results.empty())
                 {
                     stmt << valueName(results[0]) << "_intm = ";
@@ -5172,7 +5588,7 @@ namespace grh::emit
                             callOk = false;
                             break;
                         }
-                        stmt << valueName(operands[static_cast<std::size_t>(idx + 1)]);
+                        stmt << valueExpr(operands[static_cast<std::size_t>(idx + 1)]);
                     }
                     else if (dir == "inout")
                     {
@@ -5211,7 +5627,10 @@ namespace grh::emit
                     break;
                 }
                 stmt << ");\n";
-                appendIndented(stmt, 2, "end");
+                if (guardCall)
+                {
+                    appendIndented(stmt, 2, "end");
+                }
                 addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
@@ -5224,9 +5643,25 @@ namespace grh::emit
         // Declare remaining wires for non-port values not defined above.
         for (const auto valueId : view.values())
         {
-            if (view.valueIsInput(valueId) || view.valueIsOutput(valueId))
+            if (view.valueIsInput(valueId) || view.valueIsOutput(valueId) || view.valueIsInout(valueId))
             {
                 continue;
+            }
+            if (!isPortValue(valueId))
+            {
+                const grh::ir::OperationId defOpId = view.valueDef(valueId);
+                if (defOpId.valid())
+                {
+                    const auto defKind = view.opKind(defOpId);
+                    if (defKind == grh::ir::OperationKind::kConstant ||
+                        defKind == grh::ir::OperationKind::kAssign)
+                    {
+                        if (materializeValues.find(valueId) == materializeValues.end())
+                        {
+                            continue;
+                        }
+                    }
+                }
             }
             ensureWireDecl(valueId);
         }

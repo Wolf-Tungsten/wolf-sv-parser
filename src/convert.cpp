@@ -10605,10 +10605,7 @@ private:
             graph_.setAttr(op, "moduleName", moduleName);
             graph_.setAttr(op, "inputPortName", inputNames);
             graph_.setAttr(op, "outputPortName", outputNames);
-            if (!inoutNames.empty())
-            {
-                graph_.setAttr(op, "inoutPortName", inoutNames);
-            }
+            graph_.setAttr(op, "inoutPortName", inoutNames);
 
             if (instanceInfo.instanceSymbol.valid())
             {
