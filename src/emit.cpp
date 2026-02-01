@@ -2680,6 +2680,10 @@ namespace grh::emit
                         }
                         expr << valueName(operands[0]);
                     }
+                    else if (*width == 1)
+                    {
+                        expr << valueName(operands[0]) << "[" << valueName(operands[1]) << "]";
+                    }
                     else
                     {
                         expr << valueName(operands[0]) << "[" << valueName(operands[1]) << " +: " << *width << "]";
@@ -4480,6 +4484,10 @@ namespace grh::emit
                         reportError("kSliceDynamic width exceeds scalar", context);
                     }
                     expr << valueName(operands[0]);
+                }
+                else if (*width == 1)
+                {
+                    expr << valueName(operands[0]) << "[" << valueName(operands[1]) << "]";
                 }
                 else
                 {
