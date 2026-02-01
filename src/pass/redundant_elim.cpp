@@ -267,6 +267,29 @@ namespace wolf_sv_parser::transform
             return count > 0;
         }
 
+        bool isLogicNotOf(const grh::ir::Graph &graph,
+                          grh::ir::ValueId maybeNot,
+                          grh::ir::ValueId operand)
+        {
+            if (!maybeNot.valid() || !operand.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = graph.getValue(maybeNot).definingOp();
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            const grh::ir::Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() != grh::ir::OperationKind::kLogicNot &&
+                defOp.kind() != grh::ir::OperationKind::kNot)
+            {
+                return false;
+            }
+            const auto &ops = defOp.operands();
+            return !ops.empty() && ops.front() == operand;
+        }
+
         grh::ir::SymbolId makeInlineConstSymbol(grh::ir::Graph &graph,
                                                 std::string_view baseName)
         {
@@ -286,6 +309,34 @@ namespace wolf_sv_parser::transform
                 candidate = base + "__const_inline_" + std::to_string(++suffix);
             }
             return graph.internSymbol(candidate);
+        }
+
+        grh::ir::ValueId createInlineConst(grh::ir::Graph &graph,
+                                           std::string_view baseName,
+                                           int32_t width,
+                                           bool isSigned,
+                                           std::string_view literal)
+        {
+            std::string base;
+            if (!baseName.empty())
+            {
+                base = std::string(baseName);
+            }
+            else
+            {
+                base = "__const_inline";
+            }
+            const grh::ir::SymbolId valueSym =
+                makeInlineConstSymbol(graph, base + "__value");
+            const grh::ir::SymbolId opSym =
+                makeInlineConstSymbol(graph, base + "__op");
+            const grh::ir::ValueId val =
+                graph.createValue(valueSym, width, isSigned);
+            const grh::ir::OperationId op =
+                graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
+            graph.addResult(op, val);
+            graph.setAttr(op, "constValue", std::string(literal));
+            return val;
         }
 
         void replaceUsers(grh::ir::Graph &graph,
@@ -450,6 +501,57 @@ namespace wolf_sv_parser::transform
                             progress = true;
                         }
                         continue;
+                    }
+
+                    if (op.kind() == grh::ir::OperationKind::kLogicOr &&
+                        operands.size() >= 2 && results.size() == 1)
+                    {
+                        const grh::ir::ValueId resultId = results[0];
+                        if (!resultId.valid())
+                        {
+                            continue;
+                        }
+                        const grh::ir::Value resultValue = graph.getValue(resultId);
+                        if (resultValue.width() != 1)
+                        {
+                            continue;
+                        }
+                        bool alwaysTrue = false;
+                        for (std::size_t i = 0; i < operands.size() && !alwaysTrue; ++i)
+                        {
+                            const grh::ir::ValueId lhs = operands[i];
+                            if (!lhs.valid())
+                            {
+                                continue;
+                            }
+                            for (std::size_t j = i + 1; j < operands.size(); ++j)
+                            {
+                                const grh::ir::ValueId rhs = operands[j];
+                                if (!rhs.valid())
+                                {
+                                    continue;
+                                }
+                                if (isLogicNotOf(graph, lhs, rhs) ||
+                                    isLogicNotOf(graph, rhs, lhs))
+                                {
+                                    alwaysTrue = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (alwaysTrue)
+                        {
+                            auto onError = [&](const std::string &msg)
+                            { this->error(graph, op, msg); };
+                            grh::ir::ValueId constOne =
+                                createInlineConst(graph, resultValue.symbolText(),
+                                                  1, resultValue.isSigned(), "1'b1");
+                            replaceUsers(graph, resultId, constOne, onError);
+                            graph.eraseOp(opId);
+                            graphChanged = true;
+                            progress = true;
+                            continue;
+                        }
                     }
 
                     if (op.kind() == grh::ir::OperationKind::kAssign &&

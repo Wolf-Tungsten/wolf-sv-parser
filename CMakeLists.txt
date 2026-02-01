@@ -216,6 +216,17 @@ target_link_libraries(transform-dead-code-elim
 
 register_test_exe(transform-dead-code-elim)
 
+add_executable(transform-redundant-elim
+    tests/transform/test_redundant_elim_pass.cpp
+)
+
+target_link_libraries(transform-redundant-elim
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-redundant-elim)
+
 # convert: symbol collector
 add_executable(convert-symbol-collector
     tests/convert/test_convert_symbol_collector.cpp
