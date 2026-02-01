@@ -30,7 +30,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 - 由变量构建 Value，读写关系构建 Op，最终形成 Graph 和 Netlist
 
-------
+
 
 ## STEP 0001 - 更新 GRH 表示定义（kMemory 端口与四态逻辑）
 
@@ -44,12 +44,6 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 已补充四态逻辑语义说明
 
 完成情况：已完成
-
-## 本次修改记录
-
-- 2026-02-01：整理 STEP 顺序并将“Transform pass 合并与冗余清理”调整为 STEP 0045；记录本次为 redundant_elim 增加无副作用冗余 op 消除；构建通过（`cmake --build build -j$(nproc)`），未运行 CTest。
-
-------
 
 ## STEP 0002 - 制定 Convert 新架构与工作流方案
 
@@ -864,7 +858,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
-------
+
 
 ## STEP 0042 - 逻辑操作数与切片拼接简化
 
@@ -878,7 +872,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
-------
+
 
 ## STEP 0043 - 写回切片全覆盖的直接拼接
 
@@ -892,7 +886,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 完成情况：已完成
 
-------
+
 
 ## STEP 0044 - Case 二值优先与四值回退（综合友好）
 
@@ -930,3 +924,49 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - HDLBits 全量测试（用户执行）
 
 完成情况：已完成
+
+
+
+## STEP 0046 - 移除 RWAnalyzer Pass3
+
+目标：
+- 移除 Pass3（RWAnalyzer）相关实现与调用，避免维护未使用的分析结果
+- 清理配套测试与文档描述，保证架构/流程一致
+
+计划：
+- 删除 `RWAnalyzerPass`、`RWAnalyzerState`、`RWVisitor` 与相关辅助函数（`encodeRWKey`/`encodeMemKey` 等）
+- 移除 `ModulePlan.rwOps`/`memPorts` 与 `RWOp`/`MemoryPortInfo` 数据结构（若无其他依赖）
+- 移除 `tests/convert/test_convert_rw_analyzer.cpp` 并更新 `CMakeLists.txt` 测试目标
+- 更新文档：`docs/convert/convert-architecture.md`、`docs/convert/convert-workflow.md`、`docs/convert/convert-kimi.md` 中的 Pass3/RWOp/memPorts 描述
+
+实施：
+- 删除 ConvertDriver 中对 `RWAnalyzerPass` 的构建与调用
+- 清理 convert 头/源中遗留的类型与字段引用
+- 删除对应测试与 fixture 引用，确保 CTest 配置无悬挂目标
+- 文档同步：移除 Pass3 章节与数据结构说明，必要时补充“RWAnalyzer 已移除”的变更说明
+
+完成情况：未开始
+
+
+
+## STEP 0047 - 合并 Pass4/Pass5（ExprLowerer/StmtLowerer）
+
+目标：
+- 合并 ExprLowererPass 与 StmtLowererPass，减少重复的表达式降级逻辑
+- 移除 `LoweringPlan.roots`/`nextRoot` 等跨 Pass 依赖，统一由单 Pass 生成 `LoweringPlan`
+
+计划：
+- 在 `src/convert.cpp` 里合并两套 `lowerExpression` 实现，保留 Pass5 版本并删除 Pass4 版本
+- 移除 `LoweredRoot` 与 `LoweringPlan.roots`，以及 `ExprLowererState` 与 `takeNextRoot/resolveAssignmentRoot`
+- 调整 `StmtLowererState::handleAssignment` 与 `scanExpression`，直接对 RHS 统一降级并缓存
+- 更新 `ConvertDriver` 调度，删除 Pass4 实例与调用（保留 Pass5）
+- 更新文档：`convert-workflow`/`convert-architecture`/`convert-kimi` 中关于 Pass4/roots/nextRoot 的描述
+- 清理测试/fixtures（若有依赖 Pass4 行为的断言）
+
+实施：
+- 将 Pass5 的表达式降级作为唯一实现，统一处理 `widthContext`、conversion、packed index 调整等逻辑
+- 新增或调整缓存策略以替代 `roots` 顺序：对 assignment RHS 直接 `lowerExpression` 并在 Pass5 内去重
+- 维护 temp symbol 命名的可预期顺序（与现有输出一致或更新 fixture）
+- 删除 `ExprLowererPass` 类与相关声明
+
+完成情况：未开始
