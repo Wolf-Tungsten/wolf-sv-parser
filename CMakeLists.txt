@@ -227,6 +227,17 @@ target_link_libraries(transform-redundant-elim
 
 register_test_exe(transform-redundant-elim)
 
+add_executable(transform-xmr-resolve-inout
+    tests/transform/test_xmr_resolve_inout.cpp
+)
+
+target_link_libraries(transform-xmr-resolve-inout
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-xmr-resolve-inout)
+
 # convert: symbol collector
 add_executable(convert-symbol-collector
     tests/convert/test_convert_symbol_collector.cpp

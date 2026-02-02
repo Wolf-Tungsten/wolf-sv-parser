@@ -18,6 +18,7 @@
 #include "slang/ast/statements/LoopStatements.h"
 #include "slang/ast/statements/MiscStatements.h"
 #include "slang/numeric/SVInt.h"
+
 #include "slang/ast/symbols/AttributeSymbol.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
@@ -839,6 +840,9 @@ std::optional<grh::ir::OperationKind> mapBinaryOp(slang::ast::BinaryOperator op)
     return std::nullopt;
 }
 
+PlanSymbolId resolveSimpleSymbolForPlan(const slang::ast::Expression& expr,
+                                        const ModulePlan& plan);
+
 struct StmtLowererState {
     class AssignmentExprVisitor;
 
@@ -951,6 +955,366 @@ struct StmtLowererState {
           maxLoopIterations(maxLoopIterations)
     {
         nextTemp = static_cast<uint32_t>(lowering.tempSymbols.size());
+    }
+
+    const PortInfo* findPortBySymbol(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& port : plan.ports)
+        {
+            if (port.symbol.index == symbol.index)
+            {
+                return &port;
+            }
+        }
+        return nullptr;
+    }
+
+    const PortInfo::InoutBinding* inoutBindingForSymbol(PlanSymbolId symbol) const
+    {
+        const PortInfo* port = findPortBySymbol(symbol);
+        if (!port || port->direction != PortDirection::Inout || !port->inoutSymbol)
+        {
+            return nullptr;
+        }
+        return &(*port->inoutSymbol);
+    }
+
+    bool isInoutPortSymbol(PlanSymbolId symbol) const
+    {
+        return inoutBindingForSymbol(symbol) != nullptr;
+    }
+
+    const slang::ast::Expression* peelImplicit(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = &expr;
+        while (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+        {
+            if (!conversion->isImplicit())
+            {
+                break;
+            }
+            current = &conversion->operand();
+        }
+        return current;
+    }
+
+    bool isAllZExpr(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = peelImplicit(expr);
+        if (!current)
+        {
+            return false;
+        }
+        if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+        {
+            return isAllZExpr(conversion->operand());
+        }
+        if (const auto* constant = current->getConstant())
+        {
+            if (constant->isInteger())
+            {
+                const slang::SVInt& literal = constant->integer();
+                if (literal.getBitWidth() > 0 &&
+                    literal.countZs() == literal.getBitWidth())
+                {
+                    return true;
+                }
+            }
+        }
+        if (const auto* literal = current->as_if<slang::ast::IntegerLiteral>())
+        {
+            const slang::SVInt& value = literal->getValue();
+            if (value.getBitWidth() > 0 && value.countZs() == value.getBitWidth())
+            {
+                return true;
+            }
+        }
+        if (const auto* literal =
+                current->as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
+        {
+            const slang::SVInt& value = literal->getValue();
+            if (value.getBitWidth() > 0 && value.countZs() == value.getBitWidth())
+            {
+                return true;
+            }
+        }
+        if (const auto* repl = current->as_if<slang::ast::ReplicationExpression>())
+        {
+            if (!isAllZExpr(repl->concat()))
+            {
+                return false;
+            }
+            const slang::ConstantValue* countValue = repl->count().getConstant();
+            if (!countValue || !countValue->isInteger() || countValue->hasUnknown())
+            {
+                return false;
+            }
+            auto count = countValue->integer().as<int64_t>();
+            if (!count || *count <= 0)
+            {
+                return false;
+            }
+            return true;
+        }
+        if (const auto* concat = current->as_if<slang::ast::ConcatenationExpression>())
+        {
+            bool sawOperand = false;
+            for (const slang::ast::Expression* operand : concat->operands())
+            {
+                if (!operand)
+                {
+                    continue;
+                }
+                sawOperand = true;
+                if (!isAllZExpr(*operand))
+                {
+                    return false;
+                }
+            }
+            return sawOperand;
+        }
+        if (const auto* stream =
+                current->as_if<slang::ast::StreamingConcatenationExpression>())
+        {
+            if (stream->getSliceSize() != 0)
+            {
+                return false;
+            }
+            bool sawOperand = false;
+            for (const auto& element : stream->streams())
+            {
+                if (element.withExpr || !element.operand)
+                {
+                    return false;
+                }
+                sawOperand = true;
+                if (!isAllZExpr(*element.operand))
+                {
+                    return false;
+                }
+            }
+            return sawOperand;
+        }
+        return false;
+    }
+
+    bool containsZLiteral(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = peelImplicit(expr);
+        if (!current)
+        {
+            return false;
+        }
+        if (const auto* conversion = current->as_if<slang::ast::ConversionExpression>())
+        {
+            return containsZLiteral(conversion->operand());
+        }
+        if (const auto* constant = current->getConstant())
+        {
+            if (constant->isInteger())
+            {
+                const slang::SVInt& literal = constant->integer();
+                if (literal.countZs() > 0)
+                {
+                    return true;
+                }
+            }
+        }
+        if (const auto* literal = current->as_if<slang::ast::IntegerLiteral>())
+        {
+            if (literal->getValue().countZs() > 0)
+            {
+                return true;
+            }
+        }
+        if (const auto* literal =
+                current->as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
+        {
+            if (literal->getValue().countZs() > 0)
+            {
+                return true;
+            }
+        }
+        if (const auto* repl = current->as_if<slang::ast::ReplicationExpression>())
+        {
+            return containsZLiteral(repl->concat());
+        }
+        if (const auto* concat = current->as_if<slang::ast::ConcatenationExpression>())
+        {
+            for (const slang::ast::Expression* operand : concat->operands())
+            {
+                if (!operand)
+                {
+                    continue;
+                }
+                if (containsZLiteral(*operand))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (const auto* stream =
+                current->as_if<slang::ast::StreamingConcatenationExpression>())
+        {
+            for (const auto& element : stream->streams())
+            {
+                if (element.operand && containsZLiteral(*element.operand))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    bool handleInoutAssignment(const slang::ast::AssignmentExpression& expr,
+                               const LValueTarget& target)
+    {
+        if (!target.slices.empty())
+        {
+            reportUnsupported(expr, "Unsupported inout slice assignment");
+            return true;
+        }
+
+        const PortInfo* port = findPortBySymbol(target.target);
+        const PortInfo::InoutBinding* binding = inoutBindingForSymbol(target.target);
+        if (!port || !binding)
+        {
+            return false;
+        }
+
+        int32_t portWidth = port->width;
+        if (portWidth <= 0)
+        {
+            const uint64_t widthRaw = computeFixedWidth(*expr.left().type, *plan.body,
+                                                        diagnostics);
+            if (widthRaw > 0)
+            {
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                portWidth = widthRaw > maxValue
+                                ? std::numeric_limits<int32_t>::max()
+                                : static_cast<int32_t>(widthRaw);
+            }
+        }
+        if (portWidth <= 0)
+        {
+            portWidth = 1;
+        }
+
+        const slang::ast::Expression* rhs = peelImplicit(expr.right());
+        if (!rhs)
+        {
+            return false;
+        }
+
+        ExprNodeId outExpr = kInvalidPlanIndex;
+        ExprNodeId oeExpr = kInvalidPlanIndex;
+
+        if (const auto* condExpr = rhs->as_if<slang::ast::ConditionalExpression>())
+        {
+            if (condExpr->conditions.size() == 1)
+            {
+                const slang::ast::Expression& condAst = *condExpr->conditions[0].expr;
+                const slang::ast::Expression* left = peelImplicit(condExpr->left());
+                const slang::ast::Expression* right = peelImplicit(condExpr->right());
+                if (left && right)
+                {
+                    PlanSymbolId condSym = resolveSimpleSymbolForPlan(condAst, plan);
+                    PlanSymbolId leftSym = resolveSimpleSymbolForPlan(*left, plan);
+                    PlanSymbolId rightSym = resolveSimpleSymbolForPlan(*right, plan);
+                    const bool condMatches =
+                        condSym.valid() &&
+                        condSym.index == binding->oeSymbol.index;
+                    const bool leftMatches =
+                        leftSym.valid() &&
+                        leftSym.index == binding->outSymbol.index;
+                    const bool rightMatches =
+                        rightSym.valid() &&
+                        rightSym.index == binding->outSymbol.index;
+                    const bool leftHasZ = containsZLiteral(*left);
+                    const bool rightHasZ = containsZLiteral(*right);
+                    if (condMatches &&
+                        ((leftMatches && rightHasZ) ||
+                         (rightMatches && leftHasZ)))
+                    {
+                        return true;
+                    }
+                    const bool leftZ = isAllZExpr(*left);
+                    const bool rightZ = isAllZExpr(*right);
+                    if (leftZ != rightZ)
+                    {
+                        ExprNodeId condId = lowerExpression(condAst);
+                        if (condId == kInvalidPlanIndex)
+                        {
+                            return false;
+                        }
+                        condId = makeLogicNot(makeLogicNot(condId, expr.sourceRange.start()),
+                                              expr.sourceRange.start());
+                        if (rightZ)
+                        {
+                            outExpr = lowerExpression(*left);
+                            oeExpr = condId;
+                        }
+                        else
+                        {
+                            outExpr = lowerExpression(*right);
+                            oeExpr = makeLogicNot(condId, expr.sourceRange.start());
+                        }
+                    }
+                }
+            }
+        }
+
+        if (outExpr == kInvalidPlanIndex || oeExpr == kInvalidPlanIndex)
+        {
+            if (isAllZExpr(*rhs))
+            {
+                outExpr = addConstantLiteral("0", expr.sourceRange.start());
+                oeExpr = addConstantLiteral("1'b0", expr.sourceRange.start());
+            }
+            else
+            {
+                outExpr = lowerExpression(*rhs);
+                oeExpr = addConstantLiteral("1'b1", expr.sourceRange.start());
+            }
+        }
+
+        if (outExpr == kInvalidPlanIndex || oeExpr == kInvalidPlanIndex)
+        {
+            return false;
+        }
+
+        outExpr = resizeValueToWidth(outExpr, portWidth, port->isSigned,
+                                     expr.sourceRange.start());
+        oeExpr = resizeValueToWidth(oeExpr, portWidth, false, expr.sourceRange.start());
+
+        ExprNodeId guard = currentGuard(expr.sourceRange.start());
+        WriteIntent outIntent;
+        outIntent.target = binding->outSymbol;
+        outIntent.value = outExpr;
+        outIntent.guard = guard;
+        outIntent.domain = domain;
+        outIntent.isNonBlocking = expr.isNonBlocking();
+        outIntent.location = expr.sourceRange.start();
+        recordWriteIntent(std::move(outIntent));
+
+        WriteIntent oeIntent;
+        oeIntent.target = binding->oeSymbol;
+        oeIntent.value = oeExpr;
+        oeIntent.guard = guard;
+        oeIntent.domain = domain;
+        oeIntent.isNonBlocking = expr.isNonBlocking();
+        oeIntent.location = expr.sourceRange.start();
+        recordWriteIntent(std::move(oeIntent));
+
+        return true;
     }
 
     void scanExpression(const slang::ast::Expression& expr)
@@ -1504,6 +1868,15 @@ struct StmtLowererState {
         if (targets.empty())
         {
             reportUnsupported(expr, "Unsupported LHS in assignment");
+            return;
+        }
+        if (targets.size() == 1 && !composite.isComposite &&
+            isInoutPortSymbol(targets.front().target))
+        {
+            if (!handleInoutAssignment(expr, targets.front()))
+            {
+                reportUnsupported(expr, "Unsupported inout port assignment");
+            }
             return;
         }
         if (const auto* assigned = resolveAssignedValueSymbol(expr.left()))
@@ -6392,6 +6765,125 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
     }
 }
 
+PlanSymbolId resolveSimpleSymbolForPlan(const slang::ast::Expression& expr,
+                                        const ModulePlan& plan)
+{
+    if (const auto* assign = expr.as_if<slang::ast::AssignmentExpression>())
+    {
+        if (assign->isLValueArg())
+        {
+            return resolveSimpleSymbolForPlan(assign->left(), plan);
+        }
+        return resolveSimpleSymbolForPlan(assign->right(), plan);
+    }
+    if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
+    {
+        return plan.symbolTable.lookup(named->symbol.name);
+    }
+    if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
+    {
+        return resolveSimpleSymbolForPlan(conversion->operand(), plan);
+    }
+    return {};
+}
+
+const SignalInfo* findSignalBySymbol(const ModulePlan& plan, PlanSymbolId symbol)
+{
+    if (!symbol.valid())
+    {
+        return nullptr;
+    }
+    for (const auto& signal : plan.signals)
+    {
+        if (signal.symbol.index == symbol.index)
+        {
+            return &signal;
+        }
+    }
+    return nullptr;
+}
+
+bool hasInoutSignalBinding(const ModulePlan& plan, PlanSymbolId symbol)
+{
+    if (!symbol.valid())
+    {
+        return false;
+    }
+    for (const auto& info : plan.inoutSignals)
+    {
+        if (info.symbol.index == symbol.index)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void collectInoutSignals(ModulePlan& plan)
+{
+    for (const auto& instanceInfo : plan.instances)
+    {
+        if (!instanceInfo.instance)
+        {
+            continue;
+        }
+        const slang::ast::InstanceSymbol& instance = *instanceInfo.instance;
+        const slang::ast::InstanceBodySymbol& body = instance.body;
+        for (const slang::ast::Symbol* portSymbol : body.getPortList())
+        {
+            if (!portSymbol)
+            {
+                continue;
+            }
+            const auto* port = portSymbol->as_if<slang::ast::PortSymbol>();
+            if (!port || port->direction != slang::ast::ArgumentDirection::InOut)
+            {
+                continue;
+            }
+            const slang::ast::PortConnection* connection =
+                instance.getPortConnection(*port);
+            const slang::ast::Expression* expr =
+                connection ? connection->getExpression() : nullptr;
+            if (!expr || expr->bad())
+            {
+                continue;
+            }
+            PlanSymbolId symbol = resolveSimpleSymbolForPlan(*expr, plan);
+            if (!symbol.valid())
+            {
+                continue;
+            }
+            std::string_view name = plan.symbolTable.text(symbol);
+            if (name.empty())
+            {
+                continue;
+            }
+            if (const PortInfo* portInfo = findPortByName(plan, name))
+            {
+                if (portInfo->direction == PortDirection::Inout && portInfo->inoutSymbol)
+                {
+                    continue;
+                }
+                continue;
+            }
+            const SignalInfo* signal = findSignalBySymbol(plan, symbol);
+            if (!signal || signal->kind != SignalKind::Net)
+            {
+                continue;
+            }
+            if (hasInoutSignalBinding(plan, symbol))
+            {
+                continue;
+            }
+            std::string base(name);
+            PortInfo::InoutBinding binding{symbol,
+                                           plan.symbolTable.intern(base + "__out"),
+                                           plan.symbolTable.intern(base + "__oe")};
+            plan.inoutSignals.push_back(InoutSignalInfo{symbol, binding});
+        }
+    }
+}
+
 void enqueuePlanKey(ConvertContext& context, const slang::ast::InstanceBodySymbol& body,
                     std::string paramSignature = {})
 {
@@ -6946,6 +7438,7 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
     collectPorts(body, plan, context_.diagnostics);
     collectSignals(body, plan, context_.diagnostics);
     collectInstances(body, plan, context_);
+    collectInoutSignals(plan);
     return plan;
 }
 
@@ -9570,6 +10063,7 @@ public:
     {
         createPortValues();
         createSignalValues();
+        createInoutSignalValues();
         createMemoryOps();
         emitMemoryPorts();
         emitSideEffects();
@@ -9729,6 +10223,71 @@ private:
             }
             const int32_t width = normalizeWidth(signal.width);
             createValue(signal.symbol, width, signal.isSigned);
+        }
+    }
+
+    const SignalInfo* findSignalInfo(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& signal : plan_.signals)
+        {
+            if (signal.symbol.index == symbol.index)
+            {
+                return &signal;
+            }
+        }
+        return nullptr;
+    }
+
+    const InoutSignalInfo* findInoutSignalInfo(PlanSymbolId symbol) const
+    {
+        if (!symbol.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& info : plan_.inoutSignals)
+        {
+            if (info.symbol.index == symbol.index ||
+                info.binding.inSymbol.index == symbol.index ||
+                info.binding.outSymbol.index == symbol.index ||
+                info.binding.oeSymbol.index == symbol.index)
+            {
+                return &info;
+            }
+        }
+        return nullptr;
+    }
+
+    void createInoutSignalValues()
+    {
+        for (const auto& info : plan_.inoutSignals)
+        {
+            const SignalInfo* signal = findSignalInfo(info.symbol);
+            if (!signal)
+            {
+                continue;
+            }
+            const int32_t width = normalizeWidth(signal->width);
+            createValue(info.binding.outSymbol, width, signal->isSigned);
+            grh::ir::ValueId oeValue = createValue(info.binding.oeSymbol, width, false);
+            if (!oeValue.valid())
+            {
+                continue;
+            }
+            if (graph_.getValue(oeValue).definingOp().valid())
+            {
+                continue;
+            }
+            const std::string literal = std::to_string(width) + "'b0";
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kConstant,
+                         grh::ir::SymbolId::invalid(),
+                         slang::SourceLocation{});
+            graph_.addResult(op, oeValue);
+            graph_.setAttr(op, "constValue", literal);
         }
     }
 
@@ -10508,8 +11067,11 @@ private:
             std::vector<std::string> inputNames;
             std::vector<std::string> outputNames;
             std::vector<std::string> inoutNames;
-            std::vector<grh::ir::ValueId> operands;
-            std::vector<grh::ir::ValueId> results;
+            std::vector<grh::ir::ValueId> inputOperands;
+            std::vector<grh::ir::ValueId> outputResults;
+            std::vector<grh::ir::ValueId> inoutOutOperands;
+            std::vector<grh::ir::ValueId> inoutOeOperands;
+            std::vector<grh::ir::ValueId> inoutInResults;
             bool ok = true;
 
             for (const slang::ast::Symbol* portSymbol : body.getPortList())
@@ -10557,7 +11119,7 @@ private:
                         ok = false;
                         break;
                     }
-                    operands.push_back(value);
+                    inputOperands.push_back(value);
                     break;
                 }
                 case slang::ast::ArgumentDirection::Out: {
@@ -10577,7 +11139,7 @@ private:
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
                             graph_.createValue(tempSym, width, false);
-                        results.push_back(tempValue);
+                        outputResults.push_back(tempValue);
                         break;
                     }
                     outputNames.emplace_back(port->name);
@@ -10612,13 +11174,13 @@ private:
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
                             graph_.createValue(tempSym, binding.width, false);
-                        results.push_back(tempValue);
+                        outputResults.push_back(tempValue);
                         instanceXmrWrites_.push_back(
                             InstanceXmrWrite{std::move(binding.xmrPath), tempValue,
                                              binding.location});
                         break;
                     }
-                    if (const PortInfo* inout = resolveInoutPort(binding.target))
+                    if (resolveInoutBinding(binding.target))
                     {
                         if (context_.diagnostics)
                         {
@@ -10669,7 +11231,7 @@ private:
                         graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                     grh::ir::ValueId tempValue =
                         graph_.createValue(tempSym, binding.width, false);
-                    results.push_back(tempValue);
+                    outputResults.push_back(tempValue);
                     instanceSliceWrites_[binding.target.index].push_back(
                         InstanceSliceWrite{binding.target, binding.low,
                                            binding.width, tempValue,
@@ -10689,8 +11251,8 @@ private:
                         break;
                     }
                     inoutNames.emplace_back(port->name);
-                    const PortInfo* inoutPort = resolveInoutPort(*expr);
-                    if (!inoutPort || !inoutPort->inoutSymbol)
+                    const PortInfo::InoutBinding* inoutBinding = resolveInoutBinding(*expr);
+                    if (!inoutBinding)
                     {
                         if (context_.diagnostics)
                         {
@@ -10701,7 +11263,7 @@ private:
                         ok = false;
                         break;
                     }
-                    const auto& binding = *inoutPort->inoutSymbol;
+                    const auto& binding = *inoutBinding;
                     grh::ir::ValueId inValue = valueForSymbol(binding.inSymbol);
                     grh::ir::ValueId outValue = valueForSymbol(binding.outSymbol);
                     grh::ir::ValueId oeValue = valueForSymbol(binding.oeSymbol);
@@ -10716,9 +11278,9 @@ private:
                         ok = false;
                         break;
                     }
-                    operands.push_back(outValue);
-                    operands.push_back(oeValue);
-                    results.push_back(inValue);
+                    inoutOutOperands.push_back(outValue);
+                    inoutOeOperands.push_back(oeValue);
+                    inoutInResults.push_back(inValue);
                     break;
                 }
                 default:
@@ -10742,6 +11304,16 @@ private:
             {
                 continue;
             }
+
+            std::vector<grh::ir::ValueId> operands;
+            std::vector<grh::ir::ValueId> results;
+            operands.reserve(inputOperands.size() + inoutOutOperands.size() + inoutOeOperands.size());
+            operands.insert(operands.end(), inputOperands.begin(), inputOperands.end());
+            operands.insert(operands.end(), inoutOutOperands.begin(), inoutOutOperands.end());
+            operands.insert(operands.end(), inoutOeOperands.begin(), inoutOeOperands.end());
+            results.reserve(outputResults.size() + inoutInResults.size());
+            results.insert(results.end(), outputResults.begin(), outputResults.end());
+            results.insert(results.end(), inoutInResults.begin(), inoutInResults.end());
 
             const std::string moduleNameText =
                 instanceInfo.moduleSymbol.valid()
@@ -11120,13 +11692,14 @@ private:
         return {};
     }
 
-    const PortInfo* resolveInoutPort(const slang::ast::Expression& expr) const
+    const PortInfo::InoutBinding* resolveInoutBinding(
+        const slang::ast::Expression& expr) const
     {
         PlanSymbolId symbol = resolveSimpleSymbol(expr);
-        return resolveInoutPort(symbol);
+        return resolveInoutBinding(symbol);
     }
 
-    const PortInfo* resolveInoutPort(PlanSymbolId symbol) const
+    const PortInfo::InoutBinding* resolveInoutBinding(PlanSymbolId symbol) const
     {
         if (!symbol.valid())
         {
@@ -11142,11 +11715,15 @@ private:
         {
             port = findPortByInoutName(plan_, name);
         }
-        if (!port || port->direction != PortDirection::Inout || !port->inoutSymbol)
+        if (port && port->direction == PortDirection::Inout && port->inoutSymbol)
         {
-            return nullptr;
+            return &(*port->inoutSymbol);
         }
-        return port;
+        if (const InoutSignalInfo* info = findInoutSignalInfo(symbol))
+        {
+            return &info->binding;
+        }
+        return nullptr;
     }
 
     void registerExprNode()
@@ -11223,9 +11800,10 @@ private:
                 }
                 node.kind = ExprNodeKind::Symbol;
                 node.symbol = state_.plan_.symbolTable.lookup(named->symbol.name);
-                if (const PortInfo* inout = state_.resolveInoutPort(node.symbol))
+                if (const PortInfo::InoutBinding* inout =
+                        state_.resolveInoutBinding(node.symbol))
                 {
-                    node.symbol = inout->inoutSymbol->inSymbol;
+                    node.symbol = inout->inSymbol;
                 }
                 if (!node.symbol.valid())
                 {

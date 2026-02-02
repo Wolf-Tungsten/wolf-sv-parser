@@ -211,6 +211,11 @@ struct PortInfo {
     std::optional<InoutBinding> inoutSymbol;
 };
 
+struct InoutSignalInfo {
+    PlanSymbolId symbol;
+    PortInfo::InoutBinding binding;
+};
+
 struct UnpackedDimInfo {
     int32_t extent = 1;
     int32_t left = 0;
@@ -248,6 +253,7 @@ struct ModulePlan {
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
     std::vector<InstanceInfo> instances;
+    std::vector<InoutSignalInfo> inoutSignals;
 };
 
 inline const PortInfo* findPortByName(const ModulePlan& plan, std::string_view name)

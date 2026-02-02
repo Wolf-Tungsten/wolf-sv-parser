@@ -216,6 +216,7 @@ namespace wolf_sv_parser::transform
                                         bool isSigned) -> grh::ir::ValueId {
             const grh::ir::Operation op = graph.getOperation(opId);
             auto names = getAttrStrings(op, "outputPortName");
+            const auto inoutNames = getAttrStrings(op, "inoutPortName");
             const auto resultsSpan = op.results();
             const std::size_t limit = std::min(names.size(), resultsSpan.size());
             for (std::size_t i = 0; i < limit; ++i)
@@ -230,7 +231,12 @@ namespace wolf_sv_parser::transform
             std::string symName = makeUniqueSymbol(graph, base);
             grh::ir::SymbolId sym = graph.internSymbol(symName);
             grh::ir::ValueId value = graph.createValue(sym, normalizeWidth(width), isSigned);
-            graph.addResult(opId, value);
+            const std::size_t inoutCount = inoutNames.size();
+            const std::size_t resultCount = resultsSpan.size();
+            const std::size_t outputLimit =
+                resultCount > inoutCount ? resultCount - inoutCount : 0U;
+            const std::size_t insertIndex = std::min(names.size(), outputLimit);
+            graph.insertResult(opId, insertIndex, value);
             names.push_back(portName);
             graph.setAttr(opId, "outputPortName", names);
             result.changed = true;
@@ -243,6 +249,7 @@ namespace wolf_sv_parser::transform
                                        grh::ir::ValueId value) -> grh::ir::ValueId {
             const grh::ir::Operation op = graph.getOperation(opId);
             auto names = getAttrStrings(op, "inputPortName");
+            const auto inoutNames = getAttrStrings(op, "inoutPortName");
             const auto operandsSpan = op.operands();
             const std::size_t limit = std::min(names.size(), operandsSpan.size());
             for (std::size_t i = 0; i < limit; ++i)
@@ -256,7 +263,12 @@ namespace wolf_sv_parser::transform
                     return operandsSpan[i];
                 }
             }
-            graph.addOperand(opId, value);
+            const std::size_t inoutCount = inoutNames.size();
+            const std::size_t operandCount = operandsSpan.size();
+            const std::size_t inputLimit =
+                operandCount > inoutCount * 2 ? operandCount - inoutCount * 2 : 0U;
+            const std::size_t insertIndex = std::min(names.size(), inputLimit);
+            graph.insertOperand(opId, insertIndex, value);
             names.push_back(portName);
             graph.setAttr(opId, "inputPortName", names);
             result.changed = true;

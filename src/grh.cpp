@@ -825,6 +825,26 @@ namespace grh::ir
         operations_[opIdx].operands.push_back(value);
     }
 
+    void GraphBuilder::insertOperand(OperationId op, std::size_t index, ValueId value)
+    {
+        const std::size_t opIdx = opIndex(op);
+        const std::size_t valIdx = valueIndex(value);
+        if (!operations_[opIdx].alive)
+        {
+            throw std::runtime_error("OperationId refers to erased operation");
+        }
+        if (!values_[valIdx].alive)
+        {
+            throw std::runtime_error("ValueId refers to erased value");
+        }
+        auto &operands = operations_[opIdx].operands;
+        if (index > operands.size())
+        {
+            throw std::runtime_error("Operand index out of range");
+        }
+        operands.insert(operands.begin() + static_cast<std::ptrdiff_t>(index), value);
+    }
+
     void GraphBuilder::addResult(OperationId op, ValueId value)
     {
         const std::size_t opIdx = opIndex(op);
@@ -927,6 +947,115 @@ namespace grh::ir
             data.srcLoc = operations_[opIdx].srcLoc;
         }
         operations_[opIdx].results.push_back(value);
+    }
+
+    void GraphBuilder::insertResult(OperationId op, std::size_t index, ValueId value)
+    {
+        const std::size_t opIdx = opIndex(op);
+        const std::size_t valIdx = valueIndex(value);
+        if (!operations_[opIdx].alive)
+        {
+            throw std::runtime_error("OperationId refers to erased operation");
+        }
+        if (!values_[valIdx].alive)
+        {
+            throw std::runtime_error("ValueId refers to erased value");
+        }
+        auto &results = operations_[opIdx].results;
+        if (index > results.size())
+        {
+            throw std::runtime_error("Result index out of range");
+        }
+        ValueData &data = values_[valIdx];
+        if (data.definingOp.valid())
+        {
+            auto describeValue = [&](ValueId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "value=<invalid>";
+                }
+                std::string out = "value_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > values_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const ValueData &valueData = values_[idx - 1];
+                if (symbols_ && valueData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(valueData.symbol)) + ")";
+                }
+                out += " w=" + std::to_string(valueData.width);
+                out += valueData.isSigned ? " signed" : " unsigned";
+                if (valueData.isInput)
+                {
+                    out += " input";
+                }
+                if (valueData.isOutput)
+                {
+                    out += " output";
+                }
+                const std::string loc = formatSrcLocForDebug(valueData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+            auto describeOp = [&](OperationId id) -> std::string {
+                if (!id.valid())
+                {
+                    return "op=<invalid>";
+                }
+                std::string out = "op_" + std::to_string(id.index);
+                if (id.graph != graphId_)
+                {
+                    out += " graph_mismatch";
+                    return out;
+                }
+                const std::size_t idx = static_cast<std::size_t>(id.index);
+                if (idx == 0 || idx > operations_.size())
+                {
+                    out += " out_of_range";
+                    return out;
+                }
+                const OperationData &opData = operations_[idx - 1];
+                out += " kind=";
+                out += std::string(toString(opData.kind));
+                if (symbols_ && opData.symbol.valid())
+                {
+                    out += " (" + std::string(symbols_->text(opData.symbol)) + ")";
+                }
+                const std::string loc = formatSrcLocForDebug(opData.srcLoc);
+                if (!loc.empty())
+                {
+                    out += " @";
+                    out += loc;
+                }
+                return out;
+            };
+
+            std::string message = "Value already has a defining operation; ";
+            message += describeValue(value);
+            message += "; new_def=";
+            message += describeOp(op);
+            message += "; existing_def=";
+            message += describeOp(data.definingOp);
+            throw std::runtime_error(message);
+        }
+        data.definingOp = op;
+        if (!data.srcLoc && operations_[opIdx].srcLoc)
+        {
+            data.srcLoc = operations_[opIdx].srcLoc;
+        }
+        results.insert(results.begin() + static_cast<std::ptrdiff_t>(index), value);
     }
 
     void GraphBuilder::replaceOperand(OperationId op, std::size_t index, ValueId value)
@@ -2475,6 +2604,20 @@ namespace grh::ir
         GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         builder.addResult(op, value);
+    }
+
+    void Graph::insertOperand(OperationId op, std::size_t index, ValueId value)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.insertOperand(op, index, value);
+    }
+
+    void Graph::insertResult(OperationId op, std::size_t index, ValueId value)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        builder.insertResult(op, index, value);
     }
 
     void Graph::replaceOperand(OperationId op, std::size_t index, ValueId value)

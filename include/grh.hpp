@@ -337,6 +337,8 @@ public:
     OperationId addOp(OperationKind kind, SymbolId sym);
     void addOperand(OperationId op, ValueId value);
     void addResult(OperationId op, ValueId value);
+    void insertOperand(OperationId op, std::size_t index, ValueId value);
+    void insertResult(OperationId op, std::size_t index, ValueId value);
     void replaceOperand(OperationId op, std::size_t index, ValueId value);
     void replaceResult(OperationId op, std::size_t index, ValueId value);
     void replaceAllUses(ValueId from, ValueId to);
@@ -524,6 +526,8 @@ public:
 
     void addOperand(OperationId op, ValueId value);
     void addResult(OperationId op, ValueId value);
+    void insertOperand(OperationId op, std::size_t index, ValueId value);
+    void insertResult(OperationId op, std::size_t index, ValueId value);
     void replaceOperand(OperationId op, std::size_t index, ValueId value);
     void replaceResult(OperationId op, std::size_t index, ValueId value);
     void replaceAllUses(ValueId from, ValueId to);
