@@ -1176,12 +1176,6 @@ struct StmtLowererState {
     bool handleInoutAssignment(const slang::ast::AssignmentExpression& expr,
                                const LValueTarget& target)
     {
-        if (!target.slices.empty())
-        {
-            reportUnsupported(expr, "Unsupported inout slice assignment");
-            return true;
-        }
-
         const PortInfo* port = findPortBySymbol(target.target);
         const PortInfo::InoutBinding* binding = inoutBindingForSymbol(target.target);
         if (!port || !binding)
@@ -1189,18 +1183,37 @@ struct StmtLowererState {
             return false;
         }
 
+        auto clampWidth = [](uint64_t width) -> int32_t {
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                    : static_cast<int32_t>(width);
+        };
+
         int32_t portWidth = port->width;
+        if (!target.slices.empty())
+        {
+            if (target.width > 0)
+            {
+                portWidth = clampWidth(target.width);
+            }
+            else if (expr.left().type)
+            {
+                const uint64_t widthRaw =
+                    computeFixedWidth(*expr.left().type, *plan.body, diagnostics);
+                if (widthRaw > 0)
+                {
+                    portWidth = clampWidth(widthRaw);
+                }
+            }
+        }
         if (portWidth <= 0)
         {
             const uint64_t widthRaw = computeFixedWidth(*expr.left().type, *plan.body,
                                                         diagnostics);
             if (widthRaw > 0)
             {
-                const uint64_t maxValue =
-                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
-                portWidth = widthRaw > maxValue
-                                ? std::numeric_limits<int32_t>::max()
-                                : static_cast<int32_t>(widthRaw);
+                portWidth = clampWidth(widthRaw);
             }
         }
         if (portWidth <= 0)
@@ -1298,6 +1311,7 @@ struct StmtLowererState {
         ExprNodeId guard = currentGuard(expr.sourceRange.start());
         WriteIntent outIntent;
         outIntent.target = binding->outSymbol;
+        outIntent.slices = target.slices;
         outIntent.value = outExpr;
         outIntent.guard = guard;
         outIntent.domain = domain;
@@ -1307,6 +1321,7 @@ struct StmtLowererState {
 
         WriteIntent oeIntent;
         oeIntent.target = binding->oeSymbol;
+        oeIntent.slices = target.slices;
         oeIntent.value = oeExpr;
         oeIntent.guard = guard;
         oeIntent.domain = domain;
@@ -6167,13 +6182,6 @@ private:
             {
                 return kInvalidPlanIndex;
             }
-            indexExpr =
-                adjustPackedIndex(range->value().type, indexExpr,
-                                  range->sourceRange.start());
-            if (indexExpr == kInvalidPlanIndex)
-            {
-                return kInvalidPlanIndex;
-            }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kSliceDynamic;
             node.operands = {value, indexExpr};
@@ -7670,6 +7678,22 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             continue;
         }
         widthBySymbol[port.symbol.index] = port.width;
+        if (port.direction == PortDirection::Inout && port.inoutSymbol)
+        {
+            const auto& binding = *port.inoutSymbol;
+            if (binding.inSymbol.valid() && binding.inSymbol.index < widthBySymbol.size())
+            {
+                widthBySymbol[binding.inSymbol.index] = port.width;
+            }
+            if (binding.outSymbol.valid() && binding.outSymbol.index < widthBySymbol.size())
+            {
+                widthBySymbol[binding.outSymbol.index] = port.width;
+            }
+            if (binding.oeSymbol.valid() && binding.oeSymbol.index < widthBySymbol.size())
+            {
+                widthBySymbol[binding.oeSymbol.index] = port.width;
+            }
+        }
     }
     for (const auto& signal : plan.signals)
     {
@@ -7714,6 +7738,35 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             continue;
         }
         typeBySymbol[id.index] = &valueSymbol->getType();
+    }
+    for (const auto& port : plan.ports)
+    {
+        if (port.direction != PortDirection::Inout || !port.inoutSymbol)
+        {
+            continue;
+        }
+        const slang::ast::Type* portType = nullptr;
+        if (port.symbol.valid() && port.symbol.index < typeBySymbol.size())
+        {
+            portType = typeBySymbol[port.symbol.index];
+        }
+        if (!portType)
+        {
+            continue;
+        }
+        const auto& binding = *port.inoutSymbol;
+        if (binding.inSymbol.valid() && binding.inSymbol.index < typeBySymbol.size())
+        {
+            typeBySymbol[binding.inSymbol.index] = portType;
+        }
+        if (binding.outSymbol.valid() && binding.outSymbol.index < typeBySymbol.size())
+        {
+            typeBySymbol[binding.outSymbol.index] = portType;
+        }
+        if (binding.oeSymbol.valid() && binding.oeSymbol.index < typeBySymbol.size())
+        {
+            typeBySymbol[binding.oeSymbol.index] = portType;
+        }
     }
 
     std::vector<WriteBackGroup> groups;
