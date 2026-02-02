@@ -11329,7 +11329,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with mismatched output slice width");
                         }
