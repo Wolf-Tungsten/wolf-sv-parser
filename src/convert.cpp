@@ -326,6 +326,28 @@ struct TypeResolution {
     bool hasUnpacked = false;
 };
 
+bool isFlattenedNetArray(const SignalInfo& signal)
+{
+    return signal.kind == SignalKind::Net && signal.memoryRows > 0;
+}
+
+int64_t flattenedNetWidth(const SignalInfo& signal)
+{
+    if (!isFlattenedNetArray(signal))
+    {
+        return signal.width;
+    }
+    const int64_t elementWidth = signal.width > 0 ? signal.width : 1;
+    const int64_t rows = signal.memoryRows > 0 ? signal.memoryRows : 1;
+    const int64_t maxWidth = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+    if (rows > 0 && elementWidth > maxWidth / rows)
+    {
+        return maxWidth;
+    }
+    const int64_t total = elementWidth * rows;
+    return std::min<int64_t>(total, maxWidth);
+}
+
 int32_t clampWidth(uint64_t width, const slang::ast::Symbol& origin, ConvertDiagnostics* diagnostics,
                    std::string_view label)
 {
@@ -842,6 +864,7 @@ std::optional<grh::ir::OperationKind> mapBinaryOp(slang::ast::BinaryOperator op)
 
 PlanSymbolId resolveSimpleSymbolForPlan(const slang::ast::Expression& expr,
                                         const ModulePlan& plan);
+const SignalInfo* findSignalBySymbol(const ModulePlan& plan, PlanSymbolId symbol);
 
 struct StmtLowererState {
     class AssignmentExprVisitor;
@@ -4311,6 +4334,192 @@ private:
         return nullptr;
     }
 
+    struct NetArraySelectChain {
+        const slang::ast::NamedValueExpression* baseExpr = nullptr;
+        const SignalInfo* signal = nullptr;
+        std::vector<const slang::ast::Expression*> selectors;
+    };
+
+    std::optional<NetArraySelectChain>
+    collectNetArraySelectChain(const slang::ast::Expression& expr) const
+    {
+        const slang::ast::Expression* current = &expr;
+        std::vector<const slang::ast::Expression*> selectors;
+        while (const auto* select = current->as_if<slang::ast::ElementSelectExpression>())
+        {
+            const slang::ast::Type* valueType = select->value().type;
+            if (!valueType || !valueType->isUnpackedArray())
+            {
+                break;
+            }
+            selectors.push_back(&select->selector());
+            current = &select->value();
+        }
+        if (selectors.empty())
+        {
+            return std::nullopt;
+        }
+        const auto* baseNamed = current->as_if<slang::ast::NamedValueExpression>();
+        if (!baseNamed || baseNamed->symbol.name.empty())
+        {
+            return std::nullopt;
+        }
+        const PlanSymbolId baseId = plan.symbolTable.lookup(baseNamed->symbol.name);
+        const SignalInfo* signal = findSignalBySymbol(plan, baseId);
+        if (!signal || !isFlattenedNetArray(*signal))
+        {
+            return std::nullopt;
+        }
+        if (selectors.size() > signal->unpackedDims.size())
+        {
+            return std::nullopt;
+        }
+        std::reverse(selectors.begin(), selectors.end());
+        return NetArraySelectChain{baseNamed, signal, std::move(selectors)};
+    }
+
+    bool buildNetArraySlice(const NetArraySelectChain& chain,
+                            ExprNodeId& bitIndex,
+                            int64_t& sliceWidth,
+                            slang::SourceLocation location)
+    {
+        const auto& dims = chain.signal->unpackedDims;
+        if (chain.selectors.empty() || dims.empty() ||
+            chain.selectors.size() > dims.size())
+        {
+            return false;
+        }
+
+        const int64_t elementWidth = chain.signal->width > 0 ? chain.signal->width : 1;
+        int64_t subarrayRows = 1;
+        for (std::size_t i = chain.selectors.size(); i < dims.size(); ++i)
+        {
+            const int64_t extent = dims[i].extent > 0 ? dims[i].extent : 1;
+            if (subarrayRows > std::numeric_limits<int64_t>::max() / extent)
+            {
+                subarrayRows = std::numeric_limits<int64_t>::max();
+                break;
+            }
+            subarrayRows *= extent;
+        }
+        sliceWidth = elementWidth;
+        if (subarrayRows > 1)
+        {
+            if (elementWidth > std::numeric_limits<int64_t>::max() / subarrayRows)
+            {
+                sliceWidth = std::numeric_limits<int64_t>::max();
+            }
+            else
+            {
+                sliceWidth = elementWidth * subarrayRows;
+            }
+        }
+        if (sliceWidth <= 0)
+        {
+            return false;
+        }
+        const int64_t maxSliceWidth =
+            static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+        if (sliceWidth > maxSliceWidth)
+        {
+            sliceWidth = maxSliceWidth;
+        }
+
+        std::vector<int64_t> strides(dims.size(), 1);
+        int64_t stride = 1;
+        for (std::size_t i = dims.size(); i-- > 0;)
+        {
+            strides[i] = stride;
+            const int64_t extent = dims[i].extent > 0 ? dims[i].extent : 1;
+            if (stride > std::numeric_limits<int64_t>::max() / extent)
+            {
+                stride = std::numeric_limits<int64_t>::max();
+            }
+            else
+            {
+                stride *= extent;
+            }
+        }
+
+        ExprNodeId address = kInvalidPlanIndex;
+        for (std::size_t i = 0; i < chain.selectors.size(); ++i)
+        {
+            auto clampIndexWidth = [](uint64_t width) -> int32_t {
+                if (width == 0)
+                {
+                    return 0;
+                }
+                const uint64_t maxValue =
+                    static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                return width > maxValue ? std::numeric_limits<int32_t>::max()
+                                        : static_cast<int32_t>(width);
+            };
+            int32_t indexWidth = clampIndexWidth(computeExprWidth(*chain.selectors[i]));
+            if (indexWidth <= 0)
+            {
+                indexWidth = 32;
+            }
+            ExprNodeId indexExpr = kInvalidPlanIndex;
+            {
+                WidthContextScope widthScope(*this, indexWidth);
+                indexExpr = lowerExpression(*chain.selectors[i]);
+            }
+            if (indexExpr == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            const auto& dim = dims[i];
+            if (dim.left < dim.right)
+            {
+                if (dim.left != 0)
+                {
+                    ExprNodeId offset =
+                        addConstantLiteral(std::to_string(dim.left), location);
+                    indexExpr = makeOperation(grh::ir::OperationKind::kSub,
+                                              {indexExpr, offset}, location);
+                }
+            }
+            else
+            {
+                ExprNodeId offset =
+                    addConstantLiteral(std::to_string(dim.left), location);
+                indexExpr = makeOperation(grh::ir::OperationKind::kSub,
+                                          {offset, indexExpr}, location);
+            }
+            const int64_t strideVal = strides[i];
+            if (strideVal != 1)
+            {
+                ExprNodeId strideExpr =
+                    addConstantLiteral(std::to_string(strideVal), location);
+                indexExpr = makeOperation(grh::ir::OperationKind::kMul,
+                                          {indexExpr, strideExpr}, location);
+            }
+            if (address == kInvalidPlanIndex)
+            {
+                address = indexExpr;
+            }
+            else
+            {
+                address = makeOperation(grh::ir::OperationKind::kAdd,
+                                        {address, indexExpr}, location);
+            }
+        }
+        if (address == kInvalidPlanIndex)
+        {
+            return false;
+        }
+
+        bitIndex = address;
+        if (elementWidth > 1)
+        {
+            ExprNodeId widthExpr =
+                addConstantLiteral(std::to_string(elementWidth), location);
+            bitIndex = makeOperation(grh::ir::OperationKind::kMul,
+                                     {address, widthExpr}, location);
+        }
+        return true;
+    }
+
     bool prepareForLoopState(const slang::ast::ForLoopStatement& stmt,
                              slang::ast::EvalContext& ctx) const
     {
@@ -6072,6 +6281,25 @@ private:
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {
+            if (auto chain = collectNetArraySelectChain(expr))
+            {
+                ExprNodeId bitIndex = kInvalidPlanIndex;
+                int64_t sliceWidth = 0;
+                if (buildNetArraySlice(*chain, bitIndex, sliceWidth,
+                                       select->sourceRange.start()))
+                {
+                    ExprNodeId base = lowerExpression(*chain->baseExpr);
+                    if (base != kInvalidPlanIndex && bitIndex != kInvalidPlanIndex)
+                    {
+                        const int64_t maxWidth =
+                            static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+                        const int32_t width =
+                            static_cast<int32_t>(std::min<int64_t>(sliceWidth, maxWidth));
+                        return makeSliceDynamic(base, bitIndex, width,
+                                                select->sourceRange.start());
+                    }
+                }
+            }
             ExprNodeId value = lowerExpression(select->value());
             ExprNodeId index = kInvalidPlanIndex;
             auto clampWidth = [](uint64_t width) -> int32_t {
@@ -6416,6 +6644,25 @@ private:
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {
+            if (auto chain = collectNetArraySelectChain(expr))
+            {
+                ExprNodeId bitIndex = kInvalidPlanIndex;
+                int64_t sliceWidth = 0;
+                if (buildNetArraySlice(*chain, bitIndex, sliceWidth,
+                                       select->sourceRange.start()))
+                {
+                    WriteSlice slice;
+                    slice.kind = WriteSliceKind::RangeSelect;
+                    slice.rangeKind = WriteRangeKind::IndexedUp;
+                    slice.left = bitIndex;
+                    slice.right =
+                        addConstantLiteral(std::to_string(sliceWidth),
+                                           select->sourceRange.start());
+                    slice.location = select->sourceRange.start();
+                    slices.push_back(std::move(slice));
+                    return plan.symbolTable.lookup(chain->baseExpr->symbol.name);
+                }
+            }
             PlanSymbolId base = resolveLValueSymbol(select->value(), slices, xmrPath);
             if (!base.valid())
             {
@@ -7744,7 +7991,12 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
         if (widthBySymbol[signal.symbol.index] == 0)
         {
-            widthBySymbol[signal.symbol.index] = signal.width;
+            int32_t width = signal.width;
+            if (isFlattenedNetArray(signal))
+            {
+                width = static_cast<int32_t>(flattenedNetWidth(signal));
+            }
+            widthBySymbol[signal.symbol.index] = width;
         }
     }
     std::vector<const slang::ast::Type*> typeBySymbol(plan.symbolTable.size(), nullptr);
@@ -7837,7 +8089,9 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             signalId = signalBySymbol[write.target.index];
         }
-        if (signalId != kInvalidPlanIndex && plan.signals[signalId].memoryRows > 0)
+        if (signalId != kInvalidPlanIndex &&
+            plan.signals[signalId].memoryRows > 0 &&
+            plan.signals[signalId].kind != SignalKind::Net)
         {
             continue;
         }
@@ -9508,7 +9762,8 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             return kInvalidPlanIndex;
         }
-        if (plan.signals[id].memoryRows <= 0)
+        if (plan.signals[id].memoryRows <= 0 ||
+            plan.signals[id].kind == SignalKind::Net)
         {
             return kInvalidPlanIndex;
         }
@@ -10326,11 +10581,13 @@ private:
             {
                 continue;
             }
-            if (signal.memoryRows > 0 || signal.kind == SignalKind::Memory)
+            if (!isFlattenedNetArray(signal) &&
+                (signal.memoryRows > 0 || signal.kind == SignalKind::Memory))
             {
                 continue;
             }
-            const int32_t width = normalizeWidth(signal.width);
+            const int32_t width =
+                normalizeWidth(static_cast<int32_t>(flattenedNetWidth(signal)));
             createValue(signal.symbol, width, signal.isSigned);
         }
     }
@@ -10379,7 +10636,8 @@ private:
             {
                 continue;
             }
-            const int32_t width = normalizeWidth(signal->width);
+            const int32_t width =
+                normalizeWidth(static_cast<int32_t>(flattenedNetWidth(*signal)));
             createValue(info.binding.outSymbol, width, signal->isSigned);
             grh::ir::ValueId oeValue = createValue(info.binding.oeSymbol, width, false);
             if (!oeValue.valid())
@@ -10490,6 +10748,10 @@ private:
         {
             const auto& signal = plan_.signals[i];
             if (!signal.symbol.valid())
+            {
+                continue;
+            }
+            if (signal.kind == SignalKind::Net)
             {
                 continue;
             }
@@ -11073,6 +11335,161 @@ private:
             std::string xmrPath;
         };
 
+        struct NetArrayBinding {
+            PlanSymbolId target;
+            int64_t low = 0;
+            int64_t width = 0;
+        };
+
+        auto resolveNetArrayBinding = [&](const slang::ast::Expression& expr,
+                                          NetArrayBinding& out) -> bool {
+            const slang::ast::Expression* current = &expr;
+            std::vector<const slang::ast::Expression*> selectors;
+            while (const auto* select = current->as_if<slang::ast::ElementSelectExpression>())
+            {
+                const slang::ast::Type* valueType = select->value().type;
+                if (!valueType || !valueType->isUnpackedArray())
+                {
+                    break;
+                }
+                selectors.push_back(&select->selector());
+                current = &select->value();
+            }
+            if (selectors.empty())
+            {
+                return false;
+            }
+            const auto* baseNamed = current->as_if<slang::ast::NamedValueExpression>();
+            if (!baseNamed || baseNamed->symbol.name.empty())
+            {
+                return false;
+            }
+            const PlanSymbolId baseId =
+                plan_.symbolTable.lookup(baseNamed->symbol.name);
+            const SignalInfo* signal = findSignalBySymbol(plan_, baseId);
+            if (!signal || !isFlattenedNetArray(*signal))
+            {
+                return false;
+            }
+            if (selectors.size() > signal->unpackedDims.size())
+            {
+                return false;
+            }
+            std::reverse(selectors.begin(), selectors.end());
+
+            const int64_t elementWidth = signal->width > 0 ? signal->width : 1;
+            int64_t subarrayRows = 1;
+            for (std::size_t i = selectors.size(); i < signal->unpackedDims.size(); ++i)
+            {
+                const int64_t extent =
+                    signal->unpackedDims[i].extent > 0 ? signal->unpackedDims[i].extent : 1;
+                if (subarrayRows > std::numeric_limits<int64_t>::max() / extent)
+                {
+                    subarrayRows = std::numeric_limits<int64_t>::max();
+                    break;
+                }
+                subarrayRows *= extent;
+            }
+            int64_t sliceWidth = elementWidth;
+            if (subarrayRows > 1)
+            {
+                if (elementWidth > std::numeric_limits<int64_t>::max() / subarrayRows)
+                {
+                    sliceWidth = std::numeric_limits<int64_t>::max();
+                }
+                else
+                {
+                    sliceWidth = elementWidth * subarrayRows;
+                }
+            }
+            if (sliceWidth <= 0)
+            {
+                return false;
+            }
+
+            std::vector<int64_t> strides(signal->unpackedDims.size(), 1);
+            int64_t stride = 1;
+            for (std::size_t i = signal->unpackedDims.size(); i-- > 0;)
+            {
+                strides[i] = stride;
+                const int64_t extent =
+                    signal->unpackedDims[i].extent > 0 ? signal->unpackedDims[i].extent : 1;
+                if (stride > std::numeric_limits<int64_t>::max() / extent)
+                {
+                    stride = std::numeric_limits<int64_t>::max();
+                }
+                else
+                {
+                    stride *= extent;
+                }
+            }
+
+            int64_t address = 0;
+            bool haveAddress = false;
+            for (std::size_t i = 0; i < selectors.size(); ++i)
+            {
+                ExprNodeId index = connectionLowerer_.lowerExpression(*selectors[i]);
+                auto indexConst = evalConstInt(plan_, lowering_, index);
+                if (!indexConst)
+                {
+                    return false;
+                }
+                const auto& dim = signal->unpackedDims[i];
+                int64_t normalized = 0;
+                if (dim.left < dim.right)
+                {
+                    normalized = *indexConst - dim.left;
+                }
+                else
+                {
+                    normalized = dim.left - *indexConst;
+                }
+                const int64_t strideVal = strides[i];
+                if (strideVal > 1)
+                {
+                    if (normalized > 0 &&
+                        normalized > std::numeric_limits<int64_t>::max() / strideVal)
+                    {
+                        return false;
+                    }
+                    normalized *= strideVal;
+                }
+                if (!haveAddress)
+                {
+                    address = normalized;
+                    haveAddress = true;
+                }
+                else
+                {
+                    if (normalized > 0 &&
+                        address > std::numeric_limits<int64_t>::max() - normalized)
+                    {
+                        return false;
+                    }
+                    address += normalized;
+                }
+            }
+            if (!haveAddress)
+            {
+                return false;
+            }
+            int64_t bitIndex = address;
+            if (elementWidth > 1)
+            {
+                if (bitIndex > 0 &&
+                    bitIndex > std::numeric_limits<int64_t>::max() / elementWidth)
+                {
+                    return false;
+                }
+                bitIndex *= elementWidth;
+            }
+
+            out.target = baseId;
+            out.low = bitIndex;
+            out.width = sliceWidth;
+            return true;
+        };
+
         auto resolveOutputBinding = [&](auto&& self,
                                         const slang::ast::Expression& expr,
                                         int64_t portWidth,
@@ -11118,6 +11535,16 @@ private:
             }
             if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
             {
+                NetArrayBinding netBinding;
+                if (resolveNetArrayBinding(expr, netBinding))
+                {
+                    out.target = netBinding.target;
+                    out.low = netBinding.low;
+                    out.width = netBinding.width;
+                    out.location = select->sourceRange.start();
+                    out.isSlice = true;
+                    return out.target.valid();
+                }
                 OutputBinding base;
                 if (!self(self, select->value(), portWidth, base))
                 {
@@ -11138,6 +11565,53 @@ private:
             }
             if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
             {
+                NetArrayBinding netBinding;
+                if (resolveNetArrayBinding(range->value(), netBinding))
+                {
+                    ExprNodeId left = connectionLowerer_.lowerExpression(range->left());
+                    ExprNodeId right = connectionLowerer_.lowerExpression(range->right());
+                    auto leftConst = evalConstInt(plan_, lowering_, left);
+                    auto rightConst = evalConstInt(plan_, lowering_, right);
+                    if (!leftConst || !rightConst)
+                    {
+                        return false;
+                    }
+                    out.target = netBinding.target;
+                    out.location = range->sourceRange.start();
+                    out.isSlice = true;
+                    switch (range->getSelectionKind())
+                    {
+                    case slang::ast::RangeSelectionKind::Simple: {
+                        const int64_t lo = std::min(*leftConst, *rightConst);
+                        const int64_t hi = std::max(*leftConst, *rightConst);
+                        out.low = netBinding.low + lo;
+                        out.width = hi - lo + 1;
+                        break;
+                    }
+                    case slang::ast::RangeSelectionKind::IndexedUp:
+                    case slang::ast::RangeSelectionKind::IndexedDown: {
+                        if (*rightConst <= 0)
+                        {
+                            return false;
+                        }
+                        const int64_t width = *rightConst;
+                        if (range->getSelectionKind() ==
+                            slang::ast::RangeSelectionKind::IndexedDown)
+                        {
+                            out.low = netBinding.low + *leftConst - width + 1;
+                        }
+                        else
+                        {
+                            out.low = netBinding.low + *leftConst;
+                        }
+                        out.width = width;
+                        break;
+                    }
+                    default:
+                        return false;
+                    }
+                    return out.target.valid();
+                }
                 OutputBinding base;
                 if (!self(self, range->value(), portWidth, base))
                 {
@@ -12002,7 +12476,8 @@ private:
         {
             const auto& info = plan_.signals[i];
             if (info.symbol.index == baseNode.symbol.index &&
-                info.memoryRows > 0)
+                info.memoryRows > 0 &&
+                info.kind != SignalKind::Net)
             {
                 signal = i;
                 break;
