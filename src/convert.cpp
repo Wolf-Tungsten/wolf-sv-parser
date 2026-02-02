@@ -11069,6 +11069,7 @@ private:
             int64_t width = 0;
             slang::SourceLocation location{};
             bool isXmr = false;
+            bool isSlice = false;
             std::string xmrPath;
         };
 
@@ -11098,6 +11099,7 @@ private:
                 out.low = 0;
                 out.width = portWidth;
                 out.location = expr.sourceRange.start();
+                out.isSlice = false;
                 return out.target.valid();
             }
             if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
@@ -11109,6 +11111,7 @@ private:
                     out.low = 0;
                     out.width = portWidth;
                     out.location = expr.sourceRange.start();
+                    out.isSlice = false;
                     return true;
                 }
                 return false;
@@ -11130,6 +11133,7 @@ private:
                 out.low = *indexConst;
                 out.width = 1;
                 out.location = select->sourceRange.start();
+                out.isSlice = true;
                 return out.target.valid();
             }
             if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
@@ -11143,16 +11147,48 @@ private:
                 ExprNodeId right = connectionLowerer_.lowerExpression(range->right());
                 auto leftConst = evalConstInt(plan_, lowering_, left);
                 auto rightConst = evalConstInt(plan_, lowering_, right);
-                if (!leftConst || !rightConst)
+                out.target = base.target;
+                out.location = range->sourceRange.start();
+                out.isSlice = true;
+                switch (range->getSelectionKind())
                 {
+                case slang::ast::RangeSelectionKind::Simple: {
+                    if (!leftConst || !rightConst)
+                    {
+                        return false;
+                    }
+                    const int64_t lo = std::min(*leftConst, *rightConst);
+                    const int64_t hi = std::max(*leftConst, *rightConst);
+                    out.low = lo;
+                    out.width = hi - lo + 1;
+                    break;
+                }
+                case slang::ast::RangeSelectionKind::IndexedUp:
+                case slang::ast::RangeSelectionKind::IndexedDown: {
+                    if (!leftConst || !rightConst)
+                    {
+                        return false;
+                    }
+                    if (*rightConst <= 0)
+                    {
+                        return false;
+                    }
+                    const int64_t width = *rightConst;
+                    if (range->getSelectionKind() ==
+                        slang::ast::RangeSelectionKind::IndexedDown)
+                    {
+                        out.low = *leftConst - width + 1;
+                    }
+                    else
+                    {
+                        out.low = *leftConst;
+                    }
+                    out.width = width;
+                    break;
+                }
+                default:
                     return false;
                 }
-                const int64_t lo = std::min(*leftConst, *rightConst);
-                const int64_t hi = std::max(*leftConst, *rightConst);
-                out.target = base.target;
-                out.low = lo;
-                out.width = hi - lo + 1;
-                out.location = range->sourceRange.start();
                 return out.target.valid();
             }
             return false;
@@ -11232,6 +11268,9 @@ private:
                     break;
                 }
                 case slang::ast::ArgumentDirection::Out: {
+                    const int64_t portWidth =
+                        static_cast<int64_t>(port->getType().getBitstreamWidth());
+                    const bool portSigned = port->getType().isSigned();
                     if (!expr || expr->bad())
                     {
                         if (context_.diagnostics)
@@ -11241,19 +11280,15 @@ private:
                                 "Skipping unconnected output port on instance");
                         }
                         outputNames.emplace_back(port->name);
-                        const int64_t portWidth =
-                            static_cast<int64_t>(port->getType().getBitstreamWidth());
                         const int64_t width = portWidth > 0 ? portWidth : 1;
                         grh::ir::SymbolId tempSym =
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
-                            graph_.createValue(tempSym, width, false);
+                            graph_.createValue(tempSym, width, portSigned);
                         outputResults.push_back(tempValue);
                         break;
                     }
                     outputNames.emplace_back(port->name);
-                    const int64_t portWidth =
-                        static_cast<int64_t>(port->getType().getBitstreamWidth());
                     OutputBinding binding;
                     if (!resolveOutputBinding(resolveOutputBinding, *expr, portWidth, binding))
                     {
@@ -11282,7 +11317,7 @@ private:
                         grh::ir::SymbolId tempSym =
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
-                            graph_.createValue(tempSym, binding.width, false);
+                            graph_.createValue(tempSym, binding.width, portSigned);
                         outputResults.push_back(tempValue);
                         instanceXmrWrites_.push_back(
                             InstanceXmrWrite{std::move(binding.xmrPath), tempValue,
@@ -11314,7 +11349,8 @@ private:
                     }
                     const int64_t targetWidth = graph_.getValue(targetValue).width();
                     if (binding.low < 0 || binding.width <= 0 ||
-                        (targetWidth > 0 && binding.low + binding.width > targetWidth))
+                        (targetWidth > 0 && binding.low + binding.width > targetWidth &&
+                         (binding.isSlice || binding.low != 0)))
                     {
                         if (context_.diagnostics)
                         {
@@ -11325,26 +11361,15 @@ private:
                         ok = false;
                         break;
                     }
-                    if (portWidth > 0 && binding.width != portWidth)
-                    {
-                        if (context_.diagnostics)
-                        {
-                            context_.diagnostics->error(
-                                port->location,
-                                "Skipping instance with mismatched output slice width");
-                        }
-                        ok = false;
-                        break;
-                    }
                     grh::ir::SymbolId tempSym =
                         graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                     grh::ir::ValueId tempValue =
-                        graph_.createValue(tempSym, binding.width, false);
+                        graph_.createValue(tempSym, binding.width, portSigned);
                     outputResults.push_back(tempValue);
                     instanceSliceWrites_[binding.target.index].push_back(
                         InstanceSliceWrite{binding.target, binding.low,
                                            binding.width, tempValue,
-                                           binding.location});
+                                           binding.location, binding.isSlice});
                     break;
                 }
                 case slang::ast::ArgumentDirection::InOut: {
@@ -11533,6 +11558,104 @@ private:
             graph_.addResult(op, result);
             return result;
         };
+        auto makeZero = [&](int64_t width,
+                            slang::SourceLocation location) -> grh::ir::ValueId {
+            if (width <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result =
+                graph_.createValue(sym, static_cast<int32_t>(width), false);
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kConstant,
+                         grh::ir::SymbolId::invalid(),
+                         location);
+            graph_.addResult(op, result);
+            graph_.setAttr(op, "constValue",
+                           std::to_string(width) + "'b0");
+            return result;
+        };
+        auto makeReplicate = [&](grh::ir::ValueId value,
+                                 int64_t count,
+                                 slang::SourceLocation location) -> grh::ir::ValueId {
+            if (!value.valid() || count <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            const int64_t valueWidth = graph_.getValue(value).width();
+            if (valueWidth <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            const int64_t width = valueWidth * count;
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kReplicate,
+                         grh::ir::SymbolId::invalid(),
+                         location);
+            graph_.addOperand(op, value);
+            graph_.setAttr(op, "rep", count);
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result =
+                graph_.createValue(sym, static_cast<int32_t>(width),
+                                   graph_.getValue(value).isSigned());
+            graph_.addResult(op, result);
+            return result;
+        };
+        auto resizeValueToWidth = [&](grh::ir::ValueId value,
+                                      int64_t targetWidth,
+                                      bool signExtend,
+                                      slang::SourceLocation location)
+            -> grh::ir::ValueId {
+            if (!value.valid() || targetWidth <= 0)
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            const int64_t sourceWidth = graph_.getValue(value).width();
+            if (sourceWidth <= 0 || sourceWidth == targetWidth)
+            {
+                return value;
+            }
+            if (targetWidth < sourceWidth)
+            {
+                return makeSliceStatic(value, 0, targetWidth - 1, location);
+            }
+            const int64_t padWidth = targetWidth - sourceWidth;
+            if (padWidth <= 0)
+            {
+                return value;
+            }
+            grh::ir::ValueId padValue = grh::ir::ValueId::invalid();
+            if (signExtend && sourceWidth > 0)
+            {
+                grh::ir::ValueId signBit =
+                    makeSliceStatic(value, sourceWidth - 1, sourceWidth - 1, location);
+                padValue = makeReplicate(signBit, padWidth, location);
+            }
+            else
+            {
+                padValue = makeZero(padWidth, location);
+            }
+            if (!padValue.valid())
+            {
+                return grh::ir::ValueId::invalid();
+            }
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kConcat,
+                         grh::ir::SymbolId::invalid(),
+                         location);
+            graph_.addOperand(op, padValue);
+            graph_.addOperand(op, value);
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result =
+                graph_.createValue(sym, static_cast<int32_t>(targetWidth),
+                                   signExtend);
+            graph_.addResult(op, result);
+            return result;
+        };
 
         for (auto& [targetIndex, writes] : instanceSliceWrites_)
         {
@@ -11555,6 +11678,7 @@ private:
             }
             grh::ir::ValueId baseValue = targetValue;
             int64_t baseWidth = targetWidth;
+            bool hasWritebackBase = false;
             for (const auto& entry : writeBack_.entries)
             {
                 if (entry.target.index != targetIndex ||
@@ -11568,6 +11692,7 @@ private:
                     baseValue = mergedBase;
                     baseWidth = graph_.getValue(baseValue).width();
                     instanceMergedTargets_.insert(targetIndex);
+                    hasWritebackBase = true;
                 }
                 break;
             }
@@ -11575,6 +11700,25 @@ private:
             {
                 baseValue = targetValue;
                 baseWidth = targetWidth;
+            }
+
+            const bool hasOtherAssignments = hasWritebackBase || writes.size() > 1;
+            if (targetWidth > 0)
+            {
+                for (auto& write : writes)
+                {
+                    if (!write.explicitSlice && write.low == 0)
+                    {
+                        if (write.width > targetWidth)
+                        {
+                            write.width = targetWidth;
+                        }
+                        else if (write.width < targetWidth && !hasOtherAssignments)
+                        {
+                            write.width = targetWidth;
+                        }
+                    }
+                }
             }
 
             std::sort(writes.begin(), writes.end(),
@@ -11643,14 +11787,19 @@ private:
                     const int64_t valWidth = graph_.getValue(segValue).width();
                     if (valWidth != segWidth)
                     {
-                        if (context_.diagnostics)
+                        const bool signExtend = graph_.getValue(segValue).isSigned();
+                        segValue = resizeValueToWidth(segValue, segWidth, signExtend, writeLoc);
+                        if (!segValue.valid())
                         {
-                            context_.diagnostics->warn(
-                                writes.front().location,
-                                "Skipping instance output merge with width mismatch");
+                            if (context_.diagnostics)
+                            {
+                                context_.diagnostics->warn(
+                                    writes.front().location,
+                                    "Skipping instance output merge with width mismatch");
+                            }
+                            concatOperands.clear();
+                            break;
                         }
-                        concatOperands.clear();
-                        break;
                     }
                 }
                 if (!segValue.valid())
@@ -13233,6 +13382,7 @@ private:
         int64_t width = 0;
         grh::ir::ValueId value = grh::ir::ValueId::invalid();
         slang::SourceLocation location{};
+        bool explicitSlice = false;
     };
     std::vector<InstanceXmrWrite> instanceXmrWrites_;
     std::unordered_map<uint32_t, std::vector<InstanceSliceWrite>> instanceSliceWrites_;
