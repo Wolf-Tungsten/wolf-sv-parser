@@ -92,7 +92,7 @@
       - `logLevel`: `ConvertLogLevel` -> 日志等级过滤阈值。
       - `maxLoopIterations`: `uint32_t` -> Pass5 静态展开循环的最大迭代上限。
   - `diagnostics`：
-    - 作用：集中收集 todo/error/warn。
+    - 作用：集中收集 error/warn（未支持项按 error 处理）。
     - 建立：指向 `ConvertDriver::diagnostics_`。
     - 子成员（内部状态 -> 类型 -> 含义）：
       - `messages_`: `std::vector<ConvertDiagnostic>` -> 诊断条目列表。
@@ -702,7 +702,7 @@
     - 说明：
       - 仅对静态可求值且总迭代次数不超过 `ConvertOptions.maxLoopIterations` 的循环做展开；
         默认上限为 65536；
-        repeat/for/foreach 在不含 `break/continue` 时，超上限或不可静态求值 -> TODO + 单次访问回退；
+        repeat/for/foreach 在不含 `break/continue` 时，超上限或不可静态求值 -> 报错 + 单次访问回退；
         while/do-while/forever 不回退，直接报错；
         `guard=invalid` 表示无显式 guard（来自 `guardStack` 为空）。
       - 循环体内 `break/continue` 的 guard 可静态求值时，展开期直接裁剪：
@@ -832,7 +832,7 @@
 
 ### 3.9. Diagnostics / Logger
 - 总览：
-  - `ConvertDiagnostics`：统一收集 todo/error/warn，保留源码位置信息。
+  - `ConvertDiagnostics`：统一收集 error/warn（未支持项按 error 处理），保留源码位置信息。
   - `ConvertLogger`：level/tag 过滤的可控日志接口。
 
 ## 4. Pass 中间数据结构

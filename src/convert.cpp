@@ -7143,7 +7143,9 @@ void ConvertDiagnostics::add(ConvertDiagnosticKind kind, std::string originSymbo
 {
     messages_.push_back(ConvertDiagnostic{kind, std::move(message),
                                           std::move(originSymbol), location});
-    if (kind == ConvertDiagnosticKind::Error)
+    const bool isError = (kind == ConvertDiagnosticKind::Error ||
+                          kind == ConvertDiagnosticKind::Todo);
+    if (isError)
     {
         hasError_ = true;
         if (onError_)

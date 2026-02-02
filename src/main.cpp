@@ -359,7 +359,7 @@ int main(int argc, char **argv)
         switch (kind)
         {
         case wolf_sv_parser::ConvertDiagnosticKind::Todo:
-            return "TODO";
+            return "ERROR";
         case wolf_sv_parser::ConvertDiagnosticKind::Warning:
             return "WARN";
         case wolf_sv_parser::ConvertDiagnosticKind::Error:
@@ -368,7 +368,8 @@ int main(int argc, char **argv)
         }
     };
     auto isErrorKind = [](wolf_sv_parser::ConvertDiagnosticKind kind) {
-        return kind == wolf_sv_parser::ConvertDiagnosticKind::Error;
+        return kind == wolf_sv_parser::ConvertDiagnosticKind::Error ||
+               kind == wolf_sv_parser::ConvertDiagnosticKind::Todo;
     };
     if (!converter.diagnostics().empty())
     {

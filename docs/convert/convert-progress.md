@@ -252,7 +252,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 目标：
 - 支持可静态求值的 for/repeat/foreach 循环展开
-- 不可静态求值的循环给出 TODO 诊断并保持安全回退
+- 不可静态求值的循环给出报错诊断并保持安全回退
 - 增补循环相关测试与 fixture
 
 计划：
@@ -321,7 +321,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - ~~while/do-while/forever 直接报错并停止对其 body 的降级~~（已被 STEP 0026 替代）
 
 计划：
-- 将相关分支的诊断从 todo 升级为 error
+- 将相关分支的诊断升级为 error
 - ~~对 pattern 条件/PatternCase/while/do/forever 采用 “报错 + 跳过” 策略~~（已被 STEP 0026 替代）
 - 更新 workflow/architecture 说明不支持范围
 - 增补错误路径测试
@@ -553,7 +553,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - StmtLowerer 写回语句补齐 `updateCond` 与事件绑定信息
 - 新增 Pass6 WriteBackPass：按 `target + domain + event` 聚合写回，生成 `updateCond/nextValue`
 - 顺序域缺失 edge-sensitive 事件时给出 warning 并跳过写回
-- 写回合并暂不支持 LHS 切片，遇到切片写回记录 TODO
+- 写回合并暂不支持 LHS 切片，遇到切片写回记录报错
 - 新增 `tests/data/convert/write_back.sv` 与 `convert-write-back` 用例，覆盖顺序/锁存与缺失事件
 - 更新 workflow/architecture 文档对齐 Pass6 写回合并流程
 

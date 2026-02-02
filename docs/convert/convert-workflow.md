@@ -94,7 +94,7 @@ Pass5 以“入口类型”为一级结构：
 2) 访问赋值表达式并调用 `lowerExpression` 生成 RHS ExprNodeId。  
 3) 解析 LHS -> `targets + slices`（支持 concat/streaming concat、bit/range/member select）。  
 4) 若 LHS 为复合目标则按位宽拆分 RHS 并生成多条 `WriteIntent`；否则生成单条。  
-5) 右到左 streaming（slice_size > 0）与 with-clause 当前仍报 TODO。  
+5) 右到左 streaming（slice_size > 0）与 with-clause 当前仍报错提示未支持。  
 代码位置：`lowerStmtContinuousAssign`。  
 
 #### 1.2 示例
@@ -175,7 +175,7 @@ endcase
     - `loopAlive`：跨迭代 guard；break 更新 `loopAlive = loopAlive && !breakCond`。  
     - `flowGuard`：当前迭代 guard；break/continue 更新 `flowGuard = flowGuard && !cond`，用于屏蔽剩余语句。  
 - 若循环边界不可静态求值或超过上限 -> 报错不支持。  
-- repeat/for/foreach：不含 `break/continue` 时，不可静态求值或超上限 -> TODO + 单次访问回退。  
+- repeat/for/foreach：不含 `break/continue` 时，不可静态求值或超上限 -> 报错 + 单次访问回退。  
 - while/do-while/forever：仅静态展开，do-while 保证至少执行一次，forever 需在上限内由 break 终止。  
 代码位置：`StmtLowererState::visitStatement`，`StmtLowererState::tryUnrollRepeat`，
 `StmtLowererState::tryUnrollFor`，`StmtLowererState::tryUnrollForeach`，
