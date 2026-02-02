@@ -11200,7 +11200,7 @@ private:
             {
                 if (context_.diagnostics)
                 {
-                    context_.diagnostics->warn(
+                    context_.diagnostics->error(
                         slang::SourceLocation{},
                         "Skipping instance without symbol reference");
                 }
@@ -11218,6 +11218,27 @@ private:
             std::vector<grh::ir::ValueId> inoutOeOperands;
             std::vector<grh::ir::ValueId> inoutInResults;
             bool ok = true;
+            auto makeUnconnectedInput = [&](int64_t width,
+                                            bool isSigned,
+                                            slang::SourceLocation location) -> grh::ir::ValueId {
+                const int64_t maxWidth = std::numeric_limits<int32_t>::max();
+                const int32_t boundedWidth =
+                    width > maxWidth ? std::numeric_limits<int32_t>::max()
+                                     : static_cast<int32_t>(width);
+                const int32_t normalizedWidth = normalizeWidth(boundedWidth);
+                grh::ir::SymbolId sym =
+                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                grh::ir::ValueId result =
+                    graph_.createValue(sym, normalizedWidth, isSigned);
+                grh::ir::OperationId op =
+                    createOp(grh::ir::OperationKind::kConstant,
+                             grh::ir::SymbolId::invalid(),
+                             location);
+                graph_.addResult(op, result);
+                graph_.setAttr(op, "constValue",
+                               std::to_string(normalizedWidth) + "'bx");
+                return result;
+            };
 
             for (const slang::ast::Symbol* portSymbol : body.getPortList())
             {
@@ -11230,7 +11251,7 @@ private:
                 {
                     if (context_.diagnostics)
                     {
-                        context_.diagnostics->warn(
+                        context_.diagnostics->error(
                             portSymbol->location,
                             "Skipping instance with unsupported port declaration");
                     }
@@ -11246,11 +11267,27 @@ private:
                 switch (port->direction)
                 {
                 case slang::ast::ArgumentDirection::In: {
-                    if (!expr || expr->bad())
+                    const int64_t portWidth =
+                        static_cast<int64_t>(port->getType().getBitstreamWidth());
+                    const bool portSigned = port->getType().isSigned();
+                    if (!expr)
                     {
                         if (context_.diagnostics)
                         {
                             context_.diagnostics->warn(
+                                port->location,
+                                "Leaving unconnected input port on instance");
+                        }
+                        inputNames.emplace_back(port->name);
+                        inputOperands.push_back(
+                            makeUnconnectedInput(portWidth, portSigned, port->location));
+                        break;
+                    }
+                    if (expr->bad())
+                    {
+                        if (context_.diagnostics)
+                        {
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with missing port connection");
                         }
@@ -11294,7 +11331,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with unsupported output connection");
                         }
@@ -11307,7 +11344,7 @@ private:
                         {
                             if (context_.diagnostics)
                             {
-                                context_.diagnostics->warn(
+                                context_.diagnostics->error(
                                     port->location,
                                     "Skipping instance output connection to sliced XMR target");
                             }
@@ -11328,7 +11365,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance output connection to inout port");
                         }
@@ -11340,7 +11377,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with missing output binding");
                         }
@@ -11354,7 +11391,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with out-of-range output slice");
                         }
@@ -11377,7 +11414,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with missing port connection");
                         }
@@ -11405,7 +11442,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with incomplete inout binding");
                         }
@@ -11420,7 +11457,7 @@ private:
                 default:
                     if (context_.diagnostics)
                     {
-                        context_.diagnostics->warn(
+                        context_.diagnostics->error(
                             port->location,
                             "Skipping instance with unsupported port direction");
                     }
@@ -11466,7 +11503,7 @@ private:
             {
                 if (context_.diagnostics)
                 {
-                    context_.diagnostics->warn(
+                    context_.diagnostics->error(
                         instance.location,
                         "Skipping instance with empty module name");
                 }
@@ -11756,7 +11793,7 @@ private:
             {
                 if (context_.diagnostics)
                 {
-                    context_.diagnostics->warn(
+                    context_.diagnostics->error(
                         writes.front().location,
                         "Skipping instance output merge with overlapping slices");
                 }
@@ -11793,7 +11830,7 @@ private:
                         {
                             if (context_.diagnostics)
                             {
-                                context_.diagnostics->warn(
+                                context_.diagnostics->error(
                                     writes.front().location,
                                     "Skipping instance output merge with width mismatch");
                             }
