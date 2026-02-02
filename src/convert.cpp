@@ -9546,7 +9546,8 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             return;
         }
         MemoryReadUse candidate;
-        if (getMemoryReadCandidate(id, candidate))
+        const bool isMemorySlice = getMemoryReadCandidate(id, candidate);
+        if (isMemorySlice)
         {
             candidate.domain = domain;
             candidate.updateCond = updateCond;
@@ -9564,9 +9565,21 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         const ExprNode& node = lowering.values[id];
         if (node.kind == ExprNodeKind::Operation)
         {
-            for (ExprNodeId operand : node.operands)
+            if (node.op == grh::ir::OperationKind::kSliceDynamic && isMemorySlice &&
+                !node.operands.empty())
             {
-                self(self, operand, domain, edges, operands, updateCond, location, visited);
+                for (std::size_t i = 1; i < node.operands.size(); ++i)
+                {
+                    ExprNodeId operand = node.operands[i];
+                    self(self, operand, domain, edges, operands, updateCond, location, visited);
+                }
+            }
+            else
+            {
+                for (ExprNodeId operand : node.operands)
+                {
+                    self(self, operand, domain, edges, operands, updateCond, location, visited);
+                }
             }
         }
     };
