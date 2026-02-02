@@ -6063,6 +6063,85 @@ private:
         }
         if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
         {
+            if (unary->op == slang::ast::UnaryOperator::Plus ||
+                unary->op == slang::ast::UnaryOperator::Minus)
+            {
+                ExprNodeId operand = lowerExpression(unary->operand());
+                if (operand == kInvalidPlanIndex)
+                {
+                    return kInvalidPlanIndex;
+                }
+                auto operandWidth = [&](ExprNodeId id) -> int32_t {
+                    if (id == kInvalidPlanIndex || id >= lowering.values.size())
+                    {
+                        return 0;
+                    }
+                    return lowering.values[id].widthHint;
+                };
+                int32_t targetWidth = 0;
+                if (widthContext > 0)
+                {
+                    targetWidth = widthContext;
+                }
+                else
+                {
+                    targetWidth = operandWidth(operand);
+                }
+                if (targetWidth == 0)
+                {
+                    uint64_t width = computeExprWidth(expr);
+                    if (width > 0)
+                    {
+                        const uint64_t maxValue =
+                            static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                        targetWidth = width > maxValue
+                                          ? std::numeric_limits<int32_t>::max()
+                                          : static_cast<int32_t>(width);
+                    }
+                }
+                if (targetWidth > 0)
+                {
+                    const bool signExtend = expr.type ? expr.type->isSigned() : false;
+                    operand = resizeValueToWidth(operand, targetWidth, signExtend,
+                                                 expr.sourceRange.start());
+                    if (operand == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                }
+                if (unary->op == slang::ast::UnaryOperator::Plus)
+                {
+                    if (cacheable)
+                    {
+                        lowered.emplace(&expr, operand);
+                    }
+                    return operand;
+                }
+                ExprNode zeroNode;
+                zeroNode.kind = ExprNodeKind::Constant;
+                zeroNode.literal = "0";
+                zeroNode.location = expr.sourceRange.start();
+                if (targetWidth > 0)
+                {
+                    zeroNode.widthHint = targetWidth;
+                }
+                ExprNodeId zeroId = addNode(nullptr, std::move(zeroNode));
+                ExprNode negNode;
+                negNode.kind = ExprNodeKind::Operation;
+                negNode.op = grh::ir::OperationKind::kSub;
+                negNode.operands = {zeroId, operand};
+                negNode.location = expr.sourceRange.start();
+                negNode.tempSymbol = makeTempSymbol();
+                if (targetWidth > 0)
+                {
+                    negNode.widthHint = targetWidth;
+                }
+                if (negNode.widthHint == 0)
+                {
+                    applyExprWidthHint(negNode);
+                }
+                return addNodeForExpr(std::move(negNode));
+            }
             const auto opKind = mapUnaryOp(unary->op);
             if (!opKind)
             {
@@ -12845,6 +12924,57 @@ private:
             }
             if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
             {
+                if (unary->op == slang::ast::UnaryOperator::Plus ||
+                    unary->op == slang::ast::UnaryOperator::Minus)
+                {
+                    ExprNodeId operand = lowerExpression(unary->operand());
+                    if (operand == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                    int32_t targetWidth = 0;
+                    if (expr.type)
+                    {
+                        uint64_t width = expr.type->getBitstreamWidth();
+                        if (width == 0)
+                        {
+                            if (auto effective = expr.getEffectiveWidth())
+                            {
+                                width = *effective;
+                            }
+                        }
+                        if (width > 0)
+                        {
+                            const uint64_t maxValue =
+                                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                            targetWidth = width > maxValue
+                                              ? std::numeric_limits<int32_t>::max()
+                                              : static_cast<int32_t>(width);
+                        }
+                    }
+                    if (unary->op == slang::ast::UnaryOperator::Plus)
+                    {
+                        lowered_.emplace(&expr, operand);
+                        return operand;
+                    }
+                    ExprNode zeroNode;
+                    zeroNode.kind = ExprNodeKind::Constant;
+                    zeroNode.literal = "0";
+                    zeroNode.location = expr.sourceRange.start();
+                    if (targetWidth > 0)
+                    {
+                        zeroNode.widthHint = targetWidth;
+                    }
+                    ExprNodeId zeroId = addSyntheticNode(std::move(zeroNode));
+                    node.kind = ExprNodeKind::Operation;
+                    node.op = grh::ir::OperationKind::kSub;
+                    node.operands = {zeroId, operand};
+                    if (targetWidth > 0)
+                    {
+                        node.widthHint = targetWidth;
+                    }
+                    return addNode(expr, std::move(node));
+                }
                 const auto opKind = mapUnaryOp(unary->op);
                 if (!opKind)
                 {
