@@ -5804,6 +5804,47 @@ private:
                     reportUnsupported(expr, "$bits argument width is unknown");
                     return kInvalidPlanIndex;
                 }
+                if (name == "unsigned" || name == "signed")
+                {
+                    const auto args = call->arguments();
+                    const slang::ast::Expression* arg =
+                        (!args.empty() ? args.front() : nullptr);
+                    if (!arg)
+                    {
+                        reportUnsupported(expr, "$unsigned/$signed missing argument");
+                        return kInvalidPlanIndex;
+                    }
+                    if (const slang::ConstantValue* constant = arg->getConstant())
+                    {
+                        if (constant->isInteger())
+                        {
+                            const slang::SVInt& literal = constant->integer();
+                            if (!literal.hasUnknown())
+                            {
+                                ExprNode constNode;
+                                constNode.kind = ExprNodeKind::Constant;
+                                constNode.literal = formatIntegerLiteral(literal);
+                                constNode.location = expr.sourceRange.start();
+                                applyExprWidthHint(constNode);
+                                return addNodeForExpr(std::move(constNode));
+                            }
+                        }
+                    }
+                    ExprNodeId operand = kInvalidPlanIndex;
+                    {
+                        WidthContextScope widthScope(*this, 0);
+                        operand = lowerExpression(*arg);
+                    }
+                    if (operand == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                    if (expr.type)
+                    {
+                        return applyConversion(operand, expr.type, expr.sourceRange.start());
+                    }
+                    return operand;
+                }
             }
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
@@ -11731,7 +11772,191 @@ private:
         {
             return grh::ir::ValueId::invalid();
         }
+        ensureConnectionMemoryRead(id, expr.sourceRange.start());
         return emitExpr(id);
+    }
+
+    void ensureConnectionMemoryRead(ExprNodeId id, slang::SourceLocation location)
+    {
+        if (id == kInvalidPlanIndex || id >= memoryReadIndexByExpr_.size())
+        {
+            return;
+        }
+        if (memoryReadIndexByExpr_[id] != kInvalidMemoryReadIndex)
+        {
+            return;
+        }
+
+        ExprNodeId current = id;
+        std::vector<ExprNodeId> indices;
+        while (current != kInvalidPlanIndex && current < lowering_.values.size())
+        {
+            const ExprNode& node = lowering_.values[current];
+            if (node.kind != ExprNodeKind::Operation ||
+                node.op != grh::ir::OperationKind::kSliceDynamic ||
+                node.operands.size() < 2)
+            {
+                break;
+            }
+            indices.push_back(node.operands[1]);
+            current = node.operands[0];
+        }
+        if (current == kInvalidPlanIndex || current >= lowering_.values.size())
+        {
+            return;
+        }
+        const ExprNode& baseNode = lowering_.values[current];
+        if (baseNode.kind != ExprNodeKind::Symbol)
+        {
+            return;
+        }
+
+        SignalId signal = kInvalidPlanIndex;
+        for (SignalId i = 0; i < static_cast<SignalId>(plan_.signals.size()); ++i)
+        {
+            const auto& info = plan_.signals[i];
+            if (info.symbol.index == baseNode.symbol.index &&
+                info.memoryRows > 0)
+            {
+                signal = i;
+                break;
+            }
+        }
+        if (signal == kInvalidPlanIndex)
+        {
+            return;
+        }
+
+        if (!indices.empty())
+        {
+            std::reverse(indices.begin(), indices.end());
+        }
+
+        const auto& dims = plan_.signals[signal].unpackedDims;
+        ExprNodeId address = kInvalidPlanIndex;
+        if (dims.empty())
+        {
+            if (!indices.empty())
+            {
+                address = indices.front();
+            }
+        }
+        else
+        {
+            if (indices.size() < dims.size())
+            {
+                return;
+            }
+            auto addExprNode = [&](ExprNode node) -> ExprNodeId {
+                const ExprNodeId newId =
+                    static_cast<ExprNodeId>(lowering_.values.size());
+                lowering_.values.push_back(std::move(node));
+                registerExprNode();
+                return newId;
+            };
+            auto addConst = [&](int64_t literal) -> ExprNodeId {
+                ExprNode node;
+                node.kind = ExprNodeKind::Constant;
+                node.literal = std::to_string(literal);
+                node.location = location;
+                return addExprNode(std::move(node));
+            };
+            auto addOp = [&](grh::ir::OperationKind op,
+                             std::vector<ExprNodeId> ops) -> ExprNodeId {
+                for (ExprNodeId opId : ops)
+                {
+                    if (opId == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                }
+                ExprNode node;
+                node.kind = ExprNodeKind::Operation;
+                node.op = op;
+                node.operands = std::move(ops);
+                node.location = location;
+                return addExprNode(std::move(node));
+            };
+            auto buildLinearAddress =
+                [&](const std::vector<ExprNodeId>& idx,
+                    const std::vector<UnpackedDimInfo>& dimsIn) -> ExprNodeId {
+                if (idx.size() < dimsIn.size())
+                {
+                    return kInvalidPlanIndex;
+                }
+                int64_t stride = 1;
+                std::vector<int64_t> strides(dimsIn.size(), 1);
+                for (std::size_t i = dimsIn.size(); i-- > 0;)
+                {
+                    strides[i] = stride;
+                    const int32_t extent = dimsIn[i].extent;
+                    if (extent > 0 &&
+                        stride <= std::numeric_limits<int64_t>::max() / extent)
+                    {
+                        stride *= extent;
+                    }
+                }
+                ExprNodeId addressId = kInvalidPlanIndex;
+                for (std::size_t i = 0; i < dimsIn.size(); ++i)
+                {
+                    ExprNodeId term = idx[i];
+                    const UnpackedDimInfo& dim = dimsIn[i];
+                    if (dim.left < dim.right)
+                    {
+                        if (dim.left != 0)
+                        {
+                            ExprNodeId offset = addConst(dim.left);
+                            term = addOp(grh::ir::OperationKind::kSub,
+                                         {term, offset});
+                        }
+                    }
+                    else
+                    {
+                        ExprNodeId offset = addConst(dim.left);
+                        term = addOp(grh::ir::OperationKind::kSub,
+                                     {offset, term});
+                    }
+                    if (strides[i] != 1)
+                    {
+                        ExprNodeId strideId = addConst(strides[i]);
+                        term = addOp(grh::ir::OperationKind::kMul,
+                                     {term, strideId});
+                    }
+                    if (addressId == kInvalidPlanIndex)
+                    {
+                        addressId = term;
+                    }
+                    else
+                    {
+                        addressId = addOp(grh::ir::OperationKind::kAdd,
+                                          {addressId, term});
+                    }
+                }
+                return addressId;
+            };
+            address = buildLinearAddress(indices, dims);
+            if (address == kInvalidPlanIndex)
+            {
+                return;
+            }
+        }
+
+        if (address == kInvalidPlanIndex)
+        {
+            return;
+        }
+
+        MemoryReadPort entry;
+        entry.memory = baseNode.symbol;
+        entry.signal = signal;
+        entry.address = address;
+        entry.data = id;
+        entry.isSync = false;
+        entry.location = location;
+
+        const int32_t index = static_cast<int32_t>(lowering_.memoryReads.size());
+        lowering_.memoryReads.push_back(std::move(entry));
+        memoryReadIndexByExpr_[id] = index;
     }
 
     PlanSymbolId resolveSimpleSymbol(const slang::ast::Expression& expr) const
