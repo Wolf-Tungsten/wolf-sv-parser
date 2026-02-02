@@ -30,6 +30,19 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
   - `attrs`: 可选属性对象，键为属性名，值为属性负载。
   - `loc`: 可选，源码位置 `{ file, line, col, endLine, endCol }`。
 
+## XMR 操作
+- `kXMRRead`
+  - `in`: 为空
+  - `out`: 单个 result
+  - `attrs.xmrPath`: string，层次路径
+- `kXMRWrite`
+  - `in`: 单个 operand（写入值）
+  - `out`: 为空
+  - `attrs.xmrPath`: string，层次路径
+
+说明：`kXMRRead/kXMRWrite` 是中间表示，必须在 emit 之前被 resolve pass 展开，
+JSON 中若仍保留该 op，表示流程未完成。
+
 ## 属性编码
 - 属性负载统一为对象 `{ t: <type>, v?: <scalar>, vs?: <array> }`。
 - 支持的 `t`：`bool`、`int`、`double`、`string`、`bool[]`、`int[]`、`double[]`、`string[]`。

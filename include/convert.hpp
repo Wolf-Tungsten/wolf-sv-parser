@@ -294,6 +294,7 @@ enum class ExprNodeKind {
     Invalid,
     Constant,
     Symbol,
+    XmrRead,
     Operation
 };
 
@@ -303,8 +304,10 @@ struct ExprNode {
     PlanSymbolId symbol;
     PlanSymbolId tempSymbol;
     std::string literal;
+    std::string xmrPath;
     std::vector<ExprNodeId> operands;
     int32_t widthHint = 0;
+    bool isSigned = false;
     slang::SourceLocation location{};
 };
 
@@ -340,6 +343,8 @@ struct WriteIntent {
     ControlDomain domain = ControlDomain::Unknown;
     bool isNonBlocking = false;
     bool coversAllTwoState = false;
+    bool isXmr = false;
+    std::string xmrPath;
     slang::SourceLocation location{};
 };
 

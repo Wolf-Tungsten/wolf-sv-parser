@@ -35,17 +35,20 @@ Use this skill when the user wants an end-to-end flow: detect a C910 simulation 
 6. TB requirements:
    - Include `V<DUT_TOP>.h`, implement clock/reset, deterministic stimulus, and at least one correctness check.
    - Ensure the stimulus exercises enough logic so that coverage is close to 90% when running `run_c910_bug_case_ref`.
+   - TB validates module behavior; treat the original ref RTL as the gold standard for expected behavior.
+   - TB is driven by the ref flow; do not modify TB to accommodate wolf output or wolf-only failures.
    - When `VM_COVERAGE` is enabled, write coverage to `VERILATOR_COV_FILE`.
 7. Makefile requirements:
    - Targets: `run`, `run_c910_bug_case_ref`, `run_c910_bug_case`, `clean`.
    - `run` uses `--top $(DUT_TOP)` to emit `wolf_emit.sv`.
    - `run_c910_bug_case_ref` runs RTL directly; `run_c910_bug_case` runs `wolf_emit.sv`.
-   - Coverage enabled with `COVERAGE=1` and checked against `COV_MIN` (default 90%).
+   - Coverage enabled with `COVERAGE=1`; enforce `COV_MIN` (default 90%) for the ref run only.
+   - For the wolf run, report coverage but do not fail the run (e.g. use `COV_MIN=0` when invoking it).
    - Outputs under `build/c910_bug_case/case_xxx/{rtl,wolf}` only.
 8. Fill `bug_report.md` with the error summary, repro commands, expected vs actual, and minimization notes (include the log path and a snippet).
 9. Validate behavior:
    - `make -C tests/data/openc910/bug_cases/case_XXX run_c910_bug_case_ref` must complete without errors and coverage should be close to 90% (adjust TB stimulus to raise coverage; keep `COV_MIN` at 90 unless absolutely necessary).
-   - `make -C tests/data/openc910/bug_cases/case_XXX run_c910_bug_case` must reproduce the same class of error message seen in the log (e.g., the same “Value already has a defining operation” failure). If it does not, refine the filelist or TB to match the failing path.
+   - `make -C tests/data/openc910/bug_cases/case_XXX run_c910_bug_case` must reproduce the same class of error message seen in the log (e.g., the same “Value already has a defining operation” failure). If it does not, refine the filelist; do not change TB for wolf-only behavior.
 10. Diagnose the root cause in `wolf-sv-parser`:
     - Locate the failing code path (parser, elaborator, or emitter) using the error signature and minimal repro case.
     - Prefer the smallest fix that preserves existing behavior; update or add tests if the fix changes expected output.
@@ -53,7 +56,7 @@ Use this skill when the user wants an end-to-end flow: detect a C910 simulation 
     - Edit `src/` and/or `include/` as needed.
     - Rebuild with `cmake --build build -j$(nproc)` (configure with `cmake -S . -B build` if needed).
 12. Verify the fix:
-    - Re-run `make -C tests/data/openc910/bug_cases/case_XXX run_c910_bug_case` and confirm the previous error no longer reproduces.
+    - Re-run `make -C tests/data/openc910/bug_cases/case_XXX run_c910_bug_case` and confirm the previous error no longer reproduces (report coverage only; do not enforce `COV_MIN`).
     - Run `ctest --test-dir build --output-on-failure` if the fix affects shared logic.
 13. Write a fix report for human review under `docs/c910/` (e.g., `docs/c910/case_XXX_fix_report.md`):
     - Problem summary and original failure signature (include log path and a short snippet).

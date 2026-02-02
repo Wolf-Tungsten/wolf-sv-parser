@@ -483,6 +483,31 @@ end
 ## 层次结构操作
 
 
+### 层次引用 kXMRRead / kXMRWrite
+
+用于记录层次化引用（XMR）的读写意图。该类 Operation 仅作为中间表示存在，
+必须在 emit 前通过 resolve pass 展开为端口/实例连接及最终 `kAssign`。
+
+#### kXMRRead
+- operands：无
+- results：
+    - out：读取到的信号值（单个 result）
+- attributes：
+    - xmrPath（string）：层次路径（相对当前 Graph 的实例路径 + 目标信号）
+
+#### kXMRWrite
+- operands：
+    - data：写入值（单个 operand）
+- results：无
+- attributes：
+    - xmrPath（string）：层次路径（相对当前 Graph 的实例路径 + 目标信号）
+
+说明：
+- resolve pass 会沿层次路径为中间模块添加端口、更新实例端口连接，
+  并在叶子模块生成 `kAssign`，保证单一驱动语义。
+- `kXMRRead/kXMRWrite` 在 emit 阶段不应残留；若未解析则视为错误。
+
+
 
 
 ### 模块实例化 kInstance

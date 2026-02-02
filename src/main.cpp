@@ -22,6 +22,7 @@
 #include "pass/const_fold.hpp"
 #include "pass/redundant_elim.hpp"
 #include "pass/dead_code_elim.hpp"
+#include "pass/xmr_resolve.hpp"
 
 using namespace slang::driver;
 
@@ -394,6 +395,7 @@ int main(int argc, char **argv)
     // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
     wolf_sv_parser::transform::PassDiagnostics transformDiagnostics;
     wolf_sv_parser::transform::PassManager passManager;
+    passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());

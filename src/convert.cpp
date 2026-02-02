@@ -122,6 +122,63 @@ std::string formatIntegerLiteral(const slang::SVInt& value)
     return value.toString(slang::SVInt::MAX_BITS);
 }
 
+std::optional<std::string> formatHierarchicalReference(
+    const slang::ast::HierarchicalValueExpression& expr)
+{
+    const auto& ref = expr.ref;
+    if (ref.path.empty())
+    {
+        return std::nullopt;
+    }
+    std::string result;
+    for (const auto& elem : ref.path)
+    {
+        if (const auto* name = std::get_if<std::string_view>(&elem.selector))
+        {
+            if (!result.empty())
+            {
+                result.push_back('.');
+            }
+            result.append(*name);
+            continue;
+        }
+        if (const auto* index = std::get_if<int32_t>(&elem.selector))
+        {
+            result.push_back('[');
+            result.append(std::to_string(*index));
+            result.push_back(']');
+            continue;
+        }
+        if (const auto* range = std::get_if<std::pair<int32_t, int32_t>>(&elem.selector))
+        {
+            result.push_back('[');
+            result.append(std::to_string(range->first));
+            result.push_back(':');
+            result.append(std::to_string(range->second));
+            result.push_back(']');
+            continue;
+        }
+    }
+    if (result.empty())
+    {
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::optional<std::string> extractXmrPath(const slang::ast::HierarchicalValueExpression& expr)
+{
+    if (auto name = formatHierarchicalReference(expr))
+    {
+        return name;
+    }
+    if (!expr.symbol.name.empty())
+    {
+        return std::string(expr.symbol.name);
+    }
+    return std::nullopt;
+}
+
 std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
                                     ExprNodeId id);
 
@@ -859,6 +916,8 @@ struct StmtLowererState {
         PlanSymbolId target;
         std::vector<WriteSlice> slices;
         uint64_t width = 0;
+        bool isXmr = false;
+        std::string xmrPath;
         slang::SourceLocation location{};
     };
     struct LValueCompositeInfo {
@@ -1539,7 +1598,7 @@ struct StmtLowererState {
             return;
         }
         if (!expr.isNonBlocking() && hasProceduralValues() && targets.size() == 1 &&
-            !composite.isComposite)
+            !composite.isComposite && !targets.front().isXmr)
         {
             if (targets.front().slices.empty())
             {
@@ -1560,6 +1619,11 @@ struct StmtLowererState {
         ExprNodeId guard = currentGuard(expr.sourceRange.start());
         if (targets.size() == 1 && !composite.isComposite)
         {
+            if (targets.front().isXmr && !targets.front().slices.empty())
+            {
+                reportUnsupported(expr, "Unsupported XMR slice write");
+                return;
+            }
             WriteIntent intent;
             intent.target = targets.front().target;
             intent.slices = std::move(targets.front().slices);
@@ -1567,6 +1631,8 @@ struct StmtLowererState {
             intent.guard = guard;
             intent.domain = domain;
             intent.isNonBlocking = expr.isNonBlocking();
+            intent.isXmr = targets.front().isXmr;
+            intent.xmrPath = std::move(targets.front().xmrPath);
             intent.location = expr.sourceRange.start();
             recordWriteIntent(std::move(intent));
             return;
@@ -1584,6 +1650,11 @@ struct StmtLowererState {
             {
                 return;
             }
+            if (target.isXmr && !target.slices.empty())
+            {
+                reportUnsupported(expr, "Unsupported XMR slice write");
+                return;
+            }
             WriteIntent intent;
             intent.target = target.target;
             intent.slices = std::move(target.slices);
@@ -1591,6 +1662,8 @@ struct StmtLowererState {
             intent.guard = guard;
             intent.domain = domain;
             intent.isNonBlocking = expr.isNonBlocking();
+            intent.isXmr = target.isXmr;
+            intent.xmrPath = std::move(target.xmrPath);
             intent.location = expr.sourceRange.start();
             recordWriteIntent(std::move(intent));
         };
@@ -2006,16 +2079,19 @@ private:
         {
             intent.coversAllTwoState = true;
         }
-        lowering.writes.push_back(std::move(intent));
         LoweredStmt stmt;
         stmt.kind = LoweredStmtKind::Write;
         stmt.op = grh::ir::OperationKind::kAssign;
-        stmt.location = lowering.writes.back().location;
-        stmt.write = lowering.writes.back();
+        stmt.location = intent.location;
+        stmt.write = intent;
         stmt.updateCond = ensureGuardExpr(stmt.write.guard, stmt.location);
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         lowering.loweredStmts.push_back(std::move(stmt));
+        if (!intent.isXmr)
+        {
+            lowering.writes.push_back(std::move(intent));
+        }
     }
 
     const slang::ast::Expression& unwrapDpiArgument(const slang::ast::Expression& expr,
@@ -2036,7 +2112,8 @@ private:
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
-            return plan.symbolTable.lookup(hier->symbol.name);
+            (void)hier;
+            return {};
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
@@ -2544,8 +2621,7 @@ private:
                 {
                     return;
                 }
-                PlanSymbolId id = state_.plan.symbolTable.lookup(expr.symbol.name);
-                if (!id.valid())
+                if (!extractXmrPath(expr))
                 {
                     found_ = true;
                 }
@@ -2710,6 +2786,11 @@ private:
     void warnTimedStatement(const slang::ast::TimedStatement& stmt)
     {
         if (!diagnostics)
+        {
+            return;
+        }
+        if (stmt.timing.kind == slang::ast::TimingControlKind::EventList ||
+            stmt.timing.kind == slang::ast::TimingControlKind::ImplicitEvent)
         {
             return;
         }
@@ -5271,18 +5352,15 @@ private:
                     return addNodeForExpr(std::move(node));
                 }
             }
-            node.kind = ExprNodeKind::Symbol;
-            node.symbol = plan.symbolTable.lookup(hier->symbol.name);
-            if (!node.symbol.valid() &&
-                (hier->symbol.kind == slang::ast::SymbolKind::Parameter ||
-                 hier->symbol.kind == slang::ast::SymbolKind::TypeParameter))
+            auto path = extractXmrPath(*hier);
+            if (!path)
             {
-                node.symbol = plan.symbolTable.intern(hier->symbol.name);
+                reportError(expr, "Unsupported hierarchical symbol in expression");
+                return kInvalidPlanIndex;
             }
-            if (!node.symbol.valid())
-            {
-                reportUnsupported(expr, "Unknown hierarchical symbol in expression");
-            }
+            node.kind = ExprNodeKind::XmrRead;
+            node.xmrPath = std::move(*path);
+            node.isSigned = expr.type ? expr.type->isSigned() : hier->symbol.getType().isSigned();
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
@@ -5847,8 +5925,14 @@ private:
         }
 
         LValueTarget target;
-        target.target = resolveLValueSymbol(expr, target.slices);
-        if (!target.target.valid())
+        std::string xmrPath;
+        target.target = resolveLValueSymbol(expr, target.slices, &xmrPath);
+        if (!xmrPath.empty())
+        {
+            target.isXmr = true;
+            target.xmrPath = std::move(xmrPath);
+        }
+        if (!target.target.valid() && !target.isXmr)
         {
             return false;
         }
@@ -5864,7 +5948,8 @@ private:
     }
 
     PlanSymbolId resolveLValueSymbol(const slang::ast::Expression& expr,
-                                     std::vector<WriteSlice>& slices)
+                                     std::vector<WriteSlice>& slices,
+                                     std::string* xmrPath)
     {
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
@@ -5872,19 +5957,26 @@ private:
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
-            return plan.symbolTable.lookup(hier->symbol.name);
+            if (xmrPath)
+            {
+                if (auto path = extractXmrPath(*hier))
+                {
+                    *xmrPath = std::move(*path);
+                }
+            }
+            return {};
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
             if (conversion->isImplicit())
             {
-                return resolveLValueSymbol(conversion->operand(), slices);
+                return resolveLValueSymbol(conversion->operand(), slices, xmrPath);
             }
             return {};
         }
         if (const auto* member = expr.as_if<slang::ast::MemberAccessExpression>())
         {
-            PlanSymbolId base = resolveLValueSymbol(member->value(), slices);
+            PlanSymbolId base = resolveLValueSymbol(member->value(), slices, xmrPath);
             if (!base.valid())
             {
                 return {};
@@ -5902,7 +5994,7 @@ private:
         }
         if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
         {
-            PlanSymbolId base = resolveLValueSymbol(select->value(), slices);
+            PlanSymbolId base = resolveLValueSymbol(select->value(), slices, xmrPath);
             if (!base.valid())
             {
                 return {};
@@ -5925,7 +6017,7 @@ private:
         }
         if (const auto* range = expr.as_if<slang::ast::RangeSelectExpression>())
         {
-            PlanSymbolId base = resolveLValueSymbol(range->value(), slices);
+            PlanSymbolId base = resolveLValueSymbol(range->value(), slices, xmrPath);
             if (!base.valid())
             {
                 return {};
@@ -7139,6 +7231,10 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             continue;
         }
         const WriteIntent& write = stmt.write;
+        if (write.isXmr)
+        {
+            continue;
+        }
         if (!write.target.valid())
         {
             if (context_.diagnostics)
@@ -8988,6 +9084,10 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             continue;
         }
+        if (stmt.write.isXmr)
+        {
+            continue;
+        }
         std::unordered_set<ExprNodeId> visited;
         const ControlDomain domain = stmt.write.domain;
         ExprNodeId updateCond = kInvalidPlanIndex;
@@ -9125,6 +9225,10 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             continue;
         }
         const WriteIntent& write = stmt.write;
+        if (write.isXmr)
+        {
+            continue;
+        }
         SignalId signal = resolveMemorySignal(write.target);
         if (signal == kInvalidPlanIndex)
         {
@@ -9471,6 +9575,7 @@ public:
         emitSideEffects();
         emitInstances();
         emitInstanceSliceWrites();
+        emitXmrWrites();
         emitWriteBack();
     }
 
@@ -10295,6 +10400,8 @@ private:
             int64_t low = 0;
             int64_t width = 0;
             slang::SourceLocation location{};
+            bool isXmr = false;
+            std::string xmrPath;
         };
 
         auto resolveOutputBinding = [&](auto&& self,
@@ -10327,11 +10434,16 @@ private:
             }
             if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
             {
-                out.target = plan_.symbolTable.lookup(hier->symbol.name);
-                out.low = 0;
-                out.width = portWidth;
-                out.location = expr.sourceRange.start();
-                return out.target.valid();
+                if (auto path = extractXmrPath(*hier))
+                {
+                    out.isXmr = true;
+                    out.xmrPath = std::move(*path);
+                    out.low = 0;
+                    out.width = portWidth;
+                    out.location = expr.sourceRange.start();
+                    return true;
+                }
+                return false;
             }
             if (const auto* select = expr.as_if<slang::ast::ElementSelectExpression>())
             {
@@ -10483,6 +10595,29 @@ private:
                         ok = false;
                         break;
                     }
+                    if (binding.isXmr)
+                    {
+                        if (binding.low != 0)
+                        {
+                            if (context_.diagnostics)
+                            {
+                                context_.diagnostics->warn(
+                                    port->location,
+                                    "Skipping instance output connection to sliced XMR target");
+                            }
+                            ok = false;
+                            break;
+                        }
+                        grh::ir::SymbolId tempSym =
+                            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                        grh::ir::ValueId tempValue =
+                            graph_.createValue(tempSym, binding.width, false);
+                        results.push_back(tempValue);
+                        instanceXmrWrites_.push_back(
+                            InstanceXmrWrite{std::move(binding.xmrPath), tempValue,
+                                             binding.location});
+                        break;
+                    }
                     if (const PortInfo* inout = resolveInoutPort(binding.target))
                     {
                         if (context_.diagnostics)
@@ -10559,7 +10694,7 @@ private:
                     {
                         if (context_.diagnostics)
                         {
-                            context_.diagnostics->warn(
+                            context_.diagnostics->error(
                                 port->location,
                                 "Skipping instance with unsupported inout connection");
                         }
@@ -10690,7 +10825,7 @@ private:
 
     void emitInstanceSliceWrites()
     {
-        if (instanceSliceWrites_.empty())
+        if (instanceSliceWrites_.empty() && instanceXmrWrites_.empty())
         {
             return;
         }
@@ -10875,6 +11010,78 @@ private:
             graph_.addOperand(assignOp, merged);
             graph_.addResult(assignOp, targetValue);
         }
+
+        for (auto& write : instanceXmrWrites_)
+        {
+            if (write.xmrPath.empty() || !write.value.valid())
+            {
+                continue;
+            }
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kXMRWrite,
+                         grh::ir::SymbolId::invalid(),
+                         write.location);
+            graph_.addOperand(op, write.value);
+            graph_.setAttr(op, "xmrPath", write.xmrPath);
+        }
+    }
+
+    void emitXmrWrites()
+    {
+        for (const auto& stmt : lowering_.loweredStmts)
+        {
+            if (stmt.kind != LoweredStmtKind::Write)
+            {
+                continue;
+            }
+            const WriteIntent& write = stmt.write;
+            if (!write.isXmr)
+            {
+                continue;
+            }
+            if (write.xmrPath.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(write.location,
+                                               "Skipping XMR write without path");
+                }
+                continue;
+            }
+            if (write.domain != ControlDomain::Combinational || !stmt.eventEdges.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(write.location,
+                                               "Skipping sequential XMR write");
+                }
+                continue;
+            }
+            if (stmt.updateCond != kInvalidPlanIndex)
+            {
+                auto cond = evalConstInt(plan_, lowering_, stmt.updateCond);
+                if (!cond || *cond == 0)
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(write.location,
+                                                   "Skipping conditional XMR write");
+                    }
+                    continue;
+                }
+            }
+            grh::ir::ValueId data = emitExpr(write.value);
+            if (!data.valid())
+            {
+                continue;
+            }
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kXMRWrite,
+                         grh::ir::SymbolId::invalid(),
+                         write.location);
+            graph_.addOperand(op, data);
+            graph_.setAttr(op, "xmrPath", write.xmrPath);
+        }
     }
 
     grh::ir::ValueId emitConnectionExpr(const slang::ast::Expression& expr)
@@ -10903,7 +11110,8 @@ private:
         }
         if (const auto* hier = expr.as_if<slang::ast::HierarchicalValueExpression>())
         {
-            return plan_.symbolTable.lookup(hier->symbol.name);
+            (void)hier;
+            return {};
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
@@ -11037,15 +11245,33 @@ private:
                         return addNode(expr, std::move(node));
                     }
                 }
-                node.kind = ExprNodeKind::Symbol;
-                node.symbol = state_.plan_.symbolTable.lookup(hier->symbol.name);
-                if (const PortInfo* inout = state_.resolveInoutPort(node.symbol))
+                auto path = extractXmrPath(*hier);
+                if (!path)
                 {
-                    node.symbol = inout->inoutSymbol->inSymbol;
+                    reportUnsupported(expr, "Unsupported hierarchical symbol in connection");
+                    return kInvalidPlanIndex;
                 }
-                if (!node.symbol.valid())
+                node.kind = ExprNodeKind::XmrRead;
+                node.xmrPath = std::move(*path);
+                node.isSigned = expr.type ? expr.type->isSigned() : hier->symbol.getType().isSigned();
+                if (node.widthHint == 0 && expr.type)
                 {
-                    reportUnsupported(expr, "Unknown hierarchical symbol in connection");
+                    uint64_t width = expr.type->getBitstreamWidth();
+                    if (width == 0)
+                    {
+                        if (auto effective = expr.getEffectiveWidth())
+                        {
+                            width = *effective;
+                        }
+                    }
+                    if (width > 0)
+                    {
+                        const uint64_t maxValue =
+                            static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                        node.widthHint = width > maxValue
+                                             ? std::numeric_limits<int32_t>::max()
+                                             : static_cast<int32_t>(width);
+                    }
                 }
                 return addNode(expr, std::move(node));
             }
@@ -11395,11 +11621,26 @@ private:
             grh::ir::ValueId value = valueForSymbol(node.symbol);
             if (!value.valid() && context_.diagnostics)
             {
-                context_.diagnostics->warn(node.location,
-                                           "Graph assembly missing symbol value");
+                context_.diagnostics->error(node.location,
+                                            "Graph assembly missing symbol value");
             }
             valueByExpr_[id] = value;
             return value;
+        }
+        if (node.kind == ExprNodeKind::XmrRead)
+        {
+            const int32_t width = normalizeWidth(node.widthHint);
+            grh::ir::SymbolId sym =
+                graph_.internSymbol("__xmr_read_" + std::to_string(nextTempId_++));
+            grh::ir::ValueId result = graph_.createValue(sym, width, node.isSigned);
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kXMRRead,
+                         grh::ir::SymbolId::invalid(),
+                         node.location);
+            graph_.addResult(op, result);
+            graph_.setAttr(op, "xmrPath", node.xmrPath);
+            valueByExpr_[id] = result;
+            return result;
         }
         if (node.kind != ExprNodeKind::Operation)
         {
@@ -12110,6 +12351,11 @@ private:
     std::vector<std::string> memorySymbolName_;
     std::vector<int32_t> memoryReadIndexByExpr_;
     ConnectionExprLowerer connectionLowerer_;
+    struct InstanceXmrWrite {
+        std::string xmrPath;
+        grh::ir::ValueId value = grh::ir::ValueId::invalid();
+        slang::SourceLocation location{};
+    };
     struct InstanceSliceWrite {
         PlanSymbolId target;
         int64_t low = 0;
@@ -12117,6 +12363,7 @@ private:
         grh::ir::ValueId value = grh::ir::ValueId::invalid();
         slang::SourceLocation location{};
     };
+    std::vector<InstanceXmrWrite> instanceXmrWrites_;
     std::unordered_map<uint32_t, std::vector<InstanceSliceWrite>> instanceSliceWrites_;
     std::unordered_set<uint32_t> instanceMergedTargets_;
     uint32_t nextConstId_ = 0;

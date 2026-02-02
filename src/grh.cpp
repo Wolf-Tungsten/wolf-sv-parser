@@ -2004,7 +2004,9 @@ namespace grh::ir
             "kDisplay",
             "kAssert",
             "kDpicImport",
-            "kDpicCall"};
+            "kDpicCall",
+            "kXMRRead",
+            "kXMRWrite"};
 
         void writeAttributeValue(slang::JsonWriter &writer, const AttributeValue &value)
         {

@@ -2416,13 +2416,19 @@ namespace grh::emit
                     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
                         (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
                 };
-                if (!isIdentStart(expr.front()))
+                bool first = true;
+                for (char ch : expr)
                 {
-                    return false;
-                }
-                for (std::size_t i = 1; i < expr.size(); ++i)
-                {
-                    if (!isIdentChar(expr[i]))
+                    if (first)
+                    {
+                        if (!isIdentStart(ch))
+                        {
+                            return false;
+                        }
+                        first = false;
+                        continue;
+                    }
+                    if (!isIdentChar(ch))
                     {
                         return false;
                     }
@@ -3924,6 +3930,10 @@ namespace grh::emit
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
+                case grh::ir::OperationKind::kXMRRead:
+                case grh::ir::OperationKind::kXMRWrite:
+                    reportError("Unresolved XMR operation in emit", opContext);
+                    break;
                 default:
                     reportWarning("Unsupported operation for SystemVerilog emission", opContext);
                     break;
@@ -4378,13 +4388,19 @@ namespace grh::emit
                 return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
                     (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
             };
-            if (!isIdentStart(expr.front()))
+            bool first = true;
+            for (char ch : expr)
             {
-                return false;
-            }
-            for (std::size_t i = 1; i < expr.size(); ++i)
-            {
-                if (!isIdentChar(expr[i]))
+                if (first)
+                {
+                    if (!isIdentStart(ch))
+                    {
+                        return false;
+                    }
+                    first = false;
+                    continue;
+                }
+                if (!isIdentChar(ch))
                 {
                     return false;
                 }
@@ -6004,6 +6020,10 @@ namespace grh::emit
                 addSequentialStmt(*seqKey, stmt.str(), opId);
                 break;
             }
+            case grh::ir::OperationKind::kXMRRead:
+            case grh::ir::OperationKind::kXMRWrite:
+                reportError("Unresolved XMR operation in emit", context);
+                break;
             default:
                 reportWarning("Unsupported operation for SystemVerilog emission", context);
                 break;
