@@ -11557,7 +11557,13 @@ private:
                     return false;
                 }
                 out.target = base.target;
-                out.low = *indexConst;
+                int64_t low = base.low;
+                if (*indexConst > 0 &&
+                    low > std::numeric_limits<int64_t>::max() - *indexConst)
+                {
+                    return false;
+                }
+                out.low = low + *indexConst;
                 out.width = 1;
                 out.location = select->sourceRange.start();
                 out.isSlice = true;
@@ -11633,7 +11639,13 @@ private:
                     }
                     const int64_t lo = std::min(*leftConst, *rightConst);
                     const int64_t hi = std::max(*leftConst, *rightConst);
-                    out.low = lo;
+                    int64_t low = base.low;
+                    if (lo > 0 &&
+                        low > std::numeric_limits<int64_t>::max() - lo)
+                    {
+                        return false;
+                    }
+                    out.low = low + lo;
                     out.width = hi - lo + 1;
                     break;
                 }
@@ -11648,15 +11660,23 @@ private:
                         return false;
                     }
                     const int64_t width = *rightConst;
+                    int64_t low = base.low;
+                    int64_t indexLow = 0;
                     if (range->getSelectionKind() ==
                         slang::ast::RangeSelectionKind::IndexedDown)
                     {
-                        out.low = *leftConst - width + 1;
+                        indexLow = *leftConst - width + 1;
                     }
                     else
                     {
-                        out.low = *leftConst;
+                        indexLow = *leftConst;
                     }
+                    if (indexLow > 0 &&
+                        low > std::numeric_limits<int64_t>::max() - indexLow)
+                    {
+                        return false;
+                    }
+                    out.low = low + indexLow;
                     out.width = width;
                     break;
                 }
