@@ -9692,8 +9692,8 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             if (context_.diagnostics)
             {
-                context_.diagnostics->todo(use.location,
-                                           "Memory read missing address indices");
+                context_.diagnostics->error(use.location,
+                                            "Memory read missing address indices");
             }
             continue;
         }
