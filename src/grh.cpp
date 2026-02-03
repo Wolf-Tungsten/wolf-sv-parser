@@ -551,6 +551,7 @@ namespace grh::ir
         require(userOffset == view.useList_.size(), "GraphView use-list size mismatch");
 
         builder.values_.reserve(valueCount);
+        builder.valueUsers_.reserve(valueCount);
         for (std::size_t i = 0; i < valueCount; ++i)
         {
             const ValueId valueId = view.values_[i];
@@ -767,6 +768,8 @@ namespace grh::ir
             }
         }
 
+        builder.valueUsers_ = std::move(expectedUsers);
+
         return builder;
     }
 
@@ -788,6 +791,7 @@ namespace grh::ir
         data.width = width;
         data.isSigned = isSigned;
         values_.push_back(std::move(data));
+        valueUsers_.emplace_back();
         return id;
     }
 
@@ -822,7 +826,9 @@ namespace grh::ir
         {
             throw std::runtime_error("ValueId refers to erased value");
         }
-        operations_[opIdx].operands.push_back(value);
+        auto &operands = operations_[opIdx].operands;
+        operands.push_back(value);
+        addValueUser(value, op, operands.size() - 1);
     }
 
     void GraphBuilder::insertOperand(OperationId op, std::size_t index, ValueId value)
@@ -842,7 +848,10 @@ namespace grh::ir
         {
             throw std::runtime_error("Operand index out of range");
         }
+        const std::vector<ValueId> oldOperands = operands;
         operands.insert(operands.begin() + static_cast<std::ptrdiff_t>(index), value);
+        removeOpUses(op, oldOperands);
+        addOpUses(op, operands);
     }
 
     void GraphBuilder::addResult(OperationId op, ValueId value)
@@ -1075,7 +1084,14 @@ namespace grh::ir
         {
             throw std::runtime_error("Operand index out of range");
         }
+        const ValueId current = operands[index];
+        if (current == value)
+        {
+            return;
+        }
         operands[index] = value;
+        removeValueUser(current, op, index);
+        addValueUser(value, op, index);
     }
 
     void GraphBuilder::replaceResult(OperationId op, std::size_t index, ValueId value)
@@ -1199,31 +1215,7 @@ namespace grh::ir
 
     void GraphBuilder::replaceAllUses(ValueId from, ValueId to)
     {
-        if (from == to)
-        {
-            return;
-        }
-        const std::size_t fromIdx = valueIndex(from);
-        const std::size_t toIdx = valueIndex(to);
-        if (!values_[fromIdx].alive || !values_[toIdx].alive)
-        {
-            throw std::runtime_error("replaceAllUses requires live values");
-        }
-
-        for (std::size_t i = 0; i < operations_.size(); ++i)
-        {
-            if (!operations_[i].alive)
-            {
-                continue;
-            }
-            for (auto &operand : operations_[i].operands)
-            {
-                if (operand == from)
-                {
-                    operand = to;
-                }
-            }
-        }
+        replaceAllUsesInternal(from, to, std::nullopt);
     }
 
     bool GraphBuilder::eraseOperand(OperationId op, std::size_t index)
@@ -1238,7 +1230,10 @@ namespace grh::ir
         {
             return false;
         }
+        const std::vector<ValueId> oldOperands = operands;
         operands.erase(operands.begin() + static_cast<std::ptrdiff_t>(index));
+        removeOpUses(op, oldOperands);
+        addOpUses(op, operands);
         return true;
     }
 
@@ -1303,6 +1298,7 @@ namespace grh::ir
                 values_[valIdx].definingOp = OperationId::invalid();
             }
         }
+        removeOpUses(op, operations_[opIdx].operands);
         const SymbolId symbol = operations_[opIdx].symbol;
         if (symbol.valid())
         {
@@ -1328,6 +1324,7 @@ namespace grh::ir
                 values_[valIdx].definingOp = OperationId::invalid();
             }
         }
+        removeOpUses(op, operations_[opIdx].operands);
         const SymbolId symbol = operations_[opIdx].symbol;
         if (symbol.valid())
         {
@@ -1365,28 +1362,7 @@ namespace grh::ir
             {
                 continue;
             }
-            for (std::size_t opIdxIter = 0; opIdxIter < operations_.size(); ++opIdxIter)
-            {
-                if (!operations_[opIdxIter].alive)
-                {
-                    continue;
-                }
-                OperationId iterId;
-                iterId.index = static_cast<uint32_t>(opIdxIter + 1);
-                iterId.generation = 0;
-                iterId.graph = graphId_;
-                if (iterId == op)
-                {
-                    continue;
-                }
-                for (auto &operand : operations_[opIdxIter].operands)
-                {
-                    if (operand == from)
-                    {
-                        operand = to;
-                    }
-                }
-            }
+            replaceAllUsesInternal(from, to, op);
         }
         for (const auto &result : results)
         {
@@ -1396,6 +1372,7 @@ namespace grh::ir
                 values_[valIdx].definingOp = OperationId::invalid();
             }
         }
+        removeOpUses(op, operations_[opIdx].operands);
         const SymbolId symbol = operations_[opIdx].symbol;
         if (symbol.valid())
         {
@@ -1436,6 +1413,7 @@ namespace grh::ir
         {
             unbindSymbol(symbol, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
         }
+        valueUsers_[valIdx].clear();
         values_[valIdx].alive = false;
         return true;
     }
@@ -1960,32 +1938,112 @@ namespace grh::ir
 
     std::size_t GraphBuilder::countValueUses(ValueId value, std::optional<OperationId> skipOp) const
     {
-        std::optional<uint32_t> skipIndex;
-        if (skipOp)
+        const std::size_t valIdx = valueIndex(value);
+        if (!skipOp)
         {
-            skipOp->assertGraph(graphId_);
-            skipIndex = skipOp->index;
+            return valueUsers_[valIdx].size();
         }
+        skipOp->assertGraph(graphId_);
         std::size_t count = 0;
-        for (std::size_t i = 0; i < operations_.size(); ++i)
+        for (const auto &user : valueUsers_[valIdx])
         {
-            if (!operations_[i].alive)
+            if (user.operation != *skipOp)
             {
-                continue;
-            }
-            if (skipIndex && *skipIndex == static_cast<uint32_t>(i + 1))
-            {
-                continue;
-            }
-            for (const auto &operand : operations_[i].operands)
-            {
-                if (operand == value)
-                {
-                    ++count;
-                }
+                ++count;
             }
         }
         return count;
+    }
+
+    void GraphBuilder::addValueUser(ValueId value, OperationId op, std::size_t operandIndex)
+    {
+        const std::size_t valIdx = valueIndex(value);
+        op.assertGraph(graphId_);
+        if (!values_[valIdx].alive)
+        {
+            throw std::runtime_error("ValueId refers to erased value");
+        }
+        valueUsers_[valIdx].push_back(ValueUser{op, static_cast<uint32_t>(operandIndex)});
+    }
+
+    void GraphBuilder::removeValueUser(ValueId value, OperationId op, std::size_t operandIndex)
+    {
+        const std::size_t valIdx = valueIndex(value);
+        op.assertGraph(graphId_);
+        auto &users = valueUsers_[valIdx];
+        for (std::size_t i = 0; i < users.size(); ++i)
+        {
+            if (users[i].operation == op && users[i].operandIndex == operandIndex)
+            {
+                users.erase(users.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+        throw std::runtime_error("Value use-list out of sync while removing user");
+    }
+
+    void GraphBuilder::removeOpUses(OperationId op, const std::vector<ValueId> &operands)
+    {
+        for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+        {
+            removeValueUser(operands[operandIndex], op, operandIndex);
+        }
+    }
+
+    void GraphBuilder::addOpUses(OperationId op, const std::vector<ValueId> &operands)
+    {
+        for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+        {
+            addValueUser(operands[operandIndex], op, operandIndex);
+        }
+    }
+
+    void GraphBuilder::replaceAllUsesInternal(ValueId from, ValueId to, std::optional<OperationId> skipOp)
+    {
+        if (from == to)
+        {
+            return;
+        }
+        const std::size_t fromIdx = valueIndex(from);
+        const std::size_t toIdx = valueIndex(to);
+        if (!values_[fromIdx].alive || !values_[toIdx].alive)
+        {
+            throw std::runtime_error("replaceAllUses requires live values");
+        }
+        if (skipOp)
+        {
+            skipOp->assertGraph(graphId_);
+        }
+
+        std::vector<ValueUser> users = valueUsers_[fromIdx];
+        valueUsers_[fromIdx].clear();
+        valueUsers_[fromIdx].reserve(users.size());
+        valueUsers_[toIdx].reserve(valueUsers_[toIdx].size() + users.size());
+
+        for (const auto &user : users)
+        {
+            if (skipOp && user.operation == *skipOp)
+            {
+                valueUsers_[fromIdx].push_back(user);
+                continue;
+            }
+            const std::size_t opIdx = opIndex(user.operation);
+            if (!operations_[opIdx].alive)
+            {
+                continue;
+            }
+            auto &operands = operations_[opIdx].operands;
+            if (user.operandIndex >= operands.size())
+            {
+                throw std::runtime_error("Value use-list out of sync with operands");
+            }
+            if (operands[user.operandIndex] != from)
+            {
+                throw std::runtime_error("Value use-list out of sync with operands");
+            }
+            operands[user.operandIndex] = to;
+            valueUsers_[toIdx].push_back(ValueUser{user.operation, user.operandIndex});
+        }
     }
 
     void GraphBuilder::recomputePortFlags()
@@ -3088,27 +3146,8 @@ namespace grh::ir
             throw std::runtime_error("ValueId refers to erased value");
         }
 
-        std::vector<ValueUser> users;
-        const auto &ops = builder_->operations_;
-        for (std::size_t opIdx = 0; opIdx < ops.size(); ++opIdx)
-        {
-            if (!ops[opIdx].alive)
-            {
-                continue;
-            }
-            const auto &operands = ops[opIdx].operands;
-            for (std::size_t operandIdx = 0; operandIdx < operands.size(); ++operandIdx)
-            {
-                if (operands[operandIdx] == id)
-                {
-                    OperationId opId;
-                    opId.index = static_cast<uint32_t>(opIdx + 1);
-                    opId.generation = 0;
-                    opId.graph = graphId_;
-                    users.push_back(ValueUser{opId, static_cast<uint32_t>(operandIdx)});
-                }
-            }
-        }
+        const auto &usersView = builder_->valueUsers_[idx];
+        std::vector<ValueUser> users(usersView.begin(), usersView.end());
 
         std::string symbolText = symbolTextOrEmpty(symbols_, data.symbol);
         return Value(id,

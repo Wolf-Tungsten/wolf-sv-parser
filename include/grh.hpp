@@ -403,6 +403,11 @@ private:
     bool valueAlive(ValueId value) const;
     bool opAlive(OperationId op) const;
     std::size_t countValueUses(ValueId value, std::optional<OperationId> skipOp) const;
+    void addValueUser(ValueId value, OperationId op, std::size_t operandIndex);
+    void removeValueUser(ValueId value, OperationId op, std::size_t operandIndex);
+    void removeOpUses(OperationId op, const std::vector<ValueId>& operands);
+    void addOpUses(OperationId op, const std::vector<ValueId>& operands);
+    void replaceAllUsesInternal(ValueId from, ValueId to, std::optional<OperationId> skipOp);
     void recomputePortFlags();
     void validateSymbol(SymbolId sym, std::string_view context) const;
     void bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context);
@@ -414,6 +419,7 @@ private:
     GraphId graphId_;
     GraphSymbolTable* symbols_ = nullptr;
     std::vector<ValueData> values_;
+    std::vector<std::vector<ValueUser>> valueUsers_;
     std::vector<OperationData> operations_;
     std::vector<Port> inputPorts_;
     std::vector<Port> outputPorts_;

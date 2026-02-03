@@ -24,9 +24,35 @@
 - 固化基线信息到文档（含输入规模、编译 flags、运行命令）
 
 实施：
-- 待开始
+- 基线采样信息：gprof 总时长 174.41s，采样粒度 0.01s（见 call graph 头部）
+- 前 20 热点（self time）：
+  - 23.07%（40.24s）grh::ir::Graph::valueFromBuilder(ValueId) const
+  - 6.10%（10.64s）grh::ir::GraphBuilder::replaceAllUses(ValueId, ValueId)
+  - 5.42%（9.45s）std::vector<GraphBuilder::OperationData>::operator[] const
+  - 5.38%（9.38s）std::vector<GraphBuilder::OperationData>::size const
+  - 4.97%（8.66s）grh::ir::operator==(ValueId, ValueId)
+  - 4.94%（8.62s）grh::ir::Graph::ensureCaches() const
+  - 3.59%（6.27s）std::vector<ValueId>::size const
+  - 3.59%（6.26s）_init
+  - 2.43%（4.23s）std::vector<ValueId>::operator[] const
+  - 2.37%（4.14s）__gnu_cxx::eq(normal_iterator<vector<ValueId>>)
+  - 1.96%（3.42s）__gnu_cxx::normal_iterator<ValueId*>::base() const
+  - 1.64%（2.86s）__gnu_cxx::normal_iterator<ValueId*>::normal_iterator(ValueId* const&)
+  - 1.59%（2.77s）std::vector<GraphBuilder::OperationData>::operator[]
+  - 1.24%（2.16s）std::vector<ValueId>::push_back
+  - 1.16%（2.03s）std::vector<OperationId>::push_back
+  - 0.98%（1.71s）std::vector<GraphBuilder::ValueData>::size const
+  - 0.96%（1.68s）grh::ir::GraphId::GraphId()
+  - 0.86%（1.50s）std::vector<GraphBuilder::ValueData>::operator[] const
+  - 0.84%（1.46s）std::construct_at<ValueId>
+  - 0.80%（1.40s）allocator_traits<OperationId>::construct
+- 调用链摘要：
+  - ConstantFoldPass::run -> replaceUsers -> Graph::replaceAllUses -> GraphBuilder::replaceAllUses
+  - Graph::getValue -> Graph::valueFromBuilder（被 ConstantFoldPass::run 与 GraphAssemblyState::emit* 调用）
+  - Graph::outputPorts / Graph::operations -> Graph::ensureCaches（outputPorts 在 replaceUsers 路径上）
+- 运行命令/输入规模/编译 flags：未记录，需在下一次 profile 时补充
 
-完成情况：未开始
+完成情况：进行中（基线命令/输入规模待补）
 
 
 ## STEP 0002 - Graph::valueFromBuilder 映射优化
@@ -37,13 +63,21 @@
 
 计划：
 - 盘点 valueFromBuilder 的调用点与频次，确认是否可在批处理阶段完成映射
-- 评估按图缓存（Graph 内一次性建立映射表）与按构建阶段缓存（GraphBuilder 产出时携带映射）的实现复杂度
+- 优先评估“GraphBuilder 维护 use-list”的方案，避免每次 getValue 扫描所有 op/operand
+- 备选方案：Graph 内部建立 users cache，随 builder 变更失效并在首次查询重建
 - 增加 micro-bench 验证映射成本与 cache 命中收益
 
 实施：
-- 待开始
+- 代码路径确认：valueFromBuilder 每次通过遍历 operations_/operands 重建 users（O(#ops * avg_operands)），直接解释了 vector::size/operator[] 的十亿级热点
+- 调用链确认：Graph::getValue -> Graph::valueFromBuilder，主要来自 ConstantFoldPass::run 与 GraphAssemblyState::emit* 的高频查询
+- 方案 A 落地：GraphBuilder 增加 valueUsers_（按 ValueId 维护 use-list），在 add/insert/replace/erase operand、replaceAllUses、eraseOp 等路径增量维护
+- Graph::valueFromBuilder 改为直接拷贝 valueUsers_，避免全量扫描 operations_
+- replaceAllUses/eraseOp(replacement) 改为基于 use-list 更新，避免全图遍历
 
-完成情况：未开始
+完成情况：已完成（代码落地，待 profile 验证）
+
+验证记录：
+- convert 总耗时由 259s 降至 84s（基于 c910 profile 对比）
 
 
 ## STEP 0003 - GraphBuilder::replaceAllUses 批处理优化
