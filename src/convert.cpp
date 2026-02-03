@@ -48,6 +48,27 @@
 
 namespace wolf_sv_parser {
 
+// Visitor to force resolution of all expression types before parallel conversion.
+// This ensures thread-safe access to the AST by resolving all lazy bindings
+// that might not be triggered by DiagnosticVisitor (which uses VisitStatements=false
+// and VisitExpressions=false).
+struct ExpressionPrebindVisitor : public slang::ast::ASTVisitor<ExpressionPrebindVisitor, true, true> {
+    template<typename T>
+    void handle(const T& expr) {
+        if constexpr (std::is_base_of_v<slang::ast::Expression, T>) {
+            // Force type resolution by accessing the type
+            (void)expr.type;
+        }
+        if constexpr (std::is_base_of_v<slang::ast::Symbol, T>) {
+            // Force declared type resolution
+            if (auto declaredType = expr.getDeclaredType()) {
+                (void)declaredType->getType();
+            }
+        }
+        visitDefault(expr);
+    }
+};
+
 class InstanceRegistry {
 public:
     bool trySchedule(const PlanKey& key)
@@ -14402,6 +14423,19 @@ void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
     // This traverses the entire AST and triggers all lazy bindings,
     // making it safe for multithreaded access afterward.
     (void)root.getCompilation().getSemanticDiagnostics();
+    
+    // Additional prebind pass: force all expression types to be resolved.
+    // getSemanticDiagnostics() uses DiagnosticVisitor with VisitStatements=false
+    // and VisitExpressions=false, which may leave some expression types unresolved.
+    // This pass explicitly traverses all expressions to ensure thread-safe access.
+    ExpressionPrebindVisitor prebindVisitor;
+    root.visit(prebindVisitor);
+    
+    // Freeze the compilation to ensure all internal data structures are finalized
+    // and to prevent any further modifications. This is required for thread-safe
+    // access to the AST from multiple worker threads.
+    root.getCompilation().freeze();
+    
     const auto prebindEnd = ConvertClock::now();
     logPassTiming(logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
 }

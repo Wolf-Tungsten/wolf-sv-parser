@@ -25,6 +25,7 @@ CONVERT_LOG_TAG ?= timing
 SKIP_TRANSFORM ?= 0
 WOLF_TIMEOUT ?= 60
 WOLF_EMIT_FLAGS ?=
+CMAKE_BUILD_TYPE ?= Release
 
 ifneq ($(strip $(SINGLE_THREAD)),0)
 WOLF_EMIT_FLAGS += --single-thread

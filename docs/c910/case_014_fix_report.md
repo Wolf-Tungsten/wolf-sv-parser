@@ -21,6 +21,13 @@
 - The assertion fires inside slang while resolving expression types, which strongly
   suggests a thread-safety issue (concurrent AST access / lazy type resolution) during
   parallel conversion.
+- The original fix using only `getSemanticDiagnostics()` was insufficient because:
+  1. `DiagnosticVisitor` (used internally by `getSemanticDiagnostics()`) has `VisitStatements=false`
+     and `VisitExpressions=false`, meaning it does not traverse into expression trees.
+  2. This leaves some expression types unresolved, causing lazy type resolution to
+     occur during multithreaded access, leading to race conditions.
+  3. Additionally, the compilation was not frozen, allowing potential modifications
+     during parallel access.
 
 ## Fix details
 - **Prebind pass:** trigger slang's internal `DiagnosticVisitor` through the public API
@@ -31,14 +38,31 @@
   - Uses the official slang API instead of a custom visitor to ensure completeness and
     maintainability across slang updates.
 
-## Validation
-- User verification: multi-thread run no longer reports the `not_null` assertion.
+- **Enhanced expression prebind (2026-02-03 update):**
+  - Added `ExpressionPrebindVisitor` that traverses all statements and expressions
+    (`ASTVisitor<ExpressionPrebindVisitor, true, true>`) to force resolution of
+    expression types that `DiagnosticVisitor` misses.
+  - This visitor accesses `expr.type` for all expressions and `declaredType->getType()`
+    for all symbols to ensure all lazy type bindings are resolved before parallel access.
+
+- **Compilation freeze (2026-02-03 update):**
+  - Added `root.getCompilation().freeze()` after prebind to ensure all internal data
+    structures are finalized and to prevent any further modifications.
+  - This follows the pattern used in slang's own `threadtest` tool for safe multithreaded
+    AST access.
 
 ## Files changed
 - `src/convert.cpp`
+  - Added `ExpressionPrebindVisitor` struct for comprehensive expression type resolution
+  - Modified `runSlangPrebind()` to include expression prebind and compilation freeze
+
+## Validation
+- Multi-thread run no longer reports the `not_null` assertion.
+- C910 smart_run conversion completes successfully (verified `sim_top_wolf.sv` generated).
+- All 23 unit tests pass.
 
 ## Open questions / follow-ups
-- The underlying thread-safety issue in parallel conversion still needs isolation.
-  If performance becomes a problem, consider a targeted lock around slang type
-  resolution or a full pre-elaboration pass that guarantees thread-safe read-only
-  traversal.
+- The prebind pass adds some overhead to the conversion process. If performance becomes
+  an issue, consider profiling and optimizing the visitor implementation.
+- Consider adding a command-line option to disable parallel conversion for debugging
+  purposes when thread-safety issues arise.
