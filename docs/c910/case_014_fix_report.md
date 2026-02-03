@@ -23,10 +23,6 @@
   parallel conversion.
 
 ## Fix details
-- **Mitigation for C910 smart_run:** default the C910 smart_run flow to single-thread
-  conversion to avoid parallel AST access.
-  - `tests/data/openc910/smart_run/Makefile` now includes `--single-thread` in
-    `WOLF_EMIT_FLAGS` by default.
 - **Prebind pass (best-effort):** add a pre-pass that walks the slang AST and eagerly
   binds lazy symbol data before parallel conversion.
   - `src/convert.cpp` adds `SlangPrebindVisitor` and runs it when parallel mode is enabled.
@@ -38,7 +34,6 @@
 
 ## Files changed
 - `src/convert.cpp`
-- `tests/data/openc910/smart_run/Makefile`
 
 ## Open questions / follow-ups
 - The underlying thread-safety issue in parallel conversion still needs isolation.
