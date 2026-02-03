@@ -104,6 +104,7 @@ GPROF_DIR := $(BUILD_DIR)/artifacts
 GPROF_OUT := $(GPROF_DIR)/c910_gprof.txt
 GPROF_GMON := $(GPROF_DIR)/c910_gmon.out
 
+run_c910_gprof: WOLF_TIMEOUT := $(TIMEOUT)
 run_c910_gprof:
 	@$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_CXX_FLAGS=-pg
 	@$(CMAKE) --build $(BUILD_DIR) -j$(nproc) --target wolf-sv-parser
@@ -117,7 +118,7 @@ run_c910_gprof:
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 		TOOL_EXTENSION="$$TOOL_EXTENSION" \
 		WOLF_SV_PARSER="$(abspath $(WOLF_PARSER))" \
-		WOLF_EMIT_FLAGS="--emit-sv --top $${WOLF_TOP:-sim_top} --timeout $(TIMEOUT) \
+		WOLF_EMIT_FLAGS="$(WOLF_EMIT_FLAGS) --emit-sv --top $${WOLF_TOP:-sim_top} \
 			--convert-log --convert-log-level info --convert-log-tag timing"; \
 	if [ -f "$(C910_SMART_RUN_DIR)/work/gmon.out" ]; then \
 		cp -f "$(C910_SMART_RUN_DIR)/work/gmon.out" "$(GPROF_GMON)"; \

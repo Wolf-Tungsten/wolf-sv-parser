@@ -27,6 +27,7 @@
 #include "slang/ast/symbols/ParameterSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/SubroutineSymbols.h"
+#include "slang/ast/symbols/ValueSymbol.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/types/AllTypes.h"
 #include "slang/text/SourceManager.h"
@@ -179,6 +180,58 @@ std::string formatDuration(ConvertClock::duration duration)
     const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
     return std::to_string(ns) + "ns";
 }
+
+class SlangPrebindVisitor
+    : public slang::ast::ASTVisitor<SlangPrebindVisitor, true, true> {
+public:
+    void handle(const slang::ast::ValueSymbol& symbol)
+    {
+        (void)symbol.getType();
+    }
+
+    void handle(const slang::ast::Expression& expr)
+    {
+        (void)expr.type;
+    }
+
+    void handle(const slang::ast::ContinuousAssignSymbol& symbol)
+    {
+        (void)symbol.getAssignment();
+        (void)symbol.getDelay();
+    }
+
+    void handle(const slang::ast::NetSymbol& symbol)
+    {
+        (void)symbol.getInitializer();
+        (void)symbol.getDelay();
+    }
+
+    void handle(const slang::ast::VariableSymbol& symbol)
+    {
+        (void)symbol.getInitializer();
+    }
+
+    void handle(const slang::ast::PortSymbol& symbol)
+    {
+        (void)symbol.getInitializer();
+        (void)symbol.getInternalExpr();
+    }
+
+    void handle(const slang::ast::ParameterSymbol& symbol)
+    {
+        (void)symbol.getInitializer();
+    }
+
+    void handle(const slang::ast::DefParamSymbol& symbol)
+    {
+        (void)symbol.getInitializer();
+    }
+
+    void handle(const slang::ast::PrimitiveInstanceSymbol& symbol)
+    {
+        (void)symbol.getDelay();
+    }
+};
 
 void logPassTiming(ConvertLogger* logger, std::string_view passName,
                    std::string_view moduleName, ConvertClock::duration duration)
@@ -14372,6 +14425,14 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     std::condition_variable doneCv;
     std::mutex doneMutex;
     const bool useParallel = !options_.singleThread && options_.threadCount > 1;
+    if (useParallel)
+    {
+        const auto prebindStart = ConvertClock::now();
+        SlangPrebindVisitor prebindVisitor;
+        root.visit(prebindVisitor);
+        const auto prebindEnd = ConvertClock::now();
+        logPassTiming(context.logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
+    }
     if (useParallel)
     {
         context.taskCounter = &pending;
