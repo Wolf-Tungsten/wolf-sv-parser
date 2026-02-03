@@ -70,13 +70,11 @@ check-id:
 	@test -f $(DUT_SRC) || { echo "Missing DUT source: $(DUT_SRC)"; exit 1; }
 	@test -f $(TB_SRC) || { echo "Missing testbench: $(TB_SRC)"; exit 1; }
 
-$(WOLF_PARSER):
-	$(CMAKE) -S . -B $(BUILD_DIR)
-	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
-
 build_wolf_parser:
 	$(CMAKE) -S . -B $(BUILD_DIR)
 	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
+
+$(WOLF_PARSER): build_wolf_parser
 
 $(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLF_PARSER) check-id
 	@mkdir -p $(OUT_DIR)
@@ -89,7 +87,7 @@ $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 		--top-module top_module --prefix $(VERILATOR_PREFIX) -Mdir $(OUT_DIR) -o $(SIM_BIN_NAME)
 	CCACHE_DISABLE=1 $(MAKE) -C $(OUT_DIR) -f $(VERILATOR_PREFIX).mk $(SIM_BIN_NAME)
 
-run_c910_test:
+run_c910_test: build_wolf_parser
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
 	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
 		. "$(SMART_ENV)"; \
