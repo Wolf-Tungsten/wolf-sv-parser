@@ -36,7 +36,7 @@ C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
 C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
 .PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test build_wolf_parser \
-	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case clean check-id
+	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof clean check-id
 
 all: run_hdlbits_test
 
@@ -77,6 +77,34 @@ run_c910_test:
 		CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 		TOOL_EXTENSION="$$TOOL_EXTENSION"
+
+TIMEOUT ?= 120
+GPROF_DIR := $(BUILD_DIR)/artifacts
+GPROF_OUT := $(GPROF_DIR)/c910_gprof.txt
+GPROF_GMON := $(GPROF_DIR)/c910_gmon.out
+
+run_c910_gprof:
+	@$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_CXX_FLAGS=-pg
+	@$(CMAKE) --build $(BUILD_DIR) -j$(nproc) --target wolf-sv-parser
+	@mkdir -p $(GPROF_DIR)
+	@rm -f $(GPROF_GMON) $(GPROF_OUT)
+	@if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
+		. "$(SMART_ENV)"; \
+	fi; \
+	echo "[RUN] wolf-sv-parser gprof TIMEOUT=$(TIMEOUT)s"; \
+	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) wolf_emit \
+		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
+		TOOL_EXTENSION="$$TOOL_EXTENSION" \
+		WOLF_SV_PARSER="$(abspath $(WOLF_PARSER))" \
+		WOLF_EMIT_FLAGS="--emit-sv --top $${WOLF_TOP:-sim_top} --timeout $(TIMEOUT)"; \
+	if [ -f "$(C910_SMART_RUN_DIR)/work/gmon.out" ]; then \
+		cp -f "$(C910_SMART_RUN_DIR)/work/gmon.out" "$(GPROF_GMON)"; \
+		gprof "$(WOLF_PARSER)" "$(GPROF_GMON)" > "$(GPROF_OUT)"; \
+		echo "[gprof] report: $(GPROF_OUT)"; \
+	else \
+		echo "[gprof] gmon.out not found; wolf-sv-parser may not have produced profile output"; \
+		exit 1; \
+	fi
 
 run_c910_ref_test: SMART_SIM=verilator_ref
 run_c910_ref_test: run_c910_test

@@ -1,9 +1,15 @@
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include "slang/ast/ASTSerializer.h"
 #include "slang/ast/Compilation.h"
@@ -25,6 +31,57 @@
 #include "pass/xmr_resolve.hpp"
 
 using namespace slang::driver;
+
+namespace {
+class Watchdog {
+public:
+    explicit Watchdog(std::chrono::seconds timeout)
+        : timeout_(timeout),
+          thread_([this]() { run(); })
+    {
+    }
+
+    Watchdog(const Watchdog&) = delete;
+    Watchdog& operator=(const Watchdog&) = delete;
+
+    ~Watchdog()
+    {
+        cancel();
+        if (thread_.joinable())
+        {
+            thread_.join();
+        }
+    }
+
+    void cancel()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cancelled_ = true;
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void run()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (cv_.wait_for(lock, timeout_, [this]() { return cancelled_; }))
+        {
+            return;
+        }
+        std::cerr << "[timeout] Exceeded " << timeout_.count() << " seconds; terminating\n";
+        std::cerr.flush();
+        std::exit(124);
+    }
+
+    std::chrono::seconds timeout_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool cancelled_ = false;
+    std::thread thread_;
+};
+} // namespace
 
 int main(int argc, char **argv)
 {
@@ -51,9 +108,20 @@ int main(int argc, char **argv)
     driver.cmdLine.add("--emit-out-dir,--emit-out", emitOutputDir, "Directory to write emitted GRH/SV files", "<path>");
     std::optional<std::string> outputPathArg;
     driver.cmdLine.add("-o", outputPathArg, "Output file path for emitted artifacts", "<path>", slang::CommandLineFlags::FilePath);
+    std::optional<int64_t> timeoutSeconds;
+    driver.cmdLine.add("--timeout", timeoutSeconds, "Terminate if runtime exceeds timeout seconds", "<sec>");
 
     if (!driver.parseCommandLine(argc, argv)) {
         return 1;
+    }
+
+    if (timeoutSeconds && *timeoutSeconds <= 0) {
+        std::cerr << "[timeout] Value must be a positive number of seconds\n";
+        return 1;
+    }
+    std::optional<Watchdog> watchdog;
+    if (timeoutSeconds) {
+        watchdog.emplace(std::chrono::seconds(*timeoutSeconds));
     }
 
     if (!driver.processOptions()) {
