@@ -317,7 +317,7 @@ namespace wolf_sv_parser::transform
                 continue;
             }
 
-            if (options_.verbosity == PassVerbosity::Debug)
+            if (options_.verbosity <= PassVerbosity::Info)
             {
                 std::cerr << "[transform] [" << pass->id() << "] start\n";
             }

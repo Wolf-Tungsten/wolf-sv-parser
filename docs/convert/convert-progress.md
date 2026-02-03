@@ -44,6 +44,30 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 已补充四态逻辑语义说明
 
 完成情况：已完成
+
+
+
+## STEP 0049 - Convert pass 耗时日志
+
+目标：
+- 在 Convert 各 pass 结束后输出耗时，便于定位卡顿或死循环
+- 通过 ConvertLogger 的 level/tag 控制日志噪声
+
+计划：
+- 在 `ConvertDriver::convert` 中为 Pass1/Pass5/Pass6/Pass7/Pass8 添加计时
+- 使用 `ConvertLogger` 输出 tag=timing 的 info 日志
+- 同步更新 convert-architecture/workflow 文档
+
+实施：
+- 为 Pass1/Pass5/Pass6/Pass7/Pass8 添加耗时日志
+- 增加 Convert 总耗时与 transform/emit 阶段耗时日志
+- 日志仅在 `ConvertLogger` 启用且 level>=info 时输出（tag=timing）
+- 更新 convert-architecture/workflow 文档说明 timing 日志
+
+测试：
+- 未运行（仅日志输出改动）
+
+完成情况：已完成
 ~~备注：Pass3（RWAnalyzer）已在 STEP 0046 移除~~
 
 ## STEP 0002 - 制定 Convert 新架构与工作流方案

@@ -36,7 +36,8 @@ C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
 C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
 .PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test build_wolf_parser \
-	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof clean check-id
+	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof \
+	run_c910_prof clean check-id
 
 all: run_hdlbits_test
 
@@ -96,7 +97,8 @@ run_c910_gprof:
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 		TOOL_EXTENSION="$$TOOL_EXTENSION" \
 		WOLF_SV_PARSER="$(abspath $(WOLF_PARSER))" \
-		WOLF_EMIT_FLAGS="--emit-sv --top $${WOLF_TOP:-sim_top} --timeout $(TIMEOUT)"; \
+		WOLF_EMIT_FLAGS="--emit-sv --top $${WOLF_TOP:-sim_top} --timeout $(TIMEOUT) \
+			--convert-log --convert-log-level info --convert-log-tag timing"; \
 	if [ -f "$(C910_SMART_RUN_DIR)/work/gmon.out" ]; then \
 		cp -f "$(C910_SMART_RUN_DIR)/work/gmon.out" "$(GPROF_GMON)"; \
 		gprof "$(WOLF_PARSER)" "$(GPROF_GMON)" > "$(GPROF_OUT)"; \
@@ -105,6 +107,8 @@ run_c910_gprof:
 		echo "[gprof] gmon.out not found; wolf-sv-parser may not have produced profile output"; \
 		exit 1; \
 	fi
+
+run_c910_prof: run_c910_gprof
 
 run_c910_ref_test: SMART_SIM=verilator_ref
 run_c910_ref_test: run_c910_test

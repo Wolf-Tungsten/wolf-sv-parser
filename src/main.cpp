@@ -81,6 +81,39 @@ private:
     bool cancelled_ = false;
     std::thread thread_;
 };
+
+using TimingClock = std::chrono::steady_clock;
+
+std::string formatDuration(TimingClock::duration duration)
+{
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    if (ms > 0)
+    {
+        return std::to_string(ms) + "ms";
+    }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+    if (us > 0)
+    {
+        return std::to_string(us) + "us";
+    }
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    return std::to_string(ns) + "ns";
+}
+
+void logTiming(wolf_sv_parser::ConvertLogger& logger, std::string_view label,
+               TimingClock::duration duration)
+{
+    if (!logger.enabled(wolf_sv_parser::ConvertLogLevel::Info, "timing"))
+    {
+        return;
+    }
+    std::string message;
+    message.reserve(label.size() + 32);
+    message.append(label);
+    message.append(" took ");
+    message.append(formatDuration(duration));
+    logger.log(wolf_sv_parser::ConvertLogLevel::Info, "timing", message);
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -417,11 +450,18 @@ int main(int argc, char **argv)
         }
     }
 
+    const auto convertStart = TimingClock::now();
+    bool convertAborted = false;
     try {
         netlist = converter.convert(root);
     } catch (const wolf_sv_parser::ConvertAbort&) {
         // Diagnostics already recorded; stop conversion immediately.
+        convertAborted = true;
     }
+    const auto convertEnd = TimingClock::now();
+    const std::string convertLabel =
+        convertAborted ? std::string("convert-total (aborted)") : std::string("convert-total");
+    logTiming(converter.logger(), convertLabel, convertEnd - convertStart);
 
     auto kindToTag = [](wolf_sv_parser::ConvertDiagnosticKind kind) -> const char * {
         switch (kind)
@@ -469,7 +509,11 @@ int main(int argc, char **argv)
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
     passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
-    wolf_sv_parser::transform::PassManagerResult passManagerResult = passManager.run(netlist, transformDiagnostics);
+    const auto transformStart = TimingClock::now();
+    wolf_sv_parser::transform::PassManagerResult passManagerResult =
+        passManager.run(netlist, transformDiagnostics);
+    const auto transformEnd = TimingClock::now();
+    logTiming(converter.logger(), "transform", transformEnd - transformStart);
 
     if (!transformDiagnostics.empty())
     {
@@ -520,7 +564,10 @@ int main(int argc, char **argv)
             emitOptions.outputFilename = *jsonOutputName;
         }
 
+        const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        const auto emitEnd = TimingClock::now();
+        logTiming(converter.logger(), "emit-json", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
@@ -557,7 +604,10 @@ int main(int argc, char **argv)
             emitOptions.outputFilename = *svOutputName;
         }
 
+        const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        const auto emitEnd = TimingClock::now();
+        logTiming(converter.logger(), "emit-sv", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())

@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <span>
@@ -101,6 +102,45 @@ std::string sanitizeParamToken(std::string_view text, bool allowLeadingDigit = f
     }
 
     return result;
+}
+
+using ConvertClock = std::chrono::steady_clock;
+
+std::string formatDuration(ConvertClock::duration duration)
+{
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    if (ms > 0)
+    {
+        return std::to_string(ms) + "ms";
+    }
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+    if (us > 0)
+    {
+        return std::to_string(us) + "us";
+    }
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    return std::to_string(ns) + "ns";
+}
+
+void logPassTiming(ConvertLogger* logger, std::string_view passName,
+                   std::string_view moduleName, ConvertClock::duration duration)
+{
+    if (!logger || !logger->enabled(ConvertLogLevel::Info, "timing"))
+    {
+        return;
+    }
+    std::string message;
+    message.reserve(passName.size() + moduleName.size() + 32);
+    message.append(passName);
+    if (!moduleName.empty())
+    {
+        message.append(" (");
+        message.append(moduleName);
+        message.append(")");
+    }
+    message.append(" took ");
+    message.append(formatDuration(duration));
+    logger->log(ConvertLogLevel::Info, "timing", message);
 }
 
 std::string parameterValueToString(const slang::ConstantValue& value)
@@ -7844,12 +7884,6 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
 namespace {
 
-void ensureUniqueTempSymbols(ModulePlan& plan, LoweringPlan& lowering)
-{
-    (void)plan;
-    (void)lowering;
-}
-
 std::optional<int64_t> evalConstInt(const ModulePlan& plan, const LoweringPlan& lowering,
                                     ExprNodeId id);
 
@@ -14196,13 +14230,38 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         {
             continue;
         }
+        const auto planStart = ConvertClock::now();
         ModulePlan plan = planner.plan(*key.body);
+        const auto planEnd = ConvertClock::now();
+        std::string_view moduleName;
+        if (plan.moduleSymbol.valid())
+        {
+            moduleName = plan.symbolTable.text(plan.moduleSymbol);
+        }
+        logPassTiming(context.logger, "pass1-module-plan", moduleName, planEnd - planStart);
+
         LoweringPlan lowering;
+        const auto stmtStart = ConvertClock::now();
         stmtLowerer.lower(plan, lowering);
+        const auto stmtEnd = ConvertClock::now();
+        logPassTiming(context.logger, "pass2-stmt-lowerer", moduleName, stmtEnd - stmtStart);
+
+        const auto writeBackStart = ConvertClock::now();
         WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
+        const auto writeBackEnd = ConvertClock::now();
+        logPassTiming(context.logger, "pass3-writeback", moduleName, writeBackEnd - writeBackStart);
+
+        const auto memoryPortStart = ConvertClock::now();
         memoryPortLowerer.lower(plan, lowering);
-        ensureUniqueTempSymbols(plan, lowering);
+        const auto memoryPortEnd = ConvertClock::now();
+        logPassTiming(context.logger, "pass4-memory-port", moduleName,
+                      memoryPortEnd - memoryPortStart);
+
+        const auto graphStart = ConvertClock::now();
         grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
+        const auto graphEnd = ConvertClock::now();
+        logPassTiming(context.logger, "pass5-graph-assembly", moduleName,
+                      graphEnd - graphStart);
         if (topKeys.find(key) != topKeys.end())
         {
             netlist.markAsTop(graph.symbol());

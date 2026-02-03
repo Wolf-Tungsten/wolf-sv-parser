@@ -40,6 +40,11 @@
 - 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
 - 关键步骤：
   - 根据 `--convert-log/--convert-log-level/--convert-log-tag` 配置 `ConvertDriver` 日志。
+  - 当日志 level >= info 且 tag 允许 `timing` 时，Convert 会在每个 pass 结束后输出耗时：
+    `pass1-module-plan` -> `pass2-stmt-lowerer` -> `pass3-writeback`
+    -> `pass4-memory-port` -> `pass5-graph-assembly`。
+  - Convert 结束后会输出 `convert-total` 作为全流程耗时（异常中止时为 `convert-total (aborted)`）。
+  - 同一套 timing 日志会记录 transform 与 emit 耗时（`transform` / `emit-json` / `emit-sv`）。
   - 调用 `ConvertDriver::convert` 生成 `Netlist`，记录诊断并在 error 时停止。
   - 执行 transform passes（const-fold + stats）。
   - 根据 `--emit-json/--emit-sv` 选择输出 JSON/SV；`-o/--emit-out-dir` 控制路径。

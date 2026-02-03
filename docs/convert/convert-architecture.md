@@ -833,7 +833,11 @@
 ### 3.9. Diagnostics / Logger
 - 总览：
   - `ConvertDiagnostics`：统一收集 error/warn（未支持项按 error 处理），保留源码位置信息。
-  - `ConvertLogger`：level/tag 过滤的可控日志接口。
+  - `ConvertLogger`：level/tag 过滤的可控日志接口；支持输出各 pass 耗时（tag=timing，level=info）。
+    - timing 日志采用连续的 pass 编号，便于定位卡顿：
+      `pass1-module-plan` -> `pass2-stmt-lowerer` -> `pass3-writeback`
+      -> `pass4-memory-port` -> `pass5-graph-assembly`。
+    - Convert 完整耗时会输出为 `convert-total`（异常中止时为 `convert-total (aborted)`）。
 
 ## 4. Pass 中间数据结构
 - 总览：
