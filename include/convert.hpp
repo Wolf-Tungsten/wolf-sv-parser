@@ -4,6 +4,8 @@
 #include "grh.hpp"
 #include "slang/text/SourceLocation.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -36,6 +38,8 @@ using ValueId = grh::ir::ValueId;
 using OperationId = grh::ir::OperationId;
 using SymbolId = grh::ir::SymbolId;
 
+class InstanceRegistry;
+
 enum class ConvertDiagnosticKind {
     Todo,
     Error,
@@ -62,19 +66,31 @@ public:
               std::string originSymbol = {});
 
     void setOnError(std::function<void()> callback) { onError_ = std::move(callback); }
+    void enableThreadLocal(bool enable) noexcept { threadLocalEnabled_ = enable; }
+    void flushThreadLocal();
     const std::vector<ConvertDiagnostic>& messages() const noexcept { return messages_; }
     bool empty() const noexcept { return messages_.empty(); }
-    bool hasError() const noexcept { return hasError_; }
+    bool hasError() const noexcept { return hasError_.load(std::memory_order_relaxed); }
 
 private:
+    struct ThreadLocalBuffer {
+        std::vector<ConvertDiagnostic> messages;
+        bool hasError = false;
+    };
+
     void add(ConvertDiagnosticKind kind, const slang::ast::Symbol& symbol,
              std::string message);
     void add(ConvertDiagnosticKind kind, std::string originSymbol,
              std::optional<slang::SourceLocation> location, std::string message);
 
+    void flushThreadLocalLocked(ThreadLocalBuffer& buffer);
+
+    static thread_local ThreadLocalBuffer threadLocal_;
+    bool threadLocalEnabled_ = false;
     std::vector<ConvertDiagnostic> messages_;
-    bool hasError_ = false;
+    std::atomic<bool> hasError_{false};
     std::function<void()> onError_;
+    mutable std::mutex mutex_;
 };
 
 class ConvertAbort final : public std::exception {
@@ -151,6 +167,7 @@ private:
     ConvertLogLevel level_ = ConvertLogLevel::Warn;
     std::unordered_set<std::string> tags_{};
     Sink sink_{};
+    mutable std::mutex mutex_{};
 };
 
 struct ConvertOptions {
@@ -158,6 +175,8 @@ struct ConvertOptions {
     bool enableLogging = false;
     ConvertLogLevel logLevel = ConvertLogLevel::Warn;
     uint32_t maxLoopIterations = 65536;
+    uint32_t threadCount = 32;
+    bool singleThread = false;
 };
 
 class PlanCache;
@@ -171,6 +190,9 @@ struct ConvertContext {
     ConvertLogger* logger = nullptr;
     PlanCache* planCache = nullptr;
     PlanTaskQueue* planQueue = nullptr;
+    InstanceRegistry* instanceRegistry = nullptr;
+    std::atomic<std::size_t>* taskCounter = nullptr;
+    std::atomic<bool>* cancelFlag = nullptr;
 };
 
 enum class PortDirection {
@@ -537,14 +559,18 @@ private:
 class PlanTaskQueue {
 public:
     void push(PlanKey key);
+    bool tryPush(PlanKey key);
     bool tryPop(PlanKey& out);
+    bool waitPop(PlanKey& out, const std::atomic<bool>* cancelFlag = nullptr);
     void close();
+    std::size_t drain();
     bool closed() const noexcept;
     std::size_t size() const;
     void reset();
 
 private:
     mutable std::mutex mutex_;
+    std::condition_variable cv_;
     std::deque<PlanKey> queue_;
     bool closed_ = false;
 };
@@ -591,8 +617,9 @@ private:
 
 class GraphAssembler {
 public:
-    explicit GraphAssembler(ConvertContext& context, grh::ir::Netlist& netlist)
-        : context_(context), netlist_(netlist) {}
+    explicit GraphAssembler(ConvertContext& context, grh::ir::Netlist& netlist,
+                            std::mutex* netlistMutex = nullptr)
+        : context_(context), netlist_(netlist), netlistMutex_(netlistMutex) {}
 
     const std::string& resolveGraphName(const PlanKey& key, std::string_view moduleName);
 
@@ -602,9 +629,11 @@ public:
 private:
     ConvertContext& context_;
     grh::ir::Netlist& netlist_;
+    std::mutex* netlistMutex_ = nullptr;
     std::size_t nextAnonymousId_ = 0;
     std::unordered_map<PlanKey, std::string, PlanKeyHash> graphNames_{};
     std::unordered_set<std::string> reservedGraphNames_{};
+    mutable std::mutex nameMutex_{};
 };
 
 class ConvertDriver {

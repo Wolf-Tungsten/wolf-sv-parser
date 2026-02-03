@@ -1312,6 +1312,31 @@ namespace grh::ir
         return true;
     }
 
+    bool GraphBuilder::eraseOpUnchecked(OperationId op)
+    {
+        const std::size_t opIdx = opIndex(op);
+        if (!operations_[opIdx].alive)
+        {
+            return false;
+        }
+        const auto &results = operations_[opIdx].results;
+        for (const auto &result : results)
+        {
+            const std::size_t valIdx = valueIndex(result);
+            if (values_[valIdx].definingOp == op)
+            {
+                values_[valIdx].definingOp = OperationId::invalid();
+            }
+        }
+        const SymbolId symbol = operations_[opIdx].symbol;
+        if (symbol.valid())
+        {
+            unbindSymbol(symbol, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
+        }
+        operations_[opIdx].alive = false;
+        return true;
+    }
+
     bool GraphBuilder::eraseOp(OperationId op, std::span<const ValueId> replacementResults)
     {
         const std::size_t opIdx = opIndex(op);
@@ -1388,6 +1413,37 @@ namespace grh::ir
             return false;
         }
         if (countValueUses(value, std::nullopt) != 0)
+        {
+            return false;
+        }
+        if (values_[valIdx].isInput || values_[valIdx].isOutput)
+        {
+            return false;
+        }
+        for (const auto &port : inoutPorts_)
+        {
+            if (port.in == value || port.out == value || port.oe == value)
+            {
+                return false;
+            }
+        }
+        if (values_[valIdx].definingOp.valid())
+        {
+            return false;
+        }
+        const SymbolId symbol = values_[valIdx].symbol;
+        if (symbol.valid())
+        {
+            unbindSymbol(symbol, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
+        }
+        values_[valIdx].alive = false;
+        return true;
+    }
+
+    bool GraphBuilder::eraseValueUnchecked(ValueId value)
+    {
+        const std::size_t valIdx = valueIndex(value);
+        if (!values_[valIdx].alive)
         {
             return false;
         }
@@ -2669,11 +2725,25 @@ namespace grh::ir
         return builder.eraseOp(op, replacementResults);
     }
 
+    bool Graph::eraseOpUnchecked(OperationId op)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseOpUnchecked(op);
+    }
+
     bool Graph::eraseValue(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
         invalidateCaches();
         return builder.eraseValue(value);
+    }
+
+    bool Graph::eraseValueUnchecked(ValueId value)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        invalidateCaches();
+        return builder.eraseValueUnchecked(value);
     }
 
     void Graph::setAttr(OperationId op, std::string_view key, AttributeValue value)

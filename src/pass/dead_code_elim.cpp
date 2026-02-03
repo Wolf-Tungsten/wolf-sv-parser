@@ -2,6 +2,9 @@
 
 #include "grh.hpp"
 
+#include <algorithm>
+#include <deque>
+#include <unordered_map>
 #include <vector>
 
 namespace wolf_sv_parser::transform
@@ -77,48 +80,238 @@ namespace wolf_sv_parser::transform
         {
             grh::ir::Graph &graph = *entry.second;
             bool graphChanged = false;
-            bool progress = true;
 
-            while (progress)
+            const auto opSpan = graph.operations();
+            const auto valueSpan = graph.values();
+            if (opSpan.empty() && valueSpan.empty())
             {
-                progress = false;
-                std::vector<grh::ir::OperationId> toErase;
-                for (const auto opId : graph.operations())
+                continue;
+            }
+
+            uint32_t maxValueIndex = 0;
+            for (const auto valueId : valueSpan)
+            {
+                if (valueId.valid())
                 {
-                    const grh::ir::Operation op = graph.getOperation(opId);
-                    if (isDeadOp(graph, op))
+                    maxValueIndex = std::max(maxValueIndex, valueId.index);
+                }
+            }
+            uint32_t maxOpIndex = 0;
+            for (const auto opId : opSpan)
+            {
+                if (opId.valid())
+                {
+                    maxOpIndex = std::max(maxOpIndex, opId.index);
+                }
+            }
+
+            std::vector<uint8_t> isPort;
+            std::vector<std::size_t> useCounts;
+            std::vector<grh::ir::OperationId> defOpByValue;
+            if (maxValueIndex > 0)
+            {
+                isPort.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
+                useCounts.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
+                defOpByValue.assign(static_cast<std::size_t>(maxValueIndex + 1),
+                                    grh::ir::OperationId::invalid());
+            }
+
+            auto markPort = [&](grh::ir::ValueId valueId) {
+                if (!valueId.valid())
+                {
+                    return;
+                }
+                if (valueId.index >= isPort.size())
+                {
+                    return;
+                }
+                isPort[valueId.index] = 1;
+            };
+            for (const auto &port : graph.inputPorts())
+            {
+                markPort(port.value);
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                markPort(port.value);
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                markPort(port.in);
+                markPort(port.out);
+                markPort(port.oe);
+            }
+
+            struct OpInfo
+            {
+                grh::ir::OperationId id;
+                bool sideEffect = false;
+                std::vector<grh::ir::ValueId> operands;
+                std::vector<grh::ir::ValueId> results;
+            };
+
+            std::vector<OpInfo> ops;
+            ops.reserve(opSpan.size());
+            std::vector<int32_t> opIndexById;
+            if (maxOpIndex > 0)
+            {
+                opIndexById.assign(static_cast<std::size_t>(maxOpIndex + 1), -1);
+            }
+
+            for (const auto opId : opSpan)
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Operation op = graph.getOperation(opId);
+                OpInfo info;
+                info.id = opId;
+                info.sideEffect = isSideEffectOp(op.kind());
+                info.operands = std::vector<grh::ir::ValueId>(op.operands().begin(),
+                                                             op.operands().end());
+                info.results = std::vector<grh::ir::ValueId>(op.results().begin(),
+                                                            op.results().end());
+                const std::size_t infoIndex = ops.size();
+                ops.push_back(std::move(info));
+                if (opId.index < opIndexById.size())
+                {
+                    opIndexById[opId.index] = static_cast<int32_t>(infoIndex);
+                }
+                for (const auto valueId : ops.back().operands)
+                {
+                    if (valueId.valid() && valueId.index < useCounts.size())
                     {
-                        toErase.push_back(opId);
+                        useCounts[valueId.index] += 1;
+                    }
+                }
+                for (const auto valueId : ops.back().results)
+                {
+                    if (valueId.valid() && valueId.index < defOpByValue.size())
+                    {
+                        defOpByValue[valueId.index] = opId;
+                    }
+                }
+            }
+
+            auto isDeadByCounts = [&](const OpInfo &info) -> bool {
+                if (info.sideEffect)
+                {
+                    return false;
+                }
+                if (info.results.empty())
+                {
+                    return false;
+                }
+                for (const auto valueId : info.results)
+                {
+                    if (!valueId.valid() || valueId.index >= useCounts.size())
+                    {
+                        continue;
+                    }
+                    if (isPort[valueId.index] != 0)
+                    {
+                        return false;
+                    }
+                    if (useCounts[valueId.index] != 0)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            std::deque<int32_t> worklist;
+            worklist.resize(0);
+            for (std::size_t idx = 0; idx < ops.size(); ++idx)
+            {
+                if (isDeadByCounts(ops[idx]))
+                {
+                    worklist.push_back(static_cast<int32_t>(idx));
+                }
+            }
+
+            std::vector<uint8_t> opRemoved(ops.size(), 0);
+
+            while (!worklist.empty())
+            {
+                const int32_t idx = worklist.front();
+                worklist.pop_front();
+                if (idx < 0 || static_cast<std::size_t>(idx) >= ops.size())
+                {
+                    continue;
+                }
+                if (opRemoved[static_cast<std::size_t>(idx)] != 0)
+                {
+                    continue;
+                }
+                const OpInfo &info = ops[static_cast<std::size_t>(idx)];
+                if (!isDeadByCounts(info))
+                {
+                    continue;
+                }
+                if (!graph.eraseOpUnchecked(info.id))
+                {
+                    continue;
+                }
+                opRemoved[static_cast<std::size_t>(idx)] = 1;
+                graphChanged = true;
+
+                for (const auto valueId : info.results)
+                {
+                    if (valueId.valid() && valueId.index < defOpByValue.size())
+                    {
+                        defOpByValue[valueId.index] = grh::ir::OperationId::invalid();
                     }
                 }
 
-                for (const auto opId : toErase)
+                for (const auto valueId : info.operands)
                 {
-                    if (graph.eraseOp(opId))
+                    if (!valueId.valid() || valueId.index >= useCounts.size())
                     {
-                        graphChanged = true;
-                        progress = true;
+                        continue;
+                    }
+                    if (useCounts[valueId.index] > 0)
+                    {
+                        useCounts[valueId.index] -= 1;
+                    }
+                    if (useCounts[valueId.index] != 0)
+                    {
+                        continue;
+                    }
+                    const grh::ir::OperationId defOp = defOpByValue[valueId.index];
+                    if (!defOp.valid())
+                    {
+                        continue;
+                    }
+                    if (defOp.index >= opIndexById.size())
+                    {
+                        continue;
+                    }
+                    const int32_t defIdx = opIndexById[defOp.index];
+                    if (defIdx >= 0)
+                    {
+                        worklist.push_back(defIdx);
                     }
                 }
             }
 
             std::vector<grh::ir::ValueId> deadValues;
-            for (const auto valueId : graph.values())
+            for (const auto valueId : valueSpan)
             {
-                if (!valueId.valid())
+                if (!valueId.valid() || valueId.index >= useCounts.size())
                 {
                     continue;
                 }
-                const grh::ir::Value value = graph.getValue(valueId);
-                if (isPortValue(value))
+                if (isPort[valueId.index] != 0)
                 {
                     continue;
                 }
-                if (value.definingOp().valid())
+                if (useCounts[valueId.index] != 0)
                 {
                     continue;
                 }
-                if (!value.users().empty())
+                if (defOpByValue[valueId.index].valid())
                 {
                     continue;
                 }
@@ -126,7 +319,7 @@ namespace wolf_sv_parser::transform
             }
             for (const auto valueId : deadValues)
             {
-                if (graph.eraseValue(valueId))
+                if (graph.eraseValueUnchecked(valueId))
                 {
                     graphChanged = true;
                 }

@@ -34,14 +34,72 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <future>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 
 namespace wolf_sv_parser {
+
+class InstanceRegistry {
+public:
+    bool trySchedule(const PlanKey& key)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto [it, inserted] = entries_.try_emplace(key);
+        if (inserted)
+        {
+            auto promise = std::make_shared<std::promise<void>>();
+            it->second.promise = promise;
+            it->second.future = promise->get_future().share();
+            return true;
+        }
+        return false;
+    }
+
+    void markReady(const PlanKey& key)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = entries_.find(key);
+        if (it == entries_.end())
+        {
+            return;
+        }
+        if (it->second.readySignaled || !it->second.promise)
+        {
+            return;
+        }
+        it->second.promise->set_value();
+        it->second.readySignaled = true;
+    }
+
+    std::shared_future<void> futureFor(const PlanKey& key) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = entries_.find(key);
+        if (it == entries_.end())
+        {
+            return {};
+        }
+        return it->second.future;
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<std::promise<void>> promise;
+        std::shared_future<void> future;
+        bool readySignaled = false;
+    };
+
+    mutable std::mutex mutex_;
+    std::unordered_map<PlanKey, Entry, PlanKeyHash> entries_;
+};
 
 namespace {
 
@@ -7306,11 +7364,26 @@ void enqueuePlanKey(ConvertContext& context, const slang::ast::InstanceBodySymbo
     {
         return;
     }
+    if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
+    {
+        return;
+    }
     PlanKey key;
     key.definition = &body.getDefinition();
     key.body = &body;
     key.paramSignature = std::move(paramSignature);
-    context.planQueue->push(std::move(key));
+    if (context.instanceRegistry && !context.instanceRegistry->trySchedule(key))
+    {
+        return;
+    }
+    if (context.taskCounter)
+    {
+        context.taskCounter->fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!context.planQueue->tryPush(std::move(key)) && context.taskCounter)
+    {
+        context.taskCounter->fetch_sub(1, std::memory_order_relaxed);
+    }
 }
 
 void collectInstance(const slang::ast::InstanceSymbol& instance, ModulePlan& plan,
@@ -7508,6 +7581,8 @@ std::string_view PlanSymbolTable::text(PlanSymbolId id) const
     return storage_[id.index];
 }
 
+thread_local ConvertDiagnostics::ThreadLocalBuffer ConvertDiagnostics::threadLocal_{};
+
 void ConvertDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message)
 {
     add(ConvertDiagnosticKind::Todo, symbol, std::move(message));
@@ -7544,6 +7619,15 @@ void ConvertDiagnostics::warn(const slang::SourceLocation& location, std::string
         location.valid() ? std::optional(location) : std::nullopt, std::move(message));
 }
 
+void ConvertDiagnostics::flushThreadLocal()
+{
+    if (!threadLocalEnabled_)
+    {
+        return;
+    }
+    flushThreadLocalLocked(threadLocal_);
+}
+
 void ConvertDiagnostics::add(ConvertDiagnosticKind kind, const slang::ast::Symbol& symbol,
                              std::string message)
 {
@@ -7556,13 +7640,27 @@ void ConvertDiagnostics::add(ConvertDiagnosticKind kind, std::string originSymbo
                              std::optional<slang::SourceLocation> location,
                              std::string message)
 {
-    messages_.push_back(ConvertDiagnostic{kind, std::move(message),
-                                          std::move(originSymbol), location});
     const bool isError = (kind == ConvertDiagnosticKind::Error ||
                           kind == ConvertDiagnosticKind::Todo);
+    if (threadLocalEnabled_)
+    {
+        ThreadLocalBuffer& buffer = threadLocal_;
+        buffer.messages.push_back(ConvertDiagnostic{kind, std::move(message),
+                                                    std::move(originSymbol), location});
+        if (isError)
+        {
+            buffer.hasError = true;
+        }
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        messages_.push_back(ConvertDiagnostic{kind, std::move(message),
+                                              std::move(originSymbol), location});
+    }
     if (isError)
     {
-        hasError_ = true;
+        hasError_.store(true, std::memory_order_relaxed);
         if (onError_)
         {
             onError_();
@@ -7570,18 +7668,42 @@ void ConvertDiagnostics::add(ConvertDiagnosticKind kind, std::string originSymbo
     }
 }
 
+void ConvertDiagnostics::flushThreadLocalLocked(ThreadLocalBuffer& buffer)
+{
+    if (buffer.messages.empty() && !buffer.hasError)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!buffer.messages.empty())
+    {
+        messages_.insert(messages_.end(),
+                         std::make_move_iterator(buffer.messages.begin()),
+                         std::make_move_iterator(buffer.messages.end()));
+        buffer.messages.clear();
+    }
+    if (buffer.hasError)
+    {
+        hasError_.store(true, std::memory_order_relaxed);
+        buffer.hasError = false;
+    }
+}
+
 void ConvertLogger::allowTag(std::string_view tag)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     tags_.insert(std::string(tag));
 }
 
 void ConvertLogger::clearTags()
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     tags_.clear();
 }
 
 bool ConvertLogger::enabled(ConvertLogLevel level, std::string_view tag) const noexcept
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!enabled_ || level_ == ConvertLogLevel::Off)
     {
         return false;
@@ -7599,7 +7721,20 @@ bool ConvertLogger::enabled(ConvertLogLevel level, std::string_view tag) const n
 
 void ConvertLogger::log(ConvertLogLevel level, std::string_view tag, std::string_view message)
 {
-    if (!enabled(level, tag) || !sink_)
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!enabled_ || level_ == ConvertLogLevel::Off)
+    {
+        return;
+    }
+    if (level < level_)
+    {
+        return;
+    }
+    if (!tags_.empty() && tags_.find(std::string(tag)) == tags_.end())
+    {
+        return;
+    }
+    if (!sink_)
     {
         return;
     }
@@ -7796,12 +7931,19 @@ bool PlanCache::withWriteBackPlanMut(const PlanKey& key,
 
 void PlanTaskQueue::push(PlanKey key)
 {
+    (void)tryPush(std::move(key));
+}
+
+bool PlanTaskQueue::tryPush(PlanKey key)
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_)
     {
-        return;
+        return false;
     }
     queue_.push_back(std::move(key));
+    cv_.notify_one();
+    return true;
 }
 
 bool PlanTaskQueue::tryPop(PlanKey& out)
@@ -7816,10 +7958,43 @@ bool PlanTaskQueue::tryPop(PlanKey& out)
     return true;
 }
 
+bool PlanTaskQueue::waitPop(PlanKey& out, const std::atomic<bool>* cancelFlag)
+{
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [&]() {
+        if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
+        {
+            return true;
+        }
+        return closed_ || !queue_.empty();
+    });
+    if (cancelFlag && cancelFlag->load(std::memory_order_relaxed))
+    {
+        return false;
+    }
+    if (queue_.empty())
+    {
+        return false;
+    }
+    out = std::move(queue_.front());
+    queue_.pop_front();
+    return true;
+}
+
 void PlanTaskQueue::close()
 {
     std::lock_guard<std::mutex> lock(mutex_);
     closed_ = true;
+    cv_.notify_all();
+}
+
+std::size_t PlanTaskQueue::drain()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t dropped = queue_.size();
+    queue_.clear();
+    cv_.notify_all();
+    return dropped;
 }
 
 bool PlanTaskQueue::closed() const noexcept
@@ -7839,6 +8014,7 @@ void PlanTaskQueue::reset()
     std::lock_guard<std::mutex> lock(mutex_);
     queue_.clear();
     closed_ = false;
+    cv_.notify_all();
 }
 
 ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body)
@@ -14113,6 +14289,7 @@ private:
 const std::string& GraphAssembler::resolveGraphName(const PlanKey& key,
                                                     std::string_view moduleName)
 {
+    std::lock_guard<std::mutex> lock(nameMutex_);
     auto it = graphNames_.find(key);
     if (it != graphNames_.end())
     {
@@ -14128,8 +14305,7 @@ const std::string& GraphAssembler::resolveGraphName(const PlanKey& key,
     }
     std::string finalName = candidate;
     std::size_t suffix = 0;
-    while (reservedGraphNames_.find(finalName) != reservedGraphNames_.end() ||
-           netlist_.findGraph(finalName))
+    while (reservedGraphNames_.find(finalName) != reservedGraphNames_.end())
     {
         finalName = candidate + "_" + std::to_string(++suffix);
     }
@@ -14148,10 +14324,19 @@ grh::ir::Graph& GraphAssembler::build(const PlanKey& key, const ModulePlan& plan
         moduleName = std::string(plan.symbolTable.text(plan.moduleSymbol));
     }
     const std::string& finalSymbol = resolveGraphName(key, moduleName);
-    grh::ir::Graph& graph = netlist_.createGraph(std::string(finalSymbol));
-    GraphAssemblyState state(context_, *this, graph, plan, lowering, writeBack);
+    grh::ir::Graph* graph = nullptr;
+    if (netlistMutex_)
+    {
+        std::lock_guard<std::mutex> lock(*netlistMutex_);
+        graph = &netlist_.createGraph(std::string(finalSymbol));
+    }
+    else
+    {
+        graph = &netlist_.createGraph(std::string(finalSymbol));
+    }
+    GraphAssemblyState state(context_, *this, *graph, plan, lowering, writeBack);
     state.build();
-    return graph;
+    return *graph;
 }
 
 ConvertDriver::ConvertDriver(ConvertOptions options)
@@ -14161,10 +14346,6 @@ ConvertDriver::ConvertDriver(ConvertOptions options)
     if (options_.enableLogging)
     {
         logger_.enable();
-    }
-    if (options_.abortOnError)
-    {
-        diagnostics_.setOnError([]() { throw ConvertAbort(); });
     }
 }
 
@@ -14183,14 +14364,85 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     context.logger = &logger_;
     context.planCache = &planCache_;
     context.planQueue = &planQueue_;
+    InstanceRegistry instanceRegistry;
+    context.instanceRegistry = &instanceRegistry;
 
-    ModulePlanner planner(context);
-    StmtLowererPass stmtLowerer(context);
-    WriteBackPass writeBack(context);
-    MemoryPortLowererPass memoryPortLowerer(context);
-    GraphAssembler graphAssembler(context, netlist);
-    std::unordered_set<PlanKey, PlanKeyHash> topKeys;
+    std::atomic<std::size_t> pending{0};
+    std::atomic<bool> cancel{false};
+    std::condition_variable doneCv;
+    std::mutex doneMutex;
+    const bool useParallel = !options_.singleThread && options_.threadCount > 1;
+    if (useParallel)
+    {
+        context.taskCounter = &pending;
+        context.cancelFlag = &cancel;
+        diagnostics_.enableThreadLocal(true);
+    }
+    else
+    {
+        context.taskCounter = nullptr;
+        context.cancelFlag = nullptr;
+        diagnostics_.enableThreadLocal(false);
+    }
+
+    struct AbortState {
+        std::atomic<bool>& cancel;
+        PlanTaskQueue& queue;
+        std::atomic<std::size_t>& pending;
+        std::condition_variable& doneCv;
+
+        void request()
+        {
+            bool expected = false;
+            if (!cancel.compare_exchange_strong(expected, true))
+            {
+                return;
+            }
+            const std::size_t dropped = queue.drain();
+            if (dropped > 0)
+            {
+                const std::size_t prev = pending.fetch_sub(dropped,
+                                                           std::memory_order_relaxed);
+                if (prev <= dropped)
+                {
+                    pending.store(0, std::memory_order_relaxed);
+                }
+            }
+            queue.close();
+            doneCv.notify_all();
+        }
+    };
+
+    std::unique_ptr<AbortState> abortState;
+    if (useParallel && options_.abortOnError)
+    {
+        abortState = std::make_unique<AbortState>(AbortState{
+            cancel,
+            planQueue_,
+            pending,
+            doneCv});
+        diagnostics_.setOnError([state = abortState.get()]() {
+            if (state)
+            {
+                state->request();
+            }
+        });
+    }
+    else if (!useParallel && options_.abortOnError)
+    {
+        diagnostics_.setOnError([]() { throw ConvertAbort(); });
+    }
+    else
+    {
+        diagnostics_.setOnError(nullptr);
+    }
+
+    std::mutex netlistMutex;
+    GraphAssembler graphAssembler(context, netlist, &netlistMutex);
+    std::vector<PlanKey> topOrder;
+    std::unordered_set<PlanKey, PlanKeyHash> topSeen;
     std::unordered_map<PlanKey, std::vector<std::string>, PlanKeyHash> topAliases;
+    std::unordered_map<PlanKey, std::string, PlanKeyHash> topModuleNames;
     for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
     {
         if (!topInstance)
@@ -14202,7 +14454,10 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         topKey.definition = &topInstance->body.getDefinition();
         topKey.body = &topInstance->body;
         topKey.paramSignature = params.signature;
-        topKeys.insert(topKey);
+        if (topSeen.insert(topKey).second)
+        {
+            topOrder.push_back(topKey);
+        }
         std::vector<std::string>& aliases = topAliases[topKey];
         if (!topInstance->name.empty())
         {
@@ -14212,24 +14467,52 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         {
             aliases.emplace_back(topInstance->getDefinition().name);
         }
+        if (!topInstance->body.getDefinition().name.empty())
+        {
+            topModuleNames.emplace(topKey, std::string(topInstance->body.getDefinition().name));
+        }
+        else if (!topInstance->name.empty())
+        {
+            topModuleNames.emplace(topKey, std::string(topInstance->name));
+        }
         enqueuePlanKey(context, topInstance->body, std::move(params.signature));
     }
 
-    PlanKey key;
-    while (planQueue_.tryPop(key))
-    {
+    auto processKey = [&](PlanKey key) {
         if (!key.body)
         {
-            continue;
+            if (context.instanceRegistry)
+            {
+                context.instanceRegistry->markReady(key);
+            }
+            return;
         }
         if (!key.definition)
         {
             key.definition = &key.body->getDefinition();
         }
+        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
+        {
+            if (context.instanceRegistry)
+            {
+                context.instanceRegistry->markReady(key);
+            }
+            return;
+        }
         if (!planCache_.tryClaim(key))
         {
-            continue;
+            if (context.instanceRegistry)
+            {
+                context.instanceRegistry->markReady(key);
+            }
+            return;
         }
+
+        ModulePlanner planner(context);
+        StmtLowererPass stmtLowerer(context);
+        WriteBackPass writeBack(context);
+        MemoryPortLowererPass memoryPortLowerer(context);
+
         const auto planStart = ConvertClock::now();
         ModulePlan plan = planner.plan(*key.body);
         const auto planEnd = ConvertClock::now();
@@ -14239,6 +14522,15 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
             moduleName = plan.symbolTable.text(plan.moduleSymbol);
         }
         logPassTiming(context.logger, "pass1-module-plan", moduleName, planEnd - planStart);
+
+        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
+        {
+            if (context.instanceRegistry)
+            {
+                context.instanceRegistry->markReady(key);
+            }
+            return;
+        }
 
         LoweringPlan lowering;
         const auto stmtStart = ConvertClock::now();
@@ -14257,41 +14549,168 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
         logPassTiming(context.logger, "pass4-memory-port", moduleName,
                       memoryPortEnd - memoryPortStart);
 
+        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
+        {
+            if (context.instanceRegistry)
+            {
+                context.instanceRegistry->markReady(key);
+            }
+            return;
+        }
+
         const auto graphStart = ConvertClock::now();
         grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
         const auto graphEnd = ConvertClock::now();
         logPassTiming(context.logger, "pass5-graph-assembly", moduleName,
                       graphEnd - graphStart);
-        if (topKeys.find(key) != topKeys.end())
-        {
-            netlist.markAsTop(graph.symbol());
-            auto aliasIt = topAliases.find(key);
-            if (aliasIt != topAliases.end())
-            {
-                for (const std::string& alias : aliasIt->second)
-                {
-                    if (alias.empty())
-                    {
-                        continue;
-                    }
-                    const grh::ir::Graph* existing = netlist.findGraph(alias);
-                    if (existing && existing->symbol() != graph.symbol())
-                    {
-                        if (context.diagnostics)
-                        {
-                            context.diagnostics->warn(
-                                slang::SourceLocation{},
-                                "Skipping top alias conflict for " + alias);
-                        }
-                        continue;
-                    }
-                    netlist.registerGraphAlias(alias, graph);
-                }
-            }
-        }
+
         planCache_.setLoweringPlan(key, std::move(lowering));
         planCache_.setWriteBackPlan(key, std::move(writeBackPlan));
         planCache_.storePlan(key, std::move(plan));
+        if (context.instanceRegistry)
+        {
+            context.instanceRegistry->markReady(key);
+        }
+    };
+
+    if (useParallel)
+    {
+        const std::size_t threadCount =
+            std::max<std::size_t>(1, static_cast<std::size_t>(options_.threadCount));
+        std::vector<std::thread> threads;
+        threads.reserve(threadCount);
+
+        auto finishTask = [&]() {
+            const std::size_t prev = pending.fetch_sub(1, std::memory_order_relaxed);
+            if (prev <= 1)
+            {
+                pending.store(0, std::memory_order_relaxed);
+                planQueue_.close();
+                doneCv.notify_all();
+            }
+        };
+
+        auto worker = [&]() {
+            PlanKey key;
+            while (planQueue_.waitPop(key, &cancel))
+            {
+                try
+                {
+                    if (!cancel.load(std::memory_order_relaxed))
+                    {
+                        processKey(std::move(key));
+                    }
+                }
+                catch (const ConvertAbort&)
+                {
+                    if (abortState)
+                    {
+                        abortState->request();
+                    }
+                }
+                catch (const std::exception& ex)
+                {
+                    if (context.diagnostics)
+                    {
+                        context.diagnostics->error(
+                            slang::SourceLocation{},
+                            std::string("Convert worker failed: ") + ex.what());
+                    }
+                    if (abortState)
+                    {
+                        abortState->request();
+                    }
+                }
+                diagnostics_.flushThreadLocal();
+                finishTask();
+            }
+        };
+
+        if (pending.load(std::memory_order_relaxed) == 0)
+        {
+            planQueue_.close();
+        }
+
+        for (std::size_t i = 0; i < threadCount; ++i)
+        {
+            threads.emplace_back(worker);
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(doneMutex);
+            doneCv.wait(lock, [&]() { return pending.load(std::memory_order_relaxed) == 0; });
+        }
+
+        planQueue_.close();
+        for (auto& thread : threads)
+        {
+            thread.join();
+        }
+        diagnostics_.flushThreadLocal();
+        if (cancel.load(std::memory_order_relaxed) && options_.abortOnError)
+        {
+            throw ConvertAbort();
+        }
+    }
+    else
+    {
+        PlanKey key;
+        while (planQueue_.tryPop(key))
+        {
+            processKey(std::move(key));
+            diagnostics_.flushThreadLocal();
+        }
+        diagnostics_.flushThreadLocal();
+    }
+
+    for (const PlanKey& topKey : topOrder)
+    {
+        std::string_view moduleName;
+        if (auto nameIt = topModuleNames.find(topKey); nameIt != topModuleNames.end())
+        {
+            moduleName = nameIt->second;
+        }
+        const std::string& graphName = graphAssembler.resolveGraphName(topKey, moduleName);
+        grh::ir::Graph* graph = netlist.findGraph(graphName);
+        if (!graph)
+        {
+            if (context.diagnostics)
+            {
+                context.diagnostics->warn(
+                    slang::SourceLocation{},
+                    "Skipping top graph alias for missing graph " + graphName);
+            }
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(netlistMutex);
+            netlist.markAsTop(graph->symbol());
+        }
+        auto aliasIt = topAliases.find(topKey);
+        if (aliasIt == topAliases.end())
+        {
+            continue;
+        }
+        for (const std::string& alias : aliasIt->second)
+        {
+            if (alias.empty())
+            {
+                continue;
+            }
+            const grh::ir::Graph* existing = netlist.findGraph(alias);
+            if (existing && existing->symbol() != graph->symbol())
+            {
+                if (context.diagnostics)
+                {
+                    context.diagnostics->warn(
+                        slang::SourceLocation{},
+                        "Skipping top alias conflict for " + alias);
+                }
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(netlistMutex);
+            netlist.registerGraphAlias(alias, *graph);
+        }
     }
     return netlist;
 }

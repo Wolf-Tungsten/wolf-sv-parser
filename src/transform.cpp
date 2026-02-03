@@ -327,15 +327,12 @@ namespace wolf_sv_parser::transform
             pass->clearContext();
             result.changed = result.changed || passResult.changed;
 
-            if (options_.verbosity == PassVerbosity::Debug)
+            std::cerr << "[transform] [" << pass->id() << "] " << (passResult.failed ? "failed" : "done");
+            if (passResult.changed)
             {
-                std::cerr << "[transform] [" << pass->id() << "] " << (passResult.failed ? "failed" : "done");
-                if (passResult.changed)
-                {
-                    std::cerr << " (changed)";
-                }
-                std::cerr << '\n';
+                std::cerr << " (changed)";
             }
+            std::cerr << '\n';
 
             if (passResult.failed)
             {

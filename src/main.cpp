@@ -129,6 +129,9 @@ int main(int argc, char **argv)
     driver.cmdLine.add("--emit-json", dumpJson, "Emit GRH JSON after convert");
     std::optional<bool> dumpSv;
     driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after convert");
+    std::optional<bool> skipTransform;
+    driver.cmdLine.add("--skip-transform", skipTransform,
+                       "Skip transform passes and emit raw Convert netlist");
     std::optional<bool> convertLog;
     driver.cmdLine.add("--convert-log", convertLog, "Enable Convert debug logging");
     std::optional<std::string> convertLogLevel;
@@ -137,6 +140,12 @@ int main(int argc, char **argv)
     std::optional<std::string> convertLogTag;
     driver.cmdLine.add("--convert-log-tag", convertLogTag,
                        "Limit Convert logging to a tag (comma separated)", "<tag>");
+    std::optional<int64_t> convertThreads;
+    driver.cmdLine.add("--convert-threads", convertThreads,
+                       "Number of Convert worker threads (default 32)", "<count>");
+    std::optional<bool> singleThread;
+    driver.cmdLine.add("--single-thread", singleThread,
+                       "Force single-threaded Convert execution");
     std::optional<std::string> emitOutputDir;
     driver.cmdLine.add("--emit-out-dir,--emit-out", emitOutputDir, "Directory to write emitted GRH/SV files", "<path>");
     std::optional<std::string> outputPathArg;
@@ -389,6 +398,19 @@ int main(int argc, char **argv)
             convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Debug;
         }
     }
+    if (convertThreads)
+    {
+        if (*convertThreads <= 0)
+        {
+            std::cerr << "[convert] --convert-threads must be a positive number\n";
+            return 1;
+        }
+        convertOptions.threadCount = static_cast<uint32_t>(*convertThreads);
+    }
+    if (singleThread == true)
+    {
+        convertOptions.singleThread = true;
+    }
 
     wolf_sv_parser::ConvertDriver converter(convertOptions);
     converter.logger().setSink([](const wolf_sv_parser::ConvertLogEvent& event) {
@@ -501,51 +523,65 @@ int main(int argc, char **argv)
         return driver.reportDiagnostics(/* quiet */ false) ? 0 : 4;
     }
 
-    // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
-    wolf_sv_parser::transform::PassDiagnostics transformDiagnostics;
-    wolf_sv_parser::transform::PassManager passManager;
-    passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
-    passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
-    passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
-    passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
-    passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
-    const auto transformStart = TimingClock::now();
-    wolf_sv_parser::transform::PassManagerResult passManagerResult =
-        passManager.run(netlist, transformDiagnostics);
-    const auto transformEnd = TimingClock::now();
-    logTiming(converter.logger(), "transform", transformEnd - transformStart);
-
-    if (!transformDiagnostics.empty())
+    bool transformOk = true;
+    if (skipTransform == true)
     {
-        for (const auto &message : transformDiagnostics.messages())
+        std::cerr << "[transform] skipped\n";
+    }
+    else
+    {
+        // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
+        wolf_sv_parser::transform::PassDiagnostics transformDiagnostics;
+        wolf_sv_parser::transform::PassManager passManager;
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
+        const auto transformStart = TimingClock::now();
+        wolf_sv_parser::transform::PassManagerResult passManagerResult =
+            passManager.run(netlist, transformDiagnostics);
+        const auto transformEnd = TimingClock::now();
+        logTiming(converter.logger(), "transform", transformEnd - transformStart);
+
+        if (!transformDiagnostics.empty())
         {
-            const char *tag = "info";
-            switch (message.kind)
+            for (const auto &message : transformDiagnostics.messages())
             {
-            case wolf_sv_parser::transform::PassDiagnosticKind::Error:
-                tag = "error";
-                break;
-            case wolf_sv_parser::transform::PassDiagnosticKind::Warning:
-                tag = "warn";
-                break;
-            case wolf_sv_parser::transform::PassDiagnosticKind::Debug:
-                tag = "debug";
-                break;
-            case wolf_sv_parser::transform::PassDiagnosticKind::Info:
-            default:
-                tag = "info";
-                break;
+                const char *tag = "info";
+                switch (message.kind)
+                {
+                case wolf_sv_parser::transform::PassDiagnosticKind::Error:
+                    tag = "error";
+                    break;
+                case wolf_sv_parser::transform::PassDiagnosticKind::Warning:
+                    tag = "warn";
+                    break;
+                case wolf_sv_parser::transform::PassDiagnosticKind::Debug:
+                    tag = "debug";
+                    break;
+                case wolf_sv_parser::transform::PassDiagnosticKind::Info:
+                default:
+                    tag = "info";
+                    break;
+                }
+                std::cerr << "[transform] [" << message.passName << "] [" << tag << "] "
+                          << message.message;
+                if (!message.context.empty())
+                {
+                    std::cerr << " (" << message.context << ")";
+                }
+                std::cerr << '\n';
             }
-            std::cerr << "[transform] [" << message.passName << "] [" << tag << "] " << message.message;
-            if (!message.context.empty())
-            {
-                std::cerr << " (" << message.context << ")";
-            }
-            std::cerr << '\n';
+        }
+
+        if (!passManagerResult.success || transformDiagnostics.hasError())
+        {
+            transformOk = false;
         }
     }
 
-    if (!passManagerResult.success || transformDiagnostics.hasError())
+    if (!transformOk)
     {
         return 5;
     }

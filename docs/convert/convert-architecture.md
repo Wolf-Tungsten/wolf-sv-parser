@@ -59,8 +59,8 @@
 ## 3. 核心数据结构
 - 总览：
   - 定位：描述 Convert 的核心模型与共享状态，定义模块计划、符号索引与访问关系的稳定形态。
-  - 结构清单：PlanKey、ConvertContext、PlanEntry、ModulePlan、PlanSymbolTable、InstanceInfo、
-    LoweringPlan/WriteBackPlan、Diagnostics/Logger。
+  - 结构清单：PlanKey、ConvertContext、InstanceRegistry、PlanEntry、ModulePlan、
+    PlanSymbolTable、InstanceInfo、LoweringPlan/WriteBackPlan、Diagnostics/Logger。
 
 ### 3.1. ConvertContext
 - 总览：
@@ -74,6 +74,9 @@
   - `logger`: `ConvertLogger*` -> 日志收集器指针。
   - `planCache`: `PlanCache*` -> 模块计划缓存指针。
   - `planQueue`: `PlanTaskQueue*` -> 模块任务队列指针。
+  - `instanceRegistry`: `InstanceRegistry*` -> 实例任务去重与完成态登记器。
+  - `taskCounter`: `std::atomic<size_t>*` -> 并行任务计数器（待处理 + 执行中）。
+  - `cancelFlag`: `std::atomic<bool>*` -> 全局取消标记（fatal/error 时置位）。
 - 字段详解：
   - `compilation`：
     - 作用：提供类型系统与语义查询入口。
@@ -91,13 +94,16 @@
       - `enableLogging`: `bool` -> 是否启用 `ConvertLogger`。
       - `logLevel`: `ConvertLogLevel` -> 日志等级过滤阈值。
       - `maxLoopIterations`: `uint32_t` -> Pass5 静态展开循环的最大迭代上限。
+      - `threadCount`: `uint32_t` -> Convert 并行线程池大小（Graph 任务并行度）。
+      - `singleThread`: `bool` -> 强制单线程执行 Convert（便于调试/回归）。
   - `diagnostics`：
     - 作用：集中收集 error/warn（未支持项按 error 处理）。
     - 建立：指向 `ConvertDriver::diagnostics_`。
     - 子成员（内部状态 -> 类型 -> 含义）：
       - `messages_`: `std::vector<ConvertDiagnostic>` -> 诊断条目列表。
-      - `hasError_`: `bool` -> 是否已记录 error。
+      - `hasError_`: `std::atomic<bool>` -> 是否已记录 error。
       - `onError_`: `std::function<void()>` -> error 回调（可抛出 `ConvertAbort`）。
+      - `threadLocal_`: `bool` -> 是否启用线程本地缓冲收集诊断。
     - 输出：供 CLI 输出与测试断言使用。
   - `logger`：
     - 作用：统一日志出口，支持等级与 tag 过滤。
@@ -107,6 +113,7 @@
       - `level_`: `ConvertLogLevel` -> 当前日志等级阈值。
       - `tags_`: `std::unordered_set<std::string>` -> 允许的 tag 集合。
       - `sink_`: `Sink`（`std::function<void(const ConvertLogEvent&)>`）-> 日志输出回调。
+      - `mutex_`: `std::mutex` -> 并发 log 保护。
     - 输出：供调试/诊断流输出。
   - `planCache`：
     - 作用：模块计划与中间产物缓存，负责去重与状态管理。
@@ -122,7 +129,20 @@
       - `queue_`: `std::deque<PlanKey>` -> 待处理任务。
       - `closed_`: `bool` -> 队列关闭标记。
       - `mutex_`: `std::mutex` -> 并行访问保护。
+      - `cv_`: `std::condition_variable` -> 阻塞等待与唤醒。
     - 输出：供主流程投递与 drain。
+  - `instanceRegistry`：
+    - 作用：实例任务去重与完成态登记，避免重复创建同一 `PlanKey`。
+    - 建立：`ConvertDriver::convert` 内部构造并绑定到 ctx。
+    - 输出：供 `enqueuePlanKey` 判重与任务完成信号复用。
+  - `taskCounter`：
+    - 作用：并行任务计数器（队列内 + 执行中），用于收敛并行阶段。
+    - 建立：并行模式下指向 `pending` 计数器；单线程模式为 `nullptr`。
+    - 输出：用于判断队列何时关闭与线程 join。
+  - `cancelFlag`：
+    - 作用：全局取消标记（fatal/error 触发），用于提前停止投递与处理。
+    - 建立：并行模式下指向 `cancel` 标志；单线程模式为 `nullptr`。
+    - 输出：`enqueuePlanKey` 与 worker 侧可直接读取。
 - 生命周期与初始化：
   - 构造位置：`ConvertDriver::convert` 栈上临时构造。
   - 初始化顺序：先 `planCache.clear()` 与 `planQueue.reset()`，再填充 Context 字段。
@@ -1015,24 +1035,29 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 ## 6. 并行化策略（以模块为粒度）
 ### 6.1. 并行边界
 - 一个参数特化模块对应一个任务流水线。
-- Pass1/Pass5~Pass7 可并行执行；Pass8 串行写入 `Netlist`。
+- Pass1~Pass8 以“Graph 创建”为任务粒度并行；单个 Graph 内保持串行构建。
+- Netlist 写回（GraphId 分配、graphOrder、alias/topGraphs）走串行/互斥路径。
 
 ### 6.2. 任务与调度
 - 任务 key：`PlanKey = body + paramSignature`。
-- 调度：固定线程池 + 任务队列；主线程负责投递与汇总。
+- 调度：固定线程池 + 任务队列；线程池大小来自 `ConvertOptions.threadCount`。
 - 任务发现：在 Pass1 遍历实例时，将子模块的 `PlanKey` 投递到队列。
+- `InstanceRegistry` 负责 `PlanKey` 去重与完成态登记，避免重复创建任务。
+- `taskCounter` 统计“队列内 + 执行中”任务数量，归零后关闭队列并回收线程。
 
 ### 6.3. 去重与同步
-- `PlanCache` 负责去重，保证同一 `PlanKey` 只处理一次。
-- `PlanTaskQueue` 负责任务分发，支持队列关闭以收敛并行阶段。
+- `PlanCache` 负责 Plan 层面的状态去重，保证同一 `PlanKey` 只处理一次。
+- `InstanceRegistry` 负责任务级去重与 future 复用（完成态复用）。
+- `PlanTaskQueue` 使用条件变量阻塞等待，支持 close/drain 以收敛并行阶段。
 
 ### 6.4. 数据一致性
-- 并行阶段只写 `PlanCache/PlanArtifacts`，不改 `Netlist`。
-- `GraphAssemblyPass` 串行落地 Graph 与 alias，避免并发写冲突。
+- Graph 组装在 worker 内完成；Netlist 写回通过互斥保护的“单线程 commit”完成。
+- Graph 顺序不要求稳定，仅保证符号可解析；topGraphs/alias 由主线程统一注册。
+- instance 仅保留 `moduleName` 字符串属性，commit 阶段确保对应 graph 已注册。
 
 ### 6.5. 诊断与日志
-- 诊断：线程本地缓存，最终由主线程合并。
-- 日志：`ConvertLogger` 统一输出，避免多线程交错。
+- 诊断：线程本地缓冲 + 全局取消标记；worker 完成后统一 flush。
+- 日志：`ConvertLogger` 统一输出并加锁，避免多线程交错。
 
 ## 7. GRH 输出契约
 - 端口与信号宽度、符号属性完全基于 slang 类型系统。

@@ -346,7 +346,9 @@ public:
     bool eraseResult(OperationId op, std::size_t index);
     bool eraseOp(OperationId op);
     bool eraseOp(OperationId op, std::span<const ValueId> replacementResults);
+    bool eraseOpUnchecked(OperationId op);
     bool eraseValue(ValueId value);
+    bool eraseValueUnchecked(ValueId value);
     void bindInputPort(SymbolId name, ValueId value);
     void bindOutputPort(SymbolId name, ValueId value);
     void bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe);
@@ -535,7 +537,9 @@ public:
     bool eraseResult(OperationId op, std::size_t index);
     bool eraseOp(OperationId op);
     bool eraseOp(OperationId op, std::span<const ValueId> replacementResults);
+    bool eraseOpUnchecked(OperationId op);
     bool eraseValue(ValueId value);
+    bool eraseValueUnchecked(ValueId value);
     void setAttr(OperationId op, std::string_view key, AttributeValue value);
     void setOpKind(OperationId op, OperationKind kind);
     bool eraseAttr(OperationId op, std::string_view key);

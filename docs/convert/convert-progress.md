@@ -47,28 +47,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 
 
-## STEP 0049 - Convert pass 耗时日志
 
-目标：
-- 在 Convert 各 pass 结束后输出耗时，便于定位卡顿或死循环
-- 通过 ConvertLogger 的 level/tag 控制日志噪声
-
-计划：
-- 在 `ConvertDriver::convert` 中为 Pass1/Pass5/Pass6/Pass7/Pass8 添加计时
-- 使用 `ConvertLogger` 输出 tag=timing 的 info 日志
-- 同步更新 convert-architecture/workflow 文档
-
-实施：
-- 为 Pass1/Pass5/Pass6/Pass7/Pass8 添加耗时日志
-- 增加 Convert 总耗时与 transform/emit 阶段耗时日志
-- 日志仅在 `ConvertLogger` 启用且 level>=info 时输出（tag=timing）
-- 更新 convert-architecture/workflow 文档说明 timing 日志
-
-测试：
-- 未运行（仅日志输出改动）
-
-完成情况：已完成
-~~备注：Pass3（RWAnalyzer）已在 STEP 0046 移除~~
 
 ## STEP 0002 - 制定 Convert 新架构与工作流方案
 
@@ -1030,5 +1009,61 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 测试：
 - `cmake --build build -j$(nproc)`
 - `ctest --test-dir build --output-on-failure`
+
+完成情况：已完成
+
+## STEP 0049 - Convert pass 耗时日志
+
+目标：
+- 在 Convert 各 pass 结束后输出耗时，便于定位卡顿或死循环
+- 通过 ConvertLogger 的 level/tag 控制日志噪声
+
+计划：
+- 在 `ConvertDriver::convert` 中为 Pass1/Pass5/Pass6/Pass7/Pass8 添加计时
+- 使用 `ConvertLogger` 输出 tag=timing 的 info 日志
+- 同步更新 convert-architecture/workflow 文档
+
+实施：
+- 为 Pass1/Pass5/Pass6/Pass7/Pass8 添加耗时日志
+- 增加 Convert 总耗时与 transform/emit 阶段耗时日志
+- 日志仅在 `ConvertLogger` 启用且 level>=info 时输出（tag=timing）
+- 更新 convert-architecture/workflow 文档说明 timing 日志
+
+测试：
+- 未运行（仅日志输出改动）
+
+完成情况：已完成
+~~备注：Pass3（RWAnalyzer）已在 STEP 0046 移除~~
+
+
+## STEP 0050 - Convert 并行化架构与线程安全方案
+
+目标：
+- 以 Graph 创建为并行粒度，确保单个 Graph 串行创建
+- 遇到新 instance 时创建新的 Graph 任务，确保 instance 不重复创建
+- 明确诊断与 netlist 写回的线程安全策略，保证输出可复现
+
+计划：
+- 引入全局调度器（线程池）管理 Graph 任务队列，任务单元为 Graph 创建
+- 线程池大小可参数化配置，默认 32
+- Graph 创建过程保持串行；在 Graph 创建中发现新的 instance 时，计算 InstanceKey 并投递新的 Graph 任务
+- 增加 `InstanceRegistry`：基于 `InstanceKey` 的互斥创建与 `future` 复用，避免重复实例
+- Graph 任务调度按实例依赖推进（父 Graph 提交子 Graph 任务，可并发执行）
+- 诊断采用线程本地收集 + 全局取消标志（fatal 时触发），最终统一排序输出
+- netlist 写回采用 “Graph 结果本地化 + 单线程 commit”：写入 `NetlistSymbolTable` 分配 `GraphId` 并维护 `graphOrder`；顺序不要求稳定，只需确保符号可解析
+- commit 阶段集中处理 `topGraphs` 与 `registerGraphAlias`，避免并发写入导致顺序不稳定或 alias 冲突
+- instance 仅保留 `moduleName` 字符串属性；commit 时确保对应 graph 已注册，避免跨网表或未解析引用
+- 明确线程安全共享缓存策略（只读 AST/符号表无锁，读多写少缓存用 shared_mutex）
+- 新增 `--single-thread` 开关用于调试与回归对比
+- 同步更新 `convert-architecture`/`convert-workflow` 文档与并行相关示例
+
+实施：
+- `ConvertOptions` 新增 `threadCount/singleThread`，CLI 增加 `--convert-threads/--single-thread`
+- `PlanTaskQueue` 增加阻塞等待与 drain，配合并行 worker 收敛
+- 引入 `InstanceRegistry` 去重与完成态登记，`enqueuePlanKey` 先判重再入队
+- `ConvertDiagnostics` 支持线程本地缓冲与 flush；`ConvertLogger` 加锁避免并发交错
+- `GraphAssembler` 图名解析加锁，`Netlist` 写回通过互斥串行化
+- `ConvertDriver::convert` 使用线程池并行处理 Graph 任务，topGraphs/alias 在主线程统一注册
+- 同步更新 `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md`
 
 完成情况：已完成

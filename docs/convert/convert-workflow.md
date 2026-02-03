@@ -10,6 +10,8 @@
 - `PlanCache`：`PlanKey -> PlanEntry{plan, artifacts}` 的缓存容器。
 - `PlanEntry`：`PlanCache` 内的单条记录，包含状态、`ModulePlan` 与 `PlanArtifacts`。
 - `PlanTaskQueue`：`PlanKey` 队列，用于调度待处理模块。
+- `InstanceRegistry`：`PlanKey` 去重与完成态登记，防止重复创建任务。
+- `taskCounter/cancelFlag`：并行模式下的任务计数与全局取消标记。
 - `ModulePlan`：模块级静态计划，存放 `ports`/`signals`/`instances` 等骨架数据。
 - `PortInfo`/`SignalInfo`/`InstanceInfo`：`ModulePlan` 内的端口/信号/实例记录。
 - `PlanArtifacts`：与 `ModulePlan` 配套的中间产物容器（Lowering/WriteBack 等）。
@@ -34,12 +36,14 @@
     `planQueue.reset()` 清理历史状态。
   - 组装 `ConvertContext`：`compilation = &root.getCompilation()`，`root = &root`，
     `options` 拷贝，`diagnostics/logger/planCache/planQueue` 绑定到 driver 内部实例。
+  - 并行模式下额外绑定 `instanceRegistry/taskCounter/cancelFlag`，并启用诊断线程本地缓冲。
 - 当前实现已完成 Context Setup 与 Pass1（含类型解析）/Pass5~Pass8，`ConvertDriver::convert` 输出完整 `Netlist`。
 
 ## CLI 主流程（wolf-sv-parser）
 - 入口：`src/main.cpp` 负责解析 CLI 参数并驱动 Convert/Transform/Emit。
 - 关键步骤：
   - 根据 `--convert-log/--convert-log-level/--convert-log-tag` 配置 `ConvertDriver` 日志。
+  - `--convert-threads` 设置 Convert 并行线程数；`--single-thread` 强制单线程执行。
   - 当日志 level >= info 且 tag 允许 `timing` 时，Convert 会在每个 pass 结束后输出耗时：
     `pass1-module-plan` -> `pass2-stmt-lowerer` -> `pass3-writeback`
     -> `pass4-memory-port` -> `pass5-graph-assembly`。
@@ -50,6 +54,12 @@
   - 根据 `--emit-json/--emit-sv` 选择输出 JSON/SV；`-o/--emit-out-dir` 控制路径。
 - HDLBits 流程：`make run_hdlbits_test` 会调用 `wolf-sv-parser --emit-sv --emit-json -o <dut>.v`，
   产物写入 `build/hdlbits/<DUT>/` 并供 Verilator 使用。
+
+## 并行调度（Graph 任务）
+- Convert 默认按 Graph 任务并行执行（线程池大小由 `ConvertOptions.threadCount` 控制）。
+- `InstanceRegistry` 负责 `PlanKey` 去重；`PlanTaskQueue` 负责阻塞调度。
+- 任务完成后统一 flush 线程本地 diagnostics；fatal/error 触发全局 cancel。
+- Netlist 写回（GraphId 分配、graphOrder、topGraphs/alias 注册）通过互斥/主线程串行完成。
 
 ## Pass1: ModulePlanner（符号收集 + 类型解析）
 - 功能：收集端口/信号/实例信息，形成 ModulePlan 骨架，并在收集时补齐类型信息，

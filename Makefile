@@ -18,6 +18,26 @@ SMART_CASE ?= coremark
 VERILATOR ?= verilator
 VERILATOR_FLAGS ?= -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNDRIVEN \
 	-Wno-SYNCASYNCNET
+SINGLE_THREAD ?= 0
+CONVERT_LOG ?= 0
+CONVERT_LOG_LEVEL ?= info
+CONVERT_LOG_TAG ?= timing
+SKIP_TRANSFORM ?= 0
+WOLF_TIMEOUT ?= 60
+WOLF_EMIT_FLAGS ?=
+
+ifneq ($(strip $(SINGLE_THREAD)),0)
+WOLF_EMIT_FLAGS += --single-thread
+endif
+ifneq ($(strip $(CONVERT_LOG)),0)
+WOLF_EMIT_FLAGS += --convert-log --convert-log-level $(CONVERT_LOG_LEVEL) --convert-log-tag $(CONVERT_LOG_TAG)
+endif
+ifneq ($(strip $(SKIP_TRANSFORM)),0)
+WOLF_EMIT_FLAGS += --skip-transform
+endif
+ifneq ($(strip $(WOLF_TIMEOUT)),)
+WOLF_EMIT_FLAGS += --timeout $(WOLF_TIMEOUT)
+endif
 
 DUT_SRC := $(HDLBITS_ROOT)/dut/dut_$(DUT).v
 TB_SRC := $(HDLBITS_ROOT)/tb/tb_$(DUT).cpp
@@ -59,7 +79,7 @@ build_wolf_parser:
 
 $(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLF_PARSER) check-id
 	@mkdir -p $(OUT_DIR)
-	$(WOLF_PARSER) --emit-sv --emit-json -o $(EMITTED_DUT) $(DUT_SRC)
+	$(WOLF_PARSER) --emit-sv --emit-json $(WOLF_EMIT_FLAGS) -o $(EMITTED_DUT) $(DUT_SRC)
 	@if [ -f $(OUT_DIR)/grh.json ]; then mv -f $(OUT_DIR)/grh.json $(EMITTED_JSON); fi
 
 $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id

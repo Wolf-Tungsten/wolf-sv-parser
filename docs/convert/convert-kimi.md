@@ -85,6 +85,9 @@ struct ConvertContext {
     ConvertLogger* logger = nullptr;
     PlanCache* planCache = nullptr;
     PlanTaskQueue* planQueue = nullptr;
+    InstanceRegistry* instanceRegistry = nullptr;
+    std::atomic<size_t>* taskCounter = nullptr;
+    std::atomic<bool>* cancelFlag = nullptr;
 };
 ```
 
@@ -137,19 +140,24 @@ class PlanCache {
 };
 ```
 
-**PlanTaskQueue**：模块任务队列（`include/convert.hpp` 约 523 行）：
+**PlanTaskQueue**：模块任务队列（`include/convert.hpp` 约 523 行），支持并行阻塞等待与 close/drain：
 
 ```cpp
 class PlanTaskQueue {
 public:
     void push(PlanKey key);
+    bool tryPush(PlanKey key);
     bool tryPop(PlanKey& out);
+    bool waitPop(PlanKey& out, const std::atomic<bool>* cancelFlag = nullptr);
     void close();
+    std::size_t drain();
     void reset();
 private:
     std::deque<PlanKey> queue_;
 };
 ```
+
+**InstanceRegistry**：任务去重与完成态登记（内部使用），用于避免重复创建同一 `PlanKey`。
 
 **例子**：PlanEntry 的状态变化
 
