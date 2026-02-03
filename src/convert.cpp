@@ -14392,6 +14392,409 @@ grh::ir::Graph& GraphAssembler::build(const PlanKey& key, const ModulePlan& plan
     return *graph;
 }
 
+namespace {
+
+struct ConvertParallelState {
+    std::atomic<std::size_t> pending{0};
+    std::atomic<bool> cancel{false};
+    std::condition_variable doneCv;
+    std::mutex doneMutex;
+};
+
+struct AbortState {
+    std::atomic<bool>& cancel;
+    PlanTaskQueue& queue;
+    std::atomic<std::size_t>& pending;
+    std::condition_variable& doneCv;
+
+    void request()
+    {
+        bool expected = false;
+        if (!cancel.compare_exchange_strong(expected, true))
+        {
+            return;
+        }
+        const std::size_t dropped = queue.drain();
+        if (dropped > 0)
+        {
+            const std::size_t prev = pending.fetch_sub(dropped, std::memory_order_relaxed);
+            if (prev <= dropped)
+            {
+                pending.store(0, std::memory_order_relaxed);
+            }
+        }
+        queue.close();
+        doneCv.notify_all();
+    }
+};
+
+struct TopGraphInfo {
+    std::vector<PlanKey> order;
+    std::unordered_map<PlanKey, std::vector<std::string>, PlanKeyHash> aliases;
+    std::unordered_map<PlanKey, std::string, PlanKeyHash> moduleNames;
+};
+
+bool shouldCancel(const ConvertContext& context)
+{
+    return context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed);
+}
+
+void markInstanceReady(ConvertContext& context, const PlanKey& key)
+{
+    if (context.instanceRegistry)
+    {
+        context.instanceRegistry->markReady(key);
+    }
+}
+
+void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
+{
+    const auto prebindStart = ConvertClock::now();
+    SlangPrebindVisitor prebindVisitor;
+    root.visit(prebindVisitor);
+    const auto prebindEnd = ConvertClock::now();
+    logPassTiming(logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
+}
+
+void configureParallelContext(ConvertContext& context, ConvertDiagnostics& diagnostics,
+                              bool useParallel, ConvertParallelState& state)
+{
+    if (useParallel)
+    {
+        context.taskCounter = &state.pending;
+        context.cancelFlag = &state.cancel;
+        diagnostics.enableThreadLocal(true);
+    }
+    else
+    {
+        context.taskCounter = nullptr;
+        context.cancelFlag = nullptr;
+        diagnostics.enableThreadLocal(false);
+    }
+}
+
+std::unique_ptr<AbortState> configureAbortHandler(ConvertDiagnostics& diagnostics,
+                                                  bool useParallel, bool abortOnError,
+                                                  PlanTaskQueue& queue,
+                                                  ConvertParallelState& state)
+{
+    if (useParallel && abortOnError)
+    {
+        auto abortState = std::make_unique<AbortState>(AbortState{
+            state.cancel,
+            queue,
+            state.pending,
+            state.doneCv});
+        diagnostics.setOnError([statePtr = abortState.get()]() {
+            if (statePtr)
+            {
+                statePtr->request();
+            }
+        });
+        return abortState;
+    }
+
+    if (!useParallel && abortOnError)
+    {
+        diagnostics.setOnError([]() { throw ConvertAbort(); });
+        return nullptr;
+    }
+
+    diagnostics.setOnError(nullptr);
+    return nullptr;
+}
+
+TopGraphInfo collectTopInstances(const slang::ast::RootSymbol& root, ConvertContext& context)
+{
+    TopGraphInfo info;
+    std::unordered_set<PlanKey, PlanKeyHash> seen;
+
+    for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
+    {
+        if (!topInstance)
+        {
+            continue;
+        }
+        ParameterSnapshot params = snapshotParameters(topInstance->body, nullptr);
+        PlanKey topKey;
+        topKey.definition = &topInstance->body.getDefinition();
+        topKey.body = &topInstance->body;
+        topKey.paramSignature = params.signature;
+        if (seen.insert(topKey).second)
+        {
+            info.order.push_back(topKey);
+        }
+        std::vector<std::string>& aliases = info.aliases[topKey];
+        if (!topInstance->name.empty())
+        {
+            aliases.emplace_back(topInstance->name);
+        }
+        if (!topInstance->getDefinition().name.empty())
+        {
+            aliases.emplace_back(topInstance->getDefinition().name);
+        }
+        if (!topInstance->body.getDefinition().name.empty())
+        {
+            info.moduleNames.emplace(topKey,
+                                     std::string(topInstance->body.getDefinition().name));
+        }
+        else if (!topInstance->name.empty())
+        {
+            info.moduleNames.emplace(topKey, std::string(topInstance->name));
+        }
+        enqueuePlanKey(context, topInstance->body, std::move(params.signature));
+    }
+
+    return info;
+}
+
+void processPlanKey(PlanKey key, ConvertContext& context, PlanCache& planCache,
+                    GraphAssembler& graphAssembler)
+{
+    if (!key.body)
+    {
+        markInstanceReady(context, key);
+        return;
+    }
+    if (!key.definition)
+    {
+        key.definition = &key.body->getDefinition();
+    }
+    if (shouldCancel(context))
+    {
+        markInstanceReady(context, key);
+        return;
+    }
+    if (!planCache.tryClaim(key))
+    {
+        markInstanceReady(context, key);
+        return;
+    }
+
+    ModulePlanner planner(context);
+    StmtLowererPass stmtLowerer(context);
+    WriteBackPass writeBack(context);
+    MemoryPortLowererPass memoryPortLowerer(context);
+
+    const auto planStart = ConvertClock::now();
+    ModulePlan plan = planner.plan(*key.body);
+    const auto planEnd = ConvertClock::now();
+    std::string_view moduleName;
+    if (plan.moduleSymbol.valid())
+    {
+        moduleName = plan.symbolTable.text(plan.moduleSymbol);
+    }
+    logPassTiming(context.logger, "pass1-module-plan", moduleName, planEnd - planStart);
+
+    if (shouldCancel(context))
+    {
+        markInstanceReady(context, key);
+        return;
+    }
+
+    LoweringPlan lowering;
+    const auto stmtStart = ConvertClock::now();
+    stmtLowerer.lower(plan, lowering);
+    const auto stmtEnd = ConvertClock::now();
+    logPassTiming(context.logger, "pass2-stmt-lowerer", moduleName, stmtEnd - stmtStart);
+
+    const auto writeBackStart = ConvertClock::now();
+    WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
+    const auto writeBackEnd = ConvertClock::now();
+    logPassTiming(context.logger, "pass3-writeback", moduleName,
+                  writeBackEnd - writeBackStart);
+
+    const auto memoryPortStart = ConvertClock::now();
+    memoryPortLowerer.lower(plan, lowering);
+    const auto memoryPortEnd = ConvertClock::now();
+    logPassTiming(context.logger, "pass4-memory-port", moduleName,
+                  memoryPortEnd - memoryPortStart);
+
+    if (shouldCancel(context))
+    {
+        markInstanceReady(context, key);
+        return;
+    }
+
+    const auto graphStart = ConvertClock::now();
+    graphAssembler.build(key, plan, lowering, writeBackPlan);
+    const auto graphEnd = ConvertClock::now();
+    logPassTiming(context.logger, "pass5-graph-assembly", moduleName,
+                  graphEnd - graphStart);
+
+    planCache.setLoweringPlan(key, std::move(lowering));
+    planCache.setWriteBackPlan(key, std::move(writeBackPlan));
+    planCache.storePlan(key, std::move(plan));
+    markInstanceReady(context, key);
+}
+
+template <typename Processor>
+void runPlanQueueSerial(PlanTaskQueue& queue, ConvertDiagnostics* diagnostics,
+                        Processor&& processKey)
+{
+    PlanKey key;
+    while (queue.tryPop(key))
+    {
+        processKey(std::move(key));
+        if (diagnostics)
+        {
+            diagnostics->flushThreadLocal();
+        }
+    }
+    if (diagnostics)
+    {
+        diagnostics->flushThreadLocal();
+    }
+}
+
+template <typename Processor>
+void runPlanQueueParallel(PlanTaskQueue& queue, std::size_t threadCount,
+                          ConvertParallelState& state, ConvertDiagnostics* diagnostics,
+                          AbortState* abortState, Processor&& processKey,
+                          bool abortOnError)
+{
+    threadCount = std::max<std::size_t>(1, threadCount);
+    std::vector<std::thread> threads;
+    threads.reserve(threadCount);
+
+    auto finishTask = [&]() {
+        const std::size_t prev = state.pending.fetch_sub(1, std::memory_order_relaxed);
+        if (prev <= 1)
+        {
+            state.pending.store(0, std::memory_order_relaxed);
+            queue.close();
+            state.doneCv.notify_all();
+        }
+    };
+
+    auto worker = [&]() {
+        PlanKey key;
+        while (queue.waitPop(key, &state.cancel))
+        {
+            try
+            {
+                if (!state.cancel.load(std::memory_order_relaxed))
+                {
+                    processKey(std::move(key));
+                }
+            }
+            catch (const ConvertAbort&)
+            {
+                if (abortState)
+                {
+                    abortState->request();
+                }
+            }
+            catch (const std::exception& ex)
+            {
+                if (diagnostics)
+                {
+                    diagnostics->error(
+                        slang::SourceLocation{},
+                        std::string("Convert worker failed: ") + ex.what());
+                }
+                if (abortState)
+                {
+                    abortState->request();
+                }
+            }
+            if (diagnostics)
+            {
+                diagnostics->flushThreadLocal();
+            }
+            finishTask();
+        }
+    };
+
+    if (state.pending.load(std::memory_order_relaxed) == 0)
+    {
+        queue.close();
+    }
+
+    for (std::size_t i = 0; i < threadCount; ++i)
+    {
+        threads.emplace_back(worker);
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(state.doneMutex);
+        state.doneCv.wait(lock, [&]() {
+            return state.pending.load(std::memory_order_relaxed) == 0;
+        });
+    }
+
+    queue.close();
+    for (auto& thread : threads)
+    {
+        thread.join();
+    }
+    if (diagnostics)
+    {
+        diagnostics->flushThreadLocal();
+    }
+    if (state.cancel.load(std::memory_order_relaxed) && abortOnError)
+    {
+        throw ConvertAbort();
+    }
+}
+
+void finalizeTopGraphs(grh::ir::Netlist& netlist, GraphAssembler& graphAssembler,
+                       const TopGraphInfo& info, ConvertContext& context,
+                       std::mutex& netlistMutex)
+{
+    for (const PlanKey& topKey : info.order)
+    {
+        std::string_view moduleName;
+        if (auto nameIt = info.moduleNames.find(topKey); nameIt != info.moduleNames.end())
+        {
+            moduleName = nameIt->second;
+        }
+        const std::string& graphName = graphAssembler.resolveGraphName(topKey, moduleName);
+        grh::ir::Graph* graph = netlist.findGraph(graphName);
+        if (!graph)
+        {
+            if (context.diagnostics)
+            {
+                context.diagnostics->warn(
+                    slang::SourceLocation{},
+                    "Skipping top graph alias for missing graph " + graphName);
+            }
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(netlistMutex);
+            netlist.markAsTop(graph->symbol());
+        }
+        auto aliasIt = info.aliases.find(topKey);
+        if (aliasIt == info.aliases.end())
+        {
+            continue;
+        }
+        for (const std::string& alias : aliasIt->second)
+        {
+            if (alias.empty())
+            {
+                continue;
+            }
+            const grh::ir::Graph* existing = netlist.findGraph(alias);
+            if (existing && existing->symbol() != graph->symbol())
+            {
+                if (context.diagnostics)
+                {
+                    context.diagnostics->warn(
+                        slang::SourceLocation{},
+                        "Skipping top alias conflict for " + alias);
+                }
+                continue;
+            }
+            std::lock_guard<std::mutex> lock(netlistMutex);
+            netlist.registerGraphAlias(alias, *graph);
+        }
+    }
+}
+
+} // namespace
+
 ConvertDriver::ConvertDriver(ConvertOptions options)
     : options_(options)
 {
@@ -14420,359 +14823,38 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     InstanceRegistry instanceRegistry;
     context.instanceRegistry = &instanceRegistry;
 
-    std::atomic<std::size_t> pending{0};
-    std::atomic<bool> cancel{false};
-    std::condition_variable doneCv;
-    std::mutex doneMutex;
     const bool useParallel = !options_.singleThread && options_.threadCount > 1;
     if (useParallel)
     {
-        const auto prebindStart = ConvertClock::now();
-        SlangPrebindVisitor prebindVisitor;
-        root.visit(prebindVisitor);
-        const auto prebindEnd = ConvertClock::now();
-        logPassTiming(context.logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
-    }
-    if (useParallel)
-    {
-        context.taskCounter = &pending;
-        context.cancelFlag = &cancel;
-        diagnostics_.enableThreadLocal(true);
-    }
-    else
-    {
-        context.taskCounter = nullptr;
-        context.cancelFlag = nullptr;
-        diagnostics_.enableThreadLocal(false);
+        runSlangPrebind(root, context.logger);
     }
 
-    struct AbortState {
-        std::atomic<bool>& cancel;
-        PlanTaskQueue& queue;
-        std::atomic<std::size_t>& pending;
-        std::condition_variable& doneCv;
-
-        void request()
-        {
-            bool expected = false;
-            if (!cancel.compare_exchange_strong(expected, true))
-            {
-                return;
-            }
-            const std::size_t dropped = queue.drain();
-            if (dropped > 0)
-            {
-                const std::size_t prev = pending.fetch_sub(dropped,
-                                                           std::memory_order_relaxed);
-                if (prev <= dropped)
-                {
-                    pending.store(0, std::memory_order_relaxed);
-                }
-            }
-            queue.close();
-            doneCv.notify_all();
-        }
-    };
-
-    std::unique_ptr<AbortState> abortState;
-    if (useParallel && options_.abortOnError)
-    {
-        abortState = std::make_unique<AbortState>(AbortState{
-            cancel,
-            planQueue_,
-            pending,
-            doneCv});
-        diagnostics_.setOnError([state = abortState.get()]() {
-            if (state)
-            {
-                state->request();
-            }
-        });
-    }
-    else if (!useParallel && options_.abortOnError)
-    {
-        diagnostics_.setOnError([]() { throw ConvertAbort(); });
-    }
-    else
-    {
-        diagnostics_.setOnError(nullptr);
-    }
+    ConvertParallelState parallel;
+    configureParallelContext(context, diagnostics_, useParallel, parallel);
+    std::unique_ptr<AbortState> abortState =
+        configureAbortHandler(diagnostics_, useParallel, options_.abortOnError,
+                              planQueue_, parallel);
 
     std::mutex netlistMutex;
     GraphAssembler graphAssembler(context, netlist, &netlistMutex);
-    std::vector<PlanKey> topOrder;
-    std::unordered_set<PlanKey, PlanKeyHash> topSeen;
-    std::unordered_map<PlanKey, std::vector<std::string>, PlanKeyHash> topAliases;
-    std::unordered_map<PlanKey, std::string, PlanKeyHash> topModuleNames;
-    for (const slang::ast::InstanceSymbol* topInstance : root.topInstances)
-    {
-        if (!topInstance)
-        {
-            continue;
-        }
-        ParameterSnapshot params = snapshotParameters(topInstance->body, nullptr);
-        PlanKey topKey;
-        topKey.definition = &topInstance->body.getDefinition();
-        topKey.body = &topInstance->body;
-        topKey.paramSignature = params.signature;
-        if (topSeen.insert(topKey).second)
-        {
-            topOrder.push_back(topKey);
-        }
-        std::vector<std::string>& aliases = topAliases[topKey];
-        if (!topInstance->name.empty())
-        {
-            aliases.emplace_back(topInstance->name);
-        }
-        if (!topInstance->getDefinition().name.empty())
-        {
-            aliases.emplace_back(topInstance->getDefinition().name);
-        }
-        if (!topInstance->body.getDefinition().name.empty())
-        {
-            topModuleNames.emplace(topKey, std::string(topInstance->body.getDefinition().name));
-        }
-        else if (!topInstance->name.empty())
-        {
-            topModuleNames.emplace(topKey, std::string(topInstance->name));
-        }
-        enqueuePlanKey(context, topInstance->body, std::move(params.signature));
-    }
+    TopGraphInfo topInfo = collectTopInstances(root, context);
 
     auto processKey = [&](PlanKey key) {
-        if (!key.body)
-        {
-            if (context.instanceRegistry)
-            {
-                context.instanceRegistry->markReady(key);
-            }
-            return;
-        }
-        if (!key.definition)
-        {
-            key.definition = &key.body->getDefinition();
-        }
-        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
-        {
-            if (context.instanceRegistry)
-            {
-                context.instanceRegistry->markReady(key);
-            }
-            return;
-        }
-        if (!planCache_.tryClaim(key))
-        {
-            if (context.instanceRegistry)
-            {
-                context.instanceRegistry->markReady(key);
-            }
-            return;
-        }
-
-        ModulePlanner planner(context);
-        StmtLowererPass stmtLowerer(context);
-        WriteBackPass writeBack(context);
-        MemoryPortLowererPass memoryPortLowerer(context);
-
-        const auto planStart = ConvertClock::now();
-        ModulePlan plan = planner.plan(*key.body);
-        const auto planEnd = ConvertClock::now();
-        std::string_view moduleName;
-        if (plan.moduleSymbol.valid())
-        {
-            moduleName = plan.symbolTable.text(plan.moduleSymbol);
-        }
-        logPassTiming(context.logger, "pass1-module-plan", moduleName, planEnd - planStart);
-
-        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
-        {
-            if (context.instanceRegistry)
-            {
-                context.instanceRegistry->markReady(key);
-            }
-            return;
-        }
-
-        LoweringPlan lowering;
-        const auto stmtStart = ConvertClock::now();
-        stmtLowerer.lower(plan, lowering);
-        const auto stmtEnd = ConvertClock::now();
-        logPassTiming(context.logger, "pass2-stmt-lowerer", moduleName, stmtEnd - stmtStart);
-
-        const auto writeBackStart = ConvertClock::now();
-        WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
-        const auto writeBackEnd = ConvertClock::now();
-        logPassTiming(context.logger, "pass3-writeback", moduleName, writeBackEnd - writeBackStart);
-
-        const auto memoryPortStart = ConvertClock::now();
-        memoryPortLowerer.lower(plan, lowering);
-        const auto memoryPortEnd = ConvertClock::now();
-        logPassTiming(context.logger, "pass4-memory-port", moduleName,
-                      memoryPortEnd - memoryPortStart);
-
-        if (context.cancelFlag && context.cancelFlag->load(std::memory_order_relaxed))
-        {
-            if (context.instanceRegistry)
-            {
-                context.instanceRegistry->markReady(key);
-            }
-            return;
-        }
-
-        const auto graphStart = ConvertClock::now();
-        grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
-        const auto graphEnd = ConvertClock::now();
-        logPassTiming(context.logger, "pass5-graph-assembly", moduleName,
-                      graphEnd - graphStart);
-
-        planCache_.setLoweringPlan(key, std::move(lowering));
-        planCache_.setWriteBackPlan(key, std::move(writeBackPlan));
-        planCache_.storePlan(key, std::move(plan));
-        if (context.instanceRegistry)
-        {
-            context.instanceRegistry->markReady(key);
-        }
+        processPlanKey(std::move(key), context, planCache_, graphAssembler);
     };
 
     if (useParallel)
     {
-        const std::size_t threadCount =
-            std::max<std::size_t>(1, static_cast<std::size_t>(options_.threadCount));
-        std::vector<std::thread> threads;
-        threads.reserve(threadCount);
-
-        auto finishTask = [&]() {
-            const std::size_t prev = pending.fetch_sub(1, std::memory_order_relaxed);
-            if (prev <= 1)
-            {
-                pending.store(0, std::memory_order_relaxed);
-                planQueue_.close();
-                doneCv.notify_all();
-            }
-        };
-
-        auto worker = [&]() {
-            PlanKey key;
-            while (planQueue_.waitPop(key, &cancel))
-            {
-                try
-                {
-                    if (!cancel.load(std::memory_order_relaxed))
-                    {
-                        processKey(std::move(key));
-                    }
-                }
-                catch (const ConvertAbort&)
-                {
-                    if (abortState)
-                    {
-                        abortState->request();
-                    }
-                }
-                catch (const std::exception& ex)
-                {
-                    if (context.diagnostics)
-                    {
-                        context.diagnostics->error(
-                            slang::SourceLocation{},
-                            std::string("Convert worker failed: ") + ex.what());
-                    }
-                    if (abortState)
-                    {
-                        abortState->request();
-                    }
-                }
-                diagnostics_.flushThreadLocal();
-                finishTask();
-            }
-        };
-
-        if (pending.load(std::memory_order_relaxed) == 0)
-        {
-            planQueue_.close();
-        }
-
-        for (std::size_t i = 0; i < threadCount; ++i)
-        {
-            threads.emplace_back(worker);
-        }
-
-        {
-            std::unique_lock<std::mutex> lock(doneMutex);
-            doneCv.wait(lock, [&]() { return pending.load(std::memory_order_relaxed) == 0; });
-        }
-
-        planQueue_.close();
-        for (auto& thread : threads)
-        {
-            thread.join();
-        }
-        diagnostics_.flushThreadLocal();
-        if (cancel.load(std::memory_order_relaxed) && options_.abortOnError)
-        {
-            throw ConvertAbort();
-        }
+        runPlanQueueParallel(planQueue_, static_cast<std::size_t>(options_.threadCount),
+                             parallel, &diagnostics_, abortState.get(), processKey,
+                             options_.abortOnError);
     }
     else
     {
-        PlanKey key;
-        while (planQueue_.tryPop(key))
-        {
-            processKey(std::move(key));
-            diagnostics_.flushThreadLocal();
-        }
-        diagnostics_.flushThreadLocal();
+        runPlanQueueSerial(planQueue_, &diagnostics_, processKey);
     }
 
-    for (const PlanKey& topKey : topOrder)
-    {
-        std::string_view moduleName;
-        if (auto nameIt = topModuleNames.find(topKey); nameIt != topModuleNames.end())
-        {
-            moduleName = nameIt->second;
-        }
-        const std::string& graphName = graphAssembler.resolveGraphName(topKey, moduleName);
-        grh::ir::Graph* graph = netlist.findGraph(graphName);
-        if (!graph)
-        {
-            if (context.diagnostics)
-            {
-                context.diagnostics->warn(
-                    slang::SourceLocation{},
-                    "Skipping top graph alias for missing graph " + graphName);
-            }
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> lock(netlistMutex);
-            netlist.markAsTop(graph->symbol());
-        }
-        auto aliasIt = topAliases.find(topKey);
-        if (aliasIt == topAliases.end())
-        {
-            continue;
-        }
-        for (const std::string& alias : aliasIt->second)
-        {
-            if (alias.empty())
-            {
-                continue;
-            }
-            const grh::ir::Graph* existing = netlist.findGraph(alias);
-            if (existing && existing->symbol() != graph->symbol())
-            {
-                if (context.diagnostics)
-                {
-                    context.diagnostics->warn(
-                        slang::SourceLocation{},
-                        "Skipping top alias conflict for " + alias);
-                }
-                continue;
-            }
-            std::lock_guard<std::mutex> lock(netlistMutex);
-            netlist.registerGraphAlias(alias, *graph);
-        }
-    }
+    finalizeTopGraphs(netlist, graphAssembler, topInfo, context, netlistMutex);
     return netlist;
 }
 
