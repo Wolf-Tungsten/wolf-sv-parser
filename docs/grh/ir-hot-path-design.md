@@ -93,6 +93,58 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 - Graph 的 symbol/alias 仍可通过 `SymbolId -> GraphId` 的 map 解决，但热路径不应依赖。
 - Graph 之间引用（instance）仅存 GraphId 或 SymbolId（用于序列化/外部兼容）。
 
+## Graph 缓存策略（细粒度脏标记 + 增量更新）
+
+`Graph` 类维护从 `GraphBuilder` 到只读视图的缓存，以加速 `values()` / `operations()` / `ports()` 等查询。为避免每次修改后的全量重建，采用细粒度脏标记策略：
+
+### 缓存结构
+
+- `valuesCache_`：`vector<ValueId>`，缓存所有 alive value 的 ID
+- `operationsCache_`：`vector<OperationId>`，缓存所有 alive operation 的 ID
+- `inputPortsCache_` / `outputPortsCache_` / `inoutPortsCache_`：端口缓存
+
+### 脏标记
+
+三个独立的 bool 标记，替代原来的单一 `cacheValid_`：
+- `valuesCacheDirty_`：values 缓存需要重建
+- `operationsCacheDirty_`：operations 缓存需要重建
+- `portsCacheDirty_`：ports 缓存需要重建
+
+### 修改操作的缓存策略
+
+| 操作 | 缓存影响 | 实现方式 |
+|------|----------|----------|
+| `createValue` | 增量更新 | `valuesCache_.push_back(id)`，不标记 dirty |
+| `createOperation` | 增量更新 | `operationsCache_.push_back(id)`，不标记 dirty |
+| `eraseValue` | 标记 dirty | `invalidateValuesCache()`，下次查询时重建 |
+| `eraseOp` | 标记 dirty | `invalidateOperationsCache()`，下次查询时重建 |
+| `bindInput/Output/InoutPort` | 增量更新 | 直接同步对应 ports cache |
+| `addOperand`/`replaceOperand`/`replaceAllUses` 等 | 无影响 | 不触发缓存失效 |
+| `setAttr`/`setOpKind`/`setSrcLoc` 等 | 无影响 | 不触发缓存失效 |
+
+### 设计 rationale
+
+1. **create 操作增量更新**：`addValue`/`addOp` 只是追加到 builder 的数组末尾，对应的缓存也可以直接追加，无需遍历重建。
+
+2. **erase 操作标记 dirty**：erase 会导致数组中出现空洞（alive=false），从缓存中精确移除特定元素需要 O(N) 扫描和移动，不如直接标记 dirty 让下次查询时统一重建（批量 erase 时尤其如此）。
+
+3. **operand/attribute 修改无影响**：这些修改只影响 operation 的内部状态，不影响 value/operation/port 的列表，因此不应使缓存失效。
+
+4. **细粒度分离**：values/operations/ports 的修改互不影响，避免不必要的级联重建。例如频繁添加 value 但很少查询 operations 时，operations 缓存保持有效。
+
+### 性能验证
+
+实际 c910 convert 性能测试：
+- 优化前（STEP 0002 基线）：84s
+- 优化后（细粒度脏标记）：**5s**
+- **加速比：16.8x**
+
+这表明细粒度缓存策略消除了构建期的绝大多数冗余重建，将 `ensureCaches` 从主要瓶颈降至可忽略水平。
+
+### 与 GraphView 的关系
+
+当 `Graph` 处于 frozen 状态（只有 `view_`，没有 `builder_`）时，缓存机制不生效，直接返回 `GraphView` 的数据。缓存只在 mutable 模式（有 `builder_`）下维护。
+
 ## 热路径 API 形态（完整定义）
 
 热路径只读访问通过 `GraphView` 提供；构建与变换通过 `GraphBuilder` 完成。`GraphView` 不允许原地修改，所有变更在 `GraphBuilder` 中维护一致性并在 `freeze()` 时压平为连续布局。

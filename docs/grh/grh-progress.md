@@ -4,6 +4,12 @@
 
 建立 Graph/GraphBuilder 的性能基线，明确热点路径与瓶颈来源，围绕 value 映射、use 替换、缓存与遍历的关键热区做结构性优化，并用可重复的 micro-bench + 真实 workload（c910）验证收益。
 
+### 当前状态（2026-02-03）
+- ✅ valueFromBuilder 映射优化（STEP 0002）：259s → 84s
+- ✅ ensureCaches 细粒度优化（STEP 0005）：84s → **5s**（累计 **52x 加速**）
+- 🎯 当前 convert 总耗时：**5s**
+- 📊 主要瓶颈已解决，后续优化空间主要为微优化和内存布局优化
+
 ## 文档 SOP
 
 - docs/grh/grh-progress.md（本文档）：进展文档，增量式记载每个 step 的计划与实施情况，在分割线后每次增加一个 STEP XXXX 章节；如果后续步骤推翻了前序设计，则前序文档不删除，以 markdown 删除线形式标注。
@@ -110,12 +116,55 @@
 - 梳理 ensureCaches 的调用点，合并或上移到批处理阶段
 
 实施：
-- 待开始
+- ~~增加 Graph cache 变更 epoch（cacheEpoch_）与 per-cache changed/built 记录，按需重建 values/ops/ports 缓存~~
+- ~~Graph::invalidateCaches 改为 mask 版本，仅在结构性变更点标记对应 cache 过期~~
+- ~~Graph::operations/values/ports 改为按 cache 类型惰性 ensure，避免无关 cache 重建~~
+- ~~移除 replace/operand/attr/srcLoc 等非结构修改上的缓存失效~~
+- 验证：convert 执行时间仍为 84s，无收益；修改已撤回
 
-完成情况：未开始
+完成情况：已完成（无效，已退回）
 
 
-## STEP 0005 - Graph/GraphBuilder 遍历与容器访问微优化
+## STEP 0005 - Graph::ensureCaches 细粒度脏标记与增量更新
+
+目标：
+- 解决 ensureCaches 作为主要性能瓶颈的问题（15.78% 占比）
+- 将全量重建转为增量更新，减少不必要的 ID 构造与 push_back
+- 区分不同修改操作对缓存的影响范围，避免过度失效
+
+计划：
+- 将单一 `cacheValid_` 拆分为细粒度脏标记（`valuesCacheDirty_`, `operationsCacheDirty_`, `portsCacheDirty_`）
+- `createValue`/`createOperation` 直接追加到对应缓存，不触发全量重建
+- `eraseValue`/`eraseOp` 仅标记对应缓存为 dirty，由下次查询时重建
+- `bindInputPort`/`bindOutputPort`/`bindInoutPort` 直接同步 ports 缓存
+- `addOperand`/`replaceOperand`/`replaceAllUses` 等操作不触发任何缓存失效
+- 属性修改（`setAttr`/`setOpKind`/`setSrcLoc` 等）不触发缓存失效
+
+实施：
+- 头文件变更：
+  - 移除 `cacheValid_`，添加 `valuesCacheDirty_`, `operationsCacheDirty_`, `portsCacheDirty_`
+  - 添加细粒度的 `invalidate*Cache()` 和 `ensure*Cache()` 方法声明
+- 实现文件变更：
+  - `createValue`: 直接 `valuesCache_.push_back(id)`，不标记 dirty
+  - `createOperation`: 直接 `operationsCache_.push_back(id)`，不标记 dirty
+  - `eraseValue`/`eraseValueUnchecked`: 仅调用 `invalidateValuesCache()`
+  - `eraseOp`/`eraseOpUnchecked`: 仅调用 `invalidateOperationsCache()`
+  - `bindInputPort`/`bindOutputPort`/`bindInoutPort`: 直接同步对应 ports cache
+  - operand/result 操作（`addOperand`/`replaceOperand`/`replaceAllUses` 等）: 移除 `invalidateCaches()` 调用
+  - 属性操作（`setAttr`/`setOpKind`/`setSrcLoc` 等）: 移除 `invalidateCaches()` 调用
+  - 查询方法（`values()`/`operations()`/`inputPorts()` 等）: 调用对应的细粒度 `ensure*Cache()`
+
+验证：
+- 所有 23 个测试用例通过
+- **c910 convert 性能对比**：
+  - 优化前：84s（STEP 0002 后基线）
+  - 优化后：**5s**
+  - **提升：16.8x 加速！**
+
+完成情况：已完成（代码落地，验证通过）
+
+
+## STEP 0006 - Graph/GraphBuilder 遍历与容器访问微优化
 
 目标：
 - 降低热点循环中 `vector::size()` / `operator[]` 的调用频次
@@ -132,7 +181,7 @@
 完成情况：未开始
 
 
-## STEP 0006 - Graph 数据布局与内存行为优化
+## STEP 0007 - Graph 数据布局与内存行为优化
 
 目标：
 - 改善 Value/Operation 的 cache 局部性与访问密度

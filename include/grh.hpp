@@ -562,7 +562,13 @@ private:
     friend class Netlist;
 
     void invalidateCaches() const;
+    void invalidateValuesCache() const;
+    void invalidateOperationsCache() const;
+    void invalidatePortsCache() const;
     void ensureCaches() const;
+    void ensureValuesCache() const;
+    void ensureOperationsCache() const;
+    void ensurePortsCache() const;
     GraphBuilder& ensureBuilder();
     const GraphView& view() const;
     Value valueFromView(ValueId id) const;
@@ -581,7 +587,9 @@ private:
     mutable std::vector<Port> inputPortsCache_;
     mutable std::vector<Port> outputPortsCache_;
     mutable std::vector<InoutPort> inoutPortsCache_;
-    mutable bool cacheValid_ = false;
+    mutable bool valuesCacheDirty_ = true;
+    mutable bool operationsCacheDirty_ = true;
+    mutable bool portsCacheDirty_ = true;
 };
 
 class Netlist {

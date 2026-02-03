@@ -2501,7 +2501,7 @@ namespace grh::ir
             }
             return std::span<const OperationId>();
         }
-        ensureCaches();
+        ensureOperationsCache();
         return std::span<const OperationId>(operationsCache_.data(), operationsCache_.size());
     }
 
@@ -2515,7 +2515,7 @@ namespace grh::ir
             }
             return std::span<const ValueId>();
         }
-        ensureCaches();
+        ensureValuesCache();
         return std::span<const ValueId>(valuesCache_.data(), valuesCache_.size());
     }
 
@@ -2529,7 +2529,7 @@ namespace grh::ir
             }
             return std::span<const Port>();
         }
-        ensureCaches();
+        ensurePortsCache();
         return std::span<const Port>(inputPortsCache_.data(), inputPortsCache_.size());
     }
 
@@ -2543,7 +2543,7 @@ namespace grh::ir
             }
             return std::span<const Port>();
         }
-        ensureCaches();
+        ensurePortsCache();
         return std::span<const Port>(outputPortsCache_.data(), outputPortsCache_.size());
     }
 
@@ -2557,22 +2557,32 @@ namespace grh::ir
             }
             return std::span<const InoutPort>();
         }
-        ensureCaches();
+        ensurePortsCache();
         return std::span<const InoutPort>(inoutPortsCache_.data(), inoutPortsCache_.size());
     }
 
     ValueId Graph::createValue(SymbolId symbol, int32_t width, bool isSigned)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.addValue(symbol, width, isSigned);
+        ValueId id = builder.addValue(symbol, width, isSigned);
+        // Incremental update: directly append to cache without full rebuild
+        if (!valuesCacheDirty_)
+        {
+            valuesCache_.push_back(id);
+        }
+        return id;
     }
 
     OperationId Graph::createOperation(OperationKind kind, SymbolId symbol)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.addOp(kind, symbol);
+        OperationId id = builder.addOp(kind, symbol);
+        // Incremental update: directly append to cache without full rebuild
+        if (!operationsCacheDirty_)
+        {
+            operationsCache_.push_back(id);
+        }
+        return id;
     }
 
     ValueId Graph::findValue(SymbolId symbol) const noexcept
@@ -2658,22 +2668,37 @@ namespace grh::ir
     void Graph::bindInputPort(SymbolId name, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.bindInputPort(name, value);
+        // Incremental update: sync cache directly
+        if (!portsCacheDirty_)
+        {
+            inputPortsCache_.clear();
+            inputPortsCache_ = builder.inputPorts_;
+        }
     }
 
     void Graph::bindOutputPort(SymbolId name, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.bindOutputPort(name, value);
+        // Incremental update: sync cache directly
+        if (!portsCacheDirty_)
+        {
+            outputPortsCache_.clear();
+            outputPortsCache_ = builder.outputPorts_;
+        }
     }
 
     void Graph::bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.bindInoutPort(name, in, out, oe);
+        // Incremental update: sync cache directly
+        if (!portsCacheDirty_)
+        {
+            inoutPortsCache_.clear();
+            inoutPortsCache_ = builder.inoutPorts_;
+        }
     }
 
     ValueId Graph::inputPortValue(SymbolId name) const noexcept
@@ -2709,162 +2734,182 @@ namespace grh::ir
     void Graph::addOperand(OperationId op, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.addOperand(op, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::addResult(OperationId op, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.addResult(op, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::insertOperand(OperationId op, std::size_t index, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.insertOperand(op, index, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::insertResult(OperationId op, std::size_t index, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.insertResult(op, index, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::replaceOperand(OperationId op, std::size_t index, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.replaceOperand(op, index, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::replaceResult(OperationId op, std::size_t index, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.replaceResult(op, index, value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::replaceAllUses(ValueId from, ValueId to)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.replaceAllUses(from, to);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     bool Graph::eraseOperand(OperationId op, std::size_t index)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         return builder.eraseOperand(op, index);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     bool Graph::eraseResult(OperationId op, std::size_t index)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         return builder.eraseResult(op, index);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     bool Graph::eraseOp(OperationId op)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.eraseOp(op);
+        bool result = builder.eraseOp(op);
+        if (result)
+        {
+            invalidateOperationsCache();
+        }
+        return result;
     }
 
     bool Graph::eraseOp(OperationId op, std::span<const ValueId> replacementResults)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.eraseOp(op, replacementResults);
+        bool result = builder.eraseOp(op, replacementResults);
+        if (result)
+        {
+            invalidateOperationsCache();
+        }
+        return result;
     }
 
     bool Graph::eraseOpUnchecked(OperationId op)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.eraseOpUnchecked(op);
+        bool result = builder.eraseOpUnchecked(op);
+        if (result)
+        {
+            invalidateOperationsCache();
+        }
+        return result;
     }
 
     bool Graph::eraseValue(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.eraseValue(value);
+        bool result = builder.eraseValue(value);
+        if (result)
+        {
+            invalidateValuesCache();
+        }
+        return result;
     }
 
     bool Graph::eraseValueUnchecked(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
-        return builder.eraseValueUnchecked(value);
+        bool result = builder.eraseValueUnchecked(value);
+        if (result)
+        {
+            invalidateValuesCache();
+        }
+        return result;
     }
 
     void Graph::setAttr(OperationId op, std::string_view key, AttributeValue value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setAttr(op, key, std::move(value));
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::setOpKind(OperationId op, OperationKind kind)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setOpKind(op, kind);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     bool Graph::eraseAttr(OperationId op, std::string_view key)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         return builder.eraseAttr(op, key);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::setValueSrcLoc(ValueId value, SrcLoc loc)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setValueSrcLoc(value, std::move(loc));
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::setOpSrcLoc(OperationId op, SrcLoc loc)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setOpSrcLoc(op, std::move(loc));
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::setOpSymbol(OperationId op, SymbolId sym)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setOpSymbol(op, sym);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::setValueSymbol(ValueId value, SymbolId sym)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.setValueSymbol(value, sym);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::clearOpSymbol(OperationId op)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.clearOpSymbol(op);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::clearValueSymbol(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
-        invalidateCaches();
         builder.clearValueSymbol(value);
+        // No cache invalidation needed - doesn't affect value/op/port lists
     }
 
     void Graph::writeJson(slang::JsonWriter &writer) const
@@ -3024,25 +3069,40 @@ namespace grh::ir
 
     void Graph::invalidateCaches() const
     {
-        cacheValid_ = false;
-        valuesCache_.clear();
-        operationsCache_.clear();
-        inputPortsCache_.clear();
-        outputPortsCache_.clear();
-        inoutPortsCache_.clear();
+        valuesCacheDirty_ = true;
+        operationsCacheDirty_ = true;
+        portsCacheDirty_ = true;
+    }
+
+    void Graph::invalidateValuesCache() const
+    {
+        valuesCacheDirty_ = true;
+    }
+
+    void Graph::invalidateOperationsCache() const
+    {
+        operationsCacheDirty_ = true;
+    }
+
+    void Graph::invalidatePortsCache() const
+    {
+        portsCacheDirty_ = true;
     }
 
     void Graph::ensureCaches() const
     {
-        if (cacheValid_)
+        ensureValuesCache();
+        ensureOperationsCache();
+        ensurePortsCache();
+    }
+
+    void Graph::ensureValuesCache() const
+    {
+        if (!valuesCacheDirty_)
         {
             return;
         }
         valuesCache_.clear();
-        operationsCache_.clear();
-        inputPortsCache_.clear();
-        outputPortsCache_.clear();
-        inoutPortsCache_.clear();
         if (builder_)
         {
             const auto &values = builder_->values_;
@@ -3059,7 +3119,19 @@ namespace grh::ir
                 id.graph = graphId_;
                 valuesCache_.push_back(id);
             }
+        }
+        valuesCacheDirty_ = false;
+    }
 
+    void Graph::ensureOperationsCache() const
+    {
+        if (!operationsCacheDirty_)
+        {
+            return;
+        }
+        operationsCache_.clear();
+        if (builder_)
+        {
             const auto &ops = builder_->operations_;
             operationsCache_.reserve(ops.size());
             for (std::size_t i = 0; i < ops.size(); ++i)
@@ -3074,11 +3146,26 @@ namespace grh::ir
                 id.graph = graphId_;
                 operationsCache_.push_back(id);
             }
+        }
+        operationsCacheDirty_ = false;
+    }
+
+    void Graph::ensurePortsCache() const
+    {
+        if (!portsCacheDirty_)
+        {
+            return;
+        }
+        inputPortsCache_.clear();
+        outputPortsCache_.clear();
+        inoutPortsCache_.clear();
+        if (builder_)
+        {
             inputPortsCache_ = builder_->inputPorts_;
             outputPortsCache_ = builder_->outputPorts_;
             inoutPortsCache_ = builder_->inoutPorts_;
         }
-        cacheValid_ = true;
+        portsCacheDirty_ = false;
     }
 
     GraphBuilder &Graph::ensureBuilder()
