@@ -1054,6 +1054,10 @@ PlanCache (PlanKey -> PlanEntry{plan, artifacts})
 - Graph 组装在 worker 内完成；Netlist 写回通过互斥保护的“单线程 commit”完成。
 - Graph 顺序不要求稳定，仅保证符号可解析；topGraphs/alias 由主线程统一注册。
 - instance 仅保留 `moduleName` 字符串属性，commit 阶段确保对应 graph 已注册。
+- **slang AST 线程安全：** slang 的 AST 采用 lazy binding（延迟绑定）机制，首次访问类型、
+  初始化表达式等成员时会触发内部解析并修改 mutable 状态。为保证多线程安全，在并行转换前
+  调用 `Compilation::getSemanticDiagnostics()` 触发 slang 内部的 `DiagnosticVisitor`
+  遍历整个 AST，完成所有 lazy binding，使后续 worker 线程的访问变为只读操作。
 
 ### 6.5. 诊断与日志
 - 诊断：线程本地缓冲 + 全局取消标记；worker 完成后统一 flush。

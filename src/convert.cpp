@@ -181,58 +181,6 @@ std::string formatDuration(ConvertClock::duration duration)
     return std::to_string(ns) + "ns";
 }
 
-class SlangPrebindVisitor
-    : public slang::ast::ASTVisitor<SlangPrebindVisitor, true, true> {
-public:
-    void handle(const slang::ast::ValueSymbol& symbol)
-    {
-        (void)symbol.getType();
-    }
-
-    void handle(const slang::ast::Expression& expr)
-    {
-        (void)expr.type;
-    }
-
-    void handle(const slang::ast::ContinuousAssignSymbol& symbol)
-    {
-        (void)symbol.getAssignment();
-        (void)symbol.getDelay();
-    }
-
-    void handle(const slang::ast::NetSymbol& symbol)
-    {
-        (void)symbol.getInitializer();
-        (void)symbol.getDelay();
-    }
-
-    void handle(const slang::ast::VariableSymbol& symbol)
-    {
-        (void)symbol.getInitializer();
-    }
-
-    void handle(const slang::ast::PortSymbol& symbol)
-    {
-        (void)symbol.getInitializer();
-        (void)symbol.getInternalExpr();
-    }
-
-    void handle(const slang::ast::ParameterSymbol& symbol)
-    {
-        (void)symbol.getInitializer();
-    }
-
-    void handle(const slang::ast::DefParamSymbol& symbol)
-    {
-        (void)symbol.getInitializer();
-    }
-
-    void handle(const slang::ast::PrimitiveInstanceSymbol& symbol)
-    {
-        (void)symbol.getDelay();
-    }
-};
-
 void logPassTiming(ConvertLogger* logger, std::string_view passName,
                    std::string_view moduleName, ConvertClock::duration duration)
 {
@@ -14450,8 +14398,10 @@ void markInstanceReady(ConvertContext& context, const PlanKey& key)
 void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
 {
     const auto prebindStart = ConvertClock::now();
-    SlangPrebindVisitor prebindVisitor;
-    root.visit(prebindVisitor);
+    // Trigger slang's internal DiagnosticVisitor through the public API.
+    // This traverses the entire AST and triggers all lazy bindings,
+    // making it safe for multithreaded access afterward.
+    (void)root.getCompilation().getSemanticDiagnostics();
     const auto prebindEnd = ConvertClock::now();
     logPassTiming(logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
 }

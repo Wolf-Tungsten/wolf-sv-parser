@@ -23,11 +23,13 @@
   parallel conversion.
 
 ## Fix details
-- **Prebind pass (best-effort):** add a pre-pass that walks the slang AST and eagerly
-  binds lazy symbol data before parallel conversion.
-  - `src/convert.cpp` adds `SlangPrebindVisitor` and runs it when parallel mode is enabled.
-  - The pass touches lazy APIs (continuous assigns, delays, initializers, port internals)
-    to avoid concurrent binding in worker threads.
+- **Prebind pass:** trigger slang's internal `DiagnosticVisitor` through the public API
+  `Compilation::getSemanticDiagnostics()` before parallel conversion.
+  - Located in `runSlangPrebind()` in `src/convert.cpp`, invoked when parallel mode is enabled.
+  - This traverses the entire AST and triggers all lazy bindings (types, initializers,
+    assignments, delays, etc.), making subsequent multithreaded access safe.
+  - Uses the official slang API instead of a custom visitor to ensure completeness and
+    maintainability across slang updates.
 
 ## Validation
 - User verification: multi-thread run no longer reports the `not_null` assertion.
