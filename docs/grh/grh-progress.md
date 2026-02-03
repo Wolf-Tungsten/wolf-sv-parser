@@ -92,9 +92,10 @@
 - 若引入 use-list，补齐 GraphBuilder 维护逻辑并提供批量替换接口
 
 实施：
-- 待开始
+- 增加批量替换接口：Graph/GraphBuilder 新增 replaceAllUses(span<pair<from,to>>) 便于集中调用
+- 批量路径复用 use-list 更新，避免全图遍历
 
-完成情况：未开始
+完成情况：已完成（无效，未观察到性能收益；本次修改已退回）
 
 
 ## STEP 0004 - Graph::ensureCaches 去抖与惰性更新
