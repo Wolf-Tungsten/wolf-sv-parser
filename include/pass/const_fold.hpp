@@ -5,6 +5,7 @@
 #include "transform.hpp"
 
 #include <atomic>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -18,6 +19,11 @@ namespace wolf_sv_parser::transform
         bool allowXPropagation = false;
     };
 
+    // Forward declarations for internal types
+    struct ConstantValue;
+    struct ConstantKey;
+    struct ConstantKeyHash;
+
     class ConstantFoldPass : public Pass
     {
     public:
@@ -27,17 +33,17 @@ namespace wolf_sv_parser::transform
         PassResult run() override;
 
     private:
-        using ConstantStore = std::unordered_map<grh::ir::ValueId, struct ConstantValue, grh::ir::ValueIdHash>;
-        using ConstantPool = std::unordered_map<struct ConstantKey, grh::ir::ValueId, struct ConstantKeyHash>;
+        using ConstantStore = std::unordered_map<grh::ir::ValueId, ConstantValue, grh::ir::ValueIdHash>;
+        using ConstantPool = std::unordered_map<ConstantKey, grh::ir::ValueId, ConstantKeyHash>;
 
         // Per-graph folding context
         struct GraphFoldContext
         {
             grh::ir::Graph &graph;
-            ConstantStore &constants;
-            ConstantPool &pool;
-            std::atomic<int> &symbolCounter;
-            std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> &foldedOps;
+            ConstantStore &constants;  // Shared across graphs (values can reference constants from other graphs)
+            std::unique_ptr<ConstantPool> pool;  // Per-graph constant pool for deduplication
+            std::atomic<int> symbolCounter{0};  // Per-graph counter for unique symbol generation
+            std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;  // Per-graph folded operations
             bool &failed;
         };
 

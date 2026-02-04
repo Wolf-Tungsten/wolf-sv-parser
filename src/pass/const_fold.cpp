@@ -627,7 +627,7 @@ namespace wolf_sv_parser::transform
                 }
                 ctx.constants.emplace(resId, *parsed);
                 ConstantKey key = makeConstantKey(res, parsed->value);
-                if (auto it = ctx.pool.find(key); it != ctx.pool.end())
+                if (auto it = ctx.pool->find(key); it != ctx.pool->end())
                 {
                     if (it->second != resId && !res.isInput() && !res.isInout())
                     {
@@ -636,7 +636,7 @@ namespace wolf_sv_parser::transform
                     }
                     continue;
                 }
-                ctx.pool.emplace(std::move(key), resId);
+                ctx.pool->emplace(std::move(key), resId);
             }
         }
 
@@ -695,7 +695,7 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     const grh::ir::Value resValue = ctx.graph.getValue(resId);
-                    grh::ir::ValueId newValue = createConstant(ctx.graph, ctx.pool, op, idx, resValue, sv, ctx.symbolCounter);
+                    grh::ir::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, idx, resValue, sv, ctx.symbolCounter);
                     replaceUsers(ctx.graph, resId, newValue, [&](const std::string &msg)
                                  { this->error(ctx.graph, op, msg); ctx.failed = true; });
                     ctx.constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
@@ -956,40 +956,18 @@ namespace wolf_sv_parser::transform
 
         try
         {
-            // Per-graph pools for constant deduplication
-            std::unordered_map<const grh::ir::Graph *, ConstantPool> pools;
-            // Per-graph atomic counters for unique symbol generation
-            std::unordered_map<const grh::ir::Graph *, std::unique_ptr<std::atomic<int>>> symbolCounters;
-            // Set of globally folded operations
-            std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;
-
             // Iterate over all graphs
             for (const auto &graphEntry : netlist().graphs())
             {
                 grh::ir::Graph &graph = *graphEntry.second;
-                ConstantPool &pool = pools[&graph];
 
-                // Get or create symbol counter for this graph
-                std::atomic<int> *counter = nullptr;
-                auto counterIt = symbolCounters.find(&graph);
-                if (counterIt == symbolCounters.end())
-                {
-                    auto newCounter = std::make_unique<std::atomic<int>>(0);
-                    counter = newCounter.get();
-                    symbolCounters[&graph] = std::move(newCounter);
-                }
-                else
-                {
-                    counter = counterIt->second.get();
-                }
-
-                // Create context for this graph
+                // Create per-graph context with fresh state
                 GraphFoldContext ctx{
                     graph,
-                    constants,
-                    pool,
-                    *counter,
-                    foldedOps,
+                    constants,  // Shared across graphs (constants can reference values from other graphs)
+                    std::make_unique<ConstantPool>(),  // Fresh constant pool for this graph
+                    {},         // Fresh symbol counter
+                    {},         // Fresh folded operations set
                     failed
                 };
 

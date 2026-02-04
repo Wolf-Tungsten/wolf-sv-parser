@@ -1,5 +1,6 @@
 #include "transform.hpp"
 
+#include <chrono>
 #include <iostream>
 
 namespace wolf_sv_parser::transform
@@ -317,22 +318,20 @@ namespace wolf_sv_parser::transform
                 continue;
             }
 
-            if (options_.verbosity <= PassVerbosity::Info)
-            {
-                std::cerr << "[transform] [" << pass->id() << "] start\n";
-            }
-
             pass->setContext(&context);
+            auto startTime = std::chrono::steady_clock::now();
             PassResult passResult = pass->run();
+            auto endTime = std::chrono::steady_clock::now();
             pass->clearContext();
             result.changed = result.changed || passResult.changed;
 
+            auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
             std::cerr << "[transform] [" << pass->id() << "] " << (passResult.failed ? "failed" : "done");
             if (passResult.changed)
             {
                 std::cerr << " (changed)";
             }
-            std::cerr << '\n';
+            std::cerr << " in " << durationMs << "ms\n";
 
             if (passResult.failed)
             {
