@@ -10,12 +10,15 @@ Use this skill when the user wants an end-to-end flow: detect a C910 simulation 
 ## Inputs
 
 - Optional `CASE_ID`: if the user requests a specific case number; otherwise choose the next available `case_XXX`.
+- Optional `USER_LOG`: a user-provided log file path or pasted snippet. Use it to seed repro if provided.
 
 ## Workflow
 
-1. Always run `make run_c910_test` from repo root and capture stdout/stderr to a log file (e.g. `build/artifacts/c910_run.log`). Use this log path for all subsequent steps.
-2. Read the log. Extract the error snippet and locate the referenced RTL file/module.
-   - Prefer the RTL file path and module name mentioned in the error.
+1. Entry paths:
+   - If the user provides `USER_LOG`, read it first and extract warnings/errors (focus on error/critical lines, then warnings). Use these messages to identify likely RTL files/modules and the failure signature to reproduce.
+   - If no `USER_LOG` is provided or it lacks actionable error context, run `make run_c910_test` from repo root and capture stdout/stderr to a log file (e.g. `build/artifacts/c910_run.log`). Use this log path for all subsequent steps.
+2. Read the chosen log (user-provided or freshly generated). Extract the error snippet and locate the referenced RTL file/module.
+   - Prefer the RTL file path and module name mentioned in the error or warning.
 3. Determine `DUT_TOP` and minimal RTL sources.
    - Use `rg -n "module <DUT_TOP>"` in `tests/data/openc910/C910_RTL_FACTORY` to find the module file.
    - Keep `filelist.f` minimal; prefer existing RTL paths. Add `stub_modules.v` only when needed.

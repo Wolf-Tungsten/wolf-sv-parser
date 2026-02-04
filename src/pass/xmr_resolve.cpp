@@ -173,10 +173,48 @@ namespace wolf_sv_parser::transform
         PassResult result;
         PortNameCache readPortNames;
         PortNameCache writePortNames;
+        struct PendingPort
+        {
+            std::string moduleName;
+            std::string portName;
+            int32_t width = 0;
+            bool isSigned = false;
+        };
+        std::vector<PendingPort> pendingOutputPorts;
+        std::vector<PendingPort> pendingInputPorts;
+        std::unordered_map<std::string, std::unordered_map<std::string, grh::ir::ValueId>> inputPadCache;
+
+        auto getPadInput = [&](grh::ir::Graph &graph, int32_t width, bool isSigned) -> grh::ir::ValueId {
+            const int32_t normalized = normalizeWidth(width);
+            const std::string key = std::to_string(normalized) + (isSigned ? "s" : "u");
+            auto &graphCache = inputPadCache[graph.symbol()];
+            auto it = graphCache.find(key);
+            if (it != graphCache.end())
+            {
+                return it->second;
+            }
+            std::string base = "__xmr_pad_in_" + key;
+            std::string symName = makeUniqueSymbol(graph, base);
+            grh::ir::SymbolId sym = graph.internSymbol(symName);
+            grh::ir::ValueId value = graph.createValue(sym, normalized, isSigned);
+            grh::ir::OperationId op =
+                graph.createOperation(grh::ir::OperationKind::kConstant,
+                                      grh::ir::SymbolId::invalid());
+            graph.addResult(op, value);
+            graph.setAttr(op, "constValue", std::to_string(normalized) + "'b0");
+            graphCache.emplace(key, value);
+            result.changed = true;
+            return value;
+        };
 
         auto ensureOutputPort = [&](grh::ir::Graph &graph,
                                     const std::string &portName,
-                                    grh::ir::ValueId value) -> grh::ir::ValueId {
+                                    grh::ir::ValueId value,
+                                    bool *added) -> grh::ir::ValueId {
+            if (added)
+            {
+                *added = false;
+            }
             grh::ir::SymbolId sym = graph.internSymbol(portName);
             grh::ir::ValueId existing = graph.outputPortValue(sym);
             if (existing.valid() && existing != value)
@@ -184,15 +222,27 @@ namespace wolf_sv_parser::transform
                 warning(graph, "XMR output port already bound; keeping existing binding");
                 return existing;
             }
-            graph.bindOutputPort(sym, value);
-            result.changed = true;
+            if (!existing.valid())
+            {
+                graph.bindOutputPort(sym, value);
+                result.changed = true;
+                if (added)
+                {
+                    *added = true;
+                }
+            }
             return value;
         };
 
         auto ensureInputPort = [&](grh::ir::Graph &graph,
                                    const std::string &portName,
                                    int32_t width,
-                                   bool isSigned) -> grh::ir::ValueId {
+                                   bool isSigned,
+                                   bool *added) -> grh::ir::ValueId {
+            if (added)
+            {
+                *added = false;
+            }
             grh::ir::SymbolId sym = graph.internSymbol(portName);
             grh::ir::ValueId existing = graph.inputPortValue(sym);
             if (existing.valid())
@@ -206,6 +256,10 @@ namespace wolf_sv_parser::transform
             }
             graph.bindInputPort(sym, value);
             result.changed = true;
+            if (added)
+            {
+                *added = true;
+            }
             return value;
         };
 
@@ -416,9 +470,16 @@ namespace wolf_sv_parser::transform
                 const grh::ir::OperationId instOp = hops[i].instOp;
                 const std::string portName = getPortName(*childGraph, readPortNames, path, "xmr_r");
 
-                propagated = ensureOutputPort(*childGraph, portName, propagated);
+                bool newPort = false;
+                propagated = ensureOutputPort(*childGraph, portName, propagated, &newPort);
 
                 const grh::ir::Value childValue = childGraph->getValue(propagated);
+                if (newPort)
+                {
+                    pendingOutputPorts.push_back(
+                        PendingPort{childGraph->symbol(), portName,
+                                    childValue.width(), childValue.isSigned()});
+                }
                 grh::ir::ValueId parentValue =
                     ensureInstanceOutput(*parentGraph, instOp, portName,
                                          childValue.width(), childValue.isSigned());
@@ -490,9 +551,16 @@ namespace wolf_sv_parser::transform
                 const std::string portName = getPortName(*childGraph, writePortNames, path, "xmr_w");
 
                 const grh::ir::Value driverValue = current->getValue(driver);
+                bool newPort = false;
                 grh::ir::ValueId childPort =
                     ensureInputPort(*childGraph, portName, driverValue.width(),
-                                    driverValue.isSigned());
+                                    driverValue.isSigned(), &newPort);
+                if (newPort)
+                {
+                    pendingInputPorts.push_back(
+                        PendingPort{childGraph->symbol(), portName,
+                                    driverValue.width(), driverValue.isSigned()});
+                }
 
                 ensureInstanceInput(*current, instOp, portName, driver);
 
@@ -580,6 +648,80 @@ namespace wolf_sv_parser::transform
                     resolveWrite(graph, opId, *path, operands.front());
                     graph.eraseOp(opId);
                     result.changed = true;
+                }
+            }
+        }
+
+        if (!pendingOutputPorts.empty() || !pendingInputPorts.empty())
+        {
+            auto instanceHasInput = [&](const grh::ir::Operation &op,
+                                        std::string_view portName) -> bool {
+                const auto names = getAttrStrings(op, "inputPortName");
+                for (const auto &name : names)
+                {
+                    if (name == portName)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            for (const auto &pending : pendingOutputPorts)
+            {
+                for (auto &graphEntry : netlist().graphs())
+                {
+                    grh::ir::Graph &graph = *graphEntry.second;
+                    for (const auto opId : graph.operations())
+                    {
+                        const grh::ir::Operation op = graph.getOperation(opId);
+                        if (op.kind() != grh::ir::OperationKind::kInstance &&
+                            op.kind() != grh::ir::OperationKind::kBlackbox)
+                        {
+                            continue;
+                        }
+                        const auto moduleName = getAttrString(op, "moduleName");
+                        if (!moduleName || *moduleName != pending.moduleName)
+                        {
+                            continue;
+                        }
+                        ensureInstanceOutput(graph, opId, pending.portName,
+                                             pending.width, pending.isSigned);
+                    }
+                }
+            }
+
+            for (const auto &pending : pendingInputPorts)
+            {
+                for (auto &graphEntry : netlist().graphs())
+                {
+                    grh::ir::Graph &graph = *graphEntry.second;
+                    grh::ir::ValueId padValue;
+                    bool padReady = false;
+                    for (const auto opId : graph.operations())
+                    {
+                        const grh::ir::Operation op = graph.getOperation(opId);
+                        if (op.kind() != grh::ir::OperationKind::kInstance &&
+                            op.kind() != grh::ir::OperationKind::kBlackbox)
+                        {
+                            continue;
+                        }
+                        const auto moduleName = getAttrString(op, "moduleName");
+                        if (!moduleName || *moduleName != pending.moduleName)
+                        {
+                            continue;
+                        }
+                        if (instanceHasInput(op, pending.portName))
+                        {
+                            continue;
+                        }
+                        if (!padReady)
+                        {
+                            padValue = getPadInput(graph, pending.width, pending.isSigned);
+                            padReady = true;
+                        }
+                        ensureInstanceInput(graph, opId, pending.portName, padValue);
+                    }
                 }
             }
         }
