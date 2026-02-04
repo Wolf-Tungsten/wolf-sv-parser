@@ -87,16 +87,21 @@ $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 		--top-module top_module --prefix $(VERILATOR_PREFIX) -Mdir $(OUT_DIR) -o $(SIM_BIN_NAME)
 	CCACHE_DISABLE=1 $(MAKE) -C $(OUT_DIR) -f $(VERILATOR_PREFIX).mk $(SIM_BIN_NAME)
 
+C910_LOG_DIR := $(BUILD_DIR)/logs/c910
+
 run_c910_test: build_wolf_parser
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
+	LOG_FILE="$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log"; \
+	mkdir -p "$(C910_LOG_DIR)"; \
 	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
 		. "$(SMART_ENV)"; \
 	fi; \
 	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM)"; \
+	echo "[LOG] Capturing output to: $$LOG_FILE"; \
 	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 		CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-		TOOL_EXTENSION="$$TOOL_EXTENSION"
+		TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | tee "$$LOG_FILE"
 
 TIMEOUT ?= 120
 GPROF_DIR := $(BUILD_DIR)/artifacts
