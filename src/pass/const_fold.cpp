@@ -5,8 +5,13 @@
 #include "slang/numeric/SVInt.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
+#include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -18,6 +23,76 @@
 
 namespace wolf_sv_parser::transform
 {
+
+    // Timing utilities for profiling
+    struct Timer {
+        using Clock = std::chrono::high_resolution_clock;
+        using Duration = std::chrono::duration<double, std::milli>;
+        using TimePoint = Clock::time_point;
+        
+        std::string name;
+        TimePoint start;
+        mutable Duration elapsed{};
+        mutable size_t count = 0;
+        
+        explicit Timer(std::string n) : name(std::move(n)), start(Clock::now()) {}
+        
+        void stop() const {
+            elapsed += Clock::now() - start;
+            ++count;
+        }
+        
+        void restart() {
+            start = Clock::now();
+        }
+        
+        double ms() const { return elapsed.count(); }
+    };
+    
+    struct TimerCollector {
+        std::unordered_map<std::string, Timer> timers;
+        
+        Timer& get(const std::string& name) {
+            auto it = timers.find(name);
+            if (it == timers.end()) {
+                it = timers.emplace(name, Timer(name)).first;
+            }
+            return it->second;
+        }
+        
+        void report() const {
+            std::cerr << "\n=== ConstFoldPass Timing Report ===\n";
+            std::vector<const Timer*> sorted;
+            for (const auto& [name, timer] : timers) {
+                sorted.push_back(&timer);
+            }
+            std::sort(sorted.begin(), sorted.end(), [](const Timer* a, const Timer* b) {
+                return a->ms() > b->ms();
+            });
+            
+            std::cerr << std::setw(40) << std::left << "Phase/Function" 
+                      << std::setw(15) << "Time (ms)" 
+                      << std::setw(10) << "Count" 
+                      << std::setw(15) << "Avg (ms)" << "\n";
+            std::cerr << std::string(80, '-') << "\n";
+            
+            double total = 0;
+            for (const auto* t : sorted) {
+                // Only sum top-level phases (names starting with 'phase') to avoid double counting
+                // nested function timers
+                if (t->name.rfind("phase", 0) == 0) {
+                    total += t->ms();
+                }
+                std::cerr << std::setw(40) << t->name 
+                          << std::setw(15) << std::fixed << std::setprecision(3) << t->ms()
+                          << std::setw(10) << t->count
+                          << std::setw(15) << (t->count > 0 ? t->ms() / t->count : 0) << "\n";
+            }
+            std::cerr << std::string(80, '-') << "\n";
+            std::cerr << std::setw(40) << "TOTAL" << std::setw(15) << std::fixed << std::setprecision(3) << total << "\n";
+            std::cerr << "===================================\n\n";
+        }
+    };
 
     namespace
     {
@@ -477,18 +552,22 @@ namespace wolf_sv_parser::transform
             return results;
         }
 
-        std::string makeUniqueSymbol(const grh::ir::Graph &graph, std::string base, bool isOperation)
+        std::string makeUniqueSymbol(const grh::ir::Graph &graph, std::string base, bool isOperation, std::atomic<int> &counter)
         {
             std::string candidate = std::move(base);
-            int counter = 0;
+            // Fast path: assume no collision, append atomic counter
+            int id = counter.fetch_add(1, std::memory_order_relaxed);
+            candidate.append("_").append(std::to_string(id));
+            
+            // Slow path: handle collision (rare)
             const auto exists = [&](const std::string &symbol)
             {
                 return isOperation ? graph.findOperation(symbol).valid() : graph.findValue(symbol).valid();
             };
             while (exists(candidate))
             {
-                ++counter;
-                candidate.append("_").append(std::to_string(counter));
+                id = counter.fetch_add(1, std::memory_order_relaxed);
+                candidate = base + "_" + std::to_string(id);
             }
             return candidate;
         }
@@ -511,21 +590,52 @@ namespace wolf_sv_parser::transform
         grh::ir::ValueId createConstant(grh::ir::Graph &graph, ConstantPool &pool,
                                         const grh::ir::Operation &sourceOp, std::size_t resultIndex,
                                         const grh::ir::Value &resultValue,
-                                        const slang::SVInt &value)
+                                        const slang::SVInt &value,
+                                        TimerCollector* timers = nullptr,
+                                        std::atomic<int> *symbolCounter = nullptr)
         {
-            ConstantKey key = makeConstantKey(resultValue, value);
-            if (auto it = pool.find(key); it != pool.end())
+            auto T = [&](const std::string& name) -> Timer* {
+                return timers ? &timers->get(name) : nullptr;
+            };
+            
+            ConstantKey key;
             {
-                return it->second;
+                auto* t = T("_cc_make_key");
+                Timer::TimePoint start = t ? Timer::Clock::now() : Timer::TimePoint();
+                key = makeConstantKey(resultValue, value);
+                if (t) { t->elapsed += Timer::Clock::now() - start; ++t->count; }
+            }
+            {
+                auto* t = T("_cc_pool_find");
+                Timer::TimePoint start = t ? Timer::Clock::now() : Timer::TimePoint();
+                if (auto it = pool.find(key); it != pool.end())
+                {
+                    return it->second;
+                }
+                if (t) { t->elapsed += Timer::Clock::now() - start; ++t->count; }
             }
 
-            std::ostringstream base;
-            base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
-            std::string valueName = makeUniqueSymbol(graph, base.str(), /*isOperation=*/false);
+            std::string valueName;
+            {
+                auto* t = T("_cc_make_value_symbol");
+                Timer::TimePoint start = t ? Timer::Clock::now() : Timer::TimePoint();
+                std::ostringstream base;
+                base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
+                static std::atomic<int> dummyCounter{0};
+                valueName = makeUniqueSymbol(graph, base.str(), /*isOperation=*/false, symbolCounter ? *symbolCounter : dummyCounter);
+                if (t) { t->elapsed += Timer::Clock::now() - start; ++t->count; }
+            }
 
-            std::ostringstream opBase;
-            opBase << "__constfold_op_" << sourceOp.symbolText() << "_" << resultIndex;
-            std::string opName = makeUniqueSymbol(graph, opBase.str(), /*isOperation=*/true);
+            std::string opName;
+            {
+                auto* t = T("_cc_make_op_symbol");
+                Timer::TimePoint start = t ? Timer::Clock::now() : Timer::TimePoint();
+                std::ostringstream opBase;
+                opBase << "__constfold_op_" << sourceOp.symbolText() << "_" << resultIndex;
+                static std::atomic<int> dummyCounter2{0};
+                opName = makeUniqueSymbol(graph, opBase.str(), /*isOperation=*/true, symbolCounter ? *symbolCounter : dummyCounter2);
+                if (t) { t->elapsed += Timer::Clock::now() - start; ++t->count; }
+            }
 
             const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
             const grh::ir::SymbolId opSym = graph.internSymbol(opName);
@@ -537,7 +647,12 @@ namespace wolf_sv_parser::transform
             const grh::ir::ValueId newValue = graph.createValue(valueSym, width, resultValue.isSigned());
             const grh::ir::OperationId constOp = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(constOp, newValue);
-            graph.setAttr(constOp, "constValue", formatConstLiteral(value));
+            {
+                auto* t = T("_cc_format_literal");
+                Timer::TimePoint start = t ? Timer::Clock::now() : Timer::TimePoint();
+                graph.setAttr(constOp, "constValue", formatConstLiteral(value));
+                if (t) { t->elapsed += Timer::Clock::now() - start; ++t->count; }
+            }
             pool.emplace(std::move(key), newValue);
             return newValue;
         }
@@ -586,9 +701,21 @@ namespace wolf_sv_parser::transform
         : Pass("const-fold", "const-fold"), options_(options)
     {
     }
+    
+    // Scoped timer helper
+    struct ScopedTimer {
+        Timer& timer;
+        explicit ScopedTimer(Timer& t) : timer(t) { timer.restart(); }
+        ~ScopedTimer() { timer.stop(); }
+    };
 
     PassResult ConstantFoldPass::run()
     {
+        TimerCollector timers;
+        auto T = [&](const std::string& name) -> ScopedTimer { 
+            return ScopedTimer(timers.get(name)); 
+        };
+        
         PassResult result;
         ConstantStore constants;
         bool failed = false;
@@ -605,6 +732,8 @@ namespace wolf_sv_parser::transform
         // Seed constant table from existing kConstant ops and dedupe identical constants.
         bool dedupedConstants = false;
         std::unordered_map<const grh::ir::Graph *, ConstantPool> pools;
+        {
+            auto _t = T("phase1_collect_constants");
         for (const auto &graphEntry : netlist().graphs())
         {
             grh::ir::Graph &graph = *graphEntry.second;
@@ -642,6 +771,7 @@ namespace wolf_sv_parser::transform
                     {
                         if (it->second != resId && !res.isInput() && !res.isInout())
                         {
+                            auto _t2 = T("replace_users");
                             replaceUsers(graph, resId, it->second, reportError);
                             dedupedConstants = true;
                         }
@@ -651,277 +781,321 @@ namespace wolf_sv_parser::transform
                 }
             }
         }
+        } // phase1_collect_constants timer scope
         result.changed = result.changed || dedupedConstants;
 
         std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;
         FoldOptions foldOpts{options_.allowXPropagation};
+        size_t totalFolded = 0;
 
-        for (int iter = 0; iter < options_.maxIterations; ++iter)
         {
-            bool iterationChanged = false;
+            auto _t = T("phase2_iterative_folding");
+            // Per-graph atomic counter for unique symbol generation
+            std::unordered_map<const grh::ir::Graph*, std::unique_ptr<std::atomic<int>>> symbolCounters;
+            
+            for (int iter = 0; iter < options_.maxIterations; ++iter)
+            {
+                bool iterationChanged = false;
 
+                for (const auto &graphEntry : netlist().graphs())
+                {
+                    grh::ir::Graph &graph = *graphEntry.second;
+                    // Get or create counter for this graph
+                    std::atomic<int> *counter = nullptr;
+                    auto counterIt = symbolCounters.find(&graph);
+                    if (counterIt == symbolCounters.end()) {
+                        auto newCounter = std::make_unique<std::atomic<int>>(0);
+                        counter = newCounter.get();
+                        symbolCounters[&graph] = std::move(newCounter);
+                    } else {
+                        counter = counterIt->second.get();
+                    }
+                    
+                    std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(), graph.operations().end());
+                    std::vector<grh::ir::OperationId> opsToErase;
+                    for (const auto opId : opOrder)
+                    {
+                        const grh::ir::Operation op = graph.getOperation(opId);
+                        if (op.kind() == grh::ir::OperationKind::kConstant || !isFoldable(op.kind()))
+                        {
+                            continue;
+                        }
+                        if (foldedOps.find(opId) != foldedOps.end())
+                        {
+                            continue;
+                        }
+                        {
+                            auto _t2 = T("operands_are_constant");
+                            if (!operandsAreConstant(op, constants))
+                            {
+                                continue;
+                            }
+                        }
+                        auto onError = [&](const std::string &msg)
+                        { this->error(graph, op, msg); failed = true; };
+                        auto onWarning = [&](const std::string &msg)
+                        { this->warning(graph, op, msg); };
+                        std::optional<std::vector<slang::SVInt>> folded;
+                        {
+                            auto _t3 = T("fold_operation");
+                            folded = foldOperation(graph, op, constants, foldOpts, onError, onWarning);
+                        }
+                        if (!folded)
+                        {
+                            continue;
+                        }
+
+                        bool createdAllResults = true;
+                        ConstantPool &pool = pools[&graph];
+                        for (std::size_t idx = 0; idx < folded->size(); ++idx)
+                        {
+                            const slang::SVInt &sv = (*folded)[idx];
+                            const auto resId = op.results()[idx];
+                            if (!resId.valid())
+                            {
+                                error(graph, op, "Result missing during folding");
+                                failed = true;
+                                createdAllResults = false;
+                                continue;
+                            }
+                            const grh::ir::Value resValue = graph.getValue(resId);
+                            grh::ir::ValueId newValue;
+                            {
+                                auto _t4 = T("create_constant");
+                                newValue = createConstant(graph, pool, op, idx, resValue, sv, &timers, counter);
+                            }
+                            {
+                                auto _t5 = T("replace_users");
+                                replaceUsers(graph, resId, newValue, [&](const std::string &msg)
+                                             { this->error(graph, op, msg); failed = true; });
+                            }
+                            constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
+                            iterationChanged = true;
+                        }
+
+                        if (createdAllResults)
+                        {
+                            foldedOps.insert(opId);
+                            opsToErase.push_back(opId);
+                            ++totalFolded;
+                        }
+                    }
+
+                    for (const auto opId : opsToErase)
+                    {
+                        auto _t6 = T("erase_op");
+                        if (!graph.eraseOp(opId))
+                        {
+                            const grh::ir::Operation op = graph.getOperation(opId);
+                            error(graph, op, "Failed to erase folded operation");
+                            failed = true;
+                        }
+                    }
+                }
+
+                result.changed = result.changed || iterationChanged;
+                if (!iterationChanged)
+                {
+                    break;
+                }
+            }
+        }
+
+        bool simplifiedSlices = false;
+        {
+            auto _t = T("phase3_slice_simplify");
             for (const auto &graphEntry : netlist().graphs())
             {
                 grh::ir::Graph &graph = *graphEntry.second;
-                std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(), graph.operations().end());
+                std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(),
+                                                          graph.operations().end());
                 std::vector<grh::ir::OperationId> opsToErase;
                 for (const auto opId : opOrder)
                 {
                     const grh::ir::Operation op = graph.getOperation(opId);
-                    if (op.kind() == grh::ir::OperationKind::kConstant || !isFoldable(op.kind()))
+                    if (op.kind() != grh::ir::OperationKind::kSliceStatic)
                     {
                         continue;
                     }
-                    if (foldedOps.find(opId) != foldedOps.end())
+                    const auto &operands = op.operands();
+                    const auto &results = op.results();
+                    if (operands.size() != 1 || results.size() != 1)
                     {
                         continue;
                     }
-                    if (!operandsAreConstant(op, constants))
+                    auto sliceStart = getIntAttr(graph, op, "sliceStart");
+                    auto sliceEnd = getIntAttr(graph, op, "sliceEnd");
+                    if (!sliceStart || !sliceEnd)
                     {
                         continue;
                     }
-                    auto onError = [&](const std::string &msg)
-                    { this->error(graph, op, msg); failed = true; };
-                    auto onWarning = [&](const std::string &msg)
-                    { this->warning(graph, op, msg); };
-                    auto folded = foldOperation(graph, op, constants, foldOpts, onError, onWarning);
-                    if (!folded)
+                    const int64_t low = *sliceStart;
+                    const int64_t high = *sliceEnd;
+                    if (low < 0 || high < low)
                     {
                         continue;
                     }
-
-                    bool createdAllResults = true;
-                    ConstantPool &pool = pools[&graph];
-                    for (std::size_t idx = 0; idx < folded->size(); ++idx)
+                    const grh::ir::ValueId baseValueId = operands[0];
+                    if (!baseValueId.valid())
                     {
-                        const slang::SVInt &sv = (*folded)[idx];
-                        const auto resId = op.results()[idx];
-                        if (!resId.valid())
+                        continue;
+                    }
+                    const grh::ir::Value baseValue = graph.getValue(baseValueId);
+                    const grh::ir::OperationId baseDefId = baseValue.definingOp();
+                    if (!baseDefId.valid())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Operation baseDef = graph.getOperation(baseDefId);
+                    if (baseDef.kind() != grh::ir::OperationKind::kConcat)
+                    {
+                        continue;
+                    }
+                    const auto &concatOperands = baseDef.operands();
+                    if (concatOperands.empty())
+                    {
+                        continue;
+                    }
+                    std::vector<int64_t> widths;
+                    widths.reserve(concatOperands.size());
+                    int64_t totalWidth = 0;
+                    bool widthsOk = true;
+                    for (const auto operandId : concatOperands)
+                    {
+                        if (!operandId.valid())
                         {
-                            error(graph, op, "Result missing during folding");
-                            failed = true;
-                            createdAllResults = false;
+                            widthsOk = false;
+                            break;
+                        }
+                        const int64_t width = graph.getValue(operandId).width();
+                        if (width <= 0)
+                        {
+                            widthsOk = false;
+                            break;
+                        }
+                        widths.push_back(width);
+                        totalWidth += width;
+                    }
+                    if (!widthsOk || totalWidth <= 0)
+                    {
+                        continue;
+                    }
+                    if (high >= totalWidth)
+                    {
+                        continue;
+                    }
+                    const grh::ir::ValueId resultId = results[0];
+                    if (!resultId.valid())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Value resultValue = graph.getValue(resultId);
+                    int64_t cursor = totalWidth;
+                    for (std::size_t i = 0; i < concatOperands.size(); ++i)
+                    {
+                        const int64_t width = widths[i];
+                        const int64_t hi = cursor - 1;
+                        const int64_t lo = cursor - width;
+                        cursor = lo;
+                        if (lo != low || hi != high)
+                        {
                             continue;
                         }
-                        const grh::ir::Value resValue = graph.getValue(resId);
-                        const grh::ir::ValueId newValue = createConstant(graph, pool, op, idx, resValue, sv);
-                        replaceUsers(graph, resId, newValue, [&](const std::string &msg)
-                                     { this->error(graph, op, msg); failed = true; });
-                        constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
-                        iterationChanged = true;
-                    }
-
-                    if (createdAllResults)
-                    {
-                        foldedOps.insert(opId);
+                        const grh::ir::ValueId operandId = concatOperands[i];
+                        if (!operandId.valid())
+                        {
+                            break;
+                        }
+                        const grh::ir::Value operandValue = graph.getValue(operandId);
+                        if (operandValue.width() != resultValue.width() ||
+                            operandValue.isSigned() != resultValue.isSigned())
+                        {
+                            break;
+                        }
+                        auto onError = [&](const std::string &msg)
+                        { this->error(graph, op, msg); failed = true; };
+                        replaceUsers(graph, resultId, operandId, onError);
                         opsToErase.push_back(opId);
+                        simplifiedSlices = true;
+                        break;
                     }
                 }
 
                 for (const auto opId : opsToErase)
                 {
+                    const grh::ir::Operation op = graph.getOperation(opId);
                     if (!graph.eraseOp(opId))
                     {
-                        const grh::ir::Operation op = graph.getOperation(opId);
-                        error(graph, op, "Failed to erase folded operation");
+                        error(graph, op, "Failed to erase simplified kSliceStatic op");
                         failed = true;
                     }
-                }
-            }
-
-            result.changed = result.changed || iterationChanged;
-            if (!iterationChanged)
-            {
-                break;
-            }
-        }
-
-        bool simplifiedSlices = false;
-        for (const auto &graphEntry : netlist().graphs())
-        {
-            grh::ir::Graph &graph = *graphEntry.second;
-            std::vector<grh::ir::OperationId> opOrder(graph.operations().begin(),
-                                                      graph.operations().end());
-            std::vector<grh::ir::OperationId> opsToErase;
-            for (const auto opId : opOrder)
-            {
-                const grh::ir::Operation op = graph.getOperation(opId);
-                if (op.kind() != grh::ir::OperationKind::kSliceStatic)
-                {
-                    continue;
-                }
-                const auto &operands = op.operands();
-                const auto &results = op.results();
-                if (operands.size() != 1 || results.size() != 1)
-                {
-                    continue;
-                }
-                auto sliceStart = getIntAttr(graph, op, "sliceStart");
-                auto sliceEnd = getIntAttr(graph, op, "sliceEnd");
-                if (!sliceStart || !sliceEnd)
-                {
-                    continue;
-                }
-                const int64_t low = *sliceStart;
-                const int64_t high = *sliceEnd;
-                if (low < 0 || high < low)
-                {
-                    continue;
-                }
-                const grh::ir::ValueId baseValueId = operands[0];
-                if (!baseValueId.valid())
-                {
-                    continue;
-                }
-                const grh::ir::Value baseValue = graph.getValue(baseValueId);
-                const grh::ir::OperationId baseDefId = baseValue.definingOp();
-                if (!baseDefId.valid())
-                {
-                    continue;
-                }
-                const grh::ir::Operation baseDef = graph.getOperation(baseDefId);
-                if (baseDef.kind() != grh::ir::OperationKind::kConcat)
-                {
-                    continue;
-                }
-                const auto &concatOperands = baseDef.operands();
-                if (concatOperands.empty())
-                {
-                    continue;
-                }
-                std::vector<int64_t> widths;
-                widths.reserve(concatOperands.size());
-                int64_t totalWidth = 0;
-                bool widthsOk = true;
-                for (const auto operandId : concatOperands)
-                {
-                    if (!operandId.valid())
-                    {
-                        widthsOk = false;
-                        break;
-                    }
-                    const int64_t width = graph.getValue(operandId).width();
-                    if (width <= 0)
-                    {
-                        widthsOk = false;
-                        break;
-                    }
-                    widths.push_back(width);
-                    totalWidth += width;
-                }
-                if (!widthsOk || totalWidth <= 0)
-                {
-                    continue;
-                }
-                if (high >= totalWidth)
-                {
-                    continue;
-                }
-                const grh::ir::ValueId resultId = results[0];
-                if (!resultId.valid())
-                {
-                    continue;
-                }
-                const grh::ir::Value resultValue = graph.getValue(resultId);
-                int64_t cursor = totalWidth;
-                for (std::size_t i = 0; i < concatOperands.size(); ++i)
-                {
-                    const int64_t width = widths[i];
-                    const int64_t hi = cursor - 1;
-                    const int64_t lo = cursor - width;
-                    cursor = lo;
-                    if (lo != low || hi != high)
-                    {
-                        continue;
-                    }
-                    const grh::ir::ValueId operandId = concatOperands[i];
-                    if (!operandId.valid())
-                    {
-                        break;
-                    }
-                    const grh::ir::Value operandValue = graph.getValue(operandId);
-                    if (operandValue.width() != resultValue.width() ||
-                        operandValue.isSigned() != resultValue.isSigned())
-                    {
-                        break;
-                    }
-                    auto onError = [&](const std::string &msg)
-                    { this->error(graph, op, msg); failed = true; };
-                    replaceUsers(graph, resultId, operandId, onError);
-                    opsToErase.push_back(opId);
-                    simplifiedSlices = true;
-                    break;
-                }
-            }
-
-            for (const auto opId : opsToErase)
-            {
-                const grh::ir::Operation op = graph.getOperation(opId);
-                if (!graph.eraseOp(opId))
-                {
-                    error(graph, op, "Failed to erase simplified kSliceStatic op");
-                    failed = true;
                 }
             }
         }
         result.changed = result.changed || simplifiedSlices;
 
         bool removedDeadConstants = false;
-        for (const auto &graphEntry : netlist().graphs())
         {
-            grh::ir::Graph &graph = *graphEntry.second;
-            std::vector<grh::ir::OperationId> deadConstOps;
-            for (const auto opId : graph.operations())
+            auto _t = T("phase4_dead_code_elim");
+            for (const auto &graphEntry : netlist().graphs())
             {
-                const grh::ir::Operation op = graph.getOperation(opId);
-                if (op.kind() != grh::ir::OperationKind::kConstant)
+                grh::ir::Graph &graph = *graphEntry.second;
+                std::vector<grh::ir::OperationId> deadConstOps;
+                for (const auto opId : graph.operations())
                 {
-                    continue;
-                }
-                const auto &results = op.results();
-                if (results.empty())
-                {
-                    error(graph, op, "kConstant missing result");
-                    failed = true;
-                    continue;
-                }
-                bool live = false;
-                for (const auto resId : results)
-                {
-                    if (!resId.valid())
+                    const grh::ir::Operation op = graph.getOperation(opId);
+                    if (op.kind() != grh::ir::OperationKind::kConstant)
+                    {
+                        continue;
+                    }
+                    const auto &results = op.results();
+                    if (results.empty())
                     {
                         error(graph, op, "kConstant missing result");
                         failed = true;
-                        live = true;
-                        break;
+                        continue;
                     }
-                    if (isValuePortBound(graph, resId))
+                    bool live = false;
+                    for (const auto resId : results)
                     {
-                        live = true;
-                        break;
+                        if (!resId.valid())
+                        {
+                            error(graph, op, "kConstant missing result");
+                            failed = true;
+                            live = true;
+                            break;
+                        }
+                        {
+                            auto _t2 = T("is_value_port_bound");
+                            if (isValuePortBound(graph, resId))
+                            {
+                                live = true;
+                                break;
+                            }
+                        }
+                        if (!graph.getValue(resId).users().empty())
+                        {
+                            live = true;
+                            break;
+                        }
                     }
-                    if (!graph.getValue(resId).users().empty())
+                    if (!live)
                     {
-                        live = true;
-                        break;
+                        deadConstOps.push_back(opId);
                     }
                 }
-                if (!live)
+                for (const auto opId : deadConstOps)
                 {
-                    deadConstOps.push_back(opId);
-                }
-            }
-            for (const auto opId : deadConstOps)
-            {
-                const grh::ir::Operation op = graph.getOperation(opId);
-                if (!graph.eraseOp(opId))
-                {
-                    error(graph, op, "Failed to erase dead kConstant op");
-                    failed = true;
-                }
-                else
-                {
-                    removedDeadConstants = true;
+                    const grh::ir::Operation op = graph.getOperation(opId);
+                    if (!graph.eraseOp(opId))
+                    {
+                        error(graph, op, "Failed to erase dead kConstant op");
+                        failed = true;
+                    }
+                    else
+                    {
+                        removedDeadConstants = true;
+                    }
                 }
             }
         }
@@ -931,6 +1105,11 @@ namespace wolf_sv_parser::transform
         {
             result.failed = true;
         }
+        
+        // Add statistics to timing report (elapsed=0 for stats entries, count holds the value)
+        timers.get("_total_folded_ops").elapsed = Timer::Duration::zero();
+        timers.get("_total_folded_ops").count = totalFolded;
+        timers.report();
 
         return result;
         }
