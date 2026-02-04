@@ -2367,6 +2367,22 @@ namespace grh::emit
                 default:
                     break;
                 }
+                auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                if (eventEdges && !eventEdges->empty())
+                {
+                    const auto &ops = op.operands();
+                    if (ops.size() >= eventEdges->size())
+                    {
+                        const std::size_t start = ops.size() - eventEdges->size();
+                        for (std::size_t i = start; i < ops.size(); ++i)
+                        {
+                            if (ops[i].valid())
+                            {
+                                materializeValues.insert(ops[i]);
+                            }
+                        }
+                    }
+                }
             }
             std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> resolvingExpr;
             std::function<std::string(grh::ir::ValueId)> valueExpr =
@@ -4337,6 +4353,22 @@ namespace grh::emit
                 {
                     materializeValues.insert(operands[2]);
                     materializeValues.insert(operands[3]);
+                }
+            }
+            auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+            if (eventEdges && !eventEdges->empty())
+            {
+                const auto operands = view.opOperands(opId);
+                if (operands.size() >= eventEdges->size())
+                {
+                    const std::size_t start = operands.size() - eventEdges->size();
+                    for (std::size_t i = start; i < operands.size(); ++i)
+                    {
+                        if (operands[i].valid())
+                        {
+                            materializeValues.insert(operands[i]);
+                        }
+                    }
                 }
             }
         }
