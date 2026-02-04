@@ -71,7 +71,7 @@ check-id:
 	@test -f $(TB_SRC) || { echo "Missing testbench: $(TB_SRC)"; exit 1; }
 
 build_wolf_parser:
-	$(CMAKE) -S . -B $(BUILD_DIR)
+	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
 	$(CMAKE) --build $(BUILD_DIR) --target wolf-sv-parser
 
 $(WOLF_PARSER): build_wolf_parser
@@ -105,7 +105,7 @@ GPROF_GMON := $(GPROF_DIR)/c910_gmon.out
 
 run_c910_gprof: WOLF_TIMEOUT := $(TIMEOUT)
 run_c910_gprof:
-	@$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_CXX_FLAGS=-pg
+	@$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS=-pg
 	@$(CMAKE) --build $(BUILD_DIR) -j$(nproc) --target wolf-sv-parser
 	@mkdir -p $(GPROF_DIR)
 	@rm -f $(GPROF_GMON) $(GPROF_OUT)
@@ -127,8 +127,6 @@ run_c910_gprof:
 		echo "[gprof] gmon.out not found; wolf-sv-parser may not have produced profile output"; \
 		exit 1; \
 	fi
-
-run_c910_prof: run_c910_gprof
 
 run_c910_ref_test: SMART_SIM=verilator_ref
 run_c910_ref_test: run_c910_test

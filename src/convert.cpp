@@ -14431,10 +14431,9 @@ void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
     ExpressionPrebindVisitor prebindVisitor;
     root.visit(prebindVisitor);
     
-    // Freeze the compilation to ensure all internal data structures are finalized
-    // and to prevent any further modifications. This is required for thread-safe
-    // access to the AST from multiple worker threads.
-    root.getCompilation().freeze();
+    // Do not freeze the compilation here: Convert still evaluates constants
+    // (parameters, loop bounds, etc.) during passes and slang allocates constants
+    // lazily. Freezing would assert in allocConstant.
     
     const auto prebindEnd = ConvertClock::now();
     logPassTiming(logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
