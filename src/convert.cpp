@@ -9314,7 +9314,7 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 slicesCoverFullWidth(group.writes, baseWidth, baseType, entry.target);
             zeroBaseForSlices = fullCoverage;
         }
-        if (hasSlices && !zeroBaseForSlices && fullWidthStaticSlice && allCoverAllTwoState)
+        if (hasSlices && fullWidthStaticSlice)
         {
             zeroBaseForSlices = true;
         }
