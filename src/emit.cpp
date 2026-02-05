@@ -2883,6 +2883,108 @@ namespace grh::emit
                 }
                 bindOutputPort(std::string(graph->symbolText(port.name)), port.value);
             }
+            auto emitInoutAssign = [&](const std::string &dest,
+                                       grh::ir::ValueId oeValue,
+                                       grh::ir::ValueId outValue,
+                                       int64_t width,
+                                       grh::ir::OperationId sourceOp) {
+                const std::string oeExpr = valueExpr(oeValue);
+                const std::string outExpr = valueExpr(outValue);
+                const int64_t oeWidth = graph->getValue(oeValue).width();
+                auto oeConstBits = [&]() -> std::optional<std::vector<uint8_t>>
+                {
+                    if (auto literal = constLiteralFor(oeValue))
+                    {
+                        std::string literalText = *literal;
+                        if (auto sized = sizedLiteralIfUnsized(literalText, oeWidth))
+                        {
+                            literalText = *sized;
+                        }
+                        return parseConstMaskBits(literalText, oeWidth);
+                    }
+                    return std::nullopt;
+                }();
+                auto bitExpr = [&](grh::ir::ValueId valueId, int64_t bit, int64_t valueWidth) -> std::string {
+                    if (auto literal = constLiteralFor(valueId))
+                    {
+                        std::string literalText = *literal;
+                        if (auto sized = sizedLiteralIfUnsized(literalText, valueWidth))
+                        {
+                            literalText = *sized;
+                        }
+                        return "((" + literalText + " >> " + std::to_string(bit) + ") & 1'b1)";
+                    }
+                    return parenIfNeeded(valueExpr(valueId)) + "[" + std::to_string(bit) + "]";
+                };
+                if (oeConstBits && !oeConstBits->empty())
+                {
+                    const auto &bits = *oeConstBits;
+                    bool allZero = true;
+                    bool allOne = true;
+                    for (uint8_t bit : bits)
+                    {
+                        allZero = allZero && (bit == 0);
+                        allOne = allOne && (bit == 1);
+                    }
+                    if (allZero)
+                    {
+                        portBindingStmts.emplace_back(
+                            "assign " + dest + " = {" + std::to_string(width) + "{1'bz}};",
+                            sourceOp);
+                        return;
+                    }
+                    if (allOne)
+                    {
+                        portBindingStmts.emplace_back(
+                            "assign " + dest + " = " + outExpr + ";",
+                            sourceOp);
+                        return;
+                    }
+                }
+                if (width <= 1 || oeWidth == 1)
+                {
+                    portBindingStmts.emplace_back(
+                        "assign " + dest + " = " + oeExpr + " ? " + outExpr + " : {" +
+                            std::to_string(width) + "{1'bz}};",
+                        sourceOp);
+                    return;
+                }
+                if (oeWidth == width)
+                {
+                    for (int64_t bit = 0; bit < width; ++bit)
+                    {
+                        const std::string oeBit =
+                            (oeConstBits && bit < static_cast<int64_t>(oeConstBits->size()))
+                                ? ((*oeConstBits)[bit] ? "1'b1" : "1'b0")
+                                : bitExpr(oeValue, bit, oeWidth);
+                        const std::string outBit = bitExpr(outValue, bit, width);
+                        if (oeBit == "1'b0")
+                        {
+                            portBindingStmts.emplace_back(
+                                "assign " + dest + "[" + std::to_string(bit) + "] = 1'bz;",
+                                sourceOp);
+                        }
+                        else if (oeBit == "1'b1")
+                        {
+                            portBindingStmts.emplace_back(
+                                "assign " + dest + "[" + std::to_string(bit) + "] = " + outBit + ";",
+                                sourceOp);
+                        }
+                        else
+                        {
+                            portBindingStmts.emplace_back(
+                                "assign " + dest + "[" + std::to_string(bit) + "] = " + oeBit +
+                                    " ? " + outBit + " : 1'bz;",
+                                sourceOp);
+                        }
+                    }
+                    return;
+                }
+                portBindingStmts.emplace_back(
+                    "assign " + dest + " = (" + parenIfNeeded(oeExpr) + " != {" + std::to_string(oeWidth) +
+                        "{1'b0}}) ? " + valueExpr(outValue) + " : {" + std::to_string(width) + "{1'bz}};",
+                    sourceOp);
+            };
             for (const auto &port : graph->inoutPorts())
             {
                 if (!port.name.valid())
@@ -2897,10 +2999,7 @@ namespace grh::emit
                 ensureWireDecl(port.oe);
                 portBindingStmts.emplace_back(
                     "assign " + inName + " = " + portName + ";", grh::ir::OperationId::invalid());
-                portBindingStmts.emplace_back(
-                    "assign " + portName + " = " + valueExpr(port.oe) + " ? " + valueExpr(port.out) + " : {" +
-                        std::to_string(width) + "{1'bz}};",
-                    grh::ir::OperationId::invalid());
+                emitInoutAssign(portName, port.oe, port.out, width, grh::ir::OperationId::invalid());
             }
 
             // -------------------------
@@ -3699,11 +3798,7 @@ namespace grh::emit
                             ensureWireDecl(operands[outIndex]);
                             ensureWireDecl(operands[oeIndex]);
                             ensureWireDecl(results[inIndex]);
-                            portBindingStmts.emplace_back(
-                                "assign " + wireName + " = " + valueExpr(operands[oeIndex]) + " ? " +
-                                    valueExpr(operands[outIndex]) + " : {" + std::to_string(width) +
-                                    "{1'bz}};",
-                                opId);
+                            emitInoutAssign(wireName, operands[oeIndex], operands[outIndex], width, opId);
                             portBindingStmts.emplace_back(
                                 "assign " + valueName(results[inIndex]) + " = " + wireName + ";",
                                 opId);
@@ -4987,6 +5082,108 @@ namespace grh::emit
         {
             bindOutputPort(portName, valueId);
         }
+        auto emitInoutAssign = [&](const std::string &dest,
+                                   grh::ir::ValueId oeValue,
+                                   grh::ir::ValueId outValue,
+                                   int64_t width,
+                                   grh::ir::OperationId sourceOp) {
+            const std::string oeExpr = valueExpr(oeValue);
+            const std::string outExpr = valueExpr(outValue);
+            const int64_t oeWidth = view.valueWidth(oeValue);
+            auto oeConstBits = [&]() -> std::optional<std::vector<uint8_t>>
+            {
+                if (auto literal = constLiteralFor(oeValue))
+                {
+                    std::string literalText = *literal;
+                    if (auto sized = sizedLiteralIfUnsized(literalText, oeWidth))
+                    {
+                        literalText = *sized;
+                    }
+                    return parseConstMaskBits(literalText, oeWidth);
+                }
+                return std::nullopt;
+            }();
+            auto bitExpr = [&](grh::ir::ValueId valueId, int64_t bit, int64_t valueWidth) -> std::string {
+                if (auto literal = constLiteralFor(valueId))
+                {
+                    std::string literalText = *literal;
+                    if (auto sized = sizedLiteralIfUnsized(literalText, valueWidth))
+                    {
+                        literalText = *sized;
+                    }
+                    return "((" + literalText + " >> " + std::to_string(bit) + ") & 1'b1)";
+                }
+                return parenIfNeeded(valueExpr(valueId)) + "[" + std::to_string(bit) + "]";
+            };
+            if (oeConstBits && !oeConstBits->empty())
+            {
+                const auto &bits = *oeConstBits;
+                bool allZero = true;
+                bool allOne = true;
+                for (uint8_t bit : bits)
+                {
+                    allZero = allZero && (bit == 0);
+                    allOne = allOne && (bit == 1);
+                }
+                if (allZero)
+                {
+                    portBindingStmts.emplace_back(
+                        "assign " + dest + " = {" + std::to_string(width) + "{1'bz}};",
+                        sourceOp);
+                    return;
+                }
+                if (allOne)
+                {
+                    portBindingStmts.emplace_back(
+                        "assign " + dest + " = " + outExpr + ";",
+                        sourceOp);
+                    return;
+                }
+            }
+            if (width <= 1 || oeWidth == 1)
+            {
+                portBindingStmts.emplace_back(
+                    "assign " + dest + " = " + oeExpr + " ? " + outExpr + " : {" +
+                        std::to_string(width) + "{1'bz}};",
+                    sourceOp);
+                return;
+            }
+            if (oeWidth == width)
+            {
+                for (int64_t bit = 0; bit < width; ++bit)
+                {
+                    const std::string oeBit =
+                        (oeConstBits && bit < static_cast<int64_t>(oeConstBits->size()))
+                            ? ((*oeConstBits)[bit] ? "1'b1" : "1'b0")
+                            : bitExpr(oeValue, bit, oeWidth);
+                    const std::string outBit = bitExpr(outValue, bit, width);
+                    if (oeBit == "1'b0")
+                    {
+                        portBindingStmts.emplace_back(
+                            "assign " + dest + "[" + std::to_string(bit) + "] = 1'bz;",
+                            sourceOp);
+                    }
+                    else if (oeBit == "1'b1")
+                    {
+                        portBindingStmts.emplace_back(
+                            "assign " + dest + "[" + std::to_string(bit) + "] = " + outBit + ";",
+                            sourceOp);
+                    }
+                    else
+                    {
+                        portBindingStmts.emplace_back(
+                            "assign " + dest + "[" + std::to_string(bit) + "] = " + oeBit +
+                                " ? " + outBit + " : 1'bz;",
+                            sourceOp);
+                    }
+                }
+                return;
+            }
+            portBindingStmts.emplace_back(
+                "assign " + dest + " = (" + parenIfNeeded(oeExpr) + " != {" + std::to_string(oeWidth) +
+                    "{1'b0}}) ? " + valueExpr(outValue) + " : {" + std::to_string(width) + "{1'bz}};",
+                sourceOp);
+        };
         for (const auto &port : inoutPorts)
         {
             const std::string &inName = valueName(port.in);
@@ -4998,10 +5195,7 @@ namespace grh::emit
             portBindingStmts.emplace_back(
                 "assign " + inName + " = " + port.name + ";",
                 grh::ir::OperationId::invalid());
-            portBindingStmts.emplace_back(
-                "assign " + port.name + " = " + valueExpr(port.oe) + " ? " + valueExpr(port.out) + " : {" +
-                    std::to_string(port.width) + "{1'bz}};",
-                grh::ir::OperationId::invalid());
+            emitInoutAssign(port.name, port.oe, port.out, port.width, grh::ir::OperationId::invalid());
         }
 
         // Event lists are modeled directly per operation in this emission path.
@@ -5811,11 +6005,7 @@ namespace grh::emit
                         ensureWireDecl(operands[outIndex]);
                         ensureWireDecl(operands[oeIndex]);
                         ensureWireDecl(results[inIndex]);
-                        portBindingStmts.emplace_back(
-                            "assign " + wireName + " = " + valueExpr(operands[oeIndex]) + " ? " +
-                                valueExpr(operands[outIndex]) + " : {" + std::to_string(width) +
-                                "{1'bz}};",
-                            opId);
+                        emitInoutAssign(wireName, operands[oeIndex], operands[outIndex], width, opId);
                         portBindingStmts.emplace_back(
                             "assign " + valueName(results[inIndex]) + " = " + wireName + ";",
                             opId);

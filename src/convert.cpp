@@ -1449,7 +1449,32 @@ struct StmtLowererState {
 
         outExpr = resizeValueToWidth(outExpr, portWidth, port->isSigned,
                                      expr.sourceRange.start());
-        oeExpr = resizeValueToWidth(oeExpr, portWidth, false, expr.sourceRange.start());
+        int32_t oeWidth = 0;
+        if (oeExpr < lowering.values.size())
+        {
+            oeWidth = lowering.values[oeExpr].widthHint;
+        }
+        if (oeWidth == 1 && portWidth > 1)
+        {
+            ExprNode countNode;
+            countNode.kind = ExprNodeKind::Constant;
+            countNode.literal = std::to_string(portWidth);
+            countNode.location = expr.sourceRange.start();
+            countNode.widthHint = 32;
+            ExprNodeId countId = addNode(nullptr, std::move(countNode));
+            ExprNode repNode;
+            repNode.kind = ExprNodeKind::Operation;
+            repNode.op = grh::ir::OperationKind::kReplicate;
+            repNode.operands = {countId, oeExpr};
+            repNode.location = expr.sourceRange.start();
+            repNode.tempSymbol = makeTempSymbol();
+            repNode.widthHint = portWidth;
+            oeExpr = addNode(nullptr, std::move(repNode));
+        }
+        else
+        {
+            oeExpr = resizeValueToWidth(oeExpr, portWidth, false, expr.sourceRange.start());
+        }
 
         ExprNodeId guard = currentGuard(expr.sourceRange.start());
         WriteIntent outIntent;
