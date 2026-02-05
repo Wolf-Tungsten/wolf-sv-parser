@@ -9195,12 +9195,17 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
         bool hasSlices = false;
         bool hasUnconditional = false;
+        bool allCoverAllTwoState = true;
         for (const LoweredStmt* stmt : group.writes)
         {
             const WriteIntent& write = stmt->write;
             if (!write.slices.empty())
             {
                 hasSlices = true;
+            }
+            if (!write.coversAllTwoState)
+            {
+                allCoverAllTwoState = false;
             }
             if (write.coversAllTwoState && write.slices.empty())
             {
@@ -9229,6 +9234,7 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             entry.target.valid() && entry.target.index < typeBySymbol.size()
                 ? typeBySymbol[entry.target.index]
                 : nullptr;
+        bool fullWidthStaticSlice = false;
         if (!group.writes.empty() && baseWidth > 0)
         {
             bool sliceOk = true;
@@ -9269,6 +9275,15 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 entry.sliceWidth = ref.width;
             }
         }
+        if (entry.hasStaticSlice && baseWidth > 0 &&
+            entry.sliceLow == 0 && entry.sliceWidth == baseWidth)
+        {
+            fullWidthStaticSlice = true;
+            if (allCoverAllTwoState)
+            {
+                hasUnconditional = true;
+            }
+        }
         bool zeroBaseForSlices = false;
         if (hasSlices && baseWidth > 0)
         {
@@ -9298,6 +9313,10 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 allUnconditional &&
                 slicesCoverFullWidth(group.writes, baseWidth, baseType, entry.target);
             zeroBaseForSlices = fullCoverage;
+        }
+        if (hasSlices && !zeroBaseForSlices && fullWidthStaticSlice && allCoverAllTwoState)
+        {
+            zeroBaseForSlices = true;
         }
 
         ExprNodeId directConcatValue = kInvalidPlanIndex;
