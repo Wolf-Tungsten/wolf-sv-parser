@@ -55,6 +55,7 @@ namespace wolf_sv_parser::transform
         bool iterativeFolding(GraphFoldContext &ctx);
         bool simplifySlices(GraphFoldContext &ctx);
         bool eliminateDeadConstants(GraphFoldContext &ctx);
+        bool simplifyUnsignedComparisons(GraphFoldContext &ctx);
 
         ConstantFoldOptions options_;
     };

@@ -928,6 +928,127 @@ namespace wolf_sv_parser::transform
         return removedDeadConstants;
     }
 
+    bool ConstantFoldPass::simplifyUnsignedComparisons(GraphFoldContext &ctx)
+    {
+        bool simplified = false;
+        std::vector<grh::ir::OperationId> opOrder(ctx.graph.operations().begin(), ctx.graph.operations().end());
+        std::vector<grh::ir::OperationId> opsToErase;
+
+        for (const auto opId : opOrder)
+        {
+            const grh::ir::Operation op = ctx.graph.getOperation(opId);
+            const auto kind = op.kind();
+            
+            // Handle unsigned >= 0 (always true) and unsigned <= max (always true)
+            bool isGe = (kind == grh::ir::OperationKind::kGe);
+            bool isLe = (kind == grh::ir::OperationKind::kLe);
+            
+            if (!isGe && !isLe)
+            {
+                continue;
+            }
+            
+            const auto &operands = op.operands();
+            const auto &results = op.results();
+            if (operands.size() < 2 || results.empty())
+            {
+                continue;
+            }
+            
+            const grh::ir::ValueId lhsId = operands[0];
+            const grh::ir::ValueId rhsId = operands[1];
+            const grh::ir::ValueId resultId = results[0];
+            
+            if (!lhsId.valid() || !rhsId.valid() || !resultId.valid())
+            {
+                continue;
+            }
+            
+            const grh::ir::Value lhsValue = ctx.graph.getValue(lhsId);
+            const grh::ir::Value rhsValue = ctx.graph.getValue(rhsId);
+            
+            // Check for unsigned >= 0 (always true for unsigned)
+            // LHS must be unsigned, RHS must be constant 0
+            if (isGe && !lhsValue.isSigned())
+            {
+                auto rhsConstIt = ctx.constants.find(rhsId);
+                if (rhsConstIt != ctx.constants.end())
+                {
+                    const auto &rhsSv = rhsConstIt->second.value;
+                    // Check if RHS is zero
+                    if (rhsSv.getBitWidth() > 0 && rhsSv.getActiveBits() == 0)
+                    {
+                        // Replace with constant 1'b1
+                        slang::SVInt trueValue(1, 1, false);
+                        auto onError = [&](const std::string &msg)
+                        { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                        grh::ir::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0, 
+                            ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                        replaceUsers(ctx.graph, resultId, newValue, onError);
+                        ctx.constants[newValue] = ConstantValue{trueValue, false};
+                        opsToErase.push_back(opId);
+                        simplified = true;
+                        continue;
+                    }
+                }
+            }
+            
+            // Check for unsigned <= max_value (always true for unsigned)
+            // LHS must be unsigned, RHS must be constant with all 1s at LHS width
+            if (isLe && !lhsValue.isSigned())
+            {
+                auto rhsConstIt = ctx.constants.find(rhsId);
+                if (rhsConstIt != ctx.constants.end())
+                {
+                    const auto &rhsSv = rhsConstIt->second.value;
+                    int64_t lhsWidth = lhsValue.width();
+                    
+                    if (lhsWidth > 0 && rhsSv.getBitWidth() > 0)
+                    {
+                        // Check if RHS is all 1s up to LHS width
+                        // Resize RHS to LHS width and check if all bits are 1
+                        slang::SVInt resizedRhs = rhsSv.resize(static_cast<slang::bitwidth_t>(lhsWidth));
+                        bool allOnes = true;
+                        for (int i = 0; i < lhsWidth; ++i)
+                        {
+                            if (!resizedRhs[i])
+                            {
+                                allOnes = false;
+                                break;
+                            }
+                        }
+                        
+                        if (allOnes)
+                        {
+                            // Replace with constant 1'b1
+                            slang::SVInt trueValue(1, 1, false);
+                            auto onError = [&](const std::string &msg)
+                            { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                            grh::ir::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0,
+                                ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                            replaceUsers(ctx.graph, resultId, newValue, onError);
+                            ctx.constants[newValue] = ConstantValue{trueValue, false};
+                            opsToErase.push_back(opId);
+                            simplified = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (const auto opId : opsToErase)
+        {
+            if (!ctx.graph.eraseOp(opId))
+            {
+                const grh::ir::Operation op = ctx.graph.getOperation(opId);
+                error(ctx.graph, op, "Failed to erase simplified unsigned comparison op");
+                ctx.failed = true;
+            }
+        }
+        
+        return simplified;
+    }
+
     bool ConstantFoldPass::processSingleGraph(GraphFoldContext &ctx)
     {
         bool graphChanged = false;
@@ -943,6 +1064,9 @@ namespace wolf_sv_parser::transform
 
         // Phase 4: Eliminate dead constants
         graphChanged = eliminateDeadConstants(ctx) || graphChanged;
+
+        // Phase 5: Simplify unsigned comparisons (e.g., x >= 0, x <= MAX)
+        graphChanged = simplifyUnsignedComparisons(ctx) || graphChanged;
 
         return graphChanged;
     }
