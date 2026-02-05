@@ -6285,6 +6285,10 @@ private:
             {
                 node.widthHint = 1;
             }
+            if (node.widthHint == 0)
+            {
+                applyExprWidthHint(node);
+            }
             node.tempSymbol = makeTempSymbol();
             return addNodeForExpr(std::move(node));
         }
