@@ -6320,28 +6320,48 @@ private:
                 }
                 return lowering.values[id].widthHint;
             };
-            int32_t targetWidth = 0;
-            if ((isArithmetic || isBitwise) && widthContext > 0)
-            {
-                targetWidth = widthContext;
-            }
             const int32_t lhsWidth = operandWidth(lhs);
             const int32_t rhsWidth = operandWidth(rhs);
-            if ((isArithmetic || isBitwise) && targetWidth == 0 && lhsWidth > 0 && rhsWidth > 0)
+            int32_t targetWidth = 0;
+            if (isArithmetic)
             {
-                if (*opKind == grh::ir::OperationKind::kMul)
+                if (widthContext > 0)
                 {
-                    const int64_t combined =
-                        static_cast<int64_t>(lhsWidth) + static_cast<int64_t>(rhsWidth);
-                    const int64_t maxValue =
-                        static_cast<int64_t>(std::numeric_limits<int32_t>::max());
-                    targetWidth = combined > maxValue
-                                      ? std::numeric_limits<int32_t>::max()
-                                      : static_cast<int32_t>(combined);
+                    targetWidth = widthContext;
                 }
-                else
+                if (targetWidth == 0 && lhsWidth > 0 && rhsWidth > 0)
+                {
+                    if (*opKind == grh::ir::OperationKind::kMul)
+                    {
+                        const int64_t combined =
+                            static_cast<int64_t>(lhsWidth) + static_cast<int64_t>(rhsWidth);
+                        const int64_t maxValue =
+                            static_cast<int64_t>(std::numeric_limits<int32_t>::max());
+                        targetWidth = combined > maxValue
+                                          ? std::numeric_limits<int32_t>::max()
+                                          : static_cast<int32_t>(combined);
+                    }
+                    else
+                    {
+                        targetWidth = std::max(lhsWidth, rhsWidth);
+                    }
+                }
+            }
+            else if (isBitwise)
+            {
+                const bool lhsKnown = lhsWidth > 0;
+                const bool rhsKnown = rhsWidth > 0;
+                if (lhsKnown && rhsKnown)
                 {
                     targetWidth = std::max(lhsWidth, rhsWidth);
+                }
+                else if (lhsKnown || rhsKnown)
+                {
+                    targetWidth = std::max(lhsWidth, rhsWidth);
+                }
+                else if (widthContext > 0)
+                {
+                    targetWidth = widthContext;
                 }
             }
             if ((isArithmetic || isBitwise) && targetWidth > 0)
