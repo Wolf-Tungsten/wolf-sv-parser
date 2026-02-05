@@ -345,7 +345,6 @@ namespace wolf_sv_parser::transform
 
             if (!options.allowXPropagation && hasUnknown)
             {
-                onWarning("Skip folding due to X/Z operand when allowXPropagation=false");
                 return std::nullopt;
             }
 
@@ -462,6 +461,12 @@ namespace wolf_sv_parser::transform
             if (!folded)
             {
                 return std::nullopt;
+            }
+
+            // Warn when allowing X propagation and folding produces X/Z
+            if (options.allowXPropagation && folded->hasUnknown())
+            {
+                onWarning("Folding produced X/Z result while allowXPropagation=true");
             }
 
             std::vector<slang::SVInt> results;
