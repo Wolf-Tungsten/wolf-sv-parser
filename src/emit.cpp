@@ -12,6 +12,7 @@
 #include <utility>
 #include <unordered_map>
 #include <tuple>
+#include <string_view>
 
 #include "slang/text/Json.h"
 
@@ -80,6 +81,102 @@ namespace grh::emit
                 }
             }
             out.push_back('"');
+        }
+
+        std::optional<std::string> sizedLiteralIfUnsized(std::string_view literal, int64_t width)
+        {
+            if (width <= 0)
+            {
+                return std::nullopt;
+            }
+            std::string compact;
+            compact.reserve(literal.size());
+            for (char ch : literal)
+            {
+                if (std::isspace(static_cast<unsigned char>(ch)) || ch == '_')
+                {
+                    continue;
+                }
+                compact.push_back(ch);
+            }
+            if (compact.empty())
+            {
+                return std::nullopt;
+            }
+            std::size_t start = 0;
+            bool negative = false;
+            if (compact[0] == '-' || compact[0] == '+')
+            {
+                negative = compact[0] == '-';
+                start = 1;
+            }
+            auto allDigits = [&](std::size_t from, std::size_t to) -> bool
+            {
+                if (from >= to)
+                {
+                    return false;
+                }
+                for (std::size_t i = from; i < to; ++i)
+                {
+                    if (!std::isdigit(static_cast<unsigned char>(compact[i])))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            const std::size_t quotePos = compact.find('\'', start);
+            if (quotePos != std::string::npos)
+            {
+                if (quotePos > start && allDigits(start, quotePos))
+                {
+                    return std::nullopt;
+                }
+                if (quotePos + 1 >= compact.size())
+                {
+                    return std::nullopt;
+                }
+                const char baseChar = compact[quotePos + 1];
+                char base = 'b';
+                std::string digits;
+                if (baseChar == 'b' || baseChar == 'B' ||
+                    baseChar == 'd' || baseChar == 'D' ||
+                    baseChar == 'h' || baseChar == 'H' ||
+                    baseChar == 'o' || baseChar == 'O')
+                {
+                    base = static_cast<char>(std::tolower(static_cast<unsigned char>(baseChar)));
+                    digits = compact.substr(quotePos + 2);
+                    if (digits.empty())
+                    {
+                        digits = "0";
+                    }
+                }
+                else
+                {
+                    digits = compact.substr(quotePos + 1);
+                }
+                std::string sized = std::to_string(width);
+                sized.push_back('\'');
+                sized.push_back(base);
+                sized.append(digits);
+                if (negative)
+                {
+                    sized.insert(sized.begin(), '-');
+                }
+                return sized;
+            }
+            if (!allDigits(start, compact.size()))
+            {
+                return std::nullopt;
+            }
+            std::string sized = std::to_string(width);
+            sized.append("'d");
+            sized.append(compact.substr(start));
+            if (negative)
+            {
+                sized.insert(sized.begin(), '-');
+            }
+            return sized;
         }
 
         void appendNewlineAndIndent(std::string &out, int indent)
@@ -2417,6 +2514,17 @@ namespace grh::emit
                 resolvingExpr.erase(valueId);
                 return valueName(valueId);
             };
+            auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (auto literal = constLiteralFor(valueId))
+                {
+                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
+                    {
+                        return *sized;
+                    }
+                }
+                return valueExpr(valueId);
+            };
             auto isSimpleIdentifier = [](std::string_view expr) -> bool
             {
                 if (expr.empty())
@@ -3047,7 +3155,7 @@ namespace grh::emit
                         {
                             expr << ", ";
                         }
-                        expr << valueExpr(operands[i]);
+                        expr << concatOperandExpr(operands[i]);
                     }
                     expr << "};";
                     addAssign(expr.str(), opId);
@@ -3068,7 +3176,7 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueExpr(operands[0]) << "}};";
+                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << concatOperandExpr(operands[0]) << "}};";
                     addAssign(expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4405,6 +4513,17 @@ namespace grh::emit
             resolvingExpr.erase(valueId);
             return valueName(valueId);
         };
+        auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (auto literal = constLiteralFor(valueId))
+            {
+                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
+                {
+                    return *sized;
+                }
+            }
+            return valueExpr(valueId);
+        };
         auto isSimpleIdentifier = [](std::string_view expr) -> bool
         {
             if (expr.empty())
@@ -5137,7 +5256,7 @@ namespace grh::emit
                     {
                         expr << ", ";
                     }
-                    expr << valueExpr(operands[i]);
+                    expr << concatOperandExpr(operands[i]);
                 }
                 expr << "};";
                 addAssign(expr.str(), opId);
@@ -5158,7 +5277,7 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << valueExpr(operands[0]) << "}};";
+                expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << concatOperandExpr(operands[0]) << "}};";
                 addAssign(expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
