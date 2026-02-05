@@ -9309,10 +9309,17 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                     break;
                 }
             }
-            const bool fullCoverage =
-                allUnconditional &&
+            const bool slicesCoverFull =
                 slicesCoverFullWidth(group.writes, baseWidth, baseType, entry.target);
-            zeroBaseForSlices = fullCoverage;
+            // For combinational domain, if slices cover the full width,
+            // use zero base to avoid feedback loop even if writes are conditional.
+            // This is safe because combinational always blocks should fully
+            // assign the target without using its previous value.
+            const bool fullCoverage =
+                allUnconditional && slicesCoverFull;
+            const bool combinationalFullCoverage =
+                (entry.domain == ControlDomain::Combinational) && slicesCoverFull;
+            zeroBaseForSlices = fullCoverage || combinationalFullCoverage;
         }
         if (hasSlices && fullWidthStaticSlice)
         {
