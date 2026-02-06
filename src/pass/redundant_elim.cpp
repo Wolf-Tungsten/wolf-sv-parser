@@ -567,6 +567,10 @@ namespace wolf_sv_parser::transform
                         const grh::ir::Value dstValue = graph.getValue(dstId);
                         if (isOutputPortValue(dstValue) && !hasOtherUsers(dstValue))
                         {
+                            if (srcValue.isInput() || srcValue.isOutput() || srcValue.isInout())
+                            {
+                                continue;
+                            }
                             if (!dstValue.definingOp().valid() ||
                                 dstValue.definingOp() != opId)
                             {
