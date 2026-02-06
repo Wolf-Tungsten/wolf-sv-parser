@@ -9135,6 +9135,132 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         return !node.operands.empty() && node.operands.front() == operand;
     };
 
+    auto isTautologyByDnf = [&](ExprNodeId id) -> bool {
+        if (id == kInvalidPlanIndex)
+        {
+            return false;
+        }
+        std::vector<ExprNodeId> leaves;
+        std::unordered_map<ExprNodeId, std::size_t> leafIndex;
+
+        std::function<void(ExprNodeId)> collectLeaves = [&](ExprNodeId nodeId) {
+            if (nodeId == kInvalidPlanIndex)
+            {
+                return;
+            }
+            if (auto literal = evalConstInt(plan, lowering, nodeId))
+            {
+                (void)literal;
+                return;
+            }
+            if (nodeId >= static_cast<ExprNodeId>(lowering.values.size()))
+            {
+                if (leafIndex.find(nodeId) == leafIndex.end())
+                {
+                    leafIndex[nodeId] = leaves.size();
+                    leaves.push_back(nodeId);
+                }
+                return;
+            }
+            const ExprNode& node = lowering.values[nodeId];
+            if (node.kind == ExprNodeKind::Operation)
+            {
+                if (node.op == grh::ir::OperationKind::kLogicAnd ||
+                    node.op == grh::ir::OperationKind::kLogicOr ||
+                    node.op == grh::ir::OperationKind::kLogicNot ||
+                    node.op == grh::ir::OperationKind::kNot)
+                {
+                    for (ExprNodeId operand : node.operands)
+                    {
+                        collectLeaves(operand);
+                    }
+                    return;
+                }
+            }
+            if (leafIndex.find(nodeId) == leafIndex.end())
+            {
+                leafIndex[nodeId] = leaves.size();
+                leaves.push_back(nodeId);
+            }
+        };
+        collectLeaves(id);
+        if (leaves.size() > 8)
+        {
+            return false;
+        }
+
+        auto evalExpr = [&](ExprNodeId nodeId,
+                            const std::vector<bool>& assignment,
+                            auto&& self) -> bool {
+            if (nodeId == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            if (auto literal = evalConstInt(plan, lowering, nodeId))
+            {
+                return *literal != 0;
+            }
+            if (nodeId >= static_cast<ExprNodeId>(lowering.values.size()))
+            {
+                auto it = leafIndex.find(nodeId);
+                return it != leafIndex.end() && assignment[it->second];
+            }
+            const ExprNode& node = lowering.values[nodeId];
+            if (node.kind == ExprNodeKind::Operation)
+            {
+                if (node.op == grh::ir::OperationKind::kLogicAnd)
+                {
+                    for (ExprNodeId operand : node.operands)
+                    {
+                        if (!self(operand, assignment, self))
+                        {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                if (node.op == grh::ir::OperationKind::kLogicOr)
+                {
+                    for (ExprNodeId operand : node.operands)
+                    {
+                        if (self(operand, assignment, self))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                if (node.op == grh::ir::OperationKind::kLogicNot ||
+                    node.op == grh::ir::OperationKind::kNot)
+                {
+                    if (node.operands.empty())
+                    {
+                        return false;
+                    }
+                    return !self(node.operands.front(), assignment, self);
+                }
+            }
+            auto it = leafIndex.find(nodeId);
+            return it != leafIndex.end() && assignment[it->second];
+        };
+
+        const std::size_t total =
+            leaves.empty() ? 1u : (static_cast<std::size_t>(1) << leaves.size());
+        std::vector<bool> assignment(leaves.size(), false);
+        for (std::size_t mask = 0; mask < total; ++mask)
+        {
+            for (std::size_t i = 0; i < leaves.size(); ++i)
+            {
+                assignment[i] = ((mask >> i) & 1U) != 0U;
+            }
+            if (!evalExpr(id, assignment, evalExpr))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
     std::function<bool(ExprNodeId)> isAlwaysTrueExpr;
     isAlwaysTrueExpr = [&](ExprNodeId id) -> bool {
         if (id == kInvalidPlanIndex)
@@ -9171,7 +9297,7 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 }
             }
         }
-        return false;
+        return isTautologyByDnf(id);
     };
 
     auto finalizeDomain =
@@ -9496,6 +9622,133 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         entry.updateCond = updateCond;
         entry.nextValue = nextValue;
         result.entries.push_back(std::move(entry));
+    }
+
+    if (!lowering.memoryReads.empty())
+    {
+        std::unordered_map<uint64_t, bool> exprEqMemo;
+        exprEqMemo.reserve(lowering.values.size() * 2 + 8);
+
+        auto exprEquivalent = [&](auto&& self, ExprNodeId lhs, ExprNodeId rhs) -> bool {
+            if (lhs == rhs)
+            {
+                return true;
+            }
+            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+            {
+                return false;
+            }
+            if (lhs >= lowering.values.size() || rhs >= lowering.values.size())
+            {
+                return false;
+            }
+            const uint64_t key = (static_cast<uint64_t>(lhs) << 32) | rhs;
+            if (auto it = exprEqMemo.find(key); it != exprEqMemo.end())
+            {
+                return it->second;
+            }
+            const ExprNode& lhsNode = lowering.values[lhs];
+            const ExprNode& rhsNode = lowering.values[rhs];
+            if (lhsNode.kind != rhsNode.kind)
+            {
+                exprEqMemo.emplace(key, false);
+                return false;
+            }
+            bool result = false;
+            switch (lhsNode.kind)
+            {
+            case ExprNodeKind::Invalid:
+                result = true;
+                break;
+            case ExprNodeKind::Constant:
+                result = lhsNode.literal == rhsNode.literal;
+                break;
+            case ExprNodeKind::Symbol:
+                result = lhsNode.symbol.index == rhsNode.symbol.index;
+                break;
+            case ExprNodeKind::XmrRead:
+                result = lhsNode.xmrPath == rhsNode.xmrPath;
+                break;
+            case ExprNodeKind::Operation:
+                if (lhsNode.op != rhsNode.op ||
+                    lhsNode.operands.size() != rhsNode.operands.size())
+                {
+                    result = false;
+                    break;
+                }
+                result = true;
+                for (std::size_t i = 0; i < lhsNode.operands.size(); ++i)
+                {
+                    if (!self(self, lhsNode.operands[i], rhsNode.operands[i]))
+                    {
+                        result = false;
+                        break;
+                    }
+                }
+                break;
+            }
+            exprEqMemo.emplace(key, result);
+            return result;
+        };
+
+        auto exprListEquivalent = [&](const std::vector<ExprNodeId>& lhs,
+                                      const std::vector<ExprNodeId>& rhs) -> bool {
+            if (lhs.size() != rhs.size())
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < lhs.size(); ++i)
+            {
+                if (!exprEquivalent(exprEquivalent, lhs[i], rhs[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        std::vector<const MemoryReadPort*> syncReads;
+        syncReads.reserve(lowering.memoryReads.size());
+        for (const auto& read : lowering.memoryReads)
+        {
+            if (!read.isSync || read.data == kInvalidPlanIndex)
+            {
+                continue;
+            }
+            syncReads.push_back(&read);
+        }
+
+        if (!syncReads.empty())
+        {
+            for (auto& entry : result.entries)
+            {
+                if (entry.domain != ControlDomain::Sequential)
+                {
+                    continue;
+                }
+                for (const MemoryReadPort* read : syncReads)
+                {
+                    if (!exprEquivalent(exprEquivalent, entry.nextValue, read->data))
+                    {
+                        continue;
+                    }
+                    if (!exprEquivalent(exprEquivalent, entry.updateCond, read->updateCond))
+                    {
+                        continue;
+                    }
+                    if (entry.eventEdges != read->eventEdges ||
+                        !exprListEquivalent(entry.eventOperands, read->eventOperands))
+                    {
+                        continue;
+                    }
+                    entry.domain = ControlDomain::Combinational;
+                    entry.updateCond = kInvalidPlanIndex;
+                    entry.eventEdges.clear();
+                    entry.eventOperands.clear();
+                    break;
+                }
+            }
+        }
     }
 
     return result;
@@ -13841,6 +14094,81 @@ private:
     void emitWriteBack()
     {
         std::vector<bool> merged(writeBack_.entries.size(), false);
+        auto eventEdgesMatch = [&](const grh::ir::Operation& op,
+                                   const std::vector<EventEdge>& edges) -> bool {
+            if (edges.empty())
+            {
+                return false;
+            }
+            auto attr = op.attr("eventEdge");
+            if (!attr)
+            {
+                return false;
+            }
+            const auto* stored = std::get_if<std::vector<std::string>>(&*attr);
+            if (!stored || stored->size() != edges.size())
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < edges.size(); ++i)
+            {
+                if ((*stored)[i] != edgeText(edges[i]))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        auto canDemoteMemoryReadWriteback =
+            [&](const WriteBackPlan::Entry& entry,
+                grh::ir::ValueId updateCond,
+                grh::ir::ValueId nextValue) -> bool {
+            if (entry.domain != ControlDomain::Sequential ||
+                !updateCond.valid() || !nextValue.valid())
+            {
+                return false;
+            }
+            const grh::ir::Value nextVal = graph_.getValue(nextValue);
+            const grh::ir::OperationId regOpId = nextVal.definingOp();
+            if (!regOpId.valid())
+            {
+                return false;
+            }
+            const grh::ir::Operation regOp = graph_.getOperation(regOpId);
+            if (regOp.kind() != grh::ir::OperationKind::kRegister)
+            {
+                return false;
+            }
+            const auto regOperands = regOp.operands();
+            if (regOperands.size() < 2 || regOperands[0] != updateCond)
+            {
+                return false;
+            }
+            if (entry.eventOperands.size() + 2 != regOperands.size())
+            {
+                return false;
+            }
+            if (!eventEdgesMatch(regOp, entry.eventEdges))
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < entry.eventOperands.size(); ++i)
+            {
+                grh::ir::ValueId evt = emitExpr(entry.eventOperands[i]);
+                if (!evt.valid() || regOperands[i + 2] != evt)
+                {
+                    return false;
+                }
+            }
+            const grh::ir::Value dataVal = graph_.getValue(regOperands[1]);
+            const grh::ir::OperationId dataOpId = dataVal.definingOp();
+            if (!dataOpId.valid())
+            {
+                return false;
+            }
+            const grh::ir::Operation dataOp = graph_.getOperation(dataOpId);
+            return dataOp.kind() == grh::ir::OperationKind::kMemoryReadPort;
+        };
         auto sameEventOperand = [&](ExprNodeId lhs, ExprNodeId rhs) -> bool {
             if (lhs == rhs)
             {
@@ -14289,6 +14617,16 @@ private:
             {
                 if (!updateCond.valid())
                 {
+                    continue;
+                }
+                if (canDemoteMemoryReadWriteback(entry, updateCond, nextValue))
+                {
+                    grh::ir::OperationId op =
+                        createOp(grh::ir::OperationKind::kAssign,
+                                 grh::ir::SymbolId::invalid(),
+                                 entry.location);
+                    graph_.addOperand(op, nextValue);
+                    graph_.addResult(op, targetValue);
                     continue;
                 }
                 grh::ir::SymbolId sym = makeOpSymbol(entry.target, "register");

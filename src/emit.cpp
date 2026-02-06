@@ -2749,6 +2749,47 @@ namespace grh::emit
                 }
                 return false;
             };
+            auto isConstZero = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    return false;
+                }
+                auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
+                if (!constValue)
+                {
+                    return false;
+                }
+                std::string text = *constValue;
+                text.erase(std::remove_if(text.begin(), text.end(),
+                                          [](unsigned char ch)
+                                          { return std::isspace(ch) || ch == '_'; }),
+                           text.end());
+                if (text == "0")
+                {
+                    return true;
+                }
+                if (text.size() >= 3 && text.back() == '0')
+                {
+                    const std::size_t quote = text.find('\'');
+                    if (quote != std::string::npos && quote + 1 < text.size())
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
             auto isLogicNotOf = [&](grh::ir::ValueId maybeNot,
                                     grh::ir::ValueId operand) -> bool
             {
@@ -2771,6 +2812,136 @@ namespace grh::emit
                 const auto &ops = defOp.operands();
                 return !ops.empty() && ops.front() == operand;
             };
+            auto isAlwaysTrueByTruthTable = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                std::vector<grh::ir::ValueId> leaves;
+                std::unordered_map<grh::ir::ValueId, std::size_t, grh::ir::ValueIdHash> leafIndex;
+
+                std::function<void(grh::ir::ValueId)> collectLeaves =
+                    [&](grh::ir::ValueId id) {
+                        if (!id.valid())
+                        {
+                            return;
+                        }
+                        if (isConstOne(id) || isConstZero(id))
+                        {
+                            return;
+                        }
+                        const grh::ir::OperationId defId =
+                            graph->getValue(id).definingOp();
+                        if (!defId.valid())
+                        {
+                            if (leafIndex.find(id) == leafIndex.end())
+                            {
+                                leafIndex[id] = leaves.size();
+                                leaves.push_back(id);
+                            }
+                            return;
+                        }
+                        const grh::ir::Operation op = graph->getOperation(defId);
+                        if (op.kind() == grh::ir::OperationKind::kLogicAnd ||
+                            op.kind() == grh::ir::OperationKind::kLogicOr ||
+                            op.kind() == grh::ir::OperationKind::kLogicNot ||
+                            op.kind() == grh::ir::OperationKind::kNot)
+                        {
+                            for (const auto operand : op.operands())
+                            {
+                                collectLeaves(operand);
+                            }
+                            return;
+                        }
+                        if (leafIndex.find(id) == leafIndex.end())
+                        {
+                            leafIndex[id] = leaves.size();
+                            leaves.push_back(id);
+                        }
+                    };
+
+                collectLeaves(valueId);
+                if (leaves.size() > 8)
+                {
+                    return false;
+                }
+
+                auto evalExpr = [&](grh::ir::ValueId id,
+                                    const std::vector<bool>& assignment,
+                                    auto&& self) -> bool {
+                    if (!id.valid())
+                    {
+                        return false;
+                    }
+                    if (isConstOne(id))
+                    {
+                        return true;
+                    }
+                    if (isConstZero(id))
+                    {
+                        return false;
+                    }
+                    const grh::ir::OperationId defId =
+                        graph->getValue(id).definingOp();
+                    if (!defId.valid())
+                    {
+                        auto it = leafIndex.find(id);
+                        return it != leafIndex.end() && assignment[it->second];
+                    }
+                    const grh::ir::Operation op = graph->getOperation(defId);
+                    if (op.kind() == grh::ir::OperationKind::kLogicAnd)
+                    {
+                        for (const auto operand : op.operands())
+                        {
+                            if (!self(operand, assignment, self))
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                    if (op.kind() == grh::ir::OperationKind::kLogicOr)
+                    {
+                        for (const auto operand : op.operands())
+                        {
+                            if (self(operand, assignment, self))
+                            {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    if (op.kind() == grh::ir::OperationKind::kLogicNot ||
+                        op.kind() == grh::ir::OperationKind::kNot)
+                    {
+                        const auto &ops = op.operands();
+                        if (ops.empty())
+                        {
+                            return false;
+                        }
+                        return !self(ops.front(), assignment, self);
+                    }
+                    auto it = leafIndex.find(id);
+                    return it != leafIndex.end() && assignment[it->second];
+                };
+
+                const std::size_t total =
+                    leaves.empty() ? 1u : (static_cast<std::size_t>(1) << leaves.size());
+                std::vector<bool> assignment(leaves.size(), false);
+                for (std::size_t mask = 0; mask < total; ++mask)
+                {
+                    for (std::size_t i = 0; i < leaves.size(); ++i)
+                    {
+                        assignment[i] = ((mask >> i) & 1U) != 0U;
+                    }
+                    if (!evalExpr(valueId, assignment, evalExpr))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
             auto isAlwaysTrue = [&](grh::ir::ValueId valueId) -> bool
             {
                 if (isConstOne(valueId))
@@ -2783,28 +2954,26 @@ namespace grh::emit
                 }
                 const grh::ir::OperationId defOpId =
                     graph->getValue(valueId).definingOp();
-                if (!defOpId.valid())
+                if (defOpId.valid())
                 {
-                    return false;
-                }
-                const grh::ir::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != grh::ir::OperationKind::kLogicOr)
-                {
-                    return false;
-                }
-                const auto &ops = defOp.operands();
-                for (std::size_t i = 0; i < ops.size(); ++i)
-                {
-                    for (std::size_t j = i + 1; j < ops.size(); ++j)
+                    const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                    if (defOp.kind() == grh::ir::OperationKind::kLogicOr)
                     {
-                        if (isLogicNotOf(ops[i], ops[j]) ||
-                            isLogicNotOf(ops[j], ops[i]))
+                        const auto &ops = defOp.operands();
+                        for (std::size_t i = 0; i < ops.size(); ++i)
                         {
-                            return true;
+                            for (std::size_t j = i + 1; j < ops.size(); ++j)
+                            {
+                                if (isLogicNotOf(ops[i], ops[j]) ||
+                                    isLogicNotOf(ops[j], ops[i]))
+                                {
+                                    return true;
+                                }
+                            }
                         }
                     }
                 }
-                return false;
+                return isAlwaysTrueByTruthTable(valueId);
             };
 
             auto markPortAsRegIfNeeded = [&](grh::ir::ValueId valueId)
@@ -4955,6 +5124,45 @@ namespace grh::emit
             }
             return false;
         };
+        auto isConstZero = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            if (view.opKind(defOpId) != grh::ir::OperationKind::kConstant)
+            {
+                return false;
+            }
+            auto constValue = getAttribute<std::string>(view, defOpId, "constValue");
+            if (!constValue)
+            {
+                return false;
+            }
+            std::string text = *constValue;
+            text.erase(std::remove_if(text.begin(), text.end(),
+                                      [](unsigned char ch)
+                                      { return std::isspace(ch) || ch == '_'; }),
+                       text.end());
+            if (text == "0")
+            {
+                return true;
+            }
+            if (text.size() >= 3 && text.back() == '0')
+            {
+                const std::size_t quote = text.find('\'');
+                if (quote != std::string::npos && quote + 1 < text.size())
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
         auto isLogicNotOf = [&](grh::ir::ValueId maybeNot,
                                 grh::ir::ValueId operand) -> bool
         {
@@ -4976,6 +5184,137 @@ namespace grh::emit
             const auto ops = view.opOperands(defOpId);
             return !ops.empty() && ops.front() == operand;
         };
+        auto isAlwaysTrueByTruthTable = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            std::vector<grh::ir::ValueId> leaves;
+            std::unordered_map<grh::ir::ValueId, std::size_t, grh::ir::ValueIdHash> leafIndex;
+
+            std::function<void(grh::ir::ValueId)> collectLeaves =
+                [&](grh::ir::ValueId id) {
+                    if (!id.valid())
+                    {
+                        return;
+                    }
+                    if (isConstOne(id) || isConstZero(id))
+                    {
+                        return;
+                    }
+                    const grh::ir::OperationId defId = view.valueDef(id);
+                    if (!defId.valid())
+                    {
+                        if (leafIndex.find(id) == leafIndex.end())
+                        {
+                            leafIndex[id] = leaves.size();
+                            leaves.push_back(id);
+                        }
+                        return;
+                    }
+                    const grh::ir::OperationKind kind = view.opKind(defId);
+                    if (kind == grh::ir::OperationKind::kLogicAnd ||
+                        kind == grh::ir::OperationKind::kLogicOr ||
+                        kind == grh::ir::OperationKind::kLogicNot ||
+                        kind == grh::ir::OperationKind::kNot)
+                    {
+                        const auto ops = view.opOperands(defId);
+                        for (const auto operand : ops)
+                        {
+                            collectLeaves(operand);
+                        }
+                        return;
+                    }
+                    if (leafIndex.find(id) == leafIndex.end())
+                    {
+                        leafIndex[id] = leaves.size();
+                        leaves.push_back(id);
+                    }
+                };
+
+            collectLeaves(valueId);
+            if (leaves.size() > 8)
+            {
+                return false;
+            }
+
+            auto evalExpr = [&](grh::ir::ValueId id,
+                                const std::vector<bool>& assignment,
+                                auto&& self) -> bool {
+                if (!id.valid())
+                {
+                    return false;
+                }
+                if (isConstOne(id))
+                {
+                    return true;
+                }
+                if (isConstZero(id))
+                {
+                    return false;
+                }
+                const grh::ir::OperationId defId = view.valueDef(id);
+                if (!defId.valid())
+                {
+                    auto it = leafIndex.find(id);
+                    return it != leafIndex.end() && assignment[it->second];
+                }
+                const grh::ir::OperationKind kind = view.opKind(defId);
+                if (kind == grh::ir::OperationKind::kLogicAnd)
+                {
+                    const auto ops = view.opOperands(defId);
+                    for (const auto operand : ops)
+                    {
+                        if (!self(operand, assignment, self))
+                        {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                if (kind == grh::ir::OperationKind::kLogicOr)
+                {
+                    const auto ops = view.opOperands(defId);
+                    for (const auto operand : ops)
+                    {
+                        if (self(operand, assignment, self))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                if (kind == grh::ir::OperationKind::kLogicNot ||
+                    kind == grh::ir::OperationKind::kNot)
+                {
+                    const auto ops = view.opOperands(defId);
+                    if (ops.empty())
+                    {
+                        return false;
+                    }
+                    return !self(ops.front(), assignment, self);
+                }
+                auto it = leafIndex.find(id);
+                return it != leafIndex.end() && assignment[it->second];
+            };
+
+            const std::size_t total =
+                leaves.empty() ? 1u : (static_cast<std::size_t>(1) << leaves.size());
+            std::vector<bool> assignment(leaves.size(), false);
+            for (std::size_t mask = 0; mask < total; ++mask)
+            {
+                for (std::size_t i = 0; i < leaves.size(); ++i)
+                {
+                    assignment[i] = ((mask >> i) & 1U) != 0U;
+                }
+                if (!evalExpr(valueId, assignment, evalExpr))
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
         auto isAlwaysTrue = [&](grh::ir::ValueId valueId) -> bool
         {
             if (isConstOne(valueId))
@@ -4987,28 +5326,24 @@ namespace grh::emit
                 return false;
             }
             const grh::ir::OperationId defOpId = view.valueDef(valueId);
-            if (!defOpId.valid())
+            if (defOpId.valid() &&
+                view.opKind(defOpId) == grh::ir::OperationKind::kLogicOr)
             {
-                return false;
-            }
-            if (view.opKind(defOpId) != grh::ir::OperationKind::kLogicOr)
-            {
-                return false;
-            }
-            const auto ops = view.opOperands(defOpId);
-            for (std::size_t i = 0; i < ops.size(); ++i)
-            {
-                for (std::size_t j = i + 1; j < ops.size(); ++j)
+                const auto ops = view.opOperands(defOpId);
+                for (std::size_t i = 0; i < ops.size(); ++i)
                 {
-                    const grh::ir::ValueId a = ops[i];
-                    const grh::ir::ValueId b = ops[j];
-                    if (isLogicNotOf(a, b) || isLogicNotOf(b, a))
+                    for (std::size_t j = i + 1; j < ops.size(); ++j)
                     {
-                        return true;
+                        const grh::ir::ValueId a = ops[i];
+                        const grh::ir::ValueId b = ops[j];
+                        if (isLogicNotOf(a, b) || isLogicNotOf(b, a))
+                        {
+                            return true;
+                        }
                     }
                 }
             }
-            return false;
+            return isAlwaysTrueByTruthTable(valueId);
         };
 
         auto markPortAsRegIfNeeded = [&](grh::ir::ValueId value)
