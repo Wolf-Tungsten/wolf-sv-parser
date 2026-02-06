@@ -1,0 +1,4 @@
+interface:
+  display_name: "C910 Diff"
+  short_description: "Compare C910 coremark logs and debug diffs"
+  default_prompt: "Use $c910-diff to compare latest coremark logs and locate wolf-sv-parser diff root causes."
