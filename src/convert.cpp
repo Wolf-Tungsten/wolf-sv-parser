@@ -6199,6 +6199,19 @@ private:
                     }
                     return operand;
                 }
+                if (name == "time" || name == "stime" || name == "realtime")
+                {
+                    const auto args = call->arguments();
+                    if (!args.empty())
+                    {
+                        reportUnsupported(expr, "$time/$stime/$realtime do not take arguments");
+                        return kInvalidPlanIndex;
+                    }
+                    node.kind = ExprNodeKind::Constant;
+                    node.literal = "$" + name;
+                    applyExprWidthHint(node);
+                    return addNodeForExpr(std::move(node));
+                }
             }
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())

@@ -1199,6 +1199,49 @@ int testDisplayLowering(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testDisplayTimeLowering(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildLoweringPlan(sourcePath, "stmt_lowerer_display_time", diagnostics, plan, lowering)) {
+        return fail("Failed to build lowering plan for " + sourcePath.string());
+    }
+
+    const wolf_sv_parser::LoweredStmt* displayStmt = nullptr;
+    for (const auto& stmt : lowering.loweredStmts) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
+            displayStmt = &stmt;
+            break;
+        }
+    }
+    if (!displayStmt) {
+        return fail("Missing display lowered statement in " + sourcePath.string());
+    }
+    if (displayStmt->display.formatString != "t=%t/%0t") {
+        return fail("Unexpected display format string in " + sourcePath.string());
+    }
+    if (displayStmt->display.displayKind != "display") {
+        return fail("Unexpected display kind in " + sourcePath.string());
+    }
+    if (displayStmt->display.args.size() != 2) {
+        return fail("Unexpected display arg count in " + sourcePath.string());
+    }
+    for (std::size_t i = 0; i < displayStmt->display.args.size(); ++i) {
+        const auto argId = displayStmt->display.args[i];
+        if (argId >= lowering.values.size()) {
+            return fail("Display arg index out of range in " + sourcePath.string());
+        }
+        const auto& argNode = lowering.values[argId];
+        if (argNode.kind != wolf_sv_parser::ExprNodeKind::Constant || argNode.literal != "$time") {
+            return fail("Unexpected display time arg in " + sourcePath.string());
+        }
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());
+    }
+    return 0;
+}
+
 int testDisplayRequiresEdge(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -1438,6 +1481,9 @@ int main() {
         return status;
     }
     if (int status = testDisplayLowering(sourcePath); status != 0) {
+        return status;
+    }
+    if (int status = testDisplayTimeLowering(sourcePath); status != 0) {
         return status;
     }
     if (int status = testDisplayRequiresEdge(sourcePath); status != 0) {

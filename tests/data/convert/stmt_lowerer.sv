@@ -502,6 +502,14 @@ module stmt_lowerer_display(
     end
 endmodule
 
+module stmt_lowerer_display_time(
+    input logic clk
+);
+    always_ff @(posedge clk) begin
+        $display("t=%t/%0t", $time, $time);
+    end
+endmodule
+
 module stmt_lowerer_display_comb(
     input logic a
 );
