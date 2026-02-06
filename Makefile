@@ -56,7 +56,7 @@ HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
 C910_BUG_CASE_DIRS := $(wildcard $(C910_BUG_CASES_DIR)/case_*)
 C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
-.PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test build_wolf_parser \
+.PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test run_c910_diff build_wolf_parser \
 	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof \
 	run_c910_prof clean check-id
 
@@ -88,20 +88,62 @@ $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 	CCACHE_DISABLE=1 $(MAKE) -C $(OUT_DIR) -f $(VERILATOR_PREFIX).mk $(SIM_BIN_NAME)
 
 C910_LOG_DIR := $(BUILD_DIR)/logs/c910
+C910_DIFF_WORK_BASE ?= $(C910_SMART_RUN_DIR)
+C910_DIFF_WOLF_WORK_DIR ?= $(abspath $(C910_DIFF_WORK_BASE)/work_wolf)
+C910_DIFF_REF_WORK_DIR ?= $(abspath $(C910_DIFF_WORK_BASE)/work_ref)
 
-run_c910_test: build_wolf_parser
+ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
+RUN_C910_TEST_DEPS := build_wolf_parser
+endif
+
+run_c910_test: $(RUN_C910_TEST_DEPS)
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
-	LOG_FILE="$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log"; \
+	LOG_FILE="$(if $(LOG_FILE),$(LOG_FILE),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log)"; \
 	mkdir -p "$(C910_LOG_DIR)"; \
 	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
 		. "$(SMART_ENV)"; \
 	fi; \
 	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM)"; \
 	echo "[LOG] Capturing output to: $$LOG_FILE"; \
-	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
-		CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-		TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | tee "$$LOG_FILE"
+	if [ "$(LOG_ONLY_SIM)" != "0" ]; then \
+		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
+			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
+			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
+			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | \
+			tee >(awk 'f{print} index($$0,"obj_dir/Vsim_top"){f=1; next}' > "$$LOG_FILE"); \
+	else \
+		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
+			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
+			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
+			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | tee "$$LOG_FILE"; \
+	fi
+
+run_c910_diff: build_wolf_parser
+	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
+	RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
+	LOG_DIR="$(C910_LOG_DIR)"; \
+	WOLF_WORK_DIR="$(C910_DIFF_WOLF_WORK_DIR)"; \
+	REF_WORK_DIR="$(C910_DIFF_REF_WORK_DIR)"; \
+	mkdir -p "$$LOG_DIR" "$$WOLF_WORK_DIR" "$$REF_WORK_DIR"; \
+	WOLF_LOG="$$LOG_DIR/c910_wolf_$${CASE_NAME}_$${RUN_ID}.log"; \
+	REF_LOG="$$LOG_DIR/c910_ref_$${CASE_NAME}_$${RUN_ID}.log"; \
+	echo "[RUN] parallel c910 diff CASE=$$CASE_NAME"; \
+	echo "[LOG] wolf: $$WOLF_LOG"; \
+	echo "[LOG] ref : $$REF_LOG"; \
+	$(MAKE) --no-print-directory run_c910_test CASE=$$CASE_NAME \
+		WORK_DIR="$$WOLF_WORK_DIR" CCACHE_DIR="$$WOLF_WORK_DIR/.ccache" \
+		LOG_FILE="$$WOLF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 & \
+	wolf_pid=$$!; \
+	$(MAKE) --no-print-directory run_c910_ref_test CASE=$$CASE_NAME \
+		WORK_DIR="$$REF_WORK_DIR" CCACHE_DIR="$$REF_WORK_DIR/.ccache" \
+		LOG_FILE="$$REF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 & \
+	ref_pid=$$!; \
+	wait $$wolf_pid; wolf_status=$$?; \
+	wait $$ref_pid; ref_status=$$?; \
+	if [ $$wolf_status -ne 0 ] || [ $$ref_status -ne 0 ]; then \
+		echo "[FAIL] c910 diff: wolf=$$wolf_status ref=$$ref_status"; \
+		exit 1; \
+	fi
 
 TIMEOUT ?= 120
 GPROF_DIR := $(BUILD_DIR)/artifacts
