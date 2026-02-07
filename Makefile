@@ -27,6 +27,10 @@ WOLF_TIMEOUT ?= 60
 WOLF_EMIT_FLAGS ?=
 CMAKE_BUILD_TYPE ?= Release
 
+# C910 simulation control
+C910_SIM_MAX_CYCLE ?= 5000
+C910_WAVEFORM ?= 0
+
 ifneq ($(strip $(SINGLE_THREAD)),0)
 WOLF_EMIT_FLAGS += --single-thread
 endif
@@ -99,21 +103,30 @@ endif
 run_c910_test: $(RUN_C910_TEST_DEPS)
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
 	LOG_FILE="$(if $(LOG_FILE),$(LOG_FILE),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log)"; \
+	WAVEFORM_FILE="$(if $(C910_WAVEFORM_PATH),$(C910_WAVEFORM_PATH),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).fst)"; \
 	mkdir -p "$(C910_LOG_DIR)"; \
 	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
 		. "$(SMART_ENV)"; \
 	fi; \
 	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM)"; \
+	echo "[RUN] C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM)"; \
 	echo "[LOG] Capturing output to: $$LOG_FILE"; \
+	if [ "$(C910_WAVEFORM)" = "1" ]; then \
+		echo "[WAVEFORM] Will save FST to: $$WAVEFORM_FILE"; \
+	fi; \
 	if [ "$(LOG_ONLY_SIM)" != "0" ]; then \
+		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
 		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
+			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | \
 			tee >(awk 'f{print} index($$0,"obj_dir/Vsim_top"){f=1; next}' > "$$LOG_FILE"); \
 	else \
+		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
 		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
+			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | tee "$$LOG_FILE"; \
 	fi
@@ -127,16 +140,27 @@ run_c910_diff: build_wolf_parser
 	mkdir -p "$$LOG_DIR" "$$WOLF_WORK_DIR" "$$REF_WORK_DIR"; \
 	WOLF_LOG="$$LOG_DIR/c910_wolf_$${CASE_NAME}_$${RUN_ID}.log"; \
 	REF_LOG="$$LOG_DIR/c910_ref_$${CASE_NAME}_$${RUN_ID}.log"; \
+	WOLF_WAVEFORM="$$LOG_DIR/c910_wolf_$${CASE_NAME}_$${RUN_ID}.fst"; \
+	REF_WAVEFORM="$$LOG_DIR/c910_ref_$${CASE_NAME}_$${RUN_ID}.fst"; \
 	echo "[RUN] parallel c910 diff CASE=$$CASE_NAME"; \
+	echo "[RUN] C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM)"; \
 	echo "[LOG] wolf: $$WOLF_LOG"; \
 	echo "[LOG] ref : $$REF_LOG"; \
+	if [ "$(C910_WAVEFORM)" = "1" ]; then \
+		echo "[WAVEFORM] wolf: $$WOLF_WAVEFORM"; \
+		echo "[WAVEFORM] ref : $$REF_WAVEFORM"; \
+	fi; \
 	$(MAKE) --no-print-directory run_c910_test CASE=$$CASE_NAME \
 		WORK_DIR="$$WOLF_WORK_DIR" CCACHE_DIR="$$WOLF_WORK_DIR/.ccache" \
-		LOG_FILE="$$WOLF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 & \
+		LOG_FILE="$$WOLF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 \
+		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
+		C910_WAVEFORM_PATH="$$WOLF_WAVEFORM" & \
 	wolf_pid=$$!; \
 	$(MAKE) --no-print-directory run_c910_ref_test CASE=$$CASE_NAME \
 		WORK_DIR="$$REF_WORK_DIR" CCACHE_DIR="$$REF_WORK_DIR/.ccache" \
-		LOG_FILE="$$REF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 & \
+		LOG_FILE="$$REF_LOG" LOG_ONLY_SIM=1 SKIP_WOLF_BUILD=1 \
+		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
+		C910_WAVEFORM_PATH="$$REF_WAVEFORM" & \
 	ref_pid=$$!; \
 	wait $$wolf_pid; wolf_status=$$?; \
 	wait $$ref_pid; ref_status=$$?; \
