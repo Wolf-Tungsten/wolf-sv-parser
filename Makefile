@@ -28,8 +28,15 @@ WOLF_EMIT_FLAGS ?=
 CMAKE_BUILD_TYPE ?= Release
 
 # C910 simulation control
-C910_SIM_MAX_CYCLE ?= 5000
+C910_SIM_MAX_CYCLE ?= 0
 C910_WAVEFORM ?= 0
+# Waveform output control
+# - C910_WAVEFORM_PATH: explicit FST file path (relative paths resolve from repo root)
+# - C910_WAVEFORM_DIR: directory for auto-generated FST filenames (default: C910_LOG_DIR)
+C910_WAVEFORM_DIR ?= $(C910_LOG_DIR)
+C910_LOG_DIR_ABS = $(abspath $(C910_LOG_DIR))
+C910_WAVEFORM_DIR_ABS = $(abspath $(C910_WAVEFORM_DIR))
+C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVEFORM_PATH)),$(C910_WAVEFORM_PATH),$(abspath $(C910_WAVEFORM_PATH))),)
 
 ifneq ($(strip $(SINGLE_THREAD)),0)
 WOLF_EMIT_FLAGS += --single-thread
@@ -103,8 +110,9 @@ endif
 run_c910_test: $(RUN_C910_TEST_DEPS)
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
 	LOG_FILE="$(if $(LOG_FILE),$(LOG_FILE),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log)"; \
-	WAVEFORM_FILE="$(if $(C910_WAVEFORM_PATH),$(C910_WAVEFORM_PATH),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).fst)"; \
-	mkdir -p "$(C910_LOG_DIR)"; \
+	WAVEFORM_FILE="$(if $(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_DIR_ABS)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).fst)"; \
+	WAVEFORM_DIR="$$(dirname "$$WAVEFORM_FILE")"; \
+	mkdir -p "$(C910_LOG_DIR_ABS)" "$$WAVEFORM_DIR"; \
 	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
 		. "$(SMART_ENV)"; \
 	fi; \
@@ -134,14 +142,14 @@ run_c910_test: $(RUN_C910_TEST_DEPS)
 run_c910_diff: build_wolf_parser
 	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
 	RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
-	LOG_DIR="$(C910_LOG_DIR)"; \
+	LOG_DIR="$(C910_LOG_DIR_ABS)"; \
 	WOLF_WORK_DIR="$(C910_DIFF_WOLF_WORK_DIR)"; \
 	REF_WORK_DIR="$(C910_DIFF_REF_WORK_DIR)"; \
 	mkdir -p "$$LOG_DIR" "$$WOLF_WORK_DIR" "$$REF_WORK_DIR"; \
 	WOLF_LOG="$$LOG_DIR/c910_wolf_$${CASE_NAME}_$${RUN_ID}.log"; \
 	REF_LOG="$$LOG_DIR/c910_ref_$${CASE_NAME}_$${RUN_ID}.log"; \
-	WOLF_WAVEFORM="$$LOG_DIR/c910_wolf_$${CASE_NAME}_$${RUN_ID}.fst"; \
-	REF_WAVEFORM="$$LOG_DIR/c910_ref_$${CASE_NAME}_$${RUN_ID}.fst"; \
+	WOLF_WAVEFORM="$(C910_WAVEFORM_DIR_ABS)/c910_wolf_$${CASE_NAME}_$${RUN_ID}.fst"; \
+	REF_WAVEFORM="$(C910_WAVEFORM_DIR_ABS)/c910_ref_$${CASE_NAME}_$${RUN_ID}.fst"; \
 	echo "[RUN] parallel c910 diff CASE=$$CASE_NAME"; \
 	echo "[RUN] C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM)"; \
 	echo "[LOG] wolf: $$WOLF_LOG"; \
