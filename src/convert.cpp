@@ -9557,7 +9557,29 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
         ExprNodeId nextValue = hasSlices ? baseValue : kInvalidPlanIndex;
 
+        bool allGuardsTrue = true;
         if (directConcatValue != kInvalidPlanIndex)
+        {
+            for (const LoweredStmt* stmt : group.writes)
+            {
+                const WriteIntent& write = stmt->write;
+                bool guardAlwaysTrue = write.guard == kInvalidPlanIndex;
+                if (!guardAlwaysTrue)
+                {
+                    if (auto guardConst = evalConstInt(plan, lowering, write.guard))
+                    {
+                        guardAlwaysTrue = (*guardConst != 0);
+                    }
+                }
+                if (!guardAlwaysTrue)
+                {
+                    allGuardsTrue = false;
+                    break;
+                }
+            }
+        }
+
+        if (directConcatValue != kInvalidPlanIndex && allGuardsTrue)
         {
             entry.updateCond =
                 builder.ensureGuardExpr(kInvalidPlanIndex, entry.location);

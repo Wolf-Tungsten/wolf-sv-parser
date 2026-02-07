@@ -400,3 +400,274 @@
   - No further signals needed for the IFU read data path; next step is to inspect
     why `rdata_s0` diverges (axi_slave128 memory model) or why BIU uses data that
     does not match `rdata_s0` in wolf
+
+## 2026-02-06 23:39
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260206_233154.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260206_233154.log
+- Equivalence: Not equivalent
+- Evidence:
+  - `axi_slave128` shows identical control/addr but different memory data early:
+    - ref cycle 2130: `mem_addr=0x10`, `mem_cen=1`,
+      `rdata_lo=0x7c01a073004001b7`, `rdata_hi=0x01b73001a0736199`
+    - wolf cycle 2130: `mem_addr=0x10`, `mem_cen=1`,
+      `rdata_lo=0x61a13001a0730080`, `rdata_hi=0x006381b77c01a073`
+  - `c910-window` still shows matching BIU read data (`biu_rdata_*`) but
+    `rdata_s0_*` diverges in wolf at cycle 2131-2134, matching the
+    `axi_slave128` dump above
+  - `c910-window2` (cycle ~2547) shows PC stuck at 0x4c, no retire, and no
+    active IFU/BIU read traffic in wolf while `rdata_s0_*` continues to show
+    differing memory contents
+  - Wolf fails at cycle 100000 with the "no instructions retired in the last
+    50000 cycles" error; ref completes CoreMark
+- Hypotheses:
+  - Wolf corrupts memory contents during tb_init (byte/word ordering or slice
+    mapping in `f_spsram_large`), so instruction fetch reads the wrong words
+  - A parser bug in part-select arithmetic in `f_spsram_large` or `ram` wiring
+    swaps lanes, causing the persistent `rdata_s0` mismatch even at the same
+    address
+  - Less likely: `tb_init_*` port connections differ in the emitted wolf SV
+- Instrumentation changes:
+  - Added a debug cycle counter and `$display` in
+    `tests/data/openc910/smart_run/logical/axi/axi_slave128.v` to log
+    `mem_addr/mem_wen/mem_dout` for cycles 2130-2145 and 2480-2520
+  - Added a second window (2450-2550) with `c910-window2` tagging in
+    `tests/data/openc910/smart_run/logical/tb/tb_c910.cpp`
+- Results/next steps:
+  - Instrument `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v` to
+    log `tb_init_addr/tb_init_wdata` for a small address range (e.g. 0x0-0x20),
+    and the `ram*_din` slices, to verify byte/word ordering during init
+  - If init data matches but `rdata_lo/hi` still diverge, inspect `ram.v` or the
+    emitted `sim_top_wolf.sv` for incorrect part-select lowering
+
+## 2026-02-06 23:50
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260206_234248.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260206_234248.log
+- Equivalence: Not equivalent
+- Evidence:
+  - `f_spsram_large` init writes match between ref and wolf for low addresses:
+    - addr 0x0: `wdata=0x01b73001a07361997c01a073004001b7`
+    - addr 0x1: `wdata=0x006381b77c01a07361a13001a0730080`
+    (matching `ram0..ram3` bytes in both logs)
+  - Despite identical init, wolf still shows `rdata_s0_*` divergence at
+    cycle 2131 and stalls later with no retire
+- Hypotheses:
+  - Read path/addressing after init diverges (e.g., `addr_holding` or `addr`
+    selection in `f_spsram_large`), leading to different `Q` outputs
+  - Wolf’s emitted memory/array handling in `ram` or `f_spsram_large` alters
+    read behavior even with identical write data
+- Instrumentation changes:
+  - Added `[spsram-init]` logging in
+    `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v` for init writes
+    (addr 0x0-0x1f) with `wdata/mem_d/ram0..ram3`
+- Results/next steps:
+  - Add post-init logging in `f_spsram_large` for early read accesses
+    (addr 0x0/0x1), capturing `mem_addr`, `addr_holding`, `addr`, and `Q`
+  - If read addresses match but `Q` differs, instrument `ram.v` to log
+    `PortAAddr/PortADataOut` for a single instance via `%m` filtering
+
+## 2026-02-07 00:00
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260206_235256.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260206_235256.log
+- Equivalence: Not equivalent
+- Evidence:
+  - Post-init read traces diverge immediately:
+    - ref: `mem_addr=0x000001` with `addr_hold=0x000000` yields
+      `Q=0x01b73001a07361997c01a073004001b7` (line 0 data)
+    - ref: `mem_addr=0x000000` with `addr_hold=0x000001` yields
+      `Q=0x006381b77c01a07361a13001a0730080` (line 1 data)
+    - wolf: `mem_addr=0x000000` with `addr_hold=0x000002` yields
+      `Q=0x42014181410140817f30e0737c01a073` (line 2 data)
+  - This indicates the address stream in wolf is already advanced to line 2
+    before the first window; ref alternates line 0/1 as expected
+- Hypotheses:
+  - Wolf’s address/update sequencing in `axi_slave128` (mem_addr update or
+    wrap logic) differs, advancing the line index early
+  - The emitted design’s ordering of mem_addr/addr_holding updates is altered,
+    causing a read pipeline offset even though init data matches
+- Instrumentation changes:
+  - Narrowed init logging to addr < 0x2 and added post-init `[spsram-read]`
+    logging with `mem_addr/addr_holding/addr/Q` in
+    `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`
+- Results/next steps:
+  - Instrument `tests/data/openc910/smart_run/logical/axi/axi_slave128.v` to
+    log mem_addr update reasons (arvalid/awvalid/read_step/wrap flags) in the
+    post-init window and compare ref vs wolf
+
+## 2026-02-07 00:59
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_005159.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_005159.log
+- Equivalence: Not equivalent (wolf halts with no retired instructions)
+- Evidence:
+  - `[axi-memaddr]` traces are identical between ref and wolf (diff of
+    filtered logs shows no differences).
+  - `[spsram-read]` still diverges immediately:
+    - ref: `mem_addr=0x000000` with `addr_hold=0x000001` yields
+      `Q=0x006381b77c01a07361a13001a0730080`
+    - wolf: `mem_addr=0x000000` with `addr_hold=0x000002` yields
+      `Q=0x42014181410140817f30e0737c01a073`
+- Hypotheses:
+  - The mismatch is not in `axi_slave128` mem_addr sequencing; instead it is
+    likely in `f_spsram_large` address-hold or read pipeline timing (addr_hold
+    is +1 in wolf during the first post-init reads).
+  - Wolf emit may be reordering or lowering the address-holding logic
+    differently from the ref simulator.
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/axi/axi_slave128.v`:
+    - Switched `[axi-memaddr]` filter to `mem_addr[24:4] < 4` and added
+      `mem_loc` to match spsram local addressing.
+    - Made `init_seen` latch after reset so post-init logging triggers even if
+      `tb_init_en` pulses during reset.
+- Results/next steps:
+  - Add targeted logging in `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`
+    when `addr_holding` updates to capture the exact cycle and gating
+    (`mem_cen`, `mem_addr`, `addr_holding`, `addr`), then compare ref vs wolf.
+
+## 2026-02-07 01:29
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_012325.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_012325.log
+- Equivalence: Not equivalent (wolf halts with no retired instructions)
+- Evidence:
+  - `spsram-post` shows `addr_holding` changes in wolf even when `mem_cen=1`:
+    - ref: `post=0..15` keeps `addr_hold=0x007fff` with `mem_cen=1`
+    - wolf: `post=0` has `addr_hold=0x007fff`, but `post=1` drops to
+      `addr_hold=0x000000` while `mem_cen=1` and `A=0x000000`
+  - This explains why early `spsram-hold` entries show `addr_hold_prev`
+    already advanced in wolf.
+- Hypotheses:
+  - The wolf-emitted model is not preserving the sequential “hold” semantics
+    of `addr_holding` when `mem_cen` is high (likely a lowering/optimization
+    issue around the `if(!mem_cen)` block in `f_spsram_large.v`).
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`:
+    - Added `last_init_active` and `[spsram-init-done]` logging to capture
+      end-of-init state.
+    - Added `[spsram-post]` logging for the first 16 post-init cycles with
+      `mem_addr`, `mem_cen`, `addr_holding`, `CEN`, and `A`.
+    - Extended `[spsram-hold]` to include `mem_addr==0x07fff`.
+- Results/next steps:
+  - Inspect `work_wolf/wolf_emit/sim_top_wolf.sv` for the lowered
+    `addr_holding` always block and compare to ref to confirm an unintended
+    assignment when `mem_cen` is high.
+  - As an experiment, add an explicit `else addr_holding <= addr_holding;`
+    in `f_spsram_large.v` to see if wolf behavior matches ref (indicating a
+    converter issue with “implicit hold” semantics).
+
+## 2026-02-07 01:33
+- Command: inspected `tests/data/openc910/smart_run/work_wolf/wolf_emit/sim_top_wolf.sv`
+- Logs: (no new run)
+- Equivalence: Not equivalent (same as prior)
+- Evidence:
+  - In wolf-emitted `f_spsram_large`, the addr_holding update lost its guard:
+    - `always @(posedge CLK) begin addr_holding <= __expr_4; end`
+      (around `sim_top_wolf.sv:13483`)
+  - The original RTL uses `if(!mem_cen) addr_holding <= mem_addr;` so the
+    unconditional assignment explains why wolf changes `addr_holding` even
+    when `mem_cen=1`.
+- Hypotheses:
+  - The converter/optimizer is incorrectly dropping the `if(!mem_cen)` guard
+    on sequential assignments, causing the observed read-address skew.
+- Instrumentation changes: (none)
+- Results/next steps:
+  - Try adding an explicit `else addr_holding <= addr_holding;` in
+    `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v` to see if the
+    wolf-emitted RTL preserves the guard and aligns behavior.
+
+## 2026-02-07 02:06
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_015954.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_015954.log
+- Equivalence: Not equivalent (ref finishes CoreMark; wolf still stalls)
+- Evidence:
+  - ref: `VCUNT_SIM: CoreMark has been run 2 times...` and `CoreMark Size : 666`
+  - wolf: `* Error: There is no instructions retired in the last 50000 cycles! *`
+  - `spsram-post` now shows `addr_hold=0x007fff` across post=0..15 with `mem_cen=1`
+    (the explicit hold appears to keep the guard in behavior), but the stall persists.
+- Hypotheses:
+  - The remaining mismatch is outside `f_spsram_large` hold semantics; likely an
+    instruction-fetch or AXI read-data path issue (e.g., `axi_slave128`/`axi_fifo`
+    read data/valid gating or IFU/BIU handshake divergence).
+  - Missing `[spsram-read]` lines early in the wolf log suggest read-back logging
+    is suppressed or reads are not occurring as in ref; a data path mismatch may
+    still exist even with correct `addr_holding` gating.
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`:
+    - Added explicit `else addr_holding <= addr_holding;` to preserve the hold.
+- Results/next steps:
+  - Add minimal probes in `tests/data/openc910/smart_run/logical/axi/axi_slave128.v`
+    to log `arvalid/rvalid/rdata` for early reads and compare ref vs wolf.
+  - If needed, add a small fixed-count `[spsram-read]` print (first N reads)
+    to confirm identical Q values between ref and wolf.
+
+## 2026-02-07 02:18
+- Command: (no run)
+- Logs: (no new run)
+- Equivalence: Not re-evaluated
+- Evidence:
+  - Reverted the explicit hold experiment in `f_spsram_large` to restore the
+    original RTL semantics before further localization.
+- Hypotheses:
+  - None (preparing for the next targeted probe).
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`:
+    - Removed the explicit `else addr_holding <= addr_holding;` assignment.
+- Results/next steps:
+  - Proceed with targeted probes in the AXI read/IFU path.
+
+## 2026-02-07 02:26
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_022007.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_022007.log
+- Equivalence: Not equivalent (ref finishes CoreMark; wolf stalls)
+- Evidence:
+  - ref: `VCUNT_SIM: CoreMark has been run 2 times...` / `CoreMark Size : 666`
+  - wolf: `* Error: There is no instructions retired in the last 50000 cycles! *`
+  - `spsram-post` diverges immediately after post=0:
+    - ref keeps `addr_hold=0x007fff` for post=0..4
+    - wolf drops to `addr_hold=0x000000` at post=1
+  - Early `[axi-read]` samples match between ref and wolf for the first 10 reads
+    (same `araddr`, `mem_addr`, and `rdata` values).
+- Hypotheses:
+  - The AXI read data path looks consistent for early reads; the stall is likely
+    driven by the `addr_holding` divergence in `f_spsram_large` (guard dropped in
+    wolf emit) or a later read/IFU path interaction.
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/axi/axi_slave128.v`:
+    - Added `rd_dbg_cnt` and `[axi-read]` prints on early `rvalid && rready_s0`
+      handshakes (first 16 reads, SRAM-local window).
+- Results/next steps:
+  - Re-check wolf-emitted `f_spsram_large` to confirm the `addr_holding` guard is
+    being dropped again when the explicit hold is absent.
+  - If confirmed, keep the explicit hold temporarily and re-run to see whether the
+    stall persists even with aligned `addr_hold`, then pivot to IFU/BIU probes.
+
+## 2026-02-07 09:52
+- Command: `rg`/`sed` on `tests/data/openc910/smart_run/work_wolf/wolf_emit/sim_top_wolf.sv`
+- Logs: (no new run)
+- Equivalence: Not re-evaluated
+- Evidence:
+  - In wolf-emitted `f_spsram_large`, the `addr_holding` assignment is unconditional:
+    `always @(posedge CLK) begin addr_holding <= __expr_4; end` (no `if(!mem_cen)` gate).
+  - The conditional `if(!mem_cen)` guard from the original RTL is absent in the emitted
+    `addr_holding` update, while the debug `$display` remains guarded.
+- Hypotheses:
+  - Wolf emit/scheduling is splitting the original guarded always block and dropping
+    the `if(!mem_cen)` condition on the state update, causing `addr_holding` to track
+    `mem_addr` even when `mem_cen=1`.
+- Instrumentation changes:
+  - None (inspection only).
+- Results/next steps:
+  - If you want, I can proceed to fix the emitter to preserve the guard and rerun
+    `make run_c910_diff -j` to confirm equivalence, or add more AXI read-path probes
+    before touching the emitter.
