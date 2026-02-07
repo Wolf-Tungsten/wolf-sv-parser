@@ -7,9 +7,19 @@ description: Compare the latest C910 coremark ref vs wolf logs, decide whether o
 
 ## Overview
 
-Guide a repeatable diff workflow for C910 coremark runs: collect the latest ref and wolf logs, judge equivalence, and iteratively instrument non-generated RTL to isolate wolf-sv-parser introduced mismatches. Maintain a running report under docs/c910.
+Guide a repeatable diff workflow for C910 coremark runs: always start by generating fresh logs, judge equivalence, and iteratively instrument non-generated RTL to isolate wolf-sv-parser introduced mismatches. Maintain a running report under docs/c910 and converge to the smallest faulty module.
 
 ## Workflow
+
+### 0) Always start with a fresh run
+
+From repo root, run this first on every investigation and before each new major iteration:
+
+```bash
+make run_c910_diff -j
+```
+
+This ensures log paths and instrumentation reflect the current state.
 
 ### 1) Collect the latest logs
 
@@ -20,13 +30,7 @@ ls -t build/logs/c910/c910_ref_coremark_*.log | head -1
 ls -t build/logs/c910/c910_wolf_coremark_*.log | head -1
 ```
 
-- If either log is missing, run from repo root:
-
-```bash
-make run_c910_diff -j
-```
-
-Record the log paths in the report.
+Record the log paths in the report (they should be from the fresh run in step 0).
 
 ### 2) Decide equivalence
 
@@ -81,7 +85,7 @@ Keep hypotheses short and traceable to candidate modules/signals.
 
 ### 6) Re-run and capture new logs
 
-From repo root:
+From repo root (repeat step 0 whenever instrumentation changes):
 
 ```bash
 make run_c910_diff -j
@@ -94,16 +98,17 @@ Capture the new log paths and include them in the report.
 - Diff the new logs and use the added instrumentation to narrow the root cause.
 - If the root cause is still unclear, repeat steps 4-7. Each iteration must be documented.
 - Each iteration should reduce output volume and tighten scope, progressively zooming in on the failing block or signal.
+- Allow multiple phase-level notes per run (e.g., "phase: log triage", "phase: probe A/B", "phase: narrowed to module X") before moving to the next iteration.
 
 ## Report requirements
 
-Write a running report at docs/c910/c910_diff_report.md with an entry per iteration. Each entry should include:
+Write a running report at docs/c910/c910_diff_report.md with an entry per iteration, and allow multiple phase notes per iteration/run. Each entry should include:
 
 - Timestamp (YYYY-MM-DD HH:MM) and command used
 - Log paths for ref and wolf
 - Equivalence decision and evidence (key diff lines or summaries)
 - Hypotheses for the next iteration
 - Instrumentation changes (files, signals, guards)
-- Results and next steps
+- Results and next steps (include a phase label when the iteration has multiple stages)
 
-Stop once equivalence is confirmed or the root cause is identified and documented.
+Stop once equivalence is confirmed or the root cause is identified and documented. The final report must name the smallest suspected failing module and explicitly tell the user that convergence point.

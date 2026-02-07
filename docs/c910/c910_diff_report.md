@@ -671,3 +671,501 @@
   - If you want, I can proceed to fix the emitter to preserve the guard and rerun
     `make run_c910_diff -j` to confirm equivalence, or add more AXI read-path probes
     before touching the emitter.
+
+## 2026-02-07 10:48
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_103929.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_103929.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - ref: `VCUNT_SIM: CoreMark has been run 2 times...` / `CoreMark Size    : 666`
+  - wolf: `* Error: There is no instructions retired in the last 50000 cycles! *`
+  - `[spsram-hold-breach]` appears once at post=0 in both logs (expected first
+    update after init), with no further breaches during the first 5000 cycles.
+  - wolf at cycle 100000: `ifu_req_any=0`, `biu_arvalid_any=0`,
+    `pad_arready_any=0` (no IFU/BIU activity in that window).
+- Hypotheses:
+  - The stall is likely in the IFU/BIU request gating path (AR valid generation
+    or gating dropping out), not in `f_spsram_large` address holding.
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`:
+    - Added `[spsram-hold-breach]` monitor for `addr_holding` changes under
+      `mem_cen=1` during early post-init cycles.
+- Results/next steps:
+  - `f_spsram_large` guard is preserved in the wolf emit (`addr_holding` updates
+    under `!mem_cen`), so the addr-holding hypothesis is de-prioritized.
+  - Convergence point: IFU/BIU request gating path in
+    `tests/data/openc910/smart_run/logical/common/cpu_sub_system_axi.v`
+    (signals `ifu_biu_rd_req*`, `biu_arvalid_int`, `biu_arvalid_gate`).
+
+## 2026-02-07 11:30
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_112347.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_112347.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - wolf: `* Error: There is no instructions retired in the last 50000 cycles! *`
+  - wolf last IFU/BIU toggle: `cycle=2492` (`[c910-ifu-toggle] ... biu_arvalid_* 1->0`)
+  - ref IFU/BIU toggles continue through `cycle=348337`
+- Hypotheses:
+  - Wolf run loses IFU/BIU request activity shortly after reset/early fetch
+    (requests stop by ~2.5k cycles), implying a gating/handshake path inside
+    `x_ct_biu_top` is deasserting permanently in the wolf emit.
+- Instrumentation changes:
+  - `tests/data/openc910/smart_run/logical/common/cpu_sub_system_axi.v`:
+    - Added `[c910-ifu-toggle]` change detector for
+      `ifu_biu_rd_req`, `ifu_biu_rd_req_gate`, `biu_arvalid_int`,
+      `biu_arvalid_gate` via hierarchical taps under `x_ct_biu_top`.
+- Results/next steps:
+  - Convergence point: `x_ct_biu_top` request/gate generation in the wolf emit
+    (need to probe upstream gating inputs/qualifiers feeding `arvalid` /
+    `arvalid_gate`).
+
+## 2026-02-07 11:38
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_113808.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_113808.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - wolf: `[c910-biu-top]` last toggle at `cycle=2485`
+    (`arvalid/arvalid_gate/ifu_biu_rd_req*` drop and never return)
+  - wolf: no `lsu_biu_ar_req*` toggles observed in the entire run
+  - ref: `lsu_biu_ar_req` toggles begin at `cycle=4045` and continue through
+    `cycle=19989`
+- Hypotheses:
+  - Wolf suppresses LSU BIU read request generation (or gate) before it reaches
+    `x_ct_biu_top`, causing the BIU request arbiter to only see IFU traffic.
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/biu/rtl/ct_biu_top.v`:
+    - Added `[c910-biu-top]` toggle detector for `ifu_biu_rd_req`,
+      `ifu_biu_rd_req_gate`, `lsu_biu_ar_req`, `lsu_biu_ar_req_gate`,
+      `arvalid`, `arvalid_gate` (first 20k cycles).
+- Results/next steps:
+  - Convergence point: `x_ct_lsu_top` (or its BIU request generation path)
+    because `lsu_biu_ar_req*` never toggles in wolf while ref does.
+
+## 2026-02-07 11:53
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_115321.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_115321.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - wolf: no `[c910-lsu-top]` toggles at all (no activity on
+    `pfu_biu_ar_req`, `rb_biu_ar_req`, `wmb_biu_ar_req`,
+    `lsu_biu_ar_req`, or their gateclk/grant signals)
+  - ref: `rb_biu_ar_req` and `lsu_biu_ar_req` toggles begin at
+    `cycle=4045`; `pfu_biu_ar_req` toggles start around `cycle=11893`
+- Hypotheses:
+  - Wolf fails to generate any LSU BIU read requests; LSU submodules
+    (`x_ct_lsu_rb`, `x_ct_lsu_pfu`, `x_ct_lsu_wmb`) appear inert, implying
+    the issue is upstream of the LSU bus arbiter (or LSU never receives
+    valid issue/memory ops).
+- Instrumentation changes:
+  - Removed probes:
+    - `tests/data/openc910/smart_run/logical/mem/f_spsram_large.v`
+      (`[spsram-hold-breach]`)
+    - `tests/data/openc910/smart_run/logical/common/cpu_sub_system_axi.v`
+      (`[c910-ifu-toggle]`)
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/biu/rtl/ct_biu_top.v`
+      (`[c910-biu-top]`)
+  - Added probes:
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_top.v`
+      (`[c910-lsu-top]` for `pfu/rb/wmb` request + gateclk + grant and
+      `lsu_biu_ar_req*`)
+- Results/next steps:
+  - Convergence point: `x_ct_lsu_top` input side (request generators)
+    or the IDU/LSU interface that should drive LSU pipeline ops.
+
+## 2026-02-07 12:05
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_120549.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_120549.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - ref: `[c910-lsu-rb]` toggles start at `cycle=4045` and continue
+  - ref: `[c910-lsu-pfu]` toggles begin at `cycle=11893`
+  - ref: `[c910-lsu-wmb]` toggles begin at `cycle=4044`
+  - wolf: no `[c910-lsu-rb]`, `[c910-lsu-pfu]`, or `[c910-lsu-wmb]` output
+    in the entire run
+- Hypotheses:
+  - Wolf never drives LSU pipeline create signals (RB/PFU/WMB stay idle),
+    pointing upstream of LSU request generators (likely IDU→LSU issue).
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_rb.v`:
+    - Added `[c910-lsu-rb]` toggle detector for `ld_da_rb_create_vld`,
+      `rb_biu_ar_req`, `rb_biu_ar_req_gateclk_en`, `bus_arb_rb_ar_grnt`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_pfu.v`:
+    - Added `[c910-lsu-pfu]` toggle detector for `pfu_lfb_create_vld`,
+      `pfu_biu_ar_req`, `pfu_biu_ar_req_gateclk_en`,
+      `bus_arb_pfu_ar_grnt`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_wmb.v`:
+    - Added `[c910-lsu-wmb]` toggle detector for `wmb_ce_create_vld`,
+      `wmb_biu_ar_req`, `wmb_biu_ar_req_gateclk_en`,
+      `bus_arb_wmb_ar_grnt`.
+- Results/next steps:
+  - Convergence point: IDU→LSU dispatch path (no RB/PFU/WMB creation in
+    wolf). Next probe should target IDU RF pipe3/4 signals feeding LSU.
+
+## 2026-02-07 12:25
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_122512.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_122512.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - ref: `[c910-idu]` and `[c910-core-idu]` pipe3/pipe4 toggles start at
+    `cycle=4040` (pipe4) and `cycle=4149` (pipe3)
+  - wolf: no `[c910-idu]` or `[c910-core-idu]` output in the entire run
+  - wolf: still no `[c910-lsu-rb/pfu/wmb]` output
+- Hypotheses:
+  - Wolf never asserts IDU→LSU issue signals (pipe3/pipe4), so LSU stays idle.
+    The fault is upstream of `ct_idu_top` (decode/dispatch inputs or gating).
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/cpu/rtl/ct_core.v`:
+    - Added `[c910-core-idu]` toggle detector for
+      `idu_lsu_rf_pipe3_sel`, `idu_lsu_rf_pipe4_sel`,
+      `idu_lsu_rf_pipe3_inst_ldr`, `idu_lsu_rf_pipe4_inst_str`,
+      `idu_lsu_rf_pipe3_inst_type`, `idu_lsu_rf_pipe4_inst_type`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_top.v`:
+    - Added `[c910-idu]` toggle detector for same pipe3/pipe4 signals.
+- Results/next steps:
+  - Convergence point: IDU decode/dispatch front-end driving `ct_idu_top`
+    (pipe3/pipe4 never assert in wolf). Next probes should target IDU
+    input-side signals (e.g., issue queue/dispatch selects).
+
+## 2026-02-07 12:37
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_123706.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_123706.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls)
+- Evidence:
+  - ref: `[c910-lsiq]` and `[c910-rf-ctrl]` toggles start at
+    `cycle=4040+` and continue (issue/bypass/create activity present)
+  - wolf: no `[c910-lsiq]`, `[c910-rf-ctrl]`, `[c910-idu]`,
+    or `[c910-core-idu]` output in the entire run
+- Hypotheses:
+  - IDU never dispatches load/store ops into LSIQ in wolf; the fault is
+    upstream of `ct_idu_is_lsiq` (likely IDU decode/dispatch inputs).
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_is_lsiq.v`:
+    - Added `[c910-lsiq]` toggle detector for
+      `lsiq_xx_pipe3_issue_en`, `lsiq_xx_pipe4_issue_en`,
+      `lsiq_pipe3_bypass_en`, `lsiq_pipe4_bypass_en`,
+      `|lsiq_entry_vld|`, `|lsiq_entry_ready|`,
+      `dp_lsiq_create0_load`, `dp_lsiq_create0_store`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_rf_ctrl.v`:
+    - Added `[c910-rf-ctrl]` toggle detector for
+      `lsiq_xx_pipe3_issue_en`, `lsiq_xx_pipe4_issue_en`,
+      `ctrl_rf_pipe3_inst_vld`, `ctrl_rf_pipe4_inst_vld`,
+      `ctrl_rf_pipe3_pipedown_vld`, `ctrl_rf_pipe4_pipedown_vld`,
+      `ctrl_rf_pipe3_lch_fail`, `ctrl_rf_pipe4_lch_fail`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/cpu/rtl/ct_core.v`:
+    - Debug reset uses `idu_rst_b` (avoids undefined `cpurst_b`).
+- Results/next steps:
+  - Convergence point: IDU dispatch path feeding LSIQ create signals
+    (`dp_lsiq_create0_*` never toggle in wolf). Next probe should target
+    IDU decode/dispatch modules that drive LSIQ create inputs.
+
+## 2026-02-07 12:51
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_125107.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_125107.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref: `[c910-id-dp] inst*_lsu` toggles start at `cycle=4036` and continue;
+    `[c910-is-dp] lsiq_dp_en*` and `create0/1_{load,store}` toggle shortly after
+    (e.g., `cycle=4038`).
+  - wolf: `[c910-id-dp]` inst*_vld toggles occur early (`cycle=2079`), but there
+    are no `inst*_lsu` lines anywhere in the log.
+  - wolf: no `[c910-is-dp] lsiq_dp_en*` or `create0/1_{load,store}` toggles in
+    the entire run.
+- Hypotheses:
+  - IDU decode (`ct_idu_id_decd`) is not classifying load/store, so
+    `id_inst*_inst_type` never equals LSU/LSU_P5 in wolf.
+  - Alternatively, `ct_idu_id_dp` may be extracting the wrong opcode bits into
+    `id_inst*_inst`, causing the decoder to miss LSU opcodes.
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_is_dp.v`:
+    - Added `[c910-is-dp]` toggle detector for
+      `ctrl_dp_is_dis_lsiq_create0_sel`, `ctrl_dp_is_dis_lsiq_create1_sel`,
+      `ctrl_lsiq_create0_dp_en`, `ctrl_lsiq_create1_dp_en`,
+      `dp_lsiq_create0_load`, `dp_lsiq_create0_store`,
+      `dp_lsiq_create1_load`, `dp_lsiq_create1_store`.
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_id_dp.v`:
+    - Added `[c910-id-dp]` toggle detector for
+      `ctrl_dp_id_inst{0,1,2}_vld` and LSU classification of
+      `id_inst{0,1,2}_inst_type` (logs inst word/type when LSU toggles).
+- Results/next steps:
+  - Convergence point: IDU decode inst_type classification feeding LSIQ
+    dispatch. Smallest suspected module is `ct_idu_id_decd` (or the opcode
+    extraction feeding it in `ct_idu_id_dp`). Next probe should dump
+    `id_inst*_inst` and `id_inst*_inst_type` inside `ct_idu_id_decd` to confirm
+    whether LSU decode is missing or the input opcode bits are wrong in wolf.
+
+## 2026-02-07 13:59
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_135943.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_135943.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref: `[c910-id-dp] inst* op=...` continues through cycle 20000, and LSU
+    types (`type=0x010/0x030`) appear after ~cycle 4036.
+  - wolf: `[c910-id-dp] inst* op=...` stops at `cycle=2483`, and no LSU types
+    appear anywhere in the run.
+  - wolf: window2 shows PC stuck at 0x4c with `ifu_no_inst=1`/`ifu_fe_stall=1`
+    while IDU no longer receives new insts.
+- Hypotheses:
+  - IFU/IB no longer feeds IDU after early boot in wolf (likely in
+    `ct_ifu_ibdp` or upstream buffer select/gating), so IDU never sees later
+    LSU instructions.
+- Instrumentation changes:
+  - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_id_dp.v`:
+    - Added `[c910-id-dp]` log on inst*_vld rising to print opcode, inst_type,
+      illegal, and length for inst0/1/2.
+- Results/next steps:
+  - Convergence point moved upstream of IDU decode: IFU instruction buffer
+    feed into IDU. Next probe should target `ct_ifu_ibdp` to log
+    `ifu_idu_ib_inst*_vld` and opcode when valid, and track why valid drops.
+
+## 2026-02-07 14:50
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_144048.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_144048.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref: `VCUNT_SIM: CoreMark has been run 2 times...` / `CoreMark Size : 666`
+  - wolf: `* Error: There is no instructions retired in the last 50000 cycles! *`
+  - wolf IFCTRL shows a refill stall:
+    - cycle 2458: `if_self_stall 0->1` with `refill_on=1` and `trans_cmplt=0`
+    - cycle 2484: `inst_data_vld 1->0` and `if_self_stall 0->1` again with
+      `refill_on=1`/`trans_cmplt=0`, followed by `pcgen_stall 0->1`
+  - wolf PCGEN shows the PC bouncing (0x20->0x28->0x30) before the stall at 2484,
+    after which no further IFCTRL activity appears in the log.
+- Hypotheses:
+  - IFU L1 refill path in wolf never reaches `trans_cmplt` after a refill-on
+    condition, stalling `if_inst_data_vld` and freezing the frontend.
+  - Likely suspect: `ct_ifu_l1_refill` (refill state machine/data return) or
+    its handshake with BIU/icache (`ct_ifu_icache_if`).
+- Instrumentation changes:
+  - Removed probes:
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/idu/rtl/ct_idu_id_dp.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ibdp.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ibctrl.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ipctrl.v`
+  - Added probes:
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ifctrl.v`
+      (`[c910-ifctrl]` for if_vld/inst_data_vld/if_self_stall + refill signals)
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_pcgen.v`
+      (`[c910-pcgen]` for PC changes and ifctrl_stall)
+- Results/next steps:
+  - Probe `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_l1_refill.v`
+    to log refill state, `refill_on`, `trans_cmplt`, and BIU/data return handshakes.
+  - If needed, add a small probe in `ct_ifu_icache_if.v` for refill data valid
+    and tag/data hit signals to see where `trans_cmplt` is blocked.
+
+## 2026-02-07 15:10
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_144935.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_144935.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - wolf `ct_ifu_l1_refill` shows REQ->WFD1 at cycle 2485 with `refill_on=1`,
+    but no `data_vld`/`trans_cmplt` after 2485 (refill FSM stays in WFD1).
+  - ref shows each REQ->WFD* transition followed by `data_vld` and progression
+    through WFD2/3/4 or INV_WFD states.
+- Hypotheses:
+  - BIU read data is not returning to IFU refill in wolf after the 2484/2485
+    request, or the data-valid path is being gated off before L1 refill.
+  - Suspect upstream of L1 refill: IPB data-valid generation or BIU read channel.
+- Instrumentation changes:
+  - Added `[c910-l1-refill]` toggle detector in
+    `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_l1_refill.v`
+    (state, req/grant, data_vld/trans_err, refill_on/trans_cmplt).
+- Results/next steps:
+  - Probe `ct_ifu_ipb.v` to log `biu_ref_data_vld`, `biu_ifu_rd_data_vld`,
+    and `ipb_l1_refill_data_vld` around the last request/grant.
+
+## 2026-02-07 15:40
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_145715.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_145715.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - wolf `ct_ifu_ipb` shows `ref_req/ref_grnt` at cycle 2484/2485 but no
+    subsequent `biu_data_vld`/`ref_data_vld`/`l1_refill_data_vld` pulses;
+    the last `biu_data_vld` is at cycle 2480.
+  - ref shows `ref_req/ref_grnt` followed shortly by `biu_data_vld` and
+    `l1_refill_data_vld` for each refill request.
+- Hypotheses:
+  - The final IFU refill request is granted but BIU read data never returns in
+    wolf; the failure is upstream of IPB, likely in BIU read-data path or
+    pad_biu_rvalid handling.
+  - Candidate smallest module: `ct_biu_read_channel` (cur_rdata_buf/rid/valid
+    gating to `biu_ifu_rd_data_vld`).
+- Instrumentation changes:
+  - Added `[c910-ipb]` toggle detector in
+    `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ipb.v` to log
+    `ref_req/ref_grnt`, `biu_ifu_rd_data_vld`, `biu_ref_data_vld`, and
+    `ipb_l1_refill_data_vld`.
+- Results/next steps:
+  - Probe `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/biu/rtl/ct_biu_read_channel.v`
+    for `pad_biu_rvalid`, `cur_rdata_buf_rvalid`, `cur_rdata_buf_rid`,
+    `cur_rdata_is_ifu`, and `rack_full` to see why IFU data valid disappears.
+
+## 2026-02-07 15:56
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_155605.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_155605.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - wolf `ct_biu_read_channel` shows `pad_arvalid` for 0x50 at cycle 2485,
+    but no subsequent `pad_rvalid` after the 2479/2480 return.
+  - `axi_interconnect128` window (2480–2520) shows `arvalid=0`/`rvalid=0`
+    after the 0x40 transaction; no AR for 0x50 reaches the interconnect.
+- Hypotheses:
+  - The final IFU AR request is lost between BIU output and AXI interconnect
+    (candidate: `axi_fifo` or top-level wiring into `soc.v`).
+- Instrumentation changes:
+  - Removed probes in IFU/LSU paths:
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ifctrl.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_pcgen.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_l1_refill.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/ct_ifu_ipb.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_rb.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_pfu.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_wmb.v`
+    - `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/lsu/rtl/ct_lsu_top.v`
+  - Added interconnect read-path debug:
+    - `tests/data/openc910/smart_run/logical/axi/axi_interconnect128.v`
+      (`[c910-axi-ic]` rvalid/rready/rsel + 2480–2520 window)
+- Results/next steps:
+  - Add probes in `tests/data/openc910/smart_run/logical/axi/axi_fifo.v` to
+    see if `biu_pad_arvalid/araddr` reaches the FIFO, and whether `pop_req`
+   /`fifo_pad_arvalid` assert for the 0x50 request.
+
+## 2026-02-07 16:04
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_160432.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_160432.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref `axi_fifo` sees `biu_arvalid` for addr 0x50 at cycle 2504/2505
+    (`create_vld=1`, `fifo_pad_arvalid=1`).
+  - wolf `axi_fifo` never logs `biu_araddr=0x50`; window 2480–2520 shows
+    `biu_arvalid=0`, `create_en=0`, `fifo_pad_arvalid=0`.
+- Hypotheses:
+  - `biu_pad_arvalid/araddr` is being lost before `axi_fifo` in wolf.
+- Instrumentation changes:
+  - Added `[c910-axi-fifo]` in
+    `tests/data/openc910/smart_run/logical/axi/axi_fifo.v`
+    (create/pop/fifo_arvalid + 2480–2520 window).
+- Results/next steps:
+  - Probe BIU top output to confirm whether `biu_pad_arvalid` still asserts
+    for 0x50 in wolf.
+
+## 2026-02-07 16:13
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_161339.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_161339.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - wolf `ct_biu_top` shows `biu_pad_arvalid` 0->1 for addr 0x50 at cycle 2485.
+  - wolf `axi_fifo` still shows no `biu_araddr=0x50`.
+- Hypotheses:
+  - Loss happens between `ct_biu_top` and `axi_fifo` (wrapper wiring).
+- Instrumentation changes:
+  - Added `[c910-biu-top]` in
+    `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/biu/rtl/ct_biu_top.v`
+    (arvalid/araddr/arready + 2480–2520 window).
+- Results/next steps:
+  - Probe `cpu_sub_system_axi` (wrapper output) to see whether 0x50 survives
+    the wrapper boundary.
+
+## 2026-02-07 16:21
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_162109.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_162109.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref `cpu_sub_system_axi` shows `biu_pad_arvalid` for addr 0x50 at cycle 2504.
+  - wolf `cpu_sub_system_axi` never shows `araddr=0x50` (last is 0x40 at 2478),
+    even though `ct_biu_top` still shows 0x50 at 2485.
+- Hypotheses:
+  - The 0x50 AR is dropped between `ct_biu_top` output and the wrapper
+    output in `cpu_sub_system_axi`/`rv_integration_platform` (likely port
+    wiring or missing connection in the wrapper/ct_core boundary).
+- Instrumentation changes:
+  - Added `[c910-cpu-axi]` in
+    `tests/data/openc910/smart_run/logical/common/cpu_sub_system_axi.v`
+    (biu_pad_arvalid/araddr/arready + 2480–2520 window).
+- Results/next steps:
+  - Next probe should be inside `rv_integration_platform.v` (and/or `ct_core`
+    top-level wrapper) to see if `biu_pad_arvalid` is lost between core and
+    wrapper outputs.
+
+## 2026-02-07 20:35
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_202754.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_202754.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref `[c910-open]`/`[c910-rvip]` show `arvalid 0->1` with `araddr=0x50` at cycle 2504.
+  - wolf `[c910-open]`/`[c910-rvip]` show only `araddr=0x40` across cycles 2480-2520 (no 0x50), while
+    wolf `[c910-biu-top]` still shows `arvalid 0->1` with `araddr=0x50` at cycle 2485.
+- Hypotheses:
+  - The 0x50 AR is dropped between `ct_biu_top` and the top-level `biu_pad_*` outputs inside
+    `ct_ciu_top` (or its ebiu/bus-io submodules), likely a missing/incorrect connection in
+    the wolf emit.
+- Instrumentation changes:
+  - Added `[c910-open]` in `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/cpu/rtl/openC910.v`.
+  - Added `[c910-rvip]` in `tests/data/openc910/smart_run/logical/common/rv_integration_platform.v`.
+  - Removed `[c910-axi-ic]` and `[c910-axi-fifo]` probes from
+    `tests/data/openc910/smart_run/logical/axi/axi_interconnect128.v` and
+    `tests/data/openc910/smart_run/logical/axi/axi_fifo.v`.
+- Results/next steps:
+  - Convergence point: `ct_ciu_top` output path (`biu_pad_arvalid/araddr`) between
+    `ct_biu_top` and `openC910` outputs.
+  - Next probe should be inside `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ciu/rtl/ct_ciu_top.v`
+    (and possibly `ct_ciu_ebiuif.v` or `ct_ciu_bus_io.v`) to log the internal AR signals feeding
+    `biu_pad_*` and pinpoint where 0x50 is dropped.
+
+## 2026-02-07 21:14
+- Command: `make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260207_210755.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260207_210755.log
+- Equivalence: Not equivalent (ref completes CoreMark; wolf stalls at 100k cycles)
+- Evidence:
+  - ref `[c910-ebiuif]` shows `snb1_v 0->1` with `snb1_a=0x50` and `arvalid 0->1` at cycle 2500;
+    wolf shows no `snb1_v` assertion in the same window (all zero).
+  - ref `[c910-snb]` (snb1 instance) shows `arvalid 0->1 araddr=0x50` at cycle 2500;
+    wolf `[c910-snb]` never asserts `arvalid` in the 2480-2520 window (stays 0, addr=0x40).
+- Hypotheses:
+  - The missing 0x50 AR is now isolated to the snb1 path inside `ct_ciu_snb` (or its arb/SAB inputs);
+    `snb1_ebiuif_arvalid` never asserts in wolf.
+- Instrumentation changes:
+  - Added `[c910-ebiuif]` in `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ciu/rtl/ct_ciu_ebiuif.v`
+    (snb0/1 arvalid/araddr, rd_req, depd, sel, ebiuif arvalid/araddr).
+  - Added `[c910-snb]` in `tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ciu/rtl/ct_ciu_snb.v`
+    (snb_ebiuif_arvalid/araddr + piu*_snb_ar_req + bmbif_snb_bar_req, snb1 tagged).
+- Results/next steps:
+  - Convergence point: `ct_ciu_snb` snb1 output (`snb_ebiuif_arvalid`) or its immediate arb/SAB
+    sources that generate `sab_arb_ebiu_ar_req` / `sab_arb_ebiu_ar_bus`.
+  - Next probe should target `ct_ciu_snb_arb.v` (or add `sab_arb_ebiu_ar_req`/bus logging in
+    `ct_ciu_snb.v`) to see whether the request is missing before arbitration or dropped by it.
