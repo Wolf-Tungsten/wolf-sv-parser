@@ -1437,3 +1437,19 @@
   - `case_032` now passes for both ref and wolf (100% coverage reported from DA-based line counts).
 - Results/next steps:
   - Next: re-run the full C910 coremark diff to confirm the end-to-end divergence is resolved.
+
+## 2026-02-08 18:53
+- Command: `C910_SIM_MAX_CYCLE=5000 C910_WAVEFORM=1 make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_184537.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_184537.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_184537.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_184537.fst
+- Equivalence: Equivalent (no functional deltas at 5000-cycle cutoff)
+- Evidence:
+  - No `ERROR/FATAL/ASSERT/WARNING` lines in either log (rg finds none).
+  - CoreMark summary lines are absent in both logs because the run hits the max-cycle limit (`C910_SIM_MAX_CYCLE = 5000`).
+  - `diff -u` shows only expected differences: the FST path line (ref vs wolf filename) and minor log line re-ordering for identical `[axi-memaddr]` lines; values and `c910-iret` trace content match.
+- Results/next steps:
+  - Stop: logs are equivalent for this run; no waveform diff needed.

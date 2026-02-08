@@ -86,9 +86,10 @@ Keep hypotheses short and traceable to candidate modules/signals. Iterate by nar
 Recommended waveform workflow (no extra runs):
 
 1) Identify a small set of top-level signals to compare (clock/reset/PC/commit/CSR/memory interface).
-2) Use the FST ROI tool to extract a short time window around the first divergence.
-3) Compare ref vs wolf JSONL output; when you see a differing signal, descend into that module’s sub-hierarchy and repeat.
-4) Continue until the smallest root-cause module is isolated (the earliest module where the mismatch originates).
+2) Run `fst_diff_tool.py` to auto-find the earliest differing signal/time (optionally with a narrowed signal list).
+3) Use the FST ROI tool to extract a short time window around the first divergence.
+4) Compare ref vs wolf JSONL output; when you see a differing signal, descend into that module’s sub-hierarchy and repeat.
+5) Continue until the smallest root-cause module is isolated (the earliest module where the mismatch originates).
 
 Root-cause module judgment criteria (use multiple signals to confirm):
 
@@ -99,7 +100,7 @@ Root-cause module judgment criteria (use multiple signals to confirm):
 5) **Single-source fanout**: if a single output from module A feeds multiple downstream modules and all downstream differences can be explained by that output divergence, module A is the likely root cause.
 6) **Minimal scope confirmation**: once a candidate module is found, confirm by checking a smaller sub-hierarchy inside it; if no earlier divergence is found, finalize the module.
 
-Waveform tool:
+Waveform tools:
 
 ```bash
 python3 tools/fst_roi/fst_roi.py --fst <waveform.fst> --signals <sigA>,<sigB> --t0 <start> --t1 <end> --jsonl-mode fill
@@ -107,6 +108,17 @@ python3 tools/fst_roi/fst_roi.py --fst <waveform.fst> --signals <sigA>,<sigB> --
 
 Prefer `--jsonl-mode fill` to get full per-time snapshots. Use `--jsonl-mode time` for lighter output and `--jsonl-mode event` for raw event streams.
 If the tool is missing needed features or is cumbersome for the current investigation, it is acceptable to modify `tools/fst_roi/fst_roi.py` to improve the workflow.
+
+Earliest-diff finder (use this first to auto-locate the earliest divergence):
+
+```bash
+python3 tools/fst_diff_tool.py --ref <ref.fst> --wolf <wolf.fst> --top 5 --ignore-x
+```
+
+Notes:
+- The tool auto-matches the common signal intersection between the two FSTs.
+- Use `--signals` / `--signal` / `--signals-file` to focus on a subset of signals once you have a candidate module.
+- Add `--t0/--t1` to constrain the ROI and refine the earliest diff window.
 
 ### 5) Analyze and iterate
 
