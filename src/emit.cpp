@@ -3275,7 +3275,16 @@ namespace grh::emit
                     const std::string rhs = resultWidth > 0
                                                 ? extendOperand(operands[1], resultWidth)
                                                 : valueExpr(operands[1]);
-                    addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";", opId);
+                    const bool signedCompare =
+                        (op.kind() == grh::ir::OperationKind::kLt ||
+                         op.kind() == grh::ir::OperationKind::kLe ||
+                         op.kind() == grh::ir::OperationKind::kGt ||
+                         op.kind() == grh::ir::OperationKind::kGe) &&
+                        graph->getValue(operands[0]).isSigned() &&
+                        graph->getValue(operands[1]).isSigned();
+                    const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
+                    const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
+                    addAssign("assign " + valueName(results[0]) + " = " + lhsExpr + " " + tok + " " + rhsExpr + ";", opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -5636,7 +5645,16 @@ namespace grh::emit
                 const std::string rhs = resultWidth > 0
                                             ? extendOperand(operands[1], resultWidth)
                                             : valueExpr(operands[1]);
-                addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " + rhs + ";",
+                const bool signedCompare =
+                    (kind == grh::ir::OperationKind::kLt ||
+                     kind == grh::ir::OperationKind::kLe ||
+                     kind == grh::ir::OperationKind::kGt ||
+                     kind == grh::ir::OperationKind::kGe) &&
+                    view.valueSigned(operands[0]) &&
+                    view.valueSigned(operands[1]);
+                const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
+                const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
+                addAssign("assign " + valueName(results[0]) + " = " + lhsExpr + " " + tok + " " + rhsExpr + ";",
                           opId);
                 ensureWireDecl(results[0]);
                 break;

@@ -6193,11 +6193,35 @@ private:
                     {
                         return kInvalidPlanIndex;
                     }
+                    ExprNodeId converted = operand;
                     if (expr.type)
                     {
-                        return applyConversion(operand, expr.type, expr.sourceRange.start());
+                        converted = applyConversion(operand, expr.type, expr.sourceRange.start());
+                        if (converted == kInvalidPlanIndex)
+                        {
+                            return kInvalidPlanIndex;
+                        }
                     }
-                    return operand;
+                    ExprNode castNode;
+                    castNode.kind = ExprNodeKind::Operation;
+                    castNode.op = grh::ir::OperationKind::kAssign;
+                    castNode.operands = {converted};
+                    castNode.location = expr.sourceRange.start();
+                    castNode.tempSymbol = makeTempSymbol();
+                    castNode.isSigned = (name == "signed");
+                    if (expr.type)
+                    {
+                        uint64_t width = expr.type->getBitstreamWidth();
+                        if (width > 0)
+                        {
+                            const uint64_t maxValue =
+                                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                            castNode.widthHint = width > maxValue
+                                                     ? std::numeric_limits<int32_t>::max()
+                                                     : static_cast<int32_t>(width);
+                        }
+                    }
+                    return addNodeForExpr(std::move(castNode));
                 }
                 if (name == "time" || name == "stime" || name == "realtime")
                 {
@@ -6217,7 +6241,36 @@ private:
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
             ExprNodeId operand = lowerExpression(conversion->operand());
-            return applyConversion(operand, conversion->type, expr.sourceRange.start());
+            ExprNodeId converted =
+                applyConversion(operand, conversion->type, expr.sourceRange.start());
+            if (converted == kInvalidPlanIndex)
+            {
+                return kInvalidPlanIndex;
+            }
+            if (!conversion->isImplicit())
+            {
+                ExprNode castNode;
+                castNode.kind = ExprNodeKind::Operation;
+                castNode.op = grh::ir::OperationKind::kAssign;
+                castNode.operands = {converted};
+                castNode.location = expr.sourceRange.start();
+                castNode.tempSymbol = makeTempSymbol();
+                castNode.isSigned = conversion->type ? conversion->type->isSigned() : false;
+                if (conversion->type)
+                {
+                    uint64_t width = conversion->type->getBitstreamWidth();
+                    if (width > 0)
+                    {
+                        const uint64_t maxValue =
+                            static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+                        castNode.widthHint = width > maxValue
+                                                 ? std::numeric_limits<int32_t>::max()
+                                                 : static_cast<int32_t>(width);
+                    }
+                }
+                return addNodeForExpr(std::move(castNode));
+            }
+            return converted;
         }
         if (const auto* unary = expr.as_if<slang::ast::UnaryExpression>())
         {
@@ -14162,7 +14215,7 @@ private:
             }
         }
         width = normalizeWidth(width);
-        grh::ir::ValueId result = graph_.createValue(sym, width, false);
+        grh::ir::ValueId result = graph_.createValue(sym, width, node.isSigned);
         graph_.addResult(op, result);
         valueByExpr_[id] = result;
         return result;

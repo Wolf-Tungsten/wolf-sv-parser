@@ -1453,3 +1453,111 @@
   - `diff -u` shows only expected differences: the FST path line (ref vs wolf filename) and minor log line re-ordering for identical `[axi-memaddr]` lines; values and `c910-iret` trace content match.
 - Results/next steps:
   - Stop: logs are equivalent for this run; no waveform diff needed.
+
+## 2026-02-08 19:42
+- Command: `C910_SIM_MAX_CYCLE=50000 C910_WAVEFORM=1 make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_193412.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_193412.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_193412.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_193412.fst
+- Equivalence: Equivalent (no functional deltas at 50000-cycle cutoff)
+- Evidence:
+  - No `ERROR/FATAL/ASSERT/WARNING` lines in either log (rg finds none).
+  - CoreMark summary lines are absent in both logs because the run hits the max-cycle limit (`C910_SIM_MAX_CYCLE = 50000`).
+  - `diff -u` shows only expected differences: the FST path lines (ref vs wolf filename). All `c910-iret` traces and the final `c910-status` line match (`cycle=50000`, `retire_cnt=25462`, `pc0=0x2e50`).
+- Results/next steps:
+  - Stop: logs are equivalent for this run; no waveform diff needed.
+
+## 2026-02-08 20:35
+- Command: `C910_SIM_MAX_CYCLE=300000 C910_WAVEFORM=1 make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_194413.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_194413.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_194413.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_194413.fst
+- Equivalence: Not equivalent.
+- Evidence:
+  - `diff -u` shows `c910-status` lines diverge at cycles 150000/200000/250000/300000 (retire_cnt, pc0/pc1/pc2, and araddr differ).
+  - `fst_diff_tool.py` earliest retire-PC diffs: `TOP.core0_retire1_pc` at t=493875 and `TOP.core0_retire0_pc` at t=493877 (values diverge between ref/wolf).
+  - ROI around the first divergence shows retire/commit timing skew:
+    - `rtu_yy_xx_retire1` deasserts at t=493875 in ref vs t=493879 in wolf.
+    - `rob_retire_commit1` drops at t=493877 in ref while remaining asserted in wolf (include-initial shows ref 1→0, wolf stays 1).
+- Hypotheses:
+  - Divergence originates in `x_ct_rtu_rob` retire/commit control (commit1 timing differs), which then skews `rtu_yy_xx_retire1` and the retired PCs.
+- Waveform ROI extraction:
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_194413.fst --signals TOP.sim_top.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.rtu_yy_xx_retire1 --t0 493870 --t1 493880 --jsonl-mode event`
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_194413.fst --signals TOP.sim_top.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.x_ct_rtu_top.x_ct_rtu_rob.rob_retire_commit1 --t0 493870 --t1 493880 --jsonl-mode event --include-initial`
+- Results/next steps:
+  - Next: walk upstream inside `x_ct_rtu_rob` to find the earliest internal signal that differs *before* `rob_retire_commit1` drops (e.g., `rob_pst_retire_inst1_iid`, `rob_retire_inst1_*`, and retire/flush gating). If inputs match but commit output diverges, root-cause is within `x_ct_rtu_rob`.
+
+## 2026-02-08 21:00
+- Command: continued waveform narrowing on BJU/PCFIFO path (no re-run).
+- Logs/FSTs: same as 2026-02-08 20:35 run (20260208_194413).
+- Equivalence: Not equivalent.
+- Evidence:
+  - Earliest mismatch moves upstream into BJU: `x_ct_iu_bju.bju_cbus_ex2_pipe2_bht_mispred`, `bju_top_mispred_iid`, and `iu_ifu_bht_condbr_taken` diverge at t=493873.
+  - Inside `x_ct_iu_bju_pcfifo` the earliest diff is at t=493873 on both entry0 and entry1:
+    - `x_ct_iu_bju_pcfifo_entry{0,1}.bju_pcfifo_ex2_bht_mispred` differs between ref/wolf.
+    - At the same timestamp, the local inputs match: `bht_pred=1` and `condbr/bju_pcfifo_ex2_condbr` are identical in ref vs wolf, yet `bju_pcfifo_ex2_bht_mispred` flips.
+  - Downstream chain confirmed: `rob_retire_inst0_condbr_taken`/`rtu_ifu_retire0_condbr_taken` differ at t=493875 → `retire_rob_dbg_inst0_mispred`/`retire_rob_flush` at t=493877 → retire PC streams diverge.
+- Waveform ROI extraction:
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_iu_bju.{bju_cbus_ex2_pipe2_bht_mispred,bju_top_mispred_iid,iu_ifu_bht_condbr_taken} --t0 0 --t1 600000 --top 10 --ignore-x --format table`
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_iu_bju_pcfifo_entry{0,1}.bju_pcfifo_ex2_bht_mispred --t0 0 --t1 600000 --top 10 --ignore-x --format table`
+  - `python3 tools/fst_roi/fst_roi.py --fst ...194413.fst --signals TOP...pcfifo_entry{0,1}.{bju_pcfifo_ex2_bht_mispred,bju_pcfifo_ex2_condbr,bht_pred,condbr} --t0 493870 --t1 493880 --jsonl-mode fill --include-initial`
+- Results/next steps:
+  - Root-cause module (smallest isolated so far): `x_ct_iu_bju_pcfifo_entry{0,1}` inside `x_ct_iu_bju_pcfifo`. `bju_pcfifo_ex2_bht_mispred` diverges while its local inputs match at the same time.
+  - Next: inspect the emitted SV for `x_ct_iu_bju_pcfifo_entry` around the `bht_mispred`/`bht_pred`/`condbr` computation for width/sign or ordering issues; compare against original RTL for that logic.
+
+## 2026-02-08 22:35
+- Command: continued waveform narrowing on BJU/IDU/PRF path (no re-run).
+- Logs/FSTs: same as 2026-02-08 20:35 run (20260208_194413).
+- Equivalence: Not equivalent.
+- Evidence:
+  - `fst_diff_tool.py` on `x_ct_iu_bju` shows `bju_bht_mispred`/`bju_bht_mispred_vld` diverge at t=493871; the first upstream mismatch is `condbr_taken` (0 vs 1) and `iu_ifu_bht_condbr_taken` flips at t=493873.
+  - `condbr_taken` mismatch traces to `ex1_pipe2_src1` (ref vs wolf) at t=493871.
+  - `ex1_pipe2_src1` is loaded from `idu_iu_rf_pipe2_src1`; that signal already differs at t=493869.
+  - Inside IDU RF DP, `rf_pipe2_src1_data` matches the forwarded data; both `fwd_dp_rf_pipe2_src1_data` and `prf_dp_rf_pipe2_src1_data` diverge at t=493869 (selection signals match).
+  - PRF contents diverge widely: `preg*_reg_dout` diffs appear at t=493860. The src1 value matches `preg32_reg_dout` (ref 0x...13da vs wolf 0x...f482), implying `dp_prf_rf_pipe2_src1_preg=32` in that window.
+  - Earliest diff in IU writeback data observed at t=331231 (`iu_idu_ex2_pipe0_wb_preg_data`), with `iu_idu_ex2_pipe1_wb_preg_data` diverging at t=331233 and LSU pipe3 data at t=351417. This predates the PRF divergence.
+- Waveform commands:
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_iu_bju.{bju_bht_mispred,bju_bht_mispred_vld,condbr_taken,ex1_pipe2_bht_pred,bju_inst_condbr,bju_inst_br,bju_br_page_fault,iu_ifu_bht_condbr_taken} --t0 493860 --t1 493890 --top 20 --ignore-x --format table`
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_iu_bju.{ex1_pipe2_src1,ex1_pipe2_src0,ex1_pipe2_func,branch_*_taken} --t0 493860 --t1 493890 --top 20 --ignore-x --format table --strip-width`
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_idu_top.x_ct_idu_rf_dp.{rf_pipe2_src1_data,fwd_dp_rf_pipe2_src1_data,prf_dp_rf_pipe2_src1_data} --t0 493860 --t1 493890 --top 20 --ignore-x --format table --strip-width`
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_idu_top.x_ct_idu_rf_prf_pregfile.preg*_reg_dout* --t0 493860 --t1 493890 --top 20 --ignore-x --format table --strip-width`
+  - `python3 tools/fst_diff_tool.py --ref ...194413.fst --wolf ...194413.fst --signals TOP...x_ct_top_0.x_ct_core.{iu_idu_ex2_pipe0_wb_preg_data,iu_idu_ex2_pipe1_wb_preg_data,lsu_idu_wb_pipe3_wb_preg_data} --t0 0 --t1 493900 --top 10 --ignore-x --format table --strip-width`
+- Results/next steps:
+  - Root-cause now appears upstream of IDU: IU writeback data already diverges (t=331231). Next: trace `iu_idu_ex2_pipe{0,1}_wb_preg_data` back through `ct_iu_rbus` to the producing units (ALU/div/cp0/vfpu/special), and identify the earliest mismatching producer signal.
+
+## 2026-02-08 23:10
+- Command: continued waveform narrowing into ALU0 forward path (no re-run).
+- Logs/FSTs: same as 2026-02-08 20:35 run (20260208_194413).
+- Equivalence: Not equivalent.
+- Evidence:
+  - Earliest IU divergence is `iu_idu_ex1_pipe0_fwd_preg_data` at t=331229; it matches `alu_rbus_ex1_pipex_fwd_data` (ALU0).
+  - At t=331229, `adder_rslt_slt` differs while `alu_ex1_adder_src0/1` and `alu_ex1_adder_func` show no diff in the same ROI (signed compare expected).
+  - Wolf emitted SV for `ct_iu_alu` uses **unsigned** compare for signed operations:
+    - `adder_slts = __expr_91 < __expr_98;` (no `$signed`), whereas RTL is `$signed(src0) < $signed(src1)`.
+  - This explains the `adder_rslt_slt` mismatch that seeds the forward data divergence.
+- Fix (pending validation):
+  - Emit signed relational compares by wrapping operands in `$signed(...)` when both operands are signed (kLt/kLe/kGt/kGe).
+  - Code updated in `src/emit.cpp` (both IR emission paths).
+- Results/next steps:
+  - Re-run C910 diff (or a minimal ALU signed-compare repro) to confirm the divergence is resolved.
+
+## 2026-02-09 00:35
+- Command: `C910_SIM_MAX_CYCLE=400000 C910_WAVEFORM=1 make run_c910_diff -j`.
+- Logs/FSTs:
+  - `build/logs/c910/c910_ref_coremark_20260209_000756.{log,fst}`
+  - `build/logs/c910/c910_wolf_coremark_20260209_000756.{log,fst}`
+- Equivalence: Equivalent (logs match aside from FST path).
+- Fix applied:
+  - Preserve `$signed/$unsigned` conversions even when width is unchanged by emitting an explicit cast node and carrying signedness in IR results.
+  - Update conversion handling for explicit `ConversionExpression` to keep signedness in the graph.
+  - Emit now shows `$signed(...)` for `ct_iu_alu` signed compares (e.g., `adder_slts`), matching RTL.
+- Evidence:
+  - `rg -n "ERROR|FATAL|ASSERT|WARNING" ...000756.log` returns no hits.
+  - `VCUNT_SIM`/CoreMark lines match exactly (same cycle count and score).
+  - `diff -u` between ref/wolf logs shows only waveform path differences.
