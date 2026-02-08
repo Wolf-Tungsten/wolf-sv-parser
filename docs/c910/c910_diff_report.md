@@ -1169,3 +1169,157 @@
     sources that generate `sab_arb_ebiu_ar_req` / `sab_arb_ebiu_ar_bus`.
   - Next probe should target `ct_ciu_snb_arb.v` (or add `sab_arb_ebiu_ar_req`/bus logging in
     `ct_ciu_snb.v`) to see whether the request is missing before arbitration or dropped by it.
+
+## 2026-02-08 00:52
+- Command: `C910_SIM_MAX_CYCLE=5000 C910_WAVEFORM=1 make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.fst
+- Equivalence: Not equivalent (both hit the 5000-cycle limit; wolf stops retire printing after idx=19)
+- Evidence:
+  - Log diff: ref prints `[c910-iret]` idx 20..100 (cycle 2523..4350), wolf prints only idx 1..19.
+  - Waveform ROI: ref shows `TOP.retire0` pulses starting at time 252645, wolf stays 0 from that point.
+- Waveform ROI details (jsonl fill + include-initial):
+  - Top-level retire signals: `TOP.retire0/1/2`, `TOP.core0_retire{0,1,2}_pc`, `TOP.core0_cpu_no_retire` with `--t0 252500 --t1 253500`.
+  - RTU/IDU chain: `x_ct_rtu_top.rtu_pad_retire0`, `x_ct_rtu_top.rtu_yy_xx_retire0`,
+    `x_ct_rtu_top.rtu_idu_retire0_inst_vld`, `x_ct_rtu_retire.rtu_idu_retire0_inst_vld`,
+    `x_ct_idu_top.rtu_idu_retire0_inst_vld`, `x_ct_idu_rf_prf_eregfile.rtu_idu_retire0_inst_vld`
+    with `--t0 252600 --t1 252800`.
+- Results/next steps:
+  - Convergence point: `x_ct_idu_rf_prf_eregfile` (core0) — `rtu_idu_retire0_inst_vld` stops toggling in wolf at time 252645 while ref continues; downstream RTU/core/top-level retire signals follow this divergence.
+  - Next: probe inputs to `x_ct_idu_rf_prf_eregfile` around time 252640–252700 (writeback valid/enables, ROB/commit interface, retire gating) to see what first differs in wolf vs ref.
+
+## 2026-02-08 01:40
+- Command: `python3 tools/fst_roi/fst_roi.py ...` (ROI-only backtrace, no rerun)
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.fst
+- Equivalence: Not equivalent
+- Evidence:
+  - `x_ct_idu_rf_prf_eregfile` inputs: `cp0_idu_icg_en`, `cp0_yy_clk_en`, `cpurst_b`, `pad_yy_icg_scan_en`, `rtu_idu_pst_ereg_retired_released_wb` match; only `rtu_idu_retire0_inst_vld` pulses in ref (e.g., time 252645/252649/252697), missing in wolf.
+  - RTU/ROB chain: `rob_read0_inst_vld`/`rob_read0_cmplted`/`rob_retire_inst0_vld` pulse in ref around 252641–252649, missing in wolf.
+  - IDU chain: `ctrl_id_pipedown_inst0_vld` → `ir_pipedown_inst0_vld` → `is_dis_inst0_vld` → `idu_rtu_rob_create0_en` pulse in ref around 252633–252639, missing in wolf.
+  - IFU IBCTRL/IBDP: `ibctrl_ibdp_bypass_inst_vld` (252631) and `ibctrl_ibdp_ibuf_inst_vld` (252633) pulse in ref, missing in wolf; `ipctrl_ibctrl_vld` also pulses in ref at 252631 but stays 0 in wolf.
+  - IFU IPCTRL: `ifctrl_ipctrl_vld`/`ip_data_vld` pulse in ref at 252629; wolf stays 0. `ip_self_stall=0` in ref vs `ip_self_stall=1` in wolf.
+  - IFU IFCTRL: `if_inst_data_vld=1` in ref vs `0` in wolf; wolf holds `l1_refill_ifctrl_refill_on=1` and `l1_refill_ifctrl_trans_cmplt=0`.
+  - L1 refill: `ipb_l1_refill_data_vld` pulses in ref at 252627; wolf never asserts it. `refill_cur_state` stays `0100` with `refill_sm_on=1` in wolf.
+  - IPB: `biu_ref_data_vld` (`biu_ifu_rd_data_vld`) pulses in ref at 252627; wolf stays 0.
+  - BIU read channel: `pad_biu_rvalid` pulse in ref at 252625 (and `biu_ifu_rd_data_vld` at 252627); wolf never asserts `pad_biu_rvalid`.
+- Waveform ROI details (jsonl fill + include-initial):
+  - IDU/RTU/ROB: `x_ct_idu_rf_prf_eregfile.*`, `x_ct_rtu_top.*` with `--t0 252600 --t1 252700`.
+  - IFU IBCTRL/IBDP/IPCTRL/IFCTRL: key `*_vld`/stall signals with `--t0 252628 --t1 252638`.
+  - L1 refill/IPB/BIU read channel: `refill_sm_on`, `refill_cur_state`, `ipb_l1_refill_data_vld`, `biu_ifu_rd_data_vld`, `pad_biu_rvalid` with `--t0 252620 --t1 252660`.
+- Results/next steps:
+  - Convergence point: `x_ct_biu_top.x_ct_biu_read_channel.pad_biu_rvalid` (ref pulse at time 252625; wolf missing). This is the earliest divergence found in the ROI chain.
+  - Next: trace the read-response path outside BIU (e.g., `x_soc.x_axi2ahb.pad_biu_rvalid`) and confirm whether the corresponding AR request is issued/accepted in wolf; if AR is missing, backtrace `biu_pad_arvalid/araddr` to the IFU request source.
+
+## 2026-02-08 07:55
+- Command: `python3 tools/fst_roi/fst_roi.py ...` (ROI-only backtrace, no rerun)
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.fst
+- Equivalence: Not equivalent
+- Evidence:
+  - Response path: `x_ct_piu0_top.snb1_piu_rvalid` pulses in ref at time 252621 but is missing in wolf; it feeds `ciu_ibiu_rvalid` (pad_ibiu0_rvalid) at time 252625.
+  - Inside SNB1: `x_ct_ciu_snb_1.ebiuif_snb_rvalid` pulses in ref at 252617; wolf stays 0. This directly drives `snb_piu0_rvalid`.
+  - EBIU interface: `x_ct_ciu_ebiuif.ebiu_ebiuif_snb1_rvalid` pulses in ref at 252617; wolf missing. That input is sourced by `x_ct_ebiu_top.ebiu_ebiuif_snb1_rvalid`.
+  - EBIU top input: `x_ct_ebiu_top.pad_ebiu_rvalid` is 1 in ref around 252615 but remains 0 in wolf, so the read-response never enters the CIU/EBIU path in wolf.
+  - Top-level chain: `pad_biu_rvalid` pulses in ref at time 252615 across TOP/sim_top/x_soc/cpu_sub_system_axi/rv_integration_platform/x_cpu_top/x_ct_ciu_top, but never asserts in wolf.
+  - Request context: `ibiu0_pad_arvalid` pulses at 252585/252637/252689 in ref; wolf only has the 252585 pulse (missing later requests). Even with the shared 252585 request, the 252615 response is missing in wolf.
+- Waveform ROI details (jsonl fill + include-initial):
+  - PIU/SNB chain: `x_ct_piu0_top.{snb1_piu_rvalid,ciu_ibiu_rvalid}` with `--t0 252620 --t1 252640`.
+  - SNB1 internals: `x_ct_ciu_snb_1.{ebiuif_snb_rvalid,snb_piu0_rvalid}` with `--t0 252616 --t1 252636`.
+  - EBIU interface/top: `x_ct_ciu_ebiuif.ebiu_ebiuif_snb1_rvalid`, `x_ct_ebiu_top.pad_ebiu_rvalid` with `--t0 252616 --t1 252636`.
+  - Top-level pad response: `pad_biu_rvalid` chain with `--t0 252612 --t1 252620`.
+- Results/next steps:
+  - Convergence point: `x_ct_ebiu_top.pad_ebiu_rvalid` / top-level `pad_biu_rvalid` — ref asserts at time 252615, wolf remains 0. This is the earliest missing read-response signal feeding SNB1/PIU/IBIU0 and ultimately the IFU refill.
+  - Next: check why `pad_biu_rvalid` is not produced in wolf for the 252585 request (e.g., verify `biu_pad_arvalid`/`ibiu0_pad_arvalid` reach the bus adapter and whether `x_axi2ahb` or the memory model returns `pad_biu_rvalid` in wolf).
+
+## 2026-02-08 08:12
+- Command: `python3 tools/fst_roi/fst_roi.py ...` (ROI-only backtrace, no rerun)
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.fst
+- Equivalence: Not equivalent
+- Evidence:
+  - SoC read channel: ref asserts `fifo_pad_arvalid`/`arvalid_s0` at 252611 with addr 0x50 and `rvalid_s0` at 252615; wolf has no `fifo_pad_arvalid`/`arvalid_s0` pulse in the window (only the earlier 252563 return).
+  - `x_axi_fifo` shows the missing AR: ref has `biu_pad_arvalid=1` and `create_en/create_vld=1` at 252609 (addr 0x50), then `fifo_pad_arvalid` at 252611; wolf shows no `biu_pad_arvalid` or create/pop activity in 252560–252630.
+  - Core output vs CIU output: `x_ct_top_0.x_ct_biu_top.biu_pad_arvalid` pulses at 252585 with addr 0x50 in both ref/wolf, but `x_ct_ciu_top.biu_pad_arvalid` at 252609 appears only in ref (wolf never asserts), so the drop happens inside CIU/SNB path.
+  - `ct_piu0_top` inputs match: `ibiu_ciu_arvalid` (252585) and `piu_snb1_ar_req` (252587) pulse in both ref/wolf.
+  - `ct_ciu_snb_1` diverges after PIU: `piu0_snb_ar_req` matches, but `sab_arb_ebiu_ar_req`/`snb_ebiuif_arvalid` pulse at 252605/252607 only in ref.
+  - `ct_ciu_snb_1` SAB inputs match but output missing: `sab_ar_create_en`/`sab_ar_create_bus` match in ref/wolf at 252589, yet `sab_ebiur_req_vld` and `sab_ebiu_rd_sel` assert only in ref at 252605.
+  - `x_ct_ciu_snb_sab_entry0` state machine diverges: ref asserts `memr_req_vld` at 252603 and `memr_cur_state=MEMR_REQ` at 252605; wolf never asserts `memr_req_vld` and stays in `main_cur_state=POP`. Ref shows `sab_rack_sel` bit0 at 252579 and `pop_en=1` at 252581, while wolf never asserts `sab_rack_sel` or `pop_en`.
+- Hypotheses:
+  - The earliest mismatch is inside `x_ct_ciu_snb_1.x_ct_ciu_snb_sab_entry0`: inputs (`sab_ar_create_en`/bus) match, but the entry never exits POP or raises `memr_req_vld`, preventing `sab_ebiur_req_vld` and downstream EBIU AR.
+  - Missing `sab_rack_sel` in wolf suggests the rack/back path into `ct_ciu_snb_sab_entry0` is not firing, so the entry cannot pop and accept the next request.
+- Waveform ROI details (jsonl event + include-initial):
+  - SoC AR/R channel + AXI FIFO: `TOP.sim_top.{fifo_pad_arvalid,fifo_pad_araddr,arvalid_s0,rvalid_s0,rdata_s0_lo/hi}`, `x_axi_fifo.{biu_pad_arvalid,create_en,create_vld,pop_req,pop_en,fifo_pad_arvalid}` with `--t0 252560 --t1 252630`.
+  - CIU/PIU/SNB chain: `x_ct_piu0_top.{ibiu_ciu_arvalid,piu_snb1_ar_req}`, `x_ct_ciu_snb_1.{piu0_snb_ar_req,sab_arb_ebiu_ar_req,snb_ebiuif_arvalid}` with `--t0 252560 --t1 252630`.
+  - SAB + entry0: `x_ct_ciu_snb_1.{sab_ar_create_en,sab_ar_create_bus,sab_ebiur_req_vld,sab_ebiu_rd_sel,sab_rack_sel}`, `x_ct_ciu_snb_sab_entry0.{main_cur_state,memr_cur_state,memr_req_vld,pop_en}` with `--t0 252560 --t1 252630`.
+- Results/next steps:
+  - Convergence point: `x_ct_ciu_snb_1.x_ct_ciu_snb_sab_entry0` (entry stuck in POP; `memr_req_vld` never asserts in wolf despite matching create bus/en).
+  - Next: trace why `sab_rack_sel` is missing in wolf (check `sab_memr_vld/sel` and rack/back inputs into `ct_ciu_snb_sab_entry0`, or the rresp path into SAB) to see whether the rack path is dropped by emit or gated off upstream.
+
+## 2026-02-08 08:56
+- Command: `python3 tools/fst_roi/fst_roi.py ...` (ROI-only backtrace, no rerun)
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_003353.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_003353.fst
+- Equivalence: Not equivalent
+- Evidence:
+  - `ct_ciu_snb_1` rack source: ref asserts `piu0_snb_rack` at 252579 (and `sab_rack_sel` bit0), wolf never asserts `piu0_snb_rack`.
+  - `ct_piu0_top` inputs match: `ibiu_ciu_rack` and `ibiu_ciu_rack_reg` pulse at 252577/252579 in both ref/wolf; `rack_dfifo_pop_bus_vld=1` in both.
+  - Divergence is in rack DFIFO data: ref `rack_dfifo_pop_bus=0100000` while `rack_dfifo_pop_bus_vld=1`, wolf drops `rack_dfifo_pop_bus` to `0000000` at 252579, clearing bit5 and suppressing `piu_snb1_rack`.
+  - Inside `x_ct_piu_rack_dfifo` (ct_fifo):
+    - Inputs match: `fifo_create_en`/`fifo_create_en_dp` pulse at 252571 with `fifo_create_data=0100000` in both.
+    - `fifo_entry_create_dp` asserts entry0 in both at 252571.
+    - Ref updates `fifo_entry_cont[0]=0100000` at 252573; wolf never updates `fifo_entry_cont[0]` (stays 0), despite the same create inputs.
+  - Result: `fifo_pop_data`/`rack_dfifo_pop_bus` becomes unstable in wolf, causing `piu_snb1_rack` to remain low and keeping `sab_rack_sel` at 0; `x_ct_ciu_snb_sab_entry0` stays in POP and never raises `memr_req_vld`.
+- Hypotheses:
+  - The earliest mismatch is inside `ct_fifo` used by `x_ct_piu_rack_dfifo`: entry content (`fifo_entry_cont`) is not being written in wolf even though create signals match. This suggests an emit bug around the gated entry clock or array write (`fifo_entry_cont[i] <= fifo_create_data`) in generated SV.
+- Waveform ROI details (jsonl event + include-initial):
+  - PIU rack path: `x_ct_piu0_top.{ibiu_ciu_rack,ibiu_ciu_rack_reg,piu_snb1_rack,piu_snbx_rack_sid,rack_dfifo_pop_bus_vld,rack_dfifo_pop_bus}` with `--t0 252560 --t1 252630`.
+  - DFIFO internals: `x_ct_piu_rack_dfifo.{fifo_create_en,fifo_create_en_dp,fifo_entry_create_dp,fifo_create_data,fifo_entry_cont[0],fifo_pop_data}` with `--t0 252560 --t1 252630`.
+- Results/next steps:
+  - Convergence point: `x_ct_piu0_top.x_ct_piu_rack_dfifo` (ct_fifo entry write). Inputs match; `fifo_entry_cont[0]` fails to update only in wolf, leading to missing `piu0_snb_rack`.
+  - Next: inspect wolf emit of `ct_fifo` for this instance (array write) to find the concrete SV mismatch.
+
+  - Phase: wolf emit inspection
+    - `tests/data/openc910/smart_run/work_wolf/wolf_emit/sim_top_wolf.sv` shows `x_ct_piu_rack_dfifo` uses `ct_fifo__p1247403345692613480`.
+    - In that module, each `fifo_entry_cont[i]` is driven by *three* always blocks (reset, create, and a write-back from `__mem_data_i`). Example for entry 7 around lines 134764–134779:
+      - `fifo_entry_cont[7] <= __expr_61` on create.
+      - `fifo_entry_cont[7] <= __mem_data_0` when not creating.
+      - `__mem_data_0 <= __mem_rd_0` on the same clock when not creating.
+    - This creates a one-cycle feedback that causes `fifo_entry_cont[7]` to oscillate between old and new values when the clock is free-running, matching the wolf waveform where `fifo_entry_cont[7]` toggles every cycle after the create pulse.
+    - The original `ct_fifo.v` uses a *single* always block per entry with an explicit self-hold (`else fifo_entry_cont[i] <= fifo_entry_cont[i]`), which does not oscillate. The wolf emit’s memory-read/write lowering is therefore not behaviorally equivalent here.
+    - Likely root cause in wolf-sv-parser: the synchronous memory read lowering in `src/convert.cpp` (creation of `__mem_data_` / `__mem_rd_` + separate write-back) is incorrectly generated for this self-hold pattern.
+
+## 2026-02-08 09:15
+- Command: minimal repro with iverilog (`build/artifacts/c910_minrepro/ct_fifo_min.sv`)
+- Equivalence: Not equivalent (behavioral mismatch between ref-style and wolf-style ct_fifo)
+- Evidence:
+  - Ref model holds entry stable after create; wolf model toggles every cycle.
+  - Simulation output excerpt:
+    - `t=9000  ref=0100000 wolf=0100000`
+    - `t=11000 ref=0100000 wolf=0000000`
+    - `t=13000 ref=0100000 wolf=0100000`
+- Hypothesis:
+  - The wolf memory-lowering transforms a single always block with self-hold into multiple always blocks with a read-back register; with a free-running gated clock, this becomes a ping-pong that oscillates the entry contents.
+- Results/next steps:
+  - Minimal repro confirms the structural issue independent of the full C910 design.
+  - Next: implement a fix in the memory-lowering path (`src/convert.cpp`) to avoid the read-back write when the source is the same memory element (self-hold), or to coalesce the split always blocks into a single register update.

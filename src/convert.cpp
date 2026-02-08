@@ -10638,6 +10638,86 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
     }
 
+    if (!readUses.empty())
+    {
+        for (const auto& stmt : lowering.loweredStmts)
+        {
+            if (stmt.kind != LoweredStmtKind::Write)
+            {
+                continue;
+            }
+            const WriteIntent& write = stmt.write;
+            if (write.isXmr)
+            {
+                continue;
+            }
+            if (write.domain != ControlDomain::Sequential)
+            {
+                continue;
+            }
+            SignalId signal = resolveMemorySignal(write.target);
+            if (signal == kInvalidPlanIndex)
+            {
+                continue;
+            }
+            for (auto& use : readUses)
+            {
+                if (use.domain != ControlDomain::Sequential)
+                {
+                    continue;
+                }
+                if (use.memory.index != write.target.index)
+                {
+                    continue;
+                }
+                bool usedInWrite = false;
+                if (write.value != kInvalidPlanIndex &&
+                    exprDependsOn(write.value, use.data))
+                {
+                    usedInWrite = true;
+                }
+                if (!usedInWrite && write.guard != kInvalidPlanIndex &&
+                    exprDependsOn(write.guard, use.data))
+                {
+                    usedInWrite = true;
+                }
+                if (!usedInWrite)
+                {
+                    continue;
+                }
+                use.domain = ControlDomain::Combinational;
+                use.updateCond = kInvalidPlanIndex;
+                use.eventEdges.clear();
+                use.eventOperands.clear();
+            }
+        }
+
+        std::vector<MemoryReadUse> deduped;
+        deduped.reserve(readUses.size());
+        for (const auto& use : readUses)
+        {
+            bool exists = false;
+            for (const auto& existing : deduped)
+            {
+                if (existing.memory.index == use.memory.index &&
+                    existing.domain == use.domain &&
+                    existing.updateCond == use.updateCond &&
+                    existing.addressIndices == use.addressIndices &&
+                    existing.eventEdges == use.eventEdges &&
+                    existing.eventOperands == use.eventOperands)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists)
+            {
+                deduped.push_back(use);
+            }
+        }
+        readUses.swap(deduped);
+    }
+
     auto buildLinearAddress = [&](std::span<const ExprNodeId> indices,
                                   std::span<const UnpackedDimInfo> dims,
                                   slang::SourceLocation location) -> ExprNodeId {
@@ -11064,6 +11144,33 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         entry.eventOperands = stmt.eventOperands;
         entry.location = write.location;
         lowering.memoryWrites.push_back(std::move(entry));
+    }
+
+    if (!lowering.memoryReads.empty() && !lowering.memoryWrites.empty())
+    {
+        for (auto& read : lowering.memoryReads)
+        {
+            if (!read.isSync || read.data == kInvalidPlanIndex)
+            {
+                continue;
+            }
+            for (const auto& write : lowering.memoryWrites)
+            {
+                if (write.memory.index != read.memory.index)
+                {
+                    continue;
+                }
+                if (exprDependsOn(write.data, read.data) ||
+                    exprDependsOn(write.updateCond, read.data))
+                {
+                    read.isSync = false;
+                    read.updateCond = kInvalidPlanIndex;
+                    read.eventEdges.clear();
+                    read.eventOperands.clear();
+                    break;
+                }
+            }
+        }
     }
 }
 

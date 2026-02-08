@@ -35,6 +35,22 @@ module mem_read_seq_en(
     end
 endmodule
 
+module mem_read_seq_self_hold(
+    input logic clk,
+    input logic en,
+    input logic [3:0] addr,
+    input logic [7:0] data
+);
+    logic [7:0] mem [0:15];
+    always_ff @(posedge clk) begin
+        if (en) begin
+            mem[addr] <= data;
+        end else begin
+            mem[addr] <= mem[addr];
+        end
+    end
+endmodule
+
 module mem_write_mask(
     input logic clk,
     input logic [3:0] addr,

@@ -270,6 +270,33 @@ int testReadSeqEnable(const std::filesystem::path& sourcePath) {
     return 0;
 }
 
+int testReadSeqSelfHold(const std::filesystem::path& sourcePath) {
+    wolf_sv_parser::ConvertDiagnostics diagnostics;
+    wolf_sv_parser::ModulePlan plan;
+    wolf_sv_parser::LoweringPlan lowering;
+    if (!buildMemoryPlan(sourcePath, "mem_read_seq_self_hold", diagnostics, plan, lowering)) {
+        return fail("Failed to build seq self-hold memory plan for " + sourcePath.string());
+    }
+
+    if (lowering.memoryReads.size() != 1) {
+        return fail("Expected 1 memory read entry in seq self-hold");
+    }
+    const auto& entry = lowering.memoryReads.front();
+    if (entry.isSync) {
+        return fail("Expected comb read for seq self-hold");
+    }
+    if (entry.updateCond != wolf_sv_parser::kInvalidPlanIndex) {
+        return fail("Unexpected update condition for seq self-hold read");
+    }
+    if (!entry.eventEdges.empty() || !entry.eventOperands.empty()) {
+        return fail("Unexpected event binding for seq self-hold read");
+    }
+    if (diagnostics.hasError()) {
+        return fail("Unexpected Convert diagnostics errors in seq self-hold read");
+    }
+    return 0;
+}
+
 int testWriteDynamicUp(const std::filesystem::path& sourcePath) {
     wolf_sv_parser::ConvertDiagnostics diagnostics;
     wolf_sv_parser::ModulePlan plan;
@@ -732,6 +759,9 @@ int main() {
         return result;
     }
     if (int result = testReadSeqEnable(sourcePath); result != 0) {
+        return result;
+    }
+    if (int result = testReadSeqSelfHold(sourcePath); result != 0) {
         return result;
     }
     if (int result = testMaskedWrite(sourcePath); result != 0) {
