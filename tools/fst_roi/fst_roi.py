@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import difflib
 import fnmatch
 import json
 import os
+import re
 import sys
 from typing import Iterable, List, Optional, Tuple
 
@@ -32,7 +34,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fst", required=True, help="Path to .fst file")
     parser.add_argument("--signals", default="", help="Comma-separated signal list (supports glob)")
     parser.add_argument("--signal", action="append", default=[], help="Signal (repeatable, supports glob)")
+    parser.add_argument("--signals-file", default=None,
+                        help="Read signals from file (one per line; '#' comments allowed)")
     parser.add_argument("--list", action="store_true", help="List available signals and exit")
+    parser.add_argument("--list-filter", default=None,
+                        help="Filter --list output (glob or substring)")
 
     parser.add_argument("--t0", type=int, default=None, help="ROI start time (ticks)")
     parser.add_argument("--t1", type=int, default=None, help="ROI end time (ticks, inclusive)")
@@ -57,6 +63,8 @@ def _parse_args() -> argparse.Namespace:
                         help="Include last value before t0")
     parser.add_argument("--max-events", type=int, default=None,
                         help="Max events per signal (after filtering)")
+    parser.add_argument("--strip-width", action="store_true",
+                        help="Strip trailing bus width suffixes (e.g. ' [31:0]') in output")
 
     return parser.parse_args()
 
@@ -92,6 +100,22 @@ def _load_signals(ctx):
     return list(scopes), signals
 
 
+_WIDTH_SUFFIX_RE = re.compile(r"\s*\[[0-9]+:[0-9]+\]$")
+
+
+def _strip_width_suffix(name: str) -> str:
+    return _WIDTH_SUFFIX_RE.sub("", name)
+
+
+def _best_matches(all_refs: List[str], pat: str, limit: int = 8) -> List[str]:
+    # Prefer closest full-name matches, then suffix matches as a fallback.
+    close = difflib.get_close_matches(pat, all_refs, n=limit, cutoff=0.2)
+    if close:
+        return close
+    suffix_hits = [ref for ref in all_refs if ref.endswith("." + pat) or ref.endswith(pat)]
+    return suffix_hits[:limit]
+
+
 def _match_signals(all_refs: List[str], patterns: Iterable[str]) -> List[str]:
     matched: List[str] = []
     for pat in patterns:
@@ -107,7 +131,11 @@ def _match_signals(all_refs: List[str], patterns: Iterable[str]) -> List[str]:
         if hits:
             matched.extend(hits)
         else:
-            _die(f"signal not found: {pat}")
+            suggestions = _best_matches(all_refs, pat)
+            hint = ""
+            if suggestions:
+                hint = "\n  close matches:\n    " + "\n    ".join(suggestions)
+            _die(f"signal not found: {pat}{hint}")
     # de-dup while preserving order
     seen = set()
     ordered = []
@@ -237,7 +265,7 @@ def _collect_events(ctx, handles: List[int], t0: int, t1: Optional[int],
 
 
 def _print_table(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
-                 max_events: Optional[int], timescale: Optional[int]) -> None:
+                 max_events: Optional[int], timescale: Optional[int], strip_width: bool) -> None:
     header = f"ROI t=[{t0}, {t1 if t1 is not None else 'end'}]"
     if timescale is not None:
         header += f" (timescale {_timescale_str(timescale)})"
@@ -248,7 +276,8 @@ def _print_table(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
         if max_events is not None:
             tv = tv[:max_events]
         for ref in names:
-            print(f"\n{ref}")
+            ref_out = _strip_width_suffix(ref) if strip_width else ref
+            print(f"\n{ref_out}")
             if not tv:
                 print("  (no events)")
                 continue
@@ -256,20 +285,22 @@ def _print_table(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
                 print(f"  {t:>12}  {v}")
 
 
-def _print_csv(events_by_handle, handle_to_names, max_events: Optional[int]) -> None:
+def _print_csv(events_by_handle, handle_to_names, max_events: Optional[int],
+               strip_width: bool) -> None:
     print("signal,time,value")
     for handle, names in handle_to_names.items():
         tv = events_by_handle.get(handle, [])
         if max_events is not None:
             tv = tv[:max_events]
         for ref in names:
+            ref_out = _strip_width_suffix(ref) if strip_width else ref
             for t, v in tv:
-                print(f"{ref},{t},{v}")
+                print(f"{ref_out},{t},{v}")
 
 
 def _print_jsonl(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
                  max_events: Optional[int], timescale: Optional[int], include_meta: bool,
-                 mode: str, last_before_by_handle: Optional[dict]) -> None:
+                 mode: str, last_before_by_handle: Optional[dict], strip_width: bool) -> None:
     ts = _timescale_str(timescale) if timescale is not None else None
     if include_meta:
         meta = {
@@ -286,8 +317,9 @@ def _print_jsonl(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
             if max_events is not None:
                 tv = tv[:max_events]
             for ref in names:
+                ref_out = _strip_width_suffix(ref) if strip_width else ref
                 for t, v in tv:
-                    rec = {"signal": ref, "time": t, "value": v}
+                    rec = {"signal": ref_out, "time": t, "value": v}
                     print(json.dumps(rec, ensure_ascii=True, separators=(",", ":")))
         return
 
@@ -324,7 +356,8 @@ def _print_jsonl(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
             for handle, names in handle_to_names.items():
                 val = current.get(handle, "x")
                 for ref in names:
-                    values[ref] = val
+                    ref_out = _strip_width_suffix(ref) if strip_width else ref
+                    values[ref_out] = val
             rec = {"time": t, "values": values}
             print(json.dumps(rec, ensure_ascii=True, separators=(",", ":")))
         return
@@ -340,7 +373,8 @@ def _print_jsonl(events_by_handle, handle_to_names, t0: int, t1: Optional[int],
                 bucket = {}
                 merged[t] = bucket
             for ref in names:
-                bucket[ref] = v
+                ref_out = _strip_width_suffix(ref) if strip_width else ref
+                bucket[ref_out] = v
 
     for t in sorted(merged.keys()):
         rec = {"time": t, "values": merged[t]}
@@ -355,6 +389,15 @@ def main() -> None:
         signals.extend([s.strip() for s in args.signals.split(",") if s.strip()])
     if args.signal:
         signals.extend(args.signal)
+    if args.signals_file:
+        if not os.path.exists(args.signals_file):
+            _die(f"signals file not found: {args.signals_file}")
+        with open(args.signals_file, "r", encoding="utf-8") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                signals.append(raw)
 
     if not os.path.exists(args.fst):
         _die(f"file not found: {args.fst}")
@@ -369,7 +412,15 @@ def main() -> None:
         _, signals_info = _load_signals(ctx)
         all_refs = list(signals_info.by_name.keys())
         if args.list:
-            for ref in all_refs:
+            refs = all_refs
+            if args.list_filter:
+                if any(ch in args.list_filter for ch in "*?["):
+                    refs = [r for r in refs if fnmatch.fnmatch(r, args.list_filter)]
+                else:
+                    refs = [r for r in refs if args.list_filter in r]
+            for ref in refs:
+                if args.strip_width:
+                    ref = _strip_width_suffix(ref)
                 print(ref)
             return
 
@@ -416,13 +467,14 @@ def main() -> None:
         timescale = int(lib.fstReaderGetTimescale(ctx))
 
         if args.format == "table":
-            _print_table(events, handle_to_names, t0, t1, args.max_events, timescale)
+            _print_table(events, handle_to_names, t0, t1, args.max_events, timescale,
+                         args.strip_width)
         elif args.format == "csv":
-            _print_csv(events, handle_to_names, args.max_events)
+            _print_csv(events, handle_to_names, args.max_events, args.strip_width)
         else:
             _print_jsonl(events, handle_to_names, t0, t1, args.max_events, timescale,
                          include_meta=not args.no_meta, mode=args.jsonl_mode,
-                         last_before_by_handle=last_before)
+                         last_before_by_handle=last_before, strip_width=args.strip_width)
     finally:
         _close_fst(ctx)
 

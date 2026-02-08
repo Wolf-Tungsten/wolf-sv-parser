@@ -1323,3 +1323,117 @@
 - Results/next steps:
   - Minimal repro confirms the structural issue independent of the full C910 design.
   - Next: implement a fix in the memory-lowering path (`src/convert.cpp`) to avoid the read-back write when the source is the same memory element (self-hold), or to coalesce the split always blocks into a single register update.
+
+## 2026-02-08 11:02
+- Command: `C910_SIM_MAX_CYCLE=5000 C910_WAVEFORM=1 make run_c910_diff -j`
+- Logs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_104416.log
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_104416.log
+- FSTs:
+  - ref: build/logs/c910/c910_ref_coremark_20260208_104416.fst
+  - wolf: build/logs/c910/c910_wolf_coremark_20260208_104416.fst
+- Equivalence: Not equivalent
+- Evidence:
+  - CoreMark summary lines are absent in both logs, and the `c910-iret` trace diverges after idx 38 (ref shows PCs around 0x1850/0x186x; wolf switches to PCs around 0x110/0x140).
+  - Waveform top-level BIU AR diverges: `TOP.sim_top.x_soc.biu_pad_araddr/arvalid` mismatch begins at t=255511 (wolf issues 0x80; ref issues 0x100).
+  - Read channel mismatch appears earlier: `x_ct_biu_read_channel` shows `araddr/arvalid` on 0xA0 at t=255471 in wolf, while ref issues 0xC0 at t=255475.
+  - BIU request arbiter confirms source: `x_ct_biu_req_arbiter.ifu_biu_rd_req=1` with addr 0xA0 at t=255471 in wolf vs 0xC0 at t=255475 in ref; LSU AR req stays 0 in both.
+  - IFU IPB address generation diverges at t=255471: `l1_refill_ipb_vpc` is 0xAA in wolf vs 0xC0 in ref; `ref_addr_inc` is 0x3 in wolf vs 0x4 in ref. Control `pcgen_ipb_chgflw` also differs at t=255469.
+  - PCGEN outputs diverge at t=255469: `pcgen_ifctrl_pc/pcgen_ifdp_pc` in wolf are 0x58/0x55 range while ref is 0x5B/0x60 range (binary diffs). `addrgen_pcgen_pc` stays 0 in both, pointing to PCGEN logic as the origin.
+- Hypotheses:
+  - Root cause is in IFU PC generation (`x_ct_ifu_top.x_ct_ifu_pcgen`): PC/next-PC calculation differs, producing wrong VPC/increment in `x_ct_ifu_ipb`, which then drives a different IFU BIU read address.
+  - Likely conversion issue in arithmetic/bit-slicing around `pcgen_ifdp_inc_pc` or `ref_addr_inc` (width/sign/constant handling), since increment becomes 0x3 instead of 0x4.
+- Waveform ROI details (jsonl fill):
+  - Top-level BIU: `TOP.sim_top.x_soc.biu_pad_araddr/arvalid` plus `x_ct_top_0`/`x_ct_biu_top`/`x_ct_biu_read_channel` AR signals with `--t0 255400 --t1 255700`.
+  - Read channel internals: `x_ct_biu_read_channel.{cur_raddr_buf*,read_busy,read_ar_clk_en,ifu_biu_r_ready,lsu_biu_r_linefill_ready}` with `--t0 255450 --t1 255520`.
+  - BIU request arbiter: `x_ct_biu_req_arbiter.{ifu_biu_rd_req/addr,lsu_biu_ar_req/addr,araddr/arvalid,biu_ifu_rd_grnt}` with `--t0 255450 --t1 255520`.
+  - IFU path: `x_ct_ifu_ipb.{l1_refill_ipb_vpc,ref_addr_inc,pcgen_ipb_chgflw,ifu_biu_rd_addr}` and `x_ct_ifu_top.{pcgen_ifctrl_pc,pcgen_ifdp_pc,pcgen_ifdp_inc_pc}` with `--t0 255450 --t1 255520`.
+- Results/next steps:
+  - Convergence point: `TOP.sim_top.x_soc.x_cpu_sub_system_axi.x_rv_integration_platform.x_cpu_top.x_ct_top_0.x_ct_core.x_ct_ifu_top.x_ct_ifu_pcgen` (PCGEN outputs diverge first at t=255469; downstream IPB/BIU differences are consequent).
+  - Next: inspect wolf-emitted SV for `x_ct_ifu_pcgen` and `x_ct_ifu_ipb` around PC increment/address generation (look for width truncation or constant folding bugs in `pcgen_ifdp_inc_pc`/`ref_addr_inc`).
+
+## 2026-02-08 11:19
+- Command: `rg -n "inc_pc|reissue_pcload|ref_addr_inc" tests/data/openc910/C910_RTL_FACTORY/gen_rtl/ifu/rtl/{ct_ifu_pcgen.v,ct_ifu_ipb.v}` and `sed -n '450,485p' .../ct_ifu_pcgen.v`, `sed -n '650,690p' .../ct_ifu_ipb.v`
+- Logs/FSTs: same as 2026-02-08 11:02 run.
+- Equivalence: N/A (RTL vs wolf emit inspection only).
+- Evidence:
+  - The PC increment logic in RTL (`ct_ifu_pcgen.v`) matches wolf emit exactly: `inc_pc_hi = if_pc[38:3] + {35'b0, !ifctrl_pcgen_reissue_pcload}` and `inc_pc = {inc_pc_hi, {3{ifctrl_pcgen_reissue_pcload}} & if_pc[2:0]}`.
+  - IPB refill increment logic in RTL (`ct_ifu_ipb.v`) matches wolf emit: `ref_addr_inc = l1_refill_ipb_ppc[39:6] + 26'b1` and `ipb_icache_if_index_pre = l1_refill_ipb_vpc[PC_WIDTH-1:6] + 34'h1` (wolf emit uses 34'h1).
+  - `ifctrl_pcgen_reissue_pcload` in RTL is simply `icache_reissue`; wolf emit preserves this (reset gating is folded into `__expr_102`).
+- Hypotheses:
+  - Since PCGEN/IPB arithmetic matches RTL, the mismatch likely comes from upstream inputs (e.g., `icache_reissue`, `l1_refill_ipb_ppc/vpc`, or earlier PCGEN control signals) diverging between ref and wolf rather than a local width/truncation error here.
+- Results/next steps:
+  - Next: compare ref vs wolf waveforms for `icache_reissue`, `ifctrl_pcgen_reissue_pcload`, and `l1_refill_ipb_ppc/vpc` around t=255469 to locate the first upstream signal that diverges before PCGEN outputs.
+
+## 2026-02-08 11:31
+- Command:
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_pcgen.{if_pc,pcgen_ifctrl_pc,pcgen_ifdp_pc,ipctrl_pcgen_chgflw_pc}*' --t0 0 --t1 255520 --jsonl-mode fill --include-initial`
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_ifctrl.{ifctrl_pcgen_stall,ifctrl_pcgen_stall_short,if_self_stall,if_stage_stall,ipctrl_ifctrl_stall,ipctrl_ifctrl_stall_short,pcgen_ifctrl_way_pred_stall,rtu_ifu_xx_dbgon,l1_refill_ifctrl_start,l1_refill_ifctrl_idle,ipb_ifctrl_prefetch_idle,if_inst_data_vld,if_pc_vld}*' --t0 255400 --t1 255450 --jsonl-mode fill --include-initial`
+- Logs/FSTs: same as 2026-02-08 11:02 run.
+- Equivalence: Not equivalent.
+- Evidence:
+  - First divergence among PCGEN core state/outputs occurs at t=255471: `x_ct_ifu_pcgen.if_pc`, `pcgen_ifctrl_pc`, and `pcgen_ifdp_pc` differ (ref 0xC0 vs wolf 0x55/0x58 range).
+  - Inputs feeding PCGEN diverge earlier at t=255425: `x_ct_ifu_ifctrl.ipctrl_ifctrl_stall` and `ipctrl_ifctrl_stall_short` assert in wolf (1) while ref remains 0, causing `ifctrl_pcgen_stall` and `ifctrl_pcgen_stall_short` to assert only in wolf.
+- Hypotheses:
+  - Root cause is upstream of PCGEN, likely inside `x_ct_ifu_ipctrl` or its inputs, since `ipctrl_ifctrl_stall(_short)` diverges first and directly gates PCGEN progress.
+- Results/next steps:
+  - Next: compare ref vs wolf waveforms for `x_ct_ifu_ipctrl` inputs that feed `ipctrl_ifctrl_stall(_short)` (e.g., `ifctrl_ipctrl_vld`, `ifctrl_ipctrl_if_pcload`, `ipb_ipctrl_stall`, `ibctrl_ipctrl_stall`, etc.) around t=255420–255430 to locate the earliest upstream mismatch.
+
+## 2026-02-08 12:00
+- Command: multiple single-signal ROI extractions (to avoid slow multi-signal scans), e.g.
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_ipctrl.{ip_refill_pre,miss_under_refill_stall,l1_refill_ipctrl_busy,ifdp_ipctrl_way0_28_24_hit,ifdp_ipctrl_way0_23_16_hit,ifdp_ipctrl_way0_15_8_hit,ifdp_ipctrl_way0_7_0_hit}' --t0 255420 --t1 255430 --jsonl-mode fill --include-initial`
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_ifdp.{ifdp_icache_way0_28_24_hit,icache_tag_way0_28_24_hit,icache_tag_way0_23_16_hit,icache_tag_way0_15_8_hit,icache_tag_way0_7_0_hit}' --t0 255420 --t1 255430 --jsonl-mode fill --include-initial`
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_ifctrl.ifctrl_ifdp_pipedown' --t0 255420 --t1 255430 --jsonl-mode fill --include-initial`
+- Logs/FSTs: same as 2026-02-08 11:02 run.
+- Equivalence: Not equivalent.
+- Evidence:
+  - At t=255425, `ip_refill_pre=1` and `miss_under_refill_stall=1` in wolf, while ref has `ip_refill_pre=0` and `miss_under_refill_stall=0` (both see `l1_refill_ipctrl_busy=1`).
+  - The only differing input to `ip_refill_pre` at t=255425 is `icache_way0_hit`: ref=1, wolf=0. This traces to `ifdp_ipctrl_way0_28_24_hit` (ref=1, wolf=0); other way0 hit slices match.
+  - `ifdp_ipctrl_way0_28_24_hit` is a registered copy of `ifdp_icache_way0_28_24_hit` gated by `ifctrl_ifdp_pipedown`. `ifctrl_ifdp_pipedown` drops earlier in wolf (t=255425) than ref (t=255429), so wolf misses the update and keeps the stale 0.
+  - The combinational tag-compare `icache_tag_way0_28_24_hit` (valid+tag[27:24]) rises earlier in ref (t=255423) than wolf (t=255425). The other tag segments (23_16/15_8/7_0) are 1 in both, isolating the mismatch to the 28_24 slice (valid bit + upper tag).
+- Hypotheses:
+  - Root cause has moved upstream into the I-cache tag data/valid path feeding `icache_tag_way0_28_24_hit`. The delayed rise in wolf suggests the way0 tag valid bit (tag[28]) or the upper tag nibble arrives late/incorrect compared to ref.
+- Results/next steps:
+  - Next: inspect the wolf-emitted SV for the I-cache tag path feeding `icache_if_ifdp_tag_data0[28:24]` (or any explicit valid-bit signal if present) and its update enables/gated clocks. If needed, compare the timing of tag-data capture logic in the corresponding RTL module (likely IFU I-cache or IFDP tag-read path).
+
+## 2026-02-08 12:11
+- Command: targeted ROI on I-cache tag-array control and PCGEN interface signals:
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_icache_if.ifu_icache_tag_{clk_en,cen_b}' --t0 255400 --t1 255430 --jsonl-mode fill --include-initial`
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signal '...x_ct_ifu_icache_if.{ifctrl_icache_if_tag_req,ifctrl_icache_if_read_req_tag,l1_refill_icache_if_wr,l1_refill_icache_if_first,l1_refill_icache_if_last,pcgen_icache_if_chgflw,pcgen_icache_if_seq_tag_req,ipb_icache_if_req,pcgen_icache_if_gateclk_en,ipb_icache_if_req_for_gateclk,cp0_ifu_icache_en}' --t0 255420 --t1 255430 --jsonl-mode fill --include-initial`
+- Logs/FSTs: same as 2026-02-08 11:02 run.
+- Equivalence: Not equivalent.
+- Evidence:
+  - At t=255425, `pcgen_icache_if_seq_tag_req` and `pcgen_icache_if_gateclk_en` are 1 in ref but 0 in wolf; all other tag-control inputs are identical.
+  - Correspondingly, `ifu_icache_tag_cen_b` goes low (read enable) in ref at t=255425, but stays high in wolf; and `ifu_icache_tag_clk_en` drops earlier in wolf at t=255425 (ref stays high until t=255429).
+  - This explains the earlier observation that `icache_tag_way0_28_24_hit` rises in ref at t=255423 but is delayed in wolf until t=255425, which then propagates into stale `ifdp_ipctrl_way0_28_24_hit` and the `miss_under_refill_stall` assertion.
+- Hypotheses:
+  - The divergence is now pinned to PCGEN stall gating: `pcgen_icache_if_seq_tag_req` = `!ifctrl_pcgen_stall && (pc_bus[4:3]==2'b00)` and `pcgen_icache_if_gateclk_en` = `pcgen_chgflw_short || !ifctrl_pcgen_stall_short` (see `ct_ifu_pcgen.v`). The wolf path asserts `ifctrl_pcgen_stall(_short)` earlier, suppressing tag-array read enable.
+- Results/next steps:
+  - Next: inspect why `ifctrl_pcgen_stall(_short)` asserts earlier in wolf at t=255425 (inputs from `ipctrl_ifctrl_stall(_short)` are already known to diverge). Continue walking upstream to find the earliest signal that differs before the stall gating (likely in IFDP/ICache tag-read timing or stall generation around `ip_refill_pre`).
+
+## 2026-02-08 15:54
+- Command:
+  - `python3 tools/fst_roi/fst_roi.py --fst build/logs/c910/c910_{ref,wolf}_coremark_20260208_104416.fst --signals-file /tmp/c910_ifu_sigs.txt --t0 255300 --t1 255430 --jsonl-mode fill --include-initial`
+  - Inspected wolf emit of `fpga_ram` + `ct_f_spsram_512x59` in `tests/data/openc910/smart_run/work_wolf/wolf_emit/sim_top_wolf.sv`.
+- Logs/FSTs: same as 2026-02-08 11:02 run.
+- Equivalence: Not equivalent.
+- Evidence:
+  - Earliest divergence in the IFU tag path is at t=255423: `x_ct_ifu_ifdp.icache_tag_way0_28_24_hit` and `x_ct_ifu_ifdp.ifdp_icache_way0_28_24_hit` are 1 in ref but 0 in wolf. This precedes the later stall and PCGEN differences.
+  - Wolf’s `fpga_ram` model (used inside `ct_f_spsram_512x59` for the I-cache tag array) introduces an extra cycle of read latency: it updates an internal `__mem_data_0` on the clock edge and then assigns `PortADataOut <= __mem_data_0`, which uses the *previous* cycle’s value. The original `fpga_ram.v` outputs `mem[PortAAddr]` in the same clock edge when not writing.
+- Hypotheses:
+  - The extra cycle in `fpga_ram` read behavior delays `icache_ifu_tag_dout`, shifting `icache_tag_way0_28_24_hit` by 1 cycle. This matches the observed 2-tick delay and triggers the chain of stalls and PC divergence.
+- Results/next steps:
+  - Next: confirm that the `fpga_ram` lowering in `src/convert.cpp` (memory modeling) matches the original semantics (read data should reflect `mem[addr]` in the same edge when `PortAWriteEnable` is 0). If confirmed, adjust the memory-lowering transform to remove the extra read latency and re-run the diff.
+
+## 2026-02-08 18:05
+- Command:
+  - `make -C tests/data/openc910/bug_cases/case_032 run_c910_bug_case_ref`
+  - `make -C tests/data/openc910/bug_cases/case_032 run_c910_bug_case`
+  - `ctest --test-dir build --output-on-failure`
+- Logs/FSTs: `build/c910_bug_case/case_032/{rtl,wolf}`; new wolf emit at `build/c910_bug_case/case_032/wolf/wolf_emit.sv`.
+- Equivalence: Fixed for the minimal repro.
+- Evidence:
+  - The wolf emit for `fpga_ram` now wires the read port directly (no `mem_read_reg`), so `PortADataOut` sees `mem[PortAAddr]` on the same edge when `PortAWriteEnable=0`.
+  - `case_032` now passes for both ref and wolf (100% coverage reported from DA-based line counts).
+- Results/next steps:
+  - Next: re-run the full C910 coremark diff to confirm the end-to-end divergence is resolved.

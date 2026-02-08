@@ -106,6 +106,7 @@ python3 tools/fst_roi/fst_roi.py --fst <waveform.fst> --signals <sigA>,<sigB> --
 ```
 
 Prefer `--jsonl-mode fill` to get full per-time snapshots. Use `--jsonl-mode time` for lighter output and `--jsonl-mode event` for raw event streams.
+If the tool is missing needed features or is cumbersome for the current investigation, it is acceptable to modify `tools/fst_roi/fst_roi.py` to improve the workflow.
 
 ### 5) Analyze and iterate
 

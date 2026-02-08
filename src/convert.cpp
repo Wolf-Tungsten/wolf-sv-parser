@@ -11620,46 +11620,7 @@ private:
         graph_.addOperand(readOp, addressValue);
         graph_.setAttr(readOp, "memSymbol", std::string(memSymbol));
 
-        if (!entry.isSync)
-        {
-            graph_.addResult(readOp, dataValue);
-            valueByExpr_[id] = dataValue;
-            return dataValue;
-        }
-
-        grh::ir::SymbolId readValueSym =
-            graph_.internSymbol("__mem_rd_" + std::to_string(nextMemReadValueId_++));
-        grh::ir::ValueId readValue =
-            graph_.createValue(readValueSym, width, info->isSigned);
-        graph_.addResult(readOp, readValue);
-
-        grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
-        if (!updateCond.valid())
-        {
-            return grh::ir::ValueId::invalid();
-        }
-        grh::ir::SymbolId regSym = makeOpSymbol(entry.memory, "mem_read_reg");
-        grh::ir::OperationId regOp =
-            createOp(grh::ir::OperationKind::kRegister, regSym, entry.location);
-        graph_.addOperand(regOp, updateCond);
-        graph_.addOperand(regOp, readValue);
-        for (ExprNodeId evtId : entry.eventOperands)
-        {
-            grh::ir::ValueId evt = emitExpr(evtId);
-            if (!evt.valid())
-            {
-                continue;
-            }
-            graph_.addOperand(regOp, evt);
-        }
-        std::vector<std::string> edges;
-        edges.reserve(entry.eventEdges.size());
-        for (EventEdge edge : entry.eventEdges)
-        {
-            edges.push_back(edgeText(edge));
-        }
-        graph_.setAttr(regOp, "eventEdge", std::move(edges));
-        graph_.addResult(regOp, dataValue);
+        graph_.addResult(readOp, dataValue);
         valueByExpr_[id] = dataValue;
         return dataValue;
     }
