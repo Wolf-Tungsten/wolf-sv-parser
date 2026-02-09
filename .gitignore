@@ -34,3 +34,7 @@ _deps
 # Environment configuration (user-specific)
 /env.sh
 
+# Waveform files
+*.fst
+*.vcd
+

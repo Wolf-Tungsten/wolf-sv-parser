@@ -1,13 +1,20 @@
 SHELL := /bin/bash
 
-# Auto-load environment from env.sh if it exists (user-specific config)
-# This allows users to configure TOOL_EXTENSION, VERILATOR, etc. without manual sourcing
+# Check env.sh must exist and has been sourced
 ENV_FILE := $(CURDIR)/env.sh
-ifneq (,$(wildcard $(ENV_FILE)))
-    # Parse export statements from env.sh and export to environment for child processes
-    export TOOL_EXTENSION := $(or $(TOOL_EXTENSION),$(shell grep '^export TOOL_EXTENSION=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
-    export VERILATOR := $(or $(VERILATOR),$(shell grep '^export VERILATOR=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
+ifeq (,$(wildcard $(ENV_FILE)))
+    $(error env.sh not found. Please run: cp env.sh.template env.sh && source env.sh)
 endif
+
+# Guard: check if env.sh has been sourced (WOLF_ENV_SOURCED should be set)
+ifeq ($(WOLF_ENV_SOURCED),)
+    $(error env.sh exists but not sourced. Please run: source env.sh)
+endif
+
+# Auto-load environment from env.sh (user-specific config)
+# This allows users to configure TOOL_EXTENSION, VERILATOR, etc. without manual sourcing
+export TOOL_EXTENSION := $(or $(TOOL_EXTENSION),$(shell grep '^export TOOL_EXTENSION=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
+export VERILATOR := $(or $(VERILATOR),$(shell grep '^export VERILATOR=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
 
 # Usage: make run_hdlbits_test DUT=001
 DUT ?=
@@ -18,6 +25,7 @@ CMAKE ?= cmake
 WOLF_PARSER := $(BUILD_DIR)/bin/wolf-sv-parser
 HDLBITS_ROOT := tests/data/hdlbits
 C910_ROOT := tests/data/openc910
+XS_ROOT := tests/data/xiangshan
 C910_SMART_RUN_DIR := $(C910_ROOT)/smart_run
 C910_BUG_CASES_DIR := $(C910_ROOT)/bug_cases
 C910_SMART_CODE_BASE ?= $(abspath $(C910_ROOT)/C910_RTL_FACTORY)
@@ -47,6 +55,18 @@ C910_WAVEFORM_DIR ?= $(C910_LOG_DIR)
 C910_LOG_DIR_ABS = $(abspath $(C910_LOG_DIR))
 C910_WAVEFORM_DIR_ABS = $(abspath $(C910_WAVEFORM_DIR))
 C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVEFORM_PATH)),$(C910_WAVEFORM_PATH),$(abspath $(C910_WAVEFORM_PATH))),)
+
+# XiangShan simulation control
+XS_SIM_MAX_CYCLE ?= 5000
+XS_WAVEFORM ?= 1
+# Waveform output control
+# - XS_WAVEFORM_PATH: explicit FST file path (relative paths resolve from repo root)
+# - XS_WAVEFORM_DIR: directory for auto-generated FST filenames (default: XS_LOG_DIR)
+XS_LOG_DIR := $(BUILD_DIR)/logs/xs
+XS_WAVEFORM_DIR ?= $(XS_LOG_DIR)
+XS_LOG_DIR_ABS = $(abspath $(XS_LOG_DIR))
+XS_WAVEFORM_DIR_ABS = $(abspath $(XS_WAVEFORM_DIR))
+XS_WAVEFORM_PATH_ABS = $(if $(XS_WAVEFORM_PATH),$(if $(filter /%,$(XS_WAVEFORM_PATH)),$(XS_WAVEFORM_PATH),$(abspath $(XS_WAVEFORM_PATH))),)
 
 ifneq ($(strip $(SINGLE_THREAD)),0)
 WOLF_EMIT_FLAGS += --single-thread
@@ -79,9 +99,9 @@ C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
 .PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test run_c910_diff build_wolf_parser \
 	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof \
-	run_c910_prof clean check-id
+	run_c910_prof clean check-id xs-init xs-clean run_xs_ref_test
 
-all: run_hdlbits_test
+all: build_wolf_parser
 
 check-id:
 	@if [[ ! "$(DUT)" =~ ^[0-9]{3}$$ ]]; then \
@@ -297,3 +317,33 @@ run_all_hdlbits_tests: $(WOLF_PARSER)
 
 clean:
 	rm -rf build/
+
+# XiangShan targets
+xs-init:
+	$(MAKE) -C $(XS_ROOT) init
+
+xs-clean:
+	$(MAKE) -C $(XS_ROOT) clean
+
+run_xs_ref_test:
+	@echo "[RUN] Building XiangShan emu with EMU_THREADS=16..."
+	$(MAKE) -C $(XS_ROOT) emu \
+		EMU_THREADS=16 \
+		NUM_CORES=1 \
+		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)
+	@echo "[RUN] Running XiangShan emu..."
+	@mkdir -p "$(XS_LOG_DIR_ABS)"
+	@$(eval RUN_ID := $(shell date +%Y%m%d_%H%M%S))
+	@$(eval LOG_FILE := $(XS_LOG_DIR_ABS)/xs_ref_$(RUN_ID).log)
+	@$(eval WAVEFORM_FILE := $(if $(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_DIR_ABS)/xs_ref_$(RUN_ID).fst))
+	@echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM)"
+	@echo "[LOG] Capturing output to: $(LOG_FILE)"
+	$(if $(filter 1,$(XS_WAVEFORM)),@echo "[WAVEFORM] Will save FST to: $(WAVEFORM_FILE)",)
+	cd $(XS_ROOT) && ./build/emu \
+		-i ./ready-to-run/coremark-2-iteration.bin \
+		--diff ./ready-to-run/riscv64-nemu-interpreter-so \
+		-b 0 -e 0 \
+		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
+		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),) \
+		2>&1 | tee "$(LOG_FILE)"
