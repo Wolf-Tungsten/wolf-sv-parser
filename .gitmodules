@@ -16,3 +16,6 @@
 [submodule "tests/data/openc910"]
 	path = tests/data/openc910
 	url = git@github.com:Wolf-Tungsten/openc910.git
+[submodule "tests/data/xiangshan"]
+	path = tests/data/xiangshan
+	url = git@github.com:Wolf-Tungsten/XiangShan.git

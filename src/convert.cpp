@@ -15156,23 +15156,17 @@ void processPlanKey(PlanKey key, ConvertContext& context, PlanCache& planCache,
     logPassTiming(context.logger, "pass3-writeback", moduleName,
                   writeBackEnd - writeBackStart);
 
-    const auto memoryPortStart = ConvertClock::now();
+    const auto assemblyStart = ConvertClock::now();
     memoryPortLowerer.lower(plan, lowering);
-    const auto memoryPortEnd = ConvertClock::now();
-    logPassTiming(context.logger, "pass4-memory-port", moduleName,
-                  memoryPortEnd - memoryPortStart);
-
     if (shouldCancel(context))
     {
         markInstanceReady(context, key);
         return;
     }
-
-    const auto graphStart = ConvertClock::now();
     graphAssembler.build(key, plan, lowering, writeBackPlan);
-    const auto graphEnd = ConvertClock::now();
-    logPassTiming(context.logger, "pass5-graph-assembly", moduleName,
-                  graphEnd - graphStart);
+    const auto assemblyEnd = ConvertClock::now();
+    logPassTiming(context.logger, "pass4-assembly", moduleName,
+                  assemblyEnd - assemblyStart);
 
     planCache.setLoweringPlan(key, std::move(lowering));
     planCache.setWriteBackPlan(key, std::move(writeBackPlan));
