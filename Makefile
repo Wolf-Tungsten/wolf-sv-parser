@@ -1,5 +1,14 @@
 SHELL := /bin/bash
 
+# Auto-load environment from env.sh if it exists (user-specific config)
+# This allows users to configure TOOL_EXTENSION, VERILATOR, etc. without manual sourcing
+ENV_FILE := $(CURDIR)/env.sh
+ifneq (,$(wildcard $(ENV_FILE)))
+    # Parse export statements from env.sh and export to environment for child processes
+    export TOOL_EXTENSION := $(or $(TOOL_EXTENSION),$(shell grep '^export TOOL_EXTENSION=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
+    export VERILATOR := $(or $(VERILATOR),$(shell grep '^export VERILATOR=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
+endif
+
 # Usage: make run_hdlbits_test DUT=001
 DUT ?=
 CASE ?=
@@ -15,7 +24,8 @@ C910_SMART_CODE_BASE ?= $(abspath $(C910_ROOT)/C910_RTL_FACTORY)
 SMART_ENV ?= $(C910_SMART_RUN_DIR)/env.sh
 SMART_SIM ?= verilator
 SMART_CASE ?= coremark
-VERILATOR ?= verilator
+# Verilator path (can be overridden via environment or env.sh)
+VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
 VERILATOR_FLAGS ?= -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNDRIVEN \
 	-Wno-SYNCASYNCNET
 SINGLE_THREAD ?= 0
@@ -128,7 +138,8 @@ run_c910_test: $(RUN_C910_TEST_DEPS)
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | \
+			TOOL_EXTENSION="$$TOOL_EXTENSION" \
+			VERILATOR="$(VERILATOR)" 2>&1 | \
 			tee >(awk 'f{print} index($$0,"obj_dir/Vsim_top"){f=1; next}' > "$$LOG_FILE"); \
 	else \
 		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
@@ -136,7 +147,8 @@ run_c910_test: $(RUN_C910_TEST_DEPS)
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" 2>&1 | tee "$$LOG_FILE"; \
+			TOOL_EXTENSION="$$TOOL_EXTENSION" \
+			VERILATOR="$(VERILATOR)" 2>&1 | tee "$$LOG_FILE"; \
 	fi
 
 run_c910_diff: build_wolf_parser
@@ -195,6 +207,7 @@ run_c910_gprof:
 	$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) wolf_emit \
 		CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 		TOOL_EXTENSION="$$TOOL_EXTENSION" \
+		VERILATOR="$(VERILATOR)" \
 		WOLF_SV_PARSER="$(abspath $(WOLF_PARSER))" \
 		WOLF_EMIT_FLAGS="$(WOLF_EMIT_FLAGS) --emit-sv --top $${WOLF_TOP:-sim_top} \
 			--convert-log --convert-log-level info --convert-log-tag timing"; \
@@ -230,7 +243,7 @@ run_c910_bug_case: $(C910_BUG_CASE_DEPS)
 	fi; \
 	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name clean; \
 	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name \
-		COVERAGE=1 run_c910_bug_case
+		COVERAGE=1 VERILATOR="$(VERILATOR)" run_c910_bug_case
 
 run_c910_bug_case_ref:
 	@case_name="$(CASE)"; \
@@ -248,7 +261,7 @@ run_c910_bug_case_ref:
 	fi; \
 	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name clean; \
 	$(MAKE) --no-print-directory -C $(C910_BUG_CASES_DIR)/$$case_name \
-		COVERAGE=1 run_c910_bug_case_ref
+		COVERAGE=1 VERILATOR="$(VERILATOR)" run_c910_bug_case_ref
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 C910_BUG_CASE_ALL_DEPS := build_wolf_parser

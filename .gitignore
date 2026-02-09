@@ -31,3 +31,6 @@ _deps
 *~
 .DS_Store
 
+# Environment configuration (user-specific)
+/env.sh
+
