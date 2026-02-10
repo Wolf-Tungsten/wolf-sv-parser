@@ -208,7 +208,90 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    bool timingEnabled = profileTimer == true;
+    wolf_sv_parser::LogLevel globalLogLevel = wolf_sv_parser::LogLevel::Info;
+    const bool logLevelExplicit = logLevel && !logLevel->empty();
+    if (logLevelExplicit)
+    {
+        const auto parsed = parseLogLevel(*logLevel);
+        if (!parsed.has_value())
+        {
+            std::cerr << "[log] Unknown log level: " << *logLevel << '\n';
+            return 1;
+        }
+        globalLogLevel = *parsed;
+    }
+    if (timingEnabled)
+    {
+        if (!logLevelExplicit &&
+            static_cast<int>(globalLogLevel) > static_cast<int>(wolf_sv_parser::LogLevel::Debug))
+        {
+            globalLogLevel = wolf_sv_parser::LogLevel::Debug;
+        }
+    }
+    auto shouldLog = [&](wolf_sv_parser::LogLevel level) -> bool {
+        if (globalLogLevel == wolf_sv_parser::LogLevel::Off)
+        {
+            return false;
+        }
+        return static_cast<int>(level) >= static_cast<int>(globalLogLevel);
+    };
+    auto logLine = [&](wolf_sv_parser::LogLevel level, std::string_view prefix,
+                       std::string_view tag, std::string_view message) {
+        if (!shouldLog(level))
+        {
+            return;
+        }
+        std::cerr << "[" << prefix << "] [" << logLevelText(level) << "]";
+        if (!tag.empty())
+        {
+            std::cerr << " [" << tag << "]";
+        }
+        std::cerr << " " << message << '\n';
+    };
+    auto logTimingStage = [&](std::string_view prefix, std::string_view label,
+                              TimingClock::duration duration) {
+        if (!timingEnabled)
+        {
+            return;
+        }
+        std::string message;
+        message.reserve(label.size() + 32);
+        message.append(label);
+        message.append(" took ");
+        message.append(formatDuration(duration));
+        logLine(wolf_sv_parser::LogLevel::Info, prefix, "timing", message);
+    };
+
+    std::string slangBegin = "begin sources=";
+    slangBegin.append(std::to_string(driver.sourceLoader.getFilePaths().size()));
+    slangBegin.append(", defines=");
+    slangBegin.append(std::to_string(driver.options.defines.size()));
+    slangBegin.append(", undefs=");
+    slangBegin.append(std::to_string(driver.options.undefines.size()));
+    slangBegin.append(", tops=");
+    slangBegin.append(std::to_string(driver.options.topModules.size()));
+    slangBegin.append(", singleUnit=");
+    slangBegin.append(driver.options.singleUnit.value_or(false) ? "1" : "0");
+    slangBegin.append(", lint=");
+    slangBegin.append(driver.options.lintMode() ? "1" : "0");
+    slangBegin.append(", std=");
+    if (driver.options.languageVersion && !driver.options.languageVersion->empty())
+    {
+        slangBegin.append(*driver.options.languageVersion);
+    }
+    else
+    {
+        slangBegin.append("default");
+    }
+    logLine(wolf_sv_parser::LogLevel::Info, "slang", {}, slangBegin);
     if (!driver.parseAllSources()) {
+        std::string slangEnd = "end (parse failed, errors=";
+        slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
+        slangEnd.append(", warnings=");
+        slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
+        slangEnd.append(")");
+        logLine(wolf_sv_parser::LogLevel::Info, "slang", {}, slangEnd);
         return 3;
     }
 
@@ -216,6 +299,18 @@ int main(int argc, char **argv)
     driver.reportCompilation(*compilation, /* quiet */ false);
 
     driver.runAnalysis(*compilation);
+    std::string slangEnd = "end (errors=";
+    slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
+    slangEnd.append(", warnings=");
+    slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
+    slangEnd.append(")");
+    logLine(wolf_sv_parser::LogLevel::Info, "slang", {}, slangEnd);
+    if (driver.diagEngine.getNumErrors() > 0)
+    {
+        const bool diagOk = driver.reportDiagnostics(/* quiet */ false);
+        (void)diagOk;
+        return 4;
+    }
 
     auto &root = compilation->getRoot();
 
@@ -336,55 +431,6 @@ int main(int argc, char **argv)
         std::string clipped = line.substr(0, maxLen);
         clipped.append("...");
         return clipped;
-    };
-    bool timingEnabled = profileTimer == true;
-    wolf_sv_parser::LogLevel globalLogLevel = wolf_sv_parser::LogLevel::Warn;
-    if (logLevel && !logLevel->empty())
-    {
-        const auto parsed = parseLogLevel(*logLevel);
-        if (!parsed.has_value())
-        {
-            std::cerr << "[log] Unknown log level: " << *logLevel << '\n';
-            return 1;
-        }
-        globalLogLevel = *parsed;
-    }
-    if (timingEnabled)
-    {
-        globalLogLevel = wolf_sv_parser::LogLevel::Trace;
-    }
-    auto shouldLog = [&](wolf_sv_parser::LogLevel level) -> bool {
-        if (globalLogLevel == wolf_sv_parser::LogLevel::Off)
-        {
-            return false;
-        }
-        return static_cast<int>(level) >= static_cast<int>(globalLogLevel);
-    };
-    auto logLine = [&](wolf_sv_parser::LogLevel level, std::string_view prefix,
-                       std::string_view tag, std::string_view message) {
-        if (!shouldLog(level))
-        {
-            return;
-        }
-        std::cerr << "[" << prefix << "] [" << logLevelText(level) << "]";
-        if (!tag.empty())
-        {
-            std::cerr << " [" << tag << "]";
-        }
-        std::cerr << " " << message << '\n';
-    };
-    auto logTimingStage = [&](std::string_view prefix, std::string_view label,
-                              TimingClock::duration duration) {
-        if (!timingEnabled)
-        {
-            return;
-        }
-        std::string message;
-        message.reserve(label.size() + 32);
-        message.append(label);
-        message.append(" took ");
-        message.append(formatDuration(duration));
-        logLine(wolf_sv_parser::LogLevel::Trace, prefix, "timing", message);
     };
     auto reportDiagnostics = [&](std::string_view prefix,
                                  const auto& messages,
@@ -713,5 +759,9 @@ int main(int argc, char **argv)
 
     bool ok = driver.reportDiagnostics(/* quiet */ false);
     ok = ok && emitOk;
+    if (ok)
+    {
+        logLine(wolf_sv_parser::LogLevel::Info, "wolf", {}, "Completed successfully");
+    }
     return ok ? 0 : 4;
 }

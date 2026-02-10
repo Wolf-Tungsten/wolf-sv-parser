@@ -642,6 +642,7 @@ namespace wolf_sv_parser::transform
                     {
                         replaceUsers(ctx.graph, resId, it->second, reportError);
                         dedupedConstants = true;
+                        ++ctx.dedupedConstants;
                     }
                     continue;
                 }
@@ -716,6 +717,7 @@ namespace wolf_sv_parser::transform
                     ctx.foldedOps.insert(opId);
                     opsToErase.push_back(opId);
                     ++totalFolded;
+                    ++ctx.foldedOpsCount;
                 }
             }
 
@@ -726,6 +728,10 @@ namespace wolf_sv_parser::transform
                     const grh::ir::Operation op = ctx.graph.getOperation(opId);
                     error(ctx.graph, op, "Failed to erase folded operation");
                     ctx.failed = true;
+                }
+                else
+                {
+                    ++ctx.opsErased;
                 }
             }
 
@@ -852,6 +858,7 @@ namespace wolf_sv_parser::transform
                 replaceUsers(ctx.graph, resultId, operandId, onError);
                 opsToErase.push_back(opId);
                 simplifiedSlices = true;
+                ++ctx.simplifiedSlices;
                 break;
             }
         }
@@ -863,6 +870,10 @@ namespace wolf_sv_parser::transform
             {
                 error(ctx.graph, op, "Failed to erase simplified kSliceStatic op");
                 ctx.failed = true;
+            }
+            else
+            {
+                ++ctx.opsErased;
             }
         }
 
@@ -926,6 +937,8 @@ namespace wolf_sv_parser::transform
             else
             {
                 removedDeadConstants = true;
+                ++ctx.deadConstantsRemoved;
+                ++ctx.opsErased;
             }
         }
 
@@ -992,6 +1005,7 @@ namespace wolf_sv_parser::transform
                         ctx.constants[newValue] = ConstantValue{trueValue, false};
                         opsToErase.push_back(opId);
                         simplified = true;
+                        ++ctx.unsignedCmpSimplified;
                         continue;
                     }
                 }
@@ -1034,6 +1048,7 @@ namespace wolf_sv_parser::transform
                             ctx.constants[newValue] = ConstantValue{trueValue, false};
                             opsToErase.push_back(opId);
                             simplified = true;
+                            ++ctx.unsignedCmpSimplified;
                         }
                     }
                 }
@@ -1047,6 +1062,10 @@ namespace wolf_sv_parser::transform
                 const grh::ir::Operation op = ctx.graph.getOperation(opId);
                 error(ctx.graph, op, "Failed to erase simplified unsigned comparison op");
                 ctx.failed = true;
+            }
+            else
+            {
+                ++ctx.opsErased;
             }
         }
         
@@ -1083,6 +1102,12 @@ namespace wolf_sv_parser::transform
         const std::size_t graphCount = netlist().graphs().size();
         logInfo("begin graphs=" + std::to_string(graphCount));
         std::size_t changedGraphs = 0;
+        std::size_t totalDedupedConstants = 0;
+        std::size_t totalFoldedOps = 0;
+        std::size_t totalSimplifiedSlices = 0;
+        std::size_t totalDeadConstants = 0;
+        std::size_t totalUnsignedCmp = 0;
+        std::size_t totalOpsErased = 0;
 
         auto handleException = [&](const std::exception &ex)
         {
@@ -1114,6 +1139,12 @@ namespace wolf_sv_parser::transform
                 {
                     ++changedGraphs;
                 }
+                totalDedupedConstants += ctx.dedupedConstants;
+                totalFoldedOps += ctx.foldedOpsCount;
+                totalSimplifiedSlices += ctx.simplifiedSlices;
+                totalDeadConstants += ctx.deadConstantsRemoved;
+                totalUnsignedCmp += ctx.unsignedCmpSimplified;
+                totalOpsErased += ctx.opsErased;
             }
 
             if (failed)
@@ -1124,6 +1155,18 @@ namespace wolf_sv_parser::transform
             std::string message = "graphs=" + std::to_string(graphCount);
             message.append(", changedGraphs=");
             message.append(std::to_string(changedGraphs));
+            message.append(", foldedOps=");
+            message.append(std::to_string(totalFoldedOps));
+            message.append(", dedupedConsts=");
+            message.append(std::to_string(totalDedupedConstants));
+            message.append(", sliceSimplified=");
+            message.append(std::to_string(totalSimplifiedSlices));
+            message.append(", deadConsts=");
+            message.append(std::to_string(totalDeadConstants));
+            message.append(", unsignedCmp=");
+            message.append(std::to_string(totalUnsignedCmp));
+            message.append(", opsErased=");
+            message.append(std::to_string(totalOpsErased));
             message.append(result.failed ? ", failed=true" : ", failed=false");
             logInfo(std::move(message));
             return result;

@@ -392,12 +392,22 @@ namespace wolf_sv_parser::transform
         const std::size_t graphCount = netlist().graphs().size();
         logInfo("begin graphs=" + std::to_string(graphCount));
         std::size_t changedGraphs = 0;
+        std::size_t opsRemoved = 0;
+        std::size_t valuesRemoved = 0;
 
         for (const auto &entry : netlist().graphs())
         {
             grh::ir::Graph &graph = *entry.second;
             bool graphChanged = false;
             bool progress = true;
+            auto eraseOp = [&](auto opId, auto... args) -> bool {
+                if (graph.eraseOp(opId, args...))
+                {
+                    ++opsRemoved;
+                    return true;
+                }
+                return false;
+            };
 
             while (progress)
             {
@@ -442,7 +452,7 @@ namespace wolf_sv_parser::transform
                                     {
                                         continue;
                                     }
-                                    if (!graph.eraseOp(opId))
+                                    if (!eraseOp(opId))
                                     {
                                         continue;
                                     }
@@ -500,7 +510,7 @@ namespace wolf_sv_parser::transform
                         auto onError = [&](const std::string &msg)
                         { this->error(graph, op, msg); };
                         replaceUsers(graph, resultId, operandId, onError);
-                        if (graph.eraseOp(opId))
+                        if (eraseOp(opId))
                         {
                             graphChanged = true;
                             progress = true;
@@ -552,7 +562,7 @@ namespace wolf_sv_parser::transform
                                 createInlineConst(graph, resultValue.symbolText(),
                                                   1, resultValue.isSigned(), "1'b1");
                             replaceUsers(graph, resultId, constOne, onError);
-                            graph.eraseOp(opId);
+                            eraseOp(opId);
                             graphChanged = true;
                             progress = true;
                             continue;
@@ -614,7 +624,7 @@ namespace wolf_sv_parser::transform
                             {
                                 continue;
                             }
-                            if (!graph.eraseOp(opId))
+                            if (!eraseOp(opId))
                             {
                                 continue;
                             }
@@ -672,7 +682,7 @@ namespace wolf_sv_parser::transform
                         {
                             continue;
                         }
-                        if (!graph.eraseOp(opId, std::array<grh::ir::ValueId, 1>{dstId}))
+                        if (!eraseOp(opId, std::array<grh::ir::ValueId, 1>{dstId}))
                         {
                             continue;
                         }
@@ -735,7 +745,7 @@ namespace wolf_sv_parser::transform
                         {
                             continue;
                         }
-                        if (!graph.eraseOp(opId, std::array<grh::ir::ValueId, 1>{resultId}))
+                        if (!eraseOp(opId, std::array<grh::ir::ValueId, 1>{resultId}))
                         {
                             continue;
                         }
@@ -786,7 +796,7 @@ namespace wolf_sv_parser::transform
                     auto onError = [&](const std::string &msg)
                     { this->error(graph, op, msg); };
                     replaceUsers(graph, resultId, canonicalValue, onError);
-                    if (graph.eraseOp(opId))
+                    if (eraseOp(opId))
                     {
                         graphChanged = true;
                         progress = true;
@@ -825,6 +835,7 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     graph.eraseValue(existing);
+                    ++valuesRemoved;
                 }
                 if (graph.findOperation(port.name).valid())
                 {
@@ -847,6 +858,10 @@ namespace wolf_sv_parser::transform
         message.append(", changedGraphs=");
         message.append(std::to_string(changedGraphs));
         message.append(result.changed ? ", changed=true" : ", changed=false");
+        message.append(", opsRemoved=");
+        message.append(std::to_string(opsRemoved));
+        message.append(", valuesRemoved=");
+        message.append(std::to_string(valuesRemoved));
         logInfo(std::move(message));
         return result;
     }

@@ -363,7 +363,7 @@ namespace wolf_sv_parser::transform
                 message.reserve(pass->id().size() + 16);
                 message.append(pass->id());
                 message.append(" start");
-                emitLog(LogLevel::Trace, "timing", message);
+                emitLog(LogLevel::Info, "timing", message);
             }
             auto startTime = std::chrono::steady_clock::now();
             PassResult passResult = pass->run();
@@ -386,7 +386,7 @@ namespace wolf_sv_parser::transform
                 {
                     message.append(" (changed)");
                 }
-                emitLog(LogLevel::Trace, "timing", message);
+                emitLog(LogLevel::Info, "timing", message);
             }
 
             if (passResult.failed)

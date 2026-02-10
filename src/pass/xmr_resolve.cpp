@@ -655,7 +655,7 @@ namespace wolf_sv_parser::transform
                     {
                         message.append("<missing>");
                     }
-                    logInfo(std::move(message));
+                    log(LogLevel::Trace, std::move(message));
                 }
                 if (!path)
                 {
@@ -672,9 +672,9 @@ namespace wolf_sv_parser::transform
                         result.changed = true;
                         continue;
                     }
-                    logInfo("xmr read resolve begin graph=" + graph.symbol());
+                    log(LogLevel::Trace, "xmr read resolve begin graph=" + graph.symbol());
                     auto replacement = resolveRead(graph, opId, *path);
-                    logInfo("xmr read resolve end graph=" + graph.symbol());
+                    log(LogLevel::Trace, "xmr read resolve end graph=" + graph.symbol());
                     if (!replacement || !replacement->valid())
                     {
                         continue;

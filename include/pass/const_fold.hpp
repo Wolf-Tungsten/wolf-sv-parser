@@ -45,6 +45,12 @@ namespace wolf_sv_parser::transform
             std::atomic<int> symbolCounter{0};  // Per-graph counter for unique symbol generation
             std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> foldedOps;  // Per-graph folded operations
             bool &failed;
+            std::size_t dedupedConstants = 0;
+            std::size_t foldedOpsCount = 0;
+            std::size_t simplifiedSlices = 0;
+            std::size_t deadConstantsRemoved = 0;
+            std::size_t unsignedCmpSimplified = 0;
+            std::size_t opsErased = 0;
         };
 
         // Process a single graph for constant folding

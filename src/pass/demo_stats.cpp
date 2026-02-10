@@ -28,7 +28,6 @@ namespace wolf_sv_parser::transform
         oss << "graphs=" << graphCount << ", operations=" << opCount << ", values=" << valueCount;
 
         logInfo(oss.str());
-        warning(oss.str());
 
         PassResult result;
         result.changed = false;
