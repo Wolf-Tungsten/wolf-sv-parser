@@ -32,6 +32,9 @@
 - Store fixtures in `tests/data/...`; write artifacts only under `build/artifacts` or `build/hdlbits` to keep the tree clean.
 - For HDLBits-style checks, ensure both DUT (`tests/data/hdlbits/dut_*.v`) and TB (`tests/data/hdlbits/tb_*.cpp`) exist and match by ID.
 
+## Documentation Lessons
+- When describing IR or normalized forms (e.g., `kMemoryWritePort`), explicitly define each operand and show small input/output examples; do not assume the reader knows the intended normalization.
+
 ## Commit & Pull Request Guidelines
 - Commits follow conventional prefixes (`feat`, `fix`, `test`, `docs`, `chore`, `bump`); keep scopes brief (e.g., `feat: optimize slice emit`).
 - Keep changes atomic and include updated fixtures/docs when behavior shifts; run `ctest` and relevant `make run_hdlbits_test` targets before pushing.
