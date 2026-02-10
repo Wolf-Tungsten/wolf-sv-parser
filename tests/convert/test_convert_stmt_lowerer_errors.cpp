@@ -112,7 +112,7 @@ bool buildLoweringPlan(const std::filesystem::path& sourcePath, std::string_view
         return false;
     }
 
-    wolf_sv_parser::ConvertLogger logger;
+    wolf_sv_parser::Logger logger;
     wolf_sv_parser::PlanCache planCache;
     wolf_sv_parser::PlanTaskQueue planQueue;
     planQueue.reset();

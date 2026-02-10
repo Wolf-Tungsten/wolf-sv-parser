@@ -2245,6 +2245,8 @@ namespace grh::ir
             "kInstance",
             "kBlackbox",
             "kDisplay",
+            "kFwrite",
+            "kFinish",
             "kAssert",
             "kDpicImport",
             "kDpicCall",

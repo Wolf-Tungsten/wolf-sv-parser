@@ -1,9 +1,11 @@
 #ifndef WOLF_SV_TRANSFORM_HPP
 #define WOLF_SV_TRANSFORM_HPP
 
+#include "logging.hpp"
 #include "grh.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -93,6 +95,8 @@ namespace wolf_sv_parser::transform
         grh::ir::Netlist &netlist;
         PassDiagnostics &diags;
         PassVerbosity verbosity = PassVerbosity::Info;
+        LogLevel logLevel = LogLevel::Warn;
+        std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
         std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>> scratchpad;
     };
 
@@ -117,6 +121,12 @@ namespace wolf_sv_parser::transform
         void setName(std::string name) { name_ = std::move(name); }
 
     protected:
+        void log(LogLevel level, std::string message);
+        void log(LogLevel level, std::string_view tag, std::string message);
+        void logInfo(std::string message) { log(LogLevel::Info, std::move(message)); }
+        void logWarn(std::string message) { log(LogLevel::Warn, std::move(message)); }
+        void logError(std::string message) { log(LogLevel::Error, std::move(message)); }
+        void logDebug(std::string message) { log(LogLevel::Debug, std::move(message)); }
         grh::ir::Netlist &netlist() { return context_->netlist; }
         PassDiagnostics &diags() { return context_->diags; }
         PassVerbosity verbosity() const noexcept { return context_ ? context_->verbosity : PassVerbosity::Error; }
@@ -210,6 +220,7 @@ namespace wolf_sv_parser::transform
         friend class PassManager;
 
         bool shouldEmit(PassDiagnosticKind kind) const noexcept;
+        bool shouldLog(LogLevel level) const noexcept;
         void setContext(PassContext *ctx) { context_ = ctx; }
         void clearContext() { context_ = nullptr; }
 
@@ -222,7 +233,10 @@ namespace wolf_sv_parser::transform
     struct PassManagerOptions
     {
         bool stopOnError = true;
+        bool emitTiming = false;
         PassVerbosity verbosity = PassVerbosity::Info;
+        LogLevel logLevel = LogLevel::Warn;
+        std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
     };
 
     struct PassManagerResult

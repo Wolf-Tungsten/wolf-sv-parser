@@ -37,11 +37,15 @@ VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
 VERILATOR_FLAGS ?= -Wall -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNDRIVEN \
 	-Wno-SYNCASYNCNET
 SINGLE_THREAD ?= 0
-CONVERT_LOG ?= 0
-CONVERT_LOG_LEVEL ?= info
-CONVERT_LOG_TAG ?= timing
+ifeq ($(origin WOLF_LOG), undefined)
+WOLF_LOG := warn
+WOLF_LOG_DEFAULT := 1
+else
+WOLF_LOG_DEFAULT := 0
+endif
+WOLF_TIMER ?= 0
 SKIP_TRANSFORM ?= 0
-WOLF_TIMEOUT ?= 60
+WOLF_TIMEOUT ?= 1200
 WOLF_EMIT_FLAGS ?=
 CMAKE_BUILD_TYPE ?= Release
 
@@ -59,6 +63,11 @@ C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVE
 # XiangShan simulation control
 XS_SIM_MAX_CYCLE ?= 5000
 XS_WAVEFORM ?= 1
+# XiangShan emu build control
+XS_NUM_CORES ?= 1
+XS_EMU_THREADS ?= 16
+XS_SIM_TOP ?= SimTop
+XS_RTL_SUFFIX ?= sv
 # Waveform output control
 # - XS_WAVEFORM_PATH: explicit FST file path (relative paths resolve from repo root)
 # - XS_WAVEFORM_DIR: directory for auto-generated FST filenames (default: XS_LOG_DIR)
@@ -68,11 +77,46 @@ XS_LOG_DIR_ABS = $(abspath $(XS_LOG_DIR))
 XS_WAVEFORM_DIR_ABS = $(abspath $(XS_WAVEFORM_DIR))
 XS_WAVEFORM_PATH_ABS = $(if $(XS_WAVEFORM_PATH),$(if $(filter /%,$(XS_WAVEFORM_PATH)),$(XS_WAVEFORM_PATH),$(abspath $(XS_WAVEFORM_PATH))),)
 
+# XiangShan wolf integration paths
+XS_WORK_BASE ?= $(BUILD_DIR)/xs
+XS_RTL_BUILD ?= $(XS_WORK_BASE)/rtl
+XS_REF_BUILD ?= $(XS_WORK_BASE)/ref
+XS_WOLF_BUILD ?= $(XS_WORK_BASE)/wolf
+XS_RTL_DIR := $(XS_RTL_BUILD)/rtl
+XS_VSRC_DIR ?= $(XS_ROOT)/difftest/src/test/vsrc/common
+XS_WOLF_EMIT_DIR ?= $(XS_WOLF_BUILD)/wolf_emit
+XS_WOLF_EMIT ?= $(XS_WOLF_EMIT_DIR)/wolf_emit.sv
+XS_WOLF_FILELIST ?= $(XS_WOLF_EMIT_DIR)/xs_wolf.f
+XS_SIM_DEFINES ?= DIFFTEST
+XS_WOLF_EMIT_FLAGS ?=
+
+XS_WORK_BASE_ABS := $(abspath $(XS_WORK_BASE))
+XS_RTL_BUILD_ABS := $(abspath $(XS_RTL_BUILD))
+XS_REF_BUILD_ABS := $(abspath $(XS_REF_BUILD))
+XS_WOLF_BUILD_ABS := $(abspath $(XS_WOLF_BUILD))
+XS_RTL_DIR_ABS := $(abspath $(XS_RTL_DIR))
+XS_VSRC_DIR_ABS := $(abspath $(XS_VSRC_DIR))
+XS_WOLF_EMIT_DIR_ABS := $(abspath $(XS_WOLF_EMIT_DIR))
+XS_WOLF_EMIT_ABS := $(abspath $(XS_WOLF_EMIT))
+XS_WOLF_FILELIST_ABS := $(abspath $(XS_WOLF_FILELIST))
+XS_SIM_TOP_V := $(XS_RTL_DIR_ABS)/$(XS_SIM_TOP).$(XS_RTL_SUFFIX)
+
+XS_WOLF_INCLUDE_DIRS ?= $(XS_RTL_DIR_ABS) $(XS_VSRC_DIR_ABS)
+XS_WOLF_INCLUDE_FLAGS := $(foreach d,$(XS_WOLF_INCLUDE_DIRS),-I $(d))
+XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
+
+ifneq ($(strip $(WOLF_TIMER)),0)
+WOLF_LOG := trace
+endif
+
 ifneq ($(strip $(SINGLE_THREAD)),0)
 WOLF_EMIT_FLAGS += --single-thread
 endif
-ifneq ($(strip $(CONVERT_LOG)),0)
-WOLF_EMIT_FLAGS += --convert-log --convert-log-level $(CONVERT_LOG_LEVEL) --convert-log-tag $(CONVERT_LOG_TAG)
+ifneq ($(strip $(WOLF_LOG)),)
+WOLF_EMIT_FLAGS += --log $(WOLF_LOG)
+endif
+ifneq ($(strip $(WOLF_TIMER)),0)
+WOLF_EMIT_FLAGS += --profile-timer
 endif
 ifneq ($(strip $(SKIP_TRANSFORM)),0)
 WOLF_EMIT_FLAGS += --skip-transform
@@ -99,7 +143,8 @@ C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 
 .PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test run_c910_diff build_wolf_parser \
 	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof \
-	run_c910_prof clean check-id xs-init xs-clean run_xs_ref_test
+	run_c910_prof clean check-id xs-init xs-clean run_xs_ref_test \
+	xs-rtl xs-wolf-filelist xs-wolf-emit xs-ref-emu xs-wolf-emu run_xs_test run_xs_diff
 
 all: build_wolf_parser
 
@@ -230,7 +275,7 @@ run_c910_gprof:
 		VERILATOR="$(VERILATOR)" \
 		WOLF_SV_PARSER="$(abspath $(WOLF_PARSER))" \
 		WOLF_EMIT_FLAGS="$(WOLF_EMIT_FLAGS) --emit-sv --top $${WOLF_TOP:-sim_top} \
-			--convert-log --convert-log-level info --convert-log-tag timing"; \
+			--log info --profile-timer"; \
 	if [ -f "$(C910_SMART_RUN_DIR)/work/gmon.out" ]; then \
 		cp -f "$(C910_SMART_RUN_DIR)/work/gmon.out" "$(GPROF_GMON)"; \
 		gprof "$(WOLF_PARSER)" "$(GPROF_GMON)" > "$(GPROF_OUT)"; \
@@ -347,3 +392,114 @@ run_xs_ref_test:
 		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),) \
 		2>&1 | tee "$(LOG_FILE)"
+
+$(XS_SIM_TOP_V):
+	@echo "[RUN] Generating XiangShan sim-verilog into $(XS_RTL_BUILD_ABS)..."
+	$(MAKE) -C $(XS_ROOT) sim-verilog \
+		BUILD_DIR=$(XS_RTL_BUILD_ABS) \
+		NUM_CORES=$(XS_NUM_CORES) \
+		RTL_SUFFIX=$(XS_RTL_SUFFIX)
+
+xs-rtl: $(XS_SIM_TOP_V)
+
+$(XS_WOLF_FILELIST_ABS): $(XS_SIM_TOP_V)
+	@mkdir -p "$(dir $@)"
+	@{ \
+		find "$(XS_RTL_DIR_ABS)" -type f -name "*.sv" -o -type f -name "*.v"; \
+		find "$(XS_VSRC_DIR_ABS)" -type f -name "*.sv" -o -type f -name "*.v"; \
+	} | LC_ALL=C sort > "$@"
+
+xs-wolf-filelist: $(XS_WOLF_FILELIST_ABS)
+
+ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
+XS_WOLF_DEPS := $(WOLF_PARSER)
+endif
+
+xs-wolf-emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
+	@mkdir -p "$(XS_WOLF_EMIT_DIR_ABS)"
+	$(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) \
+		$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
+		$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
+		-f $(XS_WOLF_FILELIST_ABS)
+
+xs-ref-emu: $(XS_SIM_TOP_V)
+	@echo "[RUN] Building XiangShan ref emu..."
+	$(MAKE) -C $(XS_ROOT)/difftest emu \
+		BUILD_DIR=$(XS_REF_BUILD_ABS) \
+		RTL_DIR=$(XS_RTL_DIR_ABS) \
+		SIM_TOP_V=$(XS_SIM_TOP_V) \
+		NUM_CORES=$(XS_NUM_CORES) \
+		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
+		EMU_THREADS=$(XS_EMU_THREADS) \
+		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)
+
+xs-wolf-emu: xs-wolf-emit
+	@echo "[RUN] Building XiangShan wolf emu..."
+	$(MAKE) -C $(XS_ROOT)/difftest emu \
+		BUILD_DIR=$(XS_WOLF_BUILD_ABS) \
+		RTL_DIR=$(XS_WOLF_EMIT_DIR_ABS) \
+		SIM_TOP_V=$(XS_WOLF_EMIT_ABS) \
+		NUM_CORES=$(XS_NUM_CORES) \
+		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
+		EMU_THREADS=$(XS_EMU_THREADS) \
+		SIM_VSRC= \
+		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)
+
+run_xs_test: xs-wolf-emu
+	@echo "[RUN] Running XiangShan wolf emu..."
+	@mkdir -p "$(XS_LOG_DIR_ABS)"
+	@$(eval RUN_ID := $(shell date +%Y%m%d_%H%M%S))
+	@$(eval LOG_FILE := $(XS_LOG_DIR_ABS)/xs_wolf_$(RUN_ID).log)
+	@$(eval WAVEFORM_FILE := $(if $(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_DIR_ABS)/xs_wolf_$(RUN_ID).fst))
+	@echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM)"
+	@echo "[LOG] Capturing output to: $(LOG_FILE)"
+	$(if $(filter 1,$(XS_WAVEFORM)),@echo "[WAVEFORM] Will save FST to: $(WAVEFORM_FILE)",)
+	cd $(XS_WOLF_BUILD_ABS) && ./emu \
+		-i $(XS_ROOT)/ready-to-run/coremark-2-iteration.bin \
+		--diff $(XS_ROOT)/ready-to-run/riscv64-nemu-interpreter-so \
+		-b 0 -e 0 \
+		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
+		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),) \
+		2>&1 | tee "$(LOG_FILE)"
+
+run_xs_diff: xs-ref-emu xs-wolf-emu
+	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
+	LOG_DIR="$(XS_LOG_DIR_ABS)"; \
+	mkdir -p "$$LOG_DIR"; \
+	WOLF_LOG="$$LOG_DIR/xs_wolf_$${RUN_ID}.log"; \
+	REF_LOG="$$LOG_DIR/xs_ref_$${RUN_ID}.log"; \
+	WOLF_WAVEFORM="$(XS_WAVEFORM_DIR_ABS)/xs_wolf_$${RUN_ID}.fst"; \
+	REF_WAVEFORM="$(XS_WAVEFORM_DIR_ABS)/xs_ref_$${RUN_ID}.fst"; \
+	echo "[RUN] parallel xs diff"; \
+	echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM)"; \
+	echo "[LOG] wolf: $$WOLF_LOG"; \
+	echo "[LOG] ref : $$REF_LOG"; \
+	if [ "$(XS_WAVEFORM)" = "1" ]; then \
+		echo "[WAVEFORM] wolf: $$WOLF_WAVEFORM"; \
+		echo "[WAVEFORM] ref : $$REF_WAVEFORM"; \
+	fi; \
+	cd $(XS_WOLF_BUILD_ABS) && ./emu \
+		-i $(XS_ROOT)/ready-to-run/coremark-2-iteration.bin \
+		--diff $(XS_ROOT)/ready-to-run/riscv64-nemu-interpreter-so \
+		-b 0 -e 0 \
+		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
+		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,) \
+		2>&1 | tee "$$WOLF_LOG" & \
+	wolf_pid=$$!; \
+	cd $(XS_REF_BUILD_ABS) && ./emu \
+		-i $(XS_ROOT)/ready-to-run/coremark-2-iteration.bin \
+		--diff $(XS_ROOT)/ready-to-run/riscv64-nemu-interpreter-so \
+		-b 0 -e 0 \
+		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
+		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$REF_WAVEFORM,) \
+		2>&1 | tee "$$REF_LOG" & \
+	ref_pid=$$!; \
+	wait $$wolf_pid; wolf_status=$$?; \
+	wait $$ref_pid; ref_status=$$?; \
+	if [ $$wolf_status -ne 0 ] || [ $$ref_status -ne 0 ]; then \
+		echo "[FAIL] xs diff: wolf=$$wolf_status ref=$$ref_status"; \
+		exit 1; \
+	fi

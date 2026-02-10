@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -21,6 +22,8 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kInstance:
             case grh::ir::OperationKind::kBlackbox:
             case grh::ir::OperationKind::kDisplay:
+            case grh::ir::OperationKind::kFwrite:
+            case grh::ir::OperationKind::kFinish:
             case grh::ir::OperationKind::kAssert:
             case grh::ir::OperationKind::kDpicImport:
             case grh::ir::OperationKind::kDpicCall:
@@ -75,6 +78,9 @@ namespace wolf_sv_parser::transform
     {
         PassResult result;
         bool anyChanged = false;
+        const std::size_t graphCount = netlist().graphs().size();
+        logInfo("begin graphs=" + std::to_string(graphCount));
+        std::size_t changedGraphs = 0;
 
         for (const auto &entry : netlist().graphs())
         {
@@ -326,10 +332,19 @@ namespace wolf_sv_parser::transform
             }
 
             anyChanged = anyChanged || graphChanged;
+            if (graphChanged)
+            {
+                ++changedGraphs;
+            }
         }
 
         result.changed = anyChanged;
         result.failed = false;
+        std::string message = "graphs=" + std::to_string(graphCount);
+        message.append(", changedGraphs=");
+        message.append(std::to_string(changedGraphs));
+        message.append(result.changed ? ", changed=true" : ", changed=false");
+        logInfo(std::move(message));
         return result;
     }
 

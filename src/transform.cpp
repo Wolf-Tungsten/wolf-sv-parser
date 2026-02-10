@@ -1,7 +1,6 @@
 #include "transform.hpp"
 
 #include <chrono>
-#include <iostream>
 
 namespace wolf_sv_parser::transform
 {
@@ -117,6 +116,34 @@ namespace wolf_sv_parser::transform
             return false;
         }
         return diagnosticLevel(kind) >= static_cast<int>(context_->verbosity);
+    }
+
+    bool Pass::shouldLog(LogLevel level) const noexcept
+    {
+        if (!context_ || !context_->logSink)
+        {
+            return false;
+        }
+        if (static_cast<int>(level) < static_cast<int>(context_->logLevel))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    void Pass::log(LogLevel level, std::string message)
+    {
+        const std::string_view tag = name_.empty() ? std::string_view(id_) : std::string_view(name_);
+        log(level, tag, std::move(message));
+    }
+
+    void Pass::log(LogLevel level, std::string_view tag, std::string message)
+    {
+        if (!shouldLog(level))
+        {
+            return;
+        }
+        context_->logSink(level, tag, message);
     }
 
     void Pass::error(std::string message, std::string context)
@@ -294,8 +321,19 @@ namespace wolf_sv_parser::transform
     PassManagerResult PassManager::run(grh::ir::Netlist &netlist, PassDiagnostics &diags)
     {
         PassManagerResult result;
-        PassContext context{netlist, diags, options_.verbosity};
+        PassContext context{netlist, diags, options_.verbosity, options_.logLevel, options_.logSink};
         bool encounteredFailure = false;
+        auto emitLog = [&](LogLevel level, std::string_view tag, std::string_view message) {
+            if (!options_.logSink)
+            {
+                return;
+            }
+            if (static_cast<int>(level) < static_cast<int>(options_.logLevel))
+            {
+                return;
+            }
+            options_.logSink(level, tag, message);
+        };
 
         for (auto &entry : pipeline_)
         {
@@ -319,19 +357,37 @@ namespace wolf_sv_parser::transform
             }
 
             pass->setContext(&context);
+            if (options_.emitTiming)
+            {
+                std::string message;
+                message.reserve(pass->id().size() + 16);
+                message.append(pass->id());
+                message.append(" start");
+                emitLog(LogLevel::Trace, "timing", message);
+            }
             auto startTime = std::chrono::steady_clock::now();
             PassResult passResult = pass->run();
             auto endTime = std::chrono::steady_clock::now();
             pass->clearContext();
             result.changed = result.changed || passResult.changed;
 
-            auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
-            std::cerr << "[transform] [" << pass->id() << "] " << (passResult.failed ? "failed" : "done");
-            if (passResult.changed)
+            if (options_.emitTiming)
             {
-                std::cerr << " (changed)";
+                auto durationMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime)
+                        .count();
+                std::string message;
+                message.reserve(pass->id().size() + 32);
+                message.append(pass->id());
+                message.append(passResult.failed ? " failed in " : " done in ");
+                message.append(std::to_string(durationMs));
+                message.append("ms");
+                if (passResult.changed)
+                {
+                    message.append(" (changed)");
+                }
+                emitLog(LogLevel::Trace, "timing", message);
             }
-            std::cerr << " in " << durationMs << "ms\n";
 
             if (passResult.failed)
             {

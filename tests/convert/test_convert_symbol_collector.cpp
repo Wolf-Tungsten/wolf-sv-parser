@@ -199,7 +199,7 @@ int testPorts(const std::filesystem::path& sourcePath) {
     }
 
     wolf_sv_parser::ConvertDiagnostics diagnostics;
-    wolf_sv_parser::ConvertLogger logger;
+    wolf_sv_parser::Logger logger;
     wolf_sv_parser::PlanCache planCache;
     wolf_sv_parser::PlanTaskQueue planQueue;
     planQueue.reset();
@@ -248,7 +248,7 @@ int testSignals(const std::filesystem::path& sourcePath) {
     }
 
     wolf_sv_parser::ConvertDiagnostics diagnostics;
-    wolf_sv_parser::ConvertLogger logger;
+    wolf_sv_parser::Logger logger;
     wolf_sv_parser::PlanCache planCache;
     wolf_sv_parser::PlanTaskQueue planQueue;
     planQueue.reset();
@@ -287,7 +287,7 @@ int testInstances(const std::filesystem::path& sourcePath) {
     }
 
     wolf_sv_parser::ConvertDiagnostics diagnostics;
-    wolf_sv_parser::ConvertLogger logger;
+    wolf_sv_parser::Logger logger;
     wolf_sv_parser::PlanCache planCache;
     wolf_sv_parser::PlanTaskQueue planQueue;
     planQueue.reset();

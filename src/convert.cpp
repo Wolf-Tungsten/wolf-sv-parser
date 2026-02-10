@@ -202,10 +202,30 @@ std::string formatDuration(ConvertClock::duration duration)
     return std::to_string(ns) + "ns";
 }
 
-void logPassTiming(ConvertLogger* logger, std::string_view passName,
+void logPassStart(Logger* logger, bool timingEnabled, std::string_view passName,
+                  std::string_view moduleName)
+{
+    if (!timingEnabled || !logger || !logger->enabled(LogLevel::Trace, "timing"))
+    {
+        return;
+    }
+    std::string message;
+    message.reserve(passName.size() + moduleName.size() + 32);
+    message.append(passName);
+    if (!moduleName.empty())
+    {
+        message.append(" (");
+        message.append(moduleName);
+        message.append(")");
+    }
+    message.append(" start");
+    logger->log(LogLevel::Trace, "timing", message);
+}
+
+void logPassTiming(Logger* logger, bool timingEnabled, std::string_view passName,
                    std::string_view moduleName, ConvertClock::duration duration)
 {
-    if (!logger || !logger->enabled(ConvertLogLevel::Info, "timing"))
+    if (!timingEnabled || !logger || !logger->enabled(LogLevel::Trace, "timing"))
     {
         return;
     }
@@ -220,7 +240,7 @@ void logPassTiming(ConvertLogger* logger, std::string_view passName,
     }
     message.append(" took ");
     message.append(formatDuration(duration));
-    logger->log(ConvertLogLevel::Info, "timing", message);
+    logger->log(LogLevel::Trace, "timing", message);
 }
 
 std::string parameterValueToString(const slang::ConstantValue& value)
@@ -2329,9 +2349,17 @@ private:
         {
             return emitDisplayCall(call, name);
         }
+        if (name == "fwrite")
+        {
+            return emitFwriteCall(call);
+        }
+        if (name == "finish")
+        {
+            return emitFinishCall(call);
+        }
         if (name == "info" || name == "warning" || name == "error" || name == "fatal")
         {
-            return emitAssertCall(call, name);
+            return emitMessageCall(call, name);
         }
         return false;
     }
@@ -2383,6 +2411,179 @@ private:
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
         stmt.display = std::move(display);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitFwriteCall(const slang::ast::CallExpression& call)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "fwrite"))
+        {
+            return true;
+        }
+        DisplayStmt display;
+        display.displayKind = "fwrite";
+
+        const auto args = call.arguments();
+        if (args.empty() || !args.front())
+        {
+            reportUnsupported(call, "Fwrite requires a file handle expression");
+            return true;
+        }
+        ExprNodeId fileHandle = lowerExpression(*args.front());
+        if (fileHandle == kInvalidPlanIndex)
+        {
+            reportUnsupported(call, "Failed to lower fwrite file handle");
+            return true;
+        }
+        display.fileHandle = fileHandle;
+
+        if (args.size() < 2 || !args[1])
+        {
+            reportUnsupported(call, "Fwrite format string must be a literal");
+            return true;
+        }
+        auto literal = extractStringLiteral(*args[1]);
+        if (!literal)
+        {
+            reportUnsupported(call, "Fwrite format string must be a literal");
+            return true;
+        }
+        display.formatString = std::move(*literal);
+
+        for (std::size_t index = 2; index < args.size(); ++index)
+        {
+            if (!args[index])
+            {
+                continue;
+            }
+            ExprNodeId argId = lowerExpression(*args[index]);
+            if (argId == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower fwrite argument");
+                return true;
+            }
+            display.args.push_back(argId);
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Display;
+        stmt.op = grh::ir::OperationKind::kFwrite;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.display = std::move(display);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitMessageCall(const slang::ast::CallExpression& call, std::string_view messageKind)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), messageKind))
+        {
+            return true;
+        }
+        DisplayStmt display;
+        display.displayKind = std::string(messageKind);
+
+        const auto args = call.arguments();
+        if (args.empty())
+        {
+            reportUnsupported(call, "Message call requires a format string literal");
+            return true;
+        }
+
+        std::size_t index = 0;
+        if (messageKind == "fatal" && args.size() >= 2 && args.front() && args[1])
+        {
+            const bool firstIsString = extractStringLiteral(*args.front()).has_value();
+            const bool secondIsString = extractStringLiteral(*args[1]).has_value();
+            if (!firstIsString && secondIsString)
+            {
+                ExprNodeId exitCode = lowerExpression(*args.front());
+                if (exitCode == kInvalidPlanIndex)
+                {
+                    reportUnsupported(call, "Failed to lower fatal exit code");
+                    return true;
+                }
+                display.hasExitCode = true;
+                display.exitCode = exitCode;
+                index = 1;
+            }
+        }
+
+        if (index >= args.size() || !args[index])
+        {
+            reportUnsupported(call, "Message format string must be a literal");
+            return true;
+        }
+        auto literal = extractStringLiteral(*args[index]);
+        if (!literal)
+        {
+            reportUnsupported(call, "Message format string must be a literal");
+            return true;
+        }
+        display.formatString = std::move(*literal);
+
+        for (std::size_t argIndex = index + 1; argIndex < args.size(); ++argIndex)
+        {
+            if (!args[argIndex])
+            {
+                continue;
+            }
+            ExprNodeId argId = lowerExpression(*args[argIndex]);
+            if (argId == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower message argument");
+                return true;
+            }
+            display.args.push_back(argId);
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Display;
+        stmt.op = grh::ir::OperationKind::kDisplay;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.display = std::move(display);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitFinishCall(const slang::ast::CallExpression& call)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "finish"))
+        {
+            return true;
+        }
+        FinishStmt finish;
+        const auto args = call.arguments();
+        if (!args.empty() && args.front())
+        {
+            ExprNodeId exitCode = lowerExpression(*args.front());
+            if (exitCode == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower finish exit code");
+                return true;
+            }
+            finish.hasExitCode = true;
+            finish.exitCode = exitCode;
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::Finish;
+        stmt.op = grh::ir::OperationKind::kFinish;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.finish = std::move(finish);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
     }
@@ -2480,16 +2681,25 @@ private:
             }
             case slang::ast::ArgumentDirection::Out: {
                 const slang::ast::Expression& actualExpr = unwrapDpiArgument(*actual, true);
-                PlanSymbolId symbol = resolveSimpleSymbol(actualExpr);
-                if (!symbol.valid())
+                PlanSymbolId targetSymbol = resolveSimpleSymbol(actualExpr);
+                if (!targetSymbol.valid())
                 {
                     std::string message("Unsupported DPI output argument kind: ");
                     message.append(std::string(slang::ast::toString(actualExpr.kind)));
                     reportUnsupported(call, std::move(message));
                     return true;
                 }
+                PlanSymbolId resultSymbol = makeDpiResultSymbol();
                 dpi.outArgNames.emplace_back(formal->name);
-                dpi.results.push_back(symbol);
+                dpi.results.push_back(resultSymbol);
+                WriteIntent intent;
+                intent.target = targetSymbol;
+                intent.value = makeSymbolExpr(resultSymbol, call.sourceRange.start());
+                intent.guard = currentGuard(call.sourceRange.start());
+                intent.domain = domain;
+                intent.isNonBlocking = false;
+                intent.location = call.sourceRange.start();
+                recordWriteIntent(std::move(intent));
                 break;
             }
             default:
@@ -2522,6 +2732,126 @@ private:
         stmt.dpiCall = std::move(dpi);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
+    }
+
+    ExprNodeId handleDpiCallExpr(const slang::ast::CallExpression& call,
+                                 const slang::ast::SubroutineSymbol& subroutine,
+                                 const slang::ast::Expression* cacheKey)
+    {
+        if (!ensureEdgeSensitive(call.sourceRange.start(), "dpi"))
+        {
+            return kInvalidPlanIndex;
+        }
+        if (subroutine.subroutineKind != slang::ast::SubroutineKind::Function)
+        {
+            reportUnsupported(call, "DPI call supports only functions");
+            return kInvalidPlanIndex;
+        }
+        if (subroutine.getReturnType().isVoid())
+        {
+            reportUnsupported(call, "DPI call without return cannot be used in expressions");
+            return kInvalidPlanIndex;
+        }
+
+        const auto args = call.arguments();
+        const auto formals = subroutine.getArguments();
+        if (args.size() != formals.size())
+        {
+            reportUnsupported(call, "DPI call argument count mismatch");
+            return kInvalidPlanIndex;
+        }
+
+        DpiCallStmt dpi;
+        dpi.targetImportSymbol = std::string(subroutine.name);
+
+        for (std::size_t i = 0; i < formals.size(); ++i)
+        {
+            const auto* formal = formals[i];
+            const auto* actual = args[i];
+            if (!formal || !actual)
+            {
+                reportUnsupported(call, "DPI call missing argument");
+                return kInvalidPlanIndex;
+            }
+
+            switch (formal->direction)
+            {
+            case slang::ast::ArgumentDirection::In: {
+                const slang::ast::Expression& actualExpr = unwrapDpiArgument(*actual, false);
+                ExprNodeId argId = lowerExpression(actualExpr);
+                if (argId == kInvalidPlanIndex)
+                {
+                    reportUnsupported(call, "Failed to lower DPI input argument");
+                    return kInvalidPlanIndex;
+                }
+                dpi.inArgNames.emplace_back(formal->name);
+                dpi.inArgs.push_back(argId);
+                break;
+            }
+            case slang::ast::ArgumentDirection::Out: {
+                const slang::ast::Expression& actualExpr = unwrapDpiArgument(*actual, true);
+                PlanSymbolId targetSymbol = resolveSimpleSymbol(actualExpr);
+                if (!targetSymbol.valid())
+                {
+                    std::string message("Unsupported DPI output argument kind: ");
+                    message.append(std::string(slang::ast::toString(actualExpr.kind)));
+                    reportUnsupported(call, std::move(message));
+                    return kInvalidPlanIndex;
+                }
+                PlanSymbolId resultSymbol = makeDpiResultSymbol();
+                dpi.outArgNames.emplace_back(formal->name);
+                dpi.results.push_back(resultSymbol);
+                WriteIntent intent;
+                intent.target = targetSymbol;
+                intent.value = makeSymbolExpr(resultSymbol, call.sourceRange.start());
+                intent.guard = currentGuard(call.sourceRange.start());
+                intent.domain = domain;
+                intent.isNonBlocking = false;
+                intent.location = call.sourceRange.start();
+                recordWriteIntent(std::move(intent));
+                break;
+            }
+            default:
+                reportUnsupported(call, "DPI call supports only input/output arguments");
+                return kInvalidPlanIndex;
+            }
+        }
+
+        dpi.hasReturn = true;
+        PlanSymbolId retSymbol = makeDpiResultSymbol();
+        dpi.results.insert(dpi.results.begin(), retSymbol);
+
+        if (!recordDpiImport(subroutine, call.sourceRange.start()))
+        {
+            return kInvalidPlanIndex;
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::DpiCall;
+        stmt.op = grh::ir::OperationKind::kDpicCall;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.dpiCall = std::move(dpi);
+        lowering.loweredStmts.push_back(std::move(stmt));
+
+        ExprNode node;
+        node.kind = ExprNodeKind::Symbol;
+        node.symbol = retSymbol;
+        node.location = call.sourceRange.start();
+        node.isSigned = subroutine.getReturnType().isSigned();
+        uint64_t width = computeFixedWidth(subroutine.getReturnType(), subroutine, diagnostics);
+        if (width > 0)
+        {
+            const uint64_t maxValue =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            node.widthHint = width > maxValue
+                                 ? std::numeric_limits<int32_t>::max()
+                                 : static_cast<int32_t>(width);
+        }
+        return addNode(cacheKey, std::move(node));
     }
 
     bool recordDpiImport(const slang::ast::SubroutineSymbol& subroutine,
@@ -2560,11 +2890,19 @@ private:
     {
         DpiImportInfo info;
         info.symbol = std::string(subroutine.name);
+        auto classifyDpiType = [](const slang::ast::Type& type) -> std::string {
+            if (type.isString())
+            {
+                return "string";
+            }
+            return "logic";
+        };
         const auto formals = subroutine.getArguments();
         info.argsDirection.reserve(formals.size());
         info.argsWidth.reserve(formals.size());
         info.argsName.reserve(formals.size());
         info.argsSigned.reserve(formals.size());
+        info.argsType.reserve(formals.size());
 
         for (const auto* formal : formals)
         {
@@ -2593,26 +2931,41 @@ private:
                 }
                 return std::nullopt;
             }
-            const uint64_t widthRaw =
-                computeFixedWidth(formal->getType(), *formal, diagnostics);
-            const int32_t width =
-                clampWidth(widthRaw, *formal, diagnostics, "DPI argument");
+            const slang::ast::Type& formalType = formal->getType();
+            const std::string typeName = classifyDpiType(formalType);
+            int32_t width = 1;
+            bool isSigned = false;
+            if (typeName == "logic")
+            {
+                const uint64_t widthRaw =
+                    computeFixedWidth(formalType, *formal, diagnostics);
+                width = clampWidth(widthRaw, *formal, diagnostics, "DPI argument");
+                isSigned = formalType.isSigned();
+            }
             info.argsDirection.push_back(std::move(direction));
             info.argsWidth.push_back(static_cast<int64_t>(width));
             info.argsName.push_back(std::string(formal->name));
-            info.argsSigned.push_back(formal->getType().isSigned());
+            info.argsSigned.push_back(isSigned);
+            info.argsType.push_back(typeName);
         }
 
         const slang::ast::Type& returnType = subroutine.getReturnType();
         if (!returnType.isVoid())
         {
-            const uint64_t widthRaw =
-                computeFixedWidth(returnType, subroutine, diagnostics);
-            const int32_t width =
-                clampWidth(widthRaw, subroutine, diagnostics, "DPI return");
+            const std::string typeName = classifyDpiType(returnType);
+            int32_t width = 1;
+            bool isSigned = false;
+            if (typeName == "logic")
+            {
+                const uint64_t widthRaw =
+                    computeFixedWidth(returnType, subroutine, diagnostics);
+                width = clampWidth(widthRaw, subroutine, diagnostics, "DPI return");
+                isSigned = returnType.isSigned();
+            }
             info.hasReturn = true;
             info.returnWidth = static_cast<int64_t>(width);
-            info.returnSigned = returnType.isSigned();
+            info.returnSigned = isSigned;
+            info.returnType = typeName;
         }
         return info;
     }
@@ -2624,9 +2977,11 @@ private:
                lhs.argsWidth == rhs.argsWidth &&
                lhs.argsName == rhs.argsName &&
                lhs.argsSigned == rhs.argsSigned &&
+               lhs.argsType == rhs.argsType &&
                lhs.hasReturn == rhs.hasReturn &&
                lhs.returnWidth == rhs.returnWidth &&
-               lhs.returnSigned == rhs.returnSigned;
+               lhs.returnSigned == rhs.returnSigned &&
+               lhs.returnType == rhs.returnType;
     }
 
     void recordWriteIntent(WriteIntent intent)
@@ -4906,6 +5261,15 @@ private:
         return plan.symbolTable.intern(name);
     }
 
+    ExprNodeId makeSymbolExpr(PlanSymbolId symbol, slang::SourceLocation location)
+    {
+        ExprNode node;
+        node.kind = ExprNodeKind::Symbol;
+        node.symbol = symbol;
+        node.location = location;
+        return addNode(nullptr, std::move(node));
+    }
+
     PlanSymbolId makeTempSymbol()
     {
         const std::string name = "_expr_tmp_" + std::to_string(nextTemp++);
@@ -6123,7 +6487,7 @@ private:
         if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
-            node.literal.assign(literal->getValue());
+            node.literal.assign(literal->getRawValue());
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
@@ -6235,6 +6599,18 @@ private:
                     node.literal = "$" + name;
                     applyExprWidthHint(node);
                     return addNodeForExpr(std::move(node));
+                }
+            }
+            if (auto* subroutine = std::get_if<const slang::ast::SubroutineSymbol*>(&call->subroutine))
+            {
+                if (*subroutine && (*subroutine)->flags.has(slang::ast::MethodFlags::DPIImport))
+                {
+                    ExprNodeId dpiResult = handleDpiCallExpr(*call, **subroutine,
+                                                             cacheable ? &expr : nullptr);
+                    if (dpiResult != kInvalidPlanIndex)
+                    {
+                        return dpiResult;
+                    }
                 }
             }
         }
@@ -6559,6 +6935,33 @@ private:
                         continue;
                     }
                     ExprNodeId id = lowerExpression(*operand);
+                    if (id == kInvalidPlanIndex)
+                    {
+                        return kInvalidPlanIndex;
+                    }
+                    operands.push_back(id);
+                }
+            }
+            node.kind = ExprNodeKind::Operation;
+            node.op = grh::ir::OperationKind::kConcat;
+            node.operands = std::move(operands);
+            node.tempSymbol = makeTempSymbol();
+            applyExprWidthHint(node);
+            return addNodeForExpr(std::move(node));
+        }
+        if (const auto* pattern = expr.as_if<slang::ast::SimpleAssignmentPatternExpression>())
+        {
+            std::vector<ExprNodeId> operands;
+            operands.reserve(pattern->elements().size());
+            {
+                WidthContextScope widthScope(*this, 0);
+                for (const slang::ast::Expression* element : pattern->elements())
+                {
+                    if (!element)
+                    {
+                        continue;
+                    }
+                    ExprNodeId id = lowerExpression(*element);
                     if (id == kInvalidPlanIndex)
                     {
                         return kInvalidPlanIndex;
@@ -7824,59 +8227,6 @@ void ConvertDiagnostics::flushThreadLocalLocked(ThreadLocalBuffer& buffer)
         hasError_.store(true, std::memory_order_relaxed);
         buffer.hasError = false;
     }
-}
-
-void ConvertLogger::allowTag(std::string_view tag)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    tags_.insert(std::string(tag));
-}
-
-void ConvertLogger::clearTags()
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    tags_.clear();
-}
-
-bool ConvertLogger::enabled(ConvertLogLevel level, std::string_view tag) const noexcept
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!enabled_ || level_ == ConvertLogLevel::Off)
-    {
-        return false;
-    }
-    if (static_cast<int>(level) < static_cast<int>(level_))
-    {
-        return false;
-    }
-    if (!tags_.empty() && tags_.find(std::string(tag)) == tags_.end())
-    {
-        return false;
-    }
-    return true;
-}
-
-void ConvertLogger::log(ConvertLogLevel level, std::string_view tag, std::string_view message)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!enabled_ || level_ == ConvertLogLevel::Off)
-    {
-        return;
-    }
-    if (level < level_)
-    {
-        return;
-    }
-    if (!tags_.empty() && tags_.find(std::string(tag)) == tags_.end())
-    {
-        return;
-    }
-    if (!sink_)
-    {
-        return;
-    }
-    ConvertLogEvent event{level, std::string(tag), std::string(message)};
-    sink_(event);
 }
 
 bool PlanCache::tryClaim(const PlanKey& key)
@@ -11757,6 +12107,9 @@ private:
             case LoweredStmtKind::DpiCall:
                 emitDpiCall(stmt);
                 break;
+            case LoweredStmtKind::Finish:
+                emitFinish(stmt);
+                break;
             default:
                 break;
             }
@@ -11815,11 +12168,16 @@ private:
             graph_.setAttr(op, "argsWidth", info.argsWidth);
             graph_.setAttr(op, "argsName", info.argsName);
             graph_.setAttr(op, "argsSigned", info.argsSigned);
+            graph_.setAttr(op, "argsType", info.argsType);
             graph_.setAttr(op, "hasReturn", info.hasReturn);
             if (info.hasReturn)
             {
                 graph_.setAttr(op, "returnWidth", info.returnWidth);
                 graph_.setAttr(op, "returnSigned", info.returnSigned);
+                if (!info.returnType.empty())
+                {
+                    graph_.setAttr(op, "returnType", info.returnType);
+                }
             }
         }
     }
@@ -11852,10 +12210,49 @@ private:
         }
 
         grh::ir::OperationId op =
-            createOp(grh::ir::OperationKind::kDisplay,
+            createOp(stmt.op,
                      grh::ir::SymbolId::invalid(),
                      stmt.location);
         graph_.addOperand(op, updateCond);
+
+        if (stmt.op == grh::ir::OperationKind::kDisplay && stmt.display.hasExitCode)
+        {
+            if (stmt.display.exitCode == kInvalidPlanIndex)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(stmt.location,
+                                               "Skipping display without exit code");
+                }
+                return;
+            }
+            grh::ir::ValueId exitCode = emitExpr(stmt.display.exitCode);
+            if (!exitCode.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, exitCode);
+            graph_.setAttr(op, "hasExitCode", true);
+        }
+
+        if (stmt.op == grh::ir::OperationKind::kFwrite)
+        {
+            if (stmt.display.fileHandle == kInvalidPlanIndex)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(stmt.location,
+                                               "Skipping fwrite without file handle");
+                }
+                return;
+            }
+            grh::ir::ValueId fh = emitExpr(stmt.display.fileHandle);
+            if (!fh.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, fh);
+        }
 
         for (ExprNodeId argId : stmt.display.args)
         {
@@ -11943,6 +12340,62 @@ private:
         {
             graph_.setAttr(op, "severity", stmt.assertion.severity);
         }
+    }
+
+    void emitFinish(const LoweredStmt& stmt)
+    {
+        if (stmt.eventEdges.size() != stmt.eventOperands.size())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping finish with mismatched event binding");
+            }
+            return;
+        }
+        if (stmt.eventEdges.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping finish without edge-sensitive timing");
+            }
+            return;
+        }
+
+        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
+        if (!updateCond.valid())
+        {
+            return;
+        }
+
+        grh::ir::OperationId op =
+            createOp(grh::ir::OperationKind::kFinish,
+                     grh::ir::SymbolId::invalid(),
+                     stmt.location);
+        graph_.addOperand(op, updateCond);
+
+        if (stmt.finish.hasExitCode)
+        {
+            grh::ir::ValueId exitCode = emitExpr(stmt.finish.exitCode);
+            if (!exitCode.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, exitCode);
+            graph_.setAttr(op, "hasExitCode", true);
+        }
+
+        for (ExprNodeId evtId : stmt.eventOperands)
+        {
+            grh::ir::ValueId evt = emitExpr(evtId);
+            if (!evt.valid())
+            {
+                return;
+            }
+            graph_.addOperand(op, evt);
+        }
+
         std::vector<std::string> edges;
         edges.reserve(stmt.eventEdges.size());
         for (EventEdge edge : stmt.eventEdges)
@@ -14985,8 +15438,9 @@ void markInstanceReady(ConvertContext& context, const PlanKey& key)
     }
 }
 
-void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
+void runSlangPrebind(const slang::ast::RootSymbol& root, Logger* logger, bool timingEnabled)
 {
+    logPassStart(logger, timingEnabled, "pass0-slang-prebind", {});
     const auto prebindStart = ConvertClock::now();
     // Trigger slang's internal DiagnosticVisitor through the public API.
     // This traverses the entire AST and triggers all lazy bindings,
@@ -15005,7 +15459,7 @@ void runSlangPrebind(const slang::ast::RootSymbol& root, ConvertLogger* logger)
     // lazily. Freezing would assert in allocConstant.
     
     const auto prebindEnd = ConvertClock::now();
-    logPassTiming(logger, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
+    logPassTiming(logger, timingEnabled, "pass0-slang-prebind", {}, prebindEnd - prebindStart);
 }
 
 void configureParallelContext(ConvertContext& context, ConvertDiagnostics& diagnostics,
@@ -15128,15 +15582,21 @@ void processPlanKey(PlanKey key, ConvertContext& context, PlanCache& planCache,
     WriteBackPass writeBack(context);
     MemoryPortLowererPass memoryPortLowerer(context);
 
+    std::string_view moduleName;
+    if (key.definition && !key.definition->name.empty())
+    {
+        moduleName = key.definition->name;
+    }
+    logPassStart(context.logger, context.options.enableTiming, "pass1-module-plan", moduleName);
     const auto planStart = ConvertClock::now();
     ModulePlan plan = planner.plan(*key.body);
     const auto planEnd = ConvertClock::now();
-    std::string_view moduleName;
     if (plan.moduleSymbol.valid())
     {
         moduleName = plan.symbolTable.text(plan.moduleSymbol);
     }
-    logPassTiming(context.logger, "pass1-module-plan", moduleName, planEnd - planStart);
+    logPassTiming(context.logger, context.options.enableTiming,
+                  "pass1-module-plan", moduleName, planEnd - planStart);
 
     if (shouldCancel(context))
     {
@@ -15145,17 +15605,25 @@ void processPlanKey(PlanKey key, ConvertContext& context, PlanCache& planCache,
     }
 
     LoweringPlan lowering;
+    logPassStart(context.logger, context.options.enableTiming,
+                 "pass2-stmt-lowerer", moduleName);
     const auto stmtStart = ConvertClock::now();
     stmtLowerer.lower(plan, lowering);
     const auto stmtEnd = ConvertClock::now();
-    logPassTiming(context.logger, "pass2-stmt-lowerer", moduleName, stmtEnd - stmtStart);
+    logPassTiming(context.logger, context.options.enableTiming,
+                  "pass2-stmt-lowerer", moduleName, stmtEnd - stmtStart);
 
+    logPassStart(context.logger, context.options.enableTiming,
+                 "pass3-writeback", moduleName);
     const auto writeBackStart = ConvertClock::now();
     WriteBackPlan writeBackPlan = writeBack.lower(plan, lowering);
     const auto writeBackEnd = ConvertClock::now();
-    logPassTiming(context.logger, "pass3-writeback", moduleName,
+    logPassTiming(context.logger, context.options.enableTiming,
+                  "pass3-writeback", moduleName,
                   writeBackEnd - writeBackStart);
 
+    logPassStart(context.logger, context.options.enableTiming,
+                 "pass4-assembly", moduleName);
     const auto assemblyStart = ConvertClock::now();
     memoryPortLowerer.lower(plan, lowering);
     if (shouldCancel(context))
@@ -15165,7 +15633,8 @@ void processPlanKey(PlanKey key, ConvertContext& context, PlanCache& planCache,
     }
     graphAssembler.build(key, plan, lowering, writeBackPlan);
     const auto assemblyEnd = ConvertClock::now();
-    logPassTiming(context.logger, "pass4-assembly", moduleName,
+    logPassTiming(context.logger, context.options.enableTiming,
+                  "pass4-assembly", moduleName,
                   assemblyEnd - assemblyStart);
 
     planCache.setLoweringPlan(key, std::move(lowering));
@@ -15372,7 +15841,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
     const bool useParallel = !options_.singleThread && options_.threadCount > 1;
     if (useParallel)
     {
-        runSlangPrebind(root, context.logger);
+        runSlangPrebind(root, context.logger, context.options.enableTiming);
     }
 
     ConvertParallelState parallel;

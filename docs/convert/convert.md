@@ -1015,7 +1015,7 @@ WriteSlice{
 ```cpp
 // line 423-434
 struct LoweredStmt {
-    LoweredStmtKind kind;               // Write/Display/Assert/DpiCall
+    LoweredStmtKind kind;               // Write/Display/Assert/DpiCall/Finish
     grh::ir::OperationKind op;          // 对应的 GRH 操作
     ExprNodeId updateCond;              // 触发条件（无条件时为常量 1）
     std::vector<EventEdge> eventEdges;  // posedge/negedge
@@ -1027,7 +1027,7 @@ struct LoweredStmt {
     DpiCallStmt dpiCall;                // DPI 调用内容
 };
 
-enum class LoweredStmtKind { Write, Display, Assert, DpiCall };
+enum class LoweredStmtKind { Write, Display, Assert, DpiCall, Finish };
 enum class EventEdge { Posedge, Negedge };
 ```
 

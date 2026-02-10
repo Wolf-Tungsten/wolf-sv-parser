@@ -70,6 +70,8 @@ enum class OperationKind {
     kInstance,
     kBlackbox,
     kDisplay,
+    kFwrite,
+    kFinish,
     kAssert,
     kDpicImport,
     kDpicCall,

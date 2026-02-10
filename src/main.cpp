@@ -100,20 +100,60 @@ std::string formatDuration(TimingClock::duration duration)
     return std::to_string(ns) + "ns";
 }
 
-void logTiming(wolf_sv_parser::ConvertLogger& logger, std::string_view label,
-               TimingClock::duration duration)
+const char* logLevelText(wolf_sv_parser::LogLevel level)
 {
-    if (!logger.enabled(wolf_sv_parser::ConvertLogLevel::Info, "timing"))
+    switch (level)
     {
-        return;
+    case wolf_sv_parser::LogLevel::Trace:
+        return "trace";
+    case wolf_sv_parser::LogLevel::Debug:
+        return "debug";
+    case wolf_sv_parser::LogLevel::Info:
+        return "info";
+    case wolf_sv_parser::LogLevel::Warn:
+        return "warn";
+    case wolf_sv_parser::LogLevel::Error:
+        return "error";
+    case wolf_sv_parser::LogLevel::Off:
+    default:
+        return "off";
     }
-    std::string message;
-    message.reserve(label.size() + 32);
-    message.append(label);
-    message.append(" took ");
-    message.append(formatDuration(duration));
-    logger.log(wolf_sv_parser::ConvertLogLevel::Info, "timing", message);
 }
+
+std::optional<wolf_sv_parser::LogLevel> parseLogLevel(std::string_view text)
+{
+    std::string lowered(text);
+    for (char &c : lowered)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lowered == "trace")
+    {
+        return wolf_sv_parser::LogLevel::Trace;
+    }
+    if (lowered == "debug")
+    {
+        return wolf_sv_parser::LogLevel::Debug;
+    }
+    if (lowered == "info")
+    {
+        return wolf_sv_parser::LogLevel::Info;
+    }
+    if (lowered == "warn" || lowered == "warning")
+    {
+        return wolf_sv_parser::LogLevel::Warn;
+    }
+    if (lowered == "error")
+    {
+        return wolf_sv_parser::LogLevel::Error;
+    }
+    if (lowered == "off" || lowered == "none")
+    {
+        return wolf_sv_parser::LogLevel::Off;
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -132,14 +172,12 @@ int main(int argc, char **argv)
     std::optional<bool> skipTransform;
     driver.cmdLine.add("--skip-transform", skipTransform,
                        "Skip transform passes and emit raw Convert netlist");
-    std::optional<bool> convertLog;
-    driver.cmdLine.add("--convert-log", convertLog, "Enable Convert debug logging");
-    std::optional<std::string> convertLogLevel;
-    driver.cmdLine.add("--convert-log-level", convertLogLevel,
-                       "Convert log level: trace|debug|info|warn|error|off", "<level>");
-    std::optional<std::string> convertLogTag;
-    driver.cmdLine.add("--convert-log-tag", convertLogTag,
-                       "Limit Convert logging to a tag (comma separated)", "<tag>");
+    std::optional<std::string> logLevel;
+    driver.cmdLine.add("--log", logLevel,
+                       "Log level: none|error|warn|info|debug|trace", "<level>");
+    std::optional<bool> profileTimer;
+    driver.cmdLine.add("--profile-timer", profileTimer,
+                       "Emit timing logs for convert/transform passes");
     std::optional<int64_t> convertThreads;
     driver.cmdLine.add("--convert-threads", convertThreads,
                        "Number of Convert worker threads (default 32)", "<count>");
@@ -299,19 +337,72 @@ int main(int argc, char **argv)
         clipped.append("...");
         return clipped;
     };
+    bool timingEnabled = profileTimer == true;
+    wolf_sv_parser::LogLevel globalLogLevel = wolf_sv_parser::LogLevel::Warn;
+    if (logLevel && !logLevel->empty())
+    {
+        const auto parsed = parseLogLevel(*logLevel);
+        if (!parsed.has_value())
+        {
+            std::cerr << "[log] Unknown log level: " << *logLevel << '\n';
+            return 1;
+        }
+        globalLogLevel = *parsed;
+    }
+    if (timingEnabled)
+    {
+        globalLogLevel = wolf_sv_parser::LogLevel::Trace;
+    }
+    auto shouldLog = [&](wolf_sv_parser::LogLevel level) -> bool {
+        if (globalLogLevel == wolf_sv_parser::LogLevel::Off)
+        {
+            return false;
+        }
+        return static_cast<int>(level) >= static_cast<int>(globalLogLevel);
+    };
+    auto logLine = [&](wolf_sv_parser::LogLevel level, std::string_view prefix,
+                       std::string_view tag, std::string_view message) {
+        if (!shouldLog(level))
+        {
+            return;
+        }
+        std::cerr << "[" << prefix << "] [" << logLevelText(level) << "]";
+        if (!tag.empty())
+        {
+            std::cerr << " [" << tag << "]";
+        }
+        std::cerr << " " << message << '\n';
+    };
+    auto logTimingStage = [&](std::string_view prefix, std::string_view label,
+                              TimingClock::duration duration) {
+        if (!timingEnabled)
+        {
+            return;
+        }
+        std::string message;
+        message.reserve(label.size() + 32);
+        message.append(label);
+        message.append(" took ");
+        message.append(formatDuration(duration));
+        logLine(wolf_sv_parser::LogLevel::Trace, prefix, "timing", message);
+    };
     auto reportDiagnostics = [&](std::string_view prefix,
                                  const auto& messages,
-                                 auto kindToTag,
+                                 auto kindToLevel,
                                  auto isErrorKind) -> bool {
         bool hasError = false;
         for (const auto &message : messages)
         {
-            const char *tag = kindToTag(message.kind);
+            const auto level = kindToLevel(message.kind);
             if (isErrorKind(message.kind))
             {
                 hasError = true;
             }
-            std::cerr << "[" << prefix << "] [" << tag << "] ";
+            if (!shouldLog(level))
+            {
+                continue;
+            }
+            std::cerr << "[" << prefix << "] [" << logLevelText(level) << "] ";
 
             bool printedLocation = false;
             std::string statementSnippet;
@@ -353,56 +444,15 @@ int main(int argc, char **argv)
     bool hasFrontendError = false;
     wolf_sv_parser::ConvertOptions convertOptions;
     convertOptions.abortOnError = true;
-    if (convertLog == true || (convertLogLevel && !convertLogLevel->empty()))
-    {
-        convertOptions.enableLogging = true;
-        if (convertLogLevel && !convertLogLevel->empty())
-        {
-            std::string levelText = *convertLogLevel;
-            for (char &c : levelText)
-            {
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
-            if (levelText == "trace")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Trace;
-            }
-            else if (levelText == "debug")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Debug;
-            }
-            else if (levelText == "info")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Info;
-            }
-            else if (levelText == "warn")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Warn;
-            }
-            else if (levelText == "error")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Error;
-            }
-            else if (levelText == "off")
-            {
-                convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Off;
-            }
-            else
-            {
-                std::cerr << "[convert] Unknown log level: " << levelText << '\n';
-                return 1;
-            }
-        }
-        else
-        {
-            convertOptions.logLevel = wolf_sv_parser::ConvertLogLevel::Debug;
-        }
-    }
+    convertOptions.enableLogging = globalLogLevel != wolf_sv_parser::LogLevel::Off;
+    convertOptions.logLevel = globalLogLevel;
+    convertOptions.enableTiming = timingEnabled;
     if (convertThreads)
     {
         if (*convertThreads <= 0)
         {
-            std::cerr << "[convert] --convert-threads must be a positive number\n";
+            logLine(wolf_sv_parser::LogLevel::Error, "convert", {},
+                    "--convert-threads must be a positive number");
             return 1;
         }
         convertOptions.threadCount = static_cast<uint32_t>(*convertThreads);
@@ -413,65 +463,9 @@ int main(int argc, char **argv)
     }
 
     wolf_sv_parser::ConvertDriver converter(convertOptions);
-    converter.logger().setSink([](const wolf_sv_parser::ConvertLogEvent& event) {
-        const char *levelText = "debug";
-        switch (event.level)
-        {
-        case wolf_sv_parser::ConvertLogLevel::Trace:
-            levelText = "trace";
-            break;
-        case wolf_sv_parser::ConvertLogLevel::Debug:
-            levelText = "debug";
-            break;
-        case wolf_sv_parser::ConvertLogLevel::Info:
-            levelText = "info";
-            break;
-        case wolf_sv_parser::ConvertLogLevel::Warn:
-            levelText = "warn";
-            break;
-        case wolf_sv_parser::ConvertLogLevel::Error:
-            levelText = "error";
-            break;
-        case wolf_sv_parser::ConvertLogLevel::Off:
-        default:
-            levelText = "off";
-            break;
-        }
-        std::cerr << "[convert] [" << levelText << "]";
-        if (!event.tag.empty())
-        {
-            std::cerr << " [" << event.tag << "]";
-        }
-        std::cerr << " " << event.message << '\n';
+    converter.logger().setSink([&](const wolf_sv_parser::LogEvent& event) {
+        logLine(event.level, "convert", event.tag, event.message);
     });
-    if (convertLogTag && !convertLogTag->empty())
-    {
-        std::string tags = *convertLogTag;
-        std::size_t start = 0;
-        while (start < tags.size())
-        {
-            std::size_t comma = tags.find(',', start);
-            if (comma == std::string::npos)
-            {
-                comma = tags.size();
-            }
-            std::size_t end = comma;
-            while (start < end && std::isspace(static_cast<unsigned char>(tags[start])))
-            {
-                start++;
-            }
-            while (end > start && std::isspace(static_cast<unsigned char>(tags[end - 1])))
-            {
-                end--;
-            }
-            if (end > start)
-            {
-                converter.logger().allowTag(std::string_view(tags).substr(start, end - start));
-            }
-            start = comma + 1;
-        }
-    }
-
     const auto convertStart = TimingClock::now();
     bool convertAborted = false;
     try {
@@ -483,18 +477,18 @@ int main(int argc, char **argv)
     const auto convertEnd = TimingClock::now();
     const std::string convertLabel =
         convertAborted ? std::string("convert-total (aborted)") : std::string("convert-total");
-    logTiming(converter.logger(), convertLabel, convertEnd - convertStart);
+    logTimingStage("convert", convertLabel, convertEnd - convertStart);
 
-    auto kindToTag = [](wolf_sv_parser::ConvertDiagnosticKind kind) -> const char * {
+    auto kindToLevel = [](wolf_sv_parser::ConvertDiagnosticKind kind) {
         switch (kind)
         {
         case wolf_sv_parser::ConvertDiagnosticKind::Todo:
-            return "ERROR";
+            return wolf_sv_parser::LogLevel::Error;
         case wolf_sv_parser::ConvertDiagnosticKind::Warning:
-            return "WARN";
+            return wolf_sv_parser::LogLevel::Warn;
         case wolf_sv_parser::ConvertDiagnosticKind::Error:
         default:
-            return "ERROR";
+            return wolf_sv_parser::LogLevel::Error;
         }
     };
     auto isErrorKind = [](wolf_sv_parser::ConvertDiagnosticKind kind) {
@@ -504,7 +498,7 @@ int main(int argc, char **argv)
     if (!converter.diagnostics().empty())
     {
         hasFrontendError = reportDiagnostics("convert", converter.diagnostics().messages(),
-                                             kindToTag, isErrorKind);
+                                             kindToLevel, isErrorKind);
     }
     if (converter.diagnostics().hasError())
     {
@@ -513,26 +507,66 @@ int main(int argc, char **argv)
 
     if (hasFrontendError)
     {
-        std::cerr << "Build failed: convert encountered errors\n";
+        logLine(wolf_sv_parser::LogLevel::Error, "convert", {},
+                "Build failed: convert encountered errors");
         return 2;
     }
 
     if (netlist.graphs().empty())
     {
-        std::cerr << "[convert] Netlist is empty; skipping transform and emit\n";
+        logLine(wolf_sv_parser::LogLevel::Warn, "convert", {},
+                "Netlist is empty; skipping transform and emit");
         return driver.reportDiagnostics(/* quiet */ false) ? 0 : 4;
     }
 
     bool transformOk = true;
     if (skipTransform == true)
     {
-        std::cerr << "[transform] skipped\n";
+        logLine(wolf_sv_parser::LogLevel::Info, "transform", {}, "skipped");
     }
     else
     {
         // Transform stage: built-in passes can be registered here; no CLI-configured pipeline for now.
         wolf_sv_parser::transform::PassDiagnostics transformDiagnostics;
         wolf_sv_parser::transform::PassManager passManager;
+        auto transformKindToLevel = [](wolf_sv_parser::transform::PassDiagnosticKind kind) {
+            switch (kind)
+            {
+            case wolf_sv_parser::transform::PassDiagnosticKind::Error:
+                return wolf_sv_parser::LogLevel::Error;
+            case wolf_sv_parser::transform::PassDiagnosticKind::Warning:
+                return wolf_sv_parser::LogLevel::Warn;
+            case wolf_sv_parser::transform::PassDiagnosticKind::Info:
+                return wolf_sv_parser::LogLevel::Info;
+            case wolf_sv_parser::transform::PassDiagnosticKind::Debug:
+            default:
+                return wolf_sv_parser::LogLevel::Debug;
+            }
+        };
+        auto toTransformVerbosity = [](wolf_sv_parser::LogLevel level) {
+            switch (level)
+            {
+            case wolf_sv_parser::LogLevel::Trace:
+            case wolf_sv_parser::LogLevel::Debug:
+                return wolf_sv_parser::transform::PassVerbosity::Debug;
+            case wolf_sv_parser::LogLevel::Info:
+                return wolf_sv_parser::transform::PassVerbosity::Info;
+            case wolf_sv_parser::LogLevel::Warn:
+                return wolf_sv_parser::transform::PassVerbosity::Warning;
+            case wolf_sv_parser::LogLevel::Error:
+            case wolf_sv_parser::LogLevel::Off:
+            default:
+                return wolf_sv_parser::transform::PassVerbosity::Error;
+            }
+        };
+        passManager.options().verbosity = toTransformVerbosity(globalLogLevel);
+        passManager.options().emitTiming = timingEnabled;
+        passManager.options().logLevel = globalLogLevel;
+        passManager.options().logSink =
+            [&](wolf_sv_parser::LogLevel level,
+                std::string_view tag, std::string_view message) {
+                logLine(level, "transform", tag, message);
+            };
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
@@ -542,36 +576,25 @@ int main(int argc, char **argv)
         wolf_sv_parser::transform::PassManagerResult passManagerResult =
             passManager.run(netlist, transformDiagnostics);
         const auto transformEnd = TimingClock::now();
-        logTiming(converter.logger(), "transform", transformEnd - transformStart);
+        logTimingStage("transform", "transform", transformEnd - transformStart);
 
         if (!transformDiagnostics.empty())
         {
             for (const auto &message : transformDiagnostics.messages())
             {
-                const char *tag = "info";
-                switch (message.kind)
+                const auto level = transformKindToLevel(message.kind);
+                if (!shouldLog(level))
                 {
-                case wolf_sv_parser::transform::PassDiagnosticKind::Error:
-                    tag = "error";
-                    break;
-                case wolf_sv_parser::transform::PassDiagnosticKind::Warning:
-                    tag = "warn";
-                    break;
-                case wolf_sv_parser::transform::PassDiagnosticKind::Debug:
-                    tag = "debug";
-                    break;
-                case wolf_sv_parser::transform::PassDiagnosticKind::Info:
-                default:
-                    tag = "info";
-                    break;
+                    continue;
                 }
-                std::cerr << "[transform] [" << message.passName << "] [" << tag << "] "
-                          << message.message;
+                std::string text = message.message;
                 if (!message.context.empty())
                 {
-                    std::cerr << " (" << message.context << ")";
+                    text.append(" (");
+                    text.append(message.context);
+                    text.append(")");
                 }
-                std::cerr << '\n';
+                logLine(level, "transform", message.passName, text);
             }
         }
 
@@ -603,29 +626,39 @@ int main(int argc, char **argv)
         const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         const auto emitEnd = TimingClock::now();
-        logTiming(converter.logger(), "emit-json", emitEnd - emitStart);
+        logTimingStage("emit-json", "emit-json", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
             {
-                const char *tag = message.kind == grh::emit::EmitDiagnosticKind::Error ? "error" : "warn";
-                std::cerr << "[emit-json] [" << tag << "] " << message.message;
+                const auto level = message.kind == grh::emit::EmitDiagnosticKind::Error
+                    ? wolf_sv_parser::LogLevel::Error
+                    : wolf_sv_parser::LogLevel::Warn;
+                if (!shouldLog(level))
+                {
+                    continue;
+                }
+                std::string text = message.message;
                 if (!message.context.empty())
                 {
-                    std::cerr << " (" << message.context << ")";
+                    text.append(" (");
+                    text.append(message.context);
+                    text.append(")");
                 }
-                std::cerr << '\n';
+                logLine(level, "emit-json", {}, text);
             }
         }
 
         emitOk = emitResult.success && !emitDiagnostics.hasError();
         if (emitResult.success && !emitResult.artifacts.empty())
         {
-            std::cout << "[emit-json] Wrote GRH JSON to " << emitResult.artifacts.front() << '\n';
+            logLine(wolf_sv_parser::LogLevel::Info, "emit-json", {},
+                    std::string("Wrote GRH JSON to ") + emitResult.artifacts.front());
         }
         else if (!emitResult.success)
         {
-            std::cerr << "[emit-json] Failed to emit GRH JSON\n";
+            logLine(wolf_sv_parser::LogLevel::Error, "emit-json", {},
+                    "Failed to emit GRH JSON");
         }
     }
 
@@ -643,28 +676,38 @@ int main(int argc, char **argv)
         const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
         const auto emitEnd = TimingClock::now();
-        logTiming(converter.logger(), "emit-sv", emitEnd - emitStart);
+        logTimingStage("emit-sv", "emit-sv", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
             {
-                const char *tag = message.kind == grh::emit::EmitDiagnosticKind::Error ? "error" : "warn";
-                std::cerr << "[emit-sv] [" << tag << "] " << message.message;
+                const auto level = message.kind == grh::emit::EmitDiagnosticKind::Error
+                    ? wolf_sv_parser::LogLevel::Error
+                    : wolf_sv_parser::LogLevel::Warn;
+                if (!shouldLog(level))
+                {
+                    continue;
+                }
+                std::string text = message.message;
                 if (!message.context.empty())
                 {
-                    std::cerr << " (" << message.context << ")";
+                    text.append(" (");
+                    text.append(message.context);
+                    text.append(")");
                 }
-                std::cerr << '\n';
+                logLine(level, "emit-sv", {}, text);
             }
         }
         emitOk = emitOk && emitResult.success && !emitDiagnostics.hasError();
         if (emitResult.success && !emitResult.artifacts.empty())
         {
-            std::cout << "[emit-sv] Wrote SystemVerilog to " << emitResult.artifacts.front() << '\n';
+            logLine(wolf_sv_parser::LogLevel::Info, "emit-sv", {},
+                    std::string("Wrote SystemVerilog to ") + emitResult.artifacts.front());
         }
         else if (!emitResult.success)
         {
-            std::cerr << "[emit-sv] Failed to emit SystemVerilog\n";
+            logLine(wolf_sv_parser::LogLevel::Error, "emit-sv", {},
+                    "Failed to emit SystemVerilog");
         }
     }
 

@@ -170,6 +170,10 @@ namespace wolf_sv_parser::transform
 
         std::optional<ConstantValue> parseConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op, const grh::ir::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
         {
+            if (!literal.empty() && literal.front() == '"')
+            {
+                return std::nullopt;
+            }
             try
             {
                 slang::SVInt parsed = slang::SVInt::fromString(literal);
@@ -1076,6 +1080,9 @@ namespace wolf_sv_parser::transform
         PassResult result;
         ConstantStore constants;
         bool failed = false;
+        const std::size_t graphCount = netlist().graphs().size();
+        logInfo("begin graphs=" + std::to_string(graphCount));
+        std::size_t changedGraphs = 0;
 
         auto handleException = [&](const std::exception &ex)
         {
@@ -1103,6 +1110,10 @@ namespace wolf_sv_parser::transform
                 // Process the graph
                 bool graphChanged = processSingleGraph(ctx);
                 result.changed = result.changed || graphChanged;
+                if (graphChanged)
+                {
+                    ++changedGraphs;
+                }
             }
 
             if (failed)
@@ -1110,11 +1121,17 @@ namespace wolf_sv_parser::transform
                 result.failed = true;
             }
 
+            std::string message = "graphs=" + std::to_string(graphCount);
+            message.append(", changedGraphs=");
+            message.append(std::to_string(changedGraphs));
+            message.append(result.failed ? ", failed=true" : ", failed=false");
+            logInfo(std::move(message));
             return result;
         }
         catch (const std::exception &ex)
         {
             handleException(ex);
+            logError(std::string("aborted: ") + ex.what());
             result.failed = true;
             return result;
         }

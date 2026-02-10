@@ -171,8 +171,13 @@ namespace wolf_sv_parser::transform
     PassResult XmrResolvePass::run()
     {
         PassResult result;
+        const std::size_t graphCount = netlist().graphs().size();
+        logInfo("begin graphs=" + std::to_string(graphCount));
         PortNameCache readPortNames;
         PortNameCache writePortNames;
+        std::size_t xmrOpCount = 0;
+        std::size_t xmrReadCount = 0;
+        std::size_t xmrWriteCount = 0;
         struct PendingPort
         {
             std::string moduleName;
@@ -404,6 +409,15 @@ namespace wolf_sv_parser::transform
                 warning(root, root.getOperation(opId), "XMR read has empty path");
                 return std::nullopt;
             }
+            if (!segments.empty() && segments.front() == root.symbol())
+            {
+                segments.erase(segments.begin());
+                if (segments.empty())
+                {
+                    warning(root, root.getOperation(opId), "XMR read has empty path after trimming root");
+                    return std::nullopt;
+                }
+            }
             if (segments.size() == 1)
             {
                 grh::ir::ValueId local = root.findValue(segments.front());
@@ -498,6 +512,15 @@ namespace wolf_sv_parser::transform
             {
                 warning(root, root.getOperation(opId), "XMR write has empty path");
                 return false;
+            }
+            if (!segments.empty() && segments.front() == root.symbol())
+            {
+                segments.erase(segments.begin());
+                if (segments.empty())
+                {
+                    warning(root, root.getOperation(opId), "XMR write has empty path after trimming root");
+                    return false;
+                }
             }
             if (segments.size() == 1)
             {
@@ -602,6 +625,15 @@ namespace wolf_sv_parser::transform
                     op.kind() == grh::ir::OperationKind::kXMRWrite)
                 {
                     xmrOps.push_back(opId);
+                    ++xmrOpCount;
+                    if (op.kind() == grh::ir::OperationKind::kXMRRead)
+                    {
+                        ++xmrReadCount;
+                    }
+                    else
+                    {
+                        ++xmrWriteCount;
+                    }
                 }
             }
 
@@ -609,6 +641,22 @@ namespace wolf_sv_parser::transform
             {
                 const grh::ir::Operation op = graph.getOperation(opId);
                 auto path = getAttrString(op, "xmrPath");
+                {
+                    std::string message = "xmr ";
+                    message.append(op.kind() == grh::ir::OperationKind::kXMRRead ? "read" : "write");
+                    message.append(" graph=");
+                    message.append(graph.symbol());
+                    message.append(" path=");
+                    if (path)
+                    {
+                        message.append(*path);
+                    }
+                    else
+                    {
+                        message.append("<missing>");
+                    }
+                    logInfo(std::move(message));
+                }
                 if (!path)
                 {
                     warning(graph, op, "XMR op missing xmrPath attribute");
@@ -726,6 +774,17 @@ namespace wolf_sv_parser::transform
             }
         }
 
+        std::string message = "xmr ops=" + std::to_string(xmrOpCount);
+        message.append(", reads=");
+        message.append(std::to_string(xmrReadCount));
+        message.append(", writes=");
+        message.append(std::to_string(xmrWriteCount));
+        message.append(", newInputPorts=");
+        message.append(std::to_string(pendingInputPorts.size()));
+        message.append(", newOutputPorts=");
+        message.append(std::to_string(pendingOutputPorts.size()));
+        message.append(result.changed ? ", changed=true" : ", changed=false");
+        logInfo(std::move(message));
         return result;
     }
 

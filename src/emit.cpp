@@ -2667,9 +2667,33 @@ namespace grh::emit
                 assignStmts.emplace_back(std::move(stmt), sourceOp);
             };
 
+            auto sameSeqKey = [](const SeqKey &lhs, const SeqKey &rhs) -> bool
+            {
+                if (lhs.events.size() != rhs.events.size())
+                {
+                    return false;
+                }
+                for (std::size_t i = 0; i < lhs.events.size(); ++i)
+                {
+                    if (lhs.events[i].edge != rhs.events[i].edge ||
+                        lhs.events[i].signal != rhs.events[i].signal)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
             auto addSequentialStmt = [&](const SeqKey &key, std::string stmt,
                                          grh::ir::OperationId sourceOp)
             {
+                for (auto &block : seqBlocks)
+                {
+                    if (sameSeqKey(block.key, key))
+                    {
+                        block.stmts.push_back(std::move(stmt));
+                        return;
+                    }
+                }
                 seqBlocks.push_back(SeqBlock{key, std::vector<std::string>{std::move(stmt)}, sourceOp});
             };
 
@@ -4012,6 +4036,8 @@ namespace grh::emit
                     }
                     auto format = getAttribute<std::string>(*graph, op, "formatString");
                     auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    auto displayKind = getAttribute<std::string>(*graph, op, "displayKind");
+                    const bool hasExitCode = getAttribute<bool>(*graph, op, "hasExitCode").value_or(false);
                     if (!format || !eventEdges)
                     {
                         reportError("kDisplay missing eventEdge or formatString", opContext);
@@ -4022,13 +4048,126 @@ namespace grh::emit
                         reportError("kDisplay missing eventEdge entries", opContext);
                         break;
                     }
-                    if (operands.size() < 1 + eventEdges->size())
+                    const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
+                    if (operands.size() < baseIndex + eventEdges->size())
                     {
                         reportError("kDisplay operand count does not match eventEdge", opContext);
                         break;
                     }
-                    const std::size_t argCount = operands.size() - 1 - eventEdges->size();
-                    const std::size_t eventStart = 1 + argCount;
+                    const std::size_t argCount = operands.size() - baseIndex - eventEdges->size();
+                    const std::size_t eventStart = baseIndex + argCount;
+                    auto seqKey = buildEventKey(op, eventStart);
+                    if (!seqKey)
+                    {
+                        break;
+                    }
+                    const bool guardDisplay = !isConstOne(operands[0]);
+                    const int baseIndent = guardDisplay ? 3 : 2;
+                    std::string taskName = displayKind.value_or(std::string("display"));
+                    if (taskName.empty())
+                    {
+                        taskName = "display";
+                    }
+                    std::ostringstream stmt;
+                    if (guardDisplay)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                    }
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << taskName << "(";
+                    if (taskName == "fatal" && hasExitCode)
+                    {
+                        stmt << valueExpr(operands[1]) << ", ";
+                    }
+                    stmt << "\"" << *format << "\"";
+                    for (std::size_t i = 0; i < argCount; ++i)
+                    {
+                        stmt << ", " << valueExpr(operands[baseIndex + i]);
+                    }
+                    stmt << ");\n";
+                    if (guardDisplay)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
+                }
+                case grh::ir::OperationKind::kFinish:
+                {
+                    if (operands.size() < 1)
+                    {
+                        reportError("kFinish missing operands", opContext);
+                        break;
+                    }
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    const bool hasExitCode = getAttribute<bool>(*graph, op, "hasExitCode").value_or(false);
+                    if (!eventEdges)
+                    {
+                        reportError("kFinish missing eventEdge", opContext);
+                        break;
+                    }
+                    if (eventEdges->empty())
+                    {
+                        reportError("kFinish missing eventEdge entries", opContext);
+                        break;
+                    }
+                    const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
+                    if (operands.size() < baseIndex + eventEdges->size())
+                    {
+                        reportError("kFinish operand count does not match eventEdge", opContext);
+                        break;
+                    }
+                    const std::size_t eventStart = baseIndex;
+                    auto seqKey = buildEventKey(op, eventStart);
+                    if (!seqKey)
+                    {
+                        break;
+                    }
+                    const bool guardFinish = !isConstOne(operands[0]);
+                    const int baseIndent = guardFinish ? 3 : 2;
+                    std::ostringstream stmt;
+                    if (guardFinish)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                    }
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$finish";
+                    if (hasExitCode)
+                    {
+                        stmt << "(" << valueExpr(operands[1]) << ")";
+                    }
+                    stmt << ";\n";
+                    if (guardFinish)
+                    {
+                        appendIndented(stmt, 2, "end");
+                    }
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
+                }
+                case grh::ir::OperationKind::kFwrite:
+                {
+                    if (operands.size() < 2)
+                    {
+                        reportError("kFwrite missing operands", opContext);
+                        break;
+                    }
+                    auto format = getAttribute<std::string>(*graph, op, "formatString");
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (!format || !eventEdges)
+                    {
+                        reportError("kFwrite missing eventEdge or formatString", opContext);
+                        break;
+                    }
+                    if (eventEdges->empty())
+                    {
+                        reportError("kFwrite missing eventEdge entries", opContext);
+                        break;
+                    }
+                    if (operands.size() < 2 + eventEdges->size())
+                    {
+                        reportError("kFwrite operand count does not match eventEdge", opContext);
+                        break;
+                    }
+                    const std::size_t argCount = operands.size() - 2 - eventEdges->size();
+                    const std::size_t eventStart = 2 + argCount;
                     auto seqKey = buildEventKey(op, eventStart);
                     if (!seqKey)
                     {
@@ -4041,10 +4180,10 @@ namespace grh::emit
                     {
                         appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                     }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$display(\"" << *format << "\"";
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << *format << "\"";
                     for (std::size_t i = 0; i < argCount; ++i)
                     {
-                        stmt << ", " << valueExpr(operands[1 + i]);
+                        stmt << ", " << valueExpr(operands[2 + i]);
                     }
                     stmt << ");\n";
                     if (guardDisplay)
@@ -4098,9 +4237,11 @@ namespace grh::emit
                     auto argsWidth = getAttribute<std::vector<int64_t>>(*graph, op, "argsWidth");
                     auto argsName = getAttribute<std::vector<std::string>>(*graph, op, "argsName");
                     auto argsSigned = getAttribute<std::vector<bool>>(*graph, op, "argsSigned");
+                    auto argsType = getAttribute<std::vector<std::string>>(*graph, op, "argsType");
                     auto hasReturn = getAttribute<bool>(*graph, op, "hasReturn").value_or(false);
                     auto returnWidth = getAttribute<int64_t>(*graph, op, "returnWidth").value_or(0);
                     auto returnSigned = getAttribute<bool>(*graph, op, "returnSigned").value_or(false);
+                    auto returnType = getAttribute<std::string>(*graph, op, "returnType");
                     if (!argsDir || !argsWidth || !argsName ||
                         argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                     {
@@ -4112,19 +4253,33 @@ namespace grh::emit
                         reportError("kDpicImport argsSigned size mismatch", opContext);
                         break;
                     }
+                    if (argsType && argsType->size() != argsDir->size())
+                    {
+                        reportError("kDpicImport argsType size mismatch", opContext);
+                        break;
+                    }
                     std::ostringstream decl;
                     decl << "import \"DPI-C\" function ";
                     if (hasReturn)
                     {
-                        const int64_t width = returnWidth > 0 ? returnWidth : 1;
-                        decl << "logic ";
-                        if (returnSigned)
+                        const bool useLogic =
+                            !(returnType && !returnType->empty() && *returnType != "logic");
+                        if (useLogic)
                         {
-                            decl << "signed ";
+                            const int64_t width = returnWidth > 0 ? returnWidth : 1;
+                            decl << "logic ";
+                            if (returnSigned)
+                            {
+                                decl << "signed ";
+                            }
+                            if (width > 1)
+                            {
+                                decl << "[" << (width - 1) << ":0] ";
+                            }
                         }
-                        if (width > 1)
+                        else
                         {
-                            decl << "[" << (width - 1) << ":0] ";
+                            decl << *returnType << " ";
                         }
                     }
                     else
@@ -4134,14 +4289,27 @@ namespace grh::emit
                     decl << opContext << " (\n";
                     for (std::size_t i = 0; i < argsDir->size(); ++i)
                     {
-                        decl << "  " << (*argsDir)[i] << " logic ";
-                        if (argsSigned && (*argsSigned)[i])
+                        std::string typeName = "logic";
+                        if (argsType && i < argsType->size())
                         {
-                            decl << "signed ";
+                            typeName = (*argsType)[i];
                         }
-                        if ((*argsWidth)[i] > 1)
+                        decl << "  " << (*argsDir)[i] << " ";
+                        if (typeName == "logic")
                         {
-                            decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
+                            decl << "logic ";
+                            if (argsSigned && (*argsSigned)[i])
+                            {
+                                decl << "signed ";
+                            }
+                            if ((*argsWidth)[i] > 1)
+                            {
+                                decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
+                            }
+                        }
+                        else
+                        {
+                            decl << typeName << " ";
                         }
                         decl << (*argsName)[i];
                         decl << (i + 1 == argsDir->size() ? "\n" : ",\n");
@@ -5054,9 +5222,33 @@ namespace grh::emit
             assignStmts.emplace_back(std::move(stmt), sourceOp);
         };
 
+        auto sameSeqKey = [](const IrSeqKey &lhs, const IrSeqKey &rhs) -> bool
+        {
+            if (lhs.events.size() != rhs.events.size())
+            {
+                return false;
+            }
+            for (std::size_t i = 0; i < lhs.events.size(); ++i)
+            {
+                if (lhs.events[i].edge != rhs.events[i].edge ||
+                    lhs.events[i].signal != rhs.events[i].signal)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
         auto addSequentialStmt = [&](const IrSeqKey &key, std::string stmt,
                                      grh::ir::OperationId sourceOp)
         {
+            for (auto &block : seqBlocks)
+            {
+                if (sameSeqKey(block.key, key))
+                {
+                    block.stmts.push_back(std::move(stmt));
+                    return;
+                }
+            }
             seqBlocks.push_back(IrSeqBlock{key, std::vector<std::string>{std::move(stmt)}, sourceOp});
         };
 
@@ -6391,6 +6583,8 @@ namespace grh::emit
                     format = getAttribute<std::string>(view, opId, "format");
                 }
                 auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                auto displayKind = getAttribute<std::string>(view, opId, "displayKind");
+                const bool hasExitCode = getAttribute<bool>(view, opId, "hasExitCode").value_or(false);
                 if (!format || !eventEdges)
                 {
                     reportError("kDisplay missing eventEdge or format", context);
@@ -6401,13 +6595,130 @@ namespace grh::emit
                     reportError("kDisplay missing eventEdge entries", context);
                     break;
                 }
-                if (operands.size() < 1 + eventEdges->size())
+                const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
+                if (operands.size() < baseIndex + eventEdges->size())
                 {
                     reportError("kDisplay operand count does not match eventEdge", context);
                     break;
                 }
-                const std::size_t argCount = operands.size() - 1 - eventEdges->size();
-                const std::size_t eventStart = 1 + argCount;
+                const std::size_t argCount = operands.size() - baseIndex - eventEdges->size();
+                const std::size_t eventStart = baseIndex + argCount;
+                auto seqKey = buildEventKey(eventStart);
+                if (!seqKey)
+                {
+                    break;
+                }
+                const bool guardDisplay = !isConstOne(operands[0]);
+                const int baseIndent = guardDisplay ? 3 : 2;
+                std::string taskName = displayKind.value_or(std::string("display"));
+                if (taskName.empty())
+                {
+                    taskName = "display";
+                }
+                std::ostringstream stmt;
+                if (guardDisplay)
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                }
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << taskName << "(";
+                if (taskName == "fatal" && hasExitCode)
+                {
+                    stmt << valueExpr(operands[1]) << ", ";
+                }
+                stmt << "\"" << *format << "\"";
+                for (std::size_t i = 0; i < argCount; ++i)
+                {
+                    stmt << ", " << valueExpr(operands[baseIndex + i]);
+                }
+                stmt << ");\n";
+                if (guardDisplay)
+                {
+                    appendIndented(stmt, 2, "end");
+                }
+                addSequentialStmt(*seqKey, stmt.str(), opId);
+                break;
+            }
+            case grh::ir::OperationKind::kFinish:
+            {
+                if (operands.size() < 1)
+                {
+                    reportError("kFinish missing operands", context);
+                    break;
+                }
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                const bool hasExitCode = getAttribute<bool>(view, opId, "hasExitCode").value_or(false);
+                if (!eventEdges)
+                {
+                    reportError("kFinish missing eventEdge", context);
+                    break;
+                }
+                if (eventEdges->empty())
+                {
+                    reportError("kFinish missing eventEdge entries", context);
+                    break;
+                }
+                const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
+                if (operands.size() < baseIndex + eventEdges->size())
+                {
+                    reportError("kFinish operand count does not match eventEdge", context);
+                    break;
+                }
+                const std::size_t eventStart = baseIndex;
+                auto seqKey = buildEventKey(eventStart);
+                if (!seqKey)
+                {
+                    break;
+                }
+                const bool guardFinish = !isConstOne(operands[0]);
+                const int baseIndent = guardFinish ? 3 : 2;
+                std::ostringstream stmt;
+                if (guardFinish)
+                {
+                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                }
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$finish";
+                if (hasExitCode)
+                {
+                    stmt << "(" << valueExpr(operands[1]) << ")";
+                }
+                stmt << ";\n";
+                if (guardFinish)
+                {
+                    appendIndented(stmt, 2, "end");
+                }
+                addSequentialStmt(*seqKey, stmt.str(), opId);
+                break;
+            }
+            case grh::ir::OperationKind::kFwrite:
+            {
+                if (operands.size() < 2)
+                {
+                    reportError("kFwrite missing operands", context);
+                    break;
+                }
+                auto format = getAttribute<std::string>(view, opId, "formatString");
+                if (!format)
+                {
+                    format = getAttribute<std::string>(view, opId, "format");
+                }
+                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
+                if (!format || !eventEdges)
+                {
+                    reportError("kFwrite missing eventEdge or format", context);
+                    break;
+                }
+                if (eventEdges->empty())
+                {
+                    reportError("kFwrite missing eventEdge entries", context);
+                    break;
+                }
+                if (operands.size() < 2 + eventEdges->size())
+                {
+                    reportError("kFwrite operand count does not match eventEdge", context);
+                    break;
+                }
+                const std::size_t argCount = operands.size() - 2 - eventEdges->size();
+                const std::size_t eventStart = 2 + argCount;
                 auto seqKey = buildEventKey(eventStart);
                 if (!seqKey)
                 {
@@ -6420,10 +6731,10 @@ namespace grh::emit
                 {
                     appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                 }
-                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$display(\"" << *format << "\"";
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << *format << "\"";
                 for (std::size_t i = 0; i < argCount; ++i)
                 {
-                    stmt << ", " << valueExpr(operands[1 + i]);
+                    stmt << ", " << valueExpr(operands[2 + i]);
                 }
                 stmt << ");\n";
                 if (guardDisplay)
@@ -6478,9 +6789,11 @@ namespace grh::emit
                 auto argsWidth = getAttribute<std::vector<int64_t>>(view, opId, "argsWidth");
                 auto argsName = getAttribute<std::vector<std::string>>(view, opId, "argsName");
                 auto argsSigned = getAttribute<std::vector<bool>>(view, opId, "argsSigned");
+                auto argsType = getAttribute<std::vector<std::string>>(view, opId, "argsType");
                 auto hasReturn = getAttribute<bool>(view, opId, "hasReturn").value_or(false);
                 auto returnWidth = getAttribute<int64_t>(view, opId, "returnWidth").value_or(0);
                 auto returnSigned = getAttribute<bool>(view, opId, "returnSigned").value_or(false);
+                auto returnType = getAttribute<std::string>(view, opId, "returnType");
                 if (!argsDir || !argsWidth || !argsName ||
                     argsDir->size() != argsWidth->size() || argsDir->size() != argsName->size())
                 {
@@ -6490,6 +6803,11 @@ namespace grh::emit
                 if (argsSigned && argsSigned->size() != argsDir->size())
                 {
                     reportError("kDpicImport argsSigned size mismatch", context);
+                    break;
+                }
+                if (argsType && argsType->size() != argsDir->size())
+                {
+                    reportError("kDpicImport argsType size mismatch", context);
                     break;
                 }
                 const std::string &funcName = opName(opId);
@@ -6502,15 +6820,24 @@ namespace grh::emit
                 decl << "import \"DPI-C\" function ";
                 if (hasReturn)
                 {
-                    const int64_t width = returnWidth > 0 ? returnWidth : 1;
-                    decl << "logic ";
-                    if (returnSigned)
+                    const bool useLogic =
+                        !(returnType && !returnType->empty() && *returnType != "logic");
+                    if (useLogic)
                     {
-                        decl << "signed ";
+                        const int64_t width = returnWidth > 0 ? returnWidth : 1;
+                        decl << "logic ";
+                        if (returnSigned)
+                        {
+                            decl << "signed ";
+                        }
+                        if (width > 1)
+                        {
+                            decl << "[" << (width - 1) << ":0] ";
+                        }
                     }
-                    if (width > 1)
+                    else
                     {
-                        decl << "[" << (width - 1) << ":0] ";
+                        decl << *returnType << " ";
                     }
                 }
                 else
@@ -6520,14 +6847,27 @@ namespace grh::emit
                 decl << funcName << " (\n";
                 for (std::size_t i = 0; i < argsDir->size(); ++i)
                 {
-                    decl << "  " << (*argsDir)[i] << " logic ";
-                    if (argsSigned && (*argsSigned)[i])
+                    std::string typeName = "logic";
+                    if (argsType && i < argsType->size())
                     {
-                        decl << "signed ";
+                        typeName = (*argsType)[i];
                     }
-                    if ((*argsWidth)[i] > 1)
+                    decl << "  " << (*argsDir)[i] << " ";
+                    if (typeName == "logic")
                     {
-                        decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
+                        decl << "logic ";
+                        if (argsSigned && (*argsSigned)[i])
+                        {
+                            decl << "signed ";
+                        }
+                        if ((*argsWidth)[i] > 1)
+                        {
+                            decl << "[" << ((*argsWidth)[i] - 1) << ":0] ";
+                        }
+                    }
+                    else
+                    {
+                        decl << typeName << " ";
                     }
                     decl << (*argsName)[i];
                     decl << (i + 1 == argsDir->size() ? "\n" : ",\n");

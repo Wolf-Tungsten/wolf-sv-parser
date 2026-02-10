@@ -2,6 +2,7 @@
 #define WOLF_SV_CONVERT_HPP
 
 #include "grh.hpp"
+#include "logging.hpp"
 #include "slang/text/SourceLocation.h"
 
 #include <atomic>
@@ -98,21 +99,6 @@ public:
     const char* what() const noexcept override { return "convert aborted"; }
 };
 
-enum class ConvertLogLevel {
-    Trace = 0,
-    Debug = 1,
-    Info = 2,
-    Warn = 3,
-    Error = 4,
-    Off = 5
-};
-
-struct ConvertLogEvent {
-    ConvertLogLevel level;
-    std::string tag;
-    std::string message;
-};
-
 using PlanIndex = uint32_t;
 constexpr PlanIndex kInvalidPlanIndex = std::numeric_limits<PlanIndex>::max();
 
@@ -148,32 +134,11 @@ private:
     std::unordered_map<std::string_view, PlanSymbolId, StringViewHash, StringViewEq> index_;
 };
 
-class ConvertLogger {
-public:
-    using Sink = std::function<void(const ConvertLogEvent&)>;
-
-    void setLevel(ConvertLogLevel level) noexcept { level_ = level; }
-    void enable() noexcept { enabled_ = true; }
-    void disable() noexcept { enabled_ = false; }
-    void setSink(Sink sink) { sink_ = std::move(sink); }
-
-    void allowTag(std::string_view tag);
-    void clearTags();
-    bool enabled(ConvertLogLevel level, std::string_view tag) const noexcept;
-    void log(ConvertLogLevel level, std::string_view tag, std::string_view message);
-
-private:
-    bool enabled_ = false;
-    ConvertLogLevel level_ = ConvertLogLevel::Warn;
-    std::unordered_set<std::string> tags_{};
-    Sink sink_{};
-    mutable std::mutex mutex_{};
-};
-
 struct ConvertOptions {
     bool abortOnError = true;
     bool enableLogging = false;
-    ConvertLogLevel logLevel = ConvertLogLevel::Warn;
+    bool enableTiming = false;
+    LogLevel logLevel = LogLevel::Warn;
     uint32_t maxLoopIterations = 65536;
     uint32_t threadCount = 32;
     bool singleThread = false;
@@ -187,7 +152,7 @@ struct ConvertContext {
     const slang::ast::RootSymbol* root = nullptr;
     ConvertOptions options{};
     ConvertDiagnostics* diagnostics = nullptr;
-    ConvertLogger* logger = nullptr;
+    Logger* logger = nullptr;
     PlanCache* planCache = nullptr;
     PlanTaskQueue* planQueue = nullptr;
     InstanceRegistry* instanceRegistry = nullptr;
@@ -385,6 +350,9 @@ struct DisplayStmt {
     std::string formatString;
     std::string displayKind;
     std::vector<ExprNodeId> args;
+    ExprNodeId fileHandle = kInvalidPlanIndex;
+    ExprNodeId exitCode = kInvalidPlanIndex;
+    bool hasExitCode = false;
 };
 
 struct AssertStmt {
@@ -408,16 +376,24 @@ struct DpiImportInfo {
     std::vector<int64_t> argsWidth;
     std::vector<std::string> argsName;
     std::vector<bool> argsSigned;
+    std::vector<std::string> argsType;
     bool hasReturn = false;
     int64_t returnWidth = 0;
     bool returnSigned = false;
+    std::string returnType;
 };
 
 enum class LoweredStmtKind {
     Write,
     Display,
     Assert,
-    DpiCall
+    DpiCall,
+    Finish
+};
+
+struct FinishStmt {
+    ExprNodeId exitCode = kInvalidPlanIndex;
+    bool hasExitCode = false;
 };
 
 struct LoweredStmt {
@@ -431,6 +407,7 @@ struct LoweredStmt {
     DisplayStmt display;
     AssertStmt assertion;
     DpiCallStmt dpiCall;
+    FinishStmt finish;
 };
 
 struct MemoryReadPort {
@@ -643,12 +620,12 @@ public:
     grh::ir::Netlist convert(const slang::ast::RootSymbol& root);
 
     ConvertDiagnostics& diagnostics() noexcept { return diagnostics_; }
-    ConvertLogger& logger() noexcept { return logger_; }
+    Logger& logger() noexcept { return logger_; }
 
 private:
     ConvertOptions options_{};
     ConvertDiagnostics diagnostics_{};
-    ConvertLogger logger_{};
+    Logger logger_{};
     PlanCache planCache_{};
     PlanTaskQueue planQueue_{};
 };

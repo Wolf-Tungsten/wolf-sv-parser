@@ -55,7 +55,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
 - 时序：`kLatch`、`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
 - 层次：`kInstance`、`kBlackbox`
-- 调试：`kDisplay`、`kAssert`
+- 调试：`kDisplay`、`kFwrite`、`kFinish`、`kAssert`
 - DPI：`kDpicImport`、`kDpicCall`
 
 # 边 - Value
@@ -603,13 +603,61 @@ GRH 只建模包裹在有时钟驱动的过程块中的 display，其他情况�
     - `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 - n）
     - `eventOperands` = operands[1 + n ..]（按顺序与 `eventEdge` 配对）
     - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
-    - displayKind（string）：记录原始系统任务，取值 `display` / `write` / `strobe`；运行时可据此决定是否自动追加换行等语义差异
+    - displayKind（string）：记录原始系统任务，取值 `display` / `write` / `strobe` / `info` / `warning` / `error` / `fatal`
+    - hasExitCode（bool，可选）：当 `displayKind == "fatal"` 且 `$fatal(code, ...)` 使用退出码时为 true；生成时会输出 `$fatal(code, "...", ...)`
 
 生成语义：
 ```
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
     if (${updateCond.symbol}) begin
-        $display("${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
+        $${displayKind}("${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
+    end
+end
+```
+
+### 文件句柄输出操作 kFwrite
+
+GRH 建模 `$fwrite`，用于将格式化输出写入指定 file handle（例如 `32'h80000002`）。
+
+- operands:
+    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
+    - fileHandle：文件句柄表达式
+    - var0，var1，... 可变数量的参与输出的变量, n 个
+    - event0, event1, ...：触发事件信号（Value）
+- attributes:
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2 - n）
+    - `eventOperands` = operands[2 + n ..]（按顺序与 `eventEdge` 配对）
+    - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$fwrite` 一致
+
+生成语义：
+```
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
+        $fwrite(${fileHandle.symbol}, "${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
+    end
+end
+```
+
+### 终止仿真操作 kFinish
+
+GRH 建模 `$finish`，用于退出仿真。
+
+- operands:
+    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
+    - exitCode（可选）：退出码表达式
+    - event0, event1, ...：触发事件信号（Value）
+- attributes:
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 或 2）
+    - `eventOperands` = operands[1 + hasExitCode ..]（按顺序与 `eventEdge` 配对）
+    - hasExitCode（bool，可选）：是否带退出码
+
+生成语义：
+```
+always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
+    if (${updateCond.symbol}) begin
+        $finish(${exitCode.symbol}); // 可选 exitCode
     end
 end
 ```
@@ -653,22 +701,23 @@ GRH 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type
     - argsWidth (vector<int64_t>，n个)：记录每个形参的位宽
     - argsName (vector<string>，n个)：记录每个形参的名称
     - argsSigned (vector<bool>，n个)：记录每个形参是否为有符号
+    - argsType (vector<string>，n个)：记录每个形参的数据类型，取值为 "logic" / "string"（缺省视为 "logic"）
     - hasReturn (bool)：是否有返回值；false 表示 void
     - returnWidth (int64_t)：返回值位宽（hasReturn 为 true 时有效）
     - returnSigned (bool)：返回值是否有符号（hasReturn 为 true 时有效）
+    - returnType (string)：返回值类型（hasReturn 为 true 时有效）；取值为 "logic" / "string"（缺省视为 "logic"）
 
 约束：
 - `hasReturn == true` 时，`returnWidth > 0` 且 `returnSigned` 有效
-- `argsSigned` 与 `argsName/argsDirection/argsWidth` 长度一致
+- `argsSigned/argsType` 与 `argsName/argsDirection/argsWidth` 长度一致
 
 生成语义：
 ```
-import "DPI-C" function ${hasReturn ? ("logic " + (returnSigned ? "signed " : "") +
-    "[" + (returnWidth-1) + ":0]") : "void"} ${symbol} (
-    ${argsDirection[0]} logic ${argsSigned[0] ? "signed " : ""}[${argsWidth[0]}-1:0] ${argsName[0]},
-    ${argsDirection[1]} logic ${argsSigned[1] ? "signed " : ""}[${argsWidth[1]}-1:0] ${argsName[1]},
+import "DPI-C" function ${hasReturn ? (returnType == "string" ? "string" :
+    ("logic " + (returnSigned ? "signed " : "") + "[" + (returnWidth-1) + ":0]")) : "void"} ${symbol} (
+    ${argsDirection[i]} ${argsType[i] == "string" ? "string" :
+        ("logic " + (argsSigned[i] ? "signed " : "") + "[" + (argsWidth[i]-1) + ":0]")} ${argsName[i]},
     ...
-    ${argsDirection[n-1]} logic ${argsSigned[n-1] ? "signed " : ""}[${argsWidth[n-1]}-1:0] ${argsName[n-1]}
 );
 ```
 
