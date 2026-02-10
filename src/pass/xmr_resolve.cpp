@@ -672,7 +672,9 @@ namespace wolf_sv_parser::transform
                         result.changed = true;
                         continue;
                     }
+                    logInfo("xmr read resolve begin graph=" + graph.symbol());
                     auto replacement = resolveRead(graph, opId, *path);
+                    logInfo("xmr read resolve end graph=" + graph.symbol());
                     if (!replacement || !replacement->valid())
                     {
                         continue;
@@ -693,7 +695,9 @@ namespace wolf_sv_parser::transform
                         result.changed = true;
                         continue;
                     }
+                    logInfo("xmr write resolve begin graph=" + graph.symbol());
                     resolveWrite(graph, opId, *path, operands.front());
+                    logInfo("xmr write resolve end graph=" + graph.symbol());
                     graph.eraseOp(opId);
                     result.changed = true;
                 }
@@ -715,63 +719,113 @@ namespace wolf_sv_parser::transform
                 return false;
             };
 
-            for (const auto &pending : pendingOutputPorts)
+            struct InstanceRef
             {
-                for (auto &graphEntry : netlist().graphs())
+                grh::ir::Graph *graph = nullptr;
+                grh::ir::OperationId opId = grh::ir::OperationId::invalid();
+            };
+
+            std::unordered_map<std::string, std::vector<InstanceRef>> instancesByModule;
+            for (auto &graphEntry : netlist().graphs())
+            {
+                grh::ir::Graph &graph = *graphEntry.second;
+                for (const auto opId : graph.operations())
                 {
-                    grh::ir::Graph &graph = *graphEntry.second;
-                    for (const auto opId : graph.operations())
+                    const grh::ir::Operation op = graph.getOperation(opId);
+                    if (op.kind() != grh::ir::OperationKind::kInstance &&
+                        op.kind() != grh::ir::OperationKind::kBlackbox)
                     {
-                        const grh::ir::Operation op = graph.getOperation(opId);
-                        if (op.kind() != grh::ir::OperationKind::kInstance &&
-                            op.kind() != grh::ir::OperationKind::kBlackbox)
-                        {
-                            continue;
-                        }
-                        const auto moduleName = getAttrString(op, "moduleName");
-                        if (!moduleName || *moduleName != pending.moduleName)
-                        {
-                            continue;
-                        }
-                        ensureInstanceOutput(graph, opId, pending.portName,
-                                             pending.width, pending.isSigned);
+                        continue;
                     }
+                    const auto moduleName = getAttrString(op, "moduleName");
+                    if (!moduleName || moduleName->empty())
+                    {
+                        continue;
+                    }
+                    instancesByModule[*moduleName].push_back(InstanceRef{&graph, opId});
                 }
             }
 
+            std::unordered_map<std::string, std::vector<const PendingPort *>> pendingOutputsByModule;
+            pendingOutputsByModule.reserve(pendingOutputPorts.size());
+            for (const auto &pending : pendingOutputPorts)
+            {
+                pendingOutputsByModule[pending.moduleName].push_back(&pending);
+            }
+
+            std::unordered_map<std::string, std::vector<const PendingPort *>> pendingInputsByModule;
+            pendingInputsByModule.reserve(pendingInputPorts.size());
             for (const auto &pending : pendingInputPorts)
             {
-                for (auto &graphEntry : netlist().graphs())
+                pendingInputsByModule[pending.moduleName].push_back(&pending);
+            }
+
+            logInfo("xmr pending ports begin outputs=" + std::to_string(pendingOutputPorts.size()) +
+                    " inputs=" + std::to_string(pendingInputPorts.size()) +
+                    " outputModules=" + std::to_string(pendingOutputsByModule.size()) +
+                    " inputModules=" + std::to_string(pendingInputsByModule.size()) +
+                    " instanceModules=" + std::to_string(instancesByModule.size()));
+
+            std::size_t moduleIndex = 0;
+            for (const auto &entry : pendingOutputsByModule)
+            {
+                if (moduleIndex % 10 == 0)
                 {
-                    grh::ir::Graph &graph = *graphEntry.second;
-                    grh::ir::ValueId padValue;
-                    bool padReady = false;
-                    for (const auto opId : graph.operations())
+                    logInfo("xmr pending output module progress " + std::to_string(moduleIndex) +
+                            "/" + std::to_string(pendingOutputsByModule.size()));
+                }
+                auto instIt = instancesByModule.find(entry.first);
+                if (instIt == instancesByModule.end())
+                {
+                    ++moduleIndex;
+                    continue;
+                }
+                const auto &instances = instIt->second;
+                const auto &pendingPorts = entry.second;
+                for (const auto &inst : instances)
+                {
+                    for (const PendingPort *pending : pendingPorts)
                     {
-                        const grh::ir::Operation op = graph.getOperation(opId);
-                        if (op.kind() != grh::ir::OperationKind::kInstance &&
-                            op.kind() != grh::ir::OperationKind::kBlackbox)
-                        {
-                            continue;
-                        }
-                        const auto moduleName = getAttrString(op, "moduleName");
-                        if (!moduleName || *moduleName != pending.moduleName)
-                        {
-                            continue;
-                        }
-                        if (instanceHasInput(op, pending.portName))
-                        {
-                            continue;
-                        }
-                        if (!padReady)
-                        {
-                            padValue = getPadInput(graph, pending.width, pending.isSigned);
-                            padReady = true;
-                        }
-                        ensureInstanceInput(graph, opId, pending.portName, padValue);
+                        ensureInstanceOutput(*inst.graph, inst.opId, pending->portName,
+                                             pending->width, pending->isSigned);
                     }
                 }
+                ++moduleIndex;
             }
+
+            moduleIndex = 0;
+            for (const auto &entry : pendingInputsByModule)
+            {
+                if (moduleIndex % 10 == 0)
+                {
+                    logInfo("xmr pending input module progress " + std::to_string(moduleIndex) +
+                            "/" + std::to_string(pendingInputsByModule.size()));
+                }
+                auto instIt = instancesByModule.find(entry.first);
+                if (instIt == instancesByModule.end())
+                {
+                    ++moduleIndex;
+                    continue;
+                }
+                const auto &instances = instIt->second;
+                const auto &pendingPorts = entry.second;
+                for (const auto &inst : instances)
+                {
+                    for (const PendingPort *pending : pendingPorts)
+                    {
+                        const grh::ir::Operation op = inst.graph->getOperation(inst.opId);
+                        if (instanceHasInput(op, pending->portName))
+                        {
+                            continue;
+                        }
+                        grh::ir::ValueId padValue =
+                            getPadInput(*inst.graph, pending->width, pending->isSigned);
+                        ensureInstanceInput(*inst.graph, inst.opId, pending->portName, padValue);
+                    }
+                }
+                ++moduleIndex;
+            }
+            logInfo("xmr pending ports end");
         }
 
         std::string message = "xmr ops=" + std::to_string(xmrOpCount);
