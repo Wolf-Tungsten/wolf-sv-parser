@@ -1,0 +1,5 @@
+# Add RTL source files relative to this case directory.
+# Example:
+# rtl/top.sv
+# rtl/dep.sv
+# +incdir+rtl

@@ -83,6 +83,55 @@ namespace grh::emit
             out.push_back('"');
         }
 
+        std::string escapeSvString(std::string_view text)
+        {
+            std::string out;
+            out.reserve(text.size());
+            for (unsigned char ch : text)
+            {
+                switch (ch)
+                {
+                case '\\':
+                    out.append("\\\\");
+                    break;
+                case '"':
+                    out.append("\\\"");
+                    break;
+                case '\n':
+                    out.append("\\n");
+                    break;
+                case '\r':
+                    out.append("\\r");
+                    break;
+                case '\t':
+                    out.append("\\t");
+                    break;
+                case '\b':
+                    out.append("\\b");
+                    break;
+                case '\f':
+                    out.append("\\f");
+                    break;
+                case '\v':
+                    out.append("\\v");
+                    break;
+                default:
+                    if (ch < 0x20 || ch == 0x7f)
+                    {
+                        char buf[5];
+                        std::snprintf(buf, sizeof(buf), "\\x%02x", ch);
+                        out.append(buf);
+                    }
+                    else
+                    {
+                        out.push_back(static_cast<char>(ch));
+                    }
+                    break;
+                }
+            }
+            return out;
+        }
+
         std::optional<std::string> sizedLiteralIfUnsized(std::string_view literal, int64_t width)
         {
             if (width <= 0)
@@ -4078,7 +4127,7 @@ namespace grh::emit
                     {
                         stmt << valueExpr(operands[1]) << ", ";
                     }
-                    stmt << "\"" << *format << "\"";
+                    stmt << "\"" << escapeSvString(*format) << "\"";
                     for (std::size_t i = 0; i < argCount; ++i)
                     {
                         stmt << ", " << valueExpr(operands[baseIndex + i]);
@@ -4180,7 +4229,7 @@ namespace grh::emit
                     {
                         appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                     }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << *format << "\"";
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << escapeSvString(*format) << "\"";
                     for (std::size_t i = 0; i < argCount; ++i)
                     {
                         stmt << ", " << valueExpr(operands[2 + i]);
@@ -4226,7 +4275,7 @@ namespace grh::emit
                     {
                         appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
                     }
-                    appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
+                    appendIndented(stmt, 3, "$fatal(\"" + escapeSvString(message) + " at time %0t\", $time);");
                     appendIndented(stmt, 2, "end");
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
@@ -6621,15 +6670,15 @@ namespace grh::emit
                     appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                 }
                 stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << taskName << "(";
-                if (taskName == "fatal" && hasExitCode)
-                {
-                    stmt << valueExpr(operands[1]) << ", ";
-                }
-                stmt << "\"" << *format << "\"";
-                for (std::size_t i = 0; i < argCount; ++i)
-                {
-                    stmt << ", " << valueExpr(operands[baseIndex + i]);
-                }
+                    if (taskName == "fatal" && hasExitCode)
+                    {
+                        stmt << valueExpr(operands[1]) << ", ";
+                    }
+                    stmt << "\"" << escapeSvString(*format) << "\"";
+                    for (std::size_t i = 0; i < argCount; ++i)
+                    {
+                        stmt << ", " << valueExpr(operands[baseIndex + i]);
+                    }
                 stmt << ");\n";
                 if (guardDisplay)
                 {
@@ -6727,15 +6776,15 @@ namespace grh::emit
                 const bool guardDisplay = !isConstOne(operands[0]);
                 const int baseIndent = guardDisplay ? 3 : 2;
                 std::ostringstream stmt;
-                if (guardDisplay)
-                {
-                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
-                }
-                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << *format << "\"";
-                for (std::size_t i = 0; i < argCount; ++i)
-                {
-                    stmt << ", " << valueExpr(operands[2 + i]);
-                }
+                    if (guardDisplay)
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
+                    }
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << escapeSvString(*format) << "\"";
+                    for (std::size_t i = 0; i < argCount; ++i)
+                    {
+                        stmt << ", " << valueExpr(operands[2 + i]);
+                    }
                 stmt << ");\n";
                 if (guardDisplay)
                 {
@@ -6775,14 +6824,14 @@ namespace grh::emit
                     appendIndented(stmt, 2, "if (!" + valueExpr(operands[1]) + ") begin");
                 }
                 else
-                {
-                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
+                    {
+                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
+                    }
+                    appendIndented(stmt, 3, "$fatal(\"" + escapeSvString(message) + " at time %0t\", $time);");
+                    appendIndented(stmt, 2, "end");
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
                 }
-                appendIndented(stmt, 3, "$fatal(\"" + message + " at time %0t\", $time);");
-                appendIndented(stmt, 2, "end");
-                addSequentialStmt(*seqKey, stmt.str(), opId);
-                break;
-            }
             case grh::ir::OperationKind::kDpicImport:
             {
                 auto argsDir = getAttribute<std::vector<std::string>>(view, opId, "argsDirection");

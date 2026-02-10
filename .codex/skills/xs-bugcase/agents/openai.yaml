@@ -1,0 +1,4 @@
+interface:
+  display_name: "XS Bugcase"
+  short_description: "Create XiangShan SV repro cases"
+  default_prompt: "Create an xs-bugcase from this XiangShan parse error log."

@@ -444,6 +444,8 @@ xs-wolf-emu: xs-wolf-emit
 		NUM_CORES=$(XS_NUM_CORES) \
 		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
 		EMU_THREADS=$(XS_EMU_THREADS) \
+		WITH_CHISELDB=0 \
+		WITH_CONSTANTIN=0 \
 		SIM_VSRC= \
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)
 
