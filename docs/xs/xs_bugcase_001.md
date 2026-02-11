@@ -157,6 +157,81 @@ keeps the 1-bit width of `write.value`, even though the shift intends to place
 that bit into a `memWidth`-wide vector. Later, the emitter assumes the data is
 `memWidth` wide and indexes it by `bit` in the memory write expansion.
 
+## Fix Outcome: Input/Output Shape (Before vs After)
+
+Below is the concrete shape change in the IR and emitted SV for the
+`Memory[addr][i] <= RW0_wdata[i]` pattern in `array_128x76`.
+
+### IR Shape
+
+**Before (broken):**
+
+- `data` width: **1**
+- `mask` width: **32** (truncated for `i >= 32`)
+
+```
+kMemoryWritePort(updateCond, addr,
+                 data = kShl(bitval, i)   // 1-bit
+                 mask = kShl(1, i)        // 32-bit
+)
+```
+
+**After (fixed):**
+
+- `data` width: **memWidth (76)**
+- `mask` width: **memWidth (76)**
+
+```
+kMemoryWritePort(updateCond, addr,
+                 data = kShl(bitval, i)   // 76-bit
+                 mask = kShl(1, i)        // 76-bit
+)
+```
+
+### Emitted SV Shape
+
+**Before (broken):**
+
+```
+wire __expr_11;             // 1-bit
+assign __expr_12 = __expr_11 << i;  // 1-bit result
+Memory[addr][i] <= __expr_12[i];    // illegal when i != 0
+```
+
+**After (fixed):**
+
+```
+wire __expr_11;             // 1-bit
+assign __expr_12 = {{75{1'b0}}, __expr_11} << i; // 76-bit result
+Memory[addr][i] <= __expr_12[i];                 // valid for all i
+```
+
+For indexed part-select masks (e.g. `[(base +: width)]`), the `1` literal used
+to build `((1 << width) - 1)` is also now `memWidth`-sized, ensuring mask bits
+above 31 are preserved.
+
+## Fix Impact Summary (IR + Emit)
+
+### GRH IR Impact
+
+- **No new op kinds** were introduced; the IR graph structure is unchanged.
+- **Width changes only**:
+  - `kMemoryWritePort` operands `data`/`mask` are now **memWidth** instead of
+    1/32 bit.
+  - Constants that encode per‑bit masks are now **memWidth‑sized literals**
+    (e.g. `76'h...` instead of `32'h...`).
+- **No new attributes** were added to GRH ops; the change is strictly width
+  hints/constant widths in existing nodes.
+
+### Emit Impact
+
+- **Only the `kShl/kLShr/kAShr` emission path changed**.
+  - The emitter now **extends the left operand to the result width** before
+    shifting, emitting an explicit zero/sign extension in SV (e.g.
+    `{{75{1'b0}}, lhs} << i`) when needed.
+  - This is a *codegen* adjustment; it does **not** change IR semantics or add
+    IR ops.
+
 ## Fix Suggestions
 
 1. **Widen `kShl` for bit-select writes (preferred).**

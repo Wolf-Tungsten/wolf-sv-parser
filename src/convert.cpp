@@ -10216,6 +10216,14 @@ public:
     ExprNodeId makeOperation(grh::ir::OperationKind op, std::vector<ExprNodeId> operands,
                              slang::SourceLocation location)
     {
+        return makeOperationWithWidth(op, std::move(operands), 0, location);
+    }
+
+    ExprNodeId makeOperationWithWidth(grh::ir::OperationKind op,
+                                      std::vector<ExprNodeId> operands,
+                                      int32_t widthHint,
+                                      slang::SourceLocation location)
+    {
         for (ExprNodeId operand : operands)
         {
             if (operand == kInvalidPlanIndex)
@@ -10229,6 +10237,10 @@ public:
         node.operands = std::move(operands);
         node.location = location;
         node.tempSymbol = makeTempSymbol();
+        if (widthHint > 0)
+        {
+            node.widthHint = widthHint;
+        }
         return addNode(std::move(node));
     }
 
@@ -11267,6 +11279,25 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             }
             continue;
         }
+        const int32_t memWidthHint =
+            static_cast<int32_t>(std::min<int64_t>(
+                memWidth, std::numeric_limits<int32_t>::max()));
+        auto applyWriteWidthHint = [&](ExprNodeId id) {
+            if (memWidthHint <= 0 || id == kInvalidPlanIndex ||
+                id >= static_cast<ExprNodeId>(lowering.values.size()))
+            {
+                return;
+            }
+            ExprNode& node = lowering.values[id];
+            if (node.kind == ExprNodeKind::Symbol || node.kind == ExprNodeKind::XmrRead)
+            {
+                return;
+            }
+            if (node.widthHint <= 0 || node.widthHint < memWidthHint)
+            {
+                node.widthHint = memWidthHint;
+            }
+        };
 
         std::vector<ExprNodeId> addressIndices;
         const std::size_t addressCount = dims.empty() ? 1 : dims.size();
@@ -11329,6 +11360,11 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             if (dataSlice.kind == WriteSliceKind::BitSelect)
             {
                 isMasked = true;
+                const int32_t widthHint =
+                    memWidth > 0
+                        ? static_cast<int32_t>(std::min<int64_t>(
+                              memWidth, std::numeric_limits<int32_t>::max()))
+                        : 0;
                 const ExprNodeId bitIndex = dataSlice.index;
                 if (bitIndex == kInvalidPlanIndex)
                 {
@@ -11336,18 +11372,25 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                 }
                 const std::string oneLiteral = std::to_string(memWidth) + "'b1";
                 ExprNodeId one = builder.addConstantLiteral(oneLiteral, write.location);
-                mask = builder.makeOperation(grh::ir::OperationKind::kShl,
-                                             {one, bitIndex}, write.location);
+                mask = builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                                      {one, bitIndex}, widthHint,
+                                                      write.location);
                 if (bitIndex == kInvalidPlanIndex)
                 {
                     continue;
                 }
-                data = builder.makeOperation(grh::ir::OperationKind::kShl,
-                                             {write.value, bitIndex}, write.location);
+                data = builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                                      {write.value, bitIndex},
+                                                      widthHint, write.location);
             }
             else if (dataSlice.kind == WriteSliceKind::RangeSelect)
             {
                 isMasked = true;
+                const int32_t widthHint =
+                    memWidth > 0
+                        ? static_cast<int32_t>(std::min<int64_t>(
+                              memWidth, std::numeric_limits<int32_t>::max()))
+                        : 0;
                 auto leftConst = evalConstInt(plan, lowering, dataSlice.left);
                 auto rightConst = evalConstInt(plan, lowering, dataSlice.right);
                 if (dataSlice.rangeKind == WriteRangeKind::Simple)
@@ -11384,8 +11427,9 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                     {
                         ExprNodeId shift =
                             builder.addConstantLiteral(std::to_string(lo), write.location);
-                        data = builder.makeOperation(grh::ir::OperationKind::kShl,
-                                                     {write.value, shift}, write.location);
+                        data = builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                                              {write.value, shift},
+                                                              widthHint, write.location);
                     }
                     else
                     {
@@ -11469,7 +11513,8 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                     }
                     ExprNodeId widthLiteral =
                         builder.addConstantLiteral(std::to_string(*widthConst), write.location);
-                    ExprNodeId one = builder.addConstantLiteral("1", write.location);
+                    const std::string oneLiteral = std::to_string(memWidth) + "'b1";
+                    ExprNodeId one = builder.addConstantLiteral(oneLiteral, write.location);
                     ExprNodeId shifted = builder.makeOperation(grh::ir::OperationKind::kShl,
                                                                {one, widthLiteral}, write.location);
                     ExprNodeId ones =
@@ -11484,10 +11529,12 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
                         shift = builder.makeOperation(grh::ir::OperationKind::kAdd,
                                                       {baseMinus, one}, write.location);
                     }
-                    mask = builder.makeOperation(grh::ir::OperationKind::kShl,
-                                                 {ones, shift}, write.location);
-                    data = builder.makeOperation(grh::ir::OperationKind::kShl,
-                                                 {write.value, shift}, write.location);
+                    mask = builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                                          {ones, shift}, widthHint,
+                                                          write.location);
+                    data = builder.makeOperationWithWidth(grh::ir::OperationKind::kShl,
+                                                          {write.value, shift},
+                                                          widthHint, write.location);
                 }
                 else
                 {
@@ -11523,6 +11570,9 @@ void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         {
             continue;
         }
+
+        applyWriteWidthHint(data);
+        applyWriteWidthHint(mask);
 
         if (write.domain == ControlDomain::Sequential && stmt.eventEdges.empty())
         {

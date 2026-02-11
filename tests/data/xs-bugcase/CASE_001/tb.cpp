@@ -4,6 +4,7 @@
 #include "VRef.h"
 #include "VWolf.h"
 #include "verilated.h"
+#include "verilated_cov.h"
 
 static vluint64_t main_time = 0;
 double sc_time_stamp() { return static_cast<double>(main_time); }
@@ -129,5 +130,6 @@ int main(int argc, char **argv) {
 
     delete ref;
     delete wolf;
+    VerilatedCov::write();
     return 0;
 }

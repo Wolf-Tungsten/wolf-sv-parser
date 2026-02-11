@@ -324,6 +324,7 @@ int main()
         graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("op0"));
 
         PassManager manager;
+        manager.options().verbosity = PassVerbosity::Info;
         manager.addPass(std::make_unique<StatsPass>());
 
         PassDiagnostics diags;
@@ -336,14 +337,15 @@ int main()
         {
             return fail("Stats pass should not record errors");
         }
+#if WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS
         if (diags.messages().empty())
         {
             return fail("Stats pass should emit a diagnostic with counts");
         }
         const auto &message = diags.messages().front();
-        if (message.passName != "stats" || message.kind != PassDiagnosticKind::Warning)
+        if (message.passName != "stats" || message.kind != PassDiagnosticKind::Info)
         {
-            return fail("Stats pass should emit a warning diagnostic");
+            return fail("Stats pass should emit an info diagnostic");
         }
         if (message.message.find("graphs=1") == std::string::npos ||
             message.message.find("operations=1") == std::string::npos ||
@@ -351,6 +353,18 @@ int main()
         {
             return fail("Stats pass diagnostic did not contain expected counts");
         }
+#else
+        if (!diags.messages().empty())
+        {
+            const auto &message = diags.messages().front();
+            if (message.message.find("graphs=1") == std::string::npos ||
+                message.message.find("operations=1") == std::string::npos ||
+                message.message.find("values=2") == std::string::npos)
+            {
+                return fail("Stats pass diagnostic did not contain expected counts");
+            }
+        }
+#endif
     }
 
     return 0;

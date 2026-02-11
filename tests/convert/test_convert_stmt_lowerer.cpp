@@ -1311,9 +1311,23 @@ int testDpiCallLowering(const std::filesystem::path& sourcePath) {
         return fail("Unexpected DPI return value in " + sourcePath.string());
     }
     const auto resultSymbol = dpiStmt->dpiCall.results.front();
-    if (!resultSymbol.valid() ||
-        plan.symbolTable.text(resultSymbol) != std::string_view("y")) {
+    if (!resultSymbol.valid()) {
+        return fail("Missing DPI output symbol in " + sourcePath.string());
+    }
+    const std::string_view resultName = plan.symbolTable.text(resultSymbol);
+    if (resultName.find("_dpi_ret_") != 0) {
         return fail("Unexpected DPI output symbol in " + sourcePath.string());
+    }
+    bool hasWriteToY = false;
+    for (const auto& write : lowering.writes) {
+        if (write.target.valid() &&
+            plan.symbolTable.text(write.target) == std::string_view("y")) {
+            hasWriteToY = true;
+            break;
+        }
+    }
+    if (!hasWriteToY) {
+        return fail("Missing write intent for DPI output in " + sourcePath.string());
     }
     if (dpiStmt->eventEdges.size() != 1 || dpiStmt->eventOperands.size() != 1) {
         return fail("Unexpected DPI event binding in " + sourcePath.string());

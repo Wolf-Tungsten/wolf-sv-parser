@@ -38,3 +38,5 @@ _deps
 *.fst
 *.vcd
 
+.scala-build/
+.metals/

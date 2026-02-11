@@ -2781,6 +2781,28 @@ namespace grh::emit
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
+            auto extendShiftOperand = [&](grh::ir::ValueId valueId,
+                                          int64_t targetWidth,
+                                          bool signExtend) -> std::string
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                const int64_t width = value.width();
+                const std::string name = valueExpr(valueId);
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                if (signExtend)
+                {
+                    return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            };
             auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
             {
                 if (!valueId.valid())
@@ -3365,6 +3387,19 @@ namespace grh::emit
                 case grh::ir::OperationKind::kOr:
                 case grh::ir::OperationKind::kXor:
                 case grh::ir::OperationKind::kXnor:
+                {
+                    if (operands.size() < 2 || results.empty())
+                    {
+                        reportError("Binary operation missing operands or results", opContext);
+                        break;
+                    }
+                    const std::string tok = binOpToken(op.kind());
+                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " " + tok + " " +
+                                  valueExpr(operands[1]) + ";",
+                              opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
                 case grh::ir::OperationKind::kShl:
                 case grh::ir::OperationKind::kLShr:
                 case grh::ir::OperationKind::kAShr:
@@ -3374,8 +3409,15 @@ namespace grh::emit
                         reportError("Binary operation missing operands or results", opContext);
                         break;
                     }
+                    const int64_t resultWidth = graph->getValue(results[0]).width();
+                    const bool signExtend =
+                        op.kind() == grh::ir::OperationKind::kAShr &&
+                        graph->getValue(operands[0]).isSigned();
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " " + tok + " " +
+                    const std::string lhs = resultWidth > 0
+                                                ? extendShiftOperand(operands[0], resultWidth, signExtend)
+                                                : valueExpr(operands[0]);
+                    addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " +
                                   valueExpr(operands[1]) + ";",
                               opId);
                     ensureWireDecl(results[0]);
@@ -3872,6 +3914,12 @@ namespace grh::emit
                         }
                         return true;
                     };
+                    const int64_t dataWidth = graph->getValue(data).width();
+                    const bool maskAllOnes = maskBits ? maskAll(1) : false;
+                    if (dataWidth > 0 && memWidth > 0 && dataWidth != memWidth && !maskAllOnes)
+                    {
+                        reportWarning("kMemoryWritePort data width does not match memory width", opContext);
+                    }
                     std::ostringstream stmt;
                     if (guardUpdate)
                     {
@@ -5335,6 +5383,27 @@ namespace grh::emit
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };
+        auto extendShiftOperand = [&](grh::ir::ValueId valueId,
+                                      int64_t targetWidth,
+                                      bool signExtend) -> std::string
+        {
+            const int64_t width = view.valueWidth(valueId);
+            const std::string name = valueExpr(valueId);
+            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+            {
+                return name;
+            }
+            const int64_t diff = targetWidth - width;
+            if (diff <= 0)
+            {
+                return name;
+            }
+            if (signExtend)
+            {
+                return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+            }
+            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+        };
         auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
         {
             if (!valueId.valid())
@@ -5904,9 +5973,6 @@ namespace grh::emit
             case grh::ir::OperationKind::kOr:
             case grh::ir::OperationKind::kXor:
             case grh::ir::OperationKind::kXnor:
-            case grh::ir::OperationKind::kShl:
-            case grh::ir::OperationKind::kLShr:
-            case grh::ir::OperationKind::kAShr:
             {
                 if (operands.size() < 2 || results.empty())
                 {
@@ -5916,6 +5982,29 @@ namespace grh::emit
                 const std::string tok = binOpToken(kind);
                 addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) +
                               " " + tok + " " + valueExpr(operands[1]) + ";",
+                          opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
+            {
+                if (operands.size() < 2 || results.empty())
+                {
+                    reportError("Binary operation missing operands or results", context);
+                    break;
+                }
+                const int64_t resultWidth = view.valueWidth(results[0]);
+                const bool signExtend =
+                    kind == grh::ir::OperationKind::kAShr &&
+                    view.valueSigned(operands[0]);
+                const std::string tok = binOpToken(kind);
+                const std::string lhs = resultWidth > 0
+                                            ? extendShiftOperand(operands[0], resultWidth, signExtend)
+                                            : valueExpr(operands[0]);
+                addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " +
+                              valueExpr(operands[1]) + ";",
                           opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -6423,6 +6512,12 @@ namespace grh::emit
                     }
                     return true;
                 };
+                const int64_t dataWidth = view.valueWidth(data);
+                const bool maskAllOnes = maskBits ? maskAll(1) : false;
+                if (dataWidth > 0 && memWidth > 0 && dataWidth != memWidth && !maskAllOnes)
+                {
+                    reportWarning("kMemoryWritePort data width does not match memory width", context);
+                }
                 std::ostringstream stmt;
                 if (guardUpdate)
                 {

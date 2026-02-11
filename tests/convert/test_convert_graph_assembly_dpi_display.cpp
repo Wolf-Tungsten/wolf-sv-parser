@@ -154,7 +154,7 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     }
 
     grh::ir::OperationId displayOpId = grh::ir::OperationId::invalid();
-    grh::ir::OperationId assertOpId = grh::ir::OperationId::invalid();
+    grh::ir::OperationId errorDisplayOpId = grh::ir::OperationId::invalid();
     std::unordered_map<std::string, grh::ir::OperationId> importOps;
     std::unordered_map<std::string, grh::ir::OperationId> callOps;
 
@@ -162,10 +162,13 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
         grh::ir::Operation op = graph->getOperation(opId);
         switch (op.kind()) {
         case grh::ir::OperationKind::kDisplay:
-            displayOpId = opId;
-            break;
-        case grh::ir::OperationKind::kAssert:
-            assertOpId = opId;
+            if (auto kind = getAttrString(op, "displayKind")) {
+                if (*kind == "display") {
+                    displayOpId = opId;
+                } else if (*kind == "error") {
+                    errorDisplayOpId = opId;
+                }
+            }
             break;
         case grh::ir::OperationKind::kDpicImport:
             importOps.emplace(std::string(op.symbolText()), opId);
@@ -185,8 +188,8 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     if (!displayOpId.valid()) {
         return fail("Missing kDisplay op");
     }
-    if (!assertOpId.valid()) {
-        return fail("Missing kAssert op");
+    if (!errorDisplayOpId.valid()) {
+        return fail("Missing error display op");
     }
 
     const grh::ir::Operation displayOp = graph->getOperation(displayOpId);
@@ -213,25 +216,25 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
         return fail("kDisplay event operand mismatch");
     }
 
-    const grh::ir::Operation assertOp = graph->getOperation(assertOpId);
-    auto assertEdges = getAttrStrings(assertOp, "eventEdge");
-    auto assertMessage = getAttrString(assertOp, "message");
-    auto assertSeverity = getAttrString(assertOp, "severity");
-    if (!assertEdges || assertEdges->size() != 1 || (*assertEdges)[0] != "posedge") {
-        return fail("kAssert missing eventEdge");
+    const grh::ir::Operation errorOp = graph->getOperation(errorDisplayOpId);
+    auto errorEdges = getAttrStrings(errorOp, "eventEdge");
+    auto errorFormat = getAttrString(errorOp, "formatString");
+    auto errorKind = getAttrString(errorOp, "displayKind");
+    if (!errorEdges || errorEdges->size() != 1 || (*errorEdges)[0] != "posedge") {
+        return fail("error display missing eventEdge");
     }
-    if (!assertMessage || *assertMessage != "oops") {
-        return fail("kAssert message mismatch");
+    if (!errorFormat || *errorFormat != "oops") {
+        return fail("error display formatString mismatch");
     }
-    if (!assertSeverity || *assertSeverity != "error") {
-        return fail("kAssert severity mismatch");
+    if (!errorKind || *errorKind != "error") {
+        return fail("error display kind mismatch");
     }
-    const auto assertOperands = assertOp.operands();
-    if (assertOperands.size() != 3) {
-        return fail("kAssert operand count mismatch");
+    const auto errorOperands = errorOp.operands();
+    if (errorOperands.size() != 2) {
+        return fail("error display operand count mismatch");
     }
-    if (graph->getValue(assertOperands[2]).symbolText() != "clk") {
-        return fail("kAssert event operand mismatch");
+    if (graph->getValue(errorOperands[1]).symbolText() != "clk") {
+        return fail("error display event operand mismatch");
     }
 
     auto itCaptureImport = importOps.find("dpi_capture");
@@ -333,7 +336,10 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
         return fail("dpi_capture call event operand mismatch");
     }
     const auto capCallResults = captureCall.results();
-    if (capCallResults.size() != 1 || graph->getValue(capCallResults[0]).symbolText() != "y") {
+    if (capCallResults.size() != 1) {
+        return fail("dpi_capture call result count mismatch");
+    }
+    if (graph->getValue(capCallResults[0]).symbolText().find("_dpi_ret_") != 0) {
         return fail("dpi_capture call result mismatch");
     }
 

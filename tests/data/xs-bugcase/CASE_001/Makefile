@@ -21,6 +21,7 @@ WOLF_SV := $(WOLF_DIR)/wolf_emit.sv
 VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
 VERILATOR_COVERAGE ?= verilator_coverage
 VERILATOR_ROOT ?= $(shell $(VERILATOR) -V 2>/dev/null | awk -F'= *' '/^VERILATOR_ROOT/ {print $$2}')
+VERILATOR_COV_SRC = $(if $(filter 1,$(COVERAGE)),$(VERILATOR_ROOT)/include/verilated_cov.cpp,)
 
 COVERAGE ?= 1
 COV_MIN ?= 90
@@ -97,6 +98,7 @@ $(BIN): $(REF_LIB) $(WOLF_LIB) $(TB_CPP)
 		$(TB_CPP) $(REF_LIB) $(WOLF_LIB) \
 		$(VERILATOR_ROOT)/include/verilated.cpp \
 		$(VERILATOR_ROOT)/include/verilated_threads.cpp \
+		$(VERILATOR_COV_SRC) \
 		-o $(BIN) $(LDLIBS)
 
 clean:
