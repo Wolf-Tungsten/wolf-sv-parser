@@ -2455,28 +2455,77 @@ namespace grh::emit
             emittedModuleNames.emplace(graphSymbol, std::move(emittedName));
         }
 
-        std::ostringstream moduleBuffer;
+        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
+        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
+        auto stream = openOutputFile(outputPath);
+        if (!stream)
+        {
+            result.success = false;
+            return result;
+        }
+        std::ostream &out = *stream;
         bool firstModule = true;
         for (const grh::ir::Graph *graph : graphsSortedByName(netlist))
         {
             if (!firstModule)
             {
-                moduleBuffer << '\n';
+                out << '\n';
             }
             firstModule = false;
 
             const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
             const std::string &moduleName = moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : graph->symbol();
 
-            auto valueName = [&](grh::ir::ValueId valueId) -> std::string
+            uint32_t maxValueIndex = 0;
+            for (const auto valueId : graph->values())
             {
-                grh::ir::Value value = graph->getValue(valueId);
-                return std::string(value.symbolText());
+                maxValueIndex = std::max(maxValueIndex, valueId.index);
+            }
+            uint32_t maxOpIndex = 0;
+            for (const auto opId : graph->operations())
+            {
+                maxOpIndex = std::max(maxOpIndex, opId.index);
+            }
+            std::vector<std::string> valueNameCache(maxValueIndex + 1);
+            std::vector<std::string> opNameCache(maxOpIndex + 1);
+            const std::string emptyName;
+            auto valueName = [&](grh::ir::ValueId valueId) -> const std::string &
+            {
+                if (!valueId.valid() || valueId.graph != graph->id())
+                {
+                    return emptyName;
+                }
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > maxValueIndex)
+                {
+                    return emptyName;
+                }
+                std::string &slot = valueNameCache[idx];
+                if (slot.empty())
+                {
+                    grh::ir::Value value = graph->getValue(valueId);
+                    slot = std::string(value.symbolText());
+                }
+                return slot;
             };
-            auto opName = [&](grh::ir::OperationId opId) -> std::string
+            auto opName = [&](grh::ir::OperationId opId) -> const std::string &
             {
-                grh::ir::Operation op = graph->getOperation(opId);
-                return std::string(op.symbolText());
+                if (!opId.valid() || opId.graph != graph->id())
+                {
+                    return emptyName;
+                }
+                const uint32_t idx = opId.index;
+                if (idx == 0 || idx > maxOpIndex)
+                {
+                    return emptyName;
+                }
+                std::string &slot = opNameCache[idx];
+                if (slot.empty())
+                {
+                    grh::ir::Operation op = graph->getOperation(opId);
+                    slot = std::string(op.symbolText());
+                }
+                return slot;
             };
             auto isPortValue = [&](grh::ir::ValueId valueId) -> bool
             {
@@ -2552,8 +2601,33 @@ namespace grh::emit
                 }
                 return ops.front();
             };
-            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> materializeValues;
-            materializeValues.reserve(graph->operations().size());
+            std::vector<uint8_t> materializeDense(maxValueIndex + 1, 0);
+            auto markMaterialize = [&](grh::ir::ValueId valueId)
+            {
+                if (!valueId.valid() || valueId.graph != graph->id())
+                {
+                    return;
+                }
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > maxValueIndex)
+                {
+                    return;
+                }
+                materializeDense[idx] = 1;
+            };
+            auto isMaterialized = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid() || valueId.graph != graph->id())
+                {
+                    return false;
+                }
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > maxValueIndex)
+                {
+                    return false;
+                }
+                return materializeDense[idx] != 0;
+            };
             for (const auto opId : graph->operations())
             {
                 const grh::ir::Operation op = graph->getOperation(opId);
@@ -2564,14 +2638,14 @@ namespace grh::emit
                 case grh::ir::OperationKind::kSliceArray:
                     if (!op.operands().empty())
                     {
-                        materializeValues.insert(op.operands().front());
+                        markMaterialize(op.operands().front());
                     }
                     break;
                 case grh::ir::OperationKind::kMemoryWritePort:
                     if (op.operands().size() > 3)
                     {
-                        materializeValues.insert(op.operands()[2]);
-                        materializeValues.insert(op.operands()[3]);
+                        markMaterialize(op.operands()[2]);
+                        markMaterialize(op.operands()[3]);
                     }
                     break;
                 default:
@@ -2588,13 +2662,13 @@ namespace grh::emit
                         {
                             if (ops[i].valid())
                             {
-                                materializeValues.insert(ops[i]);
+                                markMaterialize(ops[i]);
                             }
                         }
                     }
                 }
             }
-            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> resolvingExpr;
+            std::vector<uint8_t> resolvingExpr(maxValueIndex + 1, 0);
             std::function<std::string(grh::ir::ValueId)> valueExpr =
                 [&](grh::ir::ValueId valueId) -> std::string
             {
@@ -2602,29 +2676,35 @@ namespace grh::emit
                 {
                     return {};
                 }
-                if (materializeValues.find(valueId) != materializeValues.end())
+                if (isMaterialized(valueId))
                 {
                     return valueName(valueId);
                 }
-                if (!resolvingExpr.insert(valueId).second)
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > maxValueIndex)
                 {
                     return valueName(valueId);
                 }
+                if (resolvingExpr[idx])
+                {
+                    return valueName(valueId);
+                }
+                resolvingExpr[idx] = 1;
                 if (!isPortValue(valueId))
                 {
                     if (auto literal = constLiteralFor(valueId))
                     {
-                        resolvingExpr.erase(valueId);
+                        resolvingExpr[idx] = 0;
                         return *literal;
                     }
                     if (auto source = assignSourceFor(valueId))
                     {
                         std::string resolved = valueExpr(*source);
-                        resolvingExpr.erase(valueId);
+                        resolvingExpr[idx] = 0;
                         return resolved;
                     }
                 }
-                resolvingExpr.erase(valueId);
+                resolvingExpr[idx] = 0;
                 return valueName(valueId);
             };
             auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
@@ -2969,33 +3049,53 @@ namespace grh::emit
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
-            std::unordered_map<grh::ir::ValueId, bool, grh::ir::ValueIdHash> dpiDependsCache;
-            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiDependsVisiting;
-            auto valueDependsOnDpi = [&](auto&& self, grh::ir::ValueId valueId) -> bool
+            const uint32_t dpiMaxValueIndex = maxValueIndex;
+            std::vector<int8_t> dpiDependsDense(dpiMaxValueIndex + 1, -1);
+            std::vector<uint8_t> dpiDependsVisiting(dpiMaxValueIndex + 1, 0);
+            std::vector<uint8_t> dpiTempDense(dpiMaxValueIndex + 1, 0);
+            for (const auto &entry : dpiTempNames)
+            {
+                const uint32_t idx = entry.first.index;
+                if (idx <= dpiMaxValueIndex)
+                {
+                    dpiTempDense[idx] = 1;
+                }
+            }
+            auto computeDpiDepends = [&](auto&& self, grh::ir::ValueId valueId) -> bool
             {
                 if (!valueId.valid())
                 {
                     return false;
                 }
-                if (dpiTempNames.find(valueId) != dpiTempNames.end())
-                {
-                    return true;
-                }
-                auto cached = dpiDependsCache.find(valueId);
-                if (cached != dpiDependsCache.end())
-                {
-                    return cached->second;
-                }
-                if (!dpiDependsVisiting.insert(valueId).second)
+                if (valueId.graph != graph->id())
                 {
                     return false;
                 }
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > dpiMaxValueIndex)
+                {
+                    return false;
+                }
+                if (dpiTempDense[idx])
+                {
+                    return true;
+                }
+                const int8_t cached = dpiDependsDense[idx];
+                if (cached >= 0)
+                {
+                    return cached != 0;
+                }
+                if (dpiDependsVisiting[idx])
+                {
+                    return false;
+                }
+                dpiDependsVisiting[idx] = 1;
                 const grh::ir::Value value = graph->getValue(valueId);
                 const grh::ir::OperationId defOpId = value.definingOp();
                 if (!defOpId.valid())
                 {
-                    dpiDependsVisiting.erase(valueId);
-                    dpiDependsCache.emplace(valueId, false);
+                    dpiDependsVisiting[idx] = 0;
+                    dpiDependsDense[idx] = 0;
                     return false;
                 }
                 const grh::ir::Operation defOp = graph->getOperation(defOpId);
@@ -3059,15 +3159,37 @@ namespace grh::emit
                     depends = false;
                     break;
                 }
-                dpiDependsVisiting.erase(valueId);
-                dpiDependsCache.emplace(valueId, depends);
+                dpiDependsVisiting[idx] = 0;
+                dpiDependsDense[idx] = depends ? 1 : 0;
                 return depends;
             };
+            for (const auto valueId : graph->values())
+            {
+                computeDpiDepends(computeDpiDepends, valueId);
+            }
+            auto valueDependsOnDpi = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                if (valueId.graph != graph->id())
+                {
+                    return false;
+                }
+                const uint32_t idx = valueId.index;
+                if (idx == 0 || idx > dpiMaxValueIndex)
+                {
+                    return false;
+                }
+                return dpiDependsDense[idx] > 0;
+            };
             std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
+            std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiInlineCache;
             std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
             auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (valueDependsOnDpi(valueDependsOnDpi, valueId))
+                if (valueDependsOnDpi(valueId))
                 {
                     return dpiInlineExpr(valueId);
                 }
@@ -3162,11 +3284,15 @@ namespace grh::emit
                 {
                     return {};
                 }
+                if (auto cached = dpiInlineCache.find(valueId); cached != dpiInlineCache.end())
+                {
+                    return cached->second;
+                }
                 if (auto it = dpiTempNames.find(valueId); it != dpiTempNames.end())
                 {
                     return it->second;
                 }
-                if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+                if (!valueDependsOnDpi(valueId))
                 {
                     return valueExpr(valueId);
                 }
@@ -3449,11 +3575,12 @@ namespace grh::emit
                     break;
                 }
                 dpiInlineResolving.erase(valueId);
+                dpiInlineCache.emplace(valueId, expr);
                 return expr;
             };
             auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+                if (!valueDependsOnDpi(valueId))
                 {
                     return valueExpr(valueId);
                 }
@@ -3990,7 +4117,7 @@ namespace grh::emit
                         break;
                     }
                     if (!isPortValue(results[0]) &&
-                        materializeValues.find(results[0]) == materializeValues.end())
+                        !isMaterialized(results[0]))
                     {
                         break;
                     }
@@ -4209,7 +4336,7 @@ namespace grh::emit
                         break;
                     }
                     if (!isPortValue(results[0]) &&
-                        materializeValues.find(results[0]) == materializeValues.end())
+                        !isMaterialized(results[0]))
                     {
                         break;
                     }
@@ -5271,7 +5398,7 @@ namespace grh::emit
                         if (defOp.kind() == grh::ir::OperationKind::kConstant ||
                             defOp.kind() == grh::ir::OperationKind::kAssign)
                         {
-                            if (materializeValues.find(valueId) == materializeValues.end())
+                            if (!isMaterialized(valueId))
                             {
                                 continue;
                             }
@@ -5284,7 +5411,7 @@ namespace grh::emit
             // -------------------------
             // Module emission
             // -------------------------
-            moduleBuffer << "module " << moduleName << " (\n";
+            out << "module " << moduleName << " (\n";
             {
                 bool first = true;
                 auto emitPortLine = [&](const std::string &name)
@@ -5298,51 +5425,51 @@ namespace grh::emit
                     const std::string attr = formatSrcAttribute(decl.debug);
                     if (!first)
                     {
-                        moduleBuffer << ",\n";
+                        out << ",\n";
                     }
                     first = false;
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
                     if (decl.valueType != grh::ir::ValueType::Logic)
                     {
-                        moduleBuffer << "  ";
+                        out << "  ";
                         if (decl.dir == PortDir::Input)
                         {
-                            moduleBuffer << "input ";
+                            out << "input ";
                         }
                         else if (decl.dir == PortDir::Output)
                         {
-                            moduleBuffer << "output ";
+                            out << "output ";
                         }
                         else
                         {
-                            moduleBuffer << "inout ";
+                            out << "inout ";
                         }
-                        moduleBuffer << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
-                        moduleBuffer << name;
+                        out << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
+                        out << name;
                         return;
                     }
                     if (decl.dir == PortDir::Input)
                     {
-                        moduleBuffer << "  input wire ";
+                        out << "  input wire ";
                     }
                     else if (decl.dir == PortDir::Output)
                     {
-                        moduleBuffer << "  " << (decl.isReg ? "output reg " : "output wire ");
+                        out << "  " << (decl.isReg ? "output reg " : "output wire ");
                     }
                     else
                     {
-                        moduleBuffer << "  inout wire ";
+                        out << "  inout wire ";
                     }
-                    moduleBuffer << signedPrefix(decl.isSigned);
+                    out << signedPrefix(decl.isSigned);
                     const std::string range = widthRange(decl.width);
                     if (!range.empty())
                     {
-                        moduleBuffer << range << " ";
+                        out << range << " ";
                     }
-                    moduleBuffer << name;
+                    out << name;
                 };
 
                 for (const auto &port : graph->inputPorts())
@@ -5369,39 +5496,39 @@ namespace grh::emit
                     }
                     emitPortLine(std::string(graph->symbolText(port.name)));
                 }
-                moduleBuffer << "\n);\n";
+                out << "\n);\n";
             }
 
             if (!wireDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[name, decl] : wireDecls)
                 {
-                    moduleBuffer << "  " << formatNetDecl("wire", name, decl) << '\n';
+                    out << "  " << formatNetDecl("wire", name, decl) << '\n';
                 }
             }
 
             if (!regDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[name, decl] : regDecls)
                 {
-                    moduleBuffer << "  " << formatNetDecl("reg", name, decl) << '\n';
+                    out << "  " << formatNetDecl("reg", name, decl) << '\n';
                 }
             }
 
             if (!varDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[name, decl] : varDecls)
                 {
-                    moduleBuffer << "  " << formatVarDecl(decl.type, name) << '\n';
+                    out << "  " << formatVarDecl(decl.type, name) << '\n';
                 }
             }
 
             if (!memoryDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 auto opSrcLoc = [&](grh::ir::OperationId opId) -> std::optional<grh::ir::SrcLoc>
                 {
                     if (!opId.valid())
@@ -5416,90 +5543,90 @@ namespace grh::emit
                         formatSrcAttribute(opSrcLoc(opPtr));
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << decl << '\n';
+                    out << "  " << decl << '\n';
                 }
             }
 
             if (!instanceDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[inst, opPtr] : instanceDecls)
                 {
                     const std::string attr =
                         formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << inst << '\n';
+                    out << "  " << inst << '\n';
                 }
             }
 
             if (!dpiImportDecls.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[decl, opPtr] : dpiImportDecls)
                 {
                     const std::string attr =
                         formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << decl << '\n';
+                    out << "  " << decl << '\n';
                 }
             }
 
             if (!portBindingStmts.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[stmt, opPtr] : portBindingStmts)
                 {
                     const std::string attr =
                         formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << stmt << '\n';
+                    out << "  " << stmt << '\n';
                 }
             }
 
             if (!assignStmts.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[stmt, opPtr] : assignStmts)
                 {
                     const std::string attr =
                         formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  " << stmt << '\n';
+                    out << "  " << stmt << '\n';
                 }
             }
 
             if (!latchBlocks.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &[block, opPtr] : latchBlocks)
                 {
                     const std::string attr =
                         formatSrcAttribute(opPtr.valid() ? graph->getOperation(opPtr).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << '\n';
+                        out << "  " << attr << '\n';
                     }
-                    moduleBuffer << block << '\n';
+                    out << block << '\n';
                 }
             }
 
             if (!simpleBlocks.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &block : simpleBlocks)
                 {
                     const std::string attr =
@@ -5507,24 +5634,24 @@ namespace grh::emit
                                                             : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << '\n';
+                        out << "  " << attr << '\n';
                     }
-                    moduleBuffer << "  " << block.header << " begin\n";
+                    out << "  " << block.header << " begin\n";
                     for (const auto &stmt : block.stmts)
                     {
-                        moduleBuffer << stmt;
+                        out << stmt;
                         if (!stmt.empty() && stmt.back() != '\n')
                         {
-                            moduleBuffer << '\n';
+                            out << '\n';
                         }
                     }
-                    moduleBuffer << "  end\n";
+                    out << "  end\n";
                 }
             }
 
             if (!seqBlocks.empty())
             {
-                moduleBuffer << '\n';
+                out << '\n';
                 for (const auto &seq : seqBlocks)
                 {
                     const std::string sens = sensitivityList(*graph, seq.key);
@@ -5537,33 +5664,23 @@ namespace grh::emit
                         formatSrcAttribute(seq.op.valid() ? graph->getOperation(seq.op).srcLoc() : std::optional<grh::ir::SrcLoc>{});
                     if (!attr.empty())
                     {
-                        moduleBuffer << "  " << attr << "\n";
+                        out << "  " << attr << "\n";
                     }
-                    moduleBuffer << "  always " << sens << " begin\n";
+                    out << "  always " << sens << " begin\n";
                     for (const auto &stmt : seq.stmts)
                     {
-                        moduleBuffer << stmt;
+                        out << stmt;
                         if (!stmt.empty() && stmt.back() != '\n')
                         {
-                            moduleBuffer << '\n';
+                            out << '\n';
                         }
                     }
-                    moduleBuffer << "  end\n";
+                    out << "  end\n";
                 }
             }
 
-            moduleBuffer << "endmodule\n";
+            out << "endmodule\n";
         }
-
-        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
-        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
-        auto stream = openOutputFile(outputPath);
-        if (!stream)
-        {
-            result.success = false;
-            return result;
-        }
-        *stream << moduleBuffer.str();
         result.artifacts.push_back(outputPath.string());
         return result;
     }
@@ -5580,6 +5697,16 @@ namespace grh::emit
             result.success = false;
             return result;
         }
+
+        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
+        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
+        auto stream = openOutputFile(outputPath);
+        if (!stream)
+        {
+            result.success = false;
+            return result;
+        }
+        std::ostream &out = *stream;
 
         const std::size_t valueCount = view.values().size();
         const std::size_t opCount = view.operations().size();
@@ -5708,8 +5835,31 @@ namespace grh::emit
             }
             return operands.front();
         };
-        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> materializeValues;
-        materializeValues.reserve(view.operations().size());
+        std::vector<uint8_t> materializeDense(valueCount + 1, 0);
+        auto markMaterialize = [&](grh::ir::ValueId valueId)
+        {
+            if (!valueId.valid())
+            {
+                return;
+            }
+            if (valueId.index == 0 || valueId.index > valueCount)
+            {
+                return;
+            }
+            materializeDense[valueId.index] = 1;
+        };
+        auto isMaterialized = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            if (valueId.index == 0 || valueId.index > valueCount)
+            {
+                return false;
+            }
+            return materializeDense[valueId.index] != 0;
+        };
         for (const auto opId : view.operations())
         {
             const auto kind = view.opKind(opId);
@@ -5720,7 +5870,7 @@ namespace grh::emit
                 const auto operands = view.opOperands(opId);
                 if (!operands.empty())
                 {
-                    materializeValues.insert(operands.front());
+                    markMaterialize(operands.front());
                 }
             }
             else if (kind == grh::ir::OperationKind::kMemoryWritePort)
@@ -5728,8 +5878,8 @@ namespace grh::emit
                 const auto operands = view.opOperands(opId);
                 if (operands.size() > 3)
                 {
-                    materializeValues.insert(operands[2]);
-                    materializeValues.insert(operands[3]);
+                    markMaterialize(operands[2]);
+                    markMaterialize(operands[3]);
                 }
             }
             auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
@@ -5743,13 +5893,13 @@ namespace grh::emit
                     {
                         if (operands[i].valid())
                         {
-                            materializeValues.insert(operands[i]);
+                            markMaterialize(operands[i]);
                         }
                     }
                 }
             }
         }
-        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> resolvingExpr;
+        std::vector<uint8_t> resolvingExpr(valueCount + 1, 0);
         std::function<std::string(grh::ir::ValueId)> valueExpr =
             [&](grh::ir::ValueId valueId) -> std::string
         {
@@ -5757,29 +5907,34 @@ namespace grh::emit
             {
                 return {};
             }
-            if (materializeValues.find(valueId) != materializeValues.end())
+            if (isMaterialized(valueId))
             {
                 return valueName(valueId);
             }
-            if (!resolvingExpr.insert(valueId).second)
+            if (valueId.index == 0 || valueId.index > valueCount)
             {
                 return valueName(valueId);
             }
+            if (resolvingExpr[valueId.index])
+            {
+                return valueName(valueId);
+            }
+            resolvingExpr[valueId.index] = 1;
             if (!isPortValue(valueId))
             {
                 if (auto literal = constLiteralFor(valueId))
                 {
-                    resolvingExpr.erase(valueId);
+                    resolvingExpr[valueId.index] = 0;
                     return *literal;
                 }
                 if (auto source = assignSourceFor(valueId))
                 {
                     std::string resolved = valueExpr(*source);
-                    resolvingExpr.erase(valueId);
+                    resolvingExpr[valueId.index] = 0;
                     return resolved;
                 }
             }
-            resolvingExpr.erase(valueId);
+            resolvingExpr[valueId.index] = 0;
             return valueName(valueId);
         };
         auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
@@ -5913,8 +6068,6 @@ namespace grh::emit
             std::vector<std::string> stmts;
             grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
-
-        std::ostringstream moduleBuffer;
 
         // -------------------------
         // Ports
@@ -6247,32 +6400,48 @@ namespace grh::emit
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };
-        std::unordered_map<grh::ir::ValueId, bool, grh::ir::ValueIdHash> dpiDependsCache;
-        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiDependsVisiting;
-        auto valueDependsOnDpi = [&](auto&& self, grh::ir::ValueId valueId) -> bool
+        const uint32_t dpiMaxValueIndex = static_cast<uint32_t>(valueCount);
+        std::vector<int8_t> dpiDependsDense(dpiMaxValueIndex + 1, -1);
+        std::vector<uint8_t> dpiDependsVisiting(dpiMaxValueIndex + 1, 0);
+        std::vector<uint8_t> dpiTempDense(dpiMaxValueIndex + 1, 0);
+        for (const auto &entry : dpiTempNames)
+        {
+            const uint32_t idx = entry.first.index;
+            if (idx <= dpiMaxValueIndex)
+            {
+                dpiTempDense[idx] = 1;
+            }
+        }
+        auto computeDpiDepends = [&](auto&& self, grh::ir::ValueId valueId) -> bool
         {
             if (!valueId.valid())
             {
                 return false;
             }
-            if (dpiTempNames.find(valueId) != dpiTempNames.end())
-            {
-                return true;
-            }
-            auto cached = dpiDependsCache.find(valueId);
-            if (cached != dpiDependsCache.end())
-            {
-                return cached->second;
-            }
-            if (!dpiDependsVisiting.insert(valueId).second)
+            const uint32_t idx = valueId.index;
+            if (idx == 0 || idx > dpiMaxValueIndex)
             {
                 return false;
             }
+            if (dpiTempDense[idx])
+            {
+                return true;
+            }
+            const int8_t cached = dpiDependsDense[idx];
+            if (cached >= 0)
+            {
+                return cached != 0;
+            }
+            if (dpiDependsVisiting[idx])
+            {
+                return false;
+            }
+            dpiDependsVisiting[idx] = 1;
             const grh::ir::OperationId defOpId = view.valueDef(valueId);
             if (!defOpId.valid())
             {
-                dpiDependsVisiting.erase(valueId);
-                dpiDependsCache.emplace(valueId, false);
+                dpiDependsVisiting[idx] = 0;
+                dpiDependsDense[idx] = 0;
                 return false;
             }
             const auto kind = view.opKind(defOpId);
@@ -6336,15 +6505,33 @@ namespace grh::emit
                 depends = false;
                 break;
             }
-            dpiDependsVisiting.erase(valueId);
-            dpiDependsCache.emplace(valueId, depends);
+            dpiDependsVisiting[idx] = 0;
+            dpiDependsDense[idx] = depends ? 1 : 0;
             return depends;
         };
+        for (const auto valueId : view.values())
+        {
+            computeDpiDepends(computeDpiDepends, valueId);
+        }
+        auto valueDependsOnDpi = [&](grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            const uint32_t idx = valueId.index;
+            if (idx == 0 || idx > dpiMaxValueIndex)
+            {
+                return false;
+            }
+            return dpiDependsDense[idx] > 0;
+        };
         std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
+        std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiInlineCache;
         std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
         auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
         {
-            if (valueDependsOnDpi(valueDependsOnDpi, valueId))
+            if (valueDependsOnDpi(valueId))
             {
                 return dpiInlineExpr(valueId);
             }
@@ -6437,11 +6624,15 @@ namespace grh::emit
             {
                 return {};
             }
+            if (auto cached = dpiInlineCache.find(valueId); cached != dpiInlineCache.end())
+            {
+                return cached->second;
+            }
             if (auto it = dpiTempNames.find(valueId); it != dpiTempNames.end())
             {
                 return it->second;
             }
-            if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+            if (!valueDependsOnDpi(valueId))
             {
                 return valueExpr(valueId);
             }
@@ -6712,11 +6903,12 @@ namespace grh::emit
                 break;
             }
             dpiInlineResolving.erase(valueId);
+            dpiInlineCache.emplace(valueId, expr);
             return expr;
         };
         auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
         {
-            if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+            if (!valueDependsOnDpi(valueId))
             {
                 return valueExpr(valueId);
             }
@@ -7237,7 +7429,7 @@ namespace grh::emit
                     break;
                 }
                 if (!isPortValue(results[0]) &&
-                    materializeValues.find(results[0]) == materializeValues.end())
+                    !isMaterialized(results[0]))
                 {
                     break;
                 }
@@ -7457,7 +7649,7 @@ namespace grh::emit
                     break;
                 }
                 if (!isPortValue(results[0]) &&
-                    materializeValues.find(results[0]) == materializeValues.end())
+                    !isMaterialized(results[0]))
                 {
                     break;
                 }
@@ -8529,7 +8721,7 @@ namespace grh::emit
                     if (defKind == grh::ir::OperationKind::kConstant ||
                         defKind == grh::ir::OperationKind::kAssign)
                     {
-                        if (materializeValues.find(valueId) == materializeValues.end())
+                        if (!isMaterialized(valueId))
                         {
                             continue;
                         }
@@ -8542,7 +8734,7 @@ namespace grh::emit
         // -------------------------
         // Module emission
         // -------------------------
-        moduleBuffer << "module " << moduleName << " (\n";
+        out << "module " << moduleName << " (\n";
         {
             bool first = true;
             auto emitPortLine = [&](const std::string &name)
@@ -8556,51 +8748,51 @@ namespace grh::emit
                 const std::string attr = formatSrcAttribute(decl.debug);
                 if (!first)
                 {
-                    moduleBuffer << ",\n";
+                    out << ",\n";
                 }
                 first = false;
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
                 if (decl.valueType != grh::ir::ValueType::Logic)
                 {
-                    moduleBuffer << "  ";
+                    out << "  ";
                     if (decl.dir == PortDir::Input)
                     {
-                        moduleBuffer << "input ";
+                        out << "input ";
                     }
                     else if (decl.dir == PortDir::Output)
                     {
-                        moduleBuffer << "output ";
+                        out << "output ";
                     }
                     else
                     {
-                        moduleBuffer << "inout ";
+                        out << "inout ";
                     }
-                    moduleBuffer << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
-                    moduleBuffer << name;
+                    out << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
+                    out << name;
                     return;
                 }
                 if (decl.dir == PortDir::Input)
                 {
-                    moduleBuffer << "  input wire ";
+                    out << "  input wire ";
                 }
                 else if (decl.dir == PortDir::Output)
                 {
-                    moduleBuffer << "  " << (decl.isReg ? "output reg " : "output wire ");
+                    out << "  " << (decl.isReg ? "output reg " : "output wire ");
                 }
                 else
                 {
-                    moduleBuffer << "  inout wire ";
+                    out << "  inout wire ";
                 }
-                moduleBuffer << signedPrefix(decl.isSigned);
+                out << signedPrefix(decl.isSigned);
                 const std::string range = widthRange(decl.width);
                 if (!range.empty())
                 {
-                    moduleBuffer << range << " ";
+                    out << range << " ";
                 }
-                moduleBuffer << name;
+                out << name;
             };
 
             for (const auto &port : inputPorts)
@@ -8615,140 +8807,140 @@ namespace grh::emit
             {
                 emitPortLine(port.name);
             }
-            moduleBuffer << "\n);\n";
+            out << "\n);\n";
         }
 
         if (!wireDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[name, decl] : wireDecls)
             {
-                moduleBuffer << "  " << formatNetDecl("wire", name, decl) << '\n';
+                out << "  " << formatNetDecl("wire", name, decl) << '\n';
             }
         }
 
         if (!regDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[name, decl] : regDecls)
             {
-                moduleBuffer << "  " << formatNetDecl("reg", name, decl) << '\n';
+                out << "  " << formatNetDecl("reg", name, decl) << '\n';
             }
         }
 
         if (!varDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[name, decl] : varDecls)
             {
-                moduleBuffer << "  " << formatVarDecl(decl.type, name) << '\n';
+                out << "  " << formatVarDecl(decl.type, name) << '\n';
             }
         }
 
         if (!memoryDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[decl, opId] : memoryDecls)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << decl << '\n';
+                out << "  " << decl << '\n';
             }
         }
 
         if (!instanceDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[inst, opId] : instanceDecls)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << inst << '\n';
+                out << "  " << inst << '\n';
             }
         }
 
         if (!dpiImportDecls.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[decl, opId] : dpiImportDecls)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << decl << '\n';
+                out << "  " << decl << '\n';
             }
         }
 
         if (!portBindingStmts.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[stmt, opId] : portBindingStmts)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << stmt << '\n';
+                out << "  " << stmt << '\n';
             }
         }
 
         if (!assignStmts.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[stmt, opId] : assignStmts)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  " << stmt << '\n';
+                out << "  " << stmt << '\n';
             }
         }
 
         if (!latchBlocks.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &[block, opId] : latchBlocks)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(opId));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << '\n';
+                    out << "  " << attr << '\n';
                 }
-                moduleBuffer << block << '\n';
+                out << block << '\n';
             }
         }
 
         if (!simpleBlocks.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &block : simpleBlocks)
             {
                 const std::string attr = formatSrcAttribute(opSrcLoc(block.op));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << '\n';
+                    out << "  " << attr << '\n';
                 }
-                moduleBuffer << "  " << block.header << " begin\n";
+                out << "  " << block.header << " begin\n";
                 for (const auto &stmt : block.stmts)
                 {
-                    moduleBuffer << stmt;
+                    out << stmt;
                     if (!stmt.empty() && stmt.back() != '\n')
                     {
-                        moduleBuffer << '\n';
+                        out << '\n';
                     }
                 }
-                moduleBuffer << "  end\n";
+                out << "  end\n";
             }
         }
 
@@ -8758,25 +8950,25 @@ namespace grh::emit
             {
                 return {};
             }
-            std::string out = "@(";
+            std::string sens = "@(";
             for (std::size_t i = 0; i < key.events.size(); ++i)
             {
                 if (i != 0)
                 {
-                    out.append(" or ");
+                    sens.append(" or ");
                 }
                 const auto &event = key.events[i];
-                out.append(event.edge);
-                out.push_back(' ');
-                out.append(valueName(event.signal));
+                sens.append(event.edge);
+                sens.push_back(' ');
+                sens.append(valueName(event.signal));
             }
-            out.push_back(')');
-            return out;
+            sens.push_back(')');
+            return sens;
         };
 
         if (!seqBlocks.empty())
         {
-            moduleBuffer << '\n';
+            out << '\n';
             for (const auto &seq : seqBlocks)
             {
                 const std::string sens = sensitivityList(seq.key);
@@ -8788,32 +8980,22 @@ namespace grh::emit
                 const std::string attr = formatSrcAttribute(opSrcLoc(seq.op));
                 if (!attr.empty())
                 {
-                    moduleBuffer << "  " << attr << "\n";
+                    out << "  " << attr << "\n";
                 }
-                moduleBuffer << "  always " << sens << " begin\n";
+                out << "  always " << sens << " begin\n";
                 for (const auto &stmt : seq.stmts)
                 {
-                    moduleBuffer << stmt;
+                    out << stmt;
                     if (!stmt.empty() && stmt.back() != '\n')
                     {
-                        moduleBuffer << '\n';
+                        out << '\n';
                     }
                 }
-                moduleBuffer << "  end\n";
+                out << "  end\n";
             }
         }
 
-        moduleBuffer << "endmodule\n";
-
-        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
-        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
-        auto stream = openOutputFile(outputPath);
-        if (!stream)
-        {
-            result.success = false;
-            return result;
-        }
-        *stream << moduleBuffer.str();
+        out << "endmodule\n";
         result.artifacts.push_back(outputPath.string());
         if (diagnostics() && diagnostics()->hasError())
         {

@@ -247,6 +247,76 @@ Net effect: only expressions that are **used inside sequential blocks** and
 clock/event (seq key) and `updateCond` structure are not changed; only the
 expression text is rewritten to avoid a delta-cycle through a wire.
 
+## Emit performance note (post-fix timeout investigation)
+
+You reported an emit-stage timeout after the DPI inlining change. Based on the
+current `src/emit.cpp` implementation, the likely hot spots are:
+
+1) **`dpiInlineExpr` has no memoization.**  
+   Every time a DPI-dependent value is used in a `kRegister`/`kLatch`, the
+   emitter rebuilds the full expression tree string from scratch, walking
+   the same subgraph repeatedly. In large graphs with many registers reusing
+   the same combinational ValueIds, this can balloon to **O(U × E)** string
+   construction work (U = number of sequential uses, E = edges in the comb DAG).
+
+2) **Heavy string building in recursive inlining.**  
+   `dpiInlineExpr` and its helpers allocate `std::ostringstream` and concat
+   strings at each node. With deep expression trees, this becomes a large
+   constant factor even if the dependency check is cached.
+
+3) **Repeated `valueDependsOnDpi` checks inside `dpiInlineExpr`.**  
+   The dependency DFS is cached, but it is still consulted many times during
+   inline expansion. This is not the main asymptotic issue, but it adds
+   overhead in tight loops when emit is already dominated by string ops.
+
+### Possible optimizations (low-risk first)
+
+1) **Memoize `dpiInlineExpr` results per ValueId.**  
+   Add a `std::unordered_map<grh::ir::ValueId, std::string, ValueIdHash>`
+   cache. Once an inline expression is built, reuse it for all later uses.
+   Keep `dpiInlineResolving` to break cycles. This directly cuts the repeated
+   rebuild cost in large graphs.
+
+2) **Precompute DPI dependency flags once.**  
+   Instead of recursive `valueDependsOnDpi` calls, compute a `std::vector<bool>`
+   (or `unordered_map`) once per module using a topological walk of the DAG.
+   This makes inlining checks O(1) without re-traversal or hashing.
+
+3) **Use block-local temporaries for repeated DPI-dependent exprs.**  
+   If multiple sequential assignments in the *same* `always` block use the
+   same DPI-dependent expression, emit one blocking temporary at the top of
+   the block, then reuse it:
+   ```
+   always @(posedge clk) begin
+     if (__expr_5) _dpi_ret_4_intm = jtag_tick(...);
+     tmp_dpi_expr = (__expr_5 ? _dpi_ret_4_intm : 32'd0);
+     if (condA) regA <= tmp_dpi_expr;
+     if (condB) regB <= tmp_dpi_expr;
+   end
+   ```
+   This stays within the same `always` (no delta), but avoids duplicate
+   inline string generation.
+
+4) **Optional: cache `valueExpr` for non-DPI values used in `valueExprSeq`.**  
+   For large modules, even non-DPI `valueExpr` calls can be substantial. A
+   general expression cache (keyed by ValueId) can reduce total emit time.
+
+**Implemented in this fix:** (1) + (2) are now applied in `src/emit.cpp`.
+`dpiInlineExpr` results are cached, and DPI dependency flags are precomputed
+once per module. In addition, the dependency map now uses dense per-ValueId
+arrays (indexed by `ValueId.index`) to avoid unordered_map hash overhead on
+large graphs.
+
+**Additional optimization (post-timeout):** value name lookups and
+`materialize/resolving` membership checks now use dense, per-ValueId arrays
+instead of `unordered_set`/repeated `getValue()` string extraction. This avoids
+millions of hash lookups and symbol-text allocations during emit.
+
+**Streaming output (option 1):** emit now writes each module directly to the
+output stream instead of building a huge in-memory `moduleBuffer` and dumping
+at the end. This avoids large string concatenations and lowers peak memory
+usage during emit.
+
 ## Key Changes (code locations)
 
 - `src/convert.cpp`: classify DPI import types as `int`, `longint`, `bit`,
