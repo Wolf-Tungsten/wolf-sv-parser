@@ -18,6 +18,7 @@
 #include "slang/ast/statements/LoopStatements.h"
 #include "slang/ast/statements/MiscStatements.h"
 #include "slang/numeric/SVInt.h"
+#include "slang/numeric/ConstantValue.h"
 
 #include "slang/ast/symbols/AttributeSymbol.h"
 #include "slang/ast/symbols/BlockSymbols.h"
@@ -38,6 +39,7 @@
 #include <future>
 #include <iterator>
 #include <limits>
+#include <sstream>
 #include <memory>
 #include <optional>
 #include <span>
@@ -460,6 +462,7 @@ ParameterSnapshot snapshotParameters(const slang::ast::InstanceBodySymbol& body,
 struct TypeResolution {
     int32_t width = 1;
     bool isSigned = false;
+    grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
     int64_t memoryRows = 0;
     std::vector<int32_t> packedDims;
     std::vector<UnpackedDimInfo> unpackedDims;
@@ -680,10 +683,46 @@ bool containsUnpackedDims(const slang::ast::Type& type, const slang::ast::Symbol
     return false;
 }
 
+grh::ir::ValueType classifyValueType(const slang::ast::Type& type)
+{
+    if (type.isString())
+    {
+        return grh::ir::ValueType::String;
+    }
+    if (type.isFloating())
+    {
+        return grh::ir::ValueType::Real;
+    }
+    return grh::ir::ValueType::Logic;
+}
+
 TypeResolution analyzeSignalType(const slang::ast::Type& type, const slang::ast::Symbol& origin,
                                  ConvertDiagnostics* diagnostics)
 {
     TypeResolution info{};
+    info.valueType = classifyValueType(type);
+    if (info.valueType != grh::ir::ValueType::Logic)
+    {
+        if (containsUnpackedDims(type, origin, diagnostics))
+        {
+            if (diagnostics)
+            {
+                diagnostics->error(origin,
+                                   "Unsupported array dimensions on real/string signal");
+            }
+        }
+        std::vector<int32_t> packedDims;
+        collectPackedDims(type, origin, diagnostics, packedDims);
+        if (!packedDims.empty() && diagnostics)
+        {
+            diagnostics->error(origin,
+                               "Unsupported packed dimensions on real/string signal");
+        }
+        info.width = 1;
+        info.isSigned = false;
+        info.memoryRows = 0;
+        return info;
+    }
     const slang::ast::Type* current = &type;
     int64_t rows = 1;
 
@@ -762,6 +801,7 @@ TypeResolution analyzeSignalType(const slang::ast::Type& type, const slang::ast:
     const uint64_t width = computeFixedWidth(*current, origin, diagnostics);
     info.width = clampWidth(width, origin, diagnostics, "Signal");
     info.isSigned = current->isSigned();
+    info.valueType = grh::ir::ValueType::Logic;
     if (info.hasUnpacked)
     {
         info.memoryRows = rows > 0 ? rows : 1;
@@ -773,6 +813,18 @@ TypeResolution analyzePortType(const slang::ast::Type& type, const slang::ast::S
                                ConvertDiagnostics* diagnostics)
 {
     TypeResolution info{};
+    info.valueType = classifyValueType(type);
+    if (info.valueType != grh::ir::ValueType::Logic)
+    {
+        if (containsUnpackedDims(type, origin, diagnostics) && diagnostics)
+        {
+            diagnostics->error(origin,
+                               "Unsupported array dimensions on real/string port");
+        }
+        info.width = 1;
+        info.isSigned = false;
+        return info;
+    }
     if (containsUnpackedDims(type, origin, diagnostics))
     {
         if (diagnostics)
@@ -915,6 +967,29 @@ ControlDomain classifyProceduralBlock(const slang::ast::ProceduralBlockSymbol& b
         break;
     }
     return ControlDomain::Unknown;
+}
+
+ProcKind mapProcKind(slang::ast::ProceduralBlockKind kind)
+{
+    using slang::ast::ProceduralBlockKind;
+    switch (kind)
+    {
+    case ProceduralBlockKind::Initial:
+        return ProcKind::Initial;
+    case ProceduralBlockKind::Final:
+        return ProcKind::Final;
+    case ProceduralBlockKind::AlwaysComb:
+        return ProcKind::AlwaysComb;
+    case ProceduralBlockKind::AlwaysLatch:
+        return ProcKind::AlwaysLatch;
+    case ProceduralBlockKind::AlwaysFF:
+        return ProcKind::AlwaysFF;
+    case ProceduralBlockKind::Always:
+        return ProcKind::Always;
+    default:
+        break;
+    }
+    return ProcKind::Unknown;
 }
 
 std::optional<grh::ir::OperationKind> mapUnaryOp(slang::ast::UnaryOperator op)
@@ -1071,6 +1146,7 @@ struct StmtLowererState {
     struct EventContext {
         bool hasTiming = false;
         bool edgeSensitive = false;
+        ProcKind procKind = ProcKind::Unknown;
         std::vector<EventEdge> edges;
         std::vector<ExprNodeId> operands;
     };
@@ -2295,6 +2371,7 @@ struct StmtLowererState {
     EventContext buildEventContext(const slang::ast::ProceduralBlockSymbol& block)
     {
         EventContext context;
+        context.procKind = mapProcKind(block.procedureKind);
         const slang::ast::TimingControl* timing = findTimingControl(block.getBody());
         if (!timing)
         {
@@ -2349,285 +2426,511 @@ private:
         {
             return emitDisplayCall(call, name);
         }
-        if (name == "fwrite")
+        if (name == "fwrite" || name == "fdisplay")
         {
-            return emitFwriteCall(call);
+            return emitFwriteCall(call, name);
         }
-        if (name == "finish")
+        if (name == "fclose")
         {
-            return emitFinishCall(call);
+            return emitFcloseCall(call);
+        }
+        if (name == "finish" || name == "stop")
+        {
+            return emitFinishCall(call, name);
         }
         if (name == "info" || name == "warning" || name == "error" || name == "fatal")
         {
             return emitMessageCall(call, name);
+        }
+        if (name == "dumpfile")
+        {
+            return emitDumpfileCall(call);
+        }
+        if (name == "dumpvars")
+        {
+            return emitDumpvarsCall(call);
+        }
+        if (name == "fflush")
+        {
+            return emitFflushCall(call);
+        }
+        if (name == "readmemh" || name == "readmemb")
+        {
+            return emitReadmemCall(call, name);
+        }
+        if (name == "sdf_annotate" || name == "monitor" || name == "monitoron" ||
+            name == "monitoroff")
+        {
+            if (diagnostics)
+            {
+                diagnostics->warn(call.sourceRange.start(),
+                                  "Ignoring unsupported system task call");
+            }
+            return true;
         }
         return false;
     }
 
     bool emitDisplayCall(const slang::ast::CallExpression& call, std::string_view displayKind)
     {
-        if (!ensureEdgeSensitive(call.sourceRange.start(), "display"))
+        if (!ensureTaskContext(call.sourceRange.start(), "display"))
         {
             return true;
         }
-        DisplayStmt display;
-        display.displayKind = std::string(displayKind);
+        SystemTaskStmt task;
+        task.name = std::string(displayKind);
 
         const auto args = call.arguments();
-        std::size_t index = 0;
-        if (!args.empty())
+        for (const auto* arg : args)
         {
-            auto literal = extractStringLiteral(*args.front());
-            if (!literal)
+            if (!arg)
             {
-                reportUnsupported(call, "Display format string must be a literal");
+                reportUnsupported(call, "Display argument is missing");
                 return true;
             }
-            display.formatString = std::move(*literal);
-            index = 1;
-        }
-
-        for (; index < args.size(); ++index)
-        {
-            if (!args[index])
-            {
-                continue;
-            }
-            ExprNodeId argId = lowerExpression(*args[index]);
+            ExprNodeId argId = lowerExpression(*arg);
             if (argId == kInvalidPlanIndex)
             {
                 reportUnsupported(call, "Failed to lower display argument");
                 return true;
             }
-            display.args.push_back(argId);
+            task.args.push_back(argId);
         }
 
         LoweredStmt stmt;
-        stmt.kind = LoweredStmtKind::Display;
-        stmt.op = grh::ir::OperationKind::kDisplay;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
         stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
                                           call.sourceRange.start());
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
-        stmt.display = std::move(display);
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
     }
 
-    bool emitFwriteCall(const slang::ast::CallExpression& call)
+    bool emitFwriteCall(const slang::ast::CallExpression& call, std::string_view taskName)
     {
-        if (!ensureEdgeSensitive(call.sourceRange.start(), "fwrite"))
+        if (!ensureTaskContext(call.sourceRange.start(), "fwrite"))
         {
             return true;
         }
-        DisplayStmt display;
-        display.displayKind = "fwrite";
+        SystemTaskStmt task;
+        task.name = std::string(taskName);
 
         const auto args = call.arguments();
-        if (args.empty() || !args.front())
+        if (args.empty())
         {
             reportUnsupported(call, "Fwrite requires a file handle expression");
             return true;
         }
-        ExprNodeId fileHandle = lowerExpression(*args.front());
-        if (fileHandle == kInvalidPlanIndex)
+        for (const auto* arg : args)
         {
-            reportUnsupported(call, "Failed to lower fwrite file handle");
-            return true;
-        }
-        display.fileHandle = fileHandle;
-
-        if (args.size() < 2 || !args[1])
-        {
-            reportUnsupported(call, "Fwrite format string must be a literal");
-            return true;
-        }
-        auto literal = extractStringLiteral(*args[1]);
-        if (!literal)
-        {
-            reportUnsupported(call, "Fwrite format string must be a literal");
-            return true;
-        }
-        display.formatString = std::move(*literal);
-
-        for (std::size_t index = 2; index < args.size(); ++index)
-        {
-            if (!args[index])
+            if (!arg)
             {
-                continue;
+                reportUnsupported(call, "Fwrite argument is missing");
+                return true;
             }
-            ExprNodeId argId = lowerExpression(*args[index]);
+            ExprNodeId argId = lowerExpression(*arg);
             if (argId == kInvalidPlanIndex)
             {
                 reportUnsupported(call, "Failed to lower fwrite argument");
                 return true;
             }
-            display.args.push_back(argId);
+            task.args.push_back(argId);
         }
 
         LoweredStmt stmt;
-        stmt.kind = LoweredStmtKind::Display;
-        stmt.op = grh::ir::OperationKind::kFwrite;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
         stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
                                           call.sourceRange.start());
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
-        stmt.display = std::move(display);
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
     }
 
     bool emitMessageCall(const slang::ast::CallExpression& call, std::string_view messageKind)
     {
-        if (!ensureEdgeSensitive(call.sourceRange.start(), messageKind))
+        if (!ensureTaskContext(call.sourceRange.start(), messageKind))
         {
             return true;
         }
-        DisplayStmt display;
-        display.displayKind = std::string(messageKind);
+        SystemTaskStmt task;
+        task.name = std::string(messageKind);
 
         const auto args = call.arguments();
-        if (args.empty())
+        for (const auto* arg : args)
         {
-            reportUnsupported(call, "Message call requires a format string literal");
-            return true;
-        }
-
-        std::size_t index = 0;
-        if (messageKind == "fatal" && args.size() >= 2 && args.front() && args[1])
-        {
-            const bool firstIsString = extractStringLiteral(*args.front()).has_value();
-            const bool secondIsString = extractStringLiteral(*args[1]).has_value();
-            if (!firstIsString && secondIsString)
+            if (!arg)
             {
-                ExprNodeId exitCode = lowerExpression(*args.front());
-                if (exitCode == kInvalidPlanIndex)
-                {
-                    reportUnsupported(call, "Failed to lower fatal exit code");
-                    return true;
-                }
-                display.hasExitCode = true;
-                display.exitCode = exitCode;
-                index = 1;
+                reportUnsupported(call, "Message argument is missing");
+                return true;
             }
-        }
-
-        if (index >= args.size() || !args[index])
-        {
-            reportUnsupported(call, "Message format string must be a literal");
-            return true;
-        }
-        auto literal = extractStringLiteral(*args[index]);
-        if (!literal)
-        {
-            reportUnsupported(call, "Message format string must be a literal");
-            return true;
-        }
-        display.formatString = std::move(*literal);
-
-        for (std::size_t argIndex = index + 1; argIndex < args.size(); ++argIndex)
-        {
-            if (!args[argIndex])
-            {
-                continue;
-            }
-            ExprNodeId argId = lowerExpression(*args[argIndex]);
+            ExprNodeId argId = lowerExpression(*arg);
             if (argId == kInvalidPlanIndex)
             {
                 reportUnsupported(call, "Failed to lower message argument");
                 return true;
             }
-            display.args.push_back(argId);
+            task.args.push_back(argId);
         }
 
         LoweredStmt stmt;
-        stmt.kind = LoweredStmtKind::Display;
-        stmt.op = grh::ir::OperationKind::kDisplay;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
         stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
                                           call.sourceRange.start());
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
-        stmt.display = std::move(display);
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
     }
 
-    bool emitFinishCall(const slang::ast::CallExpression& call)
+    bool emitFinishCall(const slang::ast::CallExpression& call, std::string_view taskName)
     {
-        if (!ensureEdgeSensitive(call.sourceRange.start(), "finish"))
+        if (!ensureTaskContext(call.sourceRange.start(), "finish"))
         {
             return true;
         }
-        FinishStmt finish;
+        SystemTaskStmt task;
+        task.name = std::string(taskName);
         const auto args = call.arguments();
-        if (!args.empty() && args.front())
+        for (const auto* arg : args)
         {
-            ExprNodeId exitCode = lowerExpression(*args.front());
-            if (exitCode == kInvalidPlanIndex)
+            if (!arg)
             {
-                reportUnsupported(call, "Failed to lower finish exit code");
+                reportUnsupported(call, "Finish argument is missing");
                 return true;
             }
-            finish.hasExitCode = true;
-            finish.exitCode = exitCode;
+            ExprNodeId argId = lowerExpression(*arg);
+            if (argId == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower finish argument");
+                return true;
+            }
+            task.args.push_back(argId);
         }
 
         LoweredStmt stmt;
-        stmt.kind = LoweredStmtKind::Finish;
-        stmt.op = grh::ir::OperationKind::kFinish;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
         stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
                                           call.sourceRange.start());
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
-        stmt.finish = std::move(finish);
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
         lowering.loweredStmts.push_back(std::move(stmt));
         return true;
     }
 
-    bool emitAssertCall(const slang::ast::CallExpression& call, std::string_view severity)
+    bool emitDumpfileCall(const slang::ast::CallExpression& call)
     {
-        if (!ensureEdgeSensitive(call.sourceRange.start(), "assert"))
+        if (!ensureTaskContext(call.sourceRange.start(), "dumpfile"))
         {
             return true;
         }
-        AssertStmt assertion;
-        assertion.severity = std::string(severity);
-
         const auto args = call.arguments();
-        if (!args.empty() && args.front())
+        if (args.empty() || !args.front())
         {
-            std::optional<std::string> literal = extractStringLiteral(*args.front());
-            if (!literal && args.size() > 1 && args[1] && isIntegerLiteralExpr(*args.front()))
+            reportUnsupported(call, "$dumpfile requires a file argument");
+            return true;
+        }
+        ExprNodeId argId = lowerExpression(*args.front());
+        if (argId == kInvalidPlanIndex)
+        {
+            reportUnsupported(call, "Failed to lower $dumpfile argument");
+            return true;
+        }
+        if (args.size() > 1 && diagnostics)
+        {
+            diagnostics->warn(call.sourceRange.start(),
+                              "Ignoring extra arguments to $dumpfile");
+        }
+        SystemTaskStmt task;
+        task.name = "dumpfile";
+        task.args.push_back(argId);
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitDumpvarsCall(const slang::ast::CallExpression& call)
+    {
+        if (!ensureTaskContext(call.sourceRange.start(), "dumpvars"))
+        {
+            return true;
+        }
+        const auto args = call.arguments();
+        auto isZeroLiteral = [&](const slang::ast::Expression& expr) -> bool {
+            if (const auto* constant = expr.getConstant())
             {
-                literal = extractStringLiteral(*args[1]);
+                if (constant->isInteger())
+                {
+                    const slang::SVInt& literal = constant->integer();
+                    if (!literal.hasUnknown())
+                    {
+                        if (auto value = literal.as<int64_t>())
+                        {
+                            return *value == 0;
+                        }
+                    }
+                }
             }
-            if (literal)
+            return false;
+        };
+        if (!args.empty())
+        {
+            if (args.size() == 1 && args.front() && isZeroLiteral(*args.front()))
             {
-                assertion.message = std::move(*literal);
+                // Accept full dump via $dumpvars(0)
             }
             else
             {
-                reportUnsupported(call, "Assert message must be a literal");
+                if (diagnostics)
+                {
+                    diagnostics->warn(call.sourceRange.start(),
+                                      "Ignoring $dumpvars with scoped arguments; only full dump is supported");
+                }
                 return true;
             }
         }
 
-        assertion.condition = addConstantLiteral("1'b0", call.sourceRange.start());
+        SystemTaskStmt task;
+        task.name = "dumpvars";
 
         LoweredStmt stmt;
-        stmt.kind = LoweredStmtKind::Assert;
-        stmt.op = grh::ir::OperationKind::kAssert;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
         stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
                                           call.sourceRange.start());
         stmt.eventEdges = eventContext.edges;
         stmt.eventOperands = eventContext.operands;
         stmt.location = call.sourceRange.start();
-        stmt.assertion = std::move(assertion);
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
         lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitFflushCall(const slang::ast::CallExpression& call)
+    {
+        if (!ensureTaskContext(call.sourceRange.start(), "fflush"))
+        {
+            return true;
+        }
+        const auto args = call.arguments();
+        SystemTaskStmt task;
+        task.name = "fflush";
+        if (!args.empty() && args.front())
+        {
+            ExprNodeId handle = lowerExpression(*args.front());
+            if (handle == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "Failed to lower fflush file handle");
+                return true;
+            }
+            task.args.push_back(handle);
+            if (args.size() > 1 && diagnostics)
+            {
+                diagnostics->warn(call.sourceRange.start(),
+                                  "Ignoring extra arguments to $fflush");
+            }
+        }
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitFcloseCall(const slang::ast::CallExpression& call)
+    {
+        if (!ensureTaskContext(call.sourceRange.start(), "fclose"))
+        {
+            return true;
+        }
+        const auto args = call.arguments();
+        if (args.empty() || !args.front())
+        {
+            reportUnsupported(call, "$fclose requires a file handle expression");
+            return true;
+        }
+        ExprNodeId handle = lowerExpression(*args.front());
+        if (handle == kInvalidPlanIndex)
+        {
+            reportUnsupported(call, "Failed to lower fclose file handle");
+            return true;
+        }
+        if (args.size() > 1 && diagnostics)
+        {
+            diagnostics->warn(call.sourceRange.start(),
+                              "Ignoring extra arguments to $fclose");
+        }
+
+        SystemTaskStmt task;
+        task.name = "fclose";
+        task.args.push_back(handle);
+
+        LoweredStmt stmt;
+        stmt.kind = LoweredStmtKind::SystemTask;
+        stmt.op = grh::ir::OperationKind::kSystemTask;
+        stmt.updateCond = ensureGuardExpr(currentGuard(call.sourceRange.start()),
+                                          call.sourceRange.start());
+        stmt.eventEdges = eventContext.edges;
+        stmt.eventOperands = eventContext.operands;
+        stmt.location = call.sourceRange.start();
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
+        stmt.systemTask = std::move(task);
+        lowering.loweredStmts.push_back(std::move(stmt));
+        return true;
+    }
+
+    bool emitReadmemCall(const slang::ast::CallExpression& call, std::string_view taskName)
+    {
+        if (eventContext.procKind != ProcKind::Initial &&
+            eventContext.procKind != ProcKind::Final)
+        {
+            if (diagnostics)
+            {
+                diagnostics->warn(call.sourceRange.start(),
+                                  "Treating $readmemh/$readmemb outside initial/final as memory init");
+            }
+        }
+
+        const auto args = call.arguments();
+        if (args.size() < 2 || !args[0] || !args[1])
+        {
+            reportUnsupported(call, "$readmemh/$readmemb requires file and memory arguments");
+            return true;
+        }
+
+        auto fileLiteral = extractStringLiteral(*args[0]);
+        if (!fileLiteral)
+        {
+            reportUnsupported(call, "$readmemh/$readmemb file must be a string literal");
+            return true;
+        }
+
+        PlanSymbolId memSymbol = resolveSimpleSymbol(*args[1]);
+        if (!memSymbol.valid())
+        {
+            reportUnsupported(call, "$readmemh/$readmemb requires a simple memory symbol");
+            return true;
+        }
+
+        const SignalInfo* signal = findSignalBySymbol(plan, memSymbol);
+        if (!signal || (signal->memoryRows <= 0 && signal->kind != SignalKind::Memory))
+        {
+            if (diagnostics)
+            {
+                diagnostics->warn(call.sourceRange.start(),
+                                  "Ignoring $readmemh/$readmemb for non-memory symbol");
+            }
+            return true;
+        }
+
+        MemoryInit init;
+        init.memory = memSymbol;
+        init.kind = std::string(taskName);
+        init.file = std::move(*fileLiteral);
+        init.location = call.sourceRange.start();
+
+        if (args.size() > 2 && args[2])
+        {
+            ExprNodeId startExpr = lowerExpression(*args[2]);
+            if (startExpr == kInvalidPlanIndex)
+            {
+                reportUnsupported(call, "$readmemh/$readmemb start expression is unsupported");
+                return true;
+            }
+            if (auto startConst = evalConstInt(plan, lowering, startExpr))
+            {
+                init.hasStart = true;
+                init.start = *startConst;
+            }
+            else if (diagnostics)
+            {
+                diagnostics->warn(call.sourceRange.start(),
+                                  "Ignoring $readmemh/$readmemb start expression; must be constant");
+            }
+        }
+
+        if (args.size() > 3 && args[3])
+        {
+            if (!init.hasStart)
+            {
+                if (diagnostics)
+                {
+                    diagnostics->warn(call.sourceRange.start(),
+                                      "Ignoring $readmemh/$readmemb finish without constant start");
+                }
+            }
+            else
+            {
+                ExprNodeId finishExpr = lowerExpression(*args[3]);
+                if (finishExpr == kInvalidPlanIndex)
+                {
+                    reportUnsupported(call, "$readmemh/$readmemb finish expression is unsupported");
+                    return true;
+                }
+                if (auto finishConst = evalConstInt(plan, lowering, finishExpr))
+                {
+                    init.hasFinish = true;
+                    init.finish = *finishConst;
+                }
+                else if (diagnostics)
+                {
+                    diagnostics->warn(call.sourceRange.start(),
+                                      "Ignoring $readmemh/$readmemb finish expression; must be constant");
+                }
+            }
+        }
+
+        if (args.size() > 4 && diagnostics)
+        {
+            diagnostics->warn(call.sourceRange.start(),
+                              "Ignoring extra arguments to $readmemh/$readmemb");
+        }
+
+        lowering.memoryInits.push_back(std::move(init));
         return true;
     }
 
@@ -2994,6 +3297,8 @@ private:
         stmt.kind = LoweredStmtKind::Write;
         stmt.op = grh::ir::OperationKind::kAssign;
         stmt.location = intent.location;
+        stmt.procKind = eventContext.procKind;
+        stmt.hasTiming = eventContext.hasTiming;
         stmt.write = intent;
         stmt.updateCond = ensureGuardExpr(stmt.write.guard, stmt.location);
         stmt.eventEdges = eventContext.edges;
@@ -3017,6 +3322,14 @@ private:
 
     PlanSymbolId resolveSimpleSymbol(const slang::ast::Expression& expr)
     {
+        if (const auto* assignment = expr.as_if<slang::ast::AssignmentExpression>())
+        {
+            if (assignment->isLValueArg())
+            {
+                return resolveSimpleSymbol(assignment->left());
+            }
+            return resolveSimpleSymbol(assignment->right());
+        }
         if (const auto* named = expr.as_if<slang::ast::NamedValueExpression>())
         {
             return plan.symbolTable.lookup(named->symbol.name);
@@ -3077,6 +3390,33 @@ private:
             std::string message("Ignoring ");
             message.append(label);
             message.append(" call without edge-sensitive timing control");
+            diagnostics->warn(location, std::move(message));
+        }
+        return false;
+    }
+
+    bool ensureTaskContext(slang::SourceLocation location, std::string_view label)
+    {
+        if (eventContext.procKind == ProcKind::Initial ||
+            eventContext.procKind == ProcKind::Final)
+        {
+            return true;
+        }
+        if (eventContext.edgeSensitive && !eventContext.operands.empty())
+        {
+            return true;
+        }
+        if (eventContext.procKind == ProcKind::AlwaysComb ||
+            eventContext.procKind == ProcKind::AlwaysLatch ||
+            eventContext.procKind == ProcKind::Always)
+        {
+            return true;
+        }
+        if (diagnostics)
+        {
+            std::string message("Ignoring ");
+            message.append(label);
+            message.append(" call without supported timing context");
             diagnostics->warn(location, std::move(message));
         }
         return false;
@@ -5280,6 +5620,10 @@ private:
 
     ExprNodeId addNode(const slang::ast::Expression* expr, ExprNode node)
     {
+        if (expr && expr->type && node.valueType == grh::ir::ValueType::Logic)
+        {
+            node.valueType = classifyValueType(*expr->type);
+        }
         const ExprNodeId id = static_cast<ExprNodeId>(lowering.values.size());
         lowering.values.push_back(std::move(node));
         if (expr)
@@ -6484,10 +6828,19 @@ private:
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
+        if (const auto* literal = expr.as_if<slang::ast::RealLiteral>())
+        {
+            node.kind = ExprNodeKind::Constant;
+            std::ostringstream oss;
+            oss << literal->getValue();
+            node.literal = oss.str();
+            return addNodeForExpr(std::move(node));
+        }
         if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
         {
             node.kind = ExprNodeKind::Constant;
-            node.literal.assign(literal->getRawValue());
+            node.literal.assign(literal->getValue());
+            node.valueType = grh::ir::ValueType::String;
             applyExprWidthHint(node);
             return addNodeForExpr(std::move(node));
         }
@@ -6587,18 +6940,187 @@ private:
                     }
                     return addNodeForExpr(std::move(castNode));
                 }
-                if (name == "time" || name == "stime" || name == "realtime")
+                if (name == "time" || name == "stime" || name == "realtime" ||
+                    name == "random" || name == "urandom" || name == "urandom_range" ||
+                    name == "fopen" || name == "ferror" || name == "clog2" || name == "size")
                 {
                     const auto args = call->arguments();
-                    if (!args.empty())
+                    if (name == "time" || name == "stime" || name == "realtime")
                     {
-                        reportUnsupported(expr, "$time/$stime/$realtime do not take arguments");
+                        if (!args.empty())
+                        {
+                            reportUnsupported(expr, "$time/$stime/$realtime do not take arguments");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+                    else if (name == "random" || name == "urandom")
+                    {
+                        if (args.size() > 1)
+                        {
+                            reportUnsupported(expr, "$random/$urandom accept at most one argument");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+                    else if (name == "urandom_range")
+                    {
+                        if (args.empty() || args.size() > 2)
+                        {
+                            reportUnsupported(expr, "$urandom_range expects one or two arguments");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+                    else if (name == "fopen")
+                    {
+                        if (args.empty() || args.size() > 2)
+                        {
+                            reportUnsupported(expr, "$fopen expects one or two arguments");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+                    else if (name == "ferror")
+                    {
+                        if (args.size() != 1)
+                        {
+                            reportUnsupported(expr, "$ferror supports only one argument");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+                    else if (name == "clog2" || name == "size")
+                    {
+                        if (args.size() != 1)
+                        {
+                            reportUnsupported(expr, "$clog2/$size expect exactly one argument");
+                            return kInvalidPlanIndex;
+                        }
+                    }
+
+                    if (name == "clog2")
+                    {
+                        const slang::ast::Expression* arg =
+                            (!args.empty() ? args.front() : nullptr);
+                        if (arg)
+                        {
+                            if (const slang::ConstantValue* constant = arg->getConstant())
+                            {
+                                if (constant->isInteger())
+                                {
+                                    const slang::SVInt& literal = constant->integer();
+                                    if (!literal.hasUnknown())
+                                    {
+                                        const uint32_t result = slang::clog2(literal);
+                                        ExprNode constNode;
+                                        constNode.kind = ExprNodeKind::Constant;
+                                        constNode.literal = std::to_string(result);
+                                        constNode.location = expr.sourceRange.start();
+                                        applyExprWidthHint(constNode);
+                                        return addNodeForExpr(std::move(constNode));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (name == "size")
+                    {
+                        const slang::ast::Expression* arg =
+                            (!args.empty() ? args.front() : nullptr);
+                        if (arg && arg->type && arg->type->hasFixedRange())
+                        {
+                            const slang::ConstantRange range = arg->type->getFixedRange();
+                            const uint64_t width = range.fullWidth();
+                            ExprNode constNode;
+                            constNode.kind = ExprNodeKind::Constant;
+                            constNode.literal = std::to_string(width);
+                            constNode.location = expr.sourceRange.start();
+                            applyExprWidthHint(constNode);
+                            return addNodeForExpr(std::move(constNode));
+                        }
+                    }
+
+                    ExprNode sysNode;
+                    sysNode.kind = ExprNodeKind::Operation;
+                    sysNode.op = grh::ir::OperationKind::kSystemFunction;
+                    sysNode.systemName = name;
+                    sysNode.location = expr.sourceRange.start();
+                    sysNode.tempSymbol = makeTempSymbol();
+                    sysNode.isSigned = expr.type ? expr.type->isSigned() : false;
+                    sysNode.hasSideEffects =
+                        (name == "random" || name == "urandom" || name == "urandom_range" ||
+                         name == "fopen" || name == "ferror");
+
+                    for (const auto* arg : args)
+                    {
+                        if (!arg)
+                        {
+                            reportUnsupported(expr, "System function argument is missing");
+                            return kInvalidPlanIndex;
+                        }
+                        ExprNodeId argId = lowerExpression(*arg);
+                        if (argId == kInvalidPlanIndex)
+                        {
+                            reportUnsupported(expr, "Failed to lower system function argument");
+                            return kInvalidPlanIndex;
+                        }
+                        sysNode.operands.push_back(argId);
+                    }
+
+                    applyExprWidthHint(sysNode);
+                    if (sysNode.widthHint == 0)
+                    {
+                        if (name == "time" || name == "realtime")
+                        {
+                            sysNode.widthHint = 64;
+                        }
+                        else
+                        {
+                            sysNode.widthHint = 32;
+                        }
+                    }
+                    return addNodeForExpr(std::move(sysNode));
+                }
+                if (name == "sformatf" || name == "psprintf" ||
+                    name == "itor" || name == "rtoi" ||
+                    name == "realtobits" || name == "bitstoreal")
+                {
+                    const auto args = call->arguments();
+                    if ((name == "itor" || name == "rtoi" ||
+                         name == "realtobits" || name == "bitstoreal") &&
+                        args.size() != 1)
+                    {
+                        reportUnsupported(expr, "System function expects one argument");
                         return kInvalidPlanIndex;
                     }
-                    node.kind = ExprNodeKind::Constant;
-                    node.literal = "$" + name;
-                    applyExprWidthHint(node);
-                    return addNodeForExpr(std::move(node));
+                    if ((name == "sformatf" || name == "psprintf") && args.empty())
+                    {
+                        reportUnsupported(expr, "System function expects at least one argument");
+                        return kInvalidPlanIndex;
+                    }
+
+                    ExprNode sysNode;
+                    sysNode.kind = ExprNodeKind::Operation;
+                    sysNode.op = grh::ir::OperationKind::kSystemFunction;
+                    sysNode.systemName = name;
+                    sysNode.location = expr.sourceRange.start();
+                    sysNode.tempSymbol = makeTempSymbol();
+                    sysNode.isSigned = expr.type ? expr.type->isSigned() : false;
+
+                    for (const auto* arg : args)
+                    {
+                        if (!arg)
+                        {
+                            reportUnsupported(expr, "System function argument is missing");
+                            return kInvalidPlanIndex;
+                        }
+                        ExprNodeId argId = lowerExpression(*arg);
+                        if (argId == kInvalidPlanIndex)
+                        {
+                            reportUnsupported(expr, "Failed to lower system function argument");
+                            return kInvalidPlanIndex;
+                        }
+                        sysNode.operands.push_back(argId);
+                    }
+
+                    applyExprWidthHint(sysNode);
+                    return addNodeForExpr(std::move(sysNode));
                 }
             }
             if (auto* subroutine = std::get_if<const slang::ast::SubroutineSymbol*>(&call->subroutine))
@@ -7665,6 +8187,7 @@ void collectPorts(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan,
             TypeResolution typeInfo = analyzePortType(port->getType(), *port, diagnostics);
             info.width = typeInfo.width;
             info.isSigned = typeInfo.isSigned;
+            info.valueType = typeInfo.valueType;
 
             plan.ports.push_back(std::move(info));
             continue;
@@ -7738,6 +8261,7 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
             TypeResolution typeInfo = analyzeSignalType(net->getType(), *net, diagnostics);
             info.width = typeInfo.width;
             info.isSigned = typeInfo.isSigned;
+            info.valueType = typeInfo.valueType;
             info.memoryRows = typeInfo.memoryRows;
             info.packedDims = std::move(typeInfo.packedDims);
             info.unpackedDims = std::move(typeInfo.unpackedDims);
@@ -7769,6 +8293,7 @@ void collectSignals(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan
             TypeResolution typeInfo = analyzeSignalType(variable->getType(), *variable, diagnostics);
             info.width = typeInfo.width;
             info.isSigned = typeInfo.isSigned;
+            info.valueType = typeInfo.valueType;
             info.memoryRows = typeInfo.memoryRows;
             info.packedDims = std::move(typeInfo.packedDims);
             info.unpackedDims = std::move(typeInfo.unpackedDims);
@@ -11737,7 +12262,8 @@ private:
         return valueBySymbol_[id.index];
     }
 
-    grh::ir::ValueId createValue(PlanSymbolId id, int32_t width, bool isSigned)
+    grh::ir::ValueId createValue(PlanSymbolId id, int32_t width, bool isSigned,
+                                 grh::ir::ValueType type)
     {
         if (!id.valid() || id.index >= valueBySymbol_.size())
         {
@@ -11753,7 +12279,7 @@ private:
             return grh::ir::ValueId::invalid();
         }
         const int32_t normalized = normalizeWidth(width);
-        grh::ir::ValueId value = graph_.createValue(symbol, normalized, isSigned);
+        grh::ir::ValueId value = graph_.createValue(symbol, normalized, isSigned, type);
         valueBySymbol_[id.index] = value;
         return value;
     }
@@ -11769,7 +12295,8 @@ private:
             const int32_t width = normalizeWidth(port.width);
             if (port.direction == PortDirection::Input)
             {
-                grh::ir::ValueId value = createValue(port.symbol, width, port.isSigned);
+                grh::ir::ValueId value =
+                    createValue(port.symbol, width, port.isSigned, port.valueType);
                 if (value.valid())
                 {
                     graph_.bindInputPort(symbolForPlan(port.symbol), value);
@@ -11778,7 +12305,8 @@ private:
             }
             if (port.direction == PortDirection::Output)
             {
-                grh::ir::ValueId value = createValue(port.symbol, width, port.isSigned);
+                grh::ir::ValueId value =
+                    createValue(port.symbol, width, port.isSigned, port.valueType);
                 if (value.valid())
                 {
                     graph_.bindOutputPort(symbolForPlan(port.symbol), value);
@@ -11788,9 +12316,19 @@ private:
             if (port.direction == PortDirection::Inout && port.inoutSymbol)
             {
                 const auto& binding = *port.inoutSymbol;
-                grh::ir::ValueId inValue = createValue(binding.inSymbol, width, port.isSigned);
-                grh::ir::ValueId outValue = createValue(binding.outSymbol, width, port.isSigned);
-                grh::ir::ValueId oeValue = createValue(binding.oeSymbol, width, false);
+                if (port.valueType != grh::ir::ValueType::Logic && context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slang::SourceLocation{},
+                        "Inout ports for real/string are unsupported; treating as logic");
+                }
+                const grh::ir::ValueType inoutType = grh::ir::ValueType::Logic;
+                grh::ir::ValueId inValue =
+                    createValue(binding.inSymbol, width, port.isSigned, inoutType);
+                grh::ir::ValueId outValue =
+                    createValue(binding.outSymbol, width, port.isSigned, inoutType);
+                grh::ir::ValueId oeValue =
+                    createValue(binding.oeSymbol, width, false, grh::ir::ValueType::Logic);
                 if (inValue.valid() && outValue.valid() && oeValue.valid())
                 {
                     graph_.bindInoutPort(symbolForPlan(port.symbol), inValue, outValue,
@@ -11820,9 +12358,20 @@ private:
             {
                 continue;
             }
+            if (signal.valueType != grh::ir::ValueType::Logic &&
+                (signal.memoryRows > 0 || signal.kind == SignalKind::Memory))
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        slang::SourceLocation{},
+                        "Ignoring memory-like real/string signal");
+                }
+                continue;
+            }
             const int32_t width =
                 normalizeWidth(static_cast<int32_t>(flattenedNetWidth(signal)));
-            createValue(signal.symbol, width, signal.isSigned);
+            createValue(signal.symbol, width, signal.isSigned, signal.valueType);
         }
     }
 
@@ -11872,8 +12421,16 @@ private:
             }
             const int32_t width =
                 normalizeWidth(static_cast<int32_t>(flattenedNetWidth(*signal)));
-            createValue(info.binding.outSymbol, width, signal->isSigned);
-            grh::ir::ValueId oeValue = createValue(info.binding.oeSymbol, width, false);
+            if (signal->valueType != grh::ir::ValueType::Logic && context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    slang::SourceLocation{},
+                    "Inout signals for real/string are unsupported; treating as logic");
+            }
+            createValue(info.binding.outSymbol, width, signal->isSigned,
+                        grh::ir::ValueType::Logic);
+            grh::ir::ValueId oeValue =
+                createValue(info.binding.oeSymbol, width, false, grh::ir::ValueType::Logic);
             if (!oeValue.valid())
             {
                 continue;
@@ -11900,6 +12457,43 @@ private:
             return nullptr;
         }
         return &plan_.signals[signal];
+    }
+
+    void applyMemoryInit(grh::ir::OperationId op, PlanSymbolId memory)
+    {
+        if (!memory.valid())
+        {
+            return;
+        }
+        std::vector<std::string> kinds;
+        std::vector<std::string> files;
+        std::vector<int64_t> starts;
+        std::vector<int64_t> finishes;
+        std::vector<bool> hasStart;
+        std::vector<bool> hasFinish;
+        for (const auto& init : lowering_.memoryInits)
+        {
+            if (init.memory.index != memory.index)
+            {
+                continue;
+            }
+            kinds.push_back(init.kind);
+            files.push_back(init.file);
+            hasStart.push_back(init.hasStart);
+            hasFinish.push_back(init.hasFinish);
+            starts.push_back(init.start);
+            finishes.push_back(init.finish);
+        }
+        if (kinds.empty())
+        {
+            return;
+        }
+        graph_.setAttr(op, "initKind", std::move(kinds));
+        graph_.setAttr(op, "initFile", std::move(files));
+        graph_.setAttr(op, "initHasStart", std::move(hasStart));
+        graph_.setAttr(op, "initHasFinish", std::move(hasFinish));
+        graph_.setAttr(op, "initStart", std::move(starts));
+        graph_.setAttr(op, "initFinish", std::move(finishes));
     }
 
     bool ensureMemoryOp(PlanSymbolId memory, SignalId signal, slang::SourceLocation location)
@@ -11962,6 +12556,7 @@ private:
         graph_.setAttr(op, "width", width);
         graph_.setAttr(op, "row", static_cast<int64_t>(info->memoryRows));
         graph_.setAttr(op, "isSigned", info->isSigned);
+        applyMemoryInit(op, memory);
         memoryOpBySymbol_[memory.index] = op;
         memorySymbolName_[memory.index] = finalName;
         return true;
@@ -12059,7 +12654,8 @@ private:
         const int32_t width = normalizeWidth(info->width);
         grh::ir::SymbolId dataSym =
             graph_.internSymbol("__mem_data_" + std::to_string(nextMemValueId_++));
-        grh::ir::ValueId dataValue = graph_.createValue(dataSym, width, info->isSigned);
+        grh::ir::ValueId dataValue =
+            graph_.createValue(dataSym, width, info->isSigned, info->valueType);
 
         grh::ir::ValueId addressValue = emitExpr(entry.address);
         if (!addressValue.valid())
@@ -12148,17 +12744,11 @@ private:
         {
             switch (stmt.kind)
             {
-            case LoweredStmtKind::Display:
-                emitDisplay(stmt);
-                break;
-            case LoweredStmtKind::Assert:
-                emitAssert(stmt);
+            case LoweredStmtKind::SystemTask:
+                emitSystemTask(stmt);
                 break;
             case LoweredStmtKind::DpiCall:
                 emitDpiCall(stmt);
-                break;
-            case LoweredStmtKind::Finish:
-                emitFinish(stmt);
                 break;
             default:
                 break;
@@ -12232,23 +12822,35 @@ private:
         }
     }
 
-    void emitDisplay(const LoweredStmt& stmt)
+    static std::string procKindText(ProcKind kind)
+    {
+        switch (kind)
+        {
+        case ProcKind::Initial:
+            return "initial";
+        case ProcKind::Final:
+            return "final";
+        case ProcKind::AlwaysComb:
+            return "always_comb";
+        case ProcKind::AlwaysLatch:
+            return "always_latch";
+        case ProcKind::AlwaysFF:
+            return "always_ff";
+        case ProcKind::Always:
+            return "always";
+        default:
+            return "unknown";
+        }
+    }
+
+    void emitSystemTask(const LoweredStmt& stmt)
     {
         if (stmt.eventEdges.size() != stmt.eventOperands.size())
         {
             if (context_.diagnostics)
             {
                 context_.diagnostics->warn(stmt.location,
-                                           "Skipping display with mismatched event binding");
-            }
-            return;
-        }
-        if (stmt.eventEdges.empty())
-        {
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->warn(stmt.location,
-                                           "Skipping display without edge-sensitive timing");
+                                           "Skipping system task with mismatched event binding");
             }
             return;
         }
@@ -12260,51 +12862,12 @@ private:
         }
 
         grh::ir::OperationId op =
-            createOp(stmt.op,
+            createOp(grh::ir::OperationKind::kSystemTask,
                      grh::ir::SymbolId::invalid(),
                      stmt.location);
         graph_.addOperand(op, updateCond);
 
-        if (stmt.op == grh::ir::OperationKind::kDisplay && stmt.display.hasExitCode)
-        {
-            if (stmt.display.exitCode == kInvalidPlanIndex)
-            {
-                if (context_.diagnostics)
-                {
-                    context_.diagnostics->warn(stmt.location,
-                                               "Skipping display without exit code");
-                }
-                return;
-            }
-            grh::ir::ValueId exitCode = emitExpr(stmt.display.exitCode);
-            if (!exitCode.valid())
-            {
-                return;
-            }
-            graph_.addOperand(op, exitCode);
-            graph_.setAttr(op, "hasExitCode", true);
-        }
-
-        if (stmt.op == grh::ir::OperationKind::kFwrite)
-        {
-            if (stmt.display.fileHandle == kInvalidPlanIndex)
-            {
-                if (context_.diagnostics)
-                {
-                    context_.diagnostics->warn(stmt.location,
-                                               "Skipping fwrite without file handle");
-                }
-                return;
-            }
-            grh::ir::ValueId fh = emitExpr(stmt.display.fileHandle);
-            if (!fh.valid())
-            {
-                return;
-            }
-            graph_.addOperand(op, fh);
-        }
-
-        for (ExprNodeId argId : stmt.display.args)
+        for (ExprNodeId argId : stmt.systemTask.args)
         {
             grh::ir::ValueId arg = emitExpr(argId);
             if (!arg.valid())
@@ -12323,140 +12886,32 @@ private:
             graph_.addOperand(op, evt);
         }
 
-        graph_.setAttr(op, "formatString", stmt.display.formatString);
-        graph_.setAttr(op, "displayKind", stmt.display.displayKind);
+        if (stmt.systemTask.name.empty())
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(stmt.location,
+                                           "Skipping system task without name");
+            }
+            return;
+        }
+        graph_.setAttr(op, "name", stmt.systemTask.name);
         std::vector<std::string> edges;
         edges.reserve(stmt.eventEdges.size());
         for (EventEdge edge : stmt.eventEdges)
         {
             edges.push_back(edgeText(edge));
         }
-        graph_.setAttr(op, "eventEdge", edges);
-        if (edges.size() == 1)
+        if (!edges.empty())
         {
-            graph_.setAttr(op, "clkPolarity", edges.front());
-        }
-    }
-
-    void emitAssert(const LoweredStmt& stmt)
-    {
-        if (stmt.eventEdges.size() != stmt.eventOperands.size())
-        {
-            if (context_.diagnostics)
+            graph_.setAttr(op, "eventEdge", edges);
+            if (edges.size() == 1)
             {
-                context_.diagnostics->warn(stmt.location,
-                                           "Skipping assert with mismatched event binding");
+                graph_.setAttr(op, "clkPolarity", edges.front());
             }
-            return;
         }
-        if (stmt.eventEdges.empty())
-        {
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->warn(stmt.location,
-                                           "Skipping assert without edge-sensitive timing");
-            }
-            return;
-        }
-
-        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
-        grh::ir::ValueId condition = emitExpr(stmt.assertion.condition);
-        if (!updateCond.valid() || !condition.valid())
-        {
-            return;
-        }
-
-        grh::ir::OperationId op =
-            createOp(grh::ir::OperationKind::kAssert,
-                     grh::ir::SymbolId::invalid(),
-                     stmt.location);
-        graph_.addOperand(op, updateCond);
-        graph_.addOperand(op, condition);
-        for (ExprNodeId evtId : stmt.eventOperands)
-        {
-            grh::ir::ValueId evt = emitExpr(evtId);
-            if (!evt.valid())
-            {
-                return;
-            }
-            graph_.addOperand(op, evt);
-        }
-
-        if (!stmt.assertion.message.empty())
-        {
-            graph_.setAttr(op, "message", stmt.assertion.message);
-        }
-        if (!stmt.assertion.severity.empty())
-        {
-            graph_.setAttr(op, "severity", stmt.assertion.severity);
-        }
-    }
-
-    void emitFinish(const LoweredStmt& stmt)
-    {
-        if (stmt.eventEdges.size() != stmt.eventOperands.size())
-        {
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->warn(stmt.location,
-                                           "Skipping finish with mismatched event binding");
-            }
-            return;
-        }
-        if (stmt.eventEdges.empty())
-        {
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->warn(stmt.location,
-                                           "Skipping finish without edge-sensitive timing");
-            }
-            return;
-        }
-
-        grh::ir::ValueId updateCond = emitExpr(stmt.updateCond);
-        if (!updateCond.valid())
-        {
-            return;
-        }
-
-        grh::ir::OperationId op =
-            createOp(grh::ir::OperationKind::kFinish,
-                     grh::ir::SymbolId::invalid(),
-                     stmt.location);
-        graph_.addOperand(op, updateCond);
-
-        if (stmt.finish.hasExitCode)
-        {
-            grh::ir::ValueId exitCode = emitExpr(stmt.finish.exitCode);
-            if (!exitCode.valid())
-            {
-                return;
-            }
-            graph_.addOperand(op, exitCode);
-            graph_.setAttr(op, "hasExitCode", true);
-        }
-
-        for (ExprNodeId evtId : stmt.eventOperands)
-        {
-            grh::ir::ValueId evt = emitExpr(evtId);
-            if (!evt.valid())
-            {
-                return;
-            }
-            graph_.addOperand(op, evt);
-        }
-
-        std::vector<std::string> edges;
-        edges.reserve(stmt.eventEdges.size());
-        for (EventEdge edge : stmt.eventEdges)
-        {
-            edges.push_back(edgeText(edge));
-        }
-        graph_.setAttr(op, "eventEdge", edges);
-        if (edges.size() == 1)
-        {
-            graph_.setAttr(op, "clkPolarity", edges.front());
-        }
+        graph_.setAttr(op, "procKind", procKindText(stmt.procKind));
+        graph_.setAttr(op, "hasTiming", stmt.hasTiming);
     }
 
     std::optional<std::pair<int64_t, bool>> findDpiArgType(
@@ -12481,6 +12936,53 @@ private:
             return std::pair<int64_t, bool>{importInfo.argsWidth[i], importInfo.argsSigned[i]};
         }
         return std::nullopt;
+    }
+
+    static grh::ir::ValueType dpiValueType(std::string_view typeName)
+    {
+        if (typeName.empty())
+        {
+            return grh::ir::ValueType::Logic;
+        }
+        std::string lowered;
+        lowered.reserve(typeName.size());
+        for (unsigned char ch : typeName)
+        {
+            lowered.push_back(static_cast<char>(std::tolower(ch)));
+        }
+        if (lowered == "real" || lowered == "shortreal")
+        {
+            return grh::ir::ValueType::Real;
+        }
+        if (lowered == "string")
+        {
+            return grh::ir::ValueType::String;
+        }
+        return grh::ir::ValueType::Logic;
+    }
+
+    grh::ir::ValueType findDpiArgValueType(const DpiImportInfo& importInfo,
+                                           std::string_view name,
+                                           std::string_view direction) const
+    {
+        for (std::size_t i = 0; i < importInfo.argsName.size(); ++i)
+        {
+            if (importInfo.argsName[i] != name)
+            {
+                continue;
+            }
+            if (!direction.empty() && i < importInfo.argsDirection.size() &&
+                importInfo.argsDirection[i] != direction)
+            {
+                break;
+            }
+            if (i < importInfo.argsType.size())
+            {
+                return dpiValueType(importInfo.argsType[i]);
+            }
+            break;
+        }
+        return grh::ir::ValueType::Logic;
     }
 
     void emitDpiCall(const LoweredStmt& stmt)
@@ -12582,7 +13084,10 @@ private:
             grh::ir::ValueId retValue = valueForSymbol(retSymbol);
             if (!retValue.valid())
             {
-                retValue = createValue(retSymbol, static_cast<int32_t>(width), isSigned);
+                const grh::ir::ValueType retType =
+                    dpiValueType(importInfo->returnType);
+                retValue = createValue(retSymbol, static_cast<int32_t>(width), isSigned,
+                                       retType);
             }
             if (!retValue.valid())
             {
@@ -12611,7 +13116,10 @@ private:
                 auto meta = findDpiArgType(*importInfo, dpi.outArgNames[i], "output");
                 int64_t width = meta ? meta->first : 1;
                 bool isSigned = meta ? meta->second : false;
-                resultValue = createValue(resultSymbol, static_cast<int32_t>(width), isSigned);
+                const grh::ir::ValueType valueType =
+                    findDpiArgValueType(*importInfo, dpi.outArgNames[i], "output");
+                resultValue =
+                    createValue(resultSymbol, static_cast<int32_t>(width), isSigned, valueType);
             }
             if (!resultValue.valid())
             {
@@ -13012,6 +13520,7 @@ private:
             bool ok = true;
             auto makeUnconnectedInput = [&](int64_t width,
                                             bool isSigned,
+                                            grh::ir::ValueType valueType,
                                             slang::SourceLocation location) -> grh::ir::ValueId {
                 const int64_t maxWidth = std::numeric_limits<int32_t>::max();
                 const int32_t boundedWidth =
@@ -13021,14 +13530,25 @@ private:
                 grh::ir::SymbolId sym =
                     graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                 grh::ir::ValueId result =
-                    graph_.createValue(sym, normalizedWidth, isSigned);
+                    graph_.createValue(sym, normalizedWidth, isSigned, valueType);
                 grh::ir::OperationId op =
                     createOp(grh::ir::OperationKind::kConstant,
                              grh::ir::SymbolId::invalid(),
                              location);
                 graph_.addResult(op, result);
-                graph_.setAttr(op, "constValue",
-                               std::to_string(normalizedWidth) + "'bx");
+                if (valueType == grh::ir::ValueType::Real)
+                {
+                    graph_.setAttr(op, "constValue", std::string("0.0"));
+                }
+                else if (valueType == grh::ir::ValueType::String)
+                {
+                    graph_.setAttr(op, "constValue", std::string());
+                }
+                else
+                {
+                    graph_.setAttr(op, "constValue",
+                                   std::to_string(normalizedWidth) + "'bx");
+                }
                 return result;
             };
 
@@ -13055,6 +13575,8 @@ private:
                     instance.getPortConnection(*port);
                 const slang::ast::Expression* expr =
                     connection ? connection->getExpression() : nullptr;
+                const grh::ir::ValueType portValueType =
+                    classifyValueType(port->getType());
 
                 switch (port->direction)
                 {
@@ -13072,7 +13594,8 @@ private:
                         }
                         inputNames.emplace_back(port->name);
                         inputOperands.push_back(
-                            makeUnconnectedInput(portWidth, portSigned, port->location));
+                            makeUnconnectedInput(portWidth, portSigned, portValueType,
+                                                 port->location));
                         break;
                     }
                     if (expr->bad())
@@ -13113,7 +13636,7 @@ private:
                         grh::ir::SymbolId tempSym =
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
-                            graph_.createValue(tempSym, width, portSigned);
+                            graph_.createValue(tempSym, width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
                         break;
                     }
@@ -13146,7 +13669,7 @@ private:
                         grh::ir::SymbolId tempSym =
                             graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                         grh::ir::ValueId tempValue =
-                            graph_.createValue(tempSym, binding.width, portSigned);
+                            graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
                         instanceXmrWrites_.push_back(
                             InstanceXmrWrite{std::move(binding.xmrPath), tempValue,
@@ -13193,7 +13716,7 @@ private:
                     grh::ir::SymbolId tempSym =
                         graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                     grh::ir::ValueId tempValue =
-                        graph_.createValue(tempSym, binding.width, portSigned);
+                        graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                     outputResults.push_back(tempValue);
                     instanceSliceWrites_[binding.target.index].push_back(
                         InstanceSliceWrite{binding.target, binding.low,
@@ -13383,7 +13906,9 @@ private:
             graph_.setAttr(op, "sliceEnd", high);
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            const grh::ir::ValueType baseType = graph_.getValue(base).type();
+            grh::ir::ValueId result =
+                graph_.createValue(sym, width, false, baseType);
             graph_.addResult(op, result);
             return result;
         };
@@ -13396,7 +13921,8 @@ private:
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             grh::ir::ValueId result =
-                graph_.createValue(sym, static_cast<int32_t>(width), false);
+                graph_.createValue(sym, static_cast<int32_t>(width), false,
+                                   grh::ir::ValueType::Logic);
             grh::ir::OperationId op =
                 createOp(grh::ir::OperationKind::kConstant,
                          grh::ir::SymbolId::invalid(),
@@ -13429,7 +13955,8 @@ private:
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             grh::ir::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(width),
-                                   graph_.getValue(value).isSigned());
+                                   graph_.getValue(value).isSigned(),
+                                   graph_.getValue(value).type());
             graph_.addResult(op, result);
             return result;
         };
@@ -13481,7 +14008,7 @@ private:
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             grh::ir::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(targetWidth),
-                                   signExtend);
+                                   signExtend, graph_.getValue(value).type());
             graph_.addResult(op, result);
             return result;
         };
@@ -13657,7 +14184,8 @@ private:
                 grh::ir::SymbolId sym =
                     graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                 grh::ir::ValueId result =
-                    graph_.createValue(sym, targetWidth, false);
+                    graph_.createValue(sym, targetWidth, false,
+                                       graph_.getValue(targetValue).type());
                 graph_.addResult(op, result);
                 merged = result;
             }
@@ -14137,6 +14665,20 @@ private:
                 node.literal = formatIntegerLiteral(literal->getValue());
                 return addNode(expr, std::move(node));
             }
+            if (const auto* literal = expr.as_if<slang::ast::RealLiteral>())
+            {
+                node.kind = ExprNodeKind::Constant;
+                std::ostringstream oss;
+                oss << literal->getValue();
+                node.literal = oss.str();
+                return addNode(expr, std::move(node));
+            }
+            if (const auto* literal = expr.as_if<slang::ast::StringLiteral>())
+            {
+                node.kind = ExprNodeKind::Constant;
+                node.literal.assign(literal->getRawValue());
+                return addNode(expr, std::move(node));
+            }
             if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
             {
                 return lowerExpression(conversion->operand());
@@ -14431,6 +14973,10 @@ private:
                                          : static_cast<int32_t>(width);
                 }
             }
+            if (expr.type)
+            {
+                node.valueType = classifyValueType(*expr.type);
+            }
             const ExprNodeId id =
                 static_cast<ExprNodeId>(state_.lowering_.values.size());
             state_.lowering_.values.push_back(std::move(node));
@@ -14482,7 +15028,8 @@ private:
             }
         }
         width = normalizeWidth(width);
-        grh::ir::ValueId value = graph_.createValue(symbol, width, false);
+        grh::ir::ValueId value =
+            graph_.createValue(symbol, width, false, node.valueType);
         grh::ir::OperationId op =
             createOp(grh::ir::OperationKind::kConstant,
                      grh::ir::SymbolId::invalid(),
@@ -14533,7 +15080,8 @@ private:
             const int32_t width = normalizeWidth(node.widthHint);
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__xmr_read_" + std::to_string(nextTempId_++));
-            grh::ir::ValueId result = graph_.createValue(sym, width, node.isSigned);
+            grh::ir::ValueId result =
+                graph_.createValue(sym, width, node.isSigned, node.valueType);
             grh::ir::OperationId op =
                 createOp(grh::ir::OperationKind::kXMRRead,
                          grh::ir::SymbolId::invalid(),
@@ -14582,7 +15130,8 @@ private:
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
             const int32_t width = normalizeWidth(node.widthHint);
-            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            grh::ir::ValueId result =
+                graph_.createValue(sym, width, false, node.valueType);
             graph_.addResult(op, result);
             valueByExpr_[id] = result;
             return result;
@@ -14642,7 +15191,8 @@ private:
                     graph_.setAttr(op, "sliceEnd", end);
                     grh::ir::SymbolId sym =
                         graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-                    grh::ir::ValueId result = graph_.createValue(sym, width, false);
+                    grh::ir::ValueId result =
+                        graph_.createValue(sym, width, false, node.valueType);
                     graph_.addResult(op, result);
                     valueByExpr_[id] = result;
                     return result;
@@ -14658,7 +15208,8 @@ private:
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            grh::ir::ValueId result =
+                graph_.createValue(sym, width, false, node.valueType);
             graph_.addResult(op, result);
             valueByExpr_[id] = result;
             return result;
@@ -14669,6 +15220,17 @@ private:
         for (const auto& operand : operands)
         {
             graph_.addOperand(op, operand);
+        }
+        if (node.op == grh::ir::OperationKind::kSystemFunction)
+        {
+            if (!node.systemName.empty())
+            {
+                graph_.setAttr(op, "name", node.systemName);
+            }
+            if (node.hasSideEffects)
+            {
+                graph_.setAttr(op, "hasSideEffects", true);
+            }
         }
 
         grh::ir::SymbolId sym =
@@ -14718,7 +15280,8 @@ private:
             }
         }
         width = normalizeWidth(width);
-        grh::ir::ValueId result = graph_.createValue(sym, width, node.isSigned);
+        grh::ir::ValueId result =
+            graph_.createValue(sym, width, node.isSigned, node.valueType);
         graph_.addResult(op, result);
         valueByExpr_[id] = result;
         return result;
@@ -14837,7 +15400,8 @@ private:
         auto makeConstOne = [&](slang::SourceLocation location) -> grh::ir::ValueId {
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__const_one_" + std::to_string(nextConstId_++));
-            grh::ir::ValueId value = graph_.createValue(sym, 1, false);
+            grh::ir::ValueId value =
+                graph_.createValue(sym, 1, false, grh::ir::ValueType::Logic);
             grh::ir::OperationId op =
                 createOp(grh::ir::OperationKind::kConstant,
                          grh::ir::SymbolId::invalid(),
@@ -14928,7 +15492,8 @@ private:
                 grh::ir::SymbolId muxSym =
                     graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                 grh::ir::ValueId muxValue =
-                    graph_.createValue(muxSym, normalizeWidth(muxWidth), false);
+                    graph_.createValue(muxSym, normalizeWidth(muxWidth), false,
+                                       graph_.getValue(posNext).type());
                 graph_.addResult(muxOp, muxValue);
 
                 grh::ir::ValueId posGuard = emitExpr(posEntry.updateCond);
@@ -14952,7 +15517,8 @@ private:
                 grh::ir::SymbolId guardSym =
                     graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
                 grh::ir::ValueId guardValue =
-                    graph_.createValue(guardSym, normalizeWidth(guardWidth), false);
+                    graph_.createValue(guardSym, normalizeWidth(guardWidth), false,
+                                       grh::ir::ValueType::Logic);
                 graph_.addResult(guardMuxOp, guardValue);
 
                 grh::ir::SymbolId regSym = makeOpSymbol(entry.target, "register");
@@ -14991,7 +15557,8 @@ private:
             graph_.setAttr(op, "sliceEnd", high);
             grh::ir::SymbolId sym =
                 graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            grh::ir::ValueId result = graph_.createValue(sym, width, false);
+            grh::ir::ValueId result =
+                graph_.createValue(sym, width, false, graph_.getValue(base).type());
             graph_.addResult(op, result);
             return result;
         };
@@ -15160,7 +15727,7 @@ private:
                 grh::ir::ValueId sliceValue =
                     graph_.createValue(sliceSym,
                                        normalizeWidth(static_cast<int32_t>(slice.width)),
-                                       false);
+                                       false, graph_.getValue(nextValue).type());
                 grh::ir::SymbolId regSym =
                     makeOpSymbol(entry.target, "slice_register");
                 grh::ir::OperationId op =

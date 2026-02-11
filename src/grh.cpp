@@ -366,6 +366,20 @@ namespace grh::ir
         return valueSigned_[valueIndex(value)] != 0;
     }
 
+    ValueType GraphView::valueType(ValueId value) const
+    {
+        if (valueTypes_.empty())
+        {
+            return ValueType::Logic;
+        }
+        const std::size_t idx = valueIndex(value);
+        if (idx >= valueTypes_.size())
+        {
+            return ValueType::Logic;
+        }
+        return static_cast<ValueType>(valueTypes_[idx]);
+    }
+
     bool GraphView::valueIsInput(ValueId value) const
     {
         return valueIsInput_[valueIndex(value)] != 0;
@@ -489,6 +503,10 @@ namespace grh::ir
         require(view.valueSymbols_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueWidths_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueSigned_.size() == valueCount, "GraphView value metadata size mismatch");
+        if (!view.valueTypes_.empty())
+        {
+            require(view.valueTypes_.size() == valueCount, "GraphView value metadata size mismatch");
+        }
         require(view.valueIsInput_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueIsOutput_.size() == valueCount, "GraphView value metadata size mismatch");
         require(view.valueIsInout_.size() == valueCount, "GraphView value metadata size mismatch");
@@ -566,12 +584,18 @@ namespace grh::ir
                 builder.validateSymbol(data.symbol, "Value");
             }
             const int32_t width = view.valueWidths_[i];
-            if (width <= 0)
+            ValueType type = ValueType::Logic;
+            if (!view.valueTypes_.empty())
+            {
+                type = static_cast<ValueType>(view.valueTypes_[i]);
+            }
+            if (type == ValueType::Logic && width <= 0)
             {
                 throw std::runtime_error("GraphView value width must be positive");
             }
-            data.width = width;
+            data.width = width > 0 ? width : 1;
             data.isSigned = view.valueSigned_[i] != 0;
+            data.type = type;
             data.isInput = false;
             data.isOutput = false;
             data.isInout = false;
@@ -773,11 +797,15 @@ namespace grh::ir
         return builder;
     }
 
-    ValueId GraphBuilder::addValue(SymbolId sym, int32_t width, bool isSigned)
+    ValueId GraphBuilder::addValue(SymbolId sym, int32_t width, bool isSigned, ValueType type)
     {
-        if (width <= 0)
+        if (type == ValueType::Logic && width <= 0)
         {
             throw std::runtime_error("Value width must be positive");
+        }
+        if (type != ValueType::Logic && width <= 0)
+        {
+            width = 1;
         }
         validateSymbol(sym, "Value");
 
@@ -790,6 +818,7 @@ namespace grh::ir
         data.symbol = sym;
         data.width = width;
         data.isSigned = isSigned;
+        data.type = type;
         values_.push_back(std::move(data));
         valueUsers_.emplace_back();
         return id;
@@ -1813,6 +1842,7 @@ namespace grh::ir
         view.valueSymbols_.reserve(valueCount);
         view.valueWidths_.reserve(valueCount);
         view.valueSigned_.reserve(valueCount);
+        view.valueTypes_.reserve(valueCount);
         view.valueIsInput_.reserve(valueCount);
         view.valueIsOutput_.reserve(valueCount);
         view.valueIsInout_.reserve(valueCount);
@@ -1835,6 +1865,7 @@ namespace grh::ir
             view.valueSymbols_.push_back(valueData.symbol);
             view.valueWidths_.push_back(valueData.width);
             view.valueSigned_.push_back(valueData.isSigned ? 1 : 0);
+            view.valueTypes_.push_back(static_cast<uint8_t>(valueData.type));
             view.valueIsInput_.push_back(valueData.isInput ? 1 : 0);
             view.valueIsOutput_.push_back(valueData.isOutput ? 1 : 0);
             view.valueIsInout_.push_back(valueData.isInout ? 1 : 0);
@@ -2244,10 +2275,8 @@ namespace grh::ir
             "kMemoryWritePort",
             "kInstance",
             "kBlackbox",
-            "kDisplay",
-            "kFwrite",
-            "kFinish",
-            "kAssert",
+            "kSystemFunction",
+            "kSystemTask",
             "kDpicImport",
             "kDpicCall",
             "kXMRRead",
@@ -2385,14 +2414,48 @@ namespace grh::ir
         return std::nullopt;
     }
 
+    std::string_view toString(ValueType type) noexcept
+    {
+        switch (type)
+        {
+        case ValueType::Logic:
+            return "logic";
+        case ValueType::Real:
+            return "real";
+        case ValueType::String:
+            return "string";
+        default:
+            return "<unknown>";
+        }
+    }
+
+    std::optional<ValueType> parseValueType(std::string_view text) noexcept
+    {
+        if (text == "logic")
+        {
+            return ValueType::Logic;
+        }
+        if (text == "real")
+        {
+            return ValueType::Real;
+        }
+        if (text == "string")
+        {
+            return ValueType::String;
+        }
+        return std::nullopt;
+    }
+
     Value::Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-                 bool isInput, bool isOutput, bool isInout, OperationId definingOp,
-                 std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc)
+                 ValueType type, bool isInput, bool isOutput, bool isInout,
+                 OperationId definingOp, std::vector<ValueUser> users,
+                 std::optional<SrcLoc> srcLoc)
         : id_(id),
           symbol_(symbol),
           symbolText_(std::move(symbolText)),
           width_(width),
           isSigned_(isSigned),
+          type_(type),
           isInput_(isInput),
           isOutput_(isOutput),
           isInout_(isInout),
@@ -2563,10 +2626,10 @@ namespace grh::ir
         return std::span<const InoutPort>(inoutPortsCache_.data(), inoutPortsCache_.size());
     }
 
-    ValueId Graph::createValue(SymbolId symbol, int32_t width, bool isSigned)
+    ValueId Graph::createValue(SymbolId symbol, int32_t width, bool isSigned, ValueType type)
     {
         GraphBuilder &builder = ensureBuilder();
-        ValueId id = builder.addValue(symbol, width, isSigned);
+        ValueId id = builder.addValue(symbol, width, isSigned, type);
         // Incremental update: directly append to cache without full rebuild
         if (!valuesCacheDirty_)
         {
@@ -2937,6 +3000,8 @@ namespace grh::ir
             writer.writeValue(static_cast<int64_t>(value.width()));
             writer.writeProperty("sgn");
             writer.writeValue(value.isSigned());
+            writer.writeProperty("type");
+            writer.writeValue(std::string(toString(value.type())));
             writer.writeProperty("in");
             writer.writeValue(value.isInput());
             writer.writeProperty("out");
@@ -3209,6 +3274,7 @@ namespace grh::ir
                      std::move(symbolText),
                      graphView.valueWidth(id),
                      graphView.valueSigned(id),
+                     graphView.valueType(id),
                      graphView.valueIsInput(id),
                      graphView.valueIsOutput(id),
                      graphView.valueIsInout(id),
@@ -3244,6 +3310,7 @@ namespace grh::ir
                      std::move(symbolText),
                      data.width,
                      data.isSigned,
+                     data.type,
                      data.isInput,
                      data.isOutput,
                      data.isInout,

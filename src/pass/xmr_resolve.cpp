@@ -201,7 +201,8 @@ namespace wolf_sv_parser::transform
             std::string base = "__xmr_pad_in_" + key;
             std::string symName = makeUniqueSymbol(graph, base);
             grh::ir::SymbolId sym = graph.internSymbol(symName);
-            grh::ir::ValueId value = graph.createValue(sym, normalized, isSigned);
+            grh::ir::ValueId value =
+                graph.createValue(sym, normalized, isSigned, grh::ir::ValueType::Logic);
             grh::ir::OperationId op =
                 graph.createOperation(grh::ir::OperationKind::kConstant,
                                       grh::ir::SymbolId::invalid());
@@ -257,7 +258,8 @@ namespace wolf_sv_parser::transform
             grh::ir::ValueId value = graph.findValue(sym);
             if (!value.valid())
             {
-                value = graph.createValue(sym, normalizeWidth(width), isSigned);
+                value = graph.createValue(sym, normalizeWidth(width), isSigned,
+                                          grh::ir::ValueType::Logic);
             }
             graph.bindInputPort(sym, value);
             result.changed = true;
@@ -289,7 +291,9 @@ namespace wolf_sv_parser::transform
             base.append(portName);
             std::string symName = makeUniqueSymbol(graph, base);
             grh::ir::SymbolId sym = graph.internSymbol(symName);
-            grh::ir::ValueId value = graph.createValue(sym, normalizeWidth(width), isSigned);
+            grh::ir::ValueId value =
+                graph.createValue(sym, normalizeWidth(width), isSigned,
+                                  grh::ir::ValueType::Logic);
             const std::size_t inoutCount = inoutNames.size();
             const std::size_t resultCount = resultsSpan.size();
             const std::size_t outputLimit =
@@ -371,7 +375,8 @@ namespace wolf_sv_parser::transform
                 std::string symName = makeUniqueSymbol(graph, base);
                 grh::ir::SymbolId sym = graph.internSymbol(symName);
                 grh::ir::ValueId replacement =
-                    graph.createValue(sym, normalizeWidth(value.width()), value.isSigned());
+                    graph.createValue(sym, normalizeWidth(value.width()), value.isSigned(),
+                                      value.type());
                 graph.replaceAllUses(target, replacement);
                 result.changed = true;
                 return replacement;
@@ -390,7 +395,8 @@ namespace wolf_sv_parser::transform
             graph.clearValueSymbol(target);
             grh::ir::SymbolId sym = graph.internSymbol(symbolText);
             grh::ir::ValueId replacement =
-                graph.createValue(sym, normalizeWidth(value.width()), value.isSigned());
+                graph.createValue(sym, normalizeWidth(value.width()), value.isSigned(),
+                                  value.type());
             graph.replaceAllUses(target, replacement);
             for (const auto &name : outputNames)
             {

@@ -55,25 +55,30 @@ GRH 表示在编译流程中的功能定位如下：
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
 - 时序：`kLatch`、`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
 - 层次：`kInstance`、`kBlackbox`
-- 调试：`kDisplay`、`kFwrite`、`kFinish`、`kAssert`
+- System call：`kSystemFunction`、`kSystemTask`
 - DPI：`kDpicImport`、`kDpicCall`
 
 # 边 - Value
 
 满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取。
 
-每个 Value 最终都会显式生成为 SystemVerilog 中的 wire 声明，以支持 SSA 特性。
+每个 Value 会显式生成为 SystemVerilog 的信号或变量声明。Logic 类型使用 wire/reg，
+Real/String 类型使用 real/string 变量声明（非 net），因此不能使用 continuous assign。
 
 - 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内建议唯一且非空；`Graph::internSymbol()` 负责驻留字符串
-- 具有一个 `int32_t` 类型的 width 字段，表示 Value 的位宽，`width` 必须大于 0
-- 具有一个 bool 类型 signed 标记是否为有符号
-- 支持 SystemVerilog 四态逻辑（0/1/x/z），Value 与 Operation 的语义均按四态传播；常量允许使用 x/z 字面量
+- 具有一个 `ValueType` 字段：`Logic/Real/String`
+- 对于 `Logic`，具有一个 `int32_t` 类型的 width 字段表示位宽（`width` 必须大于 0）
+- 对于 `Logic`，具有一个 bool 类型 signed 标记是否为有符号
+- `Logic` 支持 SystemVerilog 四态逻辑（0/1/x/z），Value 与 Operation 的语义均按四态传播；常量允许使用 x/z 字面量
+- `Real/String` 为变量类型，`width/isSigned` 不参与语义（发射时忽略）
 - Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
-生成语义
+生成语义（简化）
 
 ```
 wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
+real ${symbol};
+string ${symbol};
 ```
 
 记录是否作为模块端口
@@ -588,100 +593,84 @@ assign ${inoutWire0} = ${inoutOe0.symbol} ? ${inoutOut0.symbol} : {${width}{1'bz
 assign ${inoutIn0.symbol} = ${inoutWire0};
 ```
 
-## 调试支持操作
+## System call 操作
 
-### 打印调试操作 kDisplay
+### System function 操作 kSystemFunction
 
-GRH 只建模包裹在有时钟驱动的过程块中的 display，其他情况在生成 GRH 的时候被丢弃。
+用于表达 `$time/$random/$urandom_range/$sformatf` 等系统函数调用（表达式侧）。
 
-- operands:
-    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
-    - var0，var1，... 可变数量的参与输出的变量, n 个
-    - event0, event1, ...：触发事件信号（Value）
-- attributes:
-    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
-    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 - n）
-    - `eventOperands` = operands[1 + n ..]（按顺序与 `eventEdge` 配对）
-    - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$display` 一致，支持 `%b/%d/%h/%0d/%0h/%x/%0t` 等常见占位符，默认十进制宽度规则同 SV
-    - displayKind（string）：记录原始系统任务，取值 `display` / `write` / `strobe` / `info` / `warning` / `error` / `fatal`
-    - hasExitCode（bool，可选）：当 `displayKind == "fatal"` 且 `$fatal(code, ...)` 使用退出码时为 true；生成时会输出 `$fatal(code, "...", ...)`
+- operands：
+    - arg0，arg1，... 可变数量的输入参数
+- results：
+    - 单一返回值（Value）
+- attributes：
+    - name（string）：系统函数名（去掉 `$` 的规范化名称）
+    - hasSideEffects（bool，可选）：标记 `$random/$urandom` 等带副作用函数
+
+已支持的 system function（kSystemFunction）：
+- 运行期函数（保留为 kSystemFunction）：
+  - `$time/$stime/$realtime`
+  - `$random/$urandom/$urandom_range`
+  - `$fopen/$ferror`
+  - `$sformatf/$psprintf`
+  - `$itor/$rtoi/$realtobits/$bitstoreal`
+- 可折叠为常量（参数可解析时）：
+  - `$bits`（直接生成常量）
+  - `$clog2/$size`（参数可解析时折叠为常量，否则保留为 kSystemFunction）
+- `$signed/$unsigned` 不生成 kSystemFunction，保持为显式 cast（kAssign）
+
+参数约束：
+- `$time/$stime/$realtime`：不接受参数
+- `$random/$urandom`：支持 0~1 个参数
+- `$urandom_range`：支持 1~2 个参数
+- `$fopen`：支持 1~2 个参数（文件名 + 可选模式）
+- `$ferror`：仅支持 1 个参数（文件句柄）；不支持输出字符串参数
+- `$itor/$rtoi/$realtobits/$bitstoreal`：仅支持 1 个参数
+- `$sformatf/$psprintf`：至少 1 个参数（format string + 可变参数）
+- `$clog2/$size`：仅支持 1 个参数
+
+生成语义：
+```
+${result.symbol} = $${name}(${arg0.symbol}, ${arg1.symbol}, ...);
+```
+
+### System task 操作 kSystemTask
+
+统一承载 `$display/$fwrite/$fatal/$finish/$dumpvars/...` 等系统任务（语句侧）。
+
+- operands：
+    - callCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
+    - arg0，arg1，... 可变数量的任务参数（包含 format string / file handle / exit code）
+    - event0，event1，...：触发事件信号（Value）
+- attributes：
+    - name（string）：系统任务名（去掉 `$` 的规范化名称）
+    - eventEdge（vector<string>，可选）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - procKind（string）：过程块类型（initial/final/always_*）
+    - hasTiming（bool）：是否显式 timing control
+
+已支持的 system task（kSystemTask）：
+- `$display/$write/$strobe`
+- `$fwrite/$fdisplay/$fclose/$fflush`
+- `$info/$warning/$error/$fatal`
+- `$finish/$stop`
+- `$dumpfile/$dumpvars`（仅支持全量 dump；其它参数给 warning 并忽略）
+
+不作为 kSystemTask 处理的 system task：
+- `$readmemh/$readmemb`：记录为 `kMemory` 的初始化属性并在 emit 阶段生成 `initial $readmem*`
+- `$sdf_annotate/$monitor/$monitoron/$monitoroff`：warning 并忽略（不生成 kSystemTask）
+
+约束：
+- `eventEdge` 长度必须等于 event 操作数数量
+- `eventOperands` = operands[1 + args ..]
+
+说明：
+- 当 `eventEdge` 为空时，emit 依据 `procKind` 生成 `initial/final/always_*` 过程块
 
 生成语义：
 ```
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
-    if (${updateCond.symbol}) begin
-        $${displayKind}("${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
-    end
-end
-```
-
-### 文件句柄输出操作 kFwrite
-
-GRH 建模 `$fwrite`，用于将格式化输出写入指定 file handle（例如 `32'h80000002`）。
-
-- operands:
-    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
-    - fileHandle：文件句柄表达式
-    - var0，var1，... 可变数量的参与输出的变量, n 个
-    - event0, event1, ...：触发事件信号（Value）
-- attributes:
-    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
-    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2 - n）
-    - `eventOperands` = operands[2 + n ..]（按顺序与 `eventEdge` 配对）
-    - formatString（string）：输出格式化字符串；语法与 SystemVerilog `$fwrite` 一致
-
-生成语义：
-```
-always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
-    if (${updateCond.symbol}) begin
-        $fwrite(${fileHandle.symbol}, "${formatString}", ${var0.symbol}, ${var1.symbol}, ...);
-    end
-end
-```
-
-### 终止仿真操作 kFinish
-
-GRH 建模 `$finish`，用于退出仿真。
-
-- operands:
-    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
-    - exitCode（可选）：退出码表达式
-    - event0, event1, ...：触发事件信号（Value）
-- attributes:
-    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
-    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 或 2）
-    - `eventOperands` = operands[1 + hasExitCode ..]（按顺序与 `eventEdge` 配对）
-    - hasExitCode（bool，可选）：是否带退出码
-
-生成语义：
-```
-always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
-    if (${updateCond.symbol}) begin
-        $finish(${exitCode.symbol}); // 可选 exitCode
-    end
-end
-```
-
-### 断言操作 kAssert
-
-GRH 只建模包裹在有时钟驱动的过程块中的 assert，其他情况在生成 GRH 的时候被丢弃。
-
-- operands:
-    - updateCond：触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
-    - condition：断言条件
-    - event0, event1, ...：触发事件信号（Value）
-- attributes:
-    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
-    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2）
-    - `eventOperands` = operands[2..]（按顺序与 `eventEdge` 配对）
-    - message（string，可选）：断言失败的提示文本，通常来自 `$fatal/$error` 参数或静态字符串
-    - severity（string，可选）：记录断言级别，建议取值 fatal/error/warning
-
-生成语义：
-```
-always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
-    if (${updateCond.symbol} && !${condition.symbol}) begin
-        $fatal("Assertion failed at time %0t", $time);
+    if (${callCond.symbol}) begin
+        $${name}(${arg0.symbol}, ${arg1.symbol}, ...);
     end
 end
 ```

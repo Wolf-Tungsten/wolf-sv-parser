@@ -8,10 +8,14 @@ module graph_assembly_memory(
 );
     logic [7:0] mem [0:15];
     assign q_comb = mem[addr];
-    always_ff @(posedge clk) begin
+    always @(posedge clk) begin
         if (en) begin
             q_seq <= mem[addr];
             mem[addr][3:0] <= data[3:0];
         end
+    end
+    initial begin
+        $readmemh("mem_init.hex", mem);
+        $readmemb("mem_init.bin", mem, 2, 7);
     end
 endmodule

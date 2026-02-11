@@ -26,6 +26,7 @@
 #include "transform.hpp"
 #include "pass/demo_stats.hpp"
 #include "pass/const_fold.hpp"
+#include "pass/memory_init_check.hpp"
 #include "pass/redundant_elim.hpp"
 #include "pass/dead_code_elim.hpp"
 #include "pass/xmr_resolve.hpp"
@@ -616,6 +617,7 @@ int main(int argc, char **argv)
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
+        passManager.addPass(std::make_unique<wolf_sv_parser::transform::MemoryInitCheckPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
         const auto transformStart = TimingClock::now();

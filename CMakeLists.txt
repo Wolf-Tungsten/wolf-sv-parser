@@ -182,6 +182,22 @@ target_compile_definitions(emit-json-ir
 
 register_test_exe(emit-json-ir)
 
+add_executable(emit-sv-readmem
+    tests/emit/test_emit_sv_readmem.cpp
+)
+
+target_link_libraries(emit-sv-readmem
+    PRIVATE
+        grh
+)
+
+target_compile_definitions(emit-sv-readmem
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-sv-readmem)
+
 # transform tests
 add_executable(transform-pass-manager
     tests/transform/test_transform_pass_manager.cpp

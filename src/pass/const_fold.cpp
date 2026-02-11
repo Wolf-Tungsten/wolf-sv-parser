@@ -67,6 +67,7 @@ namespace wolf_sv_parser::transform
         {
             switch (kind)
             {
+            case grh::ir::OperationKind::kSystemFunction:
             case grh::ir::OperationKind::kAdd:
             case grh::ir::OperationKind::kSub:
             case grh::ir::OperationKind::kMul:
@@ -127,6 +128,21 @@ namespace wolf_sv_parser::transform
             return std::nullopt;
         }
 
+        std::optional<bool> getBoolAttr(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
+        {
+            (void)graph;
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<bool>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
         std::optional<int64_t> getIntAttr(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
         {
             (void)graph;
@@ -171,6 +187,10 @@ namespace wolf_sv_parser::transform
         std::optional<ConstantValue> parseConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op, const grh::ir::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
         {
             if (!literal.empty() && literal.front() == '"')
+            {
+                return std::nullopt;
+            }
+            if (!literal.empty() && literal.front() == '$')
             {
                 return std::nullopt;
             }
@@ -355,6 +375,32 @@ namespace wolf_sv_parser::transform
             std::optional<slang::SVInt> folded;
             switch (op.kind())
             {
+            case grh::ir::OperationKind::kSystemFunction: {
+                auto name = getStringAttr(graph, op, "name");
+                if (!name || name->empty())
+                {
+                    return std::nullopt;
+                }
+                if (auto sideEffect = getBoolAttr(graph, op, "hasSideEffects"); sideEffect && *sideEffect)
+                {
+                    return std::nullopt;
+                }
+                if (*name == "clog2")
+                {
+                    if (operands.size() != 1)
+                    {
+                        onError("$clog2 expects exactly one operand");
+                        return std::nullopt;
+                    }
+                    const uint32_t result = slang::clog2(operands[0]);
+                    folded = slang::SVInt(static_cast<uint64_t>(result));
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+                break;
+            }
             case grh::ir::OperationKind::kAdd:
             case grh::ir::OperationKind::kSub:
             case grh::ir::OperationKind::kMul:
@@ -550,7 +596,9 @@ namespace wolf_sv_parser::transform
             {
                 width = static_cast<int32_t>(value.getBitWidth());
             }
-            const grh::ir::ValueId newValue = graph.createValue(valueSym, width, resultValue.isSigned());
+            const grh::ir::ValueId newValue =
+                graph.createValue(valueSym, width, resultValue.isSigned(),
+                                  resultValue.type());
             const grh::ir::OperationId constOp = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(constOp, newValue);
             graph.setAttr(constOp, "constValue", formatConstLiteral(value));
@@ -629,6 +677,10 @@ namespace wolf_sv_parser::transform
                 auto reportError = [&](const std::string &msg)
                 { this->error(ctx.graph, op, msg); ctx.failed = true; };
                 grh::ir::Value res = ctx.graph.getValue(resId);
+                if (res.type() != grh::ir::ValueType::Logic)
+                {
+                    continue;
+                }
                 auto parsed = parseConstValue(ctx.graph, op, res, reportError);
                 if (!parsed)
                 {
@@ -673,6 +725,20 @@ namespace wolf_sv_parser::transform
                     continue;
                 }
                 if (ctx.foldedOps.find(opId) != ctx.foldedOps.end())
+                {
+                    continue;
+                }
+                bool nonLogicResult = false;
+                for (const auto resId : op.results())
+                {
+                    if (resId.valid() &&
+                        ctx.graph.getValue(resId).type() != grh::ir::ValueType::Logic)
+                    {
+                        nonLogicResult = true;
+                        break;
+                    }
+                }
+                if (nonLogicResult)
                 {
                     continue;
                 }

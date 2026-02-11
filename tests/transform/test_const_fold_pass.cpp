@@ -214,5 +214,75 @@ int main()
         }
     }
 
+    // Case 4: kSystemFunction $clog2 folds to constant
+    {
+        grh::ir::Netlist netlist;
+        grh::ir::Graph &graph = netlist.createGraph("g4");
+        grh::ir::ValueId arg = makeConst(graph, "arg", "arg_op", 8, false, "8'h8");
+
+        grh::ir::ValueId result = graph.createValue(graph.internSymbol("clog2_out"), 32, false);
+        grh::ir::OperationId sys = graph.createOperation(grh::ir::OperationKind::kSystemFunction,
+                                                         graph.internSymbol("sys_clog2"));
+        graph.addOperand(sys, arg);
+        graph.addResult(sys, result);
+        graph.setAttr(sys, "name", std::string("clog2"));
+        graph.setAttr(sys, "hasSideEffects", false);
+
+        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 32, false);
+        graph.bindOutputPort(graph.internSymbol("out"), out);
+        grh::ir::OperationId assign = graph.createOperation(grh::ir::OperationKind::kAssign,
+                                                            graph.internSymbol("assign_out"));
+        graph.addOperand(assign, result);
+        graph.addResult(assign, out);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<ConstantFoldPass>());
+
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(netlist, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during run: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected $clog2 constant folding to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected $clog2 folding to mark changes");
+        }
+        if (graph.findOperation("sys_clog2").valid())
+        {
+            return fail("kSystemFunction $clog2 op should be removed after folding");
+        }
+
+        grh::ir::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        if (!outVal.valid())
+        {
+            return fail("Output port missing after $clog2 folding");
+        }
+        grh::ir::Value outValue = graph.getValue(outVal);
+        if (!outValue.definingOp().valid() ||
+            graph.getOperation(outValue.definingOp()).kind() != grh::ir::OperationKind::kConstant)
+        {
+            return fail("Output port was not rewired to a constant after $clog2 folding");
+        }
+        auto literal = getConstLiteral(graph, graph.getOperation(outValue.definingOp()));
+        if (!literal)
+        {
+            return fail("Missing folded constant literal for $clog2");
+        }
+        auto value = literal->as<uint64_t>();
+        if (!value || *value != 3u)
+        {
+            return fail("Unexpected $clog2 constant value");
+        }
+    }
+
     return 0;
 }

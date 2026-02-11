@@ -1015,19 +1015,20 @@ WriteSlice{
 ```cpp
 // line 423-434
 struct LoweredStmt {
-    LoweredStmtKind kind;               // Write/Display/Assert/DpiCall/Finish
+    LoweredStmtKind kind;               // Write/SystemTask/DpiCall
     grh::ir::OperationKind op;          // 对应的 GRH 操作
     ExprNodeId updateCond;              // 触发条件（无条件时为常量 1）
+    ProcKind procKind;                  // initial/final/always_*
+    bool hasTiming;                     // 是否显式 timing control
     std::vector<EventEdge> eventEdges;  // posedge/negedge
     std::vector<ExprNodeId> eventOperands;  // 触发信号
     slang::SourceLocation location;
     WriteIntent write;                  // Write 语句内容
-    DisplayStmt display;                // $display 内容
-    AssertStmt assertion;               // $error/$warning 内容
+    SystemTaskStmt systemTask;          // system task 参数列表
     DpiCallStmt dpiCall;                // DPI 调用内容
 };
 
-enum class LoweredStmtKind { Write, Display, Assert, DpiCall, Finish };
+enum class LoweredStmtKind { Write, SystemTask, DpiCall };
 enum class EventEdge { Posedge, Negedge };
 ```
 
@@ -1039,11 +1040,12 @@ enum class EventEdge { Posedge, Negedge };
 
 | 字段 | 说明 |
 |------|------|
-| `kind` | 语句类型：赋值、显示、断言、DPI 调用 |
+| `kind` | 语句类型：赋值、system task、DPI 调用 |
 | `updateCond` | 语句级触发条件（如 `$display` 的触发条件） |
+| `procKind/hasTiming` | 过程块类型与 timing control 标记 |
 | `eventEdges` | 边沿触发列表（如 `posedge clk` `negedge rst_n`） |
 | `eventOperands` | 触发信号在 `values` 中的节点索引 |
-| `write/display/...` | union 风格的内容，根据 `kind` 选择有效字段 |
+| `write/systemTask/...` | union 风格的内容，根据 `kind` 选择有效字段 |
 
 **案例：时序块的 LoweredStmt**
 
@@ -1497,6 +1499,52 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
 - `NamedValueExpression` → `ExprNode{kind=Symbol}`
 - `BinaryExpression` → `ExprNode{kind=Operation, op=kAnd/...}`
 - `ConditionalExpression` → `ExprNode{kind=Operation, op=kMux}`
+
+**系统函数/任务支持现状（当前实现）**：
+
+**表达式侧（system function）**：
+- `$bits(expr)` → `kConstant`（常量值为位宽）
+- `$signed(expr)` / `$unsigned(expr)` → `kAssign`（表达式 cast，保留值并标注 isSigned）
+- `$time` / `$stime` / `$realtime` / `$random` / `$urandom` / `$urandom_range` / `$fopen` / `$ferror` / `$clog2` / `$size` → `kSystemFunction`
+  - `$sformatf/$psprintf/$itor/$rtoi/$realtobits/$bitstoreal` → `kSystemFunction`
+  - `$time/$stime/$realtime`：不接受参数
+  - `$random/$urandom`：支持 0~1 个参数
+  - `$urandom_range`：支持 1~2 个参数
+  - `$fopen`：支持 1~2 个参数（文件名 + 可选模式）
+  - `$ferror`：仅支持 1 个参数（文件句柄）；不支持输出字符串参数
+  - `$itor/$rtoi/$realtobits/$bitstoreal`：仅支持 1 个参数
+  - `$sformatf/$psprintf`：至少 1 个参数（format string + 可变参数）
+  - `$clog2` / `$size`：参数可解析时在 convert 阶段折叠为 `kConstant`
+  - `$random/$urandom/$urandom_range` 标注 `hasSideEffects`（避免折叠/去重）
+  - `$fopen/$ferror` 标注 `hasSideEffects`（避免折叠/去重）
+
+**语句侧（system task）**：
+- `$display` / `$write` / `$strobe`
+- `$fwrite` / `$fdisplay`（参数原样保留，首参通常为文件句柄）
+- `$fclose`（要求文件句柄）
+- `$info` / `$warning` / `$error` / `$fatal`
+  - `$fatal`：参数原样保留（可选 exit code 作为首参）
+- `$finish` / `$stop`（可选 exit code）
+- `$dumpfile`（要求文件名参数）
+- `$dumpvars`（仅支持全量 dump：无参数或 `0`）
+- `$fflush`（可选文件句柄）
+- `$readmemh/$readmemb`：记录为 `kMemory` 初始化属性（要求文件字面量 + memory 符号）
+  - `start/finish` 仅支持常量
+  - 非 `initial/final` 中出现会给 warning，并按初始化处理
+- `$sdf_annotate/$monitor/$monitoron/$monitoroff`：warning 并忽略
+  - 以上 system task 的参数均按调用顺序保留为 operands（含 format/file/exitCode）
+
+**DPI import 函数**：
+- 语句侧或表达式侧调用都降为 `LoweredStmtKind::DpiCall` + `kDpicCall`
+- 仅支持 **function** + **input/output** 参数；`output` 通过临时 symbol 写回
+- 表达式侧返回值为临时 symbol 的 `ExprNode{kind=Symbol}`
+
+**统一建模现状（kSystemFunction / kSystemTask）**：
+- `kSystemFunction` / `kSystemTask` 已成为 system call 的统一承载
+- 旧 `kDisplay` / `kFwrite` / `kFinish` / `kAssert` 已移除，统一由 `kSystemTask` 表达
+- `kSystemTask` 携带过程块上下文（`procKind`/`hasTiming`）以区分 initial/final/always 场景
+- `kSystemTask` 的参数全部以 operands 表达（包含 format/file/exitCode）
+- Transform 对 `kSystemFunction/kSystemTask` 视为有副作用节点，禁止常量折叠/去重
 
 **控制流处理**：
 - **if/else**：生成 `guard = base && cond`

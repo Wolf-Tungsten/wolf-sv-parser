@@ -108,6 +108,30 @@ std::optional<std::vector<std::string>> getAttrStrings(const grh::ir::Operation&
     return std::nullopt;
 }
 
+std::optional<std::vector<int64_t>> getAttrInts(const grh::ir::Operation& op,
+                                                std::string_view key) {
+    auto attr = op.attr(key);
+    if (!attr) {
+        return std::nullopt;
+    }
+    if (const auto* value = std::get_if<std::vector<int64_t>>(&*attr)) {
+        return *value;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::vector<bool>> getAttrBools(const grh::ir::Operation& op,
+                                              std::string_view key) {
+    auto attr = op.attr(key);
+    if (!attr) {
+        return std::nullopt;
+    }
+    if (const auto* value = std::get_if<std::vector<bool>>(&*attr)) {
+        return *value;
+    }
+    return std::nullopt;
+}
+
 int testGraphAssemblyMemory(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "graph_assembly_memory");
     if (!bundle || !bundle->compilation) {
@@ -147,6 +171,31 @@ int testGraphAssemblyMemory(const std::filesystem::path& sourcePath) {
             }
             if (*width != 8 || *rows != 16 || *isSigned) {
                 return fail("kMemory attributes do not match expected width/row/isSigned");
+            }
+            auto initKinds = getAttrStrings(op, "initKind");
+            auto initFiles = getAttrStrings(op, "initFile");
+            auto hasStart = getAttrBools(op, "initHasStart");
+            auto hasFinish = getAttrBools(op, "initHasFinish");
+            auto starts = getAttrInts(op, "initStart");
+            auto finishes = getAttrInts(op, "initFinish");
+            if (!initKinds || !initFiles || !hasStart || !hasFinish || !starts || !finishes) {
+                return fail("kMemory missing init attributes");
+            }
+            if (initKinds->size() != 2 || initFiles->size() != 2 || hasStart->size() != 2 ||
+                hasFinish->size() != 2 || starts->size() != 2 || finishes->size() != 2) {
+                return fail("kMemory init attribute sizes do not match expected count");
+            }
+            if ((*initKinds)[0] != "readmemh" || (*initKinds)[1] != "readmemb") {
+                return fail("kMemory initKind order mismatch");
+            }
+            if ((*initFiles)[0] != "mem_init.hex" || (*initFiles)[1] != "mem_init.bin") {
+                return fail("kMemory initFile order mismatch");
+            }
+            if ((*hasStart)[0] || !(*hasStart)[1] || (*hasFinish)[0] || !(*hasFinish)[1]) {
+                return fail("kMemory initHasStart/initHasFinish mismatch");
+            }
+            if ((*starts)[1] != 2 || (*finishes)[1] != 7) {
+                return fail("kMemory initStart/initFinish mismatch");
             }
             memoryAttrsOk = true;
             break;

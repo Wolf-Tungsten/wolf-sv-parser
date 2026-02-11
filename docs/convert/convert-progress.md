@@ -509,14 +509,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 在 Pass5 识别并保留调试系统任务（例如 `$display/$info/$warning/$error/$fatal`）
 - 支持 DPI-C 导入函数的语句调用（仅 input/output 方向），并支持可选返回值
 - 保留语句顺序，emit 侧按 GRH 的调用/副作用 OP 规范化输出
-- 仅在 edge-sensitive 触发列表内生成 display/DPI 调用；否则丢弃并诊断
+- 优先使用 edge-sensitive 触发列表生成 system task/DPI 调用；不满足上下文时诊断并丢弃
 - 对不可识别的调用给出明确诊断，保持可综合路径不受影响
 
 计划：
-- 扩展 `LoweringPlan`，新增统一 `LoweredStmt` 列表（Write/Display/Assert/DpiCall），
+- 扩展 `LoweringPlan`，新增统一 `LoweredStmt` 列表（Write/SystemTask/DpiCall），
   记录 kind/op、updateCond、location、eventEdge、event operands、以及参数列表
 - 引入事件绑定：在进入过程块时解析 edge-sensitive timing control，生成 event operands + eventEdge；
-  若无法解析或非 edge-sensitive，display/DPI 调用按 GRH 要求丢弃并诊断
+  若无法解析，system task/DPI 调用按上下文规则决定是否保留并诊断
 - 参数建模：`in` -> `ExprNodeId`；`out` -> 结果 value；
   可选返回值通过 `hasReturn` 与 `results[0]` 表示
 - StmtLowerer 在 `ExpressionStatement` 中识别系统任务与 DPI 调用，解析方向并生成 intent
@@ -525,11 +525,11 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新 workflow/architecture，补充 Pass5 处理“副作用语句”的流程与限制
 
 实施：
-- `LoweringPlan` 新增 `LoweredStmt` 列表与 Display/Assert/DpiCall 数据结构
+- `LoweringPlan` 新增 `LoweredStmt` 列表与 SystemTask/DpiCall 数据结构
 - StmtLowerer 进入过程块时解析 edge-sensitive timing control，填充 event operands/edges
 - `ExpressionStatement` 支持 `$display/$write/$strobe` 与 `$info/$warning/$error/$fatal` 降级
 - DPI-C import function 语句调用支持 input/output 方向与可选返回值占位
-- 非 edge-sensitive 事件调用丢弃并给出 warning 诊断
+- 非支持的过程块上下文给出 warning 诊断
 - 新增 `stmt_lowerer_display/dpi` fixture 与 `convert-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
@@ -749,20 +749,20 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 ## STEP 0037 - Pass8 副作用语句与 DPI 支持
 
 目标：
-- 落地 Display/Assert/DpiCall 为 GRH op
+- 落地 SystemTask/DpiCall 为 GRH op
 - 生成 DPI import（kDpicImport）并保障 call 解析规则
 
 计划：
-- LoweredStmt(Display/Assert/DpiCall) 发射为 kDisplay/kAssert/kDpicCall
+- LoweredStmt(SystemTask/DpiCall) 发射为 kSystemTask/kDpicCall
 - 建立 DPI import 扫描与 kDpicImport 生成（argsName/argsWidth/argsSigned 等）
 - kDpicCall 写入 targetImportSymbol/inArgName/outArgName/hasReturn/eventEdge
-- 新增 `convert-graph-assembly-dpi-display` 测试覆盖 display/assert/dpi 调用链路
+- 新增 `convert-graph-assembly-dpi-display` 测试覆盖 system task/dpi 调用链路
 - 更新 workflow/architecture 文档对齐副作用语句与 DPI 约束
 
 实施：
 - StmtLowerer 记录 `LoweringPlan.dpiImports` 并校验 DPI import 签名一致性
-- GraphAssembly 发射 kDisplay/kAssert/kDpicCall 与 kDpicImport，补齐 eventEdge/格式化/返回值元数据
-- Emit 支持 eventEdge 驱动 display/assert/dpi 调用，并解析 argsSigned/return 信息
+- GraphAssembly 发射 kSystemTask/kDpicCall 与 kDpicImport，补齐 eventEdge/返回值元数据
+- Emit 支持 eventEdge 驱动 system task/dpi 调用，并解析 argsSigned/return 信息
 - 新增 `convert-graph-assembly-dpi-display` 测试与 `graph_assembly_dpi_display.sv` fixture
 - 更新 workflow/architecture 文档对齐 DPI/副作用语句组装规则
 
@@ -1065,5 +1065,191 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `GraphAssembler` 图名解析加锁，`Netlist` 写回通过互斥串行化
 - `ConvertDriver::convert` 使用线程池并行处理 Graph 任务，topGraphs/alias 在主线程统一注册
 - 同步更新 `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md`
+
+完成情况：已完成
+
+## STEP 0051 - System call 统一建模（kSystemFunction / kSystemTask）
+
+目标：
+- 统一 **system function（表达式）** 与 **system task（语句）** 的 IR 表达
+- 可静态求解的 system function 继续折叠为常量；DPI 维持独立通路
+- 为 `$random(seed)` / `$urandom_range` / 读写 mem / dump 波形等常见语义提供一致入口
+
+计划（实现细化）：
+1) **GRH/IR 定义**
+   - 新增 `kSystemFunction`（表达式）与 `kSystemTask`（语句）op
+   - `kSystemFunction` 属性：`name`、`hasSideEffects`（width/isSigned 在 Value 上）
+   - `kSystemTask` 属性：`name`、`procKind/hasTiming`、`eventEdges/eventOperands`
+   - 任务参数（含 format/file/exitCode）统一作为 operands，operands[0] 为 callCond
+   - 保持 `kDpicCall` 独立（不并入 system call）
+2) **Convert ExprLowerer（表达式侧）**
+   - `$bits`：直接生成 `kConstant`
+   - `$signed/$unsigned`：保持 `kAssign` cast
+   - `$time/$stime/$realtime/$random/$urandom`：统一为 `kSystemFunction`
+   - `$random(seed)` / `$urandom(seed)` / `$urandom_range`：先收敛到 `kSystemFunction`，标注 `hasSideEffects`
+   - 其它未支持的 system function：保持报错（不做隐式降级）
+3) **Convert StmtLowerer（语句侧）**
+   - `$display/$write/$strobe/$fwrite/$fdisplay/$info/$warning/$error/$fatal`
+   - `$finish/$stop`
+   - `$dumpfile/$dumpvars`
+   - `$fflush`
+   - 统一生成 `kSystemTask`（旧 `kDisplay/kFwrite/kFinish` 已移除）
+   - `kSystemTask` 需要携带 **过程块上下文**（避免 initial/final 被错误丢弃）：
+     - `procKind`（Initial/Final/AlwaysComb/AlwaysLatch/AlwaysFF/Always）
+     - `hasTiming`（是否显式 timing control）
+     - `eventEdges/eventOperands`（边沿/敏感表，可为空）
+   - Emit 侧按 `procKind` 选择 `initial/final/always_*` 形态；只有“应有事件却为空”时才警告
+   - 语义约束与诊断：
+     - `$dumpvars`：仅支持“全量 dump”（无参数或参数为 `0`），其它参数/选择列表给 warning 并忽略
+     - `$sdf_annotate` / `$monitor` / `$monitoron` / `$monitoroff`：warning 并忽略
+4) **Transform 规则**
+   - const-fold / redundant-elim / CSE：**完全跳过** `kSystemFunction`（仅允许显式标注 `isPure` 的本地折叠）
+   - `kSystemTask` 永不折叠/去重
+5) **Emit 规则**
+   - `kSystemFunction` 原样发射为 `$name(args...)`（必要时补 cast）
+   - `kSystemTask` 原样发射为 `$name(args...)`（保留 guard 与 event 语义）
+6) **迁移与移除（供评估）**
+   - **已移除**：`kDisplay`、`kFwrite`、`kFinish`（统一转为 `kSystemTask`）
+   - **已移除**：`kAssert`（后续如需 SVA 再单独建模）
+   - **保留**：`kDpicCall`（不纳入 system task）
+7) **覆盖范围（阶段化）**
+   - Phase 1（仓库常用/关键）：`$display/$write/$strobe/$fwrite/$fdisplay/$info/$warning/$error/$fatal/$finish/$stop`
+     + `$dumpfile/$dumpvars`、`$fflush`
+     + `$bits/$clog2/$signed/$unsigned`、`$time/$stime/$realtime`、`$random/$urandom/$urandom_range`
+   - Phase 2（可选/需类型支持）：`$fopen/$fclose/$ferror`（已支持）
+     + 返回 string/real 的系统函数（如 `$sformatf`）已纳入（STEP 0053）
+
+暂不支持：
+- `$readmemh/$readmemb`（已迁移至 STEP 0052，以 `kMemory` 初始化属性处理）
+
+文档与测试：
+- 更新 `docs/GRH-representation.md`、`docs/convert/convert.md`（system function/task 分流表 + 迁移说明）
+- 增加 convert/emit/transform 覆盖（含 `$random`/`$time`/`$bits`）
+- 增加 system task 覆盖（优先补齐：`$dumpfile/$dumpvars`、`$fflush`、`$stop`）
+
+实施：
+- 已完成：
+  - 新增 `kSystemFunction/kSystemTask` op 定义与名称注册
+  - ExprLowerer：`$time/$stime/$realtime/$random/$urandom/$urandom_range` → `kSystemFunction`
+  - StmtLowerer：支持常见 system task，统一落 `kSystemTask`（含 `procKind/hasTiming`）
+  - Graph 组装：`kSystemFunction/kSystemTask` 属性与 operands 落地
+  - Emit：`kSystemFunction` 表达式发射、`kSystemTask` 初始/组合/时序块发射
+  - Transform：`kSystemFunction/kSystemTask` 视为有副作用，避免折叠/去重
+  - 移除旧 op：`kDisplay/kFwrite/kFinish/kAssert`
+  - 补充 `$fopen/$fclose/$ferror` system call 支持
+  - `kSystemTask` 参数统一以 operands 表达（format/file/exitCode）
+  - 文档：更新 `docs/convert/convert.md`
+  - 文档：更新 `docs/GRH-representation.md`
+  - 测试：补充 system function/task 覆盖
+
+测试：
+- 未运行
+
+完成情况：已完成
+
+## STEP 0053 - String/Real 类型支持（方案 B：完整类型）
+
+目标：
+- 为 `string/real` 引入 IR 级类型表达，并支持变量存储、赋值、比较与必要的系统函数
+- 解决 “real/string 不能用 continuous assign 驱动” 的发射限制
+
+计划（实现细化）：
+1) **GRH/IR 类型系统**
+   - `Value` 增加 `ValueType`（`Logic/Real/String`）
+   - JSON/Load/Emit 输出携带 `ValueType`
+   - `width/isSigned` 仅对 `Logic` 生效
+2) **Convert 类型分类**
+   - 新增 `classifyType(Type&) -> ValueType`
+   - `ExprNode`/Plan 传播 `ValueType`
+   - `string/real` 变量、端口、临时值均标注类型
+3) **Emitter 发射策略**
+   - `Logic` 保持现有 `assign`/net 生成
+   - `Real/String` 生成变量声明（`real`/`string`），**禁止 continuous assign**
+   - 为 `Real/String` 建立单独的赋值/组合块：
+     - 组合值用 `always_comb` + 阻塞赋值
+     - 避免 SSA 中间值的“assign”路径
+4) **Expr/Op 支持范围**
+   - `Real`：算术、比较、`$rtoi/$itor/$realtobits/$bitstoreal`
+   - `String`：赋值、比较、系统任务/函数参数
+   - 其它复杂运算（拼接/切片）保持诊断
+5) **Transform 规则**
+   - `Real/String` 值不参与 const-fold/CSE（除非显式纯函数）
+   - `kSystemFunction` 继续视为有副作用
+6) **测试与文档**
+   - 增加 convert/emit 覆盖：`real t = $realtime;`, `string s = $sformatf(...)`
+   - 更新 `docs/GRH-representation.md` 的类型章节
+
+实施：
+- GRH/IR 增加 `ValueType`，JSON/Load/Emit 带类型字段
+- Convert 传播 `ValueType`，补充 `real/string` 字面量
+- Emit 对 `Real/String` 走变量声明与 `always_comb` 赋值路径
+- Transform/Pass 跳过 `Real/String` 的 const-fold/CSE
+- 增补系统函数：`$sformatf/$psprintf/$itor/$rtoi/$realtobits/$bitstoreal`
+
+测试：
+- 未运行
+
+完成情况：已完成
+
+## STEP 0052 - $readmemh/$readmemb 作为 kMemory 初始化属性
+
+目标：
+- 以 **kMemory 属性**（而非 kSystemTask）表达 `$readmemh/$readmemb`
+- 避免优化/重写内存时丢失初始化语义
+- 统一 emit 出 initial 读文件行为
+
+计划：
+- Convert 侧识别 `$readmemh/$readmemb`：
+  - 解析参数：`file`（字符串字面量）、`mem`（必须是 memory 符号）、可选 `start/finish`
+  - 若在非 `initial`/`final` 过程块中出现，给 warning（或后续升级为 error）
+- 将初始化信息挂到 memory 描述中（ModulePlan 或 Graph 组装时写入 kMemory）：
+  - `initKind = readmemh/readmemb`
+  - `initFile`
+  - `initStart/initFinish`（可选）
+  - 多次 init 允许按出现顺序记录（`initOrder`）
+- GraphAssembler 在创建 kMemory op 时带上 init 属性
+- Emit：
+  - 根据 kMemory 的 init 属性生成 `initial $readmemh/$readmemb(...)`
+  - 保证 memory 名称与 kMemory 对应 symbol 一致
+- Transform：
+  - memory 合并/替换时要求 init 属性一致，避免语义漂移
+
+实施：
+- 已完成：
+  - Convert 解析 `$readmemh/$readmemb` 并记录为 memory init
+  - GraphAssembler 将 init 属性写入 kMemory（`initKind/initFile/initStart/initFinish` + `initHasStart/initHasFinish`）
+  - Emit 根据 kMemory 的 init 属性生成 `initial $readmemh/$readmemb(...)`
+  - 非 `initial/final` 场景给 warning，按 init 处理
+- Transform：新增 `MemoryInitCheckPass`，合并/替换场景下校验 init 属性一致性
+
+测试：
+- 新增包含 `$readmemh/$readmemb` 的 convert/emit 案例
+- 覆盖 start/finish 可选参数
+
+完成情况：已完成
+
+## STEP 0054 - 可常量求值 system function 的折叠策略
+
+目标：
+- 凡是可静态求值的 system function，都在 convert 或 transform 阶段折叠为 `kConstant`
+- `kSystemFunction` 只保留“运行期/有副作用”调用
+
+计划：
+1) **Convert 侧优先折叠**
+   - 引入可折叠白名单（`$bits/$clog2/$size` 等）
+   - 当参数全为常量时，直接求值生成 `kConstant`
+2) **Transform 侧补漏**
+   - 仅当 `hasSideEffects=false` 且 name 在白名单、operands 都是 `kConstant` 时允许折叠
+   - 其余 `kSystemFunction` 永不折叠/去重
+3) **System task 处理**
+   - 不做“求值折叠”，只允许常量 guard 下的死语句清理（如 `if (0)` 任务块）
+
+实施：
+- Convert 侧：`$bits/$clog2/$size` 在参数可解析时折叠为 `kConstant`
+- Transform 侧：对 `kSystemFunction` 中白名单函数（如 `$clog2`）在 operands 常量且 `hasSideEffects=false` 时折叠
+- 其余 system function 保持为 `kSystemFunction`（不折叠）
+
+测试：
+- 未运行
 
 完成情况：已完成

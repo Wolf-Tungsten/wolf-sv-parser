@@ -180,6 +180,16 @@ enum class ControlDomain {
     Unknown
 };
 
+enum class ProcKind {
+    Initial,
+    Final,
+    AlwaysComb,
+    AlwaysLatch,
+    AlwaysFF,
+    Always,
+    Unknown
+};
+
 using PortId = PlanIndex;
 using SignalId = PlanIndex;
 using InstanceId = PlanIndex;
@@ -190,6 +200,7 @@ struct PortInfo {
     PortDirection direction = PortDirection::Input;
     int32_t width = 0;
     bool isSigned = false;
+    grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
     struct InoutBinding {
         PlanSymbolId inSymbol;
         PlanSymbolId outSymbol;
@@ -214,6 +225,7 @@ struct SignalInfo {
     SignalKind kind = SignalKind::Net;
     int32_t width = 0;
     bool isSigned = false;
+    grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
     int64_t memoryRows = 0;
     std::vector<int32_t> packedDims;
     std::vector<UnpackedDimInfo> unpackedDims;
@@ -297,10 +309,13 @@ struct ExprNode {
     PlanSymbolId symbol;
     PlanSymbolId tempSymbol;
     std::string literal;
+    std::string systemName;
     std::string xmrPath;
     std::vector<ExprNodeId> operands;
     int32_t widthHint = 0;
     bool isSigned = false;
+    grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
+    bool hasSideEffects = false;
     slang::SourceLocation location{};
 };
 
@@ -346,19 +361,9 @@ enum class EventEdge {
     Negedge
 };
 
-struct DisplayStmt {
-    std::string formatString;
-    std::string displayKind;
+struct SystemTaskStmt {
+    std::string name;
     std::vector<ExprNodeId> args;
-    ExprNodeId fileHandle = kInvalidPlanIndex;
-    ExprNodeId exitCode = kInvalidPlanIndex;
-    bool hasExitCode = false;
-};
-
-struct AssertStmt {
-    ExprNodeId condition = kInvalidPlanIndex;
-    std::string message;
-    std::string severity;
 };
 
 struct DpiCallStmt {
@@ -385,29 +390,22 @@ struct DpiImportInfo {
 
 enum class LoweredStmtKind {
     Write,
-    Display,
-    Assert,
-    DpiCall,
-    Finish
-};
-
-struct FinishStmt {
-    ExprNodeId exitCode = kInvalidPlanIndex;
-    bool hasExitCode = false;
+    SystemTask,
+    DpiCall
 };
 
 struct LoweredStmt {
     LoweredStmtKind kind = LoweredStmtKind::Write;
     grh::ir::OperationKind op = grh::ir::OperationKind::kAssign;
     ExprNodeId updateCond = kInvalidPlanIndex;
+    ProcKind procKind = ProcKind::Unknown;
+    bool hasTiming = false;
     std::vector<EventEdge> eventEdges;
     std::vector<ExprNodeId> eventOperands;
     slang::SourceLocation location{};
     WriteIntent write;
-    DisplayStmt display;
-    AssertStmt assertion;
+    SystemTaskStmt systemTask;
     DpiCallStmt dpiCall;
-    FinishStmt finish;
 };
 
 struct MemoryReadPort {
@@ -435,6 +433,17 @@ struct MemoryWritePort {
     slang::SourceLocation location{};
 };
 
+struct MemoryInit {
+    PlanSymbolId memory;
+    std::string kind;
+    std::string file;
+    bool hasStart = false;
+    bool hasFinish = false;
+    int64_t start = 0;
+    int64_t finish = 0;
+    slang::SourceLocation location{};
+};
+
 struct LoweringPlan {
     std::vector<ExprNode> values;
     std::vector<PlanSymbolId> tempSymbols;
@@ -443,6 +452,7 @@ struct LoweringPlan {
     std::vector<DpiImportInfo> dpiImports;
     std::vector<MemoryReadPort> memoryReads;
     std::vector<MemoryWritePort> memoryWrites;
+    std::vector<MemoryInit> memoryInits;
 };
 
 struct WriteBackPlan {

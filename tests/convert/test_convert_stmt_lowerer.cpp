@@ -155,6 +155,21 @@ bool hasWarningMessage(const wolf_sv_parser::ConvertDiagnostics& diagnostics,
     return false;
 }
 
+bool matchesFormatLiteral(std::string_view literal, std::string_view expected) {
+    if (literal == expected) {
+        return true;
+    }
+    std::string normalized(literal);
+    if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"') {
+        normalized = normalized.substr(1, normalized.size() - 2);
+    }
+    if (normalized.size() >= 4 && normalized[0] == '\\' && normalized[1] == '"' &&
+        normalized[normalized.size() - 2] == '\\' && normalized.back() == '"') {
+        normalized = normalized.substr(2, normalized.size() - 4);
+    }
+    return normalized == expected;
+}
+
 constexpr std::size_t kLargeLoopCount = 5000;
 
 int testLowerer(const std::filesystem::path& sourcePath) {
@@ -1151,27 +1166,35 @@ int testDisplayLowering(const std::filesystem::path& sourcePath) {
 
     const wolf_sv_parser::LoweredStmt* displayStmt = nullptr;
     for (const auto& stmt : lowering.loweredStmts) {
-        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::SystemTask &&
+            stmt.systemTask.name == "display") {
             displayStmt = &stmt;
             break;
         }
     }
     if (!displayStmt) {
-        return fail("Missing display lowered statement in " + sourcePath.string());
+        return fail("Missing display system task in " + sourcePath.string());
     }
-    if (displayStmt->display.formatString != "a=%0d") {
-        return fail("Unexpected display format string in " + sourcePath.string());
-    }
-    if (displayStmt->display.displayKind != "display") {
-        return fail("Unexpected display kind in " + sourcePath.string());
-    }
-    if (displayStmt->display.args.size() != 1) {
+    if (displayStmt->systemTask.args.size() != 2) {
         return fail("Unexpected display arg count in " + sourcePath.string());
     }
-    if (displayStmt->display.args.front() >= lowering.values.size()) {
+    if (displayStmt->systemTask.args.front() >= lowering.values.size()) {
+        return fail("Display format index out of range in " + sourcePath.string());
+    }
+    const auto& formatNode = lowering.values[displayStmt->systemTask.args.front()];
+    if (formatNode.kind != wolf_sv_parser::ExprNodeKind::Constant ||
+        formatNode.valueType != grh::ir::ValueType::String ||
+        !matchesFormatLiteral(formatNode.literal, "a=%0d")) {
+        std::string detail = "Unexpected display format literal: literal='" +
+                             formatNode.literal + "', type=" +
+                             std::string(grh::ir::toString(formatNode.valueType)) +
+                             " in " + sourcePath.string();
+        return fail(detail);
+    }
+    if (displayStmt->systemTask.args[1] >= lowering.values.size()) {
         return fail("Display arg index out of range in " + sourcePath.string());
     }
-    const auto& argNode = lowering.values[displayStmt->display.args.front()];
+    const auto& argNode = lowering.values[displayStmt->systemTask.args[1]];
     if (argNode.kind != wolf_sv_parser::ExprNodeKind::Symbol ||
         plan.symbolTable.text(argNode.symbol) != std::string_view("a")) {
         return fail("Unexpected display arg symbol in " + sourcePath.string());
@@ -1209,30 +1232,41 @@ int testDisplayTimeLowering(const std::filesystem::path& sourcePath) {
 
     const wolf_sv_parser::LoweredStmt* displayStmt = nullptr;
     for (const auto& stmt : lowering.loweredStmts) {
-        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::SystemTask &&
+            stmt.systemTask.name == "display") {
             displayStmt = &stmt;
             break;
         }
     }
     if (!displayStmt) {
-        return fail("Missing display lowered statement in " + sourcePath.string());
+        return fail("Missing display system task in " + sourcePath.string());
     }
-    if (displayStmt->display.formatString != "t=%t/%0t") {
-        return fail("Unexpected display format string in " + sourcePath.string());
-    }
-    if (displayStmt->display.displayKind != "display") {
-        return fail("Unexpected display kind in " + sourcePath.string());
-    }
-    if (displayStmt->display.args.size() != 2) {
+    if (displayStmt->systemTask.args.size() != 3) {
         return fail("Unexpected display arg count in " + sourcePath.string());
     }
-    for (std::size_t i = 0; i < displayStmt->display.args.size(); ++i) {
-        const auto argId = displayStmt->display.args[i];
+    const auto formatId = displayStmt->systemTask.args[0];
+    if (formatId >= lowering.values.size()) {
+        return fail("Display format index out of range in " + sourcePath.string());
+    }
+    const auto& formatNode = lowering.values[formatId];
+    if (formatNode.kind != wolf_sv_parser::ExprNodeKind::Constant ||
+        formatNode.valueType != grh::ir::ValueType::String ||
+        !matchesFormatLiteral(formatNode.literal, "t=%t/%0t")) {
+        std::string detail = "Unexpected display format literal: literal='" +
+                             formatNode.literal + "', type=" +
+                             std::string(grh::ir::toString(formatNode.valueType)) +
+                             " in " + sourcePath.string();
+        return fail(detail);
+    }
+    for (std::size_t i = 1; i < displayStmt->systemTask.args.size(); ++i) {
+        const auto argId = displayStmt->systemTask.args[i];
         if (argId >= lowering.values.size()) {
             return fail("Display arg index out of range in " + sourcePath.string());
         }
         const auto& argNode = lowering.values[argId];
-        if (argNode.kind != wolf_sv_parser::ExprNodeKind::Constant || argNode.literal != "$time") {
+        if (argNode.kind != wolf_sv_parser::ExprNodeKind::Operation ||
+            argNode.op != grh::ir::OperationKind::kSystemFunction ||
+            argNode.systemName != "time") {
             return fail("Unexpected display time arg in " + sourcePath.string());
         }
     }
@@ -1250,17 +1284,22 @@ int testDisplayRequiresEdge(const std::filesystem::path& sourcePath) {
         return fail("Failed to build lowering plan for " + sourcePath.string());
     }
 
-    std::size_t displayCount = 0;
+    const wolf_sv_parser::LoweredStmt* displayStmt = nullptr;
     for (const auto& stmt : lowering.loweredStmts) {
-        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::Display) {
-            ++displayCount;
+        if (stmt.kind == wolf_sv_parser::LoweredStmtKind::SystemTask &&
+            stmt.systemTask.name == "display") {
+            displayStmt = &stmt;
+            break;
         }
     }
-    if (displayCount != 0) {
-        return fail("Expected display lowering to be dropped in " + sourcePath.string());
+    if (!displayStmt) {
+        return fail("Missing display system task in " + sourcePath.string());
     }
-    if (!hasWarningMessage(diagnostics, "edge-sensitive")) {
-        return fail("Expected display edge warning in " + sourcePath.string());
+    if (displayStmt->procKind != wolf_sv_parser::ProcKind::AlwaysComb) {
+        return fail("Unexpected display proc kind in " + sourcePath.string());
+    }
+    if (!displayStmt->eventEdges.empty() || !displayStmt->eventOperands.empty()) {
+        return fail("Unexpected display event binding in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {
         return fail("Unexpected Convert diagnostics errors in " + sourcePath.string());

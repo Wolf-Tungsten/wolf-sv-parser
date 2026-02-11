@@ -810,6 +810,8 @@ namespace grh::emit
                                        { out.append(std::to_string(value.width())); });
                                   prop("sgn", [&]
                                        { out.append(value.isSigned() ? "true" : "false"); });
+                                  prop("type", [&]
+                                       { appendQuotedString(out, std::string(grh::ir::toString(value.type()))); });
                                   prop("in", [&]
                                        { out.append(value.isInput() ? "true" : "false"); });
                                   prop("out", [&]
@@ -1226,6 +1228,8 @@ namespace grh::emit
                                        { out.append(std::to_string(view.valueWidth(valueId))); });
                                   prop("sgn", [&]
                                        { out.append(view.valueSigned(valueId) ? "true" : "false"); });
+                                  prop("type", [&]
+                                       { appendQuotedString(out, std::string(grh::ir::toString(view.valueType(valueId)))); });
                                   prop("in", [&]
                                        { out.append(view.valueIsInput(valueId) ? "true" : "false"); });
                                   prop("out", [&]
@@ -2148,12 +2152,19 @@ namespace grh::emit
             std::optional<grh::ir::SrcLoc> debug;
         };
 
+        struct VarDecl
+        {
+            grh::ir::ValueType type = grh::ir::ValueType::Logic;
+            std::optional<grh::ir::SrcLoc> debug;
+        };
+
         struct PortDecl
         {
             PortDir dir = PortDir::Input;
             int64_t width = 1;
             bool isSigned = false;
             bool isReg = false;
+            grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
             std::optional<grh::ir::SrcLoc> debug;
         };
 
@@ -2171,6 +2182,13 @@ namespace grh::emit
         struct SeqBlock
         {
             SeqKey key{};
+            std::vector<std::string> stmts;
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
+        };
+
+        struct SimpleBlock
+        {
+            std::string header;
             std::vector<std::string> stmts;
             grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
@@ -2327,6 +2345,26 @@ namespace grh::emit
             return out;
         }
 
+        std::string formatVarDecl(grh::ir::ValueType type, const std::string &name)
+        {
+            std::string out;
+            switch (type)
+            {
+            case grh::ir::ValueType::Real:
+                out.append("real ");
+                break;
+            case grh::ir::ValueType::String:
+                out.append("string ");
+                break;
+            default:
+                out.append("logic ");
+                break;
+            }
+            out.append(name);
+            out.push_back(';');
+            return out;
+        }
+
         int findNameIndex(const std::vector<std::string> &names, const std::string &target)
         {
             for (std::size_t i = 0; i < names.size(); ++i)
@@ -2445,7 +2483,24 @@ namespace grh::emit
                 const grh::ir::Value value = graph->getValue(valueId);
                 return value.isInput() || value.isOutput() || value.isInout();
             };
-            auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+            auto valueType = [&](grh::ir::ValueId valueId) -> grh::ir::ValueType
+            {
+                return graph->getValue(valueId).type();
+            };
+            auto formatConstLiteral = [&](grh::ir::ValueId valueId,
+                                          std::string_view literal) -> std::string
+            {
+                if (valueType(valueId) == grh::ir::ValueType::String)
+                {
+                    if (literal.size() >= 2 && literal.front() == '"' && literal.back() == '"')
+                    {
+                        return std::string(literal);
+                    }
+                    return "\"" + escapeSvString(literal) + "\"";
+                }
+                return std::string(literal);
+            };
+            auto constLiteralRawFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
             {
                 if (!valueId.valid())
                 {
@@ -2463,6 +2518,15 @@ namespace grh::emit
                     return std::nullopt;
                 }
                 return getAttribute<std::string>(*graph, defOp, "constValue");
+            };
+            auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+            {
+                auto raw = constLiteralRawFor(valueId);
+                if (!raw)
+                {
+                    return std::nullopt;
+                }
+                return formatConstLiteral(valueId, *raw);
             };
             auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
             {
@@ -2565,7 +2629,11 @@ namespace grh::emit
             };
             auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (auto literal = constLiteralFor(valueId))
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                if (auto literal = constLiteralRawFor(valueId))
                 {
                     if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
                     {
@@ -2634,7 +2702,7 @@ namespace grh::emit
                 const std::string name = std::string(graph->symbolText(port.name));
                 grh::ir::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Input, value.width(), value.isSigned(), false,
-                                           value.srcLoc()};
+                                           value.type(), value.srcLoc()};
             }
             for (const auto &port : graph->outputPorts())
             {
@@ -2645,7 +2713,7 @@ namespace grh::emit
                 const std::string name = std::string(graph->symbolText(port.name));
                 grh::ir::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
-                                           value.srcLoc()};
+                                           value.type(), value.srcLoc()};
             }
             for (const auto &port : graph->inoutPorts())
             {
@@ -2656,7 +2724,7 @@ namespace grh::emit
                 const std::string name = std::string(graph->symbolText(port.name));
                 grh::ir::Value value = graph->getValue(port.out);
                 portDecls[name] = PortDecl{PortDir::Inout, value.width(), value.isSigned(), false,
-                                           value.srcLoc()};
+                                           value.type(), value.srcLoc()};
             }
 
             // Book-keeping for declarations.
@@ -2667,6 +2735,7 @@ namespace grh::emit
             }
 
             // Storage for various sections.
+            std::map<std::string, VarDecl, std::less<>> varDecls;
             std::map<std::string, NetDecl, std::less<>> regDecls;
             std::map<std::string, NetDecl, std::less<>> wireDecls;
             std::vector<std::pair<std::string, grh::ir::OperationId>> memoryDecls;
@@ -2675,12 +2744,36 @@ namespace grh::emit
             std::vector<std::pair<std::string, grh::ir::OperationId>> assignStmts;
             std::vector<std::pair<std::string, grh::ir::OperationId>> portBindingStmts;
             std::vector<std::pair<std::string, grh::ir::OperationId>> latchBlocks;
+            std::vector<SimpleBlock> simpleBlocks;
             std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
 
-            auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
+            auto ensureVarDecl = [&](const std::string &name,
+                                     grh::ir::ValueType type,
                                      const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
             {
+                if (declaredNames.find(name) != declaredNames.end())
+                {
+                    auto it = varDecls.find(name);
+                    if (it != varDecls.end() && debug && !it->second.debug)
+                    {
+                        it->second.debug = *debug;
+                    }
+                    return;
+                }
+                varDecls.emplace(name, VarDecl{type, debug});
+                declaredNames.insert(name);
+            };
+
+            auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
+                                     grh::ir::ValueType valueType,
+                                     const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
+            {
+                if (valueType != grh::ir::ValueType::Logic)
+                {
+                    ensureVarDecl(name, valueType, debug);
+                    return;
+                }
                 if (declaredNames.find(name) != declaredNames.end())
                 {
                     auto it = regDecls.find(name);
@@ -2698,6 +2791,11 @@ namespace grh::emit
             {
                 grh::ir::Value value = graph->getValue(valueId);
                 const std::string name = std::string(value.symbolText());
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    ensureVarDecl(name, value.type(), value.srcLoc());
+                    return;
+                }
                 if (declaredNames.find(name) != declaredNames.end())
                 {
                     auto it = wireDecls.find(name);
@@ -2714,6 +2812,40 @@ namespace grh::emit
             auto addAssign = [&](std::string stmt, grh::ir::OperationId sourceOp)
             {
                 assignStmts.emplace_back(std::move(stmt), sourceOp);
+            };
+            auto addSimpleStmt = [&](std::string header, std::string stmt,
+                                     grh::ir::OperationId sourceOp)
+            {
+                for (auto &block : simpleBlocks)
+                {
+                    if (block.header == header)
+                    {
+                        block.stmts.push_back(std::move(stmt));
+                        return;
+                    }
+                }
+                simpleBlocks.push_back(
+                    SimpleBlock{std::move(header), std::vector<std::string>{std::move(stmt)}, sourceOp});
+            };
+            auto addCombAssign = [&](const std::string &lhs, const std::string &rhs,
+                                     grh::ir::OperationId sourceOp)
+            {
+                std::ostringstream stmt;
+                appendIndented(stmt, 2, lhs + " = " + rhs + ";");
+                addSimpleStmt("always_comb", stmt.str(), sourceOp);
+            };
+            auto addValueAssign = [&](grh::ir::ValueId result,
+                                      const std::string &rhs,
+                                      grh::ir::OperationId sourceOp)
+            {
+                if (valueType(result) != grh::ir::ValueType::Logic)
+                {
+                    addCombAssign(valueName(result), rhs, sourceOp);
+                }
+                else
+                {
+                    addAssign("assign " + valueName(result) + " = " + rhs + ";", sourceOp);
+                }
             };
 
             auto sameSeqKey = [](const SeqKey &lhs, const SeqKey &rhs) -> bool
@@ -2753,6 +2885,10 @@ namespace grh::emit
 
             auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
             {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
                 const int64_t width = graph->getValue(valueId).width();
                 const std::string name = valueExpr(valueId);
                 if (width == 1)
@@ -2764,6 +2900,10 @@ namespace grh::emit
             auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
             {
                 const grh::ir::Value value = graph->getValue(valueId);
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
                 const int64_t width = value.width();
                 const std::string name = valueExpr(valueId);
                 if (targetWidth <= 0 || width <= 0 || width == targetWidth)
@@ -2786,6 +2926,10 @@ namespace grh::emit
                                           bool signExtend) -> std::string
             {
                 const grh::ir::Value value = graph->getValue(valueId);
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
                 const int64_t width = value.width();
                 const std::string name = valueExpr(valueId);
                 if (targetWidth <= 0 || width <= 0 || width == targetWidth)
@@ -3073,6 +3217,10 @@ namespace grh::emit
 
             auto markPortAsRegIfNeeded = [&](grh::ir::ValueId valueId)
             {
+                if (graph->getValue(valueId).type() != grh::ir::ValueType::Logic)
+                {
+                    return;
+                }
                 const std::string name = valueName(valueId);
                 auto itPort = portDecls.find(name);
                 if (itPort != portDecls.end() && itPort->second.dir == PortDir::Output)
@@ -3340,7 +3488,39 @@ namespace grh::emit
                         reportError("kConstant missing constValue attribute", opContext);
                         break;
                     }
-                    addAssign("assign " + valueName(results[0]) + " = " + *constValue + ";", opId);
+                    addValueAssign(results[0], formatConstLiteral(results[0], *constValue), opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
+                case grh::ir::OperationKind::kSystemFunction:
+                {
+                    if (results.empty())
+                    {
+                        reportError("kSystemFunction missing result", opContext);
+                        break;
+                    }
+                    auto name = getAttribute<std::string>(*graph, op, "name");
+                    if (!name || name->empty())
+                    {
+                        reportError("kSystemFunction missing name", opContext);
+                        break;
+                    }
+                    std::ostringstream expr;
+                    expr << "$" << *name;
+                    if (!operands.empty())
+                    {
+                        expr << "(";
+                        for (std::size_t i = 0; i < operands.size(); ++i)
+                        {
+                            if (i != 0)
+                            {
+                                expr << ", ";
+                            }
+                            expr << valueExpr(operands[i]);
+                        }
+                        expr << ")";
+                    }
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3379,7 +3559,7 @@ namespace grh::emit
                         graph->getValue(operands[1]).isSigned();
                     const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
                     const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
-                    addAssign("assign " + valueName(results[0]) + " = " + lhsExpr + " " + tok + " " + rhsExpr + ";", opId);
+                    addValueAssign(results[0], lhsExpr + " " + tok + " " + rhsExpr, opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3394,9 +3574,9 @@ namespace grh::emit
                         break;
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " " + tok + " " +
-                                  valueExpr(operands[1]) + ";",
-                              opId);
+                    addValueAssign(results[0],
+                                   valueExpr(operands[0]) + " " + tok + " " + valueExpr(operands[1]),
+                                   opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3417,9 +3597,9 @@ namespace grh::emit
                     const std::string lhs = resultWidth > 0
                                                 ? extendShiftOperand(operands[0], resultWidth, signExtend)
                                                 : valueExpr(operands[0]);
-                    addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " +
-                                  valueExpr(operands[1]) + ";",
-                              opId);
+                    addValueAssign(results[0],
+                                   lhs + " " + tok + " " + valueExpr(operands[1]),
+                                   opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3441,10 +3621,10 @@ namespace grh::emit
                                                graph->getValue(operands[1]).width());
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " +
-                                  extendOperand(operands[0], resultWidth) + " " + tok + " " +
-                                  extendOperand(operands[1], resultWidth) + ";",
-                              opId);
+                    addValueAssign(results[0],
+                                   extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                                       extendOperand(operands[1], resultWidth),
+                                   opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3457,9 +3637,10 @@ namespace grh::emit
                         break;
                     }
                     const std::string tok = binOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + logicalOperand(operands[0]) + " " + tok +
-                                  " " + logicalOperand(operands[1]) + ";",
-                              opId);
+                    addValueAssign(results[0],
+                                   logicalOperand(operands[0]) + " " + tok + " " +
+                                       logicalOperand(operands[1]),
+                                   opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3477,7 +3658,7 @@ namespace grh::emit
                         break;
                     }
                     const std::string tok = unaryOpToken(op.kind());
-                    addAssign("assign " + valueName(results[0]) + " = " + tok + valueExpr(operands[0]) + ";", opId);
+                    addValueAssign(results[0], tok + valueExpr(operands[0]), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3488,7 +3669,7 @@ namespace grh::emit
                         reportError("Unary operation missing operands or results", opContext);
                         break;
                     }
-                    addAssign("assign " + valueName(results[0]) + " = !" + logicalOperand(operands[0]) + ";", opId);
+                    addValueAssign(results[0], "!" + logicalOperand(operands[0]), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3502,9 +3683,9 @@ namespace grh::emit
                     int64_t resultWidth = graph->getValue(results[0]).width();
                     const std::string lhs = extendOperand(operands[1], resultWidth);
                     const std::string rhs = extendOperand(operands[2], resultWidth);
-                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + " ? " +
-                                  lhs + " : " + rhs + ";",
-                              opId);
+                    addValueAssign(results[0],
+                                   valueExpr(operands[0]) + " ? " + lhs + " : " + rhs,
+                                   opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3522,7 +3703,7 @@ namespace grh::emit
                     }
                     int64_t resultWidth = graph->getValue(results[0]).width();
                     const std::string rhs = extendOperand(operands[0], resultWidth);
-                    addAssign("assign " + valueName(results[0]) + " = " + rhs + ";", opId);
+                    addValueAssign(results[0], rhs, opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3535,12 +3716,12 @@ namespace grh::emit
                     }
                     if (operands.size() == 1)
                     {
-                        addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + ";", opId);
+                        addValueAssign(results[0], valueExpr(operands[0]), opId);
                         ensureWireDecl(results[0]);
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = {";
+                    expr << "{";
                     for (std::size_t i = 0; i < operands.size(); ++i)
                     {
                         if (i != 0)
@@ -3549,8 +3730,8 @@ namespace grh::emit
                         }
                         expr << concatOperandExpr(operands[i]);
                     }
-                    expr << "};";
-                    addAssign(expr.str(), opId);
+                    expr << "}";
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3568,8 +3749,8 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << concatOperandExpr(operands[0]) << "}};";
-                    addAssign(expr.str(), opId);
+                    expr << "{" << *rep << "{" << concatOperandExpr(operands[0]) << "}}";
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3589,7 +3770,6 @@ namespace grh::emit
                     }
                     const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = ";
                     if (operandWidth == 1)
                     {
                         if (*sliceStart != 0 || *sliceEnd != 0)
@@ -3611,8 +3791,7 @@ namespace grh::emit
                         }
                         expr << "]";
                     }
-                    expr << ";";
-                    addAssign(expr.str(), opId);
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3631,7 +3810,6 @@ namespace grh::emit
                     }
                     const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = ";
                     if (operandWidth == 1)
                     {
                         if (*width != 1)
@@ -3648,8 +3826,7 @@ namespace grh::emit
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
                     }
-                    expr << ";";
-                    addAssign(expr.str(), opId);
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3668,7 +3845,6 @@ namespace grh::emit
                     }
                     const int64_t operandWidth = graph->getValue(operands[0]).width();
                     std::ostringstream expr;
-                    expr << "assign " << valueName(results[0]) << " = ";
                     if (*width == 1 && operandWidth == 1)
                     {
                         expr << valueExpr(operands[0]);
@@ -3686,8 +3862,7 @@ namespace grh::emit
                         }
                         expr << "]";
                     }
-                    expr << ";";
-                    addAssign(expr.str(), opId);
+                    addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -3720,7 +3895,8 @@ namespace grh::emit
                         reportError("kLatch data/output width mismatch", opContext);
                         break;
                     }
-                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
+                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), dValue.type(),
+                                  op.srcLoc());
                     const bool directDrive = valueName(q) == regName;
                     if (directDrive)
                     {
@@ -3729,7 +3905,7 @@ namespace grh::emit
                     else
                     {
                         ensureWireDecl(q);
-                        addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
+                        addValueAssign(q, regName, opId);
                     }
 
                     std::ostringstream block;
@@ -3789,7 +3965,8 @@ namespace grh::emit
                         break;
                     }
 
-                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), op.srcLoc());
+                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), dValue.type(),
+                                  op.srcLoc());
                     const bool directDrive = valueName(q) == regName;
                     if (directDrive)
                     {
@@ -3798,7 +3975,7 @@ namespace grh::emit
                     else
                     {
                         ensureWireDecl(q);
-                        addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
+                        addValueAssign(q, regName, opId);
                     }
 
                     std::ostringstream stmt;
@@ -3829,6 +4006,65 @@ namespace grh::emit
                     decl << "reg " << (*isSignedAttr ? "signed " : "") << "[" << (*widthAttr - 1) << ":0] " << opContext << " [0:" << (*rowAttr - 1) << "];";
                     memoryDecls.emplace_back(decl.str(), opId);
                     declaredNames.insert(opContext);
+
+                    auto initKinds = getAttribute<std::vector<std::string>>(*graph, op, "initKind");
+                    auto initFiles = getAttribute<std::vector<std::string>>(*graph, op, "initFile");
+                    if (initKinds || initFiles)
+                    {
+                        if (!initKinds || !initFiles || initKinds->size() != initFiles->size())
+                        {
+                            reportError("kMemory initKind/initFile size mismatch", opContext);
+                            break;
+                        }
+                        const std::size_t count = initKinds->size();
+                        auto hasStart = getAttribute<std::vector<bool>>(*graph, op, "initHasStart");
+                        auto hasFinish = getAttribute<std::vector<bool>>(*graph, op, "initHasFinish");
+                        auto starts = getAttribute<std::vector<int64_t>>(*graph, op, "initStart");
+                        auto finishes = getAttribute<std::vector<int64_t>>(*graph, op, "initFinish");
+                        if (hasStart && hasStart->size() != count)
+                        {
+                            reportError("kMemory initHasStart size mismatch", opContext);
+                            break;
+                        }
+                        if (hasFinish && hasFinish->size() != count)
+                        {
+                            reportError("kMemory initHasFinish size mismatch", opContext);
+                            break;
+                        }
+                        if (starts && starts->size() != count)
+                        {
+                            reportError("kMemory initStart size mismatch", opContext);
+                            break;
+                        }
+                        if (finishes && finishes->size() != count)
+                        {
+                            reportError("kMemory initFinish size mismatch", opContext);
+                            break;
+                        }
+                        std::vector<bool> localHasStart = hasStart.value_or(std::vector<bool>(count, false));
+                        std::vector<bool> localHasFinish = hasFinish.value_or(std::vector<bool>(count, false));
+                        std::vector<int64_t> localStarts = starts.value_or(std::vector<int64_t>(count, 0));
+                        std::vector<int64_t> localFinishes = finishes.value_or(std::vector<int64_t>(count, 0));
+                        for (std::size_t i = 0; i < count; ++i)
+                        {
+                            std::string call = "$" + (*initKinds)[i] + "(\"" +
+                                                escapeSvString((*initFiles)[i]) + "\", " + opContext;
+                            if (localHasStart[i])
+                            {
+                                call.append(", ");
+                                call.append(std::to_string(localStarts[i]));
+                                if (localHasFinish[i])
+                                {
+                                    call.append(", ");
+                                    call.append(std::to_string(localFinishes[i]));
+                                }
+                            }
+                            call.append(");");
+                            std::ostringstream stmt;
+                            appendIndented(stmt, 2, call);
+                            addSimpleStmt("initial", stmt.str(), opId);
+                        }
+                    }
                     break;
                 }
                 case grh::ir::OperationKind::kMemoryReadPort:
@@ -4124,208 +4360,105 @@ namespace grh::emit
                     }
                     break;
                 }
-                case grh::ir::OperationKind::kDisplay:
+                case grh::ir::OperationKind::kSystemTask:
                 {
-                    if (operands.size() < 1)
+                    if (operands.empty())
                     {
-                        reportError("kDisplay missing operands", opContext);
+                        reportError("kSystemTask missing operands", opContext);
                         break;
                     }
-                    auto format = getAttribute<std::string>(*graph, op, "formatString");
+                    auto taskName = getAttribute<std::string>(*graph, op, "name");
                     auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
-                    auto displayKind = getAttribute<std::string>(*graph, op, "displayKind");
-                    const bool hasExitCode = getAttribute<bool>(*graph, op, "hasExitCode").value_or(false);
-                    if (!format || !eventEdges)
+                    auto procKind = getAttribute<std::string>(*graph, op, "procKind");
+                    if (!taskName || taskName->empty())
                     {
-                        reportError("kDisplay missing eventEdge or formatString", opContext);
+                        reportError("kSystemTask missing name", opContext);
                         break;
                     }
-                    if (eventEdges->empty())
+                    const std::size_t eventCount = eventEdges ? eventEdges->size() : 0;
+                    if (operands.size() < 1 + eventCount)
                     {
-                        reportError("kDisplay missing eventEdge entries", opContext);
+                        reportError("kSystemTask operand count does not match eventEdge", opContext);
                         break;
                     }
-                    const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
-                    if (operands.size() < baseIndex + eventEdges->size())
+                    const std::size_t argCount = operands.size() - 1 - eventCount;
+                    const std::size_t eventStart = 1 + argCount;
+                    std::optional<SeqKey> seqKey;
+                    if (eventCount > 0)
                     {
-                        reportError("kDisplay operand count does not match eventEdge", opContext);
-                        break;
+                        seqKey = buildEventKey(op, eventStart);
+                        if (!seqKey)
+                        {
+                            break;
+                        }
                     }
-                    const std::size_t argCount = operands.size() - baseIndex - eventEdges->size();
-                    const std::size_t eventStart = baseIndex + argCount;
-                    auto seqKey = buildEventKey(op, eventStart);
-                    if (!seqKey)
-                    {
-                        break;
-                    }
-                    const bool guardDisplay = !isConstOne(operands[0]);
-                    const int baseIndent = guardDisplay ? 3 : 2;
-                    std::string taskName = displayKind.value_or(std::string("display"));
-                    if (taskName.empty())
-                    {
-                        taskName = "display";
-                    }
+
+                    const bool guardTask = !isConstOne(operands[0]);
+                    const int baseIndent = guardTask ? 3 : 2;
                     std::ostringstream stmt;
-                    if (guardDisplay)
+                    if (guardTask)
                     {
                         appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                     }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << taskName << "(";
-                    if (taskName == "fatal" && hasExitCode)
+                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << *taskName;
+                    const bool anyArgs = argCount > 0;
+                    if (anyArgs)
                     {
-                        stmt << valueExpr(operands[1]) << ", ";
-                    }
-                    stmt << "\"" << escapeSvString(*format) << "\"";
-                    for (std::size_t i = 0; i < argCount; ++i)
-                    {
-                        stmt << ", " << valueExpr(operands[baseIndex + i]);
-                    }
-                    stmt << ");\n";
-                    if (guardDisplay)
-                    {
-                        appendIndented(stmt, 2, "end");
-                    }
-                    addSequentialStmt(*seqKey, stmt.str(), opId);
-                    break;
-                }
-                case grh::ir::OperationKind::kFinish:
-                {
-                    if (operands.size() < 1)
-                    {
-                        reportError("kFinish missing operands", opContext);
-                        break;
-                    }
-                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
-                    const bool hasExitCode = getAttribute<bool>(*graph, op, "hasExitCode").value_or(false);
-                    if (!eventEdges)
-                    {
-                        reportError("kFinish missing eventEdge", opContext);
-                        break;
-                    }
-                    if (eventEdges->empty())
-                    {
-                        reportError("kFinish missing eventEdge entries", opContext);
-                        break;
-                    }
-                    const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
-                    if (operands.size() < baseIndex + eventEdges->size())
-                    {
-                        reportError("kFinish operand count does not match eventEdge", opContext);
-                        break;
-                    }
-                    const std::size_t eventStart = baseIndex;
-                    auto seqKey = buildEventKey(op, eventStart);
-                    if (!seqKey)
-                    {
-                        break;
-                    }
-                    const bool guardFinish = !isConstOne(operands[0]);
-                    const int baseIndent = guardFinish ? 3 : 2;
-                    std::ostringstream stmt;
-                    if (guardFinish)
-                    {
-                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
-                    }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$finish";
-                    if (hasExitCode)
-                    {
-                        stmt << "(" << valueExpr(operands[1]) << ")";
+                        bool firstArg = true;
+                        auto appendArg = [&](const std::string &text)
+                        {
+                            if (!firstArg)
+                            {
+                                stmt << ", ";
+                            }
+                            stmt << text;
+                            firstArg = false;
+                        };
+                        stmt << "(";
+                        for (std::size_t i = 0; i < argCount; ++i)
+                        {
+                            appendArg(valueExpr(operands[1 + i]));
+                        }
+                        stmt << ")";
                     }
                     stmt << ";\n";
-                    if (guardFinish)
+                    if (guardTask)
                     {
                         appendIndented(stmt, 2, "end");
                     }
-                    addSequentialStmt(*seqKey, stmt.str(), opId);
-                    break;
-                }
-                case grh::ir::OperationKind::kFwrite:
-                {
-                    if (operands.size() < 2)
+
+                    if (seqKey)
                     {
-                        reportError("kFwrite missing operands", opContext);
-                        break;
-                    }
-                    auto format = getAttribute<std::string>(*graph, op, "formatString");
-                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
-                    if (!format || !eventEdges)
-                    {
-                        reportError("kFwrite missing eventEdge or formatString", opContext);
-                        break;
-                    }
-                    if (eventEdges->empty())
-                    {
-                        reportError("kFwrite missing eventEdge entries", opContext);
-                        break;
-                    }
-                    if (operands.size() < 2 + eventEdges->size())
-                    {
-                        reportError("kFwrite operand count does not match eventEdge", opContext);
-                        break;
-                    }
-                    const std::size_t argCount = operands.size() - 2 - eventEdges->size();
-                    const std::size_t eventStart = 2 + argCount;
-                    auto seqKey = buildEventKey(op, eventStart);
-                    if (!seqKey)
-                    {
-                        break;
-                    }
-                    const bool guardDisplay = !isConstOne(operands[0]);
-                    const int baseIndent = guardDisplay ? 3 : 2;
-                    std::ostringstream stmt;
-                    if (guardDisplay)
-                    {
-                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
-                    }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << escapeSvString(*format) << "\"";
-                    for (std::size_t i = 0; i < argCount; ++i)
-                    {
-                        stmt << ", " << valueExpr(operands[2 + i]);
-                    }
-                    stmt << ");\n";
-                    if (guardDisplay)
-                    {
-                        appendIndented(stmt, 2, "end");
-                    }
-                    addSequentialStmt(*seqKey, stmt.str(), opId);
-                    break;
-                }
-                case grh::ir::OperationKind::kAssert:
-                {
-                    if (operands.size() < 2)
-                    {
-                        reportError("kAssert missing operands", opContext);
-                        break;
-                    }
-                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
-                    if (!eventEdges)
-                    {
-                        reportError("kAssert missing eventEdge", opContext);
-                        break;
-                    }
-                    if (eventEdges->empty())
-                    {
-                        reportError("kAssert missing eventEdge entries", opContext);
-                        break;
-                    }
-                    auto message = getAttribute<std::string>(*graph, op, "message").value_or(std::string("Assertion failed"));
-                    auto seqKey = buildEventKey(op, 2);
-                    if (!seqKey)
-                    {
-                        break;
-                    }
-                    std::ostringstream stmt;
-                    if (isConstOne(operands[0]))
-                    {
-                        appendIndented(stmt, 2, "if (!" + valueExpr(operands[1]) + ") begin");
+                        addSequentialStmt(*seqKey, stmt.str(), opId);
                     }
                     else
                     {
-                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
+                        auto headerForKind = [&](const std::optional<std::string> &kind) -> std::string
+                        {
+                            if (!kind)
+                            {
+                                return "always @*";
+                            }
+                            if (*kind == "initial")
+                            {
+                                return "initial";
+                            }
+                            if (*kind == "final")
+                            {
+                                return "final";
+                            }
+                            if (*kind == "always_comb")
+                            {
+                                return "always_comb";
+                            }
+                            if (*kind == "always_latch")
+                            {
+                                return "always_latch";
+                            }
+                            return "always @*";
+                        };
+                        addSimpleStmt(headerForKind(procKind), stmt.str(), opId);
                     }
-                    appendIndented(stmt, 3, "$fatal(\"" + escapeSvString(message) + " at time %0t\", $time);");
-                    appendIndented(stmt, 2, "end");
-                    addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
                 case grh::ir::OperationKind::kDpicImport:
@@ -4488,8 +4621,9 @@ namespace grh::emit
                     {
                         const grh::ir::Value resValue = graph->getValue(res);
                         const std::string tempName = std::string(resValue.symbolText()) + "_intm";
-                        ensureRegDecl(tempName, resValue.width(), resValue.isSigned(), op.srcLoc());
-                        addAssign("assign " + std::string(resValue.symbolText()) + " = " + tempName + ";", opId);
+                        ensureRegDecl(tempName, resValue.width(), resValue.isSigned(),
+                                      resValue.type(), op.srcLoc());
+                        addValueAssign(res, tempName, opId);
                     }
 
                     bool callOk = true;
@@ -4653,6 +4787,25 @@ namespace grh::emit
                     {
                         moduleBuffer << "  " << attr << "\n";
                     }
+                    if (decl.valueType != grh::ir::ValueType::Logic)
+                    {
+                        moduleBuffer << "  ";
+                        if (decl.dir == PortDir::Input)
+                        {
+                            moduleBuffer << "input ";
+                        }
+                        else if (decl.dir == PortDir::Output)
+                        {
+                            moduleBuffer << "output ";
+                        }
+                        else
+                        {
+                            moduleBuffer << "inout ";
+                        }
+                        moduleBuffer << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
+                        moduleBuffer << name;
+                        return;
+                    }
                     if (decl.dir == PortDir::Input)
                     {
                         moduleBuffer << "  input wire ";
@@ -4716,6 +4869,15 @@ namespace grh::emit
                 for (const auto &[name, decl] : regDecls)
                 {
                     moduleBuffer << "  " << formatNetDecl("reg", name, decl) << '\n';
+                }
+            }
+
+            if (!varDecls.empty())
+            {
+                moduleBuffer << '\n';
+                for (const auto &[name, decl] : varDecls)
+                {
+                    moduleBuffer << "  " << formatVarDecl(decl.type, name) << '\n';
                 }
             }
 
@@ -4814,6 +4976,31 @@ namespace grh::emit
                         moduleBuffer << "  " << attr << '\n';
                     }
                     moduleBuffer << block << '\n';
+                }
+            }
+
+            if (!simpleBlocks.empty())
+            {
+                moduleBuffer << '\n';
+                for (const auto &block : simpleBlocks)
+                {
+                    const std::string attr =
+                        formatSrcAttribute(block.op.valid() ? graph->getOperation(block.op).srcLoc()
+                                                            : std::optional<grh::ir::SrcLoc>{});
+                    if (!attr.empty())
+                    {
+                        moduleBuffer << "  " << attr << '\n';
+                    }
+                    moduleBuffer << "  " << block.header << " begin\n";
+                    for (const auto &stmt : block.stmts)
+                    {
+                        moduleBuffer << stmt;
+                        if (!stmt.empty() && stmt.back() != '\n')
+                        {
+                            moduleBuffer << '\n';
+                        }
+                    }
+                    moduleBuffer << "  end\n";
                 }
             }
 
@@ -4938,7 +5125,24 @@ namespace grh::emit
         {
             return view.valueIsInput(valueId) || view.valueIsOutput(valueId) || view.valueIsInout(valueId);
         };
-        auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+        auto valueType = [&](grh::ir::ValueId valueId) -> grh::ir::ValueType
+        {
+            return view.valueType(valueId);
+        };
+        auto formatConstLiteral = [&](grh::ir::ValueId valueId,
+                                      std::string_view literal) -> std::string
+        {
+            if (valueType(valueId) == grh::ir::ValueType::String)
+            {
+                if (literal.size() >= 2 && literal.front() == '"' && literal.back() == '"')
+                {
+                    return std::string(literal);
+                }
+                return "\"" + escapeSvString(literal) + "\"";
+            }
+            return std::string(literal);
+        };
+        auto constLiteralRawFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
         {
             if (!valueId.valid())
             {
@@ -4954,6 +5158,15 @@ namespace grh::emit
                 return std::nullopt;
             }
             return getAttribute<std::string>(view, defOpId, "constValue");
+        };
+        auto constLiteralFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+        {
+            auto raw = constLiteralRawFor(valueId);
+            if (!raw)
+            {
+                return std::nullopt;
+            }
+            return formatConstLiteral(valueId, *raw);
         };
         auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
         {
@@ -5053,7 +5266,11 @@ namespace grh::emit
         };
         auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
         {
-            if (auto literal = constLiteralFor(valueId))
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return valueExpr(valueId);
+            }
+            if (auto literal = constLiteralRawFor(valueId))
             {
                 if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
                 {
@@ -5172,6 +5389,13 @@ namespace grh::emit
             grh::ir::OperationId op = grh::ir::OperationId::invalid();
         };
 
+        struct IrSimpleBlock
+        {
+            std::string header;
+            std::vector<std::string> stmts;
+            grh::ir::OperationId op = grh::ir::OperationId::invalid();
+        };
+
         std::ostringstream moduleBuffer;
 
         // -------------------------
@@ -5209,6 +5433,7 @@ namespace grh::emit
             inputPorts.emplace_back(portName, port.value);
             portDecls[portName] = PortDecl{PortDir::Input, view.valueWidth(port.value),
                                            view.valueSigned(port.value), false,
+                                           view.valueType(port.value),
                                            view.valueSrcLoc(port.value)};
         }
         for (const auto &port : view.outputPorts())
@@ -5228,6 +5453,7 @@ namespace grh::emit
             outputPorts.emplace_back(portName, port.value);
             portDecls[portName] = PortDecl{PortDir::Output, view.valueWidth(port.value),
                                            view.valueSigned(port.value), false,
+                                           view.valueType(port.value),
                                            view.valueSrcLoc(port.value)};
         }
         for (const auto &port : view.inoutPorts())
@@ -5250,6 +5476,7 @@ namespace grh::emit
                                                  view.valueWidth(port.out)});
             portDecls[portName] = PortDecl{PortDir::Inout, view.valueWidth(port.out),
                                            view.valueSigned(port.out), false,
+                                           view.valueType(port.out),
                                            view.valueSrcLoc(port.out)};
         }
 
@@ -5261,6 +5488,7 @@ namespace grh::emit
         }
 
         // Storage for various sections.
+        std::map<std::string, VarDecl, std::less<>> varDecls;
         std::map<std::string, NetDecl, std::less<>> regDecls;
         std::map<std::string, NetDecl, std::less<>> wireDecls;
         std::vector<std::pair<std::string, grh::ir::OperationId>> memoryDecls;
@@ -5269,12 +5497,36 @@ namespace grh::emit
         std::vector<std::pair<std::string, grh::ir::OperationId>> assignStmts;
         std::vector<std::pair<std::string, grh::ir::OperationId>> portBindingStmts;
         std::vector<std::pair<std::string, grh::ir::OperationId>> latchBlocks;
+        std::vector<IrSimpleBlock> simpleBlocks;
         std::vector<IrSeqBlock> seqBlocks;
         std::unordered_set<std::string> instanceNamesUsed;
 
-        auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
+        auto ensureVarDecl = [&](const std::string &name,
+                                 grh::ir::ValueType type,
                                  const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
         {
+            if (declaredNames.find(name) != declaredNames.end())
+            {
+                auto it = varDecls.find(name);
+                if (it != varDecls.end() && debug && !it->second.debug)
+                {
+                    it->second.debug = *debug;
+                }
+                return;
+            }
+            varDecls.emplace(name, VarDecl{type, debug});
+            declaredNames.insert(name);
+        };
+
+        auto ensureRegDecl = [&](const std::string &name, int64_t width, bool isSigned,
+                                 grh::ir::ValueType valueType,
+                                 const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
+        {
+            if (valueType != grh::ir::ValueType::Logic)
+            {
+                ensureVarDecl(name, valueType, debug);
+                return;
+            }
             if (declaredNames.find(name) != declaredNames.end())
             {
                 auto it = regDecls.find(name);
@@ -5294,6 +5546,11 @@ namespace grh::emit
             if (name.empty())
             {
                 reportError("Value missing name during wire emission");
+                return;
+            }
+            if (valueType(value) != grh::ir::ValueType::Logic)
+            {
+                ensureVarDecl(name, valueType(value), view.valueSrcLoc(value));
                 return;
             }
             if (declaredNames.find(name) != declaredNames.end())
@@ -5317,6 +5574,40 @@ namespace grh::emit
         auto addAssign = [&](std::string stmt, grh::ir::OperationId sourceOp)
         {
             assignStmts.emplace_back(std::move(stmt), sourceOp);
+        };
+        auto addSimpleStmt = [&](std::string header, std::string stmt,
+                                 grh::ir::OperationId sourceOp)
+        {
+            for (auto &block : simpleBlocks)
+            {
+                if (block.header == header)
+                {
+                    block.stmts.push_back(std::move(stmt));
+                    return;
+                }
+            }
+            simpleBlocks.push_back(
+                IrSimpleBlock{std::move(header), std::vector<std::string>{std::move(stmt)}, sourceOp});
+        };
+        auto addCombAssign = [&](const std::string &lhs, const std::string &rhs,
+                                 grh::ir::OperationId sourceOp)
+        {
+            std::ostringstream stmt;
+            appendIndented(stmt, 2, lhs + " = " + rhs + ";");
+            addSimpleStmt("always_comb", stmt.str(), sourceOp);
+        };
+        auto addValueAssign = [&](grh::ir::ValueId result,
+                                  const std::string &rhs,
+                                  grh::ir::OperationId sourceOp)
+        {
+            if (valueType(result) != grh::ir::ValueType::Logic)
+            {
+                addCombAssign(valueName(result), rhs, sourceOp);
+            }
+            else
+            {
+                addAssign("assign " + valueName(result) + " = " + rhs + ";", sourceOp);
+            }
         };
 
         auto sameSeqKey = [](const IrSeqKey &lhs, const IrSeqKey &rhs) -> bool
@@ -5356,6 +5647,10 @@ namespace grh::emit
 
         auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
         {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return valueExpr(valueId);
+            }
             const int64_t width = view.valueWidth(valueId);
             const std::string name = valueExpr(valueId);
             if (width == 1)
@@ -5366,6 +5661,10 @@ namespace grh::emit
         };
         auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
         {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return valueExpr(valueId);
+            }
             const int64_t width = view.valueWidth(valueId);
             const std::string name = valueExpr(valueId);
             if (targetWidth <= 0 || width <= 0 || width == targetWidth)
@@ -5387,6 +5686,10 @@ namespace grh::emit
                                       int64_t targetWidth,
                                       bool signExtend) -> std::string
         {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return valueExpr(valueId);
+            }
             const int64_t width = view.valueWidth(valueId);
             const std::string name = valueExpr(valueId);
             if (targetWidth <= 0 || width <= 0 || width == targetWidth)
@@ -5667,6 +5970,10 @@ namespace grh::emit
 
         auto markPortAsRegIfNeeded = [&](grh::ir::ValueId value)
         {
+            if (valueType(value) != grh::ir::ValueType::Logic)
+            {
+                return;
+            }
             const std::string &name = valueName(value);
             auto itPort = portDecls.find(name);
             if (itPort != portDecls.end() && itPort->second.dir == PortDir::Output)
@@ -5925,7 +6232,39 @@ namespace grh::emit
                     reportError("kConstant missing constValue attribute", context);
                     break;
                 }
-                addAssign("assign " + valueName(results[0]) + " = " + *constValue + ";", opId);
+                addValueAssign(results[0], formatConstLiteral(results[0], *constValue), opId);
+                ensureWireDecl(results[0]);
+                break;
+            }
+            case grh::ir::OperationKind::kSystemFunction:
+            {
+                if (results.empty())
+                {
+                    reportError("kSystemFunction missing result", context);
+                    break;
+                }
+                auto name = getAttribute<std::string>(view, opId, "name");
+                if (!name || name->empty())
+                {
+                    reportError("kSystemFunction missing name", context);
+                    break;
+                }
+                std::ostringstream expr;
+                expr << "$" << *name;
+                if (!operands.empty())
+                {
+                    expr << "(";
+                    for (std::size_t i = 0; i < operands.size(); ++i)
+                    {
+                        if (i != 0)
+                        {
+                            expr << ", ";
+                        }
+                        expr << valueExpr(operands[i]);
+                    }
+                    expr << ")";
+                }
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -5964,8 +6303,7 @@ namespace grh::emit
                     view.valueSigned(operands[1]);
                 const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
                 const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
-                addAssign("assign " + valueName(results[0]) + " = " + lhsExpr + " " + tok + " " + rhsExpr + ";",
-                          opId);
+                addValueAssign(results[0], lhsExpr + " " + tok + " " + rhsExpr, opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -5980,9 +6318,10 @@ namespace grh::emit
                     break;
                 }
                 const std::string tok = binOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) +
-                              " " + tok + " " + valueExpr(operands[1]) + ";",
-                          opId);
+                addValueAssign(results[0],
+                               valueExpr(operands[0]) + " " + tok + " " +
+                                   valueExpr(operands[1]),
+                               opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6003,9 +6342,9 @@ namespace grh::emit
                 const std::string lhs = resultWidth > 0
                                             ? extendShiftOperand(operands[0], resultWidth, signExtend)
                                             : valueExpr(operands[0]);
-                addAssign("assign " + valueName(results[0]) + " = " + lhs + " " + tok + " " +
-                              valueExpr(operands[1]) + ";",
-                          opId);
+                addValueAssign(results[0],
+                               lhs + " " + tok + " " + valueExpr(operands[1]),
+                               opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6027,10 +6366,10 @@ namespace grh::emit
                                            view.valueWidth(operands[1]));
                 }
                 const std::string tok = binOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " +
-                              extendOperand(operands[0], resultWidth) + " " + tok + " " +
-                              extendOperand(operands[1], resultWidth) + ";",
-                          opId);
+                addValueAssign(results[0],
+                               extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                                   extendOperand(operands[1], resultWidth),
+                               opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6043,9 +6382,10 @@ namespace grh::emit
                     break;
                 }
                 const std::string tok = binOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " + logicalOperand(operands[0]) +
-                              " " + tok + " " + logicalOperand(operands[1]) + ";",
-                          opId);
+                addValueAssign(results[0],
+                               logicalOperand(operands[0]) + " " + tok + " " +
+                                   logicalOperand(operands[1]),
+                               opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6063,7 +6403,7 @@ namespace grh::emit
                     break;
                 }
                 const std::string tok = unaryOpToken(kind);
-                addAssign("assign " + valueName(results[0]) + " = " + tok + valueExpr(operands[0]) + ";", opId);
+                addValueAssign(results[0], tok + valueExpr(operands[0]), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6074,7 +6414,7 @@ namespace grh::emit
                     reportError("Unary operation missing operands or results", context);
                     break;
                 }
-                addAssign("assign " + valueName(results[0]) + " = !" + logicalOperand(operands[0]) + ";", opId);
+                addValueAssign(results[0], "!" + logicalOperand(operands[0]), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6088,9 +6428,9 @@ namespace grh::emit
                 int64_t resultWidth = view.valueWidth(results[0]);
                 const std::string lhs = extendOperand(operands[1], resultWidth);
                 const std::string rhs = extendOperand(operands[2], resultWidth);
-                addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) +
-                              " ? " + lhs + " : " + rhs + ";",
-                          opId);
+                addValueAssign(results[0],
+                               valueExpr(operands[0]) + " ? " + lhs + " : " + rhs,
+                               opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6108,7 +6448,7 @@ namespace grh::emit
                 }
                 int64_t resultWidth = view.valueWidth(results[0]);
                 const std::string rhs = extendOperand(operands[0], resultWidth);
-                addAssign("assign " + valueName(results[0]) + " = " + rhs + ";", opId);
+                addValueAssign(results[0], rhs, opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6121,12 +6461,12 @@ namespace grh::emit
                 }
                 if (operands.size() == 1)
                 {
-                    addAssign("assign " + valueName(results[0]) + " = " + valueExpr(operands[0]) + ";", opId);
+                    addValueAssign(results[0], valueExpr(operands[0]), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = {";
+                expr << "{";
                 for (std::size_t i = 0; i < operands.size(); ++i)
                 {
                     if (i != 0)
@@ -6135,8 +6475,8 @@ namespace grh::emit
                     }
                     expr << concatOperandExpr(operands[i]);
                 }
-                expr << "};";
-                addAssign(expr.str(), opId);
+                expr << "}";
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6154,8 +6494,8 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = {" << *rep << "{" << concatOperandExpr(operands[0]) << "}};";
-                addAssign(expr.str(), opId);
+                expr << "{" << *rep << "{" << concatOperandExpr(operands[0]) << "}}";
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6175,7 +6515,6 @@ namespace grh::emit
                 }
                 const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = ";
                 if (operandWidth == 1)
                 {
                     if (*sliceStart != 0 || *sliceEnd != 0)
@@ -6197,8 +6536,7 @@ namespace grh::emit
                     }
                     expr << "]";
                 }
-                expr << ";";
-                addAssign(expr.str(), opId);
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6217,7 +6555,6 @@ namespace grh::emit
                 }
                 const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = ";
                 if (operandWidth == 1)
                 {
                     if (*width != 1)
@@ -6234,8 +6571,7 @@ namespace grh::emit
                 {
                     expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
                 }
-                expr << ";";
-                addAssign(expr.str(), opId);
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6254,7 +6590,6 @@ namespace grh::emit
                 }
                 const int64_t operandWidth = view.valueWidth(operands[0]);
                 std::ostringstream expr;
-                expr << "assign " << valueName(results[0]) << " = ";
                 if (*width == 1 && operandWidth == 1)
                 {
                     expr << valueExpr(operands[0]);
@@ -6272,8 +6607,7 @@ namespace grh::emit
                     }
                     expr << "]";
                 }
-                expr << ";";
-                addAssign(expr.str(), opId);
+                addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -6310,7 +6644,8 @@ namespace grh::emit
                     reportError("kLatch data/output width mismatch", context);
                     break;
                 }
-                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue), view.opSrcLoc(opId));
+                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue),
+                              view.valueType(nextValue), view.opSrcLoc(opId));
                 const bool directDrive = valueName(q) == regName;
                 if (directDrive)
                 {
@@ -6319,7 +6654,7 @@ namespace grh::emit
                 else
                 {
                     ensureWireDecl(q);
-                    addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
+                    addValueAssign(q, regName, opId);
                 }
 
                 std::ostringstream block;
@@ -6382,7 +6717,8 @@ namespace grh::emit
                     break;
                 }
 
-                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue), view.opSrcLoc(opId));
+                ensureRegDecl(regName, view.valueWidth(nextValue), view.valueSigned(nextValue),
+                              view.valueType(nextValue), view.opSrcLoc(opId));
                 const bool directDrive = valueName(q) == regName;
                 if (directDrive)
                 {
@@ -6391,7 +6727,7 @@ namespace grh::emit
                 else
                 {
                     ensureWireDecl(q);
-                    addAssign("assign " + valueName(q) + " = " + regName + ";", opId);
+                    addValueAssign(q, regName, opId);
                 }
 
                 std::ostringstream stmt;
@@ -6429,6 +6765,65 @@ namespace grh::emit
                      << ":0] " << memName << " [0:" << (*rowAttr - 1) << "];";
                 memoryDecls.emplace_back(decl.str(), opId);
                 declaredNames.insert(memName);
+
+                auto initKinds = getAttribute<std::vector<std::string>>(view, opId, "initKind");
+                auto initFiles = getAttribute<std::vector<std::string>>(view, opId, "initFile");
+                if (initKinds || initFiles)
+                {
+                    if (!initKinds || !initFiles || initKinds->size() != initFiles->size())
+                    {
+                        reportError("kMemory initKind/initFile size mismatch", context);
+                        break;
+                    }
+                    const std::size_t count = initKinds->size();
+                    auto hasStart = getAttribute<std::vector<bool>>(view, opId, "initHasStart");
+                    auto hasFinish = getAttribute<std::vector<bool>>(view, opId, "initHasFinish");
+                    auto starts = getAttribute<std::vector<int64_t>>(view, opId, "initStart");
+                    auto finishes = getAttribute<std::vector<int64_t>>(view, opId, "initFinish");
+                    if (hasStart && hasStart->size() != count)
+                    {
+                        reportError("kMemory initHasStart size mismatch", context);
+                        break;
+                    }
+                    if (hasFinish && hasFinish->size() != count)
+                    {
+                        reportError("kMemory initHasFinish size mismatch", context);
+                        break;
+                    }
+                    if (starts && starts->size() != count)
+                    {
+                        reportError("kMemory initStart size mismatch", context);
+                        break;
+                    }
+                    if (finishes && finishes->size() != count)
+                    {
+                        reportError("kMemory initFinish size mismatch", context);
+                        break;
+                    }
+                    std::vector<bool> localHasStart = hasStart.value_or(std::vector<bool>(count, false));
+                    std::vector<bool> localHasFinish = hasFinish.value_or(std::vector<bool>(count, false));
+                    std::vector<int64_t> localStarts = starts.value_or(std::vector<int64_t>(count, 0));
+                    std::vector<int64_t> localFinishes = finishes.value_or(std::vector<int64_t>(count, 0));
+                    for (std::size_t i = 0; i < count; ++i)
+                    {
+                        std::string call = "$" + (*initKinds)[i] + "(\"" +
+                                            escapeSvString((*initFiles)[i]) + "\", " + memName;
+                        if (localHasStart[i])
+                        {
+                            call.append(", ");
+                            call.append(std::to_string(localStarts[i]));
+                            if (localHasFinish[i])
+                            {
+                                call.append(", ");
+                                call.append(std::to_string(localFinishes[i]));
+                            }
+                        }
+                        call.append(");");
+                        std::ostringstream stmt;
+                        appendIndented(stmt, 2, call);
+                        addSimpleStmt("initial", stmt.str(), opId);
+                    }
+                }
                 break;
             }
             case grh::ir::OperationKind::kMemoryReadPort:
@@ -6714,219 +7109,107 @@ namespace grh::emit
                 instanceDecls.emplace_back(decl.str(), opId);
                 break;
             }
-            case grh::ir::OperationKind::kDisplay:
+            case grh::ir::OperationKind::kSystemTask:
             {
-                if (operands.size() < 1)
+                if (operands.empty())
                 {
-                    reportError("kDisplay missing operands", context);
+                    reportError("kSystemTask missing operands", context);
                     break;
                 }
-                auto format = getAttribute<std::string>(view, opId, "formatString");
-                if (!format)
-                {
-                    format = getAttribute<std::string>(view, opId, "format");
-                }
+                auto taskName = getAttribute<std::string>(view, opId, "name");
                 auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
-                auto displayKind = getAttribute<std::string>(view, opId, "displayKind");
-                const bool hasExitCode = getAttribute<bool>(view, opId, "hasExitCode").value_or(false);
-                if (!format || !eventEdges)
+                auto procKind = getAttribute<std::string>(view, opId, "procKind");
+                if (!taskName || taskName->empty())
                 {
-                    reportError("kDisplay missing eventEdge or format", context);
+                    reportError("kSystemTask missing name", context);
                     break;
                 }
-                if (eventEdges->empty())
+                const std::size_t eventCount = eventEdges ? eventEdges->size() : 0;
+                if (operands.size() < 1 + eventCount)
                 {
-                    reportError("kDisplay missing eventEdge entries", context);
+                    reportError("kSystemTask operand count does not match eventEdge", context);
                     break;
                 }
-                const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
-                if (operands.size() < baseIndex + eventEdges->size())
+                const std::size_t argCount = operands.size() - 1 - eventCount;
+                const std::size_t eventStart = 1 + argCount;
+                std::optional<IrSeqKey> seqKey;
+                if (eventCount > 0)
                 {
-                    reportError("kDisplay operand count does not match eventEdge", context);
-                    break;
+                    seqKey = buildEventKey(eventStart);
+                    if (!seqKey)
+                    {
+                        break;
+                    }
                 }
-                const std::size_t argCount = operands.size() - baseIndex - eventEdges->size();
-                const std::size_t eventStart = baseIndex + argCount;
-                auto seqKey = buildEventKey(eventStart);
-                if (!seqKey)
-                {
-                    break;
-                }
-                const bool guardDisplay = !isConstOne(operands[0]);
-                const int baseIndent = guardDisplay ? 3 : 2;
-                std::string taskName = displayKind.value_or(std::string("display"));
-                if (taskName.empty())
-                {
-                    taskName = "display";
-                }
+
+                const bool guardTask = !isConstOne(operands[0]);
+                const int baseIndent = guardTask ? 3 : 2;
                 std::ostringstream stmt;
-                if (guardDisplay)
+                if (guardTask)
                 {
                     appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
                 }
-                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << taskName << "(";
-                    if (taskName == "fatal" && hasExitCode)
+                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$" << *taskName;
+                const bool anyArgs = argCount > 0;
+                if (anyArgs)
+                {
+                    bool firstArg = true;
+                    auto appendArg = [&](const std::string &text)
                     {
-                        stmt << valueExpr(operands[1]) << ", ";
-                    }
-                    stmt << "\"" << escapeSvString(*format) << "\"";
+                        if (!firstArg)
+                        {
+                            stmt << ", ";
+                        }
+                        stmt << text;
+                        firstArg = false;
+                    };
+                    stmt << "(";
                     for (std::size_t i = 0; i < argCount; ++i)
                     {
-                        stmt << ", " << valueExpr(operands[baseIndex + i]);
+                        appendArg(valueExpr(operands[1 + i]));
                     }
-                stmt << ");\n";
-                if (guardDisplay)
-                {
-                    appendIndented(stmt, 2, "end");
-                }
-                addSequentialStmt(*seqKey, stmt.str(), opId);
-                break;
-            }
-            case grh::ir::OperationKind::kFinish:
-            {
-                if (operands.size() < 1)
-                {
-                    reportError("kFinish missing operands", context);
-                    break;
-                }
-                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
-                const bool hasExitCode = getAttribute<bool>(view, opId, "hasExitCode").value_or(false);
-                if (!eventEdges)
-                {
-                    reportError("kFinish missing eventEdge", context);
-                    break;
-                }
-                if (eventEdges->empty())
-                {
-                    reportError("kFinish missing eventEdge entries", context);
-                    break;
-                }
-                const std::size_t baseIndex = 1 + (hasExitCode ? 1 : 0);
-                if (operands.size() < baseIndex + eventEdges->size())
-                {
-                    reportError("kFinish operand count does not match eventEdge", context);
-                    break;
-                }
-                const std::size_t eventStart = baseIndex;
-                auto seqKey = buildEventKey(eventStart);
-                if (!seqKey)
-                {
-                    break;
-                }
-                const bool guardFinish = !isConstOne(operands[0]);
-                const int baseIndent = guardFinish ? 3 : 2;
-                std::ostringstream stmt;
-                if (guardFinish)
-                {
-                    appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
-                }
-                stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$finish";
-                if (hasExitCode)
-                {
-                    stmt << "(" << valueExpr(operands[1]) << ")";
+                    stmt << ")";
                 }
                 stmt << ";\n";
-                if (guardFinish)
+                if (guardTask)
                 {
                     appendIndented(stmt, 2, "end");
                 }
-                addSequentialStmt(*seqKey, stmt.str(), opId);
-                break;
-            }
-            case grh::ir::OperationKind::kFwrite:
-            {
-                if (operands.size() < 2)
+
+                if (seqKey)
                 {
-                    reportError("kFwrite missing operands", context);
-                    break;
-                }
-                auto format = getAttribute<std::string>(view, opId, "formatString");
-                if (!format)
-                {
-                    format = getAttribute<std::string>(view, opId, "format");
-                }
-                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
-                if (!format || !eventEdges)
-                {
-                    reportError("kFwrite missing eventEdge or format", context);
-                    break;
-                }
-                if (eventEdges->empty())
-                {
-                    reportError("kFwrite missing eventEdge entries", context);
-                    break;
-                }
-                if (operands.size() < 2 + eventEdges->size())
-                {
-                    reportError("kFwrite operand count does not match eventEdge", context);
-                    break;
-                }
-                const std::size_t argCount = operands.size() - 2 - eventEdges->size();
-                const std::size_t eventStart = 2 + argCount;
-                auto seqKey = buildEventKey(eventStart);
-                if (!seqKey)
-                {
-                    break;
-                }
-                const bool guardDisplay = !isConstOne(operands[0]);
-                const int baseIndent = guardDisplay ? 3 : 2;
-                std::ostringstream stmt;
-                    if (guardDisplay)
-                    {
-                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + ") begin");
-                    }
-                    stmt << std::string(kIndentSizeSv * baseIndent, ' ') << "$fwrite(" << valueExpr(operands[1]) << ", \"" << escapeSvString(*format) << "\"";
-                    for (std::size_t i = 0; i < argCount; ++i)
-                    {
-                        stmt << ", " << valueExpr(operands[2 + i]);
-                    }
-                stmt << ");\n";
-                if (guardDisplay)
-                {
-                    appendIndented(stmt, 2, "end");
-                }
-                addSequentialStmt(*seqKey, stmt.str(), opId);
-                break;
-            }
-            case grh::ir::OperationKind::kAssert:
-            {
-                if (operands.size() < 2)
-                {
-                    reportError("kAssert missing operands", context);
-                    break;
-                }
-                auto eventEdges = getAttribute<std::vector<std::string>>(view, opId, "eventEdge");
-                if (!eventEdges)
-                {
-                    reportError("kAssert missing eventEdge", context);
-                    break;
-                }
-                if (eventEdges->empty())
-                {
-                    reportError("kAssert missing eventEdge entries", context);
-                    break;
-                }
-                auto message = getAttribute<std::string>(view, opId, "message")
-                                   .value_or(std::string("Assertion failed"));
-                auto seqKey = buildEventKey(2);
-                if (!seqKey)
-                {
-                    break;
-                }
-                std::ostringstream stmt;
-                if (isConstOne(operands[0]))
-                {
-                    appendIndented(stmt, 2, "if (!" + valueExpr(operands[1]) + ") begin");
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
                 }
                 else
+                {
+                    auto headerForKind = [&](const std::optional<std::string> &kind) -> std::string
                     {
-                        appendIndented(stmt, 2, "if (" + valueExpr(operands[0]) + " && !" + valueExpr(operands[1]) + ") begin");
-                    }
-                    appendIndented(stmt, 3, "$fatal(\"" + escapeSvString(message) + " at time %0t\", $time);");
-                    appendIndented(stmt, 2, "end");
-                    addSequentialStmt(*seqKey, stmt.str(), opId);
-                    break;
+                        if (!kind)
+                        {
+                            return "always @*";
+                        }
+                        if (*kind == "initial")
+                        {
+                            return "initial";
+                        }
+                        if (*kind == "final")
+                        {
+                            return "final";
+                        }
+                        if (*kind == "always_comb")
+                        {
+                            return "always_comb";
+                        }
+                        if (*kind == "always_latch")
+                        {
+                            return "always_latch";
+                        }
+                        return "always @*";
+                    };
+                    addSimpleStmt(headerForKind(procKind), stmt.str(), opId);
                 }
+                break;
+            }
             case grh::ir::OperationKind::kDpicImport:
             {
                 auto argsDir = getAttribute<std::vector<std::string>>(view, opId, "argsDirection");
@@ -7095,8 +7378,9 @@ namespace grh::emit
                         continue;
                     }
                     const std::string tempName = resName + "_intm";
-                    ensureRegDecl(tempName, view.valueWidth(res), view.valueSigned(res), view.opSrcLoc(opId));
-                    addAssign("assign " + resName + " = " + tempName + ";", opId);
+                    ensureRegDecl(tempName, view.valueWidth(res), view.valueSigned(res),
+                                  view.valueType(res), view.opSrcLoc(opId));
+                    addValueAssign(res, tempName, opId);
                 }
 
                 bool callOk = true;
@@ -7258,6 +7542,25 @@ namespace grh::emit
                 {
                     moduleBuffer << "  " << attr << "\n";
                 }
+                if (decl.valueType != grh::ir::ValueType::Logic)
+                {
+                    moduleBuffer << "  ";
+                    if (decl.dir == PortDir::Input)
+                    {
+                        moduleBuffer << "input ";
+                    }
+                    else if (decl.dir == PortDir::Output)
+                    {
+                        moduleBuffer << "output ";
+                    }
+                    else
+                    {
+                        moduleBuffer << "inout ";
+                    }
+                    moduleBuffer << (decl.valueType == grh::ir::ValueType::Real ? "real " : "string ");
+                    moduleBuffer << name;
+                    return;
+                }
                 if (decl.dir == PortDir::Input)
                 {
                     moduleBuffer << "  input wire ";
@@ -7309,6 +7612,15 @@ namespace grh::emit
             for (const auto &[name, decl] : regDecls)
             {
                 moduleBuffer << "  " << formatNetDecl("reg", name, decl) << '\n';
+            }
+        }
+
+        if (!varDecls.empty())
+        {
+            moduleBuffer << '\n';
+            for (const auto &[name, decl] : varDecls)
+            {
+                moduleBuffer << "  " << formatVarDecl(decl.type, name) << '\n';
             }
         }
 
@@ -7393,6 +7705,29 @@ namespace grh::emit
                     moduleBuffer << "  " << attr << '\n';
                 }
                 moduleBuffer << block << '\n';
+            }
+        }
+
+        if (!simpleBlocks.empty())
+        {
+            moduleBuffer << '\n';
+            for (const auto &block : simpleBlocks)
+            {
+                const std::string attr = formatSrcAttribute(opSrcLoc(block.op));
+                if (!attr.empty())
+                {
+                    moduleBuffer << "  " << attr << '\n';
+                }
+                moduleBuffer << "  " << block.header << " begin\n";
+                for (const auto &stmt : block.stmts)
+                {
+                    moduleBuffer << stmt;
+                    if (!stmt.empty() && stmt.back() != '\n')
+                    {
+                        moduleBuffer << '\n';
+                    }
+                }
+                moduleBuffer << "  end\n";
             }
         }
 

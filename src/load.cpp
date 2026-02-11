@@ -714,8 +714,21 @@ namespace grh::ir::load
                 const auto &symbol = valueObj.at("sym").asString("value.sym");
                 int64_t width = valueObj.at("w").asInt("value.w");
                 bool isSigned = valueObj.at("sgn").asBool("value.sgn");
+                grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
+                if (auto typeIt = valueObj.find("type"); typeIt != valueObj.end())
+                {
+                    const std::string &typeName = typeIt->second.asString("value.type");
+                    if (auto parsed = grh::ir::parseValueType(typeName))
+                    {
+                        valueType = *parsed;
+                    }
+                    else
+                    {
+                        throw std::runtime_error("Unknown value type in JSON: " + typeName);
+                    }
+                }
                 SymbolId valueSym = graph.internSymbol(symbol);
-                ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
+                ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned, valueType);
                 valueBySymbol.emplace(symbol, valueId);
 
                 bool isInput = valueObj.at("in").asBool("value.in");

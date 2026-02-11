@@ -21,10 +21,8 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kMemoryWritePort:
             case grh::ir::OperationKind::kInstance:
             case grh::ir::OperationKind::kBlackbox:
-            case grh::ir::OperationKind::kDisplay:
-            case grh::ir::OperationKind::kFwrite:
-            case grh::ir::OperationKind::kFinish:
-            case grh::ir::OperationKind::kAssert:
+            case grh::ir::OperationKind::kSystemFunction:
+            case grh::ir::OperationKind::kSystemTask:
             case grh::ir::OperationKind::kDpicImport:
             case grh::ir::OperationKind::kDpicCall:
                 return true;

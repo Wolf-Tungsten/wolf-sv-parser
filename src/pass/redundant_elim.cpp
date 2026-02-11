@@ -188,10 +188,8 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kRegister:
             case grh::ir::OperationKind::kInstance:
             case grh::ir::OperationKind::kBlackbox:
-            case grh::ir::OperationKind::kDisplay:
-            case grh::ir::OperationKind::kFwrite:
-            case grh::ir::OperationKind::kFinish:
-            case grh::ir::OperationKind::kAssert:
+            case grh::ir::OperationKind::kSystemFunction:
+            case grh::ir::OperationKind::kSystemTask:
             case grh::ir::OperationKind::kDpicImport:
             case grh::ir::OperationKind::kDpicCall:
                 return false;
@@ -333,7 +331,7 @@ namespace wolf_sv_parser::transform
             const grh::ir::SymbolId opSym =
                 makeInlineConstSymbol(graph, base + "__op");
             const grh::ir::ValueId val =
-                graph.createValue(valueSym, width, isSigned);
+                graph.createValue(valueSym, width, isSigned, grh::ir::ValueType::Logic);
             const grh::ir::OperationId op =
                 graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(op, val);
@@ -782,6 +780,10 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     const grh::ir::ValueId resultId = op.results()[0];
+                    if (graph.getValue(resultId).type() != grh::ir::ValueType::Logic)
+                    {
+                        continue;
+                    }
                     OpSignature sig = makeSignature(graph, op);
                     auto [it, inserted] = seen.emplace(std::move(sig), CseEntry{opId, resultId});
                     if (inserted)

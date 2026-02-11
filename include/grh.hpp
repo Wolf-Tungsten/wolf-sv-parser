@@ -69,10 +69,8 @@ enum class OperationKind {
     kMemoryWritePort,
     kInstance,
     kBlackbox,
-    kDisplay,
-    kFwrite,
-    kFinish,
-    kAssert,
+    kSystemFunction,
+    kSystemTask,
     kDpicImport,
     kDpicCall,
     kXMRRead,
@@ -81,6 +79,15 @@ enum class OperationKind {
 
 std::string_view toString(OperationKind kind) noexcept;
 std::optional<OperationKind> parseOperationKind(std::string_view text) noexcept;
+
+enum class ValueType : uint8_t {
+    Logic,
+    Real,
+    String
+};
+
+std::string_view toString(ValueType type) noexcept;
+std::optional<ValueType> parseValueType(std::string_view text) noexcept;
 
 using AttributeValue = std::variant<
     bool,
@@ -276,6 +283,7 @@ public:
     SymbolId valueSymbol(ValueId value) const;
     int32_t valueWidth(ValueId value) const;
     bool valueSigned(ValueId value) const;
+    ValueType valueType(ValueId value) const;
     bool valueIsInput(ValueId value) const;
     bool valueIsOutput(ValueId value) const;
     bool valueIsInout(ValueId value) const;
@@ -317,6 +325,7 @@ private:
     std::vector<SymbolId> valueSymbols_;
     std::vector<int32_t> valueWidths_;
     std::vector<uint8_t> valueSigned_;
+    std::vector<uint8_t> valueTypes_;
     std::vector<uint8_t> valueIsInput_;
     std::vector<uint8_t> valueIsOutput_;
     std::vector<uint8_t> valueIsInout_;
@@ -335,7 +344,8 @@ public:
     GraphBuilder(GraphSymbolTable& symbols, GraphId graphId = GraphId{1, 0});
     static GraphBuilder fromView(const GraphView& view, GraphSymbolTable& symbols);
 
-    ValueId addValue(SymbolId sym, int32_t width, bool isSigned);
+    ValueId addValue(SymbolId sym, int32_t width, bool isSigned,
+                     ValueType type = ValueType::Logic);
     OperationId addOp(OperationKind kind, SymbolId sym);
     void addOperand(OperationId op, ValueId value);
     void addResult(OperationId op, ValueId value);
@@ -372,6 +382,7 @@ private:
         SymbolId symbol;
         int32_t width = 0;
         bool isSigned = false;
+        ValueType type = ValueType::Logic;
         bool isInput = false;
         bool isOutput = false;
         bool isInout = false;
@@ -436,6 +447,7 @@ public:
     std::string_view symbolText() const noexcept { return symbolText_; }
     int32_t width() const noexcept { return width_; }
     bool isSigned() const noexcept { return isSigned_; }
+    ValueType type() const noexcept { return type_; }
     bool isInput() const noexcept { return isInput_; }
     bool isOutput() const noexcept { return isOutput_; }
     bool isInout() const noexcept { return isInout_; }
@@ -447,14 +459,16 @@ private:
     friend class Graph;
 
     Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
-          bool isInput, bool isOutput, bool isInout, OperationId definingOp,
-          std::vector<ValueUser> users, std::optional<SrcLoc> srcLoc);
+          ValueType type, bool isInput, bool isOutput, bool isInout,
+          OperationId definingOp, std::vector<ValueUser> users,
+          std::optional<SrcLoc> srcLoc);
 
     ValueId id_{};
     SymbolId symbol_{};
     std::string symbolText_;
     int32_t width_ = 0;
     bool isSigned_ = false;
+    ValueType type_ = ValueType::Logic;
     bool isInput_ = false;
     bool isOutput_ = false;
     bool isInout_ = false;
@@ -518,7 +532,8 @@ public:
     std::span<const Port> outputPorts() const;
     std::span<const InoutPort> inoutPorts() const;
 
-    ValueId createValue(SymbolId symbol, int32_t width, bool isSigned);
+    ValueId createValue(SymbolId symbol, int32_t width, bool isSigned,
+                        ValueType type = ValueType::Logic);
     OperationId createOperation(OperationKind kind, SymbolId symbol);
 
     ValueId findValue(SymbolId symbol) const noexcept;

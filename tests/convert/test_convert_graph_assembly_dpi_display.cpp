@@ -132,6 +132,22 @@ std::optional<std::vector<bool>> getAttrBools(const grh::ir::Operation& op, std:
     return std::nullopt;
 }
 
+std::optional<std::string> getConstLiteral(const grh::ir::Graph& graph, grh::ir::ValueId valueId) {
+    if (!valueId.valid()) {
+        return std::nullopt;
+    }
+    const grh::ir::Value value = graph.getValue(valueId);
+    const grh::ir::OperationId defOpId = value.definingOp();
+    if (!defOpId.valid()) {
+        return std::nullopt;
+    }
+    const grh::ir::Operation defOp = graph.getOperation(defOpId);
+    if (defOp.kind() != grh::ir::OperationKind::kConstant) {
+        return std::nullopt;
+    }
+    return getAttrString(defOp, "constValue");
+}
+
 int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     auto bundle = compileInput(sourcePath, "graph_assembly_dpi_display");
     if (!bundle || !bundle->compilation) {
@@ -161,11 +177,11 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     for (grh::ir::OperationId opId : graph->operations()) {
         grh::ir::Operation op = graph->getOperation(opId);
         switch (op.kind()) {
-        case grh::ir::OperationKind::kDisplay:
-            if (auto kind = getAttrString(op, "displayKind")) {
-                if (*kind == "display") {
+        case grh::ir::OperationKind::kSystemTask:
+            if (auto name = getAttrString(op, "name")) {
+                if (*name == "display") {
                     displayOpId = opId;
-                } else if (*kind == "error") {
+                } else if (*name == "error") {
                     errorDisplayOpId = opId;
                 }
             }
@@ -186,55 +202,47 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     }
 
     if (!displayOpId.valid()) {
-        return fail("Missing kDisplay op");
+        return fail("Missing kSystemTask display op");
     }
     if (!errorDisplayOpId.valid()) {
-        return fail("Missing error display op");
+        return fail("Missing kSystemTask error op");
     }
 
     const grh::ir::Operation displayOp = graph->getOperation(displayOpId);
     auto displayEdges = getAttrStrings(displayOp, "eventEdge");
-    auto displayFormat = getAttrString(displayOp, "formatString");
-    auto displayKind = getAttrString(displayOp, "displayKind");
     if (!displayEdges || displayEdges->size() != 1 || (*displayEdges)[0] != "posedge") {
-        return fail("kDisplay missing eventEdge");
-    }
-    if (!displayFormat || *displayFormat != "a=%0d") {
-        return fail("kDisplay formatString mismatch");
-    }
-    if (!displayKind || *displayKind != "display") {
-        return fail("kDisplay displayKind mismatch");
+        return fail("kSystemTask display missing eventEdge");
     }
     const auto displayOperands = displayOp.operands();
-    if (displayOperands.size() != 3) {
-        return fail("kDisplay operand count mismatch");
+    if (displayOperands.size() != 4) {
+        return fail("kSystemTask display operand count mismatch");
     }
-    if (graph->getValue(displayOperands[1]).symbolText() != "a") {
-        return fail("kDisplay arg operand mismatch");
+    auto displayFormat = getConstLiteral(*graph, displayOperands[1]);
+    if (!displayFormat || (*displayFormat != "a=%0d" && *displayFormat != "\"a=%0d\"")) {
+        return fail("kSystemTask display format literal mismatch");
     }
-    if (graph->getValue(displayOperands[2]).symbolText() != "clk") {
-        return fail("kDisplay event operand mismatch");
+    if (graph->getValue(displayOperands[2]).symbolText() != "a") {
+        return fail("kSystemTask display arg operand mismatch");
+    }
+    if (graph->getValue(displayOperands[3]).symbolText() != "clk") {
+        return fail("kSystemTask display event operand mismatch");
     }
 
     const grh::ir::Operation errorOp = graph->getOperation(errorDisplayOpId);
     auto errorEdges = getAttrStrings(errorOp, "eventEdge");
-    auto errorFormat = getAttrString(errorOp, "formatString");
-    auto errorKind = getAttrString(errorOp, "displayKind");
     if (!errorEdges || errorEdges->size() != 1 || (*errorEdges)[0] != "posedge") {
-        return fail("error display missing eventEdge");
-    }
-    if (!errorFormat || *errorFormat != "oops") {
-        return fail("error display formatString mismatch");
-    }
-    if (!errorKind || *errorKind != "error") {
-        return fail("error display kind mismatch");
+        return fail("error system task missing eventEdge");
     }
     const auto errorOperands = errorOp.operands();
-    if (errorOperands.size() != 2) {
-        return fail("error display operand count mismatch");
+    if (errorOperands.size() != 3) {
+        return fail("error system task operand count mismatch");
     }
-    if (graph->getValue(errorOperands[1]).symbolText() != "clk") {
-        return fail("error display event operand mismatch");
+    auto errorFormat = getConstLiteral(*graph, errorOperands[1]);
+    if (!errorFormat || (*errorFormat != "oops" && *errorFormat != "\"oops\"")) {
+        return fail("error system task format literal mismatch");
+    }
+    if (graph->getValue(errorOperands[2]).symbolText() != "clk") {
+        return fail("error system task event operand mismatch");
     }
 
     auto itCaptureImport = importOps.find("dpi_capture");
