@@ -3194,9 +3194,57 @@ private:
         DpiImportInfo info;
         info.symbol = std::string(subroutine.name);
         auto classifyDpiType = [](const slang::ast::Type& type) -> std::string {
-            if (type.isString())
+            const slang::ast::Type& canonical = type.getCanonicalType();
+            if (canonical.isString())
             {
                 return "string";
+            }
+            if (canonical.isFloating())
+            {
+                const auto& floatType = canonical.as<slang::ast::FloatingType>();
+                switch (floatType.floatKind)
+                {
+                case slang::ast::FloatingType::Real:
+                    return "real";
+                case slang::ast::FloatingType::ShortReal:
+                    return "shortreal";
+                case slang::ast::FloatingType::RealTime:
+                    return "realtime";
+                }
+            }
+            if (canonical.isCHandle())
+            {
+                return "chandle";
+            }
+
+            const slang::ast::Type* base = &canonical;
+            while (base->kind == slang::ast::SymbolKind::PackedArrayType)
+            {
+                base = &base->as<slang::ast::PackedArrayType>().elementType.getCanonicalType();
+            }
+            if (base->kind == slang::ast::SymbolKind::ScalarType)
+            {
+                const auto& scalar = base->as<slang::ast::ScalarType>();
+                return scalar.scalarKind == slang::ast::ScalarType::Bit ? "bit" : "logic";
+            }
+            if (base->kind == slang::ast::SymbolKind::PredefinedIntegerType)
+            {
+                const auto& intType = base->as<slang::ast::PredefinedIntegerType>();
+                switch (intType.integerKind)
+                {
+                case slang::ast::PredefinedIntegerType::ShortInt:
+                    return "shortint";
+                case slang::ast::PredefinedIntegerType::Int:
+                    return "int";
+                case slang::ast::PredefinedIntegerType::LongInt:
+                    return "longint";
+                case slang::ast::PredefinedIntegerType::Byte:
+                    return "byte";
+                case slang::ast::PredefinedIntegerType::Integer:
+                    return "integer";
+                case slang::ast::PredefinedIntegerType::Time:
+                    return "time";
+                }
             }
             return "logic";
         };
@@ -3238,7 +3286,7 @@ private:
             const std::string typeName = classifyDpiType(formalType);
             int32_t width = 1;
             bool isSigned = false;
-            if (typeName == "logic")
+            if (formalType.isIntegral())
             {
                 const uint64_t widthRaw =
                     computeFixedWidth(formalType, *formal, diagnostics);
@@ -3258,7 +3306,7 @@ private:
             const std::string typeName = classifyDpiType(returnType);
             int32_t width = 1;
             bool isSigned = false;
-            if (typeName == "logic")
+            if (returnType.isIntegral())
             {
                 const uint64_t widthRaw =
                     computeFixedWidth(returnType, subroutine, diagnostics);

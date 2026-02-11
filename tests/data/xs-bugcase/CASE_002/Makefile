@@ -44,6 +44,8 @@ BIN := $(OUT_DIR_BASE)/sim_$(CASE_TAG)
 CXX ?= g++
 CXXFLAGS ?= -O2 -std=c++17 -Wall
 LDLIBS ?= -pthread
+CCACHE_DIR ?= $(OUT_DIR_BASE)/ccache
+export CCACHE_DIR
 
 .PHONY: run build_ref build_wolf clean
 
@@ -72,6 +74,7 @@ $(REF_LIB): $(TB_V) $(FILELIST)
 		echo "[$(CASE_TAG)] verilator not found in PATH"; \
 		exit 1; \
 	fi
+	@mkdir -p $(CCACHE_DIR)
 	@mkdir -p $(REF_DIR)
 	@$(VERILATOR) $(REF_FLAGS) --cc $(TB_V) -f $(FILELIST) \
 		--top-module $(TB_TOP) --prefix $(REF_PREFIX) -Mdir $(REF_DIR)
@@ -82,6 +85,7 @@ $(WOLF_LIB): $(TB_V) $(WOLF_SV)
 		echo "[$(CASE_TAG)] verilator not found in PATH"; \
 		exit 1; \
 	fi
+	@mkdir -p $(CCACHE_DIR)
 	@mkdir -p $(WOLF_DIR)
 	@$(VERILATOR) $(WOLF_FLAGS) --cc $(TB_V) $(WOLF_SV) \
 		--top-module $(TB_TOP) --prefix $(WOLF_PREFIX) -Mdir $(WOLF_DIR)
@@ -97,6 +101,7 @@ $(BIN): $(REF_LIB) $(WOLF_LIB) $(TB_CPP)
 		-I$(VERILATOR_ROOT)/include -I$(VERILATOR_ROOT)/include/vltstd \
 		$(TB_CPP) $(REF_LIB) $(WOLF_LIB) \
 		$(VERILATOR_ROOT)/include/verilated.cpp \
+		$(VERILATOR_ROOT)/include/verilated_dpi.cpp \
 		$(VERILATOR_ROOT)/include/verilated_threads.cpp \
 		$(VERILATOR_COV_SRC) \
 		-o $(BIN) $(LDLIBS)

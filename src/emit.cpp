@@ -2747,6 +2747,28 @@ namespace grh::emit
             std::vector<SimpleBlock> simpleBlocks;
             std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
+            std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiTempNames;
+
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kDpicCall)
+                {
+                    continue;
+                }
+                for (const auto res : op.results())
+                {
+                    if (!res.valid())
+                    {
+                        continue;
+                    }
+                    const std::string name = valueName(res);
+                    if (!name.empty())
+                    {
+                        dpiTempNames.emplace(res, name + "_intm");
+                    }
+                }
+            }
 
             auto ensureVarDecl = [&](const std::string &name,
                                      grh::ir::ValueType type,
@@ -2946,6 +2968,496 @@ namespace grh::emit
                     return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            };
+            std::unordered_map<grh::ir::ValueId, bool, grh::ir::ValueIdHash> dpiDependsCache;
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiDependsVisiting;
+            auto valueDependsOnDpi = [&](auto&& self, grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                if (dpiTempNames.find(valueId) != dpiTempNames.end())
+                {
+                    return true;
+                }
+                auto cached = dpiDependsCache.find(valueId);
+                if (cached != dpiDependsCache.end())
+                {
+                    return cached->second;
+                }
+                if (!dpiDependsVisiting.insert(valueId).second)
+                {
+                    return false;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    dpiDependsVisiting.erase(valueId);
+                    dpiDependsCache.emplace(valueId, false);
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                const auto &ops = defOp.operands();
+                auto dependsForOperands = [&]() -> bool {
+                    for (const auto operand : ops)
+                    {
+                        if (self(self, operand))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                bool depends = false;
+                switch (defOp.kind())
+                {
+                case grh::ir::OperationKind::kConstant:
+                case grh::ir::OperationKind::kEq:
+                case grh::ir::OperationKind::kNe:
+                case grh::ir::OperationKind::kCaseEq:
+                case grh::ir::OperationKind::kCaseNe:
+                case grh::ir::OperationKind::kWildcardEq:
+                case grh::ir::OperationKind::kWildcardNe:
+                case grh::ir::OperationKind::kLt:
+                case grh::ir::OperationKind::kLe:
+                case grh::ir::OperationKind::kGt:
+                case grh::ir::OperationKind::kGe:
+                case grh::ir::OperationKind::kAnd:
+                case grh::ir::OperationKind::kOr:
+                case grh::ir::OperationKind::kXor:
+                case grh::ir::OperationKind::kXnor:
+                case grh::ir::OperationKind::kShl:
+                case grh::ir::OperationKind::kLShr:
+                case grh::ir::OperationKind::kAShr:
+                case grh::ir::OperationKind::kAdd:
+                case grh::ir::OperationKind::kSub:
+                case grh::ir::OperationKind::kMul:
+                case grh::ir::OperationKind::kDiv:
+                case grh::ir::OperationKind::kMod:
+                case grh::ir::OperationKind::kLogicAnd:
+                case grh::ir::OperationKind::kLogicOr:
+                case grh::ir::OperationKind::kNot:
+                case grh::ir::OperationKind::kReduceAnd:
+                case grh::ir::OperationKind::kReduceOr:
+                case grh::ir::OperationKind::kReduceXor:
+                case grh::ir::OperationKind::kReduceNor:
+                case grh::ir::OperationKind::kReduceNand:
+                case grh::ir::OperationKind::kReduceXnor:
+                case grh::ir::OperationKind::kLogicNot:
+                case grh::ir::OperationKind::kMux:
+                case grh::ir::OperationKind::kAssign:
+                case grh::ir::OperationKind::kConcat:
+                case grh::ir::OperationKind::kReplicate:
+                case grh::ir::OperationKind::kSliceStatic:
+                case grh::ir::OperationKind::kSliceDynamic:
+                case grh::ir::OperationKind::kSliceArray:
+                    depends = dependsForOperands();
+                    break;
+                default:
+                    depends = false;
+                    break;
+                }
+                dpiDependsVisiting.erase(valueId);
+                dpiDependsCache.emplace(valueId, depends);
+                return depends;
+            };
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
+            std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
+            auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (valueDependsOnDpi(valueDependsOnDpi, valueId))
+                {
+                    return dpiInlineExpr(valueId);
+                }
+                return valueExpr(valueId);
+            };
+            auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return inlineOperandExpr(valueId);
+                }
+                const int64_t width = graph->getValue(valueId).width();
+                const std::string name = inlineOperandExpr(valueId);
+                if (width == 1)
+                {
+                    return name;
+                }
+                return "(|" + parenIfNeeded(name) + ")";
+            };
+            auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                const std::string name = inlineOperandExpr(valueId);
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    return name;
+                }
+                const int64_t width = value.width();
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                const std::string indexed = parenIfNeeded(name);
+                if (value.isSigned())
+                {
+                    return "{{" + std::to_string(diff) + "{" + indexed + "[" +
+                        std::to_string(width - 1) + "]}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            };
+            auto inlineExtendShiftOperand = [&](grh::ir::ValueId valueId,
+                                                int64_t targetWidth,
+                                                bool signExtend) -> std::string
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                const std::string name = inlineOperandExpr(valueId);
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    return name;
+                }
+                const int64_t width = value.width();
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                const std::string indexed = parenIfNeeded(name);
+                if (signExtend)
+                {
+                    return "{{" + std::to_string(diff) + "{" + indexed + "[" +
+                        std::to_string(width - 1) + "]}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            };
+            auto inlineConcatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return inlineOperandExpr(valueId);
+                }
+                if (auto literal = constLiteralRawFor(valueId))
+                {
+                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
+                    {
+                        return *sized;
+                    }
+                }
+                return inlineOperandExpr(valueId);
+            };
+            dpiInlineExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (!valueId.valid())
+                {
+                    return {};
+                }
+                if (auto it = dpiTempNames.find(valueId); it != dpiTempNames.end())
+                {
+                    return it->second;
+                }
+                if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+                {
+                    return valueExpr(valueId);
+                }
+                if (!dpiInlineResolving.insert(valueId).second)
+                {
+                    return valueExpr(valueId);
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    dpiInlineResolving.erase(valueId);
+                    return valueExpr(valueId);
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                const auto &ops = defOp.operands();
+                std::string expr = valueExpr(valueId);
+                switch (defOp.kind())
+                {
+                case grh::ir::OperationKind::kConstant:
+                    if (auto literal = constLiteralFor(valueId))
+                    {
+                        expr = *literal;
+                    }
+                    break;
+                case grh::ir::OperationKind::kEq:
+                case grh::ir::OperationKind::kNe:
+                case grh::ir::OperationKind::kCaseEq:
+                case grh::ir::OperationKind::kCaseNe:
+                case grh::ir::OperationKind::kWildcardEq:
+                case grh::ir::OperationKind::kWildcardNe:
+                case grh::ir::OperationKind::kLt:
+                case grh::ir::OperationKind::kLe:
+                case grh::ir::OperationKind::kGt:
+                case grh::ir::OperationKind::kGe:
+                {
+                    if (ops.size() >= 2)
+                    {
+                        int64_t resultWidth =
+                            std::max(graph->getValue(ops[0]).width(),
+                                     graph->getValue(ops[1]).width());
+                        const std::string tok = binOpToken(defOp.kind());
+                        const std::string lhs = resultWidth > 0
+                                                    ? inlineExtendOperand(ops[0], resultWidth)
+                                                    : inlineOperandExpr(ops[0]);
+                        const std::string rhs = resultWidth > 0
+                                                    ? inlineExtendOperand(ops[1], resultWidth)
+                                                    : inlineOperandExpr(ops[1]);
+                        const bool signedCompare =
+                            (defOp.kind() == grh::ir::OperationKind::kLt ||
+                             defOp.kind() == grh::ir::OperationKind::kLe ||
+                             defOp.kind() == grh::ir::OperationKind::kGt ||
+                             defOp.kind() == grh::ir::OperationKind::kGe) &&
+                            graph->getValue(ops[0]).isSigned() &&
+                            graph->getValue(ops[1]).isSigned();
+                        const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
+                        const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
+                        expr = lhsExpr + " " + tok + " " + rhsExpr;
+                    }
+                    break;
+                }
+                case grh::ir::OperationKind::kAnd:
+                case grh::ir::OperationKind::kOr:
+                case grh::ir::OperationKind::kXor:
+                case grh::ir::OperationKind::kXnor:
+                    if (ops.size() >= 2)
+                    {
+                        const std::string tok = binOpToken(defOp.kind());
+                        expr = inlineOperandExpr(ops[0]) + " " + tok + " " + inlineOperandExpr(ops[1]);
+                    }
+                    break;
+                case grh::ir::OperationKind::kShl:
+                case grh::ir::OperationKind::kLShr:
+                case grh::ir::OperationKind::kAShr:
+                    if (ops.size() >= 2)
+                    {
+                        const int64_t resultWidth = graph->getValue(valueId).width();
+                        const bool signExtend =
+                            defOp.kind() == grh::ir::OperationKind::kAShr &&
+                            graph->getValue(ops[0]).isSigned();
+                        const std::string tok = binOpToken(defOp.kind());
+                        const std::string lhs = resultWidth > 0
+                                                    ? inlineExtendShiftOperand(ops[0], resultWidth, signExtend)
+                                                    : inlineOperandExpr(ops[0]);
+                        expr = lhs + " " + tok + " " + inlineOperandExpr(ops[1]);
+                    }
+                    break;
+                case grh::ir::OperationKind::kAdd:
+                case grh::ir::OperationKind::kSub:
+                case grh::ir::OperationKind::kMul:
+                case grh::ir::OperationKind::kDiv:
+                case grh::ir::OperationKind::kMod:
+                    if (ops.size() >= 2)
+                    {
+                        int64_t resultWidth = graph->getValue(valueId).width();
+                        if (resultWidth <= 0)
+                        {
+                            resultWidth = std::max(graph->getValue(ops[0]).width(),
+                                                   graph->getValue(ops[1]).width());
+                        }
+                        const std::string tok = binOpToken(defOp.kind());
+                        expr = inlineExtendOperand(ops[0], resultWidth) + " " + tok + " " +
+                               inlineExtendOperand(ops[1], resultWidth);
+                    }
+                    break;
+                case grh::ir::OperationKind::kLogicAnd:
+                case grh::ir::OperationKind::kLogicOr:
+                    if (ops.size() >= 2)
+                    {
+                        const std::string tok = binOpToken(defOp.kind());
+                        expr = inlineLogicalOperand(ops[0]) + " " + tok + " " +
+                               inlineLogicalOperand(ops[1]);
+                    }
+                    break;
+                case grh::ir::OperationKind::kNot:
+                case grh::ir::OperationKind::kReduceAnd:
+                case grh::ir::OperationKind::kReduceOr:
+                case grh::ir::OperationKind::kReduceXor:
+                case grh::ir::OperationKind::kReduceNor:
+                case grh::ir::OperationKind::kReduceNand:
+                case grh::ir::OperationKind::kReduceXnor:
+                    if (!ops.empty())
+                    {
+                        const std::string tok = unaryOpToken(defOp.kind());
+                        expr = tok + inlineOperandExpr(ops[0]);
+                    }
+                    break;
+                case grh::ir::OperationKind::kLogicNot:
+                    if (!ops.empty())
+                    {
+                        expr = "!" + inlineLogicalOperand(ops[0]);
+                    }
+                    break;
+                case grh::ir::OperationKind::kMux:
+                    if (ops.size() >= 3)
+                    {
+                        const int64_t resultWidth = graph->getValue(valueId).width();
+                        const std::string lhs = inlineExtendOperand(ops[1], resultWidth);
+                        const std::string rhs = inlineExtendOperand(ops[2], resultWidth);
+                        expr = inlineOperandExpr(ops[0]) + " ? " + lhs + " : " + rhs;
+                    }
+                    break;
+                case grh::ir::OperationKind::kAssign:
+                    if (!ops.empty())
+                    {
+                        int64_t resultWidth = graph->getValue(valueId).width();
+                        expr = inlineExtendOperand(ops[0], resultWidth);
+                    }
+                    break;
+                case grh::ir::OperationKind::kConcat:
+                    if (!ops.empty())
+                    {
+                        if (ops.size() == 1)
+                        {
+                            expr = inlineOperandExpr(ops[0]);
+                        }
+                        else
+                        {
+                            std::ostringstream exprStream;
+                            exprStream << "{";
+                            for (std::size_t i = 0; i < ops.size(); ++i)
+                            {
+                                if (i != 0)
+                                {
+                                    exprStream << ", ";
+                                }
+                                exprStream << inlineConcatOperandExpr(ops[i]);
+                            }
+                            exprStream << "}";
+                            expr = exprStream.str();
+                        }
+                    }
+                    break;
+                case grh::ir::OperationKind::kReplicate:
+                {
+                    if (!ops.empty())
+                    {
+                        auto rep = getAttribute<int64_t>(*graph, defOp, "rep");
+                        if (rep)
+                        {
+                            std::ostringstream exprStream;
+                            exprStream << "{" << *rep << "{" << inlineConcatOperandExpr(ops[0]) << "}}";
+                            expr = exprStream.str();
+                        }
+                    }
+                    break;
+                }
+                case grh::ir::OperationKind::kSliceStatic:
+                {
+                    if (!ops.empty())
+                    {
+                        auto sliceStart = getAttribute<int64_t>(*graph, defOp, "sliceStart");
+                        auto sliceEnd = getAttribute<int64_t>(*graph, defOp, "sliceEnd");
+                        if (sliceStart && sliceEnd)
+                        {
+                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            std::ostringstream exprStream;
+                            if (operandWidth == 1)
+                            {
+                                exprStream << inlineOperandExpr(ops[0]);
+                            }
+                            else
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                                if (*sliceStart == *sliceEnd)
+                                {
+                                    exprStream << *sliceStart;
+                                }
+                                else
+                                {
+                                    exprStream << *sliceEnd << ":" << *sliceStart;
+                                }
+                                exprStream << "]";
+                            }
+                            expr = exprStream.str();
+                        }
+                    }
+                    break;
+                }
+                case grh::ir::OperationKind::kSliceDynamic:
+                {
+                    if (ops.size() >= 2)
+                    {
+                        auto width = getAttribute<int64_t>(*graph, defOp, "sliceWidth");
+                        if (width)
+                        {
+                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            std::ostringstream exprStream;
+                            if (operandWidth == 1)
+                            {
+                                exprStream << inlineOperandExpr(ops[0]);
+                            }
+                            else if (*width == 1)
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
+                                    parenIfNeeded(inlineOperandExpr(ops[1])) << "]";
+                            }
+                            else
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
+                                    parenIfNeeded(inlineOperandExpr(ops[1])) << " +: " << *width << "]";
+                            }
+                            expr = exprStream.str();
+                        }
+                    }
+                    break;
+                }
+                case grh::ir::OperationKind::kSliceArray:
+                {
+                    if (ops.size() >= 2)
+                    {
+                        auto width = getAttribute<int64_t>(*graph, defOp, "sliceWidth");
+                        if (width)
+                        {
+                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            std::ostringstream exprStream;
+                            if (*width == 1 && operandWidth == 1)
+                            {
+                                exprStream << inlineOperandExpr(ops[0]);
+                            }
+                            else
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                                if (*width == 1)
+                                {
+                                    exprStream << parenIfNeeded(inlineOperandExpr(ops[1]));
+                                }
+                                else
+                                {
+                                    exprStream << parenIfNeeded(inlineOperandExpr(ops[1])) << " * " << *width << " +: " << *width;
+                                }
+                                exprStream << "]";
+                            }
+                            expr = exprStream.str();
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+                }
+                dpiInlineResolving.erase(valueId);
+                return expr;
+            };
+            auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+                {
+                    return valueExpr(valueId);
+                }
+                return dpiInlineExpr(valueId);
             };
             auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
             {
@@ -3912,14 +4424,14 @@ namespace grh::emit
                     if (isAlwaysTrue(updateCond))
                     {
                         appendIndented(block, 1, "always @* begin");
-                        appendIndented(block, 2, regName + " = " + valueExpr(nextValue) + ";");
+                        appendIndented(block, 2, regName + " = " + valueExprSeq(nextValue) + ";");
                         appendIndented(block, 1, "end");
                     }
                     else
                     {
                         std::ostringstream stmt;
-                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
-                        appendIndented(stmt, 3, regName + " = " + valueExpr(nextValue) + ";");
+                        appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
+                        appendIndented(stmt, 3, regName + " = " + valueExprSeq(nextValue) + ";");
                         appendIndented(stmt, 2, "end");
                         block << "  always_latch begin\n";
                         block << stmt.str();
@@ -3981,12 +4493,12 @@ namespace grh::emit
                     std::ostringstream stmt;
                     if (isConstOne(updateCond))
                     {
-                        appendIndented(stmt, 2, regName + " <= " + valueExpr(nextValue) + ";");
+                        appendIndented(stmt, 2, regName + " <= " + valueExprSeq(nextValue) + ";");
                     }
                     else
                     {
-                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
-                        appendIndented(stmt, 3, regName + " <= " + valueExpr(nextValue) + ";");
+                        appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
+                        appendIndented(stmt, 3, regName + " <= " + valueExprSeq(nextValue) + ";");
                         appendIndented(stmt, 2, "end");
                     }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -4489,15 +5001,21 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream decl;
+                    const auto isPackedVector = [](const std::string& typeName) {
+                        return typeName == "logic" || typeName == "bit";
+                    };
                     decl << "import \"DPI-C\" function ";
                     if (hasReturn)
                     {
-                        const bool useLogic =
-                            !(returnType && !returnType->empty() && *returnType != "logic");
-                        if (useLogic)
+                        std::string typeName = "logic";
+                        if (returnType && !returnType->empty())
+                        {
+                            typeName = *returnType;
+                        }
+                        if (isPackedVector(typeName))
                         {
                             const int64_t width = returnWidth > 0 ? returnWidth : 1;
-                            decl << "logic ";
+                            decl << typeName << " ";
                             if (returnSigned)
                             {
                                 decl << "signed ";
@@ -4509,7 +5027,7 @@ namespace grh::emit
                         }
                         else
                         {
-                            decl << *returnType << " ";
+                            decl << typeName << " ";
                         }
                     }
                     else
@@ -4525,9 +5043,9 @@ namespace grh::emit
                             typeName = (*argsType)[i];
                         }
                         decl << "  " << (*argsDir)[i] << " ";
-                        if (typeName == "logic")
+                        if (isPackedVector(typeName))
                         {
-                            decl << "logic ";
+                            decl << typeName << " ";
                             if (argsSigned && (*argsSigned)[i])
                             {
                                 decl << "signed ";
@@ -5500,6 +6018,28 @@ namespace grh::emit
         std::vector<IrSimpleBlock> simpleBlocks;
         std::vector<IrSeqBlock> seqBlocks;
         std::unordered_set<std::string> instanceNamesUsed;
+        std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiTempNames;
+
+        for (const auto opId : view.operations())
+        {
+            if (view.opKind(opId) != grh::ir::OperationKind::kDpicCall)
+            {
+                continue;
+            }
+            const auto results = view.opResults(opId);
+            for (const auto res : results)
+            {
+                if (!res.valid())
+                {
+                    continue;
+                }
+                const std::string name = valueName(res);
+                if (!name.empty())
+                {
+                    dpiTempNames.emplace(res, name + "_intm");
+                }
+            }
+        }
 
         auto ensureVarDecl = [&](const std::string &name,
                                  grh::ir::ValueType type,
@@ -5706,6 +6246,481 @@ namespace grh::emit
                 return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+        };
+        std::unordered_map<grh::ir::ValueId, bool, grh::ir::ValueIdHash> dpiDependsCache;
+        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiDependsVisiting;
+        auto valueDependsOnDpi = [&](auto&& self, grh::ir::ValueId valueId) -> bool
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            if (dpiTempNames.find(valueId) != dpiTempNames.end())
+            {
+                return true;
+            }
+            auto cached = dpiDependsCache.find(valueId);
+            if (cached != dpiDependsCache.end())
+            {
+                return cached->second;
+            }
+            if (!dpiDependsVisiting.insert(valueId).second)
+            {
+                return false;
+            }
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                dpiDependsVisiting.erase(valueId);
+                dpiDependsCache.emplace(valueId, false);
+                return false;
+            }
+            const auto kind = view.opKind(defOpId);
+            const auto ops = view.opOperands(defOpId);
+            auto dependsForOperands = [&]() -> bool {
+                for (const auto operand : ops)
+                {
+                    if (self(self, operand))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            bool depends = false;
+            switch (kind)
+            {
+            case grh::ir::OperationKind::kConstant:
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+            case grh::ir::OperationKind::kAnd:
+            case grh::ir::OperationKind::kOr:
+            case grh::ir::OperationKind::kXor:
+            case grh::ir::OperationKind::kXnor:
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+            case grh::ir::OperationKind::kNot:
+            case grh::ir::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceXnor:
+            case grh::ir::OperationKind::kLogicNot:
+            case grh::ir::OperationKind::kMux:
+            case grh::ir::OperationKind::kAssign:
+            case grh::ir::OperationKind::kConcat:
+            case grh::ir::OperationKind::kReplicate:
+            case grh::ir::OperationKind::kSliceStatic:
+            case grh::ir::OperationKind::kSliceDynamic:
+            case grh::ir::OperationKind::kSliceArray:
+                depends = dependsForOperands();
+                break;
+            default:
+                depends = false;
+                break;
+            }
+            dpiDependsVisiting.erase(valueId);
+            dpiDependsCache.emplace(valueId, depends);
+            return depends;
+        };
+        std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
+        std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
+        auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (valueDependsOnDpi(valueDependsOnDpi, valueId))
+            {
+                return dpiInlineExpr(valueId);
+            }
+            return valueExpr(valueId);
+        };
+        auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return inlineOperandExpr(valueId);
+            }
+            const int64_t width = view.valueWidth(valueId);
+            const std::string name = inlineOperandExpr(valueId);
+            if (width == 1)
+            {
+                return name;
+            }
+            return "(|" + parenIfNeeded(name) + ")";
+        };
+        auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+        {
+            const std::string name = inlineOperandExpr(valueId);
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return name;
+            }
+            const int64_t width = view.valueWidth(valueId);
+            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+            {
+                return name;
+            }
+            const int64_t diff = targetWidth - width;
+            if (diff <= 0)
+            {
+                return name;
+            }
+            const std::string indexed = parenIfNeeded(name);
+            if (view.valueSigned(valueId))
+            {
+                return "{{" + std::to_string(diff) + "{" + indexed + "[" +
+                    std::to_string(width - 1) + "]}}," + name + "}";
+            }
+            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+        };
+        auto inlineExtendShiftOperand = [&](grh::ir::ValueId valueId,
+                                            int64_t targetWidth,
+                                            bool signExtend) -> std::string
+        {
+            const std::string name = inlineOperandExpr(valueId);
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return name;
+            }
+            const int64_t width = view.valueWidth(valueId);
+            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+            {
+                return name;
+            }
+            const int64_t diff = targetWidth - width;
+            if (diff <= 0)
+            {
+                return name;
+            }
+            const std::string indexed = parenIfNeeded(name);
+            if (signExtend)
+            {
+                return "{{" + std::to_string(diff) + "{" + indexed + "[" +
+                    std::to_string(width - 1) + "]}}," + name + "}";
+            }
+            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+        };
+        auto inlineConcatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return inlineOperandExpr(valueId);
+            }
+            if (auto literal = constLiteralRawFor(valueId))
+            {
+                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
+                {
+                    return *sized;
+                }
+            }
+            return inlineOperandExpr(valueId);
+        };
+        dpiInlineExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (!valueId.valid())
+            {
+                return {};
+            }
+            if (auto it = dpiTempNames.find(valueId); it != dpiTempNames.end())
+            {
+                return it->second;
+            }
+            if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+            {
+                return valueExpr(valueId);
+            }
+            if (!dpiInlineResolving.insert(valueId).second)
+            {
+                return valueExpr(valueId);
+            }
+            std::string expr = valueExpr(valueId);
+            const grh::ir::OperationId defOpId = view.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                dpiInlineResolving.erase(valueId);
+                return expr;
+            }
+            const auto kind = view.opKind(defOpId);
+            const auto ops = view.opOperands(defOpId);
+            switch (kind)
+            {
+            case grh::ir::OperationKind::kConstant:
+                if (auto literal = constLiteralFor(valueId))
+                {
+                    expr = *literal;
+                }
+                break;
+            case grh::ir::OperationKind::kEq:
+            case grh::ir::OperationKind::kNe:
+            case grh::ir::OperationKind::kCaseEq:
+            case grh::ir::OperationKind::kCaseNe:
+            case grh::ir::OperationKind::kWildcardEq:
+            case grh::ir::OperationKind::kWildcardNe:
+            case grh::ir::OperationKind::kLt:
+            case grh::ir::OperationKind::kLe:
+            case grh::ir::OperationKind::kGt:
+            case grh::ir::OperationKind::kGe:
+            {
+                if (ops.size() >= 2)
+                {
+                    int64_t resultWidth =
+                        std::max(view.valueWidth(ops[0]), view.valueWidth(ops[1]));
+                    const std::string tok = binOpToken(kind);
+                    const std::string lhs = resultWidth > 0
+                                                ? inlineExtendOperand(ops[0], resultWidth)
+                                                : inlineOperandExpr(ops[0]);
+                    const std::string rhs = resultWidth > 0
+                                                ? inlineExtendOperand(ops[1], resultWidth)
+                                                : inlineOperandExpr(ops[1]);
+                    const bool signedCompare =
+                        (kind == grh::ir::OperationKind::kLt ||
+                         kind == grh::ir::OperationKind::kLe ||
+                         kind == grh::ir::OperationKind::kGt ||
+                         kind == grh::ir::OperationKind::kGe) &&
+                        view.valueSigned(ops[0]) &&
+                        view.valueSigned(ops[1]);
+                    const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
+                    const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
+                    expr = lhsExpr + " " + tok + " " + rhsExpr;
+                }
+                break;
+            }
+            case grh::ir::OperationKind::kAnd:
+            case grh::ir::OperationKind::kOr:
+            case grh::ir::OperationKind::kXor:
+            case grh::ir::OperationKind::kXnor:
+                if (ops.size() >= 2)
+                {
+                    const std::string tok = binOpToken(kind);
+                    expr = inlineOperandExpr(ops[0]) + " " + tok + " " + inlineOperandExpr(ops[1]);
+                }
+                break;
+            case grh::ir::OperationKind::kShl:
+            case grh::ir::OperationKind::kLShr:
+            case grh::ir::OperationKind::kAShr:
+                if (ops.size() >= 2)
+                {
+                    const int64_t resultWidth = view.valueWidth(valueId);
+                    const bool signExtend =
+                        kind == grh::ir::OperationKind::kAShr && view.valueSigned(ops[0]);
+                    const std::string tok = binOpToken(kind);
+                    const std::string lhs = resultWidth > 0
+                                                ? inlineExtendShiftOperand(ops[0], resultWidth, signExtend)
+                                                : inlineOperandExpr(ops[0]);
+                    expr = lhs + " " + tok + " " + inlineOperandExpr(ops[1]);
+                }
+                break;
+            case grh::ir::OperationKind::kAdd:
+            case grh::ir::OperationKind::kSub:
+            case grh::ir::OperationKind::kMul:
+            case grh::ir::OperationKind::kDiv:
+            case grh::ir::OperationKind::kMod:
+                if (ops.size() >= 2)
+                {
+                    int64_t resultWidth = view.valueWidth(valueId);
+                    if (resultWidth <= 0)
+                    {
+                        resultWidth = std::max(view.valueWidth(ops[0]), view.valueWidth(ops[1]));
+                    }
+                    const std::string tok = binOpToken(kind);
+                    expr = inlineExtendOperand(ops[0], resultWidth) + " " + tok + " " +
+                           inlineExtendOperand(ops[1], resultWidth);
+                }
+                break;
+            case grh::ir::OperationKind::kLogicAnd:
+            case grh::ir::OperationKind::kLogicOr:
+                if (ops.size() >= 2)
+                {
+                    const std::string tok = binOpToken(kind);
+                    expr = inlineLogicalOperand(ops[0]) + " " + tok + " " +
+                           inlineLogicalOperand(ops[1]);
+                }
+                break;
+            case grh::ir::OperationKind::kNot:
+            case grh::ir::OperationKind::kReduceAnd:
+            case grh::ir::OperationKind::kReduceOr:
+            case grh::ir::OperationKind::kReduceXor:
+            case grh::ir::OperationKind::kReduceNor:
+            case grh::ir::OperationKind::kReduceNand:
+            case grh::ir::OperationKind::kReduceXnor:
+                if (!ops.empty())
+                {
+                    const std::string tok = unaryOpToken(kind);
+                    expr = tok + inlineOperandExpr(ops[0]);
+                }
+                break;
+            case grh::ir::OperationKind::kLogicNot:
+                if (!ops.empty())
+                {
+                    expr = "!" + inlineLogicalOperand(ops[0]);
+                }
+                break;
+            case grh::ir::OperationKind::kMux:
+                if (ops.size() >= 3)
+                {
+                    const int64_t resultWidth = view.valueWidth(valueId);
+                    const std::string lhs = inlineExtendOperand(ops[1], resultWidth);
+                    const std::string rhs = inlineExtendOperand(ops[2], resultWidth);
+                    expr = inlineOperandExpr(ops[0]) + " ? " + lhs + " : " + rhs;
+                }
+                break;
+            case grh::ir::OperationKind::kAssign:
+                if (!ops.empty())
+                {
+                    int64_t resultWidth = view.valueWidth(valueId);
+                    expr = inlineExtendOperand(ops[0], resultWidth);
+                }
+                break;
+            case grh::ir::OperationKind::kConcat:
+                if (!ops.empty())
+                {
+                    if (ops.size() == 1)
+                    {
+                        expr = inlineOperandExpr(ops[0]);
+                    }
+                    else
+                    {
+                        std::ostringstream exprStream;
+                        exprStream << "{";
+                        for (std::size_t i = 0; i < ops.size(); ++i)
+                        {
+                            if (i != 0)
+                            {
+                                exprStream << ", ";
+                            }
+                            exprStream << inlineConcatOperandExpr(ops[i]);
+                        }
+                        exprStream << "}";
+                        expr = exprStream.str();
+                    }
+                }
+                break;
+            case grh::ir::OperationKind::kReplicate:
+                if (!ops.empty())
+                {
+                    auto rep = getAttribute<int64_t>(view, defOpId, "rep");
+                    if (rep)
+                    {
+                        std::ostringstream exprStream;
+                        exprStream << "{" << *rep << "{" << inlineConcatOperandExpr(ops[0]) << "}}";
+                        expr = exprStream.str();
+                    }
+                }
+                break;
+            case grh::ir::OperationKind::kSliceStatic:
+                if (!ops.empty())
+                {
+                    auto sliceStart = getAttribute<int64_t>(view, defOpId, "sliceStart");
+                    auto sliceEnd = getAttribute<int64_t>(view, defOpId, "sliceEnd");
+                    if (sliceStart && sliceEnd)
+                    {
+                        const int64_t operandWidth = view.valueWidth(ops[0]);
+                        std::ostringstream exprStream;
+                        if (operandWidth == 1)
+                        {
+                            exprStream << inlineOperandExpr(ops[0]);
+                        }
+                        else
+                        {
+                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                            if (*sliceStart == *sliceEnd)
+                            {
+                                exprStream << *sliceStart;
+                            }
+                            else
+                            {
+                                exprStream << *sliceEnd << ":" << *sliceStart;
+                            }
+                            exprStream << "]";
+                        }
+                        expr = exprStream.str();
+                    }
+                }
+                break;
+            case grh::ir::OperationKind::kSliceDynamic:
+                if (ops.size() >= 2)
+                {
+                    auto width = getAttribute<int64_t>(view, defOpId, "sliceWidth");
+                    if (width)
+                    {
+                        const int64_t operandWidth = view.valueWidth(ops[0]);
+                        std::ostringstream exprStream;
+                        if (operandWidth == 1)
+                        {
+                            exprStream << inlineOperandExpr(ops[0]);
+                        }
+                        else if (*width == 1)
+                        {
+                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
+                                parenIfNeeded(inlineOperandExpr(ops[1])) << "]";
+                        }
+                        else
+                        {
+                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
+                                parenIfNeeded(inlineOperandExpr(ops[1])) << " +: " << *width << "]";
+                        }
+                        expr = exprStream.str();
+                    }
+                }
+                break;
+            case grh::ir::OperationKind::kSliceArray:
+                if (ops.size() >= 2)
+                {
+                    auto width = getAttribute<int64_t>(view, defOpId, "sliceWidth");
+                    if (width)
+                    {
+                        const int64_t operandWidth = view.valueWidth(ops[0]);
+                        std::ostringstream exprStream;
+                        if (*width == 1 && operandWidth == 1)
+                        {
+                            exprStream << inlineOperandExpr(ops[0]);
+                        }
+                        else
+                        {
+                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                            if (*width == 1)
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[1]));
+                            }
+                            else
+                            {
+                                exprStream << parenIfNeeded(inlineOperandExpr(ops[1])) << " * " << *width << " +: " << *width;
+                            }
+                            exprStream << "]";
+                        }
+                        expr = exprStream.str();
+                    }
+                }
+                break;
+            default:
+                break;
+            }
+            dpiInlineResolving.erase(valueId);
+            return expr;
+        };
+        auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (!valueDependsOnDpi(valueDependsOnDpi, valueId))
+            {
+                return valueExpr(valueId);
+            }
+            return dpiInlineExpr(valueId);
         };
         auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
         {
@@ -6661,14 +7676,14 @@ namespace grh::emit
                 if (isAlwaysTrue(updateCond))
                 {
                     appendIndented(block, 1, "always @* begin");
-                    appendIndented(block, 2, regName + " = " + valueExpr(nextValue) + ";");
+                appendIndented(block, 2, regName + " = " + valueExprSeq(nextValue) + ";");
                     appendIndented(block, 1, "end");
                 }
                 else
                 {
                     std::ostringstream stmt;
-                    appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
-                    appendIndented(stmt, 3, regName + " = " + valueExpr(nextValue) + ";");
+                appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
+                appendIndented(stmt, 3, regName + " = " + valueExprSeq(nextValue) + ";");
                     appendIndented(stmt, 2, "end");
                     block << "  always_latch begin\n";
                     block << stmt.str();
@@ -6733,12 +7748,12 @@ namespace grh::emit
                 std::ostringstream stmt;
                 if (isConstOne(updateCond))
                 {
-                    appendIndented(stmt, 2, regName + " <= " + valueExpr(nextValue) + ";");
+                appendIndented(stmt, 2, regName + " <= " + valueExprSeq(nextValue) + ";");
                 }
                 else
                 {
-                    appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
-                    appendIndented(stmt, 3, regName + " <= " + valueExpr(nextValue) + ";");
+                appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
+                appendIndented(stmt, 3, regName + " <= " + valueExprSeq(nextValue) + ";");
                     appendIndented(stmt, 2, "end");
                 }
                 addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -7244,15 +8259,21 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream decl;
+                const auto isPackedVector = [](const std::string& typeName) {
+                    return typeName == "logic" || typeName == "bit";
+                };
                 decl << "import \"DPI-C\" function ";
                 if (hasReturn)
                 {
-                    const bool useLogic =
-                        !(returnType && !returnType->empty() && *returnType != "logic");
-                    if (useLogic)
+                    std::string typeName = "logic";
+                    if (returnType && !returnType->empty())
+                    {
+                        typeName = *returnType;
+                    }
+                    if (isPackedVector(typeName))
                     {
                         const int64_t width = returnWidth > 0 ? returnWidth : 1;
-                        decl << "logic ";
+                        decl << typeName << " ";
                         if (returnSigned)
                         {
                             decl << "signed ";
@@ -7264,7 +8285,7 @@ namespace grh::emit
                     }
                     else
                     {
-                        decl << *returnType << " ";
+                        decl << typeName << " ";
                     }
                 }
                 else
@@ -7280,9 +8301,9 @@ namespace grh::emit
                         typeName = (*argsType)[i];
                     }
                     decl << "  " << (*argsDir)[i] << " ";
-                    if (typeName == "logic")
+                    if (isPackedVector(typeName))
                     {
-                        decl << "logic ";
+                        decl << typeName << " ";
                         if (argsSigned && (*argsSigned)[i])
                         {
                             decl << "signed ";

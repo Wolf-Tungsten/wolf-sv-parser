@@ -689,23 +689,34 @@ GRH 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type
     - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output
     - argsWidth (vector<int64_t>，n个)：记录每个形参的位宽
     - argsName (vector<string>，n个)：记录每个形参的名称
-    - argsSigned (vector<bool>，n个)：记录每个形参是否为有符号
-    - argsType (vector<string>，n个)：记录每个形参的数据类型，取值为 "logic" / "string"（缺省视为 "logic"）
+    - argsSigned (vector<bool>，n个)：记录每个形参是否为有符号（仅对 integral 类型有效）
+    - argsType (vector<string>，n个)：记录每个形参的数据类型，缺省视为 "logic"。目前可取：
+        - integral： "logic" / "bit" / "byte" / "shortint" / "int" / "longint" / "integer" / "time"
+        - non-integral： "real" / "shortreal" / "realtime" / "string" / "chandle"
     - hasReturn (bool)：是否有返回值；false 表示 void
-    - returnWidth (int64_t)：返回值位宽（hasReturn 为 true 时有效）
-    - returnSigned (bool)：返回值是否有符号（hasReturn 为 true 时有效）
-    - returnType (string)：返回值类型（hasReturn 为 true 时有效）；取值为 "logic" / "string"（缺省视为 "logic"）
+    - returnWidth (int64_t)：返回值位宽（hasReturn 为 true 时有效，仅对 integral 类型有效）
+    - returnSigned (bool)：返回值是否有符号（hasReturn 为 true 时有效，仅对 integral 类型有效）
+    - returnType (string)：返回值类型（hasReturn 为 true 时有效）；缺省视为 "logic"。取值范围同 argsType
 
 约束：
-- `hasReturn == true` 时，`returnWidth > 0` 且 `returnSigned` 有效
+- `hasReturn == true` 且 `returnType` 为 integral 时，`returnWidth > 0` 且 `returnSigned` 有效
 - `argsSigned/argsType` 与 `argsName/argsDirection/argsWidth` 长度一致
+- `argsType/returnType` 为 non-integral 时，`argsWidth/returnWidth` 仅保留为信息字段，emit 会忽略
 
 生成语义：
 ```
-import "DPI-C" function ${hasReturn ? (returnType == "string" ? "string" :
-    ("logic " + (returnSigned ? "signed " : "") + "[" + (returnWidth-1) + ":0]")) : "void"} ${symbol} (
-    ${argsDirection[i]} ${argsType[i] == "string" ? "string" :
-        ("logic " + (argsSigned[i] ? "signed " : "") + "[" + (argsWidth[i]-1) + ":0]")} ${argsName[i]},
+import "DPI-C" function ${
+    hasReturn ? (
+        (returnType == "logic" || returnType == "bit")
+            ? (returnType + " " + (returnSigned ? "signed " : "") + "[" + (returnWidth-1) + ":0]")
+            : returnType
+    ) : "void"
+} ${symbol} (
+    ${argsDirection[i]} ${
+        (argsType[i] == "logic" || argsType[i] == "bit")
+            ? (argsType[i] + " " + (argsSigned[i] ? "signed " : "") + "[" + (argsWidth[i]-1) + ":0]")
+            : argsType[i]
+    } ${argsName[i]},
     ...
 );
 ```

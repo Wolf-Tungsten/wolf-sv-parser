@@ -22,7 +22,9 @@ extern "C" int jtag_tick(svBit *jtag_TCK,
                           svBit *jtag_TDI,
                           svBit *jtag_TRSTn,
                           svBit jtag_TDO) {
-    static int tick_count = 0;
+    static int tick_counts[2] = {0, 0};
+    extern int g_model_index;
+    int &tick_count = tick_counts[g_model_index];
     const int value = tick_count ^ (jtag_TDO ? 1 : 0);
     *jtag_TCK = (tick_count >> 0) & 1;
     *jtag_TMS = (tick_count >> 1) & 1;
@@ -35,10 +37,14 @@ extern "C" int jtag_tick(svBit *jtag_TCK,
 static vluint64_t main_time = 0;
 double sc_time_stamp() { return static_cast<double>(main_time); }
 
+int g_model_index = 0;
+
 static void tick(VRef *ref, VWolf *wolf, bool clk) {
     ref->clk = clk;
     wolf->clk = clk;
+    g_model_index = 0;
     ref->eval();
+    g_model_index = 1;
     wolf->eval();
     ++main_time;
 }
