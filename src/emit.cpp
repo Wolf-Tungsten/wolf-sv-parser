@@ -4459,11 +4459,13 @@ namespace grh::emit
                     }
                     else if (*width == 1)
                     {
-                        expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << "]";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "["
+                             << parenIfNeeded(valueExpr(operands[1])) << "]";
                     }
                     else
                     {
-                        expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
+                        expr << parenIfNeeded(valueExpr(operands[0])) << "["
+                             << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
                     }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
