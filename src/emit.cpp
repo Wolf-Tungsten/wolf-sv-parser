@@ -2793,14 +2793,7 @@ namespace grh::emit
                     return indexExpr;
                 }
                 std::ostringstream expr;
-                if (clampWidth == 1)
-                {
-                    expr << "(" << indexExpr << ")[0]";
-                }
-                else
-                {
-                    expr << "(" << indexExpr << ")[" << (clampWidth - 1) << ":0]";
-                }
+                expr << clampWidth << "'(" << indexExpr << ")";
                 return expr.str();
             };
 
@@ -3034,6 +3027,21 @@ namespace grh::emit
                 }
                 return "(|" + name + ")";
             };
+            auto sizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                if (auto literal = constLiteralRawFor(valueId))
+                {
+                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
+                    {
+                        return *sized;
+                    }
+                }
+                return valueExpr(valueId);
+            };
             auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
             {
                 const grh::ir::Value value = graph->getValue(valueId);
@@ -3042,7 +3050,7 @@ namespace grh::emit
                     return valueExpr(valueId);
                 }
                 const int64_t width = value.width();
-                const std::string name = valueExpr(valueId);
+                const std::string name = sizedOperandExpr(valueId);
                 if (targetWidth <= 0 || width <= 0 || width == targetWidth)
                 {
                     return name;
@@ -3054,7 +3062,11 @@ namespace grh::emit
                 }
                 if (value.isSigned())
                 {
-                    return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                    const std::string indexed = parenIfNeeded(name);
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
@@ -3068,7 +3080,7 @@ namespace grh::emit
                     return valueExpr(valueId);
                 }
                 const int64_t width = value.width();
-                const std::string name = valueExpr(valueId);
+                const std::string name = sizedOperandExpr(valueId);
                 if (targetWidth <= 0 || width <= 0 || width == targetWidth)
                 {
                     return name;
@@ -3080,7 +3092,11 @@ namespace grh::emit
                 }
                 if (signExtend)
                 {
-                    return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                    const std::string indexed = parenIfNeeded(name);
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
@@ -3230,6 +3246,22 @@ namespace grh::emit
                 }
                 return valueExpr(valueId);
             };
+            auto inlineSizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                if (value.type() != grh::ir::ValueType::Logic)
+                {
+                    return inlineOperandExpr(valueId);
+                }
+                if (auto literal = constLiteralRawFor(valueId))
+                {
+                    if (auto sized = sizedLiteralIfUnsized(*literal, value.width()))
+                    {
+                        return *sized;
+                    }
+                }
+                return inlineOperandExpr(valueId);
+            };
             auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
             {
                 if (valueType(valueId) != grh::ir::ValueType::Logic)
@@ -3247,7 +3279,7 @@ namespace grh::emit
             auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
             {
                 const grh::ir::Value value = graph->getValue(valueId);
-                const std::string name = inlineOperandExpr(valueId);
+                const std::string name = inlineSizedOperandExpr(valueId);
                 if (value.type() != grh::ir::ValueType::Logic)
                 {
                     return name;
@@ -3265,8 +3297,10 @@ namespace grh::emit
                 const std::string indexed = parenIfNeeded(name);
                 if (value.isSigned())
                 {
-                    return "{{" + std::to_string(diff) + "{" + indexed + "[" +
-                        std::to_string(width - 1) + "]}}," + name + "}";
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
@@ -3275,7 +3309,7 @@ namespace grh::emit
                                                 bool signExtend) -> std::string
             {
                 const grh::ir::Value value = graph->getValue(valueId);
-                const std::string name = inlineOperandExpr(valueId);
+                const std::string name = inlineSizedOperandExpr(valueId);
                 if (value.type() != grh::ir::ValueType::Logic)
                 {
                     return name;
@@ -3293,8 +3327,10 @@ namespace grh::emit
                 const std::string indexed = parenIfNeeded(name);
                 if (signExtend)
                 {
-                    return "{{" + std::to_string(diff) + "{" + indexed + "[" +
-                        std::to_string(width - 1) + "]}}," + name + "}";
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
                 }
                 return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
             };
@@ -6060,14 +6096,7 @@ namespace grh::emit
                 return indexExpr;
             }
             std::ostringstream expr;
-            if (clampWidth == 1)
-            {
-                expr << "(" << indexExpr << ")[0]";
-            }
-            else
-            {
-                expr << "(" << indexExpr << ")[" << (clampWidth - 1) << ":0]";
-            }
+            expr << clampWidth << "'(" << indexExpr << ")";
             return expr.str();
         };
         auto opContext = [&](grh::ir::OperationId opId) -> std::string
@@ -6424,6 +6453,21 @@ namespace grh::emit
             }
             return "(|" + name + ")";
         };
+        auto sizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return valueExpr(valueId);
+            }
+            if (auto literal = constLiteralRawFor(valueId))
+            {
+                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
+                {
+                    return *sized;
+                }
+            }
+            return valueExpr(valueId);
+        };
         auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
         {
             if (valueType(valueId) != grh::ir::ValueType::Logic)
@@ -6431,7 +6475,7 @@ namespace grh::emit
                 return valueExpr(valueId);
             }
             const int64_t width = view.valueWidth(valueId);
-            const std::string name = valueExpr(valueId);
+            const std::string name = sizedOperandExpr(valueId);
             if (targetWidth <= 0 || width <= 0 || width == targetWidth)
             {
                 return name;
@@ -6443,7 +6487,11 @@ namespace grh::emit
             }
             if (view.valueSigned(valueId))
             {
-                return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                const std::string indexed = parenIfNeeded(name);
+                const std::string signBit =
+                    width == 1 ? indexed
+                               : indexed + "[" + std::to_string(width - 1) + "]";
+                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };
@@ -6456,7 +6504,7 @@ namespace grh::emit
                 return valueExpr(valueId);
             }
             const int64_t width = view.valueWidth(valueId);
-            const std::string name = valueExpr(valueId);
+            const std::string name = sizedOperandExpr(valueId);
             if (targetWidth <= 0 || width <= 0 || width == targetWidth)
             {
                 return name;
@@ -6468,7 +6516,11 @@ namespace grh::emit
             }
             if (signExtend)
             {
-                return "{{" + std::to_string(diff) + "{" + name + "[" + std::to_string(width - 1) + "]}}," + name + "}";
+                const std::string indexed = parenIfNeeded(name);
+                const std::string signBit =
+                    width == 1 ? indexed
+                               : indexed + "[" + std::to_string(width - 1) + "]";
+                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };
@@ -6609,6 +6661,21 @@ namespace grh::emit
             }
             return valueExpr(valueId);
         };
+        auto inlineSizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        {
+            if (valueType(valueId) != grh::ir::ValueType::Logic)
+            {
+                return inlineOperandExpr(valueId);
+            }
+            if (auto literal = constLiteralRawFor(valueId))
+            {
+                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
+                {
+                    return *sized;
+                }
+            }
+            return inlineOperandExpr(valueId);
+        };
         auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
         {
             if (valueType(valueId) != grh::ir::ValueType::Logic)
@@ -6625,7 +6692,7 @@ namespace grh::emit
         };
         auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
         {
-            const std::string name = inlineOperandExpr(valueId);
+            const std::string name = inlineSizedOperandExpr(valueId);
             if (valueType(valueId) != grh::ir::ValueType::Logic)
             {
                 return name;
@@ -6643,8 +6710,10 @@ namespace grh::emit
             const std::string indexed = parenIfNeeded(name);
             if (view.valueSigned(valueId))
             {
-                return "{{" + std::to_string(diff) + "{" + indexed + "[" +
-                    std::to_string(width - 1) + "]}}," + name + "}";
+                const std::string signBit =
+                    width == 1 ? indexed
+                               : indexed + "[" + std::to_string(width - 1) + "]";
+                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };
@@ -6652,7 +6721,7 @@ namespace grh::emit
                                             int64_t targetWidth,
                                             bool signExtend) -> std::string
         {
-            const std::string name = inlineOperandExpr(valueId);
+            const std::string name = inlineSizedOperandExpr(valueId);
             if (valueType(valueId) != grh::ir::ValueType::Logic)
             {
                 return name;
@@ -6670,8 +6739,10 @@ namespace grh::emit
             const std::string indexed = parenIfNeeded(name);
             if (signExtend)
             {
-                return "{{" + std::to_string(diff) + "{" + indexed + "[" +
-                    std::to_string(width - 1) + "]}}," + name + "}";
+                const std::string signBit =
+                    width == 1 ? indexed
+                               : indexed + "[" + std::to_string(width - 1) + "]";
+                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
             }
             return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
         };

@@ -7012,6 +7012,7 @@ private:
                                 constNode.kind = ExprNodeKind::Constant;
                                 constNode.literal = formatIntegerLiteral(literal);
                                 constNode.location = expr.sourceRange.start();
+                                constNode.isSigned = (name == "signed");
                                 applyExprWidthHint(constNode);
                                 return addNodeForExpr(std::move(constNode));
                             }
@@ -7296,6 +7297,11 @@ private:
                 {
                     return kInvalidPlanIndex;
                 }
+                bool operandSigned = false;
+                if (operand < lowering.values.size())
+                {
+                    operandSigned = lowering.values[operand].isSigned;
+                }
                 auto operandWidth = [&](ExprNodeId id) -> int32_t {
                     if (id == kInvalidPlanIndex || id >= lowering.values.size())
                     {
@@ -7326,7 +7332,8 @@ private:
                 }
                 if (targetWidth > 0)
                 {
-                    const bool signExtend = expr.type ? expr.type->isSigned() : false;
+                    const bool signExtend =
+                        expr.type ? expr.type->isSigned() : operandSigned;
                     operand = resizeValueToWidth(operand, targetWidth, signExtend,
                                                  expr.sourceRange.start());
                     if (operand == kInvalidPlanIndex)
@@ -7342,10 +7349,13 @@ private:
                     }
                     return operand;
                 }
+                const bool signExtend =
+                    expr.type ? expr.type->isSigned() : operandSigned;
                 ExprNode zeroNode;
                 zeroNode.kind = ExprNodeKind::Constant;
                 zeroNode.literal = "0";
                 zeroNode.location = expr.sourceRange.start();
+                zeroNode.isSigned = signExtend;
                 if (targetWidth > 0)
                 {
                     zeroNode.widthHint = targetWidth;
@@ -7357,6 +7367,7 @@ private:
                 negNode.operands = {zeroId, operand};
                 negNode.location = expr.sourceRange.start();
                 negNode.tempSymbol = makeTempSymbol();
+                negNode.isSigned = signExtend;
                 if (targetWidth > 0)
                 {
                     negNode.widthHint = targetWidth;
@@ -14773,12 +14784,16 @@ private:
             {
                 node.kind = ExprNodeKind::Constant;
                 node.literal = formatIntegerLiteral(literal->getValue());
+                node.isSigned = expr.type ? expr.type->isSigned()
+                                          : literal->getValue().isSigned();
                 return addNode(expr, std::move(node));
             }
             if (const auto* literal = expr.as_if<slang::ast::UnbasedUnsizedIntegerLiteral>())
             {
                 node.kind = ExprNodeKind::Constant;
                 node.literal = formatIntegerLiteral(literal->getValue());
+                node.isSigned = expr.type ? expr.type->isSigned()
+                                          : literal->getValue().isSigned();
                 return addNode(expr, std::move(node));
             }
             if (const auto* literal = expr.as_if<slang::ast::RealLiteral>())
@@ -14809,6 +14824,11 @@ private:
                     {
                         return kInvalidPlanIndex;
                     }
+                    bool operandSigned = false;
+                    if (operand < state_.lowering_.values.size())
+                    {
+                        operandSigned = state_.lowering_.values[operand].isSigned;
+                    }
                     int32_t targetWidth = 0;
                     if (expr.type)
                     {
@@ -14834,10 +14854,13 @@ private:
                         lowered_.emplace(&expr, operand);
                         return operand;
                     }
+                    const bool signExtend =
+                        expr.type ? expr.type->isSigned() : operandSigned;
                     ExprNode zeroNode;
                     zeroNode.kind = ExprNodeKind::Constant;
                     zeroNode.literal = "0";
                     zeroNode.location = expr.sourceRange.start();
+                    zeroNode.isSigned = signExtend;
                     if (targetWidth > 0)
                     {
                         zeroNode.widthHint = targetWidth;
@@ -14846,6 +14869,7 @@ private:
                     node.kind = ExprNodeKind::Operation;
                     node.op = grh::ir::OperationKind::kSub;
                     node.operands = {zeroId, operand};
+                    node.isSigned = signExtend;
                     if (targetWidth > 0)
                     {
                         node.widthHint = targetWidth;

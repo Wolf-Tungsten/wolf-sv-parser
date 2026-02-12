@@ -303,6 +303,10 @@ rtl/VSegmentUnit.sv:1041:46: warning: if statement has empty body [-Wempty-body]
 explicitly clamped to the `clog2` width of the target vector before `+:`. The
 clean run no longer reports `WIDTHTRUNC` warnings.
 
+`WIDTHCONCAT` is also fixed: emit now sizes unsized constants before they are
+used in concatenations/replications during extension (e.g. `8'd128` instead of
+`128`), so Verilator no longer reports `WIDTHCONCAT` for `wolf_emit.sv`.
+
 ## Analysis: %Warning-WIDTHTRUNC series
 
 Verilator reports `WIDTHTRUNC` when a dynamic bit/part select index is wider
