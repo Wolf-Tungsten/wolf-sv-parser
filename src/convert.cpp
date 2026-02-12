@@ -9560,7 +9560,7 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             {
                 context_.diagnostics->warn(
                     write.location,
-                    "Skipping sequential write without edge-sensitive timing control");
+                    "Skipping sequential write without edge-sensitive timing control; initial/final assignments are ignored");
             }
             continue;
         }

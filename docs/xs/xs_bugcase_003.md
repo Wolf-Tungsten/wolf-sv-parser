@@ -173,3 +173,132 @@ cycles) in `tb.cpp`:
 ```
 [COVERAGE] line coverage 93.92% (2164/2304)
 ```
+
+## Warnings (clean run on Feb 12, 2026)
+
+Collected after:
+
+```
+make -C tests/data/xs-bugcase/CASE_003 clean
+make -C tests/data/xs-bugcase/CASE_003 run
+```
+
+### slang
+
+- 4 warnings reported by slang (details not printed in the log).
+
+### convert
+
+Repeated warning: `Skipping sequential write without edge-sensitive timing control`.
+
+```
+rtl/NewPipelineConnectPipe_21.sv:115:9
+rtl/VSegmentUnit.sv:3186:9  instMicroOpValid = 1'h0;
+rtl/VSegmentUnit.sv:3187:9  enqPtr_flag = 1'h0;
+rtl/VSegmentUnit.sv:3188:9  enqPtr_value = 3'h0;
+rtl/VSegmentUnit.sv:3189:9  deqPtr_flag = 1'h0;
+rtl/VSegmentUnit.sv:3190:9  deqPtr_value = 3'h0;
+rtl/VSegmentUnit.sv:3191:9  stridePtrReg_value = 3'h0;
+rtl/VSegmentUnit.sv:3192:9  segmentIdx = 8'h0;
+rtl/VSegmentUnit.sv:3193:9  fieldIdx = 4'h0;
+rtl/VSegmentUnit.sv:3194:9  segmentOffset = 64'h0;
+rtl/VSegmentUnit.sv:3195:9  splitPtr_flag = 1'h0;
+rtl/VSegmentUnit.sv:3196:9  splitPtr_value = 3'h0;
+rtl/VSegmentUnit.sv:3197:9  latchVaddr = 64'h0;
+rtl/VSegmentUnit.sv:3198:9  latchVaddrDup = 64'h0;
+rtl/VSegmentUnit.sv:3199:9  fofBuffer_fuOpType = 9'h0;
+rtl/VSegmentUnit.sv:3200:9  fofBuffer_vecWen = 1'h0;
+rtl/VSegmentUnit.sv:3201:9  fofBuffer_v0Wen = 1'h0;
+rtl/VSegmentUnit.sv:3202:9  fofBuffer_vlWen = 1'h0;
+rtl/VSegmentUnit.sv:3203:9  fofBuffer_vpu_vill = 1'h0;
+rtl/VSegmentUnit.sv:3204:9  fofBuffer_vpu_vma = 1'h0;
+rtl/VSegmentUnit.sv:3205:9  fofBuffer_vpu_vta = 1'h0;
+rtl/VSegmentUnit.sv:3206:9  fofBuffer_vpu_vsew = 2'h0;
+rtl/VSegmentUnit.sv:3207:9  fofBuffer_vpu_vlmul = 3'h0;
+rtl/VSegmentUnit.sv:3208:9  fofBuffer_vpu_specVill = 1'h0;
+rtl/VSegmentUnit.sv:3209:9  fofBuffer_vpu_specVma = 1'h0;
+rtl/VSegmentUnit.sv:3210:9  fofBuffer_vpu_specVta = 1'h0;
+rtl/VSegmentUnit.sv:3211:9  fofBuffer_vpu_specVsew = 2'h0;
+rtl/VSegmentUnit.sv:3212:9  fofBuffer_vpu_specVlmul = 3'h0;
+rtl/VSegmentUnit.sv:3213:9  fofBuffer_vpu_vm = 1'h0;
+rtl/VSegmentUnit.sv:3214:9  fofBuffer_vpu_vstart = 8'h0;
+rtl/VSegmentUnit.sv:3215:9  fofBuffer_vpu_frm = 3'h0;
+rtl/VSegmentUnit.sv:3216:9  fofBuffer_vpu_fpu_isFpToVecInst = 1'h0;
+rtl/VSegmentUnit.sv:3217:9  fofBuffer_vpu_fpu_isFP32Instr = 1'h0;
+rtl/VSegmentUnit.sv:3218:9  fofBuffer_vpu_fpu_isFP64Instr = 1'h0;
+rtl/VSegmentUnit.sv:3219:9  fofBuffer_vpu_fpu_isReduction = 1'h0;
+rtl/VSegmentUnit.sv:3220:9  fofBuffer_vpu_fpu_isFoldTo1_2 = 1'h0;
+rtl/VSegmentUnit.sv:3221:9  fofBuffer_vpu_fpu_isFoldTo1_4 = 1'h0;
+rtl/VSegmentUnit.sv:3222:9  fofBuffer_vpu_fpu_isFoldTo1_8 = 1'h0;
+rtl/VSegmentUnit.sv:3223:9  fofBuffer_vpu_vxrm = 2'h0;
+rtl/VSegmentUnit.sv:3224:9  fofBuffer_vpu_vuopIdx = 7'h0;
+rtl/VSegmentUnit.sv:3225:9  fofBuffer_vpu_lastUop = 1'h0;
+rtl/VSegmentUnit.sv:3226:9  fofBuffer_vpu_nf = 3'h0;
+rtl/VSegmentUnit.sv:3227:9  fofBuffer_vpu_veew = 2'h0;
+rtl/VSegmentUnit.sv:3228:9  fofBuffer_vpu_isReverse = 1'h0;
+rtl/VSegmentUnit.sv:3229:9  fofBuffer_vpu_isExt = 1'h0;
+rtl/VSegmentUnit.sv:3230:9  fofBuffer_vpu_isNarrow = 1'h0;
+rtl/VSegmentUnit.sv:3231:9  fofBuffer_vpu_isDstMask = 1'h0;
+rtl/VSegmentUnit.sv:3232:9  fofBuffer_vpu_isOpMask = 1'h0;
+rtl/VSegmentUnit.sv:3233:9  fofBuffer_vpu_isMove = 1'h0;
+rtl/VSegmentUnit.sv:3234:9  fofBuffer_vpu_isDependOldVd = 1'h0;
+rtl/VSegmentUnit.sv:3235:9  fofBuffer_vpu_isWritePartVd = 1'h0;
+rtl/VSegmentUnit.sv:3236:9  fofBuffer_vpu_isVleff = 1'h0;
+rtl/VSegmentUnit.sv:3237:9  fofBuffer_vpu_maskVecGen = 16'h0;
+rtl/VSegmentUnit.sv:3238:9  fofBuffer_vpu_sew8 = 1'h0;
+rtl/VSegmentUnit.sv:3239:9  fofBuffer_vpu_sew16 = 1'h0;
+rtl/VSegmentUnit.sv:3240:9  fofBuffer_vpu_sew32 = 1'h0;
+rtl/VSegmentUnit.sv:3241:9  fofBuffer_vpu_sew64 = 1'h0;
+rtl/VSegmentUnit.sv:3242:9  fofBuffer_pdest = 8'h0;
+rtl/VSegmentUnit.sv:3243:9  fofBuffer_robIdx_flag = 1'h0;
+rtl/VSegmentUnit.sv:3244:9  fofBuffer_robIdx_value = 9'h0;
+rtl/VSegmentUnit.sv:3245:9  fofBuffer_perfDebugInfo_eliminatedMove = 1'h0;
+rtl/VSegmentUnit.sv:3246:9  fofBuffer_perfDebugInfo_renameTime = 64'h0;
+rtl/VSegmentUnit.sv:3247:9  fofBuffer_perfDebugInfo_dispatchTime = 64'h0;
+rtl/VSegmentUnit.sv:3248:9  fofBuffer_perfDebugInfo_enqRsTime = 64'h0;
+rtl/VSegmentUnit.sv:3249:9  fofBuffer_perfDebugInfo_selectTime = 64'h0;
+rtl/VSegmentUnit.sv:3250:9  fofBuffer_perfDebugInfo_issueTime = 64'h0;
+rtl/VSegmentUnit.sv:3251:9  fofBuffer_perfDebugInfo_runahead_checkpoint_id = 64'h0;
+rtl/VSegmentUnit.sv:3252:9  fofBuffer_perfDebugInfo_tlbFirstReqTime = 64'h0;
+rtl/VSegmentUnit.sv:3253:9  fofBuffer_perfDebugInfo_tlbRespTime = 64'h0;
+rtl/VSegmentUnit.sv:3254:9  fofBuffer_debug_seqNum_seqNum = 56'h0;
+rtl/VSegmentUnit.sv:3255:9  fofBuffer_debug_seqNum_uopIdx = 8'h0;
+rtl/VSegmentUnit.sv:3256:9  fofBufferValid = 1'h0;
+rtl/VSegmentUnit.sv:3257:9  state = 4'h0;
+rtl/VSegmentUnit.sv:3258:9  curPtr = 1'h0;
+rtl/VSegmentUnit.sv:3259:9  isMisalignReg = 1'h0;
+rtl/VSegmentUnit.sv:3260:9  notCross16ByteReg = 1'h0;
+rtl/VSegmentUnit.sv:3261:9  combinedData = 64'h0;
+rtl/VSegmentUnit.sv:3262:9  lowPagePaddr = 48'h0;
+rtl/VSegmentUnit.sv:3263:9  triggerDebugMode = 1'h0;
+rtl/VSegmentUnit.sv:3264:9  triggerBreakpoint = 1'h0;
+rtl/VSegmentUnit.sv:3265:9  last_REG = 1'h0;
+rtl/VSegmentUnit.sv:3266:9  nextBaseVaddr_r = 64'h0;
+```
+
+### clang (RTL)
+
+```
+rtl/VSegmentUnit.sv:1021:46: warning: if statement has empty body [-Wempty-body]
+rtl/VSegmentUnit.sv:1027:46: warning: if statement has empty body [-Wempty-body]
+rtl/VSegmentUnit.sv:1035:46: warning: if statement has empty body [-Wempty-body]
+rtl/VSegmentUnit.sv:1041:46: warning: if statement has empty body [-Wempty-body]
+```
+
+### Verilator (wolf_emit.sv)
+
+```
+%Warning-WIDTHTRUNC: wolf_emit.sv:3433:27 Bit extraction of var[63:0] requires 6 bit index, not 7 bits.
+%Warning-WIDTHCONCAT: wolf_emit.sv:3459:67 Unsized numbers/parameters not allowed in concatenations.
+%Warning-WIDTHCONCAT: wolf_emit.sv:3459:66 Unsized numbers/parameters not allowed in replications.
+%Warning-WIDTHTRUNC: wolf_emit.sv:3461:27 Bit extraction of var[1023:0] requires 10 bit index, not 11 bits.
+%Warning-WIDTHCONCAT: wolf_emit.sv:3871:63 Unsized numbers/parameters not allowed in concatenations.
+%Warning-WIDTHCONCAT: wolf_emit.sv:3871:62 Unsized numbers/parameters not allowed in replications.
+%Warning-WIDTHTRUNC: wolf_emit.sv:3873:27 Bit extraction of var[1023:0] requires 10 bit index, not 11 bits.
+```
+
+### Verilator C++ headers (toolchain noise)
+
+Multiple `-Wsign-compare` warnings in `verilated_funcs.h` and
+`verilated_types.h` due to comparisons between `int32_t` and `size_t` inside
+Verilator helper templates.
