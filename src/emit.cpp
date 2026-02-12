@@ -2768,6 +2768,41 @@ namespace grh::emit
                 }
                 return "(" + expr + ")";
             };
+            auto clampIndexExpr = [&](grh::ir::ValueId indexId,
+                                      int64_t operandWidth) -> std::string
+            {
+                std::string indexExpr = parenIfNeeded(valueExpr(indexId));
+                if (operandWidth <= 1)
+                {
+                    return indexExpr;
+                }
+                const int64_t indexWidth = graph->getValue(indexId).width();
+                if (indexWidth <= 0)
+                {
+                    return indexExpr;
+                }
+                uint64_t temp = static_cast<uint64_t>(operandWidth - 1);
+                int64_t clampWidth = 0;
+                while (temp > 0)
+                {
+                    ++clampWidth;
+                    temp >>= 1;
+                }
+                if (clampWidth <= 0 || indexWidth <= clampWidth)
+                {
+                    return indexExpr;
+                }
+                std::ostringstream expr;
+                if (clampWidth == 1)
+                {
+                    expr << "(" << indexExpr << ")[0]";
+                }
+                else
+                {
+                    expr << "(" << indexExpr << ")[" << (clampWidth - 1) << ":0]";
+                }
+                return expr.str();
+            };
 
             // -------------------------
             // Ports
@@ -4460,12 +4495,12 @@ namespace grh::emit
                     else if (*width == 1)
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << parenIfNeeded(valueExpr(operands[1])) << "]";
+                             << clampIndexExpr(operands[1], operandWidth) << "]";
                     }
                     else
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
+                             << clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
                     }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
@@ -5999,6 +6034,41 @@ namespace grh::emit
                 return expr;
             }
             return "(" + expr + ")";
+        };
+        auto clampIndexExpr = [&](grh::ir::ValueId indexId,
+                                  int64_t operandWidth) -> std::string
+        {
+            std::string indexExpr = parenIfNeeded(valueExpr(indexId));
+            if (operandWidth <= 1)
+            {
+                return indexExpr;
+            }
+            const int64_t indexWidth = view.valueWidth(indexId);
+            if (indexWidth <= 0)
+            {
+                return indexExpr;
+            }
+            uint64_t temp = static_cast<uint64_t>(operandWidth - 1);
+            int64_t clampWidth = 0;
+            while (temp > 0)
+            {
+                ++clampWidth;
+                temp >>= 1;
+            }
+            if (clampWidth <= 0 || indexWidth <= clampWidth)
+            {
+                return indexExpr;
+            }
+            std::ostringstream expr;
+            if (clampWidth == 1)
+            {
+                expr << "(" << indexExpr << ")[0]";
+            }
+            else
+            {
+                expr << "(" << indexExpr << ")[" << (clampWidth - 1) << ":0]";
+            }
+            return expr.str();
         };
         auto opContext = [&](grh::ir::OperationId opId) -> std::string
         {
@@ -7774,11 +7844,13 @@ namespace grh::emit
                 }
                 else if (*width == 1)
                 {
-                    expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << "]";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "["
+                         << clampIndexExpr(operands[1], operandWidth) << "]";
                 }
                 else
                 {
-                    expr << parenIfNeeded(valueExpr(operands[0])) << "[" << parenIfNeeded(valueExpr(operands[1])) << " +: " << *width << "]";
+                    expr << parenIfNeeded(valueExpr(operands[0])) << "["
+                         << clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
                 }
                 addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);

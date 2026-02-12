@@ -6611,21 +6611,35 @@ private:
             const int64_t elementWidth =
                 elementWidthRaw > maxWidth ? static_cast<int64_t>(maxWidth)
                                            : static_cast<int64_t>(elementWidthRaw);
-            if (offset == 0)
+            int32_t indexWidthHint = 0;
+            if (index < lowering.values.size())
             {
-                if (elementWidth <= 1)
-                {
-                    return index;
-                }
-                int32_t indexWidthHint = 0;
-                if (index < lowering.values.size())
-                {
-                    indexWidthHint = lowering.values[index].widthHint;
-                }
-                if (indexWidthHint <= 0)
-                {
-                    indexWidthHint = 32;
-                }
+                indexWidthHint = lowering.values[index].widthHint;
+            }
+            if (indexWidthHint <= 0)
+            {
+                indexWidthHint = 32;
+            }
+            ExprNodeId adjustedId = index;
+            if (offset != 0)
+            {
+                ExprNode offsetNode;
+                offsetNode.kind = ExprNodeKind::Constant;
+                offsetNode.literal = std::to_string(offset);
+                offsetNode.location = location;
+                offsetNode.widthHint = indexWidthHint;
+                ExprNodeId offsetId = addNode(nullptr, std::move(offsetNode));
+                ExprNode subNode;
+                subNode.kind = ExprNodeKind::Operation;
+                subNode.op = grh::ir::OperationKind::kSub;
+                subNode.operands = {adjustedId, offsetId};
+                subNode.location = location;
+                subNode.tempSymbol = makeTempSymbol();
+                subNode.widthHint = indexWidthHint;
+                adjustedId = addNode(nullptr, std::move(subNode));
+            }
+            if (elementWidth > 1)
+            {
                 int32_t elementWidthHint = 0;
                 for (int64_t temp = elementWidth; temp > 0; temp >>= 1)
                 {
@@ -6637,83 +6651,45 @@ private:
                 }
                 const int32_t constWidthHint =
                     elementWidthHint > indexWidthHint ? elementWidthHint : indexWidthHint;
-                int64_t mulWidthHint = static_cast<int64_t>(indexWidthHint) + elementWidthHint;
+                int64_t mulWidthHint =
+                    static_cast<int64_t>(indexWidthHint) + elementWidthHint;
                 if (mulWidthHint > std::numeric_limits<int32_t>::max())
                 {
                     mulWidthHint = std::numeric_limits<int32_t>::max();
                 }
-                ExprNode constNode;
-                constNode.kind = ExprNodeKind::Constant;
-                constNode.literal = std::to_string(elementWidth);
-                constNode.location = location;
-                constNode.widthHint = constWidthHint;
-                ExprNodeId widthId = addNode(nullptr, std::move(constNode));
+                ExprNode widthNode;
+                widthNode.kind = ExprNodeKind::Constant;
+                widthNode.literal = std::to_string(elementWidth);
+                widthNode.location = location;
+                widthNode.widthHint = constWidthHint;
+                ExprNodeId widthId = addNode(nullptr, std::move(widthNode));
                 ExprNode mulNode;
                 mulNode.kind = ExprNodeKind::Operation;
                 mulNode.op = grh::ir::OperationKind::kMul;
-                mulNode.operands = {index, widthId};
+                mulNode.operands = {adjustedId, widthId};
                 mulNode.location = location;
                 mulNode.tempSymbol = makeTempSymbol();
                 mulNode.widthHint = static_cast<int32_t>(mulWidthHint);
-                return addNode(nullptr, std::move(mulNode));
+                adjustedId = addNode(nullptr, std::move(mulNode));
             }
-            int32_t indexWidthHint = 0;
-            if (index < lowering.values.size())
+            // Clamp packed-array bit indices to the addressing width of the bitstream.
+            uint64_t bitstreamWidth = canonical.getBitstreamWidth();
+            if (bitstreamWidth > 1)
             {
-                indexWidthHint = lowering.values[index].widthHint;
+                uint64_t temp = bitstreamWidth - 1;
+                int32_t clampWidth = 0;
+                while (temp > 0 && clampWidth < std::numeric_limits<int32_t>::max())
+                {
+                    ++clampWidth;
+                    temp >>= 1;
+                }
+                if (clampWidth > 0)
+                {
+                    adjustedId =
+                        resizeValueToWidth(adjustedId, clampWidth, false, location);
+                }
             }
-            if (indexWidthHint <= 0)
-            {
-                indexWidthHint = 32;
-            }
-            ExprNode offsetNode;
-            offsetNode.kind = ExprNodeKind::Constant;
-            offsetNode.literal = std::to_string(offset);
-            offsetNode.location = location;
-            offsetNode.widthHint = indexWidthHint;
-            ExprNodeId offsetId = addNode(nullptr, std::move(offsetNode));
-            ExprNode subNode;
-            subNode.kind = ExprNodeKind::Operation;
-            subNode.op = grh::ir::OperationKind::kSub;
-            subNode.operands = {index, offsetId};
-            subNode.location = location;
-            subNode.tempSymbol = makeTempSymbol();
-            subNode.widthHint = indexWidthHint;
-            ExprNodeId adjustedId = addNode(nullptr, std::move(subNode));
-            if (elementWidth <= 1)
-            {
-                return adjustedId;
-            }
-            int32_t elementWidthHint = 0;
-            for (int64_t temp = elementWidth; temp > 0; temp >>= 1)
-            {
-                ++elementWidthHint;
-            }
-            if (elementWidthHint <= 0)
-            {
-                elementWidthHint = 1;
-            }
-            const int32_t constWidthHint =
-                elementWidthHint > indexWidthHint ? elementWidthHint : indexWidthHint;
-            int64_t mulWidthHint = static_cast<int64_t>(indexWidthHint) + elementWidthHint;
-            if (mulWidthHint > std::numeric_limits<int32_t>::max())
-            {
-                mulWidthHint = std::numeric_limits<int32_t>::max();
-            }
-            ExprNode widthNode;
-            widthNode.kind = ExprNodeKind::Constant;
-            widthNode.literal = std::to_string(elementWidth);
-            widthNode.location = location;
-            widthNode.widthHint = constWidthHint;
-            ExprNodeId widthId = addNode(nullptr, std::move(widthNode));
-            ExprNode mulNode;
-            mulNode.kind = ExprNodeKind::Operation;
-            mulNode.op = grh::ir::OperationKind::kMul;
-            mulNode.operands = {adjustedId, widthId};
-            mulNode.location = location;
-            mulNode.tempSymbol = makeTempSymbol();
-            mulNode.widthHint = static_cast<int32_t>(mulWidthHint);
-            return addNode(nullptr, std::move(mulNode));
+            return adjustedId;
         };
 
         auto applyConversion =

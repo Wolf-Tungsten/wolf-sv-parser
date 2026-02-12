@@ -297,6 +297,50 @@ rtl/VSegmentUnit.sv:1041:46: warning: if statement has empty body [-Wempty-body]
 %Warning-WIDTHTRUNC: wolf_emit.sv:3873:27 Bit extraction of var[1023:0] requires 10 bit index, not 11 bits.
 ```
 
+### Update
+
+`WIDTHTRUNC` is fixed as of the latest emit changes: dynamic slice indices are
+explicitly clamped to the `clog2` width of the target vector before `+:`. The
+clean run no longer reports `WIDTHTRUNC` warnings.
+
+## Analysis: %Warning-WIDTHTRUNC series
+
+Verilator reports `WIDTHTRUNC` when a dynamic bit/part select index is wider
+than the number of bits required to address the target vector. In this case
+the dynamic slice indices are widened during packed-array index scaling, then
+used directly in `[...] +: ...` without resizing back to `$clog2(width)`:
+
+- `var[63:0]` needs a 6-bit index, but the index expression is 7 bits.
+- `var[1023:0]` needs a 10-bit index, but the index expression is 11 bits.
+
+These indices are derived from scaled packed-array element indices (e.g.
+`state * 4`, `stridePtr * 128`). The scaling logic zero-extends the index
+before multiplication, which makes the result 1 bit wider than necessary for
+the target vector. Verilator therefore warns that the upper bit is truncated.
+If the upper bit is provably zero, this is a lint-only warning; otherwise it
+can mask a real out-of-range index.
+
+## Fix Plan: clamp dynamic slice indices
+
+1) **Lowering/GRH: insert an explicit resize on dynamic slice indices**
+   - When lowering `kSliceDynamic` for packed arrays, compute the required
+     index width as `ceil(log2(bitstream_width))` and insert a resize node so
+     the index width matches exactly.
+   - Example intent:
+
+     ```
+     idx = resize(state * 4, 6);     // for [63:0]
+     idx = resize(stridePtr * 128, 10); // for [1023:0]
+     ```
+
+2) **Emit: preserve the resize semantics**
+   - Ensure `kResize` emits a sized cast or explicit `logic [N-1:0]` temporary
+     before the `[...] +: ...` so the index width is explicit in SV.
+
+3) **Validation**
+   - Re-run `make -C tests/data/xs-bugcase/CASE_003 run` and confirm the
+     `WIDTHTRUNC` warnings are gone while functional outputs match.
+
 ### Verilator C++ headers (toolchain noise)
 
 Multiple `-Wsign-compare` warnings in `verilated_funcs.h` and
