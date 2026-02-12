@@ -14,6 +14,7 @@
 #include <tuple>
 #include <string_view>
 
+#include "slang/numeric/SVInt.h"
 #include "slang/text/Json.h"
 
 namespace grh::emit
@@ -226,6 +227,80 @@ namespace grh::emit
                 sized.insert(sized.begin(), '-');
             }
             return sized;
+        }
+
+        std::optional<std::string> signBitLiteralForConst(std::string_view literal,
+                                                          int64_t width,
+                                                          bool isSigned)
+        {
+            if (width <= 0)
+            {
+                return std::nullopt;
+            }
+            std::string compact;
+            compact.reserve(literal.size());
+            for (char ch : literal)
+            {
+                if (std::isspace(static_cast<unsigned char>(ch)) || ch == '_')
+                {
+                    continue;
+                }
+                compact.push_back(ch);
+            }
+            if (compact.empty())
+            {
+                return std::nullopt;
+            }
+            if (compact.size() >= 2 && compact.front() == '(' && compact.back() == ')')
+            {
+                bool nested = false;
+                for (std::size_t i = 1; i + 1 < compact.size(); ++i)
+                {
+                    if (compact[i] == '(' || compact[i] == ')')
+                    {
+                        nested = true;
+                        break;
+                    }
+                }
+                if (!nested)
+                {
+                    compact = compact.substr(1, compact.size() - 2);
+                }
+            }
+            if (compact.empty())
+            {
+                return std::nullopt;
+            }
+            bool negative = false;
+            if (compact.front() == '-' || compact.front() == '+')
+            {
+                negative = compact.front() == '-';
+                compact.erase(compact.begin());
+            }
+            if (compact.empty())
+            {
+                return std::nullopt;
+            }
+            try
+            {
+                slang::SVInt parsed = slang::SVInt::fromString(compact);
+                if (negative)
+                {
+                    parsed = -parsed;
+                }
+                parsed.setSigned(isSigned);
+                parsed = parsed.resize(static_cast<slang::bitwidth_t>(width));
+                const slang::logic_t bit = parsed[static_cast<int32_t>(width - 1)];
+                char bitChar = bit.toChar();
+                bitChar = static_cast<char>(std::tolower(static_cast<unsigned char>(bitChar)));
+                std::string out = "1'b";
+                out.push_back(bitChar);
+                return out;
+            }
+            catch (const std::exception &)
+            {
+                return std::nullopt;
+            }
         }
 
         void appendNewlineAndIndent(std::string &out, int indent)
@@ -2212,6 +2287,244 @@ namespace grh::emit
             return isSigned ? "signed " : "";
         }
 
+        bool isSimpleIdentifier(std::string_view expr)
+        {
+            if (expr.empty())
+            {
+                return false;
+            }
+            const auto isIdentStart = [](char ch) -> bool
+            {
+                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+            };
+            const auto isIdentChar = [](char ch) -> bool
+            {
+                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                    (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
+            };
+            bool first = true;
+            for (char ch : expr)
+            {
+                if (first)
+                {
+                    if (!isIdentStart(ch))
+                    {
+                        return false;
+                    }
+                    first = false;
+                    continue;
+                }
+                if (!isIdentChar(ch))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        std::string parenIfNeeded(std::string_view expr)
+        {
+            if (expr.empty() || isSimpleIdentifier(expr))
+            {
+                return std::string(expr);
+            }
+            if (expr.front() == '(' && expr.back() == ')')
+            {
+                return std::string(expr);
+            }
+            std::string out;
+            out.reserve(expr.size() + 2);
+            out.push_back('(');
+            out.append(expr);
+            out.push_back(')');
+            return out;
+        }
+
+        struct ExprTools
+        {
+            std::function<grh::ir::ValueType(grh::ir::ValueId)> valueType;
+            std::function<int64_t(grh::ir::ValueId)> valueWidth;
+            std::function<bool(grh::ir::ValueId)> valueSigned;
+            std::function<std::optional<std::string>(grh::ir::ValueId)> constLiteralRawFor;
+            std::function<std::string(grh::ir::ValueId)> valueExpr;
+            bool parenReduce = false;
+            bool allowConstSignBit = true;
+            bool allowInlineLiteral = true;
+
+            std::string logicalOperand(grh::ir::ValueId valueId) const
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                const int64_t width = valueWidth(valueId);
+                const std::string name = valueExpr(valueId);
+                if (width == 1)
+                {
+                    return name;
+                }
+                if (parenReduce)
+                {
+                    return "(|" + parenIfNeeded(name) + ")";
+                }
+                return "(|" + name + ")";
+            }
+
+            std::string sizedOperandExpr(grh::ir::ValueId valueId) const
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                const std::string expr = valueExpr(valueId);
+                if (!expr.empty() && isSimpleIdentifier(expr))
+                {
+                    return expr;
+                }
+                if (allowInlineLiteral)
+                {
+                    if (auto literal = constLiteralRawFor(valueId))
+                    {
+                        if (auto sized = sizedLiteralIfUnsized(*literal, valueWidth(valueId)))
+                        {
+                            return *sized;
+                        }
+                    }
+                }
+                return expr;
+            }
+
+            std::string extendOperand(grh::ir::ValueId valueId, int64_t targetWidth) const
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                const int64_t width = valueWidth(valueId);
+                const std::string name = sizedOperandExpr(valueId);
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                if (valueSigned(valueId))
+                {
+                    if (allowConstSignBit)
+                    {
+                        if (auto literal = constLiteralRawFor(valueId))
+                        {
+                            if (auto signBit = signBitLiteralForConst(*literal, width, valueSigned(valueId)))
+                            {
+                                return "{{" + std::to_string(diff) + "{" + *signBit + "}}," + name + "}";
+                            }
+                        }
+                    }
+                    const std::string indexed = parenIfNeeded(name);
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            }
+
+            std::string extendShiftOperand(grh::ir::ValueId valueId,
+                                           int64_t targetWidth,
+                                           bool signExtend) const
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                const int64_t width = valueWidth(valueId);
+                const std::string name = sizedOperandExpr(valueId);
+                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
+                {
+                    return name;
+                }
+                const int64_t diff = targetWidth - width;
+                if (diff <= 0)
+                {
+                    return name;
+                }
+                if (signExtend)
+                {
+                    if (allowConstSignBit)
+                    {
+                        if (auto literal = constLiteralRawFor(valueId))
+                        {
+                            if (auto signBit = signBitLiteralForConst(*literal, width, valueSigned(valueId)))
+                            {
+                                return "{{" + std::to_string(diff) + "{" + *signBit + "}}," + name + "}";
+                            }
+                        }
+                    }
+                    const std::string indexed = parenIfNeeded(name);
+                    const std::string signBit =
+                        width == 1 ? indexed
+                                   : indexed + "[" + std::to_string(width - 1) + "]";
+                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
+                }
+                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
+            }
+
+            std::string concatOperandExpr(grh::ir::ValueId valueId) const
+            {
+                if (valueType(valueId) != grh::ir::ValueType::Logic)
+                {
+                    return valueExpr(valueId);
+                }
+                const std::string expr = valueExpr(valueId);
+                if (!expr.empty() && isSimpleIdentifier(expr))
+                {
+                    return expr;
+                }
+                if (allowInlineLiteral)
+                {
+                    if (auto literal = constLiteralRawFor(valueId))
+                    {
+                        if (auto sized = sizedLiteralIfUnsized(*literal, valueWidth(valueId)))
+                        {
+                            return *sized;
+                        }
+                    }
+                }
+                return expr;
+            }
+
+            std::string clampIndexExpr(grh::ir::ValueId indexId, int64_t operandWidth) const
+            {
+                std::string indexExpr = parenIfNeeded(valueExpr(indexId));
+                if (operandWidth <= 1)
+                {
+                    return indexExpr;
+                }
+                const int64_t indexWidth = valueWidth(indexId);
+                if (indexWidth <= 0)
+                {
+                    return indexExpr;
+                }
+                uint64_t temp = static_cast<uint64_t>(operandWidth - 1);
+                int64_t clampWidth = 0;
+                while (temp > 0)
+                {
+                    ++clampWidth;
+                    temp >>= 1;
+                }
+                if (clampWidth <= 0 || indexWidth <= clampWidth)
+                {
+                    return indexExpr;
+                }
+                std::ostringstream expr;
+                expr << clampWidth << "'(" << indexExpr << ")";
+                return expr.str();
+            }
+        };
+
         template <typename T>
         std::optional<T> getAttribute(const grh::ir::Graph &graph, const grh::ir::Operation &op, std::string_view key)
         {
@@ -2486,6 +2799,55 @@ namespace grh::emit
             {
                 maxOpIndex = std::max(maxOpIndex, opId.index);
             }
+            std::unordered_set<std::string> usedValueNames;
+            usedValueNames.reserve(static_cast<std::size_t>(maxValueIndex) + 8);
+            for (const auto valueId : graph->values())
+            {
+                if (!valueId.valid() || valueId.graph != graph->id())
+                {
+                    continue;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const std::string name = std::string(value.symbolText());
+                if (!name.empty())
+                {
+                    usedValueNames.insert(name);
+                }
+            }
+            for (const auto &port : graph->inputPorts())
+            {
+                if (port.name.valid())
+                {
+                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
+                }
+            }
+            for (const auto &port : graph->outputPorts())
+            {
+                if (port.name.valid())
+                {
+                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
+                }
+            }
+            for (const auto &port : graph->inoutPorts())
+            {
+                if (port.name.valid())
+                {
+                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
+                }
+            }
+            auto makeUniqueValueName = [&](uint32_t idx) -> std::string
+            {
+                std::string base = "__wolf_v" + std::to_string(idx);
+                std::string name = base;
+                int suffix = 0;
+                while (usedValueNames.find(name) != usedValueNames.end())
+                {
+                    ++suffix;
+                    name = base + "_" + std::to_string(suffix);
+                }
+                usedValueNames.insert(name);
+                return name;
+            };
             std::vector<std::string> valueNameCache(maxValueIndex + 1);
             std::vector<std::string> opNameCache(maxOpIndex + 1);
             const std::string emptyName;
@@ -2505,6 +2867,10 @@ namespace grh::emit
                 {
                     grh::ir::Value value = graph->getValue(valueId);
                     slot = std::string(value.symbolText());
+                    if (slot.empty())
+                    {
+                        slot = makeUniqueValueName(idx);
+                    }
                 }
                 return slot;
             };
@@ -2535,6 +2901,14 @@ namespace grh::emit
             auto valueType = [&](grh::ir::ValueId valueId) -> grh::ir::ValueType
             {
                 return graph->getValue(valueId).type();
+            };
+            auto valueWidth = [&](grh::ir::ValueId valueId) -> int64_t
+            {
+                return graph->getValue(valueId).width();
+            };
+            auto valueSigned = [&](grh::ir::ValueId valueId) -> bool
+            {
+                return graph->getValue(valueId).isSigned();
             };
             auto formatConstLiteral = [&](grh::ir::ValueId valueId,
                                           std::string_view literal) -> std::string
@@ -2577,30 +2951,6 @@ namespace grh::emit
                 }
                 return formatConstLiteral(valueId, *raw);
             };
-            auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
-            {
-                if (!valueId.valid())
-                {
-                    return std::nullopt;
-                }
-                const grh::ir::Value value = graph->getValue(valueId);
-                const grh::ir::OperationId defOpId = value.definingOp();
-                if (!defOpId.valid())
-                {
-                    return std::nullopt;
-                }
-                const grh::ir::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != grh::ir::OperationKind::kAssign)
-                {
-                    return std::nullopt;
-                }
-                const auto &ops = defOp.operands();
-                if (ops.empty())
-                {
-                    return std::nullopt;
-                }
-                return ops.front();
-            };
             std::vector<uint8_t> materializeDense(maxValueIndex + 1, 0);
             auto markMaterialize = [&](grh::ir::ValueId valueId)
             {
@@ -2610,6 +2960,10 @@ namespace grh::emit
                 }
                 const uint32_t idx = valueId.index;
                 if (idx == 0 || idx > maxValueIndex)
+                {
+                    return;
+                }
+                if (valueName(valueId).empty())
                 {
                     return;
                 }
@@ -2628,6 +2982,13 @@ namespace grh::emit
                 }
                 return materializeDense[idx] != 0;
             };
+            for (const auto valueId : graph->values())
+            {
+                if (!valueName(valueId).empty())
+                {
+                    markMaterialize(valueId);
+                }
+            }
             for (const auto opId : graph->operations())
             {
                 const grh::ir::Operation op = graph->getOperation(opId);
@@ -2668,7 +3029,6 @@ namespace grh::emit
                     }
                 }
             }
-            std::vector<uint8_t> resolvingExpr(maxValueIndex + 1, 0);
             std::function<std::string(grh::ir::ValueId)> valueExpr =
                 [&](grh::ir::ValueId valueId) -> std::string
             {
@@ -2676,126 +3036,17 @@ namespace grh::emit
                 {
                     return {};
                 }
-                if (isMaterialized(valueId))
-                {
-                    return valueName(valueId);
-                }
-                const uint32_t idx = valueId.index;
-                if (idx == 0 || idx > maxValueIndex)
-                {
-                    return valueName(valueId);
-                }
-                if (resolvingExpr[idx])
-                {
-                    return valueName(valueId);
-                }
-                resolvingExpr[idx] = 1;
-                if (!isPortValue(valueId))
-                {
-                    if (auto literal = constLiteralFor(valueId))
-                    {
-                        resolvingExpr[idx] = 0;
-                        return *literal;
-                    }
-                    if (auto source = assignSourceFor(valueId))
-                    {
-                        std::string resolved = valueExpr(*source);
-                        resolvingExpr[idx] = 0;
-                        return resolved;
-                    }
-                }
-                resolvingExpr[idx] = 0;
                 return valueName(valueId);
             };
-            auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                if (valueType(valueId) != grh::ir::ValueType::Logic)
-                {
-                    return valueExpr(valueId);
-                }
-                if (auto literal = constLiteralRawFor(valueId))
-                {
-                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
-                    {
-                        return *sized;
-                    }
-                }
-                return valueExpr(valueId);
-            };
-            auto isSimpleIdentifier = [](std::string_view expr) -> bool
-            {
-                if (expr.empty())
-                {
-                    return false;
-                }
-                const auto isIdentStart = [](char ch) -> bool
-                {
-                    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
-                };
-                const auto isIdentChar = [](char ch) -> bool
-                {
-                    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                        (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
-                };
-                bool first = true;
-                for (char ch : expr)
-                {
-                    if (first)
-                    {
-                        if (!isIdentStart(ch))
-                        {
-                            return false;
-                        }
-                        first = false;
-                        continue;
-                    }
-                    if (!isIdentChar(ch))
-                    {
-                        return false;
-                    }
-                }
-                return true;
-            };
-            auto parenIfNeeded = [&](const std::string &expr) -> std::string
-            {
-                if (expr.empty() || isSimpleIdentifier(expr))
-                {
-                    return expr;
-                }
-                if (expr.front() == '(' && expr.back() == ')')
-                {
-                    return expr;
-                }
-                return "(" + expr + ")";
-            };
-            auto clampIndexExpr = [&](grh::ir::ValueId indexId,
-                                      int64_t operandWidth) -> std::string
-            {
-                std::string indexExpr = parenIfNeeded(valueExpr(indexId));
-                if (operandWidth <= 1)
-                {
-                    return indexExpr;
-                }
-                const int64_t indexWidth = graph->getValue(indexId).width();
-                if (indexWidth <= 0)
-                {
-                    return indexExpr;
-                }
-                uint64_t temp = static_cast<uint64_t>(operandWidth - 1);
-                int64_t clampWidth = 0;
-                while (temp > 0)
-                {
-                    ++clampWidth;
-                    temp >>= 1;
-                }
-                if (clampWidth <= 0 || indexWidth <= clampWidth)
-                {
-                    return indexExpr;
-                }
-                std::ostringstream expr;
-                expr << clampWidth << "'(" << indexExpr << ")";
-                return expr.str();
-            };
+            ExprTools baseExpr;
+            baseExpr.valueType = valueType;
+            baseExpr.valueWidth = valueWidth;
+            baseExpr.valueSigned = valueSigned;
+            baseExpr.constLiteralRawFor = constLiteralRawFor;
+            baseExpr.valueExpr = valueExpr;
+            baseExpr.parenReduce = false;
+            baseExpr.allowConstSignBit = true;
+            baseExpr.allowInlineLiteral = false;
 
             // -------------------------
             // Ports
@@ -3012,94 +3263,6 @@ namespace grh::emit
             {
                 latchBlocks.emplace_back(std::move(stmt), sourceOp);
             };
-
-            auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                if (valueType(valueId) != grh::ir::ValueType::Logic)
-                {
-                    return valueExpr(valueId);
-                }
-                const int64_t width = graph->getValue(valueId).width();
-                const std::string name = valueExpr(valueId);
-                if (width == 1)
-                {
-                    return name;
-                }
-                return "(|" + name + ")";
-            };
-            auto sizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                if (valueType(valueId) != grh::ir::ValueType::Logic)
-                {
-                    return valueExpr(valueId);
-                }
-                if (auto literal = constLiteralRawFor(valueId))
-                {
-                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
-                    {
-                        return *sized;
-                    }
-                }
-                return valueExpr(valueId);
-            };
-            auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
-            {
-                const grh::ir::Value value = graph->getValue(valueId);
-                if (value.type() != grh::ir::ValueType::Logic)
-                {
-                    return valueExpr(valueId);
-                }
-                const int64_t width = value.width();
-                const std::string name = sizedOperandExpr(valueId);
-                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-                {
-                    return name;
-                }
-                const int64_t diff = targetWidth - width;
-                if (diff <= 0)
-                {
-                    return name;
-                }
-                if (value.isSigned())
-                {
-                    const std::string indexed = parenIfNeeded(name);
-                    const std::string signBit =
-                        width == 1 ? indexed
-                                   : indexed + "[" + std::to_string(width - 1) + "]";
-                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-                }
-                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-            };
-            auto extendShiftOperand = [&](grh::ir::ValueId valueId,
-                                          int64_t targetWidth,
-                                          bool signExtend) -> std::string
-            {
-                const grh::ir::Value value = graph->getValue(valueId);
-                if (value.type() != grh::ir::ValueType::Logic)
-                {
-                    return valueExpr(valueId);
-                }
-                const int64_t width = value.width();
-                const std::string name = sizedOperandExpr(valueId);
-                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-                {
-                    return name;
-                }
-                const int64_t diff = targetWidth - width;
-                if (diff <= 0)
-                {
-                    return name;
-                }
-                if (signExtend)
-                {
-                    const std::string indexed = parenIfNeeded(name);
-                    const std::string signBit =
-                        width == 1 ? indexed
-                                   : indexed + "[" + std::to_string(width - 1) + "]";
-                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-                }
-                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-            };
             const uint32_t dpiMaxValueIndex = maxValueIndex;
             std::vector<int8_t> dpiDependsDense(dpiMaxValueIndex + 1, -1);
             std::vector<uint8_t> dpiDependsVisiting(dpiMaxValueIndex + 1, 0);
@@ -3238,116 +3401,17 @@ namespace grh::emit
             std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
             std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiInlineCache;
             std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
-            auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+            ExprTools inlineExpr = baseExpr;
+            inlineExpr.parenReduce = true;
+            inlineExpr.allowConstSignBit = false;
+            inlineExpr.allowInlineLiteral = true;
+            inlineExpr.valueExpr = [&](grh::ir::ValueId valueId) -> std::string
             {
                 if (valueDependsOnDpi(valueId))
                 {
                     return dpiInlineExpr(valueId);
                 }
                 return valueExpr(valueId);
-            };
-            auto inlineSizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                const grh::ir::Value value = graph->getValue(valueId);
-                if (value.type() != grh::ir::ValueType::Logic)
-                {
-                    return inlineOperandExpr(valueId);
-                }
-                if (auto literal = constLiteralRawFor(valueId))
-                {
-                    if (auto sized = sizedLiteralIfUnsized(*literal, value.width()))
-                    {
-                        return *sized;
-                    }
-                }
-                return inlineOperandExpr(valueId);
-            };
-            auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                if (valueType(valueId) != grh::ir::ValueType::Logic)
-                {
-                    return inlineOperandExpr(valueId);
-                }
-                const int64_t width = graph->getValue(valueId).width();
-                const std::string name = inlineOperandExpr(valueId);
-                if (width == 1)
-                {
-                    return name;
-                }
-                return "(|" + parenIfNeeded(name) + ")";
-            };
-            auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
-            {
-                const grh::ir::Value value = graph->getValue(valueId);
-                const std::string name = inlineSizedOperandExpr(valueId);
-                if (value.type() != grh::ir::ValueType::Logic)
-                {
-                    return name;
-                }
-                const int64_t width = value.width();
-                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-                {
-                    return name;
-                }
-                const int64_t diff = targetWidth - width;
-                if (diff <= 0)
-                {
-                    return name;
-                }
-                const std::string indexed = parenIfNeeded(name);
-                if (value.isSigned())
-                {
-                    const std::string signBit =
-                        width == 1 ? indexed
-                                   : indexed + "[" + std::to_string(width - 1) + "]";
-                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-                }
-                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-            };
-            auto inlineExtendShiftOperand = [&](grh::ir::ValueId valueId,
-                                                int64_t targetWidth,
-                                                bool signExtend) -> std::string
-            {
-                const grh::ir::Value value = graph->getValue(valueId);
-                const std::string name = inlineSizedOperandExpr(valueId);
-                if (value.type() != grh::ir::ValueType::Logic)
-                {
-                    return name;
-                }
-                const int64_t width = value.width();
-                if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-                {
-                    return name;
-                }
-                const int64_t diff = targetWidth - width;
-                if (diff <= 0)
-                {
-                    return name;
-                }
-                const std::string indexed = parenIfNeeded(name);
-                if (signExtend)
-                {
-                    const std::string signBit =
-                        width == 1 ? indexed
-                                   : indexed + "[" + std::to_string(width - 1) + "]";
-                    return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-                }
-                return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-            };
-            auto inlineConcatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-            {
-                if (valueType(valueId) != grh::ir::ValueType::Logic)
-                {
-                    return inlineOperandExpr(valueId);
-                }
-                if (auto literal = constLiteralRawFor(valueId))
-                {
-                    if (auto sized = sizedLiteralIfUnsized(*literal, graph->getValue(valueId).width()))
-                    {
-                        return *sized;
-                    }
-                }
-                return inlineOperandExpr(valueId);
             };
             dpiInlineExpr = [&](grh::ir::ValueId valueId) -> std::string
             {
@@ -3407,11 +3471,11 @@ namespace grh::emit
                                      graph->getValue(ops[1]).width());
                         const std::string tok = binOpToken(defOp.kind());
                         const std::string lhs = resultWidth > 0
-                                                    ? inlineExtendOperand(ops[0], resultWidth)
-                                                    : inlineOperandExpr(ops[0]);
+                                                    ? inlineExpr.extendOperand(ops[0], resultWidth)
+                                                    : inlineExpr.valueExpr(ops[0]);
                         const std::string rhs = resultWidth > 0
-                                                    ? inlineExtendOperand(ops[1], resultWidth)
-                                                    : inlineOperandExpr(ops[1]);
+                                                    ? inlineExpr.extendOperand(ops[1], resultWidth)
+                                                    : inlineExpr.valueExpr(ops[1]);
                         const bool signedCompare =
                             (defOp.kind() == grh::ir::OperationKind::kLt ||
                              defOp.kind() == grh::ir::OperationKind::kLe ||
@@ -3432,7 +3496,7 @@ namespace grh::emit
                     if (ops.size() >= 2)
                     {
                         const std::string tok = binOpToken(defOp.kind());
-                        expr = inlineOperandExpr(ops[0]) + " " + tok + " " + inlineOperandExpr(ops[1]);
+                        expr = inlineExpr.valueExpr(ops[0]) + " " + tok + " " + inlineExpr.valueExpr(ops[1]);
                     }
                     break;
                 case grh::ir::OperationKind::kShl:
@@ -3446,9 +3510,9 @@ namespace grh::emit
                             graph->getValue(ops[0]).isSigned();
                         const std::string tok = binOpToken(defOp.kind());
                         const std::string lhs = resultWidth > 0
-                                                    ? inlineExtendShiftOperand(ops[0], resultWidth, signExtend)
-                                                    : inlineOperandExpr(ops[0]);
-                        expr = lhs + " " + tok + " " + inlineOperandExpr(ops[1]);
+                                                    ? inlineExpr.extendShiftOperand(ops[0], resultWidth, signExtend)
+                                                    : inlineExpr.valueExpr(ops[0]);
+                        expr = lhs + " " + tok + " " + inlineExpr.valueExpr(ops[1]);
                     }
                     break;
                 case grh::ir::OperationKind::kAdd:
@@ -3465,8 +3529,8 @@ namespace grh::emit
                                                    graph->getValue(ops[1]).width());
                         }
                         const std::string tok = binOpToken(defOp.kind());
-                        expr = inlineExtendOperand(ops[0], resultWidth) + " " + tok + " " +
-                               inlineExtendOperand(ops[1], resultWidth);
+                        expr = inlineExpr.extendOperand(ops[0], resultWidth) + " " + tok + " " +
+                               inlineExpr.extendOperand(ops[1], resultWidth);
                     }
                     break;
                 case grh::ir::OperationKind::kLogicAnd:
@@ -3474,8 +3538,8 @@ namespace grh::emit
                     if (ops.size() >= 2)
                     {
                         const std::string tok = binOpToken(defOp.kind());
-                        expr = inlineLogicalOperand(ops[0]) + " " + tok + " " +
-                               inlineLogicalOperand(ops[1]);
+                        expr = inlineExpr.logicalOperand(ops[0]) + " " + tok + " " +
+                               inlineExpr.logicalOperand(ops[1]);
                     }
                     break;
                 case grh::ir::OperationKind::kNot:
@@ -3488,29 +3552,29 @@ namespace grh::emit
                     if (!ops.empty())
                     {
                         const std::string tok = unaryOpToken(defOp.kind());
-                        expr = tok + inlineOperandExpr(ops[0]);
+                        expr = tok + inlineExpr.valueExpr(ops[0]);
                     }
                     break;
                 case grh::ir::OperationKind::kLogicNot:
                     if (!ops.empty())
                     {
-                        expr = "!" + inlineLogicalOperand(ops[0]);
+                        expr = "!" + inlineExpr.logicalOperand(ops[0]);
                     }
                     break;
                 case grh::ir::OperationKind::kMux:
                     if (ops.size() >= 3)
                     {
                         const int64_t resultWidth = graph->getValue(valueId).width();
-                        const std::string lhs = inlineExtendOperand(ops[1], resultWidth);
-                        const std::string rhs = inlineExtendOperand(ops[2], resultWidth);
-                        expr = inlineOperandExpr(ops[0]) + " ? " + lhs + " : " + rhs;
+                        const std::string lhs = inlineExpr.extendOperand(ops[1], resultWidth);
+                        const std::string rhs = inlineExpr.extendOperand(ops[2], resultWidth);
+                        expr = inlineExpr.valueExpr(ops[0]) + " ? " + lhs + " : " + rhs;
                     }
                     break;
                 case grh::ir::OperationKind::kAssign:
                     if (!ops.empty())
                     {
                         int64_t resultWidth = graph->getValue(valueId).width();
-                        expr = inlineExtendOperand(ops[0], resultWidth);
+                        expr = inlineExpr.extendOperand(ops[0], resultWidth);
                     }
                     break;
                 case grh::ir::OperationKind::kConcat:
@@ -3518,7 +3582,7 @@ namespace grh::emit
                     {
                         if (ops.size() == 1)
                         {
-                            expr = inlineOperandExpr(ops[0]);
+                            expr = inlineExpr.valueExpr(ops[0]);
                         }
                         else
                         {
@@ -3530,7 +3594,7 @@ namespace grh::emit
                                 {
                                     exprStream << ", ";
                                 }
-                                exprStream << inlineConcatOperandExpr(ops[i]);
+                                exprStream << inlineExpr.concatOperandExpr(ops[i]);
                             }
                             exprStream << "}";
                             expr = exprStream.str();
@@ -3545,7 +3609,7 @@ namespace grh::emit
                         if (rep)
                         {
                             std::ostringstream exprStream;
-                            exprStream << "{" << *rep << "{" << inlineConcatOperandExpr(ops[0]) << "}}";
+                            exprStream << "{" << *rep << "{" << inlineExpr.concatOperandExpr(ops[0]) << "}}";
                             expr = exprStream.str();
                         }
                     }
@@ -3563,11 +3627,11 @@ namespace grh::emit
                             std::ostringstream exprStream;
                             if (operandWidth == 1)
                             {
-                                exprStream << inlineOperandExpr(ops[0]);
+                                exprStream << inlineExpr.valueExpr(ops[0]);
                             }
                             else
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[";
                                 if (*sliceStart == *sliceEnd)
                                 {
                                     exprStream << *sliceStart;
@@ -3594,17 +3658,17 @@ namespace grh::emit
                             std::ostringstream exprStream;
                             if (operandWidth == 1)
                             {
-                                exprStream << inlineOperandExpr(ops[0]);
+                                exprStream << inlineExpr.valueExpr(ops[0]);
                             }
                             else if (*width == 1)
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
-                                    parenIfNeeded(inlineOperandExpr(ops[1])) << "]";
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[" <<
+                                    parenIfNeeded(inlineExpr.valueExpr(ops[1])) << "]";
                             }
                             else
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
-                                    parenIfNeeded(inlineOperandExpr(ops[1])) << " +: " << *width << "]";
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[" <<
+                                    parenIfNeeded(inlineExpr.valueExpr(ops[1])) << " +: " << *width << "]";
                             }
                             expr = exprStream.str();
                         }
@@ -3622,18 +3686,18 @@ namespace grh::emit
                             std::ostringstream exprStream;
                             if (*width == 1 && operandWidth == 1)
                             {
-                                exprStream << inlineOperandExpr(ops[0]);
+                                exprStream << inlineExpr.valueExpr(ops[0]);
                             }
                             else
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[";
                                 if (*width == 1)
                                 {
-                                    exprStream << parenIfNeeded(inlineOperandExpr(ops[1]));
+                                    exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[1]));
                                 }
                                 else
                                 {
-                                    exprStream << parenIfNeeded(inlineOperandExpr(ops[1])) << " * " << *width << " +: " << *width;
+                                    exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[1])) << " * " << *width << " +: " << *width;
                                 }
                                 exprStream << "]";
                             }
@@ -3651,11 +3715,11 @@ namespace grh::emit
             };
             auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (!valueDependsOnDpi(valueId))
+                if (valueDependsOnDpi(valueId))
                 {
-                    return valueExpr(valueId);
+                    return dpiInlineExpr(valueId);
                 }
-                return dpiInlineExpr(valueId);
+                return valueExpr(valueId);
             };
             auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
             {
@@ -4255,10 +4319,10 @@ namespace grh::emit
                                  graph->getValue(operands[1]).width());
                     const std::string tok = binOpToken(op.kind());
                     const std::string lhs = resultWidth > 0
-                                                ? extendOperand(operands[0], resultWidth)
+                                                ? baseExpr.extendOperand(operands[0], resultWidth)
                                                 : valueExpr(operands[0]);
                     const std::string rhs = resultWidth > 0
-                                                ? extendOperand(operands[1], resultWidth)
+                                                ? baseExpr.extendOperand(operands[1], resultWidth)
                                                 : valueExpr(operands[1]);
                     const bool signedCompare =
                         (op.kind() == grh::ir::OperationKind::kLt ||
@@ -4305,7 +4369,7 @@ namespace grh::emit
                         graph->getValue(operands[0]).isSigned();
                     const std::string tok = binOpToken(op.kind());
                     const std::string lhs = resultWidth > 0
-                                                ? extendShiftOperand(operands[0], resultWidth, signExtend)
+                                                ? baseExpr.extendShiftOperand(operands[0], resultWidth, signExtend)
                                                 : valueExpr(operands[0]);
                     addValueAssign(results[0],
                                    lhs + " " + tok + " " + valueExpr(operands[1]),
@@ -4332,8 +4396,8 @@ namespace grh::emit
                     }
                     const std::string tok = binOpToken(op.kind());
                     addValueAssign(results[0],
-                                   extendOperand(operands[0], resultWidth) + " " + tok + " " +
-                                       extendOperand(operands[1], resultWidth),
+                                   baseExpr.extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                                       baseExpr.extendOperand(operands[1], resultWidth),
                                    opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4348,8 +4412,8 @@ namespace grh::emit
                     }
                     const std::string tok = binOpToken(op.kind());
                     addValueAssign(results[0],
-                                   logicalOperand(operands[0]) + " " + tok + " " +
-                                       logicalOperand(operands[1]),
+                                   baseExpr.logicalOperand(operands[0]) + " " + tok + " " +
+                                       baseExpr.logicalOperand(operands[1]),
                                    opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4379,7 +4443,7 @@ namespace grh::emit
                         reportError("Unary operation missing operands or results", opContext);
                         break;
                     }
-                    addValueAssign(results[0], "!" + logicalOperand(operands[0]), opId);
+                    addValueAssign(results[0], "!" + baseExpr.logicalOperand(operands[0]), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -4391,8 +4455,8 @@ namespace grh::emit
                         break;
                     }
                     int64_t resultWidth = graph->getValue(results[0]).width();
-                    const std::string lhs = extendOperand(operands[1], resultWidth);
-                    const std::string rhs = extendOperand(operands[2], resultWidth);
+                    const std::string lhs = baseExpr.extendOperand(operands[1], resultWidth);
+                    const std::string rhs = baseExpr.extendOperand(operands[2], resultWidth);
                     addValueAssign(results[0],
                                    valueExpr(operands[0]) + " ? " + lhs + " : " + rhs,
                                    opId);
@@ -4412,7 +4476,7 @@ namespace grh::emit
                         break;
                     }
                     int64_t resultWidth = graph->getValue(results[0]).width();
-                    const std::string rhs = extendOperand(operands[0], resultWidth);
+                    const std::string rhs = baseExpr.extendOperand(operands[0], resultWidth);
                     addValueAssign(results[0], rhs, opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4438,7 +4502,7 @@ namespace grh::emit
                         {
                             expr << ", ";
                         }
-                        expr << concatOperandExpr(operands[i]);
+                        expr << baseExpr.concatOperandExpr(operands[i]);
                     }
                     expr << "}";
                     addValueAssign(results[0], expr.str(), opId);
@@ -4459,7 +4523,7 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "{" << *rep << "{" << concatOperandExpr(operands[0]) << "}}";
+                    expr << "{" << *rep << "{" << baseExpr.concatOperandExpr(operands[0]) << "}}";
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4531,12 +4595,12 @@ namespace grh::emit
                     else if (*width == 1)
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << clampIndexExpr(operands[1], operandWidth) << "]";
+                             << baseExpr.clampIndexExpr(operands[1], operandWidth) << "]";
                     }
                     else
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
+                             << baseExpr.clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
                     }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
@@ -5785,6 +5849,8 @@ namespace grh::emit
         const std::size_t opCount = view.operations().size();
         std::vector<std::string> valueNames(valueCount);
         std::vector<std::string> opNames(opCount);
+        std::unordered_set<std::string> usedValueNames;
+        usedValueNames.reserve(valueCount + 8);
 
         for (const auto valueId : view.values())
         {
@@ -5794,15 +5860,18 @@ namespace grh::emit
                 continue;
             }
             const std::size_t idx = valueId.index - 1;
-            const std::string fallback = "value_" + std::to_string(valueId.index);
             const grh::ir::SymbolId sym = view.valueSymbol(valueId);
             if (!sym.valid())
             {
-                reportError("Value missing symbol", fallback);
-                valueNames[idx] = fallback;
+                reportError("Value missing symbol");
                 continue;
             }
-            valueNames[idx] = std::string(symbols.text(sym));
+            const std::string name = std::string(symbols.text(sym));
+            if (!name.empty())
+            {
+                valueNames[idx] = name;
+                usedValueNames.insert(name);
+            }
         }
 
         for (const auto opId : view.operations())
@@ -5819,6 +5888,47 @@ namespace grh::emit
                 continue;
             }
             opNames[idx] = std::string(symbols.text(sym));
+        }
+        for (const auto &port : view.inputPorts())
+        {
+            if (port.name.valid())
+            {
+                usedValueNames.insert(std::string(symbols.text(port.name)));
+            }
+        }
+        for (const auto &port : view.outputPorts())
+        {
+            if (port.name.valid())
+            {
+                usedValueNames.insert(std::string(symbols.text(port.name)));
+            }
+        }
+        for (const auto &port : view.inoutPorts())
+        {
+            if (port.name.valid())
+            {
+                usedValueNames.insert(std::string(symbols.text(port.name)));
+            }
+        }
+        auto makeUniqueValueName = [&](uint32_t idx) -> std::string
+        {
+            std::string base = "__wolf_v" + std::to_string(idx);
+            std::string name = base;
+            int suffix = 0;
+            while (usedValueNames.find(name) != usedValueNames.end())
+            {
+                ++suffix;
+                name = base + "_" + std::to_string(suffix);
+            }
+            usedValueNames.insert(name);
+            return name;
+        };
+        for (std::size_t i = 0; i < valueNames.size(); ++i)
+        {
+            if (valueNames[i].empty())
+            {
+                valueNames[i] = makeUniqueValueName(static_cast<uint32_t>(i + 1));
+            }
         }
 
         auto valueName = [&](grh::ir::ValueId valueId) -> const std::string &
@@ -5846,6 +5956,14 @@ namespace grh::emit
         auto valueType = [&](grh::ir::ValueId valueId) -> grh::ir::ValueType
         {
             return view.valueType(valueId);
+        };
+        auto valueWidth = [&](grh::ir::ValueId valueId) -> int64_t
+        {
+            return view.valueWidth(valueId);
+        };
+        auto valueSigned = [&](grh::ir::ValueId valueId) -> bool
+        {
+            return view.valueSigned(valueId);
         };
         auto formatConstLiteral = [&](grh::ir::ValueId valueId,
                                       std::string_view literal) -> std::string
@@ -5886,28 +6004,6 @@ namespace grh::emit
             }
             return formatConstLiteral(valueId, *raw);
         };
-        auto assignSourceFor = [&](grh::ir::ValueId valueId) -> std::optional<grh::ir::ValueId>
-        {
-            if (!valueId.valid())
-            {
-                return std::nullopt;
-            }
-            const grh::ir::OperationId defOpId = view.valueDef(valueId);
-            if (!defOpId.valid())
-            {
-                return std::nullopt;
-            }
-            if (view.opKind(defOpId) != grh::ir::OperationKind::kAssign)
-            {
-                return std::nullopt;
-            }
-            auto operands = view.opOperands(defOpId);
-            if (operands.empty())
-            {
-                return std::nullopt;
-            }
-            return operands.front();
-        };
         std::vector<uint8_t> materializeDense(valueCount + 1, 0);
         auto markMaterialize = [&](grh::ir::ValueId valueId)
         {
@@ -5916,6 +6012,10 @@ namespace grh::emit
                 return;
             }
             if (valueId.index == 0 || valueId.index > valueCount)
+            {
+                return;
+            }
+            if (valueName(valueId).empty())
             {
                 return;
             }
@@ -5933,6 +6033,13 @@ namespace grh::emit
             }
             return materializeDense[valueId.index] != 0;
         };
+        for (const auto valueId : view.values())
+        {
+            if (!valueName(valueId).empty())
+            {
+                markMaterialize(valueId);
+            }
+        }
         for (const auto opId : view.operations())
         {
             const auto kind = view.opKind(opId);
@@ -5972,7 +6079,6 @@ namespace grh::emit
                 }
             }
         }
-        std::vector<uint8_t> resolvingExpr(valueCount + 1, 0);
         std::function<std::string(grh::ir::ValueId)> valueExpr =
             [&](grh::ir::ValueId valueId) -> std::string
         {
@@ -5980,125 +6086,17 @@ namespace grh::emit
             {
                 return {};
             }
-            if (isMaterialized(valueId))
-            {
-                return valueName(valueId);
-            }
-            if (valueId.index == 0 || valueId.index > valueCount)
-            {
-                return valueName(valueId);
-            }
-            if (resolvingExpr[valueId.index])
-            {
-                return valueName(valueId);
-            }
-            resolvingExpr[valueId.index] = 1;
-            if (!isPortValue(valueId))
-            {
-                if (auto literal = constLiteralFor(valueId))
-                {
-                    resolvingExpr[valueId.index] = 0;
-                    return *literal;
-                }
-                if (auto source = assignSourceFor(valueId))
-                {
-                    std::string resolved = valueExpr(*source);
-                    resolvingExpr[valueId.index] = 0;
-                    return resolved;
-                }
-            }
-            resolvingExpr[valueId.index] = 0;
             return valueName(valueId);
         };
-        auto concatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return valueExpr(valueId);
-            }
-            if (auto literal = constLiteralRawFor(valueId))
-            {
-                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
-                {
-                    return *sized;
-                }
-            }
-            return valueExpr(valueId);
-        };
-        auto isSimpleIdentifier = [](std::string_view expr) -> bool
-        {
-            if (expr.empty())
-            {
-                return false;
-            }
-            const auto isIdentStart = [](char ch) -> bool
-            {
-                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
-            };
-            const auto isIdentChar = [](char ch) -> bool
-            {
-                return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                    (ch >= '0' && ch <= '9') || ch == '_' || ch == '$';
-            };
-            bool first = true;
-            for (char ch : expr)
-            {
-                if (first)
-                {
-                    if (!isIdentStart(ch))
-                    {
-                        return false;
-                    }
-                    first = false;
-                    continue;
-                }
-                if (!isIdentChar(ch))
-                {
-                    return false;
-                }
-            }
-            return true;
-        };
-        auto parenIfNeeded = [&](const std::string &expr) -> std::string
-        {
-            if (expr.empty() || isSimpleIdentifier(expr))
-            {
-                return expr;
-            }
-            if (expr.front() == '(' && expr.back() == ')')
-            {
-                return expr;
-            }
-            return "(" + expr + ")";
-        };
-        auto clampIndexExpr = [&](grh::ir::ValueId indexId,
-                                  int64_t operandWidth) -> std::string
-        {
-            std::string indexExpr = parenIfNeeded(valueExpr(indexId));
-            if (operandWidth <= 1)
-            {
-                return indexExpr;
-            }
-            const int64_t indexWidth = view.valueWidth(indexId);
-            if (indexWidth <= 0)
-            {
-                return indexExpr;
-            }
-            uint64_t temp = static_cast<uint64_t>(operandWidth - 1);
-            int64_t clampWidth = 0;
-            while (temp > 0)
-            {
-                ++clampWidth;
-                temp >>= 1;
-            }
-            if (clampWidth <= 0 || indexWidth <= clampWidth)
-            {
-                return indexExpr;
-            }
-            std::ostringstream expr;
-            expr << clampWidth << "'(" << indexExpr << ")";
-            return expr.str();
-        };
+        ExprTools baseExpr;
+        baseExpr.valueType = valueType;
+        baseExpr.valueWidth = valueWidth;
+        baseExpr.valueSigned = valueSigned;
+        baseExpr.constLiteralRawFor = constLiteralRawFor;
+        baseExpr.valueExpr = valueExpr;
+        baseExpr.parenReduce = false;
+        baseExpr.allowConstSignBit = true;
+        baseExpr.allowInlineLiteral = false;
         auto opContext = [&](grh::ir::OperationId opId) -> std::string
         {
             if (!opId.valid())
@@ -6438,92 +6436,6 @@ namespace grh::emit
         {
             latchBlocks.emplace_back(std::move(stmt), sourceOp);
         };
-
-        auto logicalOperand = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return valueExpr(valueId);
-            }
-            const int64_t width = view.valueWidth(valueId);
-            const std::string name = valueExpr(valueId);
-            if (width == 1)
-            {
-                return name;
-            }
-            return "(|" + name + ")";
-        };
-        auto sizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return valueExpr(valueId);
-            }
-            if (auto literal = constLiteralRawFor(valueId))
-            {
-                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
-                {
-                    return *sized;
-                }
-            }
-            return valueExpr(valueId);
-        };
-        auto extendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return valueExpr(valueId);
-            }
-            const int64_t width = view.valueWidth(valueId);
-            const std::string name = sizedOperandExpr(valueId);
-            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-            {
-                return name;
-            }
-            const int64_t diff = targetWidth - width;
-            if (diff <= 0)
-            {
-                return name;
-            }
-            if (view.valueSigned(valueId))
-            {
-                const std::string indexed = parenIfNeeded(name);
-                const std::string signBit =
-                    width == 1 ? indexed
-                               : indexed + "[" + std::to_string(width - 1) + "]";
-                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-            }
-            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-        };
-        auto extendShiftOperand = [&](grh::ir::ValueId valueId,
-                                      int64_t targetWidth,
-                                      bool signExtend) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return valueExpr(valueId);
-            }
-            const int64_t width = view.valueWidth(valueId);
-            const std::string name = sizedOperandExpr(valueId);
-            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-            {
-                return name;
-            }
-            const int64_t diff = targetWidth - width;
-            if (diff <= 0)
-            {
-                return name;
-            }
-            if (signExtend)
-            {
-                const std::string indexed = parenIfNeeded(name);
-                const std::string signBit =
-                    width == 1 ? indexed
-                               : indexed + "[" + std::to_string(width - 1) + "]";
-                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-            }
-            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-        };
         const uint32_t dpiMaxValueIndex = static_cast<uint32_t>(valueCount);
         std::vector<int8_t> dpiDependsDense(dpiMaxValueIndex + 1, -1);
         std::vector<uint8_t> dpiDependsVisiting(dpiMaxValueIndex + 1, 0);
@@ -6653,113 +6565,17 @@ namespace grh::emit
         std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
         std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiInlineCache;
         std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
-        auto inlineOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
+        ExprTools inlineExpr = baseExpr;
+        inlineExpr.parenReduce = true;
+        inlineExpr.allowConstSignBit = false;
+        inlineExpr.allowInlineLiteral = true;
+        inlineExpr.valueExpr = [&](grh::ir::ValueId valueId) -> std::string
         {
             if (valueDependsOnDpi(valueId))
             {
                 return dpiInlineExpr(valueId);
             }
             return valueExpr(valueId);
-        };
-        auto inlineSizedOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return inlineOperandExpr(valueId);
-            }
-            if (auto literal = constLiteralRawFor(valueId))
-            {
-                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
-                {
-                    return *sized;
-                }
-            }
-            return inlineOperandExpr(valueId);
-        };
-        auto inlineLogicalOperand = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return inlineOperandExpr(valueId);
-            }
-            const int64_t width = view.valueWidth(valueId);
-            const std::string name = inlineOperandExpr(valueId);
-            if (width == 1)
-            {
-                return name;
-            }
-            return "(|" + parenIfNeeded(name) + ")";
-        };
-        auto inlineExtendOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
-        {
-            const std::string name = inlineSizedOperandExpr(valueId);
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return name;
-            }
-            const int64_t width = view.valueWidth(valueId);
-            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-            {
-                return name;
-            }
-            const int64_t diff = targetWidth - width;
-            if (diff <= 0)
-            {
-                return name;
-            }
-            const std::string indexed = parenIfNeeded(name);
-            if (view.valueSigned(valueId))
-            {
-                const std::string signBit =
-                    width == 1 ? indexed
-                               : indexed + "[" + std::to_string(width - 1) + "]";
-                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-            }
-            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-        };
-        auto inlineExtendShiftOperand = [&](grh::ir::ValueId valueId,
-                                            int64_t targetWidth,
-                                            bool signExtend) -> std::string
-        {
-            const std::string name = inlineSizedOperandExpr(valueId);
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return name;
-            }
-            const int64_t width = view.valueWidth(valueId);
-            if (targetWidth <= 0 || width <= 0 || width == targetWidth)
-            {
-                return name;
-            }
-            const int64_t diff = targetWidth - width;
-            if (diff <= 0)
-            {
-                return name;
-            }
-            const std::string indexed = parenIfNeeded(name);
-            if (signExtend)
-            {
-                const std::string signBit =
-                    width == 1 ? indexed
-                               : indexed + "[" + std::to_string(width - 1) + "]";
-                return "{{" + std::to_string(diff) + "{" + signBit + "}}," + name + "}";
-            }
-            return "{{" + std::to_string(diff) + "{1'b0}}," + name + "}";
-        };
-        auto inlineConcatOperandExpr = [&](grh::ir::ValueId valueId) -> std::string
-        {
-            if (valueType(valueId) != grh::ir::ValueType::Logic)
-            {
-                return inlineOperandExpr(valueId);
-            }
-            if (auto literal = constLiteralRawFor(valueId))
-            {
-                if (auto sized = sizedLiteralIfUnsized(*literal, view.valueWidth(valueId)))
-                {
-                    return *sized;
-                }
-            }
-            return inlineOperandExpr(valueId);
         };
         dpiInlineExpr = [&](grh::ir::ValueId valueId) -> std::string
         {
@@ -6817,11 +6633,11 @@ namespace grh::emit
                         std::max(view.valueWidth(ops[0]), view.valueWidth(ops[1]));
                     const std::string tok = binOpToken(kind);
                     const std::string lhs = resultWidth > 0
-                                                ? inlineExtendOperand(ops[0], resultWidth)
-                                                : inlineOperandExpr(ops[0]);
+                                                ? inlineExpr.extendOperand(ops[0], resultWidth)
+                                                : inlineExpr.valueExpr(ops[0]);
                     const std::string rhs = resultWidth > 0
-                                                ? inlineExtendOperand(ops[1], resultWidth)
-                                                : inlineOperandExpr(ops[1]);
+                                                ? inlineExpr.extendOperand(ops[1], resultWidth)
+                                                : inlineExpr.valueExpr(ops[1]);
                     const bool signedCompare =
                         (kind == grh::ir::OperationKind::kLt ||
                          kind == grh::ir::OperationKind::kLe ||
@@ -6842,7 +6658,7 @@ namespace grh::emit
                 if (ops.size() >= 2)
                 {
                     const std::string tok = binOpToken(kind);
-                    expr = inlineOperandExpr(ops[0]) + " " + tok + " " + inlineOperandExpr(ops[1]);
+                    expr = inlineExpr.valueExpr(ops[0]) + " " + tok + " " + inlineExpr.valueExpr(ops[1]);
                 }
                 break;
             case grh::ir::OperationKind::kShl:
@@ -6855,9 +6671,9 @@ namespace grh::emit
                         kind == grh::ir::OperationKind::kAShr && view.valueSigned(ops[0]);
                     const std::string tok = binOpToken(kind);
                     const std::string lhs = resultWidth > 0
-                                                ? inlineExtendShiftOperand(ops[0], resultWidth, signExtend)
-                                                : inlineOperandExpr(ops[0]);
-                    expr = lhs + " " + tok + " " + inlineOperandExpr(ops[1]);
+                                                ? inlineExpr.extendShiftOperand(ops[0], resultWidth, signExtend)
+                                                : inlineExpr.valueExpr(ops[0]);
+                    expr = lhs + " " + tok + " " + inlineExpr.valueExpr(ops[1]);
                 }
                 break;
             case grh::ir::OperationKind::kAdd:
@@ -6873,8 +6689,8 @@ namespace grh::emit
                         resultWidth = std::max(view.valueWidth(ops[0]), view.valueWidth(ops[1]));
                     }
                     const std::string tok = binOpToken(kind);
-                    expr = inlineExtendOperand(ops[0], resultWidth) + " " + tok + " " +
-                           inlineExtendOperand(ops[1], resultWidth);
+                    expr = inlineExpr.extendOperand(ops[0], resultWidth) + " " + tok + " " +
+                           inlineExpr.extendOperand(ops[1], resultWidth);
                 }
                 break;
             case grh::ir::OperationKind::kLogicAnd:
@@ -6882,8 +6698,8 @@ namespace grh::emit
                 if (ops.size() >= 2)
                 {
                     const std::string tok = binOpToken(kind);
-                    expr = inlineLogicalOperand(ops[0]) + " " + tok + " " +
-                           inlineLogicalOperand(ops[1]);
+                    expr = inlineExpr.logicalOperand(ops[0]) + " " + tok + " " +
+                           inlineExpr.logicalOperand(ops[1]);
                 }
                 break;
             case grh::ir::OperationKind::kNot:
@@ -6896,29 +6712,29 @@ namespace grh::emit
                 if (!ops.empty())
                 {
                     const std::string tok = unaryOpToken(kind);
-                    expr = tok + inlineOperandExpr(ops[0]);
+                    expr = tok + inlineExpr.valueExpr(ops[0]);
                 }
                 break;
             case grh::ir::OperationKind::kLogicNot:
                 if (!ops.empty())
                 {
-                    expr = "!" + inlineLogicalOperand(ops[0]);
+                    expr = "!" + inlineExpr.logicalOperand(ops[0]);
                 }
                 break;
             case grh::ir::OperationKind::kMux:
                 if (ops.size() >= 3)
                 {
                     const int64_t resultWidth = view.valueWidth(valueId);
-                    const std::string lhs = inlineExtendOperand(ops[1], resultWidth);
-                    const std::string rhs = inlineExtendOperand(ops[2], resultWidth);
-                    expr = inlineOperandExpr(ops[0]) + " ? " + lhs + " : " + rhs;
+                    const std::string lhs = inlineExpr.extendOperand(ops[1], resultWidth);
+                    const std::string rhs = inlineExpr.extendOperand(ops[2], resultWidth);
+                    expr = inlineExpr.valueExpr(ops[0]) + " ? " + lhs + " : " + rhs;
                 }
                 break;
             case grh::ir::OperationKind::kAssign:
                 if (!ops.empty())
                 {
                     int64_t resultWidth = view.valueWidth(valueId);
-                    expr = inlineExtendOperand(ops[0], resultWidth);
+                    expr = inlineExpr.extendOperand(ops[0], resultWidth);
                 }
                 break;
             case grh::ir::OperationKind::kConcat:
@@ -6926,7 +6742,7 @@ namespace grh::emit
                 {
                     if (ops.size() == 1)
                     {
-                        expr = inlineOperandExpr(ops[0]);
+                        expr = inlineExpr.valueExpr(ops[0]);
                     }
                     else
                     {
@@ -6938,7 +6754,7 @@ namespace grh::emit
                             {
                                 exprStream << ", ";
                             }
-                            exprStream << inlineConcatOperandExpr(ops[i]);
+                            exprStream << inlineExpr.concatOperandExpr(ops[i]);
                         }
                         exprStream << "}";
                         expr = exprStream.str();
@@ -6952,7 +6768,7 @@ namespace grh::emit
                     if (rep)
                     {
                         std::ostringstream exprStream;
-                        exprStream << "{" << *rep << "{" << inlineConcatOperandExpr(ops[0]) << "}}";
+                        exprStream << "{" << *rep << "{" << inlineExpr.concatOperandExpr(ops[0]) << "}}";
                         expr = exprStream.str();
                     }
                 }
@@ -6968,11 +6784,11 @@ namespace grh::emit
                         std::ostringstream exprStream;
                         if (operandWidth == 1)
                         {
-                            exprStream << inlineOperandExpr(ops[0]);
+                            exprStream << inlineExpr.valueExpr(ops[0]);
                         }
                         else
                         {
-                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                            exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[";
                             if (*sliceStart == *sliceEnd)
                             {
                                 exprStream << *sliceStart;
@@ -6997,17 +6813,17 @@ namespace grh::emit
                         std::ostringstream exprStream;
                         if (operandWidth == 1)
                         {
-                            exprStream << inlineOperandExpr(ops[0]);
+                            exprStream << inlineExpr.valueExpr(ops[0]);
                         }
                         else if (*width == 1)
                         {
-                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
-                                parenIfNeeded(inlineOperandExpr(ops[1])) << "]";
+                            exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[" <<
+                                parenIfNeeded(inlineExpr.valueExpr(ops[1])) << "]";
                         }
                         else
                         {
-                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[" <<
-                                parenIfNeeded(inlineOperandExpr(ops[1])) << " +: " << *width << "]";
+                            exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[" <<
+                                parenIfNeeded(inlineExpr.valueExpr(ops[1])) << " +: " << *width << "]";
                         }
                         expr = exprStream.str();
                     }
@@ -7023,18 +6839,18 @@ namespace grh::emit
                         std::ostringstream exprStream;
                         if (*width == 1 && operandWidth == 1)
                         {
-                            exprStream << inlineOperandExpr(ops[0]);
+                            exprStream << inlineExpr.valueExpr(ops[0]);
                         }
                         else
                         {
-                            exprStream << parenIfNeeded(inlineOperandExpr(ops[0])) << "[";
+                            exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[0])) << "[";
                             if (*width == 1)
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[1]));
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[1]));
                             }
                             else
                             {
-                                exprStream << parenIfNeeded(inlineOperandExpr(ops[1])) << " * " << *width << " +: " << *width;
+                                exprStream << parenIfNeeded(inlineExpr.valueExpr(ops[1])) << " * " << *width << " +: " << *width;
                             }
                             exprStream << "]";
                         }
@@ -7051,11 +6867,11 @@ namespace grh::emit
         };
         auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
         {
-            if (!valueDependsOnDpi(valueId))
+            if (valueDependsOnDpi(valueId))
             {
-                return valueExpr(valueId);
+                return dpiInlineExpr(valueId);
             }
-            return dpiInlineExpr(valueId);
+            return valueExpr(valueId);
         };
         auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
         {
@@ -7639,10 +7455,10 @@ namespace grh::emit
                              view.valueWidth(operands[1]));
                 const std::string tok = binOpToken(kind);
                 const std::string lhs = resultWidth > 0
-                                            ? extendOperand(operands[0], resultWidth)
+                                            ? baseExpr.extendOperand(operands[0], resultWidth)
                                             : valueExpr(operands[0]);
                 const std::string rhs = resultWidth > 0
-                                            ? extendOperand(operands[1], resultWidth)
+                                            ? baseExpr.extendOperand(operands[1], resultWidth)
                                             : valueExpr(operands[1]);
                 const bool signedCompare =
                     (kind == grh::ir::OperationKind::kLt ||
@@ -7690,7 +7506,7 @@ namespace grh::emit
                     view.valueSigned(operands[0]);
                 const std::string tok = binOpToken(kind);
                 const std::string lhs = resultWidth > 0
-                                            ? extendShiftOperand(operands[0], resultWidth, signExtend)
+                                            ? baseExpr.extendShiftOperand(operands[0], resultWidth, signExtend)
                                             : valueExpr(operands[0]);
                 addValueAssign(results[0],
                                lhs + " " + tok + " " + valueExpr(operands[1]),
@@ -7717,8 +7533,8 @@ namespace grh::emit
                 }
                 const std::string tok = binOpToken(kind);
                 addValueAssign(results[0],
-                               extendOperand(operands[0], resultWidth) + " " + tok + " " +
-                                   extendOperand(operands[1], resultWidth),
+                               baseExpr.extendOperand(operands[0], resultWidth) + " " + tok + " " +
+                                   baseExpr.extendOperand(operands[1], resultWidth),
                                opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -7733,8 +7549,8 @@ namespace grh::emit
                 }
                 const std::string tok = binOpToken(kind);
                 addValueAssign(results[0],
-                               logicalOperand(operands[0]) + " " + tok + " " +
-                                   logicalOperand(operands[1]),
+                               baseExpr.logicalOperand(operands[0]) + " " + tok + " " +
+                                   baseExpr.logicalOperand(operands[1]),
                                opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -7764,7 +7580,7 @@ namespace grh::emit
                     reportError("Unary operation missing operands or results", context);
                     break;
                 }
-                addValueAssign(results[0], "!" + logicalOperand(operands[0]), opId);
+                addValueAssign(results[0], "!" + baseExpr.logicalOperand(operands[0]), opId);
                 ensureWireDecl(results[0]);
                 break;
             }
@@ -7776,8 +7592,8 @@ namespace grh::emit
                     break;
                 }
                 int64_t resultWidth = view.valueWidth(results[0]);
-                const std::string lhs = extendOperand(operands[1], resultWidth);
-                const std::string rhs = extendOperand(operands[2], resultWidth);
+                const std::string lhs = baseExpr.extendOperand(operands[1], resultWidth);
+                const std::string rhs = baseExpr.extendOperand(operands[2], resultWidth);
                 addValueAssign(results[0],
                                valueExpr(operands[0]) + " ? " + lhs + " : " + rhs,
                                opId);
@@ -7797,7 +7613,7 @@ namespace grh::emit
                     break;
                 }
                 int64_t resultWidth = view.valueWidth(results[0]);
-                const std::string rhs = extendOperand(operands[0], resultWidth);
+                const std::string rhs = baseExpr.extendOperand(operands[0], resultWidth);
                 addValueAssign(results[0], rhs, opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -7823,7 +7639,7 @@ namespace grh::emit
                     {
                         expr << ", ";
                     }
-                    expr << concatOperandExpr(operands[i]);
+                    expr << baseExpr.concatOperandExpr(operands[i]);
                 }
                 expr << "}";
                 addValueAssign(results[0], expr.str(), opId);
@@ -7844,7 +7660,7 @@ namespace grh::emit
                     break;
                 }
                 std::ostringstream expr;
-                expr << "{" << *rep << "{" << concatOperandExpr(operands[0]) << "}}";
+                expr << "{" << *rep << "{" << baseExpr.concatOperandExpr(operands[0]) << "}}";
                 addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
                 break;
@@ -7916,12 +7732,12 @@ namespace grh::emit
                 else if (*width == 1)
                 {
                     expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                         << clampIndexExpr(operands[1], operandWidth) << "]";
+                         << baseExpr.clampIndexExpr(operands[1], operandWidth) << "]";
                 }
                 else
                 {
                     expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                         << clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
+                         << baseExpr.clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
                 }
                 addValueAssign(results[0], expr.str(), opId);
                 ensureWireDecl(results[0]);
