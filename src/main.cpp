@@ -178,7 +178,7 @@ int main(int argc, char **argv)
                        "Log level: none|error|warn|info|debug|trace", "<level>");
     std::optional<bool> profileTimer;
     driver.cmdLine.add("--profile-timer", profileTimer,
-                       "Emit timing logs for convert/transform passes");
+                       "Emit detailed timing logs for convert/transform/emit passes");
     std::optional<int64_t> convertThreads;
     driver.cmdLine.add("--convert-threads", convertThreads,
                        "Number of Convert worker threads (default 32)", "<count>");
@@ -250,20 +250,22 @@ int main(int argc, char **argv)
         }
         std::cerr << " " << message << '\n';
     };
+    const auto pipelineStart = TimingClock::now();
     auto logTimingStage = [&](std::string_view prefix, std::string_view label,
-                              TimingClock::duration duration) {
-        if (!timingEnabled)
-        {
-            return;
-        }
+                              TimingClock::time_point stageStart,
+                              TimingClock::time_point stageEnd) {
         std::string message;
-        message.reserve(label.size() + 32);
+        message.reserve(label.size() + 48);
         message.append(label);
         message.append(" took ");
-        message.append(formatDuration(duration));
-        logLine(wolf_sv_parser::LogLevel::Info, prefix, "timing", message);
+        message.append(formatDuration(stageEnd - stageStart));
+        message.append(" (total ");
+        message.append(formatDuration(stageEnd - pipelineStart));
+        message.append(")");
+        std::cerr << "[" << prefix << "] [timing] " << message << '\n';
     };
 
+    const auto slangStart = TimingClock::now();
     std::string slangBegin = "begin sources=";
     slangBegin.append(std::to_string(driver.sourceLoader.getFilePaths().size()));
     slangBegin.append(", defines=");
@@ -293,6 +295,8 @@ int main(int argc, char **argv)
         slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
         slangEnd.append(")");
         logLine(wolf_sv_parser::LogLevel::Info, "slang", {}, slangEnd);
+        const auto slangEndTime = TimingClock::now();
+        logTimingStage("slang", "slang", slangStart, slangEndTime);
         return 3;
     }
 
@@ -311,9 +315,13 @@ int main(int argc, char **argv)
     {
         diagOk = driver.reportDiagnostics(/* quiet */ false);
         (void)diagOk;
+        const auto slangEndTime = TimingClock::now();
+        logTimingStage("slang", "slang", slangStart, slangEndTime);
         return 4;
     }
     diagOk = driver.reportDiagnostics(/* quiet */ false);
+    const auto slangEndTime = TimingClock::now();
+    logTimingStage("slang", "slang", slangStart, slangEndTime);
 
     auto &root = compilation->getRoot();
 
@@ -526,7 +534,7 @@ int main(int argc, char **argv)
     const auto convertEnd = TimingClock::now();
     const std::string convertLabel =
         convertAborted ? std::string("convert-total (aborted)") : std::string("convert-total");
-    logTimingStage("convert", convertLabel, convertEnd - convertStart);
+    logTimingStage("convert", convertLabel, convertStart, convertEnd);
 
     auto kindToLevel = [](wolf_sv_parser::ConvertDiagnosticKind kind) {
         switch (kind)
@@ -569,9 +577,12 @@ int main(int argc, char **argv)
     }
 
     bool transformOk = true;
+    const auto transformStart = TimingClock::now();
     if (skipTransform == true)
     {
         logLine(wolf_sv_parser::LogLevel::Info, "transform", {}, "skipped");
+        const auto transformEnd = TimingClock::now();
+        logTimingStage("transform", "transform", transformStart, transformEnd);
     }
     else
     {
@@ -622,11 +633,10 @@ int main(int argc, char **argv)
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::MemoryInitCheckPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::DeadCodeElimPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::StatsPass>());
-        const auto transformStart = TimingClock::now();
         wolf_sv_parser::transform::PassManagerResult passManagerResult =
             passManager.run(netlist, transformDiagnostics);
         const auto transformEnd = TimingClock::now();
-        logTimingStage("transform", "transform", transformEnd - transformStart);
+        logTimingStage("transform", "transform", transformStart, transformEnd);
 
         if (!transformDiagnostics.empty())
         {
@@ -660,6 +670,12 @@ int main(int argc, char **argv)
     }
 
     bool emitOk = true;
+    const bool wantsEmit = dumpJson == true || dumpSv == true;
+    std::optional<TimingClock::time_point> emitStart;
+    if (wantsEmit)
+    {
+        emitStart = TimingClock::now();
+    }
     if (dumpJson == true)
     {
         grh::emit::EmitDiagnostics emitDiagnostics;
@@ -673,10 +689,7 @@ int main(int argc, char **argv)
             emitOptions.outputFilename = *jsonOutputName;
         }
 
-        const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
-        const auto emitEnd = TimingClock::now();
-        logTimingStage("emit-json", "emit-json", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
@@ -723,10 +736,7 @@ int main(int argc, char **argv)
             emitOptions.outputFilename = *svOutputName;
         }
 
-        const auto emitStart = TimingClock::now();
         grh::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
-        const auto emitEnd = TimingClock::now();
-        logTimingStage("emit-sv", "emit-sv", emitEnd - emitStart);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())
@@ -759,6 +769,12 @@ int main(int argc, char **argv)
             logLine(wolf_sv_parser::LogLevel::Error, "emit-sv", {},
                     "Failed to emit SystemVerilog");
         }
+    }
+
+    if (emitStart)
+    {
+        const auto emitEnd = TimingClock::now();
+        logTimingStage("emit", "emit", *emitStart, emitEnd);
     }
 
     bool ok = diagOk;
