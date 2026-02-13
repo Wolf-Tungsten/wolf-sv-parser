@@ -306,12 +306,14 @@ int main(int argc, char **argv)
     slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
     slangEnd.append(")");
     logLine(wolf_sv_parser::LogLevel::Info, "slang", {}, slangEnd);
+    bool diagOk = true;
     if (driver.diagEngine.getNumErrors() > 0)
     {
-        const bool diagOk = driver.reportDiagnostics(/* quiet */ false);
+        diagOk = driver.reportDiagnostics(/* quiet */ false);
         (void)diagOk;
         return 4;
     }
+    diagOk = driver.reportDiagnostics(/* quiet */ false);
 
     auto &root = compilation->getRoot();
 
@@ -759,7 +761,7 @@ int main(int argc, char **argv)
         }
     }
 
-    bool ok = driver.reportDiagnostics(/* quiet */ false);
+    bool ok = diagOk;
     ok = ok && emitOk;
     if (ok)
     {

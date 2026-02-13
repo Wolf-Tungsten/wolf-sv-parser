@@ -37,35 +37,36 @@ namespace
 
 int main()
 {
-    grh_ir::GraphSymbolTable symbols;
-    const auto symA = symbols.intern("a");
-    const auto symB = symbols.intern("b");
-    const auto symSum = symbols.intern("sum");
-    const auto symOut = symbols.intern("out");
-    const auto symAdd = symbols.intern("add0");
-    const auto symAssign = symbols.intern("assign0");
+    grh_ir::Netlist netlist;
+    grh_ir::Graph &graph = netlist.createGraph("demo_ir");
 
-    grh_ir::GraphBuilder builder(symbols);
-    const auto vA = builder.addValue(symA, 8, false);
-    const auto vB = builder.addValue(symB, 8, false);
-    const auto vSum = builder.addValue(symSum, 8, false);
-    const auto vOut = builder.addValue(symOut, 8, false);
+    const auto symA = graph.internSymbol("a");
+    const auto symB = graph.internSymbol("b");
+    const auto symSum = graph.internSymbol("sum");
+    const auto symOut = graph.internSymbol("out");
+    const auto symAdd = graph.internSymbol("add0");
+    const auto symAssign = graph.internSymbol("assign0");
 
-    builder.bindInputPort(symA, vA);
-    builder.bindInputPort(symB, vB);
-    builder.bindOutputPort(symOut, vOut);
+    const auto vA = graph.createValue(symA, 8, false);
+    const auto vB = graph.createValue(symB, 8, false);
+    const auto vSum = graph.createValue(symSum, 8, false);
+    const auto vOut = graph.createValue(symOut, 8, false);
 
-    const auto opAdd = builder.addOp(grh::ir::OperationKind::kAdd, symAdd);
-    builder.addOperand(opAdd, vA);
-    builder.addOperand(opAdd, vB);
-    builder.addResult(opAdd, vSum);
-    builder.setAttr(opAdd, "weights", AttributeValue(std::vector<int64_t>{1, 2}));
+    graph.bindInputPort(symA, vA);
+    graph.bindInputPort(symB, vB);
+    graph.bindOutputPort(symOut, vOut);
 
-    const auto opAssign = builder.addOp(grh::ir::OperationKind::kAssign, symAssign);
-    builder.addOperand(opAssign, vSum);
-    builder.addResult(opAssign, vOut);
+    const auto opAdd = graph.createOperation(grh::ir::OperationKind::kAdd, symAdd);
+    graph.addOperand(opAdd, vA);
+    graph.addOperand(opAdd, vB);
+    graph.addResult(opAdd, vSum);
+    graph.setAttr(opAdd, "weights", AttributeValue(std::vector<int64_t>{1, 2}));
 
-    const grh_ir::GraphView view = builder.freeze();
+    const auto opAssign = graph.createOperation(grh::ir::OperationKind::kAssign, symAssign);
+    graph.addOperand(opAssign, vSum);
+    graph.addResult(opAssign, vOut);
+
+    netlist.markAsTop(graph.symbol());
 
     EmitDiagnostics diagnostics;
     EmitJSON emitter(&diagnostics);
@@ -73,14 +74,14 @@ int main()
     options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
     options.outputFilename = std::string("emit_json_ir.json");
 
-    EmitResult result = emitter.emitGraphView(view, symbols, "demo_ir", options);
+    EmitResult result = emitter.emit(netlist, options);
     if (!result.success || diagnostics.hasError())
     {
-        return fail("emitGraphView failed");
+        return fail("emit failed");
     }
     if (result.artifacts.empty())
     {
-        return fail("emitGraphView produced no artifact");
+        return fail("emit produced no artifact");
     }
 
     const std::filesystem::path jsonPath = result.artifacts.front();
