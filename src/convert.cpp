@@ -7255,7 +7255,16 @@ private:
         }
         if (const auto* conversion = expr.as_if<slang::ast::ConversionExpression>())
         {
-            ExprNodeId operand = lowerExpression(conversion->operand());
+            ExprNodeId operand = kInvalidPlanIndex;
+            if (conversion->isImplicit())
+            {
+                operand = lowerExpression(conversion->operand());
+            }
+            else
+            {
+                WidthContextScope widthScope(*this, 0);
+                operand = lowerExpression(conversion->operand());
+            }
             ExprNodeId converted =
                 applyConversion(operand, conversion->type, expr.sourceRange.start());
             if (converted == kInvalidPlanIndex)

@@ -69,7 +69,7 @@ $(WOLF_SV): $(FILELIST)
 	@mkdir -p $(WOLF_DIR)
 	@$(WOLF_SV_PARSER) --emit-sv --emit-json --top $(DUT_TOP) -o $(WOLF_SV) -f $(FILELIST)
 
-$(REF_LIB): $(TB_V) $(FILELIST)
+$(REF_LIB): clean $(TB_V) $(FILELIST)
 	@if ! command -v $(VERILATOR) >/dev/null 2>&1; then \
 		echo "[$(CASE_TAG)] verilator not found in PATH"; \
 		exit 1; \
