@@ -58,6 +58,7 @@ namespace grh::emit
         JsonPrintMode jsonMode = JsonPrintMode::PrettyCompact;
         std::vector<std::string> topOverrides;
         std::map<std::string, std::string, std::less<>> attributes;
+        bool traceUnderscoreValues = false;
     };
 
     struct EmitResult

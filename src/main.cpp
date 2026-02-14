@@ -170,6 +170,9 @@ int main(int argc, char **argv)
     driver.cmdLine.add("--emit-json", dumpJson, "Emit GRH JSON after convert");
     std::optional<bool> dumpSv;
     driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after convert");
+    std::optional<bool> emitTraceUnderscore;
+    driver.cmdLine.add("--emit-trace-underscore", emitTraceUnderscore,
+                       "Emit wd_* aliases for underscore-prefixed internal values to improve tracing");
     std::optional<bool> skipTransform;
     driver.cmdLine.add("--skip-transform", skipTransform,
                        "Skip transform passes and emit raw Convert netlist");
@@ -389,6 +392,10 @@ int main(int argc, char **argv)
         else if (emitOutputDir && !emitOutputDir->empty())
         {
             emitOptions.outputDir = *emitOutputDir;
+        }
+        if (emitTraceUnderscore == true)
+        {
+            emitOptions.traceUnderscoreValues = true;
         }
     };
 

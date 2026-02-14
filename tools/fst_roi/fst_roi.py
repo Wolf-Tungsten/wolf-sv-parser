@@ -42,6 +42,8 @@ def _parse_args() -> argparse.Namespace:
 
     parser.add_argument("--t0", type=int, default=None, help="ROI start time (ticks)")
     parser.add_argument("--t1", type=int, default=None, help="ROI end time (ticks, inclusive)")
+    parser.add_argument("--no-stop-after-t1", action="store_true",
+                        help="Scan full file even when t1 is set (default: stop after t1)")
 
     parser.add_argument("--clk", default=None, help="Clock signal name for cycle-based ROI")
     parser.add_argument("--cycle-start", type=int, default=None, help="Cycle start index (inclusive)")
@@ -65,6 +67,8 @@ def _parse_args() -> argparse.Namespace:
                         help="Max events per signal (after filtering)")
     parser.add_argument("--strip-width", action="store_true",
                         help="Strip trailing bus width suffixes (e.g. ' [31:0]') in output")
+    parser.add_argument("--match-strip-width", action="store_true",
+                        help="Match signals ignoring trailing bus width suffixes")
 
     return parser.parse_args()
 
@@ -100,6 +104,68 @@ def _load_signals(ctx):
     return list(scopes), signals
 
 
+def _cstr(val) -> str:
+    if val == ffi.NULL:
+        return ""
+    return ffi.string(val).decode("utf-8", errors="replace")
+
+
+def _load_signals_subset(ctx, wanted: set, match_strip_width: bool = False):
+    scopes = []
+    signals_by_name = {}
+    signals_by_handle = {}
+    cur_scope = ""
+    last_scopes = []
+    from collections import namedtuple
+    Signal = namedtuple("Signal", "name length handle")
+    Signals = namedtuple("Signals", "by_name by_handle")
+
+    wanted_map = {}
+    for name in wanted:
+        key = _strip_width_suffix(name) if match_strip_width else name
+        wanted_map.setdefault(key, []).append(name)
+    resolved = {}
+
+    lib.fstReaderIterateHierRewind(ctx)
+    while True:
+        fstHier = lib.fstReaderIterateHier(ctx)
+        if fstHier == ffi.NULL:
+            break
+
+        if fstHier.htyp == lib.FST_HT_SCOPE:
+            last_scopes.append(cur_scope)
+            if cur_scope != "":
+                cur_scope += "."
+            cur_scope += _cstr(fstHier.u.scope.name)
+            scopes.append(cur_scope)
+        elif fstHier.htyp == lib.FST_HT_UPSCOPE:
+            cur_scope = last_scopes.pop()
+        elif fstHier.htyp == lib.FST_HT_VAR:
+            var_name = cur_scope + "." + _cstr(fstHier.u.var.name)
+            matched = []
+            if var_name in wanted:
+                matched = [var_name]
+            elif match_strip_width:
+                key = _strip_width_suffix(var_name)
+                matched = wanted_map.get(key, [])
+            if matched:
+                handle = fstHier.u.var.handle
+                signal = Signal(var_name, fstHier.u.var.length, handle)
+                signals_by_handle.setdefault(handle, signal)
+                if var_name in wanted:
+                    signals_by_name[var_name] = signal
+                for name in matched:
+                    if name in resolved and resolved[name] != var_name:
+                        _die(f"ambiguous match for {name}: {resolved[name]} vs {var_name}. "
+                             "Use full name including width suffix.")
+                    resolved[name] = var_name
+                    signals_by_name[name] = signal
+                if len(resolved) == len(wanted):
+                    break
+
+    return (scopes, Signals(signals_by_name, signals_by_handle))
+
+
 _WIDTH_SUFFIX_RE = re.compile(r"\s*\[[0-9]+:[0-9]+\]$")
 
 
@@ -116,7 +182,14 @@ def _best_matches(all_refs: List[str], pat: str, limit: int = 8) -> List[str]:
     return suffix_hits[:limit]
 
 
-def _match_signals(all_refs: List[str], patterns: Iterable[str]) -> List[str]:
+def _match_signals(all_refs: List[str], patterns: Iterable[str],
+                   match_strip_width: bool = False) -> List[str]:
+    stripped_map = None
+    if match_strip_width:
+        stripped_map = {}
+        for ref in all_refs:
+            key = _strip_width_suffix(ref)
+            stripped_map.setdefault(key, []).append(ref)
     matched: List[str] = []
     for pat in patterns:
         if any(ch in pat for ch in "*?["):
@@ -126,6 +199,17 @@ def _match_signals(all_refs: List[str], patterns: Iterable[str]) -> List[str]:
         if pat in all_refs:
             matched.append(pat)
             continue
+        if match_strip_width and stripped_map is not None:
+            key = _strip_width_suffix(pat)
+            hits = stripped_map.get(key, [])
+            if not hits:
+                hits = [ref for ref in all_refs if _strip_width_suffix(ref).endswith(key)]
+            if len(hits) == 1:
+                matched.append(hits[0])
+                continue
+            if len(hits) > 1:
+                _die(f"ambiguous match for {pat}: {', '.join(hits[:8])}. "
+                     "Use full name including width suffix.")
         # fallback: suffix match
         hits = [ref for ref in all_refs if ref.endswith("." + pat) or ref.endswith(pat)]
         if hits:
@@ -228,8 +312,13 @@ def _timescale_str(ts: int) -> str:
     return mapping.get(ts, f"1e{ts}s")
 
 
+class _StopScan(Exception):
+    pass
+
+
 def _collect_events(ctx, handles: List[int], t0: int, t1: Optional[int],
-                    include_initial: bool, need_last_before: bool) -> Tuple[dict, dict]:
+                    include_initial: bool, need_last_before: bool,
+                    stop_after_t1: bool) -> Tuple[dict, dict]:
     events = {h: [] for h in handles}
     track_last = include_initial or need_last_before
     last_before = {h: None for h in handles} if track_last else {}
@@ -243,6 +332,8 @@ def _collect_events(ctx, handles: List[int], t0: int, t1: Optional[int],
             return
         t = int(time)
         val = ffi.string(value).decode("utf-8", errors="replace")
+        if stop_after_t1 and t1 is not None and t > t1:
+            raise _StopScan()
         if track_last and t <= t0:
             last_before[facidx] = (t, val)
         if t < t0:
@@ -251,7 +342,10 @@ def _collect_events(ctx, handles: List[int], t0: int, t1: Optional[int],
             return
         events[facidx].append((t, val))
 
-    pylibfst.fstReaderIterBlocks(ctx, cb)
+    try:
+        pylibfst.fstReaderIterBlocks(ctx, cb)
+    except _StopScan:
+        pass
 
     if include_initial:
         for h in handles:
@@ -261,6 +355,20 @@ def _collect_events(ctx, handles: List[int], t0: int, t1: Optional[int],
             if not events[h] or events[h][0][0] != lb[0]:
                 events[h].insert(0, lb)
 
+    return events, last_before
+
+
+def _collect_events_direct(ctx, handles: List[int], t0: int) -> Tuple[dict, dict]:
+    events = {h: [] for h in handles}
+    last_before = {h: None for h in handles}
+    buf = ffi.new("char[4096]")
+    for h in handles:
+        ptr = lib.fstReaderGetValueFromHandleAtTime(ctx, t0, h, buf)
+        if ptr == ffi.NULL:
+            continue
+        val = ffi.string(ptr).decode("utf-8", errors="replace")
+        events[h].append((t0, val))
+        last_before[h] = (t0, val)
     return events, last_before
 
 
@@ -409,7 +517,26 @@ def main() -> None:
 
     ctx = _open_fst(args.fst)
     try:
-        _, signals_info = _load_signals(ctx)
+        use_subset = False
+        need_full = bool(args.list or args.list_filter)
+        if not need_full:
+            for sig in signals:
+                if any(ch in sig for ch in "*?["):
+                    need_full = True
+                    break
+        wanted = set(signals)
+        if args.clk:
+            wanted.add(args.clk)
+
+        if not need_full and wanted:
+            _, signals_info = _load_signals_subset(ctx, wanted, match_strip_width=args.match_strip_width)
+            if len(signals_info.by_name) == len(wanted):
+                use_subset = True
+            else:
+                _, signals_info = _load_signals(ctx)
+        else:
+            _, signals_info = _load_signals(ctx)
+
         all_refs = list(signals_info.by_name.keys())
         if args.list:
             refs = all_refs
@@ -427,7 +554,13 @@ def main() -> None:
         if not signals:
             _die("no signals specified. Use --signals or --signal")
 
-        refs = _match_signals(all_refs, signals)
+        if use_subset:
+            missing = [s for s in signals if s not in signals_info.by_name]
+            if missing:
+                _die(f"signal not found: {missing[0]}")
+            refs = signals
+        else:
+            refs = _match_signals(all_refs, signals, match_strip_width=args.match_strip_width)
 
         if (args.cycle_start is not None or args.cycle_end is not None) and (
             args.t0 is not None or args.t1 is not None
@@ -462,8 +595,18 @@ def main() -> None:
                 handles.append(handle)
             handle_to_names[handle].append(ref)
 
-        events, last_before = _collect_events(ctx, handles, t0, t1, args.include_initial,
-                                              need_last_before=(args.jsonl_mode == "fill"))
+        if t1 is not None and t0 == t1:
+            events, last_before = _collect_events_direct(ctx, handles, t0)
+        else:
+            events, last_before = _collect_events(
+                ctx,
+                handles,
+                t0,
+                t1,
+                args.include_initial,
+                need_last_before=(args.jsonl_mode == "fill"),
+                stop_after_t1=(t1 is not None and not args.no_stop_after_t1),
+            )
         timescale = int(lib.fstReaderGetTimescale(ctx))
 
         if args.format == "table":

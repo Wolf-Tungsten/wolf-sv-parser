@@ -4780,6 +4780,60 @@ namespace grh::emit
                 ensureWireDecl(valueId);
             }
 
+            std::vector<std::string> traceAliasDecls;
+            if (options.traceUnderscoreValues)
+            {
+                std::unordered_set<std::string> aliasNames = declaredNames;
+                auto makeUniqueAlias = [&](const std::string &base) -> std::string
+                {
+                    std::string name = base;
+                    int suffix = 0;
+                    while (aliasNames.find(name) != aliasNames.end())
+                    {
+                        ++suffix;
+                        name = base + "_" + std::to_string(suffix);
+                    }
+                    aliasNames.insert(name);
+                    return name;
+                };
+
+                for (const auto valueId : graph->values())
+                {
+                    if (!valueId.valid() || valueId.graph != graph->id())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Value val = graph->getValue(valueId);
+                    if (val.isInput() || val.isOutput() || val.isInout())
+                    {
+                        continue;
+                    }
+                    if (val.type() != grh::ir::ValueType::Logic || val.width() <= 0)
+                    {
+                        continue;
+                    }
+                    const std::string &orig = valueName(valueId);
+                    if (orig.empty() || orig.front() != '_')
+                    {
+                        continue;
+                    }
+                    std::string alias = makeUniqueAlias("wd_" + orig);
+                    std::string decl = "(* keep *) wire ";
+                    decl.append(signedPrefix(val.isSigned()));
+                    const std::string range = widthRange(val.width());
+                    if (!range.empty())
+                    {
+                        decl.append(range);
+                        decl.push_back(' ');
+                    }
+                    decl.append(alias);
+                    decl.append(" = ");
+                    decl.append(orig);
+                    decl.append(";");
+                    traceAliasDecls.emplace_back(std::move(decl));
+                }
+            }
+
             // -------------------------
             // Module emission
             // -------------------------
@@ -4895,6 +4949,16 @@ namespace grh::emit
                 for (const auto &[name, decl] : varDecls)
                 {
                     out << "  " << formatVarDecl(decl.type, name) << '\n';
+                }
+            }
+
+            if (!traceAliasDecls.empty())
+            {
+                out << '\n';
+                out << "  // Trace aliases for underscore-prefixed internals\n";
+                for (const auto &decl : traceAliasDecls)
+                {
+                    out << "  " << decl << '\n';
                 }
             }
 

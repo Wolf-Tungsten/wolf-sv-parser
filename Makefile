@@ -99,6 +99,7 @@ XS_WOLF_EMIT ?= $(XS_WOLF_EMIT_DIR)/wolf_emit.sv
 XS_WOLF_FILELIST ?= $(XS_WOLF_EMIT_DIR)/xs_wolf.f
 XS_SIM_DEFINES ?= DIFFTEST
 XS_WOLF_EMIT_FLAGS ?=
+XS_WOLF_EMIT_FLAGS += --emit-trace-underscore
 
 XS_WORK_BASE_ABS := $(abspath $(XS_WORK_BASE))
 XS_ROOT_ABS := $(abspath $(XS_ROOT))
@@ -394,6 +395,7 @@ run_xs_ref_test:
 	@printf '' > "$(BUILD_LOG_FILE)"
 	$(MAKE) -C $(XS_ROOT) emu \
 		EMU_THREADS=$(XS_EMU_THREADS) \
+		EMU_RANDOMIZE=0 \
 		NUM_CORES=1 \
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
 		2>&1 | tee "$(BUILD_LOG_FILE)"
@@ -462,6 +464,7 @@ xs-ref-emu: $(XS_SIM_TOP_V)
 		NUM_CORES=$(XS_NUM_CORES) \
 		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
 		EMU_THREADS=$(XS_EMU_THREADS) \
+		EMU_RANDOMIZE=0 \
 		WITH_CHISELDB=$(XS_WITH_CHISELDB) \
 		WITH_CONSTANTIN=$(XS_WITH_CONSTANTIN) \
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
