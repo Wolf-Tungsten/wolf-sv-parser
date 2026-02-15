@@ -68,7 +68,7 @@ C910_WAVEFORM_DIR_ABS = $(abspath $(C910_WAVEFORM_DIR))
 C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVEFORM_PATH)),$(C910_WAVEFORM_PATH),$(abspath $(C910_WAVEFORM_PATH))),)
 
 # XiangShan simulation control
-XS_SIM_MAX_CYCLE ?= 5000
+XS_SIM_MAX_CYCLE ?= 50000
 XS_WAVEFORM ?= 1
 # XiangShan emu build control
 XS_NUM_CORES ?= 1

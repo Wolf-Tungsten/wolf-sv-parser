@@ -40,3 +40,4 @@ _deps
 
 .scala-build/
 .metals/
+*.pyc

@@ -14675,6 +14675,121 @@ private:
         {
         }
 
+        ExprNodeId adjustPackedIndex(const slang::ast::Type* baseType,
+                                     ExprNodeId index,
+                                     slang::SourceLocation location)
+        {
+            if (!baseType || index == kInvalidPlanIndex)
+            {
+                return index;
+            }
+            const auto& canonical = baseType->getCanonicalType();
+            if (canonical.kind != slang::ast::SymbolKind::PackedArrayType)
+            {
+                return index;
+            }
+            const auto& packed = canonical.as<slang::ast::PackedArrayType>();
+            const int64_t offset =
+                std::min<int64_t>(packed.range.left, packed.range.right);
+            uint64_t elementWidthRaw = packed.elementType.getBitstreamWidth();
+            if (elementWidthRaw == 0)
+            {
+                elementWidthRaw = 1;
+            }
+            constexpr uint64_t maxWidth =
+                static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+            const int64_t elementWidth =
+                elementWidthRaw > maxWidth ? static_cast<int64_t>(maxWidth)
+                                           : static_cast<int64_t>(elementWidthRaw);
+            int32_t indexWidthHint = 0;
+            if (index < state_.lowering_.values.size())
+            {
+                indexWidthHint = state_.lowering_.values[index].widthHint;
+            }
+            if (indexWidthHint <= 0)
+            {
+                indexWidthHint = 32;
+            }
+            ExprNodeId adjustedId = index;
+            if (offset != 0)
+            {
+                ExprNode offsetNode;
+                offsetNode.kind = ExprNodeKind::Constant;
+                offsetNode.literal = std::to_string(offset);
+                offsetNode.location = location;
+                offsetNode.widthHint = indexWidthHint;
+                ExprNodeId offsetId = addSyntheticNode(std::move(offsetNode));
+                ExprNode subNode;
+                subNode.kind = ExprNodeKind::Operation;
+                subNode.op = grh::ir::OperationKind::kSub;
+                subNode.operands = {adjustedId, offsetId};
+                subNode.location = location;
+                subNode.widthHint = indexWidthHint;
+                adjustedId = addSyntheticNode(std::move(subNode));
+            }
+            if (elementWidth > 1)
+            {
+                int32_t elementWidthHint = 0;
+                for (int64_t temp = elementWidth; temp > 0; temp >>= 1)
+                {
+                    ++elementWidthHint;
+                }
+                if (elementWidthHint <= 0)
+                {
+                    elementWidthHint = 1;
+                }
+                const int32_t constWidthHint =
+                    elementWidthHint > indexWidthHint ? elementWidthHint : indexWidthHint;
+                int64_t mulWidthHint =
+                    static_cast<int64_t>(indexWidthHint) + elementWidthHint;
+                if (mulWidthHint > std::numeric_limits<int32_t>::max())
+                {
+                    mulWidthHint = std::numeric_limits<int32_t>::max();
+                }
+                ExprNode widthNode;
+                widthNode.kind = ExprNodeKind::Constant;
+                widthNode.literal = std::to_string(elementWidth);
+                widthNode.location = location;
+                widthNode.widthHint = constWidthHint;
+                ExprNodeId widthId = addSyntheticNode(std::move(widthNode));
+                ExprNode mulNode;
+                mulNode.kind = ExprNodeKind::Operation;
+                mulNode.op = grh::ir::OperationKind::kMul;
+                mulNode.operands = {adjustedId, widthId};
+                mulNode.location = location;
+                mulNode.widthHint = static_cast<int32_t>(mulWidthHint);
+                adjustedId = addSyntheticNode(std::move(mulNode));
+            }
+            uint64_t bitstreamWidth = canonical.getBitstreamWidth();
+            if (bitstreamWidth > 1)
+            {
+                uint64_t temp = bitstreamWidth - 1;
+                int32_t clampWidth = 0;
+                while (temp > 0 && clampWidth < std::numeric_limits<int32_t>::max())
+                {
+                    ++clampWidth;
+                    temp >>= 1;
+                }
+                if (clampWidth > 0)
+                {
+                    ExprNode zeroNode;
+                    zeroNode.kind = ExprNodeKind::Constant;
+                    zeroNode.literal = "0";
+                    zeroNode.location = location;
+                    zeroNode.widthHint = clampWidth;
+                    ExprNodeId zeroId = addSyntheticNode(std::move(zeroNode));
+                    ExprNode sliceNode;
+                    sliceNode.kind = ExprNodeKind::Operation;
+                    sliceNode.op = grh::ir::OperationKind::kSliceDynamic;
+                    sliceNode.operands = {adjustedId, zeroId};
+                    sliceNode.location = location;
+                    sliceNode.widthHint = clampWidth;
+                    adjustedId = addSyntheticNode(std::move(sliceNode));
+                }
+            }
+            return adjustedId;
+        }
+
         ExprNodeId lowerExpression(const slang::ast::Expression& expr)
         {
             if (auto it = lowered_.find(&expr); it != lowered_.end())
@@ -14988,6 +15103,8 @@ private:
                 {
                     return kInvalidPlanIndex;
                 }
+                index = adjustPackedIndex(select->value().type, index,
+                                          select->sourceRange.start());
                 node.kind = ExprNodeKind::Operation;
                 node.op = grh::ir::OperationKind::kSliceDynamic;
                 node.operands = {value, index};
@@ -15090,6 +15207,9 @@ private:
                 {
                     return kInvalidPlanIndex;
                 }
+                indexExpr =
+                    adjustPackedIndex(range->value().type, indexExpr,
+                                      range->sourceRange.start());
                 node.kind = ExprNodeKind::Operation;
                 node.op = grh::ir::OperationKind::kSliceDynamic;
                 node.operands = {value, indexExpr};
