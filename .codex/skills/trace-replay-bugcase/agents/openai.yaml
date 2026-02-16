@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trace Replay Bugcase"
+  short_description: "Replay FST traces as minimal bugcases"
+  default_prompt: "Use $trace-replay-bugcase to build a minimal replay test for this module from FST traces."

@@ -70,6 +70,7 @@ C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVE
 # XiangShan simulation control
 XS_SIM_MAX_CYCLE ?= 50000
 XS_WAVEFORM ?= 1
+XS_WAVEFORM_FULL ?= 1
 # XiangShan emu build control
 XS_NUM_CORES ?= 1
 XS_EMU_THREADS ?= 4
@@ -79,6 +80,7 @@ XS_WITH_CHISELDB ?= 0
 XS_WITH_CONSTANTIN ?= 0
 XS_EMU_PREFIX ?= $(shell if command -v stdbuf >/dev/null 2>&1; then echo "stdbuf -oL -eL"; fi)
 # Waveform output control
+# - XS_WAVEFORM_FULL: dump full waveform range (default: 1)
 # - XS_WAVEFORM_PATH: explicit FST file path (relative paths resolve from repo root)
 # - XS_WAVEFORM_DIR: directory for auto-generated FST filenames (default: XS_LOG_DIR)
 XS_LOG_DIR := $(BUILD_DIR)/logs/xs
@@ -530,7 +532,7 @@ run_xs_diff:
 	printf '' > "$$WOLF_LOG"; \
 	printf '' > "$$REF_LOG"; \
 	echo "[RUN] parallel xs diff"; \
-	echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM)"; \
+	echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM) XS_WAVEFORM_FULL=$(XS_WAVEFORM_FULL)"; \
 	echo "[LOG] wolf: $$WOLF_LOG"; \
 	echo "[LOG] ref : $$REF_LOG"; \
 	if [ "$(XS_WAVEFORM)" = "1" ]; then \
@@ -540,18 +542,18 @@ run_xs_diff:
 	cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
 		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
 		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
-		-b 0 -e 0 \
+		-b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) \
 		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
-		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,) \
 		2>&1 | tee "$$WOLF_LOG" & \
 	wolf_pid=$$!; \
 	cd $(XS_REF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
 		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
 		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
-		-b 0 -e 0 \
+		-b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) \
 		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
-		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
+		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$REF_WAVEFORM,) \
 		2>&1 | tee "$$REF_LOG" & \
 	ref_pid=$$!; \
