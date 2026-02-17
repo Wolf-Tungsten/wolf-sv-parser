@@ -1588,6 +1588,7 @@ namespace grh::emit
         {
             grh::ir::ValueType type = grh::ir::ValueType::Logic;
             std::optional<grh::ir::SrcLoc> debug;
+            std::optional<std::string> initValue;  // For compile-time constants (e.g., strings)
         };
 
         struct PortDecl
@@ -2006,7 +2007,8 @@ namespace grh::emit
             return out;
         }
 
-        std::string formatVarDecl(grh::ir::ValueType type, const std::string &name)
+        std::string formatVarDecl(grh::ir::ValueType type, const std::string &name,
+                                   const std::optional<std::string> &initValue = std::nullopt)
         {
             std::string out;
             switch (type)
@@ -2022,6 +2024,11 @@ namespace grh::emit
                 break;
             }
             out.append(name);
+            if (initValue.has_value())
+            {
+                out.append(" = ");
+                out.append(*initValue);
+            }
             out.push_back(';');
             return out;
         }
@@ -2401,18 +2408,26 @@ namespace grh::emit
 
             auto ensureVarDecl = [&](const std::string &name,
                                      grh::ir::ValueType type,
-                                     const std::optional<grh::ir::SrcLoc> &debug = std::nullopt)
+                                     const std::optional<grh::ir::SrcLoc> &debug = std::nullopt,
+                                     const std::optional<std::string> &initValue = std::nullopt)
             {
                 if (declaredNames.find(name) != declaredNames.end())
                 {
                     auto it = varDecls.find(name);
-                    if (it != varDecls.end() && debug && !it->second.debug)
+                    if (it != varDecls.end())
                     {
-                        it->second.debug = *debug;
+                        if (debug && !it->second.debug)
+                        {
+                            it->second.debug = *debug;
+                        }
+                        if (initValue && !it->second.initValue)
+                        {
+                            it->second.initValue = *initValue;
+                        }
                     }
                     return;
                 }
-                varDecls.emplace(name, VarDecl{type, debug});
+                varDecls.emplace(name, VarDecl{type, debug, initValue});
                 declaredNames.insert(name);
             };
 
@@ -2491,7 +2506,17 @@ namespace grh::emit
             {
                 if (valueType(result) != grh::ir::ValueType::Logic)
                 {
-                    addCombAssign(valueName(result), rhs, sourceOp);
+                    // For String constants, use declaration-time initialization
+                    // instead of always_comb to ensure value is available in initial blocks
+                    if (valueType(result) == grh::ir::ValueType::String)
+                    {
+                        ensureVarDecl(valueName(result), valueType(result), 
+                                      graph->getValue(result).srcLoc(), rhs);
+                    }
+                    else
+                    {
+                        addCombAssign(valueName(result), rhs, sourceOp);
+                    }
                 }
                 else
                 {
@@ -4429,6 +4454,21 @@ namespace grh::emit
                         }
                     }
 
+                    // Helper to inline string literals for system tasks
+                    auto getSystemTaskArgExpr = [&](grh::ir::ValueId argId) -> std::string
+                    {
+                        // For string constants used in system tasks, inline the literal
+                        // to avoid initialization order issues with initial blocks
+                        if (valueType(argId) == grh::ir::ValueType::String)
+                        {
+                            if (auto literal = constLiteralFor(argId))
+                            {
+                                return *literal;
+                            }
+                        }
+                        return valueExpr(argId);
+                    };
+
                     const bool guardTask = !isConstOne(operands[0]);
                     const int baseIndent = guardTask ? 3 : 2;
                     std::ostringstream stmt;
@@ -4453,7 +4493,7 @@ namespace grh::emit
                         stmt << "(";
                         for (std::size_t i = 0; i < argCount; ++i)
                         {
-                            appendArg(valueExpr(operands[1 + i]));
+                            appendArg(getSystemTaskArgExpr(operands[1 + i]));
                         }
                         stmt << ")";
                     }
@@ -4957,7 +4997,7 @@ namespace grh::emit
                 out << '\n';
                 for (const auto &[name, decl] : varDecls)
                 {
-                    out << "  " << formatVarDecl(decl.type, name) << '\n';
+                    out << "  " << formatVarDecl(decl.type, name, decl.initValue) << '\n';
                 }
             }
 
