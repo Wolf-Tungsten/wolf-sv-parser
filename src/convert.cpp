@@ -2149,6 +2149,21 @@ struct StmtLowererState {
             reportUnsupported(expr, "Unsupported LHS in assignment");
             return;
         }
+
+        // Try to record memory/register initialization in initial block
+        // If handled, don't create write intent (init values are attributes, not writes)
+        if (eventContext.procKind == ProcKind::Initial)
+        {
+            if (tryRecordMemoryInit(expr, targets))
+            {
+                return;
+            }
+            if (tryRecordRegisterInit(expr, targets))
+            {
+                return;
+            }
+        }
+
         if (targets.size() == 1 && !composite.isComposite &&
             isInoutPortSymbol(targets.front().target))
         {
@@ -8178,6 +8193,184 @@ private:
         }
     }
 
+    // Try to extract init value from expression for initial block memory assignment
+    // Returns non-empty string if it's a simple pattern we can capture
+    std::string tryExtractInitValue(const slang::ast::Expression& rhs)
+    {
+        // Case 0: Conversion expression - unwrap and retry
+        if (rhs.kind == slang::ast::ExpressionKind::Conversion) {
+            const auto& conv = rhs.as<slang::ast::ConversionExpression>();
+            return tryExtractInitValue(conv.operand());
+        }
+        
+        // Case 1: IntegerLiteral -> hex string representation
+        if (rhs.kind == slang::ast::ExpressionKind::IntegerLiteral) {
+            const auto& lit = rhs.as<slang::ast::IntegerLiteral>();
+            auto value = lit.getValue();
+            std::ostringstream oss;
+            // Output as hex with appropriate width (at least 1 hex digit)
+            oss << value.getBitWidth() << "'h" << std::hex << std::setfill('0');
+            int hexDigits = (value.getBitWidth() + 3) / 4;
+            if (hexDigits < 1) hexDigits = 1;
+            oss << std::setw(hexDigits) << value.getRawPtr()[0];
+            return oss.str();
+        }
+
+        // Case 2: UnbasedUnsizedIntegerLiteral -> "0" or "1"
+        if (rhs.kind == slang::ast::ExpressionKind::UnbasedUnsizedIntegerLiteral) {
+            const auto& lit = rhs.as<slang::ast::UnbasedUnsizedIntegerLiteral>();
+            auto value = lit.getValue();
+            // Check if it's 0 or 1
+            if (value.getRawPtr()[0] == 0) {
+                return "0";
+            } else if (value.getRawPtr()[0] == 1) {
+                return "1";
+            }
+            // Other unsized values -> treat as complex
+            return "";
+        }
+
+        // Case 3: $random or $urandom call
+        if (rhs.kind == slang::ast::ExpressionKind::Call) {
+            const auto& call = rhs.as<slang::ast::CallExpression>();
+            if (const auto* subroutine = std::get_if<const slang::ast::SubroutineSymbol*>(&call.subroutine)) {
+                std::string name((*subroutine)->name);
+                // Handle $random or $urandom
+                if (name == "$random" || name == "$urandom") {
+                    const auto& args = call.arguments();
+                    if (args.empty()) {
+                        return "$random";
+                    } else if (args.size() == 1) {
+                        // Try to extract seed if it's a constant
+                        if (args[0]->kind == slang::ast::ExpressionKind::IntegerLiteral) {
+                            const auto& seedLit = args[0]->as<slang::ast::IntegerLiteral>();
+                            auto seed = seedLit.getValue();
+                            std::ostringstream oss;
+                            oss << "$random(" << seed.getRawPtr()[0] << ")";
+                            return oss.str();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Complex expression -> can't capture as initValue
+        return "";
+    }
+
+    // Try to record memory initialization in initial block
+    // Returns true if this assignment was handled as a memory init
+    bool tryRecordMemoryInit(const slang::ast::AssignmentExpression& expr,
+                             const std::vector<LValueTarget>& targets)
+    {
+        // Only handle simple assignments to indexed memory elements in initial blocks
+        if (eventContext.procKind != ProcKind::Initial) {
+            return false;
+        }
+
+        // Must have exactly one target
+        if (targets.size() != 1) {
+            return false;
+        }
+
+        const auto& target = targets[0];
+
+        // Check if this is an indexed element (memory write)
+        // Memory access is represented as BitSelect or RangeSelect on a symbol
+        bool isIndexedAccess = false;
+        for (const auto& slice : target.slices) {
+            if (slice.kind == WriteSliceKind::BitSelect || 
+                slice.kind == WriteSliceKind::RangeSelect) {
+                isIndexedAccess = true;
+                break;
+            }
+        }
+        if (!isIndexedAccess) {
+            return false;
+        }
+
+        // Get the memory symbol
+        PlanSymbolId memorySym = target.target;
+
+        // Try to extract init value from RHS
+        std::string initValue = tryExtractInitValue(expr.right());
+        if (initValue.empty()) {
+            // Complex expression - will be ignored by emitter with warning
+            return false;
+        }
+
+        // Record the memory init
+        MemoryInit init;
+        init.memory = memorySym;
+        init.kind = "literal";
+        if (initValue.find("$random") != std::string::npos) {
+            init.kind = "random";
+        }
+        init.initValue = std::move(initValue);
+        init.address = -1;  // Unknown index (loop variable)
+        init.location = expr.sourceRange.start();
+
+        lowering.memoryInits.push_back(std::move(init));
+
+        return true;
+    }
+
+    // Try to record register initialization in initial block
+    // Returns true if this assignment was handled as a register init
+    bool tryRecordRegisterInit(const slang::ast::AssignmentExpression& expr,
+                               const std::vector<LValueTarget>& targets)
+    {
+        // Only handle simple assignments in initial blocks
+        if (eventContext.procKind != ProcKind::Initial) {
+            return false;
+        }
+
+        // Must have exactly one target
+        if (targets.size() != 1) {
+            return false;
+        }
+
+        const auto& target = targets[0];
+
+        // Check this is NOT an indexed access (register, not memory)
+        // Register access has no slices or only MemberSelect slices
+        bool isIndexedAccess = false;
+        for (const auto& slice : target.slices) {
+            if (slice.kind == WriteSliceKind::BitSelect || 
+                slice.kind == WriteSliceKind::RangeSelect) {
+                isIndexedAccess = true;
+                break;
+            }
+        }
+        if (isIndexedAccess) {
+            return false;
+        }
+
+        // Get the register symbol
+        PlanSymbolId regSym = target.target;
+
+        // Try to extract init value from RHS
+        std::string initValue = tryExtractInitValue(expr.right());
+        if (initValue.empty()) {
+            // Complex expression - will be ignored by emitter with warning
+            return false;
+        }
+
+        // Record the register init
+        RegisterInit init;
+        init.reg = regSym;
+        init.kind = "literal";
+        if (initValue.find("$random") != std::string::npos) {
+            init.kind = "random";
+        }
+        init.initValue = std::move(initValue);
+        init.location = expr.sourceRange.start();
+
+        lowering.registerInits.push_back(std::move(init));
+
+        return true;
+    }
+
 };
 
 void lowerStmtGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
@@ -12625,8 +12818,10 @@ private:
         }
         std::vector<std::string> kinds;
         std::vector<std::string> files;
+        std::vector<std::string> initValues;
         std::vector<int64_t> starts;
         std::vector<int64_t> finishes;
+        std::vector<int64_t> addresses;
         std::vector<bool> hasStart;
         std::vector<bool> hasFinish;
         for (const auto& init : lowering_.memoryInits)
@@ -12637,10 +12832,12 @@ private:
             }
             kinds.push_back(init.kind);
             files.push_back(init.file);
+            initValues.push_back(init.initValue);
             hasStart.push_back(init.hasStart);
             hasFinish.push_back(init.hasFinish);
             starts.push_back(init.start);
             finishes.push_back(init.finish);
+            addresses.push_back(init.address);
         }
         if (kinds.empty())
         {
@@ -12648,10 +12845,37 @@ private:
         }
         graph_.setAttr(op, "initKind", std::move(kinds));
         graph_.setAttr(op, "initFile", std::move(files));
+        graph_.setAttr(op, "initValue", std::move(initValues));
         graph_.setAttr(op, "initHasStart", std::move(hasStart));
         graph_.setAttr(op, "initHasFinish", std::move(hasFinish));
         graph_.setAttr(op, "initStart", std::move(starts));
         graph_.setAttr(op, "initFinish", std::move(finishes));
+        graph_.setAttr(op, "initAddress", std::move(addresses));
+    }
+
+    void applyRegisterInit(grh::ir::OperationId op, PlanSymbolId reg)
+    {
+        if (!reg.valid())
+        {
+            return;
+        }
+        std::vector<std::string> kinds;
+        std::vector<std::string> initValues;
+        for (const auto& init : lowering_.registerInits)
+        {
+            if (init.reg.index != reg.index)
+            {
+                continue;
+            }
+            kinds.push_back(init.kind);
+            initValues.push_back(init.initValue);
+        }
+        if (kinds.empty())
+        {
+            return;
+        }
+        graph_.setAttr(op, "initKind", std::move(kinds));
+        graph_.setAttr(op, "initValue", std::move(initValues));
     }
 
     bool ensureMemoryOp(PlanSymbolId memory, SignalId signal, slang::SourceLocation location)
@@ -15822,6 +16046,7 @@ private:
                 graph_.setAttr(regOp, "eventEdge",
                                std::vector<std::string>{edgeText(EventEdge::Posedge),
                                                         edgeText(EventEdge::Negedge)});
+                applyRegisterInit(regOp, entry.target);
                 graph_.addResult(regOp, targetValue);
 
                 merged[i] = true;
@@ -16136,6 +16361,7 @@ private:
                 grh::ir::SymbolId sym = makeOpSymbol(entry.target, "register");
                 grh::ir::OperationId op =
                     createOp(grh::ir::OperationKind::kRegister, sym, entry.location);
+                applyRegisterInit(op, entry.target);
                 graph_.addOperand(op, updateCond);
                 graph_.addOperand(op, nextValue);
                 std::vector<std::string> edges;

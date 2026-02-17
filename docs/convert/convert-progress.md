@@ -1253,3 +1253,128 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 未运行
 
 完成情况：已完成
+
+## STEP 0055 - Reg/Mem 初始化值属性（initValue）
+
+目标：
+- 为 kRegister/kMemory 等状态化 op 引入 `initValue` 属性，支持 initial 块初始化
+- 解决 wolf-sv-parser 生成的代码中 Memory 未初始化导致 X 态的问题（CASE_007）
+- 与现有 `$readmemh/$readmemb` 机制配合，按 initial 块顺序处理覆盖关系
+
+计划：
+
+1) **IR/GRH 扩展**
+   - 为 kRegister/kMemory op 增加 `optional<string> initValue` 属性
+   - `initValue` 格式支持：
+     - `"0"` - 全 0 初始化
+     - `"1"` - 全 1 初始化
+     - `"$random"` - 无种子随机（`$random()`），每次调用独立
+     - `"$random(N)"` - **带种子 N 的随机序列**：先执行 `$random(N)` 设置种子，后续用 `$random()` 继续序列
+       - ⚠️ 注意：Verilog 中 `$random(seed)` 会**重置 RNG 状态**，连续调用相同 seed 会产生相同值
+       - 正确用法：先 seed 一次，再生成序列
+       ```verilog
+       // initValue="$random(12345)" 发射为：
+       initial begin
+           $random(12345);  // 设置 seed
+           for (i = 0; i < 32; i = i + 1)
+               Memory[i] = $random();  // 继续序列，每个元素不同
+       end
+       // ❌ 错误：Memory[i] = $random(12345);  // 每次循环都 re-seed，所有元素相同！
+       ```
+     - `"8'hAB"` / `"8'b1010"` - 十六进制/二进制字面量
+     - `"X"` / 省略 - 显式留 X（默认行为）
+   - 支持为 unpacked array 的每个元素指定独立 initValue（如 memory 行）
+
+2) **Convert 初始块解析（InitialBlockParser）**
+   - 在 Pass1（SymbolCollector）或新增 Pass 中扫描 `initial` 过程块
+   - 识别简单赋值模式：
+     ```verilog
+     // ✅ 支持：直接字面量赋值
+     Memory[i] = 8'h00;
+     Memory[i] = $random;
+     Memory[i] = $random(12345);
+     
+     // ✅ 支持：全数组统一初始化（循环展开）
+     for (i = 0; i < 32; i = i + 1)
+         Memory[i] = $random;
+     
+     // ❌ 拒绝：复杂表达式
+     Memory[i] = (cond) ? a : b;
+     Memory[i] = func(arg);
+     Memory[i] = OtherArray[j];  // 跨数组拷贝
+     ```
+   - 解析策略：
+     - 单条赋值：直接提取 RHS 字面量或 `$random` 调用
+     - `$random(seed)` 特殊处理：
+       - 若在循环外单次调用：`initValue="$random(seed)"`
+       - 若在循环内调用：需要区分是"每次迭代 seed"（罕见）还是"先 seed 再生成序列"
+       - 默认假设：循环内的 `$random` 使用统一的 seed（循环前 seed）
+     - 循环展开：静态求值循环边界，逐迭代提取赋值
+     - 复杂 RHS：记录为 `"X"` 并发出 warning
+   - 覆盖语义：按 initial 块中的语句顺序，**后来者覆盖前者**
+     - 与 `$readmemh` 不强制优先级，统一按出现顺序处理
+     - 示例：
+       ```verilog
+       initial begin
+           $readmemh("init.hex", Memory);  // 先执行
+           Memory[0] = 8'hFF;               // 覆盖 Memory[0]
+       end
+       // 结果：Memory[0]=8'hFF，其余来自文件
+       ```
+
+3) **与 readmemh 的整合**
+   - 保留现有 STEP 0052 的 `kMemory.initKind = readmemh/readmemb` 机制
+   - 扩展为统一的 `initSequence` 列表，按顺序记录：
+     - `InitEntry{kind: readmemh/readmemb/literal/random, file/literal/seed, startAddr, endAddr}`
+   - Convert 阶段：将 initial 块解析为 `initSequence`
+   - GraphAssembler：将 `initSequence` 写入 kMemory 属性
+   - 简化方案（MVP）：先支持单 initValue 或 readmemh 二选一，复杂序列后续扩展
+
+4) **Emit 初始块生成**
+   - 收集模块内所有带 initValue 的状态化 op（kRegister/kMemory）
+   - 按 op 名称排序（保证确定性输出）
+   - 生成单个 `initial begin ... end` 块：
+     ```verilog
+     initial begin
+         // Register init
+         reg_a = $random;  // initValue="$random"
+         reg_b = 8'h00;    // initValue="8'h0"
+         
+         // Memory init
+         for (integer i = 0; i < 32; i = i + 1)
+             Memory[i] = $random;  // initValue="$random"
+     end
+     ```
+   - 若存在 `$readmemh/$readmemb`，按 initSequence 顺序发射：
+     ```verilog
+     initial begin
+         $readmemh("file.hex", Memory, 0, 31);
+         Memory[0] = 8'hFF;  // 覆盖
+     end
+     ```
+
+5) **复杂度控制与诊断**
+   - 循环展开上限：复用 `maxLoopIterations` 配置（默认 65536）
+   - 超过上限的初始化循环：
+     - 发出 warning
+     - 降级为 `"X"`（或部分初始化）
+   - 复杂 RHS 表达式：
+     - 发出 warning："Complex init expression not supported, leaving as X"
+     - 设置 initValue="X"
+   - 多驱动检测：
+     - 若 initial 赋值与 always 块赋值冲突，保持现有诊断
+
+6) **边界情况处理**
+   - 二维数组初始化：`Memory[i][j]` 视为复杂，降级为 X
+   - 部分初始化：未初始化元素保持 X
+   - 参数依赖：`Memory[i] = PARAM` - 若 PARAM 为常量，求值记录；否则 X
+
+实施：
+- 待定：优先完成基础支持（全 0 / 全随机 / 字面量），复杂序列后续迭代
+
+测试：
+- 新增 CASE_007 回归测试：验证 Memory 初始化后无 X
+- 覆盖：零初始化、随机初始化、字面量、循环展开、readmemh 后覆盖
+
+完成情况：待开始
+

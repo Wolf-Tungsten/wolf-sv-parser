@@ -101,7 +101,6 @@ XS_WOLF_EMIT ?= $(XS_WOLF_EMIT_DIR)/wolf_emit.sv
 XS_WOLF_FILELIST ?= $(XS_WOLF_EMIT_DIR)/xs_wolf.f
 XS_SIM_DEFINES ?= DIFFTEST
 XS_WOLF_EMIT_FLAGS ?=
-XS_WOLF_EMIT_FLAGS += --emit-trace-underscore
 
 XS_WORK_BASE_ABS := $(abspath $(XS_WORK_BASE))
 XS_ROOT_ABS := $(abspath $(XS_ROOT))

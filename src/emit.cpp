@@ -2879,8 +2879,9 @@ namespace grh::emit
                         {
                             expr = inlineExpr.valueExpr(ops[0]);
                         }
-                        else
+                        else if (ops.size() <= 4)
                         {
+                            // Short concat: single line
                             std::ostringstream exprStream;
                             exprStream << "{";
                             for (std::size_t i = 0; i < ops.size(); ++i)
@@ -2892,6 +2893,23 @@ namespace grh::emit
                                 exprStream << inlineExpr.concatOperandExpr(ops[i]);
                             }
                             exprStream << "}";
+                            expr = exprStream.str();
+                        }
+                        else
+                        {
+                            // Long concat: multi-line format
+                            std::ostringstream exprStream;
+                            exprStream << "{\n";
+                            for (std::size_t i = 0; i < ops.size(); ++i)
+                            {
+                                exprStream << "    " << inlineExpr.concatOperandExpr(ops[i]);
+                                if (i + 1 < ops.size())
+                                {
+                                    exprStream << ",";
+                                }
+                                exprStream << "\n";
+                            }
+                            exprStream << "  }";
                             expr = exprStream.str();
                         }
                     }
@@ -3573,16 +3591,35 @@ namespace grh::emit
                     expr << "$" << *name;
                     if (!operands.empty())
                     {
-                        expr << "(";
-                        for (std::size_t i = 0; i < operands.size(); ++i)
+                        if (operands.size() <= 4)
                         {
-                            if (i != 0)
+                            // Short arg list: single line
+                            expr << "(";
+                            for (std::size_t i = 0; i < operands.size(); ++i)
                             {
-                                expr << ", ";
+                                if (i != 0)
+                                {
+                                    expr << ", ";
+                                }
+                                expr << valueExpr(operands[i]);
                             }
-                            expr << valueExpr(operands[i]);
+                            expr << ")";
                         }
-                        expr << ")";
+                        else
+                        {
+                            // Long arg list: multi-line format
+                            expr << "(\n";
+                            for (std::size_t i = 0; i < operands.size(); ++i)
+                            {
+                                expr << "    " << valueExpr(operands[i]);
+                                if (i + 1 < operands.size())
+                                {
+                                    expr << ",";
+                                }
+                                expr << "\n";
+                            }
+                            expr << "  )";
+                        }
                     }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
@@ -3780,16 +3817,35 @@ namespace grh::emit
                         break;
                     }
                     std::ostringstream expr;
-                    expr << "{";
-                    for (std::size_t i = 0; i < operands.size(); ++i)
+                    if (operands.size() <= 4)
                     {
-                        if (i != 0)
+                        // Short concat: single line
+                        expr << "{";
+                        for (std::size_t i = 0; i < operands.size(); ++i)
                         {
-                            expr << ", ";
+                            if (i != 0)
+                            {
+                                expr << ", ";
+                            }
+                            expr << baseExpr.concatOperandExpr(operands[i]);
                         }
-                        expr << baseExpr.concatOperandExpr(operands[i]);
+                        expr << "}";
                     }
-                    expr << "}";
+                    else
+                    {
+                        // Long concat: multi-line format
+                        expr << "{\n";
+                        for (std::size_t i = 0; i < operands.size(); ++i)
+                        {
+                            expr << "    " << baseExpr.concatOperandExpr(operands[i]);
+                            if (i + 1 < operands.size())
+                            {
+                                expr << ",";
+                            }
+                            expr << "\n";
+                        }
+                        expr << "  }";
+                    }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4039,6 +4095,33 @@ namespace grh::emit
                         addValueAssign(q, regName, opId);
                     }
 
+                    // Handle register initialization
+                    auto initKinds = getAttribute<std::vector<std::string>>(*graph, op, "initKind");
+                    auto initValues = getAttribute<std::vector<std::string>>(*graph, op, "initValue");
+                    if (initKinds && initValues && !initKinds->empty())
+                    {
+                        for (std::size_t i = 0; i < initKinds->size(); ++i)
+                        {
+                            const std::string& kind = (*initKinds)[i];
+                            const std::string& value = (*initValues)[i];
+                            std::string stmt;
+                            if (kind == "literal")
+                            {
+                                stmt = regName + " = " + value + ";";
+                            }
+                            else if (kind == "random")
+                            {
+                                stmt = regName + " = " + value + ";";
+                            }
+                            if (!stmt.empty())
+                            {
+                                std::ostringstream oss;
+                                appendIndented(oss, 2, stmt);
+                                addSimpleStmt("initial", oss.str(), opId);
+                            }
+                        }
+                    }
+
                     std::ostringstream stmt;
                     if (isConstOne(updateCond))
                     {
@@ -4070,6 +4153,7 @@ namespace grh::emit
 
                     auto initKinds = getAttribute<std::vector<std::string>>(*graph, op, "initKind");
                     auto initFiles = getAttribute<std::vector<std::string>>(*graph, op, "initFile");
+                    auto initValues = getAttribute<std::vector<std::string>>(*graph, op, "initValue");
                     if (initKinds || initFiles)
                     {
                         if (!initKinds || !initFiles || initKinds->size() != initFiles->size())
@@ -4082,6 +4166,7 @@ namespace grh::emit
                         auto hasFinish = getAttribute<std::vector<bool>>(*graph, op, "initHasFinish");
                         auto starts = getAttribute<std::vector<int64_t>>(*graph, op, "initStart");
                         auto finishes = getAttribute<std::vector<int64_t>>(*graph, op, "initFinish");
+                        auto addresses = getAttribute<std::vector<int64_t>>(*graph, op, "initAddress");
                         if (hasStart && hasStart->size() != count)
                         {
                             reportError("kMemory initHasStart size mismatch", opContext);
@@ -4106,24 +4191,53 @@ namespace grh::emit
                         std::vector<bool> localHasFinish = hasFinish.value_or(std::vector<bool>(count, false));
                         std::vector<int64_t> localStarts = starts.value_or(std::vector<int64_t>(count, 0));
                         std::vector<int64_t> localFinishes = finishes.value_or(std::vector<int64_t>(count, 0));
+                        std::vector<int64_t> localAddresses = addresses.value_or(std::vector<int64_t>(count, -1));
                         for (std::size_t i = 0; i < count; ++i)
                         {
-                            std::string call = "$" + (*initKinds)[i] + "(\"" +
-                                                escapeSvString((*initFiles)[i]) + "\", " + opContext;
-                            if (localHasStart[i])
+                            const std::string& kind = (*initKinds)[i];
+                            std::string stmt;
+                            
+                            if (kind == "readmemh" || kind == "readmemb")
                             {
-                                call.append(", ");
-                                call.append(std::to_string(localStarts[i]));
-                                if (localHasFinish[i])
+                                // readmemh/readmemb: $readmemh("file", memory, start, finish);
+                                stmt = "$" + kind + "(\"" + escapeSvString((*initFiles)[i]) + "\", " + opContext;
+                                if (localHasStart[i])
                                 {
-                                    call.append(", ");
-                                    call.append(std::to_string(localFinishes[i]));
+                                    stmt.append(", ");
+                                    stmt.append(std::to_string(localStarts[i]));
+                                    if (localHasFinish[i])
+                                    {
+                                        stmt.append(", ");
+                                        stmt.append(std::to_string(localFinishes[i]));
+                                    }
+                                }
+                                stmt.append(");");
+                            }
+                            else if (kind == "literal" || kind == "random")
+                            {
+                                // Direct assignment: memory[addr] = value;
+                                std::string value = (initValues && i < initValues->size()) ? (*initValues)[i] : "0";
+                                if (localAddresses[i] >= 0)
+                                {
+                                    // Specific address
+                                    stmt = opContext + "[" + std::to_string(localAddresses[i]) + "] = " + value + ";";
+                                }
+                                else
+                                {
+                                    // Unknown address (e.g., loop variable) - need to init all elements
+                                    // Generate a for loop to initialize all entries
+                                    stmt = "for (int __i = 0; __i < " + std::to_string(*rowAttr) + "; __i = __i + 1) " + opContext + "[__i] = " + value + ";";
                                 }
                             }
-                            call.append(");");
-                            std::ostringstream stmt;
-                            appendIndented(stmt, 2, call);
-                            addSimpleStmt("initial", stmt.str(), opId);
+                            else
+                            {
+                                // Unknown kind, skip
+                                continue;
+                            }
+                            
+                            std::ostringstream oss;
+                            appendIndented(oss, 2, stmt);
+                            addSimpleStmt("initial", oss.str(), opId);
                         }
                     }
                     break;

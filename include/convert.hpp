@@ -435,12 +435,21 @@ struct MemoryWritePort {
 
 struct MemoryInit {
     PlanSymbolId memory;
-    std::string kind;
-    std::string file;
+    std::string kind;  // "readmemh", "readmemb", "literal", "random", "random_seeded"
+    std::string file;  // for readmemh/readmemb
+    std::string initValue;  // for literal/random: "0", "1", "8'hAB", "$random", "$random(12345)"
     bool hasStart = false;
     bool hasFinish = false;
     int64_t start = 0;
     int64_t finish = 0;
+    int64_t address = -1;  // for per-element init: -1 means all elements, >=0 means specific address
+    slang::SourceLocation location{};
+};
+
+struct RegisterInit {
+    PlanSymbolId reg;
+    std::string kind;  // "literal", "random", "random_seeded"
+    std::string initValue;  // "0", "1", "8'hAB", "$random", "$random(12345)"
     slang::SourceLocation location{};
 };
 
@@ -453,6 +462,7 @@ struct LoweringPlan {
     std::vector<MemoryReadPort> memoryReads;
     std::vector<MemoryWritePort> memoryWrites;
     std::vector<MemoryInit> memoryInits;
+    std::vector<RegisterInit> registerInits;
 };
 
 struct WriteBackPlan {
