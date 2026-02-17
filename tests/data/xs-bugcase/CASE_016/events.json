@@ -1,0 +1,64 @@
+{
+  "io_fromBpu_prediction_valid": [
+    {
+      "_meta": {
+        "timescale": "1ps",
+        "roi_start": 1100,
+        "roi_end": 1200
+      }
+    },
+    {
+      "time": 1132,
+      "values": {
+        "TOP.SimTop.cpu.l_soc.core_with_l2.core.frontend.inner_ftq.io_fromBpu_prediction_valid": "1"
+      }
+    }
+  ],
+  "io_fromBpu_prediction_bits_startPc_addr": [],
+  "io_fromBpu_prediction_bits_target_addr": [],
+  "io_fromBpu_prediction_bits_s3Override": [
+    {
+      "_meta": {
+        "timescale": "1ps",
+        "roi_start": 1100,
+        "roi_end": 1200
+      }
+    }
+  ],
+  "io_fromBpu_meta_valid": [
+    {
+      "_meta": {
+        "timescale": "1ps",
+        "roi_start": 1100,
+        "roi_end": 1200
+      }
+    },
+    {
+      "time": 1136,
+      "values": {
+        "TOP.SimTop.cpu.l_soc.core_with_l2.core.frontend.inner_ftq.io_fromBpu_meta_valid": "1"
+      }
+    },
+    {
+      "time": 1158,
+      "values": {
+        "TOP.SimTop.cpu.l_soc.core_with_l2.core.frontend.inner_ftq.io_fromBpu_meta_valid": "0"
+      }
+    }
+  ],
+  "io_fromBpu_prediction_ready": [
+    {
+      "_meta": {
+        "timescale": "1ps",
+        "roi_start": 1100,
+        "roi_end": 1200
+      }
+    },
+    {
+      "time": 1154,
+      "values": {
+        "TOP.SimTop.cpu.l_soc.core_with_l2.core.frontend.inner_ftq.io_fromBpu_prediction_ready": "0"
+      }
+    }
+  ]
+}
