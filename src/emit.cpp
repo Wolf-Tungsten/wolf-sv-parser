@@ -1764,9 +1764,18 @@ namespace grh::emit
                     return name;
                 }
                 const int64_t diff = targetWidth - width;
-                if (diff <= 0)
+                if (diff == 0)
                 {
                     return name;
+                }
+                if (diff < 0)
+                {
+                    // Truncation needed: generate explicit slice to avoid WIDTHTRUNC warnings
+                    if (targetWidth == 1)
+                    {
+                        return name + "[0]";
+                    }
+                    return name + "[" + std::to_string(targetWidth - 1) + ":0]";
                 }
                 if (valueSigned(valueId))
                 {

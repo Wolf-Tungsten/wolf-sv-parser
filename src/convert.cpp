@@ -2206,9 +2206,11 @@ struct StmtLowererState {
             signExtend = expr.left().type->isSigned();
         }
 
+        // Lower RHS without width context to preserve natural widths of sub-expressions
+        // Width adjustment will be done explicitly at the assignment boundary
         ExprNodeId value = kInvalidPlanIndex;
         {
-            WidthContextScope widthScope(*this, targetWidth);
+            WidthContextScope widthScope(*this, 0);
             if (expr.op)
             {
                 const auto opKind = mapBinaryOp(*expr.op);
@@ -7554,31 +7556,51 @@ private:
                     condId = addNode(nullptr, std::move(logicNode));
                 }
             }
-            ExprNodeId lhs = lowerExpression(cond->left());
-            ExprNodeId rhs = lowerExpression(cond->right());
-            if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
-                rhs == kInvalidPlanIndex)
+            ExprNodeId lhs = kInvalidPlanIndex;
+            ExprNodeId rhs = kInvalidPlanIndex;
             {
-                return kInvalidPlanIndex;
-            }
-            if (widthContext > 0)
-            {
-                const bool signExtend = expr.type ? expr.type->isSigned() : false;
-                lhs = resizeValueToWidth(lhs, widthContext, signExtend,
-                                         expr.sourceRange.start());
-                rhs = resizeValueToWidth(rhs, widthContext, signExtend,
-                                         expr.sourceRange.start());
-                if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
+                WidthContextScope widthScope(*this, 0);
+                lhs = lowerExpression(cond->left());
+                rhs = lowerExpression(cond->right());
+                if (condId == kInvalidPlanIndex || lhs == kInvalidPlanIndex ||
+                    rhs == kInvalidPlanIndex)
                 {
                     return kInvalidPlanIndex;
                 }
-                node.widthHint = widthContext;
+            }
+            // Preserve natural width of MUX branches, but resize result if needed
+            // This fixes issues like: (cond ? a : b) < 8 where a and b should not be truncated
+            // Optimization: if both branches are constants and we have a width context,
+            // resize the constants directly to avoid WIDTHTRUNC warnings
+            if (widthContext > 0 && lhs != kInvalidPlanIndex && rhs != kInvalidPlanIndex)
+            {
+                const bool lhsIsConst =
+                    lhs < lowering.values.size() &&
+                    lowering.values[lhs].kind == ExprNodeKind::Constant;
+                const bool rhsIsConst =
+                    rhs < lowering.values.size() &&
+                    lowering.values[rhs].kind == ExprNodeKind::Constant;
+                if (lhsIsConst && rhsIsConst)
+                {
+                    const bool signExtend = expr.type ? expr.type->isSigned() : false;
+                    lhs = resizeValueToWidth(lhs, widthContext, signExtend,
+                                             expr.sourceRange.start());
+                    rhs = resizeValueToWidth(rhs, widthContext, signExtend,
+                                             expr.sourceRange.start());
+                }
             }
             node.kind = ExprNodeKind::Operation;
             node.op = grh::ir::OperationKind::kMux;
             node.operands = {condId, lhs, rhs};
             node.tempSymbol = makeTempSymbol();
-            return addNodeForExpr(std::move(node));
+            ExprNodeId muxResult = addNodeForExpr(std::move(node));
+            if (widthContext > 0 && muxResult != kInvalidPlanIndex)
+            {
+                const bool signExtend = expr.type ? expr.type->isSigned() : false;
+                return resizeValueToWidth(muxResult, widthContext, signExtend,
+                                          expr.sourceRange.start());
+            }
+            return muxResult;
         }
         if (const auto* concat = expr.as_if<slang::ast::ConcatenationExpression>())
         {

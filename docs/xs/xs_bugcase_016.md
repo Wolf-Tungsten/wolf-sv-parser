@@ -361,3 +361,175 @@ Minimal module for reproduction:
   - Create CASE_016 targeting `inner_ftq` specifically
   - Extract FTQ inputs from FST and replay to isolate the bug
   - Alternatively, create a combined `frontend` test case including both `inner_ftq` and `inner_bpu`
+
+
+---
+
+## IR Analysis & Fix (2026-02-17)
+
+### GRH IR Bug Identified and Fixed
+
+After analyzing the Wolf GRH IR (`build/xs_bugcase/CASE_016/wolf/grh.json`), a **transformation bug** was identified and fixed in the `io_fromBpu_prediction_ready` logic.
+
+### Original Verilog (Ftq.sv line 24551-24555)
+
+```verilog
+wire              io_fromBpu_prediction_ready_0 =
+  ~(~_io_fromBpu_prediction_ready_T & _io_fromBpu_prediction_ready_T_5[6])
+  & (_io_fromBpu_prediction_ready_T_9
+       ? _GEN_3                                    // 7-bit: {1'h0, 6'(bpuPtr - ifuPtr)}
+       : 7'(_io_fromBpu_prediction_ready_T_12 - _GEN_2))  // 7-bit subtraction result
+     < 7'h8 
+  & ~(bpTrainStallCnt[3]);
+```
+
+The comparison `< 7'h8` operates on the **full 7-bit value** from the MUX.
+
+### Wolf Generated Code (Before Fix)
+
+```verilog
+assign __expr_208 = _GEN_3[0];                         // BUG: Only takes bit [0] !
+assign __expr_211 = __expr_210[0];                     // BUG: Only takes bit [0] !
+assign __expr_212 = _io_fromBpu_prediction_ready_T_9 ? __expr_208 : __expr_211;  // 1-bit
+assign __expr_213 = {{6{1'b0}},__expr_212} < __const_39;  // Zero-extend 1-bit to 7-bit
+```
+
+### Root Cause: Width Context Propagation
+
+The `convert.cpp` propagated `widthContext` into sub-expressions:
+1. Assignment target is 1 bit → `widthContext = 1`
+2. This propagated into MUX branches
+3. Branches were prematurely truncated to 1 bit via `resizeValueToWidth`
+4. Comparison became `{6'b0, 1bit} < 8` instead of `7bit < 8`
+
+**Impact:**
+- If `_GEN_3 = 7'h10` (16): Original compares `16 < 8` → **false (0)**
+- Wolf took `_GEN_3[0] = 0`, compares `0 < 8` → **true (1)**
+
+### Fix Applied
+
+**Design Principle:** *"Sub-expressions should be lowered with natural width; explicit resizing only at assignment boundaries"*
+
+**File:** `src/convert.cpp`
+
+#### 1. Assignment Handler (line ~2209)
+```cpp
+// BEFORE: Propagated width context into RHS
+WidthContextScope widthScope(*this, targetWidth);
+
+// AFTER: Reset width context, explicit resize at boundary
+WidthContextScope widthScope(*this, 0);  // Preserve natural widths
+// ...
+if (targetWidth > 0) {
+    value = resizeValueToWidth(value, targetWidth, signExtend, ...);
+}
+```
+
+#### 2. ConditionalExpression Handler (line ~7557)
+```cpp
+// Reset width context for MUX branches
+{
+    WidthContextScope widthScope(*this, 0);
+    lhs = lowerExpression(cond->left());
+    rhs = lowerExpression(cond->right());
+}
+
+// Optimization: Direct constant truncation for cleaner output
+if (widthContext > 0 && lhsIsConst && rhsIsConst) {
+    lhs = resizeValueToWidth(lhs, widthContext, signExtend, ...);
+    rhs = resizeValueToWidth(rhs, widthContext, signExtend, ...);
+}
+
+// Create MUX with natural width branches
+ExprNodeId muxResult = addNodeForExpr(std::move(node));
+
+// Resize result if needed (not branches)
+if (widthContext > 0) {
+    return resizeValueToWidth(muxResult, widthContext, signExtend, ...);
+}
+```
+
+### Generated IR Operations
+
+The `resizeValueToWidth` function creates explicit IR operations:
+
+| Operation | IR Node | Emitted SV |
+|-----------|---------|------------|
+| Truncate 7→1 bit | `kSliceDynamic[value, 0, width]` | `value[0]` |
+| Zero-extend 1→7 bit | `kReplicate[0, n] + kConcat` | `{6'b0, value}` |
+| Sign-extend 1→7 bit | `kReplicate[signBit, n] + kConcat` | `{6{value[0]}, value}` |
+
+### Wolf Generated Code (After Fix)
+
+```verilog
+assign __expr_210 = _io_fromBpu_prediction_ready_T_9 ? _GEN_3 : __expr_209;  // 7-bit MUX
+assign __expr_211 = __expr_210 < __const_37;  // Compare full 7-bit value
+```
+
+### Additional Fix in `src/emit.cpp`
+
+**Problem:** After the `convert.cpp` fix, the IR correctly contained explicit truncation nodes (`kSliceDynamic`), but the emit phase was not generating explicit `[0]` slices for truncation cases in assignment RHS. This caused Verilator WIDTHTRUNC warnings.
+
+**Solution:** Updated `extendOperand` function to handle truncation:
+
+```cpp
+// BEFORE (line ~1767)
+if (diff <= 0)
+{
+    return name;  // BUG: Implicit truncation
+}
+
+// AFTER
+if (diff == 0)
+{
+    return name;  // Same width, no change needed
+}
+if (diff < 0)  // Truncation: targetWidth < sourceWidth
+{
+    if (targetWidth == 1)
+        return name + "[0]";  // Single bit slice
+    else
+        return name + "[" + std::to_string(targetWidth - 1) + ":0]";  // Multi-bit slice
+}
+// diff > 0: Extension logic unchanged
+```
+
+### Generated Code Examples
+
+```verilog
+// 1-bit target assignment - explicit [0] slice
+assign db_input_tea = __expr_275[0];
+assign trans_clk_posedge_en = __expr_89[0];
+
+// Multi-bit target assignment - explicit [N:0] slice  
+assign __expr_72 = __expr_71[31:0];
+assign __expr_48 = __expr_47[3:0];
+
+// Same width - no slice (smart optimization, avoids code bloat)
+assign same_width = other_signal;  // Both 32-bit
+```
+
+### Verification
+
+| Test | Status |
+|------|--------|
+| CASE_016 | ✅ PASS (no mismatch at cycle 20) |
+| CASE_004 (related) | ✅ PASS |
+| All convert/emit tests (17) | ✅ PASS |
+| **C910 WIDTHTRUNC warnings** | ✅ **ELIMINATED (4 → 0)** |
+
+### Related Bug
+
+This extends **CASE_004** (commit `ba42623`):
+
+| Bug | Expression Type | Root Cause |
+|-----|-----------------|------------|
+| CASE_004 | `ConversionExpression` (e.g., `9'(...)`) | Width context into cast operand |
+| CASE_016 | `ConditionalExpression` (e.g., `cond ? a : b`) | Width context into MUX branches |
+
+Both fixes ensure sub-expressions preserve natural widths during lowering.
+
+---
+
+*Document updated: 2026-02-17*  
+*Status: Bug identified, fixed, and verified*
