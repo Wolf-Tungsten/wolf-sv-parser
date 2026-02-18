@@ -78,6 +78,15 @@ XS_SIM_TOP ?= SimTop
 XS_RTL_SUFFIX ?= sv
 XS_WITH_CHISELDB ?= 0
 XS_WITH_CONSTANTIN ?= 0
+# XiangShan init control (0 init by default)
+XS_ZERO_INIT ?= 1
+ifeq ($(XS_ZERO_INIT),1)
+XS_ZERO_INIT_DEFINES := RANDOMIZE_REG_INIT RANDOMIZE_MEM_INIT RANDOMIZE_DELAY=0 RANDOM=32'h0
+else
+XS_ZERO_INIT_DEFINES :=
+endif
+XS_ZERO_INIT_SIM_DEFINES := $(subst 32'h0,32\\'h0,$(XS_ZERO_INIT_DEFINES))
+XS_SIM_VFLAGS ?= +define+DIFFTEST $(foreach d,$(XS_ZERO_INIT_SIM_DEFINES),+define+$(d))
 XS_EMU_PREFIX ?= $(shell if command -v stdbuf >/dev/null 2>&1; then echo "stdbuf -oL -eL"; fi)
 # Waveform output control
 # - XS_WAVEFORM_FULL: dump full waveform range (default: 1)
@@ -100,6 +109,7 @@ XS_WOLF_EMIT_DIR ?= $(XS_WOLF_BUILD)/wolf_emit
 XS_WOLF_EMIT ?= $(XS_WOLF_EMIT_DIR)/wolf_emit.sv
 XS_WOLF_FILELIST ?= $(XS_WOLF_EMIT_DIR)/xs_wolf.f
 XS_SIM_DEFINES ?= DIFFTEST
+XS_SIM_DEFINES += $(XS_ZERO_INIT_DEFINES)
 XS_WOLF_EMIT_FLAGS ?=
 
 XS_WORK_BASE_ABS := $(abspath $(XS_WORK_BASE))
@@ -118,7 +128,8 @@ XS_DIFFTEST_GEN_DIR ?= $(XS_ROOT)/build/generated-src
 XS_DIFFTEST_GEN_DIR_ABS := $(abspath $(XS_DIFFTEST_GEN_DIR))
 XS_WOLF_INCLUDE_DIRS ?= $(XS_RTL_DIR_ABS) $(XS_VSRC_DIR_ABS) $(XS_DIFFTEST_GEN_DIR_ABS)
 XS_WOLF_INCLUDE_FLAGS := $(foreach d,$(XS_WOLF_INCLUDE_DIRS),-I $(d))
-XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
+XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D "$(d)")
+XS_WOLF_DEFINE_FLAGS_LOG := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
 
 ifneq ($(strip $(WOLF_TIMER)),0)
 WOLF_LOG := debug
@@ -159,7 +170,8 @@ C910_BUG_CASES := $(sort $(notdir $(C910_BUG_CASE_DIRS)))
 .PHONY: all run_hdlbits_test run_c910_test run_c910_ref_test run_c910_diff build_wolf_parser \
 	run_c910_bug_case run_c910_bug_case_ref run_c910_all_bug_case run_c910_gprof \
 	run_c910_prof clean check-id xs-init xs-clean run_xs_ref_test \
-	xs-rtl xs-wolf-filelist xs-wolf-emit xs-ref-emu xs-wolf-emu run_xs_test run_xs_diff
+	xs-rtl xs-wolf-filelist xs-wolf-emit xs-ref-emu xs-wolf-emu run_xs_test \
+	run_xs_ref run_xs_wolf run_xs_ref_emu run_xs_wolf_emu run_xs_diff
 
 all: build_wolf_parser
 
@@ -386,28 +398,21 @@ xs-clean:
 	$(MAKE) -C $(XS_ROOT) clean
 
 run_xs_ref_test:
-	@echo "[RUN] Building XiangShan emu with EMU_THREADS=$(XS_EMU_THREADS)..."
+	@echo "[RUN] Building XiangShan ref emu (difftest)..."
 	@mkdir -p "$(XS_LOG_DIR_ABS)"
 	@$(eval RUN_ID := $(if $(RUN_ID),$(RUN_ID),$(shell date +%Y%m%d_%H%M%S)))
-	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_ref_build_$(RUN_ID).log)
 	@$(eval LOG_FILE := $(XS_LOG_DIR_ABS)/xs_ref_$(RUN_ID).log)
 	@$(eval WAVEFORM_FILE := $(if $(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_PATH_ABS),$(XS_WAVEFORM_DIR_ABS)/xs_ref_$(RUN_ID).fst))
-	@echo "[LOG] Capturing build output to: $(BUILD_LOG_FILE)"
-	@printf '' > "$(BUILD_LOG_FILE)"
-	$(MAKE) -C $(XS_ROOT) emu \
-		EMU_THREADS=$(XS_EMU_THREADS) \
-		EMU_RANDOMIZE=0 \
-		NUM_CORES=1 \
-		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
-		2>&1 | tee "$(BUILD_LOG_FILE)"
-	@echo "[RUN] Running XiangShan emu..."
+	@$(MAKE) --no-print-directory xs-ref-emu RUN_ID=$(RUN_ID)
+	@echo "[RUN] Running XiangShan ref emu..."
 	@echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM)"
 	@echo "[LOG] Capturing output to: $(LOG_FILE)"
 	@printf '' > "$(LOG_FILE)"
 	$(if $(filter 1,$(XS_WAVEFORM)),@echo "[WAVEFORM] Will save FST to: $(WAVEFORM_FILE)",)
-	cd $(XS_ROOT) && $(XS_EMU_PREFIX) ./build/emu \
-		-i ./ready-to-run/coremark-2-iteration.bin \
-		--diff ./ready-to-run/riscv64-nemu-interpreter-so \
+	@echo "[CMD] cd $(XS_REF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu -i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin --diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so -b 0 -e 0 $(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) $(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) $(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),)" | tee -a "$(LOG_FILE)"
+	cd $(XS_REF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
+		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
+		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
 		-b 0 -e 0 \
 		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
 		$(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) \
@@ -416,6 +421,11 @@ run_xs_ref_test:
 
 $(XS_SIM_TOP_V):
 	@echo "[RUN] Generating XiangShan sim-verilog into $(XS_RTL_BUILD_ABS)..."
+	@mkdir -p "$(XS_LOG_DIR_ABS)"
+	@$(eval LOG_FILE := $(XS_LOG_DIR_ABS)/xs_simverilog_$(RUN_ID).log)
+	@echo "[LOG] Recording sim-verilog command to: $(LOG_FILE)"
+	@printf '' > "$(LOG_FILE)"
+	@echo "[CMD] $(MAKE) -C $(XS_ROOT) sim-verilog BUILD_DIR=$(XS_RTL_BUILD_ABS) NUM_CORES=$(XS_NUM_CORES) RTL_SUFFIX=$(XS_RTL_SUFFIX)" | tee -a "$(LOG_FILE)"
 	$(MAKE) -C $(XS_ROOT) sim-verilog \
 		BUILD_DIR=$(XS_RTL_BUILD_ABS) \
 		NUM_CORES=$(XS_NUM_CORES) \
@@ -443,6 +453,7 @@ xs-wolf-emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
 	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_wolf_build_$(RUN_ID).log)
 	@echo "[LOG] Capturing wolf emit output to: $(BUILD_LOG_FILE)"
 	@printf '' > "$(BUILD_LOG_FILE)"
+	@echo "[CMD] $(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)" | tee -a "$(BUILD_LOG_FILE)"
 	$(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) \
 		$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
 		$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
@@ -456,6 +467,7 @@ xs-ref-emu: $(XS_SIM_TOP_V)
 	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_ref_build_$(RUN_ID).log)
 	@echo "[LOG] Capturing build output to: $(BUILD_LOG_FILE)"
 	@printf '' > "$(BUILD_LOG_FILE)"
+	@echo "[CMD] $(MAKE) -C $(XS_ROOT)/difftest emu BUILD_DIR=$(XS_REF_BUILD_ABS) GEN_CSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) GEN_VSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) RTL_DIR=$(XS_RTL_DIR_ABS) SIM_TOP_V=$(XS_SIM_TOP_V) NUM_CORES=$(XS_NUM_CORES) RTL_SUFFIX=$(XS_RTL_SUFFIX) EMU_THREADS=$(XS_EMU_THREADS) EMU_RANDOMIZE=0 SIM_VFLAGS=\"$(XS_SIM_VFLAGS)\" WITH_CHISELDB=$(XS_WITH_CHISELDB) WITH_CONSTANTIN=$(XS_WITH_CONSTANTIN) $(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)" | tee -a "$(BUILD_LOG_FILE)"
 	$(MAKE) -C $(XS_ROOT)/difftest emu \
 		BUILD_DIR=$(XS_REF_BUILD_ABS) \
 		GEN_CSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) \
@@ -466,6 +478,7 @@ xs-ref-emu: $(XS_SIM_TOP_V)
 		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
 		EMU_THREADS=$(XS_EMU_THREADS) \
 		EMU_RANDOMIZE=0 \
+		SIM_VFLAGS="$(XS_SIM_VFLAGS)" \
 		WITH_CHISELDB=$(XS_WITH_CHISELDB) \
 		WITH_CONSTANTIN=$(XS_WITH_CONSTANTIN) \
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
@@ -478,6 +491,7 @@ xs-wolf-emu: xs-wolf-emit
 	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_wolf_build_$(RUN_ID).log)
 	@echo "[LOG] Capturing build output to: $(BUILD_LOG_FILE)"
 	@printf '' >> "$(BUILD_LOG_FILE)"
+	@echo "[CMD] $(MAKE) -C $(XS_ROOT)/difftest emu BUILD_DIR=$(XS_WOLF_BUILD_ABS) GEN_CSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) GEN_VSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) RTL_DIR=$(XS_WOLF_EMIT_DIR_ABS) SIM_TOP_V=$(XS_WOLF_EMIT_ABS) NUM_CORES=$(XS_NUM_CORES) RTL_SUFFIX=$(XS_RTL_SUFFIX) EMU_THREADS=$(XS_EMU_THREADS) EMU_RANDOMIZE=0 SIM_VFLAGS=\"$(XS_SIM_VFLAGS)\" WITH_CHISELDB=$(XS_WITH_CHISELDB) WITH_CONSTANTIN=$(XS_WITH_CONSTANTIN) SIM_VSRC= $(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,)" | tee -a "$(BUILD_LOG_FILE)"
 	$(MAKE) -C $(XS_ROOT)/difftest emu \
 		BUILD_DIR=$(XS_WOLF_BUILD_ABS) \
 		GEN_CSRC_DIR=$(XS_DIFFTEST_GEN_DIR_ABS) \
@@ -487,6 +501,8 @@ xs-wolf-emu: xs-wolf-emit
 		NUM_CORES=$(XS_NUM_CORES) \
 		RTL_SUFFIX=$(XS_RTL_SUFFIX) \
 		EMU_THREADS=$(XS_EMU_THREADS) \
+		EMU_RANDOMIZE=0 \
+		SIM_VFLAGS="$(XS_SIM_VFLAGS)" \
 		WITH_CHISELDB=$(XS_WITH_CHISELDB) \
 		WITH_CONSTANTIN=$(XS_WITH_CONSTANTIN) \
 		SIM_VSRC= \
@@ -496,8 +512,7 @@ xs-wolf-emu: xs-wolf-emit
 xs-diff-clean:
 	rm -rf "$(XS_REF_BUILD_ABS)/verilator-compile" \
 		"$(XS_WOLF_BUILD_ABS)/verilator-compile" \
-		"$(XS_WOLF_EMIT_DIR_ABS)" \
-		"$(XS_LOG_DIR_ABS)"
+		"$(XS_WOLF_EMIT_DIR_ABS)"
 
 run_xs_test: xs-wolf-emu
 	@echo "[RUN] Running XiangShan wolf emu..."
@@ -509,6 +524,7 @@ run_xs_test: xs-wolf-emu
 	@echo "[LOG] Capturing output to: $(LOG_FILE)"
 	@printf '' > "$(LOG_FILE)"
 	$(if $(filter 1,$(XS_WAVEFORM)),@echo "[WAVEFORM] Will save FST to: $(WAVEFORM_FILE)",)
+	@echo "[CMD] cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu -i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin --diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so -b 0 -e 0 $(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) $(if $(filter 1,$(XS_WAVEFORM)),--dump-wave,) $(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),)" | tee -a "$(LOG_FILE)"
 	cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
 		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
 		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
@@ -518,35 +534,26 @@ run_xs_test: xs-wolf-emu
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $(WAVEFORM_FILE),) \
 		2>&1 | tee "$(LOG_FILE)"
 
-run_xs_diff:
-	@$(MAKE) --no-print-directory xs-diff-clean
-	@$(MAKE) --no-print-directory xs-ref-emu xs-wolf-emu
-	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
+run_xs_ref: xs-ref-emu
+	@$(MAKE) --no-print-directory run_xs_ref_emu RUN_ID=$(RUN_ID)
+
+run_xs_wolf: xs-wolf-emu
+	@$(MAKE) --no-print-directory run_xs_wolf_emu RUN_ID=$(RUN_ID)
+
+run_xs_ref_emu:
+	@RUN_ID="$(if $(RUN_ID),$(RUN_ID),$$(date +%Y%m%d_%H%M%S))"; \
 	LOG_DIR="$(XS_LOG_DIR_ABS)"; \
 	mkdir -p "$$LOG_DIR"; \
-	WOLF_LOG="$$LOG_DIR/xs_wolf_$${RUN_ID}.log"; \
 	REF_LOG="$$LOG_DIR/xs_ref_$${RUN_ID}.log"; \
-	WOLF_WAVEFORM="$(XS_WAVEFORM_DIR_ABS)/xs_wolf_$${RUN_ID}.fst"; \
 	REF_WAVEFORM="$(XS_WAVEFORM_DIR_ABS)/xs_ref_$${RUN_ID}.fst"; \
-	printf '' > "$$WOLF_LOG"; \
 	printf '' > "$$REF_LOG"; \
-	echo "[RUN] parallel xs diff"; \
+	echo "[RUN] xs ref emu"; \
 	echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM) XS_WAVEFORM_FULL=$(XS_WAVEFORM_FULL)"; \
-	echo "[LOG] wolf: $$WOLF_LOG"; \
 	echo "[LOG] ref : $$REF_LOG"; \
 	if [ "$(XS_WAVEFORM)" = "1" ]; then \
-		echo "[WAVEFORM] wolf: $$WOLF_WAVEFORM"; \
 		echo "[WAVEFORM] ref : $$REF_WAVEFORM"; \
 	fi; \
-	cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
-		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
-		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
-		-b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) \
-		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
-		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
-		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,) \
-		2>&1 | tee "$$WOLF_LOG" & \
-	wolf_pid=$$!; \
+	echo "[CMD] cd $(XS_REF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu -i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin --diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so -b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) $(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) $(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) $(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$REF_WAVEFORM,)"; \
 	cd $(XS_REF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
 		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
 		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
@@ -554,8 +561,38 @@ run_xs_diff:
 		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
 		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$REF_WAVEFORM,) \
-		2>&1 | tee "$$REF_LOG" & \
-	ref_pid=$$!; \
+		2>&1 | tee "$$REF_LOG"
+
+run_xs_wolf_emu:
+	@RUN_ID="$(if $(RUN_ID),$(RUN_ID),$$(date +%Y%m%d_%H%M%S))"; \
+	LOG_DIR="$(XS_LOG_DIR_ABS)"; \
+	mkdir -p "$$LOG_DIR"; \
+	WOLF_LOG="$$LOG_DIR/xs_wolf_$${RUN_ID}.log"; \
+	WOLF_WAVEFORM="$(XS_WAVEFORM_DIR_ABS)/xs_wolf_$${RUN_ID}.fst"; \
+	printf '' > "$$WOLF_LOG"; \
+	echo "[RUN] xs wolf emu"; \
+	echo "[RUN] XS_SIM_MAX_CYCLE=$(XS_SIM_MAX_CYCLE) XS_WAVEFORM=$(XS_WAVEFORM) XS_WAVEFORM_FULL=$(XS_WAVEFORM_FULL)"; \
+	echo "[LOG] wolf: $$WOLF_LOG"; \
+	if [ "$(XS_WAVEFORM)" = "1" ]; then \
+		echo "[WAVEFORM] wolf: $$WOLF_WAVEFORM"; \
+	fi; \
+	echo "[CMD] cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu -i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin --diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so -b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) $(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) $(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) $(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,)"; \
+	cd $(XS_WOLF_BUILD_ABS) && $(XS_EMU_PREFIX) ./emu \
+		-i $(XS_ROOT_ABS)/ready-to-run/coremark-2-iteration.bin \
+		--diff $(XS_ROOT_ABS)/ready-to-run/riscv64-nemu-interpreter-so \
+		-b 0 $(if $(filter 1,$(XS_WAVEFORM_FULL)),-e -1,-e 0) \
+		$(if $(filter-out 0,$(XS_SIM_MAX_CYCLE)),-C $(XS_SIM_MAX_CYCLE),) \
+		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
+		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,) \
+		2>&1 | tee "$$WOLF_LOG"
+
+run_xs_diff:
+	@$(MAKE) --no-print-directory xs-diff-clean
+	@$(MAKE) --no-print-directory xs-ref-emu xs-wolf-emu
+	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
+	echo "[RUN] parallel xs diff"; \
+	$(MAKE) --no-print-directory run_xs_wolf_emu RUN_ID=$$RUN_ID & wolf_pid=$$!; \
+	$(MAKE) --no-print-directory run_xs_ref_emu RUN_ID=$$RUN_ID & ref_pid=$$!; \
 	wait $$wolf_pid; wolf_status=$$?; \
 	wait $$ref_pid; ref_status=$$?; \
 	if [ $$wolf_status -ne 0 ] || [ $$ref_status -ne 0 ]; then \

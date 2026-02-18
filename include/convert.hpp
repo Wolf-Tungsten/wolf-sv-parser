@@ -139,7 +139,7 @@ struct ConvertOptions {
     bool enableLogging = false;
     bool enableTiming = false;
     LogLevel logLevel = LogLevel::Warn;
-    uint32_t maxLoopIterations = 65536;
+    uint32_t maxLoopIterations = 131072;
     uint32_t threadCount = 32;
     bool singleThread = false;
 };

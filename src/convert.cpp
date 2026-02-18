@@ -2947,6 +2947,24 @@ private:
                               "Ignoring extra arguments to $readmemh/$readmemb");
         }
 
+        for (const auto& existing : lowering.memoryInits)
+        {
+            if (existing.memory.index != init.memory.index ||
+                existing.kind != init.kind ||
+                existing.file != init.file ||
+                existing.initValue != init.initValue ||
+                existing.hasStart != init.hasStart ||
+                existing.hasFinish != init.hasFinish ||
+                existing.start != init.start ||
+                existing.finish != init.finish ||
+                existing.address != init.address ||
+                existing.location != init.location)
+            {
+                continue;
+            }
+            return true;
+        }
+
         lowering.memoryInits.push_back(std::move(init));
         return true;
     }
@@ -5546,6 +5564,15 @@ private:
             }
             if (const auto* assign = step->as_if<slang::ast::AssignmentExpression>())
             {
+                if (assign->isCompound())
+                {
+                    slang::ConstantValue value = assign->eval(ctx);
+                    if (!value || value.hasUnknown())
+                    {
+                        return false;
+                    }
+                    continue;
+                }
                 if (const slang::ast::ValueSymbol* symbol =
                         resolveAssignedValueSymbol(assign->left()))
                 {
@@ -8202,7 +8229,7 @@ private:
             const auto& conv = rhs.as<slang::ast::ConversionExpression>();
             return tryExtractInitValue(conv.operand());
         }
-        
+
         // Case 1: IntegerLiteral -> hex string representation
         if (rhs.kind == slang::ast::ExpressionKind::IntegerLiteral) {
             const auto& lit = rhs.as<slang::ast::IntegerLiteral>();
@@ -8371,6 +8398,275 @@ private:
         return true;
     }
 
+    std::optional<slang::ConstantValue> buildUnknownValue(const slang::ast::Type& type) const
+    {
+        if (type.isIntegral())
+        {
+            const uint64_t rawWidth = type.getBitstreamWidth();
+            const slang::bitwidth_t width =
+                static_cast<slang::bitwidth_t>(rawWidth > 0 ? rawWidth : 1);
+            slang::SVInt init = slang::SVInt::createFillX(width, type.isSigned());
+            return slang::ConstantValue(std::move(init));
+        }
+        const auto* elemType = type.getArrayElementType();
+        if (!elemType)
+        {
+            return std::nullopt;
+        }
+        if (!type.hasFixedRange())
+        {
+            return std::nullopt;
+        }
+        const auto range = type.getFixedRange();
+        const uint64_t count = range.fullWidth();
+        if (count == 0)
+        {
+            return std::nullopt;
+        }
+        auto elemValue = buildUnknownValue(*elemType);
+        if (!elemValue)
+        {
+            return std::nullopt;
+        }
+        slang::ConstantValue::Elements elements;
+        elements.reserve(count);
+        for (uint64_t i = 0; i < count; ++i)
+        {
+            elements.push_back(*elemValue);
+        }
+        return slang::ConstantValue(std::move(elements));
+    }
+
+    static std::optional<std::string> formatInitLiteral(const slang::ConstantValue& value)
+    {
+        if (!value.isInteger())
+        {
+            return std::nullopt;
+        }
+        const auto& integer = value.integer();
+        if (integer.hasUnknown())
+        {
+            return std::nullopt;
+        }
+        return formatIntegerLiteral(integer);
+    }
+
+public:
+    bool tryEvaluateInitialBlock(const slang::ast::ProceduralBlockSymbol& block)
+    {
+        if (eventContext.procKind != ProcKind::Initial)
+        {
+            return false;
+        }
+
+        struct InitialSymbolCollector
+            : public slang::ast::ASTVisitor<InitialSymbolCollector, true, true> {
+            std::unordered_set<const slang::ast::ValueSymbol*> symbols;
+            bool hasHier = false;
+
+            void handle(const slang::ast::NamedValueExpression& expr)
+            {
+                if (expr.symbol.name.empty())
+                {
+                    return;
+                }
+                if (const auto* value = expr.symbol.as_if<slang::ast::ValueSymbol>())
+                {
+                    symbols.insert(value);
+                }
+            }
+
+            void handle(const slang::ast::HierarchicalValueExpression&)
+            {
+                hasHier = true;
+            }
+        };
+
+        InitialSymbolCollector collector;
+        block.getBody().visit(collector);
+        if (collector.hasHier)
+        {
+            return false;
+        }
+
+        slang::ast::EvalContext ctx(*plan.body, slang::ast::EvalFlags::IsScript);
+        for (const slang::ast::ValueSymbol* symbol : collector.symbols)
+        {
+            if (!symbol || symbol->name.empty())
+            {
+                continue;
+            }
+            if (symbol->kind == slang::ast::SymbolKind::Parameter ||
+                symbol->kind == slang::ast::SymbolKind::TypeParameter)
+            {
+                continue;
+            }
+            PlanSymbolId id = plan.symbolTable.lookup(symbol->name);
+            if (!id.valid())
+            {
+                continue;
+            }
+            auto value = buildUnknownValue(symbol->getType());
+            if (!value)
+            {
+                return false;
+            }
+            ctx.createLocal(symbol, std::move(*value));
+        }
+
+        struct ReadmemCollector
+            : public slang::ast::ASTVisitor<ReadmemCollector, true, true> {
+            StmtLowererState& state;
+            std::unordered_set<const slang::ast::CallExpression*> seen;
+            explicit ReadmemCollector(StmtLowererState& state) : state(state) {}
+
+            void handle(const slang::ast::ExpressionStatement& stmt)
+            {
+                const auto* call = stmt.expr.as_if<slang::ast::CallExpression>();
+                if (!call || !call->isSystemCall())
+                {
+                    return;
+                }
+                if (!seen.insert(call).second)
+                {
+                    return;
+                }
+                const std::string name =
+                    normalizeSystemTaskName(call->getSubroutineName());
+                if (name == "readmemh" || name == "readmemb")
+                {
+                    state.emitReadmemCall(*call, name);
+                }
+            }
+        };
+
+        ReadmemCollector readmemCollector(*this);
+        block.getBody().visit(readmemCollector);
+
+        using ER = slang::ast::Statement::EvalResult;
+        ER evalResult = block.getBody().eval(ctx);
+        if (evalResult != ER::Success && evalResult != ER::Return)
+        {
+            return false;
+        }
+
+        std::vector<RegisterInit> regInits;
+        std::vector<MemoryInit> memInits;
+        for (const slang::ast::ValueSymbol* symbol : collector.symbols)
+        {
+            if (!symbol || symbol->name.empty())
+            {
+                continue;
+            }
+            PlanSymbolId id = plan.symbolTable.lookup(symbol->name);
+            if (!id.valid())
+            {
+                continue;
+            }
+            slang::ConstantValue* value = ctx.findLocal(symbol);
+            if (!value)
+            {
+                continue;
+            }
+            const SignalInfo* signal = findSignalBySymbol(plan, id);
+            if (!signal)
+            {
+                continue;
+            }
+
+            if (signal->memoryRows > 0 || signal->kind == SignalKind::Memory)
+            {
+                if (!value->isUnpacked())
+                {
+                    return false;
+                }
+                auto elems = value->elements();
+                if (signal->memoryRows > 0 &&
+                    elems.size() != static_cast<std::size_t>(signal->memoryRows))
+                {
+                    return false;
+                }
+
+                std::vector<std::string> literals;
+                literals.reserve(elems.size());
+                for (const auto& elem : elems)
+                {
+                    auto literal = formatInitLiteral(elem);
+                    if (!literal)
+                    {
+                        return false;
+                    }
+                    literals.push_back(*literal);
+                }
+                if (literals.empty())
+                {
+                    continue;
+                }
+
+                bool allSame = true;
+                for (std::size_t i = 1; i < literals.size(); ++i)
+                {
+                    if (literals[i] != literals[0])
+                    {
+                        allSame = false;
+                        break;
+                    }
+                }
+                if (allSame)
+                {
+                    MemoryInit init;
+                    init.memory = id;
+                    init.kind = "literal";
+                    init.initValue = literals[0];
+                    init.address = -1;
+                    init.location = block.location;
+                    memInits.push_back(std::move(init));
+                }
+                else
+                {
+                    for (std::size_t i = 0; i < literals.size(); ++i)
+                    {
+                        MemoryInit init;
+                        init.memory = id;
+                        init.kind = "literal";
+                        init.initValue = literals[i];
+                        init.address = static_cast<int64_t>(i);
+                        init.location = block.location;
+                        memInits.push_back(std::move(init));
+                    }
+                }
+                continue;
+            }
+
+            auto literal = formatInitLiteral(*value);
+            if (!literal)
+            {
+                return false;
+            }
+            RegisterInit init;
+            init.reg = id;
+            init.kind = "literal";
+            init.initValue = *literal;
+            init.location = block.location;
+            regInits.push_back(std::move(init));
+        }
+
+        if (!regInits.empty())
+        {
+            lowering.registerInits.insert(lowering.registerInits.end(),
+                                          std::make_move_iterator(regInits.begin()),
+                                          std::make_move_iterator(regInits.end()));
+        }
+        if (!memInits.empty())
+        {
+            lowering.memoryInits.insert(lowering.memoryInits.end(),
+                                        std::make_move_iterator(memInits.begin()),
+                                        std::make_move_iterator(memInits.end()));
+        }
+
+        return true;
+    }
+
 };
 
 void lowerStmtGenerateBlock(const slang::ast::GenerateBlockSymbol& block,
@@ -8385,6 +8681,15 @@ void lowerStmtProceduralBlock(const slang::ast::ProceduralBlockSymbol& block,
     const StmtLowererState::EventContext savedEvent = state.eventContext;
     state.domain = classifyProceduralBlock(block);
     state.eventContext = state.buildEventContext(block);
+    if (state.eventContext.procKind == ProcKind::Initial)
+    {
+        if (state.tryEvaluateInitialBlock(block))
+        {
+            state.domain = saved;
+            state.eventContext = savedEvent;
+            return;
+        }
+    }
     const bool trackTemps =
         (state.domain == ControlDomain::Combinational ||
          state.domain == ControlDomain::Latch ||
