@@ -2558,6 +2558,363 @@ namespace grh::emit
             {
                 latchBlocks.emplace_back(std::move(stmt), sourceOp);
             };
+
+            auto isStateSinkKind = [](grh::ir::OperationKind kind) -> bool
+            {
+                switch (kind)
+                {
+                case grh::ir::OperationKind::kRegister:
+                case grh::ir::OperationKind::kLatch:
+                case grh::ir::OperationKind::kMemoryReadPort:
+                case grh::ir::OperationKind::kMemoryWritePort:
+                    return true;
+                default:
+                    return false;
+                }
+            };
+
+            std::unordered_map<grh::ir::OperationId, grh::ir::OperationId, grh::ir::OperationIdHash>
+                dpiInlineReturnSink;
+            std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> dpiDrivenStateOps;
+            std::unordered_map<grh::ir::ValueId,
+                               std::vector<grh::ir::OperationId>,
+                               grh::ir::ValueIdHash> valueUseMap;
+            valueUseMap.reserve(static_cast<std::size_t>(maxValueIndex) + 8);
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                for (const auto operand : op.operands())
+                {
+                    if (!operand.valid() || operand.graph != graph->id())
+                    {
+                        continue;
+                    }
+                    valueUseMap[operand].push_back(opId);
+                }
+            }
+
+            auto isConstOneValue = [&](grh::ir::ValueId valueId) -> bool
+            {
+                if (!valueId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    return false;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    return false;
+                }
+                auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
+                if (!constValue)
+                {
+                    return false;
+                }
+                std::string text = *constValue;
+                text.erase(std::remove_if(text.begin(), text.end(),
+                                          [](unsigned char ch)
+                                          { return std::isspace(ch) || ch == '_'; }),
+                           text.end());
+                if (text == "1")
+                {
+                    return true;
+                }
+                if (text.size() >= 3 && text.back() == '1')
+                {
+                    const std::size_t quote = text.find('\'');
+                    if (quote != std::string::npos && quote + 1 < text.size())
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            auto computeEventKey = [&](const grh::ir::Operation &eventOp,
+                                       std::size_t eventStart,
+                                       std::string_view opContext) -> std::optional<SeqKey>
+            {
+                auto eventEdges = getAttribute<std::vector<std::string>>(*graph, eventOp, "eventEdge");
+                if (!eventEdges)
+                {
+                    reportError(std::string(grh::ir::toString(eventOp.kind())) + " missing eventEdge",
+                                std::string(opContext));
+                    return std::nullopt;
+                }
+                const auto &eventOperands = eventOp.operands();
+                const std::size_t eventCount =
+                    eventOperands.size() > eventStart ? eventOperands.size() - eventStart : 0;
+                if (eventCount == 0 || eventEdges->size() != eventCount)
+                {
+                    reportError(std::string(grh::ir::toString(eventOp.kind())) + " eventEdge size mismatch",
+                                std::string(opContext));
+                    return std::nullopt;
+                }
+                SeqKey key;
+                key.events.reserve(eventCount);
+                for (std::size_t i = 0; i < eventCount; ++i)
+                {
+                    const grh::ir::ValueId signal = eventOperands[eventStart + i];
+                    if (!signal.valid())
+                    {
+                        reportError(std::string(grh::ir::toString(eventOp.kind())) + " missing event operand",
+                                    std::string(opContext));
+                        return std::nullopt;
+                    }
+                    key.events.push_back(SeqEvent{(*eventEdges)[i], signal});
+                }
+                return key;
+            };
+
+            auto collectStateSinks =
+                [&](auto &&self,
+                    grh::ir::ValueId valueId,
+                    std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> &visited,
+                    std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> &sinks) -> void
+            {
+                if (!valueId.valid() || valueId.graph != graph->id())
+                {
+                    return;
+                }
+                if (!visited.insert(valueId).second)
+                {
+                    return;
+                }
+                auto itUses = valueUseMap.find(valueId);
+                if (itUses == valueUseMap.end())
+                {
+                    return;
+                }
+                for (const auto userOpId : itUses->second)
+                {
+                    if (!userOpId.valid())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Operation userOp = graph->getOperation(userOpId);
+                    if (isStateSinkKind(userOp.kind()))
+                    {
+                        sinks.insert(userOpId);
+                        continue;
+                    }
+                    for (const auto result : userOp.results())
+                    {
+                        self(self, result, visited, sinks);
+                    }
+                }
+            };
+            auto formatSinkName = [&](grh::ir::OperationId sinkOpId) -> std::string
+            {
+                if (!sinkOpId.valid())
+                {
+                    return "<invalid>";
+                }
+                const grh::ir::Operation sinkOp = graph->getOperation(sinkOpId);
+                const std::string opName = std::string(sinkOp.symbolText());
+                if (!opName.empty())
+                {
+                    return opName;
+                }
+                if (!sinkOp.results().empty())
+                {
+                    const std::string &valueSym = valueName(sinkOp.results().front());
+                    if (!valueSym.empty())
+                    {
+                        return valueSym;
+                    }
+                }
+                std::ostringstream label;
+                label << grh::ir::toString(sinkOp.kind()) << "#" << sinkOpId.index;
+                return label.str();
+            };
+            auto formatDpiName = [&](const grh::ir::Operation &dpiOp) -> std::string
+            {
+                std::string name = std::string(dpiOp.symbolText());
+                if (!name.empty())
+                {
+                    return name;
+                }
+                if (auto importSym = getAttribute<std::string>(*graph, dpiOp, "targetImportSymbol");
+                    importSym && !importSym->empty())
+                {
+                    return *importSym;
+                }
+                if (!dpiOp.results().empty())
+                {
+                    const std::string &valueSym = valueName(dpiOp.results().front());
+                    if (!valueSym.empty())
+                    {
+                        return valueSym;
+                    }
+                }
+                std::ostringstream label;
+                label << "kDpicCall#" << dpiOp.id().index;
+                return label.str();
+            };
+
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kDpicCall)
+                {
+                    continue;
+                }
+                const std::string opContext = std::string(op.symbolText());
+                const std::string dpiName = formatDpiName(op);
+                const auto hasReturn = getAttribute<bool>(*graph, op, "hasReturn").value_or(false);
+                grh::ir::OperationId returnSinkOpId = grh::ir::OperationId::invalid();
+                bool resultsOk = true;
+                const auto &results = op.results();
+                for (std::size_t resIdx = 0; resIdx < results.size(); ++resIdx)
+                {
+                    const auto res = results[resIdx];
+                    if (!res.valid())
+                    {
+                        continue;
+                    }
+                    std::unordered_set<grh::ir::OperationId, grh::ir::OperationIdHash> sinks;
+                    std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> visited;
+                    collectStateSinks(collectStateSinks, res, visited, sinks);
+                    if (sinks.size() > 1)
+                    {
+                        std::ostringstream details;
+                        bool firstSink = true;
+                        for (const auto sinkOpId : sinks)
+                        {
+                            if (!firstSink)
+                            {
+                                details << ", ";
+                            }
+                            firstSink = false;
+                            details << formatSinkName(sinkOpId);
+                        }
+                        const std::string &resName = valueName(res);
+                        const std::string resLabel = resName.empty() ? "<unnamed>" : resName;
+                        reportError("kDpicCall result drives multiple state elements: dpic=" +
+                                        dpiName + " result=" + resLabel + " sinks=[" +
+                                        details.str() + "]",
+                                    opContext);
+                        resultsOk = false;
+                        continue;
+                    }
+                    if (hasReturn && resIdx == 0 && sinks.size() == 1)
+                    {
+                        returnSinkOpId = *sinks.begin();
+                    }
+                }
+                if (!resultsOk)
+                {
+                    continue;
+                }
+                if (!hasReturn || !returnSinkOpId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Operation sinkOp = graph->getOperation(returnSinkOpId);
+
+                auto outArgName = getAttribute<std::vector<std::string>>(*graph, op, "outArgName");
+                auto inoutArgName = getAttribute<std::vector<std::string>>(*graph, op, "inoutArgName");
+                if ((outArgName && !outArgName->empty()) ||
+                    (inoutArgName && !inoutArgName->empty()))
+                {
+                    continue;
+                }
+                if (op.results().size() != 1)
+                {
+                    continue;
+                }
+
+                const auto &operands = op.operands();
+                if (operands.empty())
+                {
+                    reportError("kDpicCall missing updateCond operand", opContext);
+                    continue;
+                }
+                const grh::ir::ValueId dpiUpdateCond = operands[0];
+                bool updateCondOk = true;
+                if (sinkOp.kind() == grh::ir::OperationKind::kRegister ||
+                    sinkOp.kind() == grh::ir::OperationKind::kLatch ||
+                    sinkOp.kind() == grh::ir::OperationKind::kMemoryWritePort)
+                {
+                    const auto &sinkOperands = sinkOp.operands();
+                    if (sinkOperands.empty())
+                    {
+                        reportError("DPI sink missing updateCond operand", opContext);
+                        updateCondOk = false;
+                    }
+                    else
+                    {
+                        const grh::ir::ValueId sinkUpdateCond = sinkOperands[0];
+                        const bool bothConstOne =
+                            isConstOneValue(dpiUpdateCond) && isConstOneValue(sinkUpdateCond);
+                        if (!bothConstOne && dpiUpdateCond != sinkUpdateCond)
+                        {
+                            reportError("kDpicCall updateCond must match sink updateCond for inline",
+                                        opContext);
+                            updateCondOk = false;
+                        }
+                    }
+                }
+                else if (sinkOp.kind() == grh::ir::OperationKind::kMemoryReadPort)
+                {
+                    if (!isConstOneValue(dpiUpdateCond))
+                    {
+                        reportError("kDpicCall updateCond must be constant 1 for memory read port inline",
+                                    opContext);
+                        updateCondOk = false;
+                    }
+                }
+                if (!updateCondOk)
+                {
+                    continue;
+                }
+
+                bool eventOk = true;
+                if (sinkOp.kind() == grh::ir::OperationKind::kRegister ||
+                    sinkOp.kind() == grh::ir::OperationKind::kMemoryWritePort)
+                {
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (!eventEdges)
+                    {
+                        reportError("kDpicCall missing eventEdge", opContext);
+                        continue;
+                    }
+                    const std::size_t eventStart = operands.size() - eventEdges->size();
+                    auto dpiKey = computeEventKey(op, eventStart, opContext);
+                    auto sinkKey = computeEventKey(
+                        sinkOp,
+                        sinkOp.kind() == grh::ir::OperationKind::kRegister ? 2U : 4U,
+                        std::string(sinkOp.symbolText()));
+                    if (!dpiKey || !sinkKey || !sameSeqKey(*dpiKey, *sinkKey))
+                    {
+                        reportError("kDpicCall eventEdge does not match sink eventEdge for inline",
+                                    opContext);
+                        eventOk = false;
+                    }
+                }
+                else if (sinkOp.kind() == grh::ir::OperationKind::kLatch ||
+                         sinkOp.kind() == grh::ir::OperationKind::kMemoryReadPort)
+                {
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (eventEdges && !eventEdges->empty())
+                    {
+                        reportError("kDpicCall eventEdge must be empty for comb/latch inline", opContext);
+                        eventOk = false;
+                    }
+                }
+                if (!eventOk)
+                {
+                    continue;
+                }
+
+                dpiInlineReturnSink.emplace(opId, returnSinkOpId);
+                dpiDrivenStateOps.insert(returnSinkOpId);
+            }
             const uint32_t dpiMaxValueIndex = maxValueIndex;
             std::vector<int8_t> dpiDependsDense(dpiMaxValueIndex + 1, -1);
             std::vector<uint8_t> dpiDependsVisiting(dpiMaxValueIndex + 1, 0);
@@ -2693,6 +3050,83 @@ namespace grh::emit
                 }
                 return dpiDependsDense[idx] > 0;
             };
+
+            auto buildDpiCallExpr = [&](const grh::ir::Operation &dpiOp) -> std::optional<std::string>
+            {
+                const std::string opContext = std::string(dpiOp.symbolText());
+                const auto &operands = dpiOp.operands();
+                auto targetImport = getAttribute<std::string>(*graph, dpiOp, "targetImportSymbol");
+                auto inArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "inArgName");
+                auto outArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "outArgName");
+                auto inoutArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "inoutArgName");
+                auto hasReturn = getAttribute<bool>(*graph, dpiOp, "hasReturn").value_or(false);
+                if (!targetImport || !inArgName || !outArgName)
+                {
+                    reportError("kDpicCall missing metadata for inline", opContext);
+                    return std::nullopt;
+                }
+                if (!hasReturn)
+                {
+                    reportError("kDpicCall without return cannot be inlined", opContext);
+                    return std::nullopt;
+                }
+                if ((outArgName && !outArgName->empty()) ||
+                    (inoutArgName && !inoutArgName->empty()))
+                {
+                    reportError("kDpicCall inline supports return-only results", opContext);
+                    return std::nullopt;
+                }
+                if (operands.empty())
+                {
+                    reportError("kDpicCall missing operands for inline", opContext);
+                    return std::nullopt;
+                }
+                auto itImport = dpicImports.find(*targetImport);
+                if (itImport == dpicImports.end() || itImport->second.graph == nullptr)
+                {
+                    reportError("kDpicCall cannot resolve import symbol for inline", opContext);
+                    return std::nullopt;
+                }
+                const DpiImportRef &importRef = itImport->second;
+                const grh::ir::Operation importOp = importRef.graph->getOperation(importRef.op);
+                auto importArgs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsName");
+                auto importDirs =
+                    getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsDirection");
+                if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
+                {
+                    reportError("kDpicCall found malformed import signature for inline", opContext);
+                    return std::nullopt;
+                }
+                std::ostringstream expr;
+                expr << *targetImport << "(";
+                bool firstArg = true;
+                for (std::size_t i = 0; i < importArgs->size(); ++i)
+                {
+                    if (!firstArg)
+                    {
+                        expr << ", ";
+                    }
+                    firstArg = false;
+                    const std::string &formal = (*importArgs)[i];
+                    const std::string &dir = (*importDirs)[i];
+                    if (dir != "input")
+                    {
+                        reportError("kDpicCall inline supports only input args", opContext);
+                        return std::nullopt;
+                    }
+                    int idx = findNameIndex(*inArgName, formal);
+                    if (idx < 0 || static_cast<std::size_t>(idx + 1) >= operands.size())
+                    {
+                        reportError("kDpicCall missing matching input arg " + formal, opContext);
+                        return std::nullopt;
+                    }
+                    expr << valueExpr(operands[static_cast<std::size_t>(idx + 1)]);
+                }
+                expr << ")";
+                return expr.str();
+            };
+
+            grh::ir::OperationId dpiInlineSink = grh::ir::OperationId::invalid();
             std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> dpiInlineResolving;
             std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiInlineCache;
             std::function<std::string(grh::ir::ValueId)> dpiInlineExpr;
@@ -2702,7 +3136,7 @@ namespace grh::emit
             inlineExpr.allowInlineLiteral = true;
             inlineExpr.valueExpr = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (valueDependsOnDpi(valueId))
+                if (dpiInlineSink.valid() || valueDependsOnDpi(valueId))
                 {
                     return dpiInlineExpr(valueId);
                 }
@@ -2718,6 +3152,24 @@ namespace grh::emit
                 {
                     return cached->second;
                 }
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (defOpId.valid())
+                {
+                    const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                    if (defOp.kind() == grh::ir::OperationKind::kDpicCall && dpiInlineSink.valid())
+                    {
+                        auto itSink = dpiInlineReturnSink.find(defOpId);
+                        if (itSink != dpiInlineReturnSink.end() && itSink->second == dpiInlineSink)
+                        {
+                            if (auto inlineExpr = buildDpiCallExpr(defOp))
+                            {
+                                dpiInlineCache.emplace(valueId, *inlineExpr);
+                                return *inlineExpr;
+                            }
+                        }
+                    }
+                }
                 if (auto it = dpiTempNames.find(valueId); it != dpiTempNames.end())
                 {
                     return it->second;
@@ -2730,8 +3182,6 @@ namespace grh::emit
                 {
                     return valueExpr(valueId);
                 }
-                const grh::ir::Value value = graph->getValue(valueId);
-                const grh::ir::OperationId defOpId = value.definingOp();
                 if (!defOpId.valid())
                 {
                     dpiInlineResolving.erase(valueId);
@@ -3028,11 +3478,22 @@ namespace grh::emit
             };
             auto valueExprSeq = [&](grh::ir::ValueId valueId) -> std::string
             {
-                if (valueDependsOnDpi(valueId))
+                if (dpiInlineSink.valid() || valueDependsOnDpi(valueId))
                 {
                     return dpiInlineExpr(valueId);
                 }
                 return valueExpr(valueId);
+            };
+            auto withDpiInlineSink = [&](grh::ir::OperationId sinkOp, auto &&fn)
+            {
+                const grh::ir::OperationId prev = dpiInlineSink;
+                dpiInlineSink = sinkOp;
+                dpiInlineCache.clear();
+                dpiInlineResolving.clear();
+                fn();
+                dpiInlineCache.clear();
+                dpiInlineResolving.clear();
+                dpiInlineSink = prev;
             };
             auto isConstOne = [&](grh::ir::ValueId valueId) -> bool
             {
@@ -4026,17 +4487,31 @@ namespace grh::emit
                     }
 
                     std::ostringstream block;
+                    std::string updateExpr;
+                    std::string nextExpr;
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
+                    {
+                        withDpiInlineSink(opId, [&]() {
+                            updateExpr = valueExprSeq(updateCond);
+                            nextExpr = valueExprSeq(nextValue);
+                        });
+                    }
+                    else
+                    {
+                        updateExpr = valueExprSeq(updateCond);
+                        nextExpr = valueExprSeq(nextValue);
+                    }
                     if (isAlwaysTrue(updateCond))
                     {
                         appendIndented(block, 1, "always @* begin");
-                        appendIndented(block, 2, regName + " = " + valueExprSeq(nextValue) + ";");
+                        appendIndented(block, 2, regName + " = " + nextExpr + ";");
                         appendIndented(block, 1, "end");
                     }
                     else
                     {
                         std::ostringstream stmt;
-                        appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
-                        appendIndented(stmt, 3, regName + " = " + valueExprSeq(nextValue) + ";");
+                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
+                        appendIndented(stmt, 3, regName + " = " + nextExpr + ";");
                         appendIndented(stmt, 2, "end");
                         block << "  always_latch begin\n";
                         block << stmt.str();
@@ -4123,14 +4598,28 @@ namespace grh::emit
                     }
 
                     std::ostringstream stmt;
-                    if (isConstOne(updateCond))
+                    std::string updateExpr;
+                    std::string nextExpr;
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
                     {
-                        appendIndented(stmt, 2, regName + " <= " + valueExprSeq(nextValue) + ";");
+                        withDpiInlineSink(opId, [&]() {
+                            updateExpr = valueExprSeq(updateCond);
+                            nextExpr = valueExprSeq(nextValue);
+                        });
                     }
                     else
                     {
-                        appendIndented(stmt, 2, "if (" + valueExprSeq(updateCond) + ") begin");
-                        appendIndented(stmt, 3, regName + " <= " + valueExprSeq(nextValue) + ";");
+                        updateExpr = valueExprSeq(updateCond);
+                        nextExpr = valueExprSeq(nextValue);
+                    }
+                    if (isConstOne(updateCond))
+                    {
+                        appendIndented(stmt, 2, regName + " <= " + nextExpr + ";");
+                    }
+                    else
+                    {
+                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
+                        appendIndented(stmt, 3, regName + " <= " + nextExpr + ";");
                         appendIndented(stmt, 2, "end");
                     }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
@@ -4255,8 +4744,19 @@ namespace grh::emit
                         reportError("kMemoryReadPort missing memSymbol", opContext);
                         break;
                     }
+                    std::string addrExpr;
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
+                    {
+                        withDpiInlineSink(opId, [&]() {
+                            addrExpr = valueExprSeq(operands[0]);
+                        });
+                    }
+                    else
+                    {
+                        addrExpr = valueExprSeq(operands[0]);
+                    }
                     addAssign("assign " + valueName(results[0]) + " = " + *memSymbolAttr + "[" +
-                                  valueExpr(operands[0]) + "];",
+                                  addrExpr + "];",
                               opId);
                     ensureWireDecl(results[0]);
                     break;
@@ -4303,6 +4803,27 @@ namespace grh::emit
                         memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
                     }
 
+                    std::string updateExpr;
+                    std::string addrExpr;
+                    std::string dataExpr;
+                    std::string maskExpr;
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
+                    {
+                        withDpiInlineSink(opId, [&]() {
+                            updateExpr = valueExprSeq(updateCond);
+                            addrExpr = valueExprSeq(addr);
+                            dataExpr = valueExprSeq(data);
+                            maskExpr = valueExprSeq(mask);
+                        });
+                    }
+                    else
+                    {
+                        updateExpr = valueExprSeq(updateCond);
+                        addrExpr = valueExprSeq(addr);
+                        dataExpr = valueExprSeq(data);
+                        maskExpr = valueExprSeq(mask);
+                    }
+
                     const bool guardUpdate = !isConstOne(updateCond);
                     const int baseIndent = guardUpdate ? 3 : 2;
                     std::optional<std::vector<uint8_t>> maskBits;
@@ -4334,7 +4855,7 @@ namespace grh::emit
                     std::ostringstream stmt;
                     if (guardUpdate)
                     {
-                        appendIndented(stmt, 2, "if (" + valueExpr(updateCond) + ") begin");
+                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
                     }
                     if (maskBits)
                     {
@@ -4346,7 +4867,7 @@ namespace grh::emit
                         }
                         if (allOnes || memWidth <= 1)
                         {
-                            appendIndented(stmt, baseIndent, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                            appendIndented(stmt, baseIndent, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
                         }
                         else
                         {
@@ -4355,8 +4876,8 @@ namespace grh::emit
                                 if ((*maskBits)[static_cast<std::size_t>(bit)] != 0)
                                 {
                                     appendIndented(stmt, baseIndent,
-                                                   memSymbol + "[" + valueExpr(addr) + "][" + std::to_string(bit) + "] <= " +
-                                                       valueExpr(data) + "[" + std::to_string(bit) + "];");
+                                                   memSymbol + "[" + addrExpr + "][" + std::to_string(bit) + "] <= " +
+                                                       dataExpr + "[" + std::to_string(bit) + "];");
                                 }
                             }
                         }
@@ -4369,8 +4890,8 @@ namespace grh::emit
                     }
                     if (memWidth <= 1)
                     {
-                        appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + ") begin");
-                        appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                        appendIndented(stmt, baseIndent, "if (" + maskExpr + ") begin");
+                        appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
                         appendIndented(stmt, baseIndent, "end");
                         if (guardUpdate)
                         {
@@ -4379,13 +4900,13 @@ namespace grh::emit
                         addSequentialStmt(*seqKey, stmt.str(), opId);
                         break;
                     }
-                    appendIndented(stmt, baseIndent, "if (" + valueExpr(mask) + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + valueExpr(addr) + "] <= " + valueExpr(data) + ";");
+                    appendIndented(stmt, baseIndent, "if (" + maskExpr + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
+                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
                     appendIndented(stmt, baseIndent, "end else begin");
                     appendIndented(stmt, baseIndent + 1, "integer i;");
                     appendIndented(stmt, baseIndent + 1, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
-                    appendIndented(stmt, baseIndent + 2, "if (" + valueExpr(mask) + "[i]) begin");
-                    appendIndented(stmt, baseIndent + 3, memSymbol + "[" + valueExpr(addr) + "][i] <= " + valueExpr(data) + "[i];");
+                    appendIndented(stmt, baseIndent + 2, "if (" + maskExpr + "[i]) begin");
+                    appendIndented(stmt, baseIndent + 3, memSymbol + "[" + addrExpr + "][i] <= " + dataExpr + "[i];");
                     appendIndented(stmt, baseIndent + 2, "end");
                     appendIndented(stmt, baseIndent + 1, "end");
                     appendIndented(stmt, baseIndent, "end");
@@ -4809,6 +5330,13 @@ namespace grh::emit
                     if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
                     {
                         reportError("kDpicCall found malformed import signature", *targetImport);
+                        break;
+                    }
+
+                    const bool inlineReturn =
+                        hasReturn && (dpiInlineReturnSink.find(opId) != dpiInlineReturnSink.end());
+                    if (inlineReturn)
+                    {
                         break;
                     }
 
