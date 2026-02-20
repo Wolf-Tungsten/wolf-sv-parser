@@ -80,7 +80,7 @@ XS_RTL_SUFFIX ?= sv
 XS_WITH_CHISELDB ?= 0
 XS_WITH_CONSTANTIN ?= 0
 # XiangShan init control (0 init by default)
-XS_ZERO_INIT ?= 1
+XS_ZERO_INIT ?= 0
 ifeq ($(XS_ZERO_INIT),1)
 XS_ZERO_INIT_DEFINES := RANDOMIZE_REG_INIT RANDOMIZE_MEM_INIT RANDOMIZE_DELAY=0 RANDOM=32'h0
 else
@@ -596,8 +596,22 @@ run_xs_diff:
 	@$(MAKE) --no-print-directory xs-ref-emu xs-wolf-emu
 	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
 	echo "[RUN] parallel xs diff"; \
-	$(MAKE) --no-print-directory run_xs_wolf_emu RUN_ID=$$RUN_ID & wolf_pid=$$!; \
-	$(MAKE) --no-print-directory run_xs_ref_emu RUN_ID=$$RUN_ID & ref_pid=$$!; \
+	{ start=$$(date +%s); \
+	  $(MAKE) --no-print-directory run_xs_wolf_emu RUN_ID=$$RUN_ID; \
+	  wolf_status=$$?; \
+	  end=$$(date +%s); \
+	  wolf_log="$(XS_LOG_DIR_ABS)/xs_wolf_$${RUN_ID}.log"; \
+	  mkdir -p "$(XS_LOG_DIR_ABS)"; \
+	  echo "[TIME] xs wolf emu: $$((end-start))s" | tee -a "$$wolf_log"; \
+	  exit $$wolf_status; } & wolf_pid=$$!; \
+	{ start=$$(date +%s); \
+	  $(MAKE) --no-print-directory run_xs_ref_emu RUN_ID=$$RUN_ID; \
+	  ref_status=$$?; \
+	  end=$$(date +%s); \
+	  ref_log="$(XS_LOG_DIR_ABS)/xs_ref_$${RUN_ID}.log"; \
+	  mkdir -p "$(XS_LOG_DIR_ABS)"; \
+	  echo "[TIME] xs ref emu: $$((end-start))s" | tee -a "$$ref_log"; \
+	  exit $$ref_status; } & ref_pid=$$!; \
 	wait $$wolf_pid; wolf_status=$$?; \
 	wait $$ref_pid; ref_status=$$?; \
 	if [ $$wolf_status -ne 0 ] || [ $$ref_status -ne 0 ]; then \
