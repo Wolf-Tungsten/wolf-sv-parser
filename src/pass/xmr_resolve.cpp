@@ -120,6 +120,36 @@ namespace wolf_sv_parser::transform
             return std::nullopt;
         }
 
+        std::optional<int64_t> getAttrInt(const grh::ir::Operation &op,
+                                          std::string_view key)
+        {
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (auto value = std::get_if<int64_t>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
+        std::optional<bool> getAttrBool(const grh::ir::Operation &op,
+                                        std::string_view key)
+        {
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (auto value = std::get_if<bool>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
         std::vector<std::string> getAttrStrings(const grh::ir::Operation &op,
                                                 std::string_view key)
         {
@@ -133,6 +163,21 @@ namespace wolf_sv_parser::transform
                 return *values;
             }
             return {};
+        }
+
+        std::optional<std::vector<std::string>> getAttrStringsOptional(const grh::ir::Operation &op,
+                                                                        std::string_view key)
+        {
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (auto values = std::get_if<std::vector<std::string>>(&*attr))
+            {
+                return *values;
+            }
+            return std::nullopt;
         }
 
         grh::ir::OperationId findInstanceOp(const grh::ir::Graph &graph,
@@ -189,6 +234,21 @@ namespace wolf_sv_parser::transform
         std::vector<PendingPort> pendingInputPorts;
         std::unordered_map<std::string, std::unordered_map<std::string, grh::ir::ValueId>> inputPadCache;
 
+        enum class StorageKind
+        {
+            Register,
+            Latch,
+            Memory
+        };
+
+        struct StorageInfo
+        {
+            StorageKind kind{};
+            grh::ir::OperationId opId = grh::ir::OperationId::invalid();
+            int32_t width = 0;
+            bool isSigned = false;
+        };
+
         auto getPadInput = [&](grh::ir::Graph &graph, int32_t width, bool isSigned) -> grh::ir::ValueId {
             const int32_t normalized = normalizeWidth(width);
             const std::string key = std::to_string(normalized) + (isSigned ? "s" : "u");
@@ -211,6 +271,46 @@ namespace wolf_sv_parser::transform
             graphCache.emplace(key, value);
             result.changed = true;
             return value;
+        };
+
+        auto findStorageInfo = [&](const grh::ir::Graph &contextGraph,
+                                   grh::ir::Graph &graph,
+                                   std::string_view symbol,
+                                   const grh::ir::Operation &contextOp) -> std::optional<StorageInfo> {
+            const grh::ir::OperationId opId = graph.findOperation(symbol);
+            if (!opId.valid())
+            {
+                return std::nullopt;
+            }
+            const grh::ir::Operation op = graph.getOperation(opId);
+            StorageInfo info;
+            if (op.kind() == grh::ir::OperationKind::kRegister)
+            {
+                info.kind = StorageKind::Register;
+            }
+            else if (op.kind() == grh::ir::OperationKind::kLatch)
+            {
+                info.kind = StorageKind::Latch;
+            }
+            else if (op.kind() == grh::ir::OperationKind::kMemory)
+            {
+                info.kind = StorageKind::Memory;
+            }
+            else
+            {
+                return std::nullopt;
+            }
+            auto widthAttr = getAttrInt(op, "width");
+            auto signedAttr = getAttrBool(op, "isSigned");
+            if (!widthAttr || !signedAttr)
+            {
+                error(contextGraph, contextOp, "XMR target storage missing width/isSigned");
+                return std::nullopt;
+            }
+            info.opId = opId;
+            info.width = normalizeWidth(static_cast<int32_t>(*widthAttr));
+            info.isSigned = *signedAttr;
+            return info;
         };
 
         auto ensureOutputPort = [&](grh::ir::Graph &graph,
@@ -267,6 +367,35 @@ namespace wolf_sv_parser::transform
             {
                 *added = true;
             }
+            return value;
+        };
+
+        auto createStorageReadPort = [&](grh::ir::Graph &graph,
+                                         const StorageInfo &storage,
+                                         std::string_view storageName) -> grh::ir::ValueId {
+            const grh::ir::OperationKind kind =
+                storage.kind == StorageKind::Register
+                    ? grh::ir::OperationKind::kRegisterReadPort
+                    : grh::ir::OperationKind::kLatchReadPort;
+            std::string base = "__xmr_read_";
+            base.append(storageName);
+            std::string symName = makeUniqueSymbol(graph, base);
+            grh::ir::SymbolId valueSym = graph.internSymbol(symName);
+            grh::ir::ValueId value =
+                graph.createValue(valueSym, storage.width, storage.isSigned,
+                                  grh::ir::ValueType::Logic);
+            grh::ir::OperationId op =
+                graph.createOperation(kind, grh::ir::SymbolId::invalid());
+            graph.addResult(op, value);
+            if (storage.kind == StorageKind::Register)
+            {
+                graph.setAttr(op, "regSymbol", std::string(storageName));
+            }
+            else
+            {
+                graph.setAttr(op, "latchSymbol", std::string(storageName));
+            }
+            result.changed = true;
             return value;
         };
 
@@ -409,6 +538,7 @@ namespace wolf_sv_parser::transform
         auto resolveRead = [&](grh::ir::Graph &root,
                                grh::ir::OperationId opId,
                                const std::string &path) -> std::optional<grh::ir::ValueId> {
+            const grh::ir::Operation contextOp = root.getOperation(opId);
             auto segments = splitPath(path);
             if (segments.empty())
             {
@@ -426,7 +556,18 @@ namespace wolf_sv_parser::transform
             }
             if (segments.size() == 1)
             {
-                grh::ir::ValueId local = root.findValue(segments.front());
+                const std::string &leafName = segments.front();
+                if (auto storage = findStorageInfo(root, root, leafName, contextOp))
+                {
+                    if (storage->kind == StorageKind::Memory)
+                    {
+                        error(root, contextOp, "XMR read to memory requires explicit address");
+                        return std::nullopt;
+                    }
+                    return createStorageReadPort(root, *storage, leafName);
+                }
+
+                grh::ir::ValueId local = root.findValue(leafName);
                 if (!local.valid())
                 {
                     warning(root, root.getOperation(opId), "XMR read target not found in graph");
@@ -474,15 +615,33 @@ namespace wolf_sv_parser::transform
 
             grh::ir::Graph *leafGraph = current;
             const std::string &leafName = segments.back();
-            grh::ir::ValueId leafValue = leafGraph->findValue(leafName);
-            if (!leafValue.valid())
+            grh::ir::ValueId propagated = grh::ir::ValueId::invalid();
+            if (auto storage = findStorageInfo(root, *leafGraph, leafName, contextOp))
             {
-                warning(root, root.getOperation(opId),
-                        "XMR read target not found: " + leafName);
-                return std::nullopt;
+                if (storage->kind == StorageKind::Memory)
+                {
+                    error(root, contextOp, "XMR read to memory requires explicit address");
+                    return std::nullopt;
+                }
+                const std::string portName = getPortName(*leafGraph, readPortNames, path, "xmr_r");
+                grh::ir::SymbolId portSym = leafGraph->internSymbol(portName);
+                propagated = leafGraph->outputPortValue(portSym);
+                if (!propagated.valid())
+                {
+                    propagated = createStorageReadPort(*leafGraph, *storage, leafName);
+                }
             }
-
-            grh::ir::ValueId propagated = leafValue;
+            else
+            {
+                grh::ir::ValueId leafValue = leafGraph->findValue(leafName);
+                if (!leafValue.valid())
+                {
+                    warning(root, root.getOperation(opId),
+                            "XMR read target not found: " + leafName);
+                    return std::nullopt;
+                }
+                propagated = leafValue;
+            }
             for (std::size_t i = hops.size(); i-- > 0;)
             {
                 grh::ir::Graph *childGraph = hops[i].child;
@@ -512,7 +671,15 @@ namespace wolf_sv_parser::transform
         auto resolveWrite = [&](grh::ir::Graph &root,
                                 grh::ir::OperationId opId,
                                 const std::string &path,
-                                grh::ir::ValueId data) -> bool {
+                                const std::vector<grh::ir::ValueId> &operands,
+                                const std::optional<std::vector<std::string>> &eventEdgesOpt) -> bool {
+            const grh::ir::Operation contextOp = root.getOperation(opId);
+            if (operands.empty())
+            {
+                error(root, contextOp, "XMR write missing operands");
+                return false;
+            }
+
             auto segments = splitPath(path);
             if (segments.empty())
             {
@@ -528,30 +695,15 @@ namespace wolf_sv_parser::transform
                     return false;
                 }
             }
-            if (segments.size() == 1)
-            {
-                grh::ir::ValueId target = root.findValue(segments.front());
-                if (!target.valid())
-                {
-                    warning(root, root.getOperation(opId), "XMR write target not found in graph");
-                    return false;
-                }
-                auto replacement = forceSingleDriver(root, target, opId, path);
-                if (!replacement || !replacement->valid())
-                {
-                    return false;
-                }
-                grh::ir::OperationId assign =
-                    root.createOperation(grh::ir::OperationKind::kAssign,
-                                         grh::ir::SymbolId::invalid());
-                root.addOperand(assign, data);
-                root.addResult(assign, *replacement);
-                result.changed = true;
-                return true;
-            }
 
+            struct Hop
+            {
+                grh::ir::Graph *parent = nullptr;
+                grh::ir::OperationId instOp = grh::ir::OperationId::invalid();
+                grh::ir::Graph *child = nullptr;
+            };
+            std::vector<Hop> hops;
             grh::ir::Graph *current = &root;
-            grh::ir::ValueId driver = data;
             for (std::size_t i = 0; i + 1 < segments.size(); ++i)
             {
                 const std::string &instName = segments[i];
@@ -577,28 +729,164 @@ namespace wolf_sv_parser::transform
                             "XMR write module not found: " + *moduleName);
                     return false;
                 }
-                const std::string portName = getPortName(*childGraph, writePortNames, path, "xmr_w");
-
-                const grh::ir::Value driverValue = current->getValue(driver);
-                bool newPort = false;
-                grh::ir::ValueId childPort =
-                    ensureInputPort(*childGraph, portName, driverValue.width(),
-                                    driverValue.isSigned(), &newPort);
-                if (newPort)
-                {
-                    pendingInputPorts.push_back(
-                        PendingPort{childGraph->symbol(), portName,
-                                    driverValue.width(), driverValue.isSigned()});
-                }
-
-                ensureInstanceInput(*current, instOp, portName, driver);
-
+                hops.push_back(Hop{current, instOp, childGraph});
                 current = childGraph;
-                driver = childPort;
             }
 
             grh::ir::Graph *leafGraph = current;
             const std::string &leafName = segments.back();
+            const std::optional<StorageInfo> storage =
+                findStorageInfo(root, *leafGraph, leafName, contextOp);
+
+            std::vector<std::string> labels;
+            std::vector<grh::ir::ValueId> drivers;
+            if (storage)
+            {
+                if (storage->kind == StorageKind::Register)
+                {
+                    if (operands.size() < 3)
+                    {
+                        error(root, contextOp, "XMR write to register missing operands");
+                        return false;
+                    }
+                    const std::size_t eventCount = operands.size() - 3;
+                    if (!eventEdgesOpt || eventEdgesOpt->size() != eventCount || eventCount == 0)
+                    {
+                        error(root, contextOp, "XMR write to register missing eventEdge operands");
+                        return false;
+                    }
+                    labels = {"cond", "data", "mask"};
+                    for (std::size_t i = 0; i < eventCount; ++i)
+                    {
+                        labels.push_back("evt" + std::to_string(i));
+                    }
+                }
+                else if (storage->kind == StorageKind::Memory)
+                {
+                    if (operands.size() < 4)
+                    {
+                        error(root, contextOp, "XMR write to memory missing operands");
+                        return false;
+                    }
+                    const std::size_t eventCount = operands.size() - 4;
+                    if (!eventEdgesOpt || eventEdgesOpt->size() != eventCount || eventCount == 0)
+                    {
+                        error(root, contextOp, "XMR write to memory missing eventEdge operands");
+                        return false;
+                    }
+                    labels = {"cond", "addr", "data", "mask"};
+                    for (std::size_t i = 0; i < eventCount; ++i)
+                    {
+                        labels.push_back("evt" + std::to_string(i));
+                    }
+                }
+                else
+                {
+                    if (operands.size() != 3)
+                    {
+                        error(root, contextOp, "XMR write to latch expects 3 operands");
+                        return false;
+                    }
+                    if (eventEdgesOpt && !eventEdgesOpt->empty())
+                    {
+                        error(root, contextOp, "XMR write to latch must not include eventEdge");
+                        return false;
+                    }
+                    labels = {"cond", "data", "mask"};
+                }
+                drivers = operands;
+            }
+            else
+            {
+                if (operands.size() > 1)
+                {
+                    warning(root, contextOp, "XMR write has extra operands; using first");
+                }
+                labels.push_back("");
+                drivers.push_back(operands.front());
+            }
+
+            if (labels.size() != drivers.size())
+            {
+                error(root, contextOp, "XMR write operand/label size mismatch");
+                return false;
+            }
+
+            current = &root;
+            for (const auto &hop : hops)
+            {
+                for (std::size_t idx = 0; idx < drivers.size(); ++idx)
+                {
+                    if (!drivers[idx].valid())
+                    {
+                        error(root, contextOp, "XMR write operand is invalid");
+                        return false;
+                    }
+                    const grh::ir::Value driverValue = current->getValue(drivers[idx]);
+                    const std::string &label = labels[idx];
+                    const std::string pathKey =
+                        label.empty() ? path : (path + ":" + label);
+                    const std::string portName =
+                        getPortName(*hop.child, writePortNames, pathKey, "xmr_w");
+
+                    bool newPort = false;
+                    grh::ir::ValueId childPort =
+                        ensureInputPort(*hop.child, portName, driverValue.width(),
+                                        driverValue.isSigned(), &newPort);
+                    if (newPort)
+                    {
+                        pendingInputPorts.push_back(
+                            PendingPort{hop.child->symbol(), portName,
+                                        driverValue.width(), driverValue.isSigned()});
+                    }
+                    ensureInstanceInput(*hop.parent, hop.instOp, portName, drivers[idx]);
+                    drivers[idx] = childPort;
+                }
+                current = hop.child;
+            }
+
+            if (storage)
+            {
+                if (storage->kind == StorageKind::Register)
+                {
+                    grh::ir::OperationId writeOp =
+                        leafGraph->createOperation(grh::ir::OperationKind::kRegisterWritePort,
+                                                   grh::ir::SymbolId::invalid());
+                    for (const auto value : drivers)
+                    {
+                        leafGraph->addOperand(writeOp, value);
+                    }
+                    leafGraph->setAttr(writeOp, "regSymbol", leafName);
+                    leafGraph->setAttr(writeOp, "eventEdge", *eventEdgesOpt);
+                    result.changed = true;
+                    return true;
+                }
+                if (storage->kind == StorageKind::Latch)
+                {
+                    grh::ir::OperationId writeOp =
+                        leafGraph->createOperation(grh::ir::OperationKind::kLatchWritePort,
+                                                   grh::ir::SymbolId::invalid());
+                    for (const auto value : drivers)
+                    {
+                        leafGraph->addOperand(writeOp, value);
+                    }
+                    leafGraph->setAttr(writeOp, "latchSymbol", leafName);
+                    result.changed = true;
+                    return true;
+                }
+                grh::ir::OperationId writeOp =
+                    leafGraph->createOperation(grh::ir::OperationKind::kMemoryWritePort,
+                                               grh::ir::SymbolId::invalid());
+                for (const auto value : drivers)
+                {
+                    leafGraph->addOperand(writeOp, value);
+                }
+                leafGraph->setAttr(writeOp, "memSymbol", leafName);
+                leafGraph->setAttr(writeOp, "eventEdge", *eventEdgesOpt);
+                result.changed = true;
+                return true;
+            }
+
             grh::ir::ValueId target = leafGraph->findValue(leafName);
             if (!target.valid())
             {
@@ -614,7 +902,7 @@ namespace wolf_sv_parser::transform
             grh::ir::OperationId assign =
                 leafGraph->createOperation(grh::ir::OperationKind::kAssign,
                                            grh::ir::SymbolId::invalid());
-            leafGraph->addOperand(assign, driver);
+            leafGraph->addOperand(assign, drivers.front());
             leafGraph->addResult(assign, *replacement);
             result.changed = true;
             return true;
@@ -693,19 +981,17 @@ namespace wolf_sv_parser::transform
 
                 if (op.kind() == grh::ir::OperationKind::kXMRWrite)
                 {
-                    const auto operands = op.operands();
-                    if (operands.empty())
+                    const auto operandsSpan = op.operands();
+                    std::vector<grh::ir::ValueId> operands(operandsSpan.begin(), operandsSpan.end());
+                    const auto eventEdgesOpt = getAttrStringsOptional(op, "eventEdge");
+                    logInfo("xmr write resolve begin graph=" + graph.symbol());
+                    const bool resolved = resolveWrite(graph, opId, *path, operands, eventEdgesOpt);
+                    logInfo("xmr write resolve end graph=" + graph.symbol());
+                    if (resolved)
                     {
-                        warning(graph, op, "XMR write missing operand");
                         graph.eraseOp(opId);
                         result.changed = true;
-                        continue;
                     }
-                    logInfo("xmr write resolve begin graph=" + graph.symbol());
-                    resolveWrite(graph, opId, *path, operands.front());
-                    logInfo("xmr write resolve end graph=" + graph.symbol());
-                    graph.eraseOp(opId);
-                    result.changed = true;
                 }
             }
         }

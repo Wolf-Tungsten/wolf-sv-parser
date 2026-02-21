@@ -561,3 +561,14 @@ XMR 写入存储单元时，resolve pass 应在**目标模块**创建新的 Writ
 - `docs/GRH-JSON-spec.md`: JSON 规范（需要同步更新）
 - `docs/convert/convert.md`: Convert 设计文档
 - `docs/emit/`: Emit 相关文档
+
+---
+
+## 实施记录
+- 2026-02-20：完成阶段 1（IR/JSON 基础），新增 OperationKind（kRegisterReadPort/kRegisterWritePort/kLatchReadPort/kLatchWritePort），更新 `docs/GRH-JSON-spec.md` 与 `docs/GRH-representation.md` 说明新的存储 Port 结构。测试：`ctest --test-dir build --output-on-failure`（24/24 通过），**局限性**：仅覆盖既有测试用例，未新增针对新 OperationKind 的专项测试。
+- 2026-02-20：完成阶段 2（Convert）。Convert 输出 `kRegister`/`kLatch` 声明与对应 ReadPort/WritePort，写回端口使用 mask；更新 `convert-graph-assembly-basic` 断言 Port 模型，并新增多 always 写端口用例 `convert-graph-assembly-register-multi` 与 fixture。测试：`ctest --test-dir build --output-on-failure`（24/25 通过），失败项：`transform-pass-manager`（报错：Stats pass should emit a diagnostic with counts）。
+- 2026-02-20：修复 `StatsPass` 使用诊断通道输出统计信息，`ctest --test-dir build --output-on-failure`（25/25 通过）。
+- 2026-02-21：完成阶段 3（Emit + XMR）。Emit 支持 `kRegister/kLatch` 声明、`kRegisterReadPort/kLatchReadPort` 生成 `assign`，`kRegisterWritePort/kLatchWritePort` 生成 `always/always_latch`（含 mask）；XMR resolve 对存储单元生成 ReadPort/WritePort，`kXMRWrite` 校验事件信息并扩展多 operand 传递。新增测试：`emit-sv-storage-ports`、`transform-xmr-resolve-storage`。测试：`ctest --test-dir build --output-on-failure`（27/27 通过）。
+- 2026-02-21：完成阶段 4（Passes 与回归）。更新 `dead_code_elim`/`redundant_elim` 识别新的寄存器/锁存器 ReadPort/WritePort，避免将存储访问视为可消除表达式；回归通过。测试：`ctest --test-dir build --output-on-failure`（27/27 通过）。
+- 2026-02-21：阶段 3/4 追修 Emit 输出：寄存器/锁存器与输出端口同名时保持 `output reg` 声明、跳过多余绑定；常量改为按需内联，避免输出多余 `__const_*`/`*_reg_val`。验证：`ctest --test-dir build --output-on-failure`（27/27 通过），`make run_hdlbits_test DUT=023` 通过。
+- 2026-02-21：修复 `kDpicCall` 在 WritePort 内联路径中扩展表达式脱离 inline 作用域的问题，确保 DPI 返回值在写回语句中就地调用（`difftest_ram_read` 不再丢失）。验证：重新生成 `build/xs_bugcase/CASE_006/wolf/wolf_emit.sv`，确认调用内联到写回语句。

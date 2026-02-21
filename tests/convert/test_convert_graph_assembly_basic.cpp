@@ -106,8 +106,12 @@ int testGraphAssemblyBasic(const std::filesystem::path& sourcePath) {
     }
 
     bool hasAssign = false;
-    bool hasRegister = false;
-    bool hasLatch = false;
+    int regDecls = 0;
+    int regReads = 0;
+    int regWrites = 0;
+    int latchDecls = 0;
+    int latchReads = 0;
+    int latchWrites = 0;
 
     for (grh::ir::OperationId opId : graph->operations()) {
         grh::ir::Operation op = graph->getOperation(opId);
@@ -116,18 +120,72 @@ int testGraphAssemblyBasic(const std::filesystem::path& sourcePath) {
             hasAssign = true;
             break;
         case grh::ir::OperationKind::kRegister:
-            hasRegister = true;
+            ++regDecls;
+            if (!op.operands().empty() || !op.results().empty()) {
+                return fail("kRegister should not have operands or results");
+            }
+            if (!op.attr("width") || !op.attr("isSigned")) {
+                return fail("kRegister missing width/isSigned attributes");
+            }
+            break;
+        case grh::ir::OperationKind::kRegisterReadPort:
+            ++regReads;
+            if (!op.operands().empty() || op.results().size() != 1) {
+                return fail("kRegisterReadPort should have 0 operands and 1 result");
+            }
+            if (!op.attr("regSymbol")) {
+                return fail("kRegisterReadPort missing regSymbol attribute");
+            }
+            break;
+        case grh::ir::OperationKind::kRegisterWritePort:
+            ++regWrites;
+            if (op.operands().size() < 3 || !op.results().empty()) {
+                return fail("kRegisterWritePort missing operands or has results");
+            }
+            if (!op.attr("regSymbol") || !op.attr("eventEdge")) {
+                return fail("kRegisterWritePort missing regSymbol/eventEdge attributes");
+            }
             break;
         case grh::ir::OperationKind::kLatch:
-            hasLatch = true;
+            ++latchDecls;
+            if (!op.operands().empty() || !op.results().empty()) {
+                return fail("kLatch should not have operands or results");
+            }
+            if (!op.attr("width") || !op.attr("isSigned")) {
+                return fail("kLatch missing width/isSigned attributes");
+            }
+            break;
+        case grh::ir::OperationKind::kLatchReadPort:
+            ++latchReads;
+            if (!op.operands().empty() || op.results().size() != 1) {
+                return fail("kLatchReadPort should have 0 operands and 1 result");
+            }
+            if (!op.attr("latchSymbol")) {
+                return fail("kLatchReadPort missing latchSymbol attribute");
+            }
+            break;
+        case grh::ir::OperationKind::kLatchWritePort:
+            ++latchWrites;
+            if (op.operands().size() < 3 || !op.results().empty()) {
+                return fail("kLatchWritePort missing operands or has results");
+            }
+            if (!op.attr("latchSymbol")) {
+                return fail("kLatchWritePort missing latchSymbol attribute");
+            }
             break;
         default:
             break;
         }
     }
 
-    if (!hasAssign || !hasRegister || !hasLatch) {
-        return fail("Missing expected assign/register/latch operations");
+    if (!hasAssign) {
+        return fail("Missing expected assign operation");
+    }
+    if (regDecls != 1 || regReads != 1 || regWrites != 1) {
+        return fail("Unexpected register declaration/read/write port count");
+    }
+    if (latchDecls != 1 || latchReads != 1 || latchWrites != 1) {
+        return fail("Unexpected latch declaration/read/write port count");
     }
 
     return 0;

@@ -27,7 +27,7 @@ namespace wolf_sv_parser::transform
         std::ostringstream oss;
         oss << "graphs=" << graphCount << ", operations=" << opCount << ", values=" << valueCount;
 
-        logInfo(oss.str());
+        info(oss.str());
 
         PassResult result;
         result.changed = false;

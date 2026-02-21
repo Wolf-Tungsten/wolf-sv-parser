@@ -12823,6 +12823,9 @@ public:
         valueByExpr_.assign(lowering_.values.size(), grh::ir::ValueId::invalid());
         memoryOpBySymbol_.assign(plan_.symbolTable.size(), grh::ir::OperationId::invalid());
         memorySymbolName_.assign(plan_.symbolTable.size(), std::string());
+        storageBySymbol_.assign(plan_.symbolTable.size(), StorageKind::None);
+        storageOpBySymbol_.assign(plan_.symbolTable.size(), grh::ir::OperationId::invalid());
+        storageLocation_.assign(plan_.symbolTable.size(), slang::SourceLocation{});
         memoryReadIndexByExpr_.assign(lowering_.values.size(), kInvalidMemoryReadIndex);
         for (std::size_t i = 0; i < lowering_.memoryReads.size(); ++i)
         {
@@ -12836,10 +12839,12 @@ public:
                 memoryReadIndexByExpr_[data] = static_cast<int32_t>(i);
             }
         }
+        initStorageKinds();
     }
 
     void build()
     {
+        createStorageDeclarations();
         createPortValues();
         createSignalValues();
         createInoutSignalValues();
@@ -12855,6 +12860,12 @@ public:
 private:
     static int32_t normalizeWidth(int32_t width) { return width > 0 ? width : 1; }
     static constexpr int32_t kInvalidMemoryReadIndex = -1;
+
+    enum class StorageKind {
+        None,
+        Register,
+        Latch
+    };
 
     std::optional<grh::ir::SrcLoc> resolveSrcLoc(slang::SourceLocation location) const
     {
@@ -12915,6 +12926,11 @@ private:
         {
             return grh::ir::ValueId::invalid();
         }
+        if (!valueBySymbol_[id.index].valid() && isStorageSymbol(id))
+        {
+            return ensureStorageReadValue(id, storageBySymbol_[id.index],
+                                          storageLocation_[id.index]);
+        }
         return valueBySymbol_[id.index];
     }
 
@@ -12940,6 +12956,188 @@ private:
         return value;
     }
 
+    struct StorageInfo {
+        int32_t width = 0;
+        bool isSigned = false;
+        grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
+    };
+
+    bool isStorageSymbol(PlanSymbolId id) const
+    {
+        if (!id.valid() || id.index >= storageBySymbol_.size())
+        {
+            return false;
+        }
+        return storageBySymbol_[id.index] != StorageKind::None;
+    }
+
+    std::optional<StorageInfo> resolveStorageInfo(PlanSymbolId id) const
+    {
+        StorageInfo info{};
+        if (!id.valid())
+        {
+            return std::nullopt;
+        }
+        if (const SignalInfo* signal = findSignalInfo(id))
+        {
+            int32_t width = signal->width;
+            if (isFlattenedNetArray(*signal))
+            {
+                width = static_cast<int32_t>(flattenedNetWidth(*signal));
+            }
+            info.width = normalizeWidth(width);
+            info.isSigned = signal->isSigned;
+            info.valueType = signal->valueType;
+            return info;
+        }
+        std::string_view name = plan_.symbolTable.text(id);
+        if (!name.empty())
+        {
+            if (const PortInfo* port = findPortByName(plan_, name))
+            {
+                info.width = normalizeWidth(port->width);
+                info.isSigned = port->isSigned;
+                info.valueType = port->valueType;
+                return info;
+            }
+        }
+        return std::nullopt;
+    }
+
+    grh::ir::ValueId ensureStorageReadValue(PlanSymbolId id,
+                                            StorageKind kind,
+                                            slang::SourceLocation location)
+    {
+        if (!id.valid() || id.index >= valueBySymbol_.size())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        if (valueBySymbol_[id.index].valid())
+        {
+            return valueBySymbol_[id.index];
+        }
+        const auto info = resolveStorageInfo(id);
+        if (!info)
+        {
+            if (context_.diagnostics)
+            {
+                context_.diagnostics->warn(location,
+                                           "Skipping storage read port without width info");
+            }
+            return grh::ir::ValueId::invalid();
+        }
+        std::string_view name = plan_.symbolTable.text(id);
+        if (name.empty())
+        {
+            return grh::ir::ValueId::invalid();
+        }
+        const bool isRegister = kind == StorageKind::Register;
+        grh::ir::SymbolId opSym =
+            makeOpSymbol(id, isRegister ? "reg_read" : "latch_read");
+        grh::ir::OperationId op =
+            createOp(isRegister ? grh::ir::OperationKind::kRegisterReadPort
+                                : grh::ir::OperationKind::kLatchReadPort,
+                     opSym, location);
+        grh::ir::SymbolId valSym =
+            makeOpSymbol(id, isRegister ? "reg_val" : "latch_val");
+        grh::ir::ValueId value =
+            graph_.createValue(valSym, info->width, info->isSigned, info->valueType);
+        graph_.addResult(op, value);
+        if (isRegister)
+        {
+            graph_.setAttr(op, "regSymbol", std::string(name));
+        }
+        else
+        {
+            graph_.setAttr(op, "latchSymbol", std::string(name));
+        }
+        valueBySymbol_[id.index] = value;
+        return value;
+    }
+
+    void initStorageKinds()
+    {
+        if (storageBySymbol_.empty())
+        {
+            return;
+        }
+        for (const auto& entry : writeBack_.entries)
+        {
+            if (!entry.target.valid() || entry.target.index >= storageBySymbol_.size())
+            {
+                continue;
+            }
+            StorageKind kind = StorageKind::None;
+            if (entry.domain == ControlDomain::Sequential)
+            {
+                kind = StorageKind::Register;
+            }
+            else if (entry.domain == ControlDomain::Latch)
+            {
+                kind = StorageKind::Latch;
+            }
+            if (kind == StorageKind::None)
+            {
+                continue;
+            }
+            StorageKind& current = storageBySymbol_[entry.target.index];
+            if (current == StorageKind::None)
+            {
+                current = kind;
+                if (entry.location.valid())
+                {
+                    storageLocation_[entry.target.index] = entry.location;
+                }
+                continue;
+            }
+            if (current != kind && context_.diagnostics)
+            {
+                context_.diagnostics->warn(
+                    entry.location,
+                    "Storage target written in mixed sequential/latch domains");
+            }
+        }
+    }
+
+    void createStorageDeclarations()
+    {
+        for (std::size_t index = 0; index < storageBySymbol_.size(); ++index)
+        {
+            if (storageBySymbol_[index] == StorageKind::None)
+            {
+                continue;
+            }
+            PlanSymbolId symbol;
+            symbol.index = static_cast<uint32_t>(index);
+            std::string_view name = plan_.symbolTable.text(symbol);
+            if (name.empty())
+            {
+                continue;
+            }
+            const auto info = resolveStorageInfo(symbol);
+            if (!info)
+            {
+                continue;
+            }
+            const bool isRegister = storageBySymbol_[index] == StorageKind::Register;
+            const grh::ir::OperationKind kind =
+                isRegister ? grh::ir::OperationKind::kRegister
+                           : grh::ir::OperationKind::kLatch;
+            grh::ir::SymbolId sym = graph_.internSymbol(name);
+            slang::SourceLocation location = storageLocation_[index];
+            grh::ir::OperationId op = createOp(kind, sym, location);
+            graph_.setAttr(op, "width", static_cast<int64_t>(info->width));
+            graph_.setAttr(op, "isSigned", info->isSigned);
+            if (isRegister)
+            {
+                applyRegisterInit(op, symbol);
+            }
+            storageOpBySymbol_[index] = op;
+            ensureStorageReadValue(symbol, storageBySymbol_[index], location);
+        }
+    }
+
+
     void createPortValues()
     {
         for (const auto& port : plan_.ports)
@@ -12951,6 +13149,16 @@ private:
             const int32_t width = normalizeWidth(port.width);
             if (port.direction == PortDirection::Input)
             {
+                if (isStorageSymbol(port.symbol))
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            slang::SourceLocation{},
+                            "Skipping input port bound to storage symbol");
+                    }
+                    continue;
+                }
                 grh::ir::ValueId value =
                     createValue(port.symbol, width, port.isSigned, port.valueType);
                 if (value.valid())
@@ -12961,8 +13169,21 @@ private:
             }
             if (port.direction == PortDirection::Output)
             {
-                grh::ir::ValueId value =
-                    createValue(port.symbol, width, port.isSigned, port.valueType);
+                grh::ir::ValueId value = grh::ir::ValueId::invalid();
+                if (isStorageSymbol(port.symbol))
+                {
+                    value = valueForSymbol(port.symbol);
+                    if (!value.valid())
+                    {
+                        value = ensureStorageReadValue(port.symbol,
+                                                       storageBySymbol_[port.symbol.index],
+                                                       slang::SourceLocation{});
+                    }
+                }
+                else
+                {
+                    value = createValue(port.symbol, width, port.isSigned, port.valueType);
+                }
                 if (value.valid())
                 {
                     graph_.bindOutputPort(symbolForPlan(port.symbol), value);
@@ -13006,6 +13227,10 @@ private:
         for (const auto& signal : plan_.signals)
         {
             if (!signal.symbol.valid())
+            {
+                continue;
+            }
+            if (isStorageSymbol(signal.symbol))
             {
                 continue;
             }
@@ -16122,495 +16347,43 @@ private:
 
     void emitWriteBack()
     {
-        std::vector<bool> merged(writeBack_.entries.size(), false);
-        auto eventEdgesMatch = [&](const grh::ir::Operation& op,
-                                   const std::vector<EventEdge>& edges) -> bool {
-            if (edges.empty())
+        auto makeMaskLiteral = [&](int32_t width, int64_t low, int64_t span) -> std::string {
+            const int32_t normalized = normalizeWidth(width);
+            std::string bits(static_cast<std::size_t>(normalized), '0');
+            if (span > 0)
             {
-                return false;
-            }
-            auto attr = op.attr("eventEdge");
-            if (!attr)
-            {
-                return false;
-            }
-            const auto* stored = std::get_if<std::vector<std::string>>(&*attr);
-            if (!stored || stored->size() != edges.size())
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < edges.size(); ++i)
-            {
-                if ((*stored)[i] != edgeText(edges[i]))
+                const int64_t end = low + span;
+                for (int64_t bit = low; bit < end; ++bit)
                 {
-                    return false;
+                    if (bit < 0 || bit >= normalized)
+                    {
+                        continue;
+                    }
+                    const std::size_t index =
+                        static_cast<std::size_t>(normalized - 1 - bit);
+                    bits[index] = '1';
                 }
             }
-            return true;
+            return std::to_string(normalized) + "'b" + bits;
         };
-        auto canDemoteMemoryReadWriteback =
-            [&](const WriteBackPlan::Entry& entry,
-                grh::ir::ValueId updateCond,
-                grh::ir::ValueId nextValue) -> bool {
-            if (entry.domain != ControlDomain::Sequential ||
-                !updateCond.valid() || !nextValue.valid())
-            {
-                return false;
-            }
-            const grh::ir::Value nextVal = graph_.getValue(nextValue);
-            const grh::ir::OperationId regOpId = nextVal.definingOp();
-            if (!regOpId.valid())
-            {
-                return false;
-            }
-            const grh::ir::Operation regOp = graph_.getOperation(regOpId);
-            if (regOp.kind() != grh::ir::OperationKind::kRegister)
-            {
-                return false;
-            }
-            const auto regOperands = regOp.operands();
-            if (regOperands.size() < 2 || regOperands[0] != updateCond)
-            {
-                return false;
-            }
-            if (entry.eventOperands.size() + 2 != regOperands.size())
-            {
-                return false;
-            }
-            if (!eventEdgesMatch(regOp, entry.eventEdges))
-            {
-                return false;
-            }
-            for (std::size_t i = 0; i < entry.eventOperands.size(); ++i)
-            {
-                grh::ir::ValueId evt = emitExpr(entry.eventOperands[i]);
-                if (!evt.valid() || regOperands[i + 2] != evt)
-                {
-                    return false;
-                }
-            }
-            const grh::ir::Value dataVal = graph_.getValue(regOperands[1]);
-            const grh::ir::OperationId dataOpId = dataVal.definingOp();
-            if (!dataOpId.valid())
-            {
-                return false;
-            }
-            const grh::ir::Operation dataOp = graph_.getOperation(dataOpId);
-            return dataOp.kind() == grh::ir::OperationKind::kMemoryReadPort;
-        };
-        auto sameEventOperand = [&](ExprNodeId lhs, ExprNodeId rhs) -> bool {
-            if (lhs == rhs)
-            {
-                return true;
-            }
-            if (lhs == kInvalidPlanIndex || rhs == kInvalidPlanIndex)
-            {
-                return false;
-            }
-            if (lhs >= lowering_.values.size() || rhs >= lowering_.values.size())
-            {
-                return false;
-            }
-            const ExprNode& left = lowering_.values[lhs];
-            const ExprNode& right = lowering_.values[rhs];
-            return left.kind == ExprNodeKind::Symbol &&
-                   right.kind == ExprNodeKind::Symbol &&
-                   left.symbol.index == right.symbol.index;
-        };
-        auto makeConstOne = [&](slang::SourceLocation location) -> grh::ir::ValueId {
+        auto makeMaskValue = [&](int32_t width, int64_t low, int64_t span,
+                                 slang::SourceLocation location) -> grh::ir::ValueId {
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__const_one_" + std::to_string(nextConstId_++));
+                graph_.internSymbol("__mask_" + std::to_string(nextConstId_++));
+            const int32_t normalized = normalizeWidth(width);
             grh::ir::ValueId value =
-                graph_.createValue(sym, 1, false, grh::ir::ValueType::Logic);
+                graph_.createValue(sym, normalized, false, grh::ir::ValueType::Logic);
             grh::ir::OperationId op =
                 createOp(grh::ir::OperationKind::kConstant,
                          grh::ir::SymbolId::invalid(),
                          location);
             graph_.addResult(op, value);
-            graph_.setAttr(op, "constValue", "1'b1");
+            graph_.setAttr(op, "constValue", makeMaskLiteral(normalized, low, span));
             return value;
         };
-        for (std::size_t i = 0; i < writeBack_.entries.size(); ++i)
+
+        for (const auto& entry : writeBack_.entries)
         {
-            if (merged[i])
-            {
-                continue;
-            }
-            const auto& entry = writeBack_.entries[i];
-            if (entry.domain != ControlDomain::Sequential || !entry.target.valid())
-            {
-                continue;
-            }
-            if (instanceMergedTargets_.find(entry.target.index) !=
-                instanceMergedTargets_.end())
-            {
-                continue;
-            }
-            if (entry.eventEdges.size() != 1 || entry.eventOperands.size() != 1)
-            {
-                continue;
-            }
-            for (std::size_t j = i + 1; j < writeBack_.entries.size(); ++j)
-            {
-                if (merged[j])
-                {
-                    continue;
-                }
-                const auto& other = writeBack_.entries[j];
-                if (other.domain != ControlDomain::Sequential ||
-                    other.target.index != entry.target.index)
-                {
-                    continue;
-                }
-                if (other.eventEdges.size() != 1 || other.eventOperands.size() != 1)
-                {
-                    continue;
-                }
-                if (!sameEventOperand(entry.eventOperands.front(),
-                                      other.eventOperands.front()))
-                {
-                    continue;
-                }
-                const EventEdge edgeA = entry.eventEdges.front();
-                const EventEdge edgeB = other.eventEdges.front();
-                if (!((edgeA == EventEdge::Posedge && edgeB == EventEdge::Negedge) ||
-                      (edgeA == EventEdge::Negedge && edgeB == EventEdge::Posedge)))
-                {
-                    continue;
-                }
-
-                const auto& posEntry = (edgeA == EventEdge::Posedge) ? entry : other;
-                const auto& negEntry = (edgeA == EventEdge::Posedge) ? other : entry;
-
-                grh::ir::ValueId targetValue = valueForSymbol(entry.target);
-                if (!targetValue.valid())
-                {
-                    continue;
-                }
-                grh::ir::ValueId condValue = emitExpr(entry.eventOperands.front());
-                if (!condValue.valid())
-                {
-                    continue;
-                }
-                grh::ir::ValueId posNext = emitExpr(posEntry.nextValue);
-                grh::ir::ValueId negNext = emitExpr(negEntry.nextValue);
-                if (!posNext.valid() || !negNext.valid())
-                {
-                    continue;
-                }
-
-                int32_t muxWidth = graph_.getValue(posNext).width();
-                slang::SourceLocation mergeLoc =
-                    posEntry.location.valid() ? posEntry.location : negEntry.location;
-                grh::ir::OperationId muxOp =
-                    createOp(grh::ir::OperationKind::kMux,
-                             grh::ir::SymbolId::invalid(),
-                             mergeLoc);
-                graph_.addOperand(muxOp, condValue);
-                graph_.addOperand(muxOp, posNext);
-                graph_.addOperand(muxOp, negNext);
-                grh::ir::SymbolId muxSym =
-                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-                grh::ir::ValueId muxValue =
-                    graph_.createValue(muxSym, normalizeWidth(muxWidth), false,
-                                       graph_.getValue(posNext).type());
-                graph_.addResult(muxOp, muxValue);
-
-                grh::ir::ValueId posGuard = emitExpr(posEntry.updateCond);
-                grh::ir::ValueId negGuard = emitExpr(negEntry.updateCond);
-                if (!posGuard.valid())
-                {
-                    posGuard = makeConstOne(posEntry.location);
-                }
-                if (!negGuard.valid())
-                {
-                    negGuard = makeConstOne(negEntry.location);
-                }
-                int32_t guardWidth = graph_.getValue(posGuard).width();
-                grh::ir::OperationId guardMuxOp =
-                    createOp(grh::ir::OperationKind::kMux,
-                             grh::ir::SymbolId::invalid(),
-                             mergeLoc);
-                graph_.addOperand(guardMuxOp, condValue);
-                graph_.addOperand(guardMuxOp, posGuard);
-                graph_.addOperand(guardMuxOp, negGuard);
-                grh::ir::SymbolId guardSym =
-                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-                grh::ir::ValueId guardValue =
-                    graph_.createValue(guardSym, normalizeWidth(guardWidth), false,
-                                       grh::ir::ValueType::Logic);
-                graph_.addResult(guardMuxOp, guardValue);
-
-                grh::ir::SymbolId regSym = makeOpSymbol(entry.target, "register");
-                grh::ir::OperationId regOp =
-                    createOp(grh::ir::OperationKind::kRegister, regSym, mergeLoc);
-                graph_.addOperand(regOp, guardValue);
-                graph_.addOperand(regOp, muxValue);
-                graph_.addOperand(regOp, condValue);
-                graph_.addOperand(regOp, condValue);
-                graph_.setAttr(regOp, "eventEdge",
-                               std::vector<std::string>{edgeText(EventEdge::Posedge),
-                                                        edgeText(EventEdge::Negedge)});
-                applyRegisterInit(regOp, entry.target);
-                graph_.addResult(regOp, targetValue);
-
-                merged[i] = true;
-                merged[j] = true;
-                break;
-            }
-        }
-
-        auto makeSliceStatic = [&](grh::ir::ValueId base,
-                                   int64_t low,
-                                   int64_t high,
-                                   slang::SourceLocation location) -> grh::ir::ValueId {
-            const int64_t width = high - low + 1;
-            if (width <= 0)
-            {
-                return grh::ir::ValueId::invalid();
-            }
-            grh::ir::OperationId op =
-                createOp(grh::ir::OperationKind::kSliceStatic,
-                         grh::ir::SymbolId::invalid(),
-                         location);
-            graph_.addOperand(op, base);
-            graph_.setAttr(op, "sliceStart", low);
-            graph_.setAttr(op, "sliceEnd", high);
-            grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
-            grh::ir::ValueId result =
-                graph_.createValue(sym, width, false, graph_.getValue(base).type());
-            graph_.addResult(op, result);
-            return result;
-        };
-
-        auto makeSliceSymbol = [&](PlanSymbolId target,
-                                   int64_t low,
-                                   int64_t width) -> grh::ir::SymbolId {
-            std::string base;
-            if (target.valid())
-            {
-                base = std::string(plan_.symbolTable.text(target));
-            }
-            if (base.empty())
-            {
-                base = "__slice";
-            }
-            std::string candidate = base + "__slice_" + std::to_string(low) + "_" +
-                                    std::to_string(width);
-            while (graph_.symbols().contains(candidate))
-            {
-                candidate = base + "__slice_" + std::to_string(low) + "_" +
-                            std::to_string(width) + "_" + std::to_string(nextTempId_++);
-            }
-            return graph_.internSymbol(candidate);
-        };
-
-        std::unordered_map<uint32_t, std::vector<std::size_t>> sliceGroups;
-        for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
-        {
-            if (merged[idx])
-            {
-                continue;
-            }
-            const auto& entry = writeBack_.entries[idx];
-            if (entry.domain != ControlDomain::Sequential || !entry.target.valid())
-            {
-                continue;
-            }
-            if (!entry.hasStaticSlice)
-            {
-                continue;
-            }
-            if (instanceMergedTargets_.find(entry.target.index) !=
-                instanceMergedTargets_.end())
-            {
-                continue;
-            }
-            sliceGroups[entry.target.index].push_back(idx);
-        }
-
-        for (auto& [targetIndex, indices] : sliceGroups)
-        {
-            if (indices.size() < 2)
-            {
-                continue;
-            }
-            bool hasOther = false;
-            for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
-            {
-                if (merged[idx])
-                {
-                    continue;
-                }
-                const auto& entry = writeBack_.entries[idx];
-                if (entry.domain != ControlDomain::Sequential ||
-                    !entry.target.valid() ||
-                    entry.target.index != targetIndex)
-                {
-                    continue;
-                }
-                if (!entry.hasStaticSlice)
-                {
-                    hasOther = true;
-                    break;
-                }
-            }
-            if (hasOther)
-            {
-                continue;
-            }
-
-            PlanSymbolId target;
-            target.index = targetIndex;
-            grh::ir::ValueId targetValue = valueForSymbol(target);
-            if (!targetValue.valid())
-            {
-                continue;
-            }
-            const int64_t targetWidth = graph_.getValue(targetValue).width();
-            if (targetWidth <= 0)
-            {
-                continue;
-            }
-
-            struct SliceEntry {
-                std::size_t index;
-                int64_t low;
-                int64_t width;
-                grh::ir::ValueId regValue;
-            };
-            std::vector<SliceEntry> slices;
-            slices.reserve(indices.size());
-            bool invalid = false;
-            for (std::size_t idx : indices)
-            {
-                const auto& entry = writeBack_.entries[idx];
-                if (!entry.hasStaticSlice || entry.sliceWidth <= 0)
-                {
-                    invalid = true;
-                    break;
-                }
-                if (entry.sliceLow < 0 ||
-                    entry.sliceLow + entry.sliceWidth > targetWidth)
-                {
-                    invalid = true;
-                    break;
-                }
-                slices.push_back(SliceEntry{idx, entry.sliceLow, entry.sliceWidth,
-                                            grh::ir::ValueId::invalid()});
-            }
-            if (invalid)
-            {
-                continue;
-            }
-            std::sort(slices.begin(), slices.end(),
-                      [](const SliceEntry& lhs, const SliceEntry& rhs) {
-                          return lhs.low < rhs.low;
-                      });
-            int64_t cursor = 0;
-            for (const auto& slice : slices)
-            {
-                if (slice.low != cursor)
-                {
-                    invalid = true;
-                    break;
-                }
-                cursor = slice.low + slice.width;
-            }
-            if (invalid || cursor != targetWidth)
-            {
-                continue;
-            }
-
-            for (auto& slice : slices)
-            {
-                const auto& entry = writeBack_.entries[slice.index];
-                grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
-                grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
-                if (!updateCond.valid() || !nextValue.valid())
-                {
-                    invalid = true;
-                    break;
-                }
-                grh::ir::ValueId sliceNext =
-                    makeSliceStatic(nextValue, slice.low,
-                                    slice.low + slice.width - 1,
-                                    entry.location);
-                if (!sliceNext.valid())
-                {
-                    invalid = true;
-                    break;
-                }
-
-                grh::ir::SymbolId sliceSym =
-                    makeSliceSymbol(entry.target, slice.low, slice.width);
-                grh::ir::ValueId sliceValue =
-                    graph_.createValue(sliceSym,
-                                       normalizeWidth(static_cast<int32_t>(slice.width)),
-                                       false, graph_.getValue(nextValue).type());
-                grh::ir::SymbolId regSym =
-                    makeOpSymbol(entry.target, "slice_register");
-                grh::ir::OperationId op =
-                    createOp(grh::ir::OperationKind::kRegister, regSym, entry.location);
-                graph_.addOperand(op, updateCond);
-                graph_.addOperand(op, sliceNext);
-                std::vector<std::string> edges;
-                edges.reserve(entry.eventEdges.size());
-                for (ExprNodeId evtId : entry.eventOperands)
-                {
-                    grh::ir::ValueId evt = emitExpr(evtId);
-                    if (!evt.valid())
-                    {
-                        continue;
-                    }
-                    graph_.addOperand(op, evt);
-                }
-                for (EventEdge edge : entry.eventEdges)
-                {
-                    edges.push_back(edgeText(edge));
-                }
-                graph_.setAttr(op, "eventEdge", std::move(edges));
-                graph_.addResult(op, sliceValue);
-                slice.regValue = sliceValue;
-            }
-            if (invalid)
-            {
-                continue;
-            }
-
-            grh::ir::OperationId concatOp =
-                createOp(grh::ir::OperationKind::kConcat,
-                         grh::ir::SymbolId::invalid(),
-                         writeBack_.entries[slices.front().index].location);
-            for (auto it = slices.rbegin(); it != slices.rend(); ++it)
-            {
-                if (!it->regValue.valid())
-                {
-                    invalid = true;
-                    break;
-                }
-                graph_.addOperand(concatOp, it->regValue);
-            }
-            if (invalid)
-            {
-                continue;
-            }
-            graph_.addResult(concatOp, targetValue);
-
-            for (const auto& slice : slices)
-            {
-                merged[slice.index] = true;
-            }
-        }
-
-        for (std::size_t idx = 0; idx < writeBack_.entries.size(); ++idx)
-        {
-            if (merged[idx])
-            {
-                continue;
-            }
-            const auto& entry = writeBack_.entries[idx];
             if (!entry.target.valid())
             {
                 continue;
@@ -16619,6 +16392,62 @@ private:
             {
                 continue;
             }
+
+            if (entry.domain == ControlDomain::Combinational)
+            {
+                grh::ir::ValueId targetValue = valueForSymbol(entry.target);
+                if (!targetValue.valid())
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(entry.location,
+                                                   "Write-back target missing value");
+                    }
+                    continue;
+                }
+                grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
+                if (!nextValue.valid())
+                {
+                    continue;
+                }
+                grh::ir::OperationId op =
+                    createOp(grh::ir::OperationKind::kAssign,
+                             grh::ir::SymbolId::invalid(),
+                             entry.location);
+                graph_.addOperand(op, nextValue);
+                graph_.addResult(op, targetValue);
+                continue;
+            }
+
+            const bool isSequential = entry.domain == ControlDomain::Sequential;
+            const bool isLatch = entry.domain == ControlDomain::Latch;
+            if (!isSequential && !isLatch)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(entry.location,
+                                               "Skipping unsupported control domain");
+                }
+                continue;
+            }
+
+            grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
+            grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
+            if (!updateCond.valid() || !nextValue.valid())
+            {
+                continue;
+            }
+            if (isSequential && entry.eventEdges.empty())
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        entry.location,
+                        "Skipping register write without edge-sensitive timing control");
+                }
+                continue;
+            }
+
             grh::ir::ValueId targetValue = valueForSymbol(entry.target);
             if (!targetValue.valid())
             {
@@ -16629,48 +16458,37 @@ private:
                 }
                 continue;
             }
-            grh::ir::ValueId updateCond = emitExpr(entry.updateCond);
-            grh::ir::ValueId nextValue = emitExpr(entry.nextValue);
-            if (!nextValue.valid())
+            const int32_t targetWidth = graph_.getValue(targetValue).width();
+            int64_t maskLow = 0;
+            int64_t maskSpan = targetWidth;
+            if (entry.hasStaticSlice && entry.sliceWidth > 0 &&
+                entry.sliceLow >= 0 &&
+                entry.sliceLow + entry.sliceWidth <= targetWidth)
+            {
+                maskLow = entry.sliceLow;
+                maskSpan = entry.sliceWidth;
+            }
+            grh::ir::ValueId maskValue =
+                makeMaskValue(targetWidth, maskLow, maskSpan, entry.location);
+            if (!maskValue.valid())
             {
                 continue;
             }
 
-            if (entry.domain == ControlDomain::Combinational)
+            if (isSequential)
             {
-                grh::ir::OperationId op =
-                    createOp(grh::ir::OperationKind::kAssign,
-                             grh::ir::SymbolId::invalid(),
-                             entry.location);
-                graph_.addOperand(op, nextValue);
-                graph_.addResult(op, targetValue);
-                continue;
-            }
-
-            if (entry.domain == ControlDomain::Sequential)
-            {
-                if (!updateCond.valid())
+                std::string_view regName = plan_.symbolTable.text(entry.target);
+                if (regName.empty())
                 {
                     continue;
                 }
-                if (canDemoteMemoryReadWriteback(entry, updateCond, nextValue))
-                {
-                    grh::ir::OperationId op =
-                        createOp(grh::ir::OperationKind::kAssign,
-                                 grh::ir::SymbolId::invalid(),
-                                 entry.location);
-                    graph_.addOperand(op, nextValue);
-                    graph_.addResult(op, targetValue);
-                    continue;
-                }
-                grh::ir::SymbolId sym = makeOpSymbol(entry.target, "register");
+                grh::ir::SymbolId opSym = makeOpSymbol(entry.target, "reg_write");
                 grh::ir::OperationId op =
-                    createOp(grh::ir::OperationKind::kRegister, sym, entry.location);
-                applyRegisterInit(op, entry.target);
+                    createOp(grh::ir::OperationKind::kRegisterWritePort,
+                             opSym, entry.location);
                 graph_.addOperand(op, updateCond);
                 graph_.addOperand(op, nextValue);
-                std::vector<std::string> edges;
-                edges.reserve(entry.eventEdges.size());
+                graph_.addOperand(op, maskValue);
                 for (ExprNodeId evtId : entry.eventOperands)
                 {
                     grh::ir::ValueId evt = emitExpr(evtId);
@@ -16680,35 +16498,30 @@ private:
                     }
                     graph_.addOperand(op, evt);
                 }
+                std::vector<std::string> edges;
+                edges.reserve(entry.eventEdges.size());
                 for (EventEdge edge : entry.eventEdges)
                 {
                     edges.push_back(edgeText(edge));
                 }
                 graph_.setAttr(op, "eventEdge", std::move(edges));
-                graph_.addResult(op, targetValue);
+                graph_.setAttr(op, "regSymbol", std::string(regName));
                 continue;
             }
 
-            if (entry.domain == ControlDomain::Latch)
+            std::string_view latchName = plan_.symbolTable.text(entry.target);
+            if (latchName.empty())
             {
-                if (!updateCond.valid())
-                {
-                    continue;
-                }
-                grh::ir::SymbolId sym = makeOpSymbol(entry.target, "latch");
-                grh::ir::OperationId op =
-                    createOp(grh::ir::OperationKind::kLatch, sym, entry.location);
-                graph_.addOperand(op, updateCond);
-                graph_.addOperand(op, nextValue);
-                graph_.addResult(op, targetValue);
                 continue;
             }
-
-            if (context_.diagnostics)
-            {
-                context_.diagnostics->warn(entry.location,
-                                           "Skipping unsupported control domain");
-            }
+            grh::ir::SymbolId opSym = makeOpSymbol(entry.target, "latch_write");
+            grh::ir::OperationId op =
+                createOp(grh::ir::OperationKind::kLatchWritePort,
+                         opSym, entry.location);
+            graph_.addOperand(op, updateCond);
+            graph_.addOperand(op, nextValue);
+            graph_.addOperand(op, maskValue);
+            graph_.setAttr(op, "latchSymbol", std::string(latchName));
         }
     }
 
@@ -16724,6 +16537,9 @@ private:
     std::vector<grh::ir::ValueId> valueByExpr_;
     std::vector<grh::ir::OperationId> memoryOpBySymbol_;
     std::vector<std::string> memorySymbolName_;
+    std::vector<StorageKind> storageBySymbol_;
+    std::vector<grh::ir::OperationId> storageOpBySymbol_;
+    std::vector<slang::SourceLocation> storageLocation_;
     std::vector<int32_t> memoryReadIndexByExpr_;
     ConnectionExprLowerer connectionLowerer_;
     struct InstanceXmrWrite {

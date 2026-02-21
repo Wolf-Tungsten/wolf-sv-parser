@@ -53,7 +53,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 常量：`kConstant`
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kCaseEq`、`kCaseNe`、`kWildcardEq`、`kWildcardNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
-- 时序：`kLatch`、`kRegister`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
+- 时序/存储：`kLatch`、`kLatchReadPort`、`kLatchWritePort`、`kRegister`、`kRegisterReadPort`、`kRegisterWritePort`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
 - 层次：`kInstance`、`kBlackbox`
 - System call：`kSystemFunction`、`kSystemTask`
 - DPI：`kDpicImport`、`kDpicCall`
@@ -360,56 +360,122 @@ assign ${res.symbol} = (sliceWidth == 1)
 
 GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
 
-## 时序逻辑操作
-### 统一锁存器 kLatch
+## 时序/存储操作
+GRH 使用 **声明 + ReadPort + WritePort** 的 Port 模型统一 `kLatch`/`kRegister`/`kMemory`。
+所有对存储单元的访问必须通过对应的 ReadPort/WritePort。
+
+### 锁存器声明 kLatch
 
 kLatch 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
 
-- operands：
-    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
-    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
-- result：
-    - q：锁存器输出
+- operands：无
+- results：无
+- attributes：
+    - width（int64_t）：位宽
+    - isSigned（bool）：是否有符号
 
 生成语义：
 ```
-reg ${nextValue.signed ? "signed" : ""} [${nextValue.width}-1:0] ${symbol};
-always_latch begin
-    if (${updateCond.symbol}) begin
-        ${symbol} = ${nextValue.symbol};
-    end
-end
-assign ${q.symbol} = ${symbol};
+reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
 ```
 
-示例（异步低有效复位 + 使能）：
-- updateCond = (!rst_n) || en
-- nextValue = (!rst_n) ? resetValue : d
+### 锁存器读端口 kLatchReadPort
 
-### 统一寄存器 kRegister
+- operands：无
+- results：
+    - data：读出的锁存器值
+- attributes：
+    - latchSymbol：指向目标 kLatch 的 symbol
+
+生成语义：
+```
+assign ${data.symbol} = ${latchSymbol};
+```
+
+### 锁存器写端口 kLatchWritePort
+
+- operands：
+    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
+    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
+    - mask：逐位写掩码，位宽与目标 kLatch 一致；无掩码写入时使用常量全 1
+- results：无
+- attributes：
+    - latchSymbol：指向目标 kLatch 的 symbol
+
+生成语义：
+```
+always_latch begin
+    if (${updateCond.symbol}) begin
+        if (${mask.symbol} == {${latchSymbol.width}{1'b1}}) begin
+            ${latchSymbol} = ${nextValue.symbol};
+        end else begin
+            for (int i = 0; i < ${latchSymbol.width}; i = i + 1) begin
+                if (${mask.symbol}[i]) begin
+                    ${latchSymbol}[i] = ${nextValue.symbol}[i];
+                end
+            end
+        end
+    end
+end
+```
+
+### 寄存器声明 kRegister
 
 kRegister 的 symbol 是必须定义的，且必须符合 verilog 标识符规范。
 
-- operands：
-    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
-    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
-    - event0, event1, ...：触发事件信号（Value）
-- result：
-    - q：寄存器输出
+- operands：无
+- results：无
 - attributes：
-    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
-    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 2）
-    - `eventOperands` = operands[2..]（按顺序与 `eventEdge` 配对）
+    - width（int64_t）：位宽
+    - isSigned（bool）：是否有符号
 
 生成语义：
 ```
-reg ${nextValue.signed ? "signed" : ""} [${nextValue.width}-1:0] ${symbol};
+reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
+```
+
+### 寄存器读端口 kRegisterReadPort
+
+- operands：无
+- results：
+    - data：读出的寄存器值
+- attributes：
+    - regSymbol：指向目标 kRegister 的 symbol
+
+生成语义：
+```
+assign ${data.symbol} = ${regSymbol};
+```
+
+### 寄存器写端口 kRegisterWritePort
+
+- operands：
+    - updateCond：更新条件，必须为 1 bit；无条件更新时使用常量 `1'b1`
+    - nextValue：更新值表达式（reset/enable 的优先级需在此表达式中显式编码）
+    - mask：逐位写掩码，位宽与目标 kRegister 一致；无掩码写入时使用常量全 1
+    - event0, event1, ...：触发事件信号（Value）
+- results：无
+- attributes：
+    - regSymbol：指向目标 kRegister 的 symbol
+    - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
+    - `eventEdge` 长度必须等于事件信号数量（operand 总数减 3）
+    - `eventOperands` = operands[3..]（按顺序与 `eventEdge` 配对）
+
+生成语义：
+```
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
     if (${updateCond.symbol}) begin
-        ${symbol} <= ${nextValue.symbol};
+        if (${mask.symbol} == {${regSymbol.width}{1'b1}}) begin
+            ${regSymbol} <= ${nextValue.symbol};
+        end else begin
+            for (int i = 0; i < ${regSymbol.width}; i = i + 1) begin
+                if (${mask.symbol}[i]) begin
+                    ${regSymbol}[i] <= ${nextValue.symbol}[i];
+                end
+            end
+        end
     end
 end
-assign ${q.symbol} = ${symbol};
 ```
 
 示例（异步低有效复位 + 使能）：
@@ -448,7 +514,7 @@ reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol} [0:${row}-1];
 assign ${data.symbol} = ${memSymbol}[${addr.symbol}];
 ```
 
-说明：同步读端口使用 `kRegister` 捕获 `kMemoryReadPort` 的输出，
+说明：同步读端口使用 `kRegisterWritePort` 捕获 `kMemoryReadPort` 的输出，
 在事件 operands 与 `eventEdge` 中声明时钟/复位事件，并通过 `updateCond/nextValue` 编码 enable/reset 语义。
 
 ### 片上存储器写端口 kMemoryWritePort
@@ -502,14 +568,19 @@ end
 
 #### kXMRWrite
 - operands：
-    - data：写入值（单个 operand）
+    - 非存储目标：`data`（单个 operand）
+    - 目标为 `kRegister`：`updateCond, nextValue, mask, event0, event1, ...`
+    - 目标为 `kLatch`：`updateCond, nextValue, mask`
+    - 目标为 `kMemory`：`updateCond, addr, data, mask, event0, event1, ...`
 - results：无
 - attributes：
     - xmrPath（string）：层次路径（相对当前 Graph 的实例路径 + 目标信号）
+    - eventEdge（vector<string>）：仅 `kRegister/kMemory` 目标必需，长度需与事件 operand 数一致
 
 说明：
-- resolve pass 会沿层次路径为中间模块添加端口、更新实例端口连接，
-  并在叶子模块生成 `kAssign`，保证单一驱动语义。
+- resolve pass 会沿层次路径为中间模块添加端口、更新实例端口连接；
+  对存储单元会生成对应的 ReadPort/WritePort，对普通信号则生成 `kAssign`。
+- `kRegister/kMemory` 目标的 `kXMRWrite` 必须携带 `eventEdge` 与事件 operand。
 - `kXMRRead/kXMRWrite` 在 emit 阶段不应残留；若未解析则视为错误。
 
 

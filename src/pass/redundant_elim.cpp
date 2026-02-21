@@ -184,8 +184,12 @@ namespace wolf_sv_parser::transform
             case grh::ir::OperationKind::kMemory:
             case grh::ir::OperationKind::kMemoryReadPort:
             case grh::ir::OperationKind::kMemoryWritePort:
-            case grh::ir::OperationKind::kLatch:
             case grh::ir::OperationKind::kRegister:
+            case grh::ir::OperationKind::kRegisterReadPort:
+            case grh::ir::OperationKind::kRegisterWritePort:
+            case grh::ir::OperationKind::kLatch:
+            case grh::ir::OperationKind::kLatchReadPort:
+            case grh::ir::OperationKind::kLatchWritePort:
             case grh::ir::OperationKind::kInstance:
             case grh::ir::OperationKind::kBlackbox:
             case grh::ir::OperationKind::kSystemFunction:

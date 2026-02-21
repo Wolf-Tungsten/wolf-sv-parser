@@ -198,6 +198,22 @@ target_compile_definitions(emit-sv-readmem
 
 register_test_exe(emit-sv-readmem)
 
+add_executable(emit-sv-storage-ports
+    tests/emit/test_emit_sv_storage_ports.cpp
+)
+
+target_link_libraries(emit-sv-storage-ports
+    PRIVATE
+        grh
+)
+
+target_compile_definitions(emit-sv-storage-ports
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-sv-storage-ports)
+
 # transform tests
 add_executable(transform-pass-manager
     tests/transform/test_transform_pass_manager.cpp
@@ -253,6 +269,17 @@ target_link_libraries(transform-xmr-resolve-inout
 )
 
 register_test_exe(transform-xmr-resolve-inout)
+
+add_executable(transform-xmr-resolve-storage
+    tests/transform/test_xmr_resolve_storage.cpp
+)
+
+target_link_libraries(transform-xmr-resolve-storage
+    PRIVATE
+        transform
+)
+
+register_test_exe(transform-xmr-resolve-storage)
 
 # convert: symbol collector
 add_executable(convert-symbol-collector
@@ -374,6 +401,21 @@ target_compile_definitions(convert-graph-assembly-basic
         WOLF_SV_CONVERT_GRAPH_ASSEMBLY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_basic.sv"
 )
 register_test_exe(convert-graph-assembly-basic)
+
+# convert: graph assembly register multi-write
+add_executable(convert-graph-assembly-register-multi
+    tests/convert/test_convert_graph_assembly_register_multi.cpp
+)
+target_link_libraries(convert-graph-assembly-register-multi
+    PRIVATE
+        convert
+        grh
+)
+target_compile_definitions(convert-graph-assembly-register-multi
+    PRIVATE
+        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_REGISTER_MULTI_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_register_multi.sv"
+)
+register_test_exe(convert-graph-assembly-register-multi)
 
 # convert: graph assembly memory
 add_executable(convert-graph-assembly-memory

@@ -2306,12 +2306,114 @@ namespace grh::emit
                 }
                 return formatConstLiteral(valueId, *raw);
             };
+            std::unordered_map<std::string, std::unordered_set<std::string>> regWritePortEventKeys;
+            regWritePortEventKeys.reserve(static_cast<std::size_t>(graph->operations().size()));
+            auto writePortEventKey = [&](const grh::ir::Operation &op,
+                                         std::size_t eventStart) -> std::optional<std::string>
+            {
+                auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                if (!eventEdges)
+                {
+                    return std::nullopt;
+                }
+                const auto &operands = op.operands();
+                const std::size_t eventCount =
+                    operands.size() > eventStart ? operands.size() - eventStart : 0;
+                if (eventCount == 0 || eventEdges->size() != eventCount)
+                {
+                    return std::nullopt;
+                }
+                std::ostringstream key;
+                for (std::size_t i = 0; i < eventCount; ++i)
+                {
+                    if (i != 0)
+                    {
+                        key << ";";
+                    }
+                    const std::string edge = (*eventEdges)[i];
+                    key << edge << ":";
+                    const grh::ir::ValueId eventValue = operands[eventStart + i];
+                    if (eventValue.valid())
+                    {
+                        key << valueName(eventValue);
+                    }
+                }
+                return key.str();
+            };
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kRegisterWritePort)
+                {
+                    continue;
+                }
+                auto regSymbolAttr = getAttribute<std::string>(*graph, op, "regSymbol");
+                if (!regSymbolAttr)
+                {
+                    continue;
+                }
+                auto key = writePortEventKey(op, 3);
+                if (!key)
+                {
+                    continue;
+                }
+                regWritePortEventKeys[*regSymbolAttr].insert(*key);
+            }
+            std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> readPortAliases;
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kRegisterReadPort)
+                {
+                    continue;
+                }
+                if (op.results().empty())
+                {
+                    continue;
+                }
+                auto regSymbolAttr = getAttribute<std::string>(*graph, op, "regSymbol");
+                if (!regSymbolAttr)
+                {
+                    continue;
+                }
+                auto itKeys = regWritePortEventKeys.find(*regSymbolAttr);
+                if (itKeys == regWritePortEventKeys.end() || itKeys->second.size() <= 1)
+                {
+                    continue;
+                }
+                readPortAliases.emplace(op.results()[0], *regSymbolAttr);
+            }
+            auto inlineConstExprFor = [&](grh::ir::ValueId valueId) -> std::optional<std::string>
+            {
+                auto rawLiteral = constLiteralRawFor(valueId);
+                if (!rawLiteral)
+                {
+                    return std::nullopt;
+                }
+                if (valueType(valueId) == grh::ir::ValueType::String)
+                {
+                    return formatConstLiteral(valueId, *rawLiteral);
+                }
+                std::string literal = *rawLiteral;
+                if (valueType(valueId) == grh::ir::ValueType::Logic)
+                {
+                    if (auto sized = sizedLiteralIfUnsized(literal, valueWidth(valueId)))
+                    {
+                        literal = *sized;
+                    }
+                }
+                return literal;
+            };
             std::function<std::string(grh::ir::ValueId)> valueExpr =
                 [&](grh::ir::ValueId valueId) -> std::string
             {
                 if (!valueId.valid())
                 {
                     return {};
+                }
+                if (auto it = readPortAliases.find(valueId); it != readPortAliases.end())
+                {
+                    return it->second;
                 }
                 return valueName(valueId);
             };
@@ -2370,6 +2472,83 @@ namespace grh::emit
                 declaredNames.insert(name);
             }
 
+            std::unordered_set<std::string> storageBackedPorts;
+            for (const auto opId : graph->operations())
+            {
+                const grh::ir::Operation op = graph->getOperation(opId);
+                if (op.kind() != grh::ir::OperationKind::kRegister &&
+                    op.kind() != grh::ir::OperationKind::kLatch)
+                {
+                    continue;
+                }
+                const std::string opName = std::string(op.symbolText());
+                if (opName.empty())
+                {
+                    continue;
+                }
+                auto itPort = portDecls.find(opName);
+                if (itPort == portDecls.end())
+                {
+                    continue;
+                }
+                if (itPort->second.dir != PortDir::Output)
+                {
+                    reportError("Storage symbol conflicts with non-output port", opName);
+                    continue;
+                }
+                itPort->second.isReg = true;
+                storageBackedPorts.insert(opName);
+            }
+
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> elidedReadPortValues;
+            for (const auto &port : graph->outputPorts())
+            {
+                if (!port.name.valid())
+                {
+                    continue;
+                }
+                const std::string portName = std::string(graph->symbolText(port.name));
+                if (storageBackedPorts.find(portName) == storageBackedPorts.end())
+                {
+                    continue;
+                }
+                if (!port.value.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Value portValue = graph->getValue(port.value);
+                if (!portValue.users().empty())
+                {
+                    continue;
+                }
+                const grh::ir::OperationId defOpId = portValue.definingOp();
+                if (!defOpId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() == grh::ir::OperationKind::kRegisterReadPort)
+                {
+                    auto regSymbolAttr = getAttribute<std::string>(*graph, defOp, "regSymbol");
+                    if (regSymbolAttr && *regSymbolAttr == portName)
+                    {
+                        elidedReadPortValues.insert(port.value);
+                    }
+                }
+                else if (defOp.kind() == grh::ir::OperationKind::kLatchReadPort)
+                {
+                    auto latchSymbolAttr = getAttribute<std::string>(*graph, defOp, "latchSymbol");
+                    if (latchSymbolAttr && *latchSymbolAttr == portName)
+                    {
+                        elidedReadPortValues.insert(port.value);
+                    }
+                }
+            }
+            for (const auto &alias : readPortAliases)
+            {
+                elidedReadPortValues.insert(alias.first);
+            }
+
             // Storage for various sections.
             std::map<std::string, VarDecl, std::less<>> varDecls;
             std::map<std::string, NetDecl, std::less<>> regDecls;
@@ -2384,6 +2563,18 @@ namespace grh::emit
             std::vector<SeqBlock> seqBlocks;
             std::unordered_set<std::string> instanceNamesUsed;
             std::unordered_map<grh::ir::ValueId, std::string, grh::ir::ValueIdHash> dpiTempNames;
+            int concatTempIndex = 0;
+            auto makeConcatTempName = [&]() -> std::string
+            {
+                std::string base = "__concat_tmp";
+                std::string name = base + "_" + std::to_string(concatTempIndex++);
+                while (declaredNames.find(name) != declaredNames.end())
+                {
+                    name = base + "_" + std::to_string(concatTempIndex++);
+                }
+                declaredNames.insert(name);
+                return name;
+            };
 
             for (const auto opId : graph->operations())
             {
@@ -2563,8 +2754,8 @@ namespace grh::emit
             {
                 switch (kind)
                 {
-                case grh::ir::OperationKind::kRegister:
-                case grh::ir::OperationKind::kLatch:
+                case grh::ir::OperationKind::kRegisterWritePort:
+                case grh::ir::OperationKind::kLatchWritePort:
                 case grh::ir::OperationKind::kMemoryReadPort:
                 case grh::ir::OperationKind::kMemoryWritePort:
                     return true;
@@ -2756,6 +2947,61 @@ namespace grh::emit
                 label << "kDpicCall#" << dpiOp.id().index;
                 return label.str();
             };
+            auto canInlineDpiCall = [&](const grh::ir::Operation &dpiOp) -> bool
+            {
+                auto targetImport = getAttribute<std::string>(*graph, dpiOp, "targetImportSymbol");
+                auto inArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "inArgName");
+                auto outArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "outArgName");
+                auto inoutArgName = getAttribute<std::vector<std::string>>(*graph, dpiOp, "inoutArgName");
+                const auto hasReturn = getAttribute<bool>(*graph, dpiOp, "hasReturn").value_or(false);
+                if (!targetImport || !inArgName || !outArgName)
+                {
+                    return false;
+                }
+                if (!hasReturn)
+                {
+                    return false;
+                }
+                if ((outArgName && !outArgName->empty()) ||
+                    (inoutArgName && !inoutArgName->empty()))
+                {
+                    return false;
+                }
+                const auto &operands = dpiOp.operands();
+                if (operands.empty())
+                {
+                    return false;
+                }
+                auto itImport = dpicImports.find(*targetImport);
+                if (itImport == dpicImports.end() || itImport->second.graph == nullptr)
+                {
+                    return false;
+                }
+                const DpiImportRef &importRef = itImport->second;
+                const grh::ir::Operation importOp = importRef.graph->getOperation(importRef.op);
+                auto importArgs = getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsName");
+                auto importDirs =
+                    getAttribute<std::vector<std::string>>(*importRef.graph, importOp, "argsDirection");
+                if (!importArgs || !importDirs || importArgs->size() != importDirs->size())
+                {
+                    return false;
+                }
+                for (std::size_t i = 0; i < importArgs->size(); ++i)
+                {
+                    const std::string &formal = (*importArgs)[i];
+                    const std::string &dir = (*importDirs)[i];
+                    if (dir != "input")
+                    {
+                        return false;
+                    }
+                    int idx = findNameIndex(*inArgName, formal);
+                    if (idx < 0 || static_cast<std::size_t>(idx + 1) >= operands.size())
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
 
             for (const auto opId : graph->operations())
             {
@@ -2837,8 +3083,8 @@ namespace grh::emit
                 }
                 const grh::ir::ValueId dpiUpdateCond = operands[0];
                 bool updateCondOk = true;
-                if (sinkOp.kind() == grh::ir::OperationKind::kRegister ||
-                    sinkOp.kind() == grh::ir::OperationKind::kLatch ||
+                if (sinkOp.kind() == grh::ir::OperationKind::kRegisterWritePort ||
+                    sinkOp.kind() == grh::ir::OperationKind::kLatchWritePort ||
                     sinkOp.kind() == grh::ir::OperationKind::kMemoryWritePort)
                 {
                     const auto &sinkOperands = sinkOp.operands();
@@ -2875,7 +3121,7 @@ namespace grh::emit
                 }
 
                 bool eventOk = true;
-                if (sinkOp.kind() == grh::ir::OperationKind::kRegister ||
+                if (sinkOp.kind() == grh::ir::OperationKind::kRegisterWritePort ||
                     sinkOp.kind() == grh::ir::OperationKind::kMemoryWritePort)
                 {
                     auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
@@ -2888,7 +3134,7 @@ namespace grh::emit
                     auto dpiKey = computeEventKey(op, eventStart, opContext);
                     auto sinkKey = computeEventKey(
                         sinkOp,
-                        sinkOp.kind() == grh::ir::OperationKind::kRegister ? 2U : 4U,
+                        sinkOp.kind() == grh::ir::OperationKind::kRegisterWritePort ? 3U : 4U,
                         std::string(sinkOp.symbolText()));
                     if (!dpiKey || !sinkKey || !sameSeqKey(*dpiKey, *sinkKey))
                     {
@@ -2897,7 +3143,7 @@ namespace grh::emit
                         eventOk = false;
                     }
                 }
-                else if (sinkOp.kind() == grh::ir::OperationKind::kLatch ||
+                else if (sinkOp.kind() == grh::ir::OperationKind::kLatchWritePort ||
                          sinkOp.kind() == grh::ir::OperationKind::kMemoryReadPort)
                 {
                     auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
@@ -2908,6 +3154,10 @@ namespace grh::emit
                     }
                 }
                 if (!eventOk)
+                {
+                    continue;
+                }
+                if (!canInlineDpiCall(op))
                 {
                     continue;
                 }
@@ -3801,6 +4051,202 @@ namespace grh::emit
                 return candidate;
             };
 
+            std::unordered_set<grh::ir::ValueId, grh::ir::ValueIdHash> elidedConstValues;
+            auto maskAllOnesLiteral = [&](std::string_view literal, int64_t width) -> bool
+            {
+                auto bits = parseConstMaskBits(literal, width);
+                if (!bits || bits->empty())
+                {
+                    return false;
+                }
+                for (uint8_t bit : *bits)
+                {
+                    if (bit != 1)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            auto registerWidthForSymbol = [&](const std::string &symbol,
+                                              grh::ir::ValueId nextValue) -> int64_t
+            {
+                int64_t width = graph->getValue(nextValue).width();
+                const grh::ir::OperationId regOpId = graph->findOperation(symbol);
+                if (regOpId.valid())
+                {
+                    const grh::ir::Operation regOp = graph->getOperation(regOpId);
+                    if (regOp.kind() == grh::ir::OperationKind::kRegister)
+                    {
+                        width = getAttribute<int64_t>(*graph, regOp, "width").value_or(width);
+                    }
+                }
+                if (width <= 0)
+                {
+                    width = 1;
+                }
+                return width;
+            };
+            auto latchWidthForSymbol = [&](const std::string &symbol,
+                                           grh::ir::ValueId nextValue) -> int64_t
+            {
+                int64_t width = graph->getValue(nextValue).width();
+                const grh::ir::OperationId latchOpId = graph->findOperation(symbol);
+                if (latchOpId.valid())
+                {
+                    const grh::ir::Operation latchOp = graph->getOperation(latchOpId);
+                    if (latchOp.kind() == grh::ir::OperationKind::kLatch)
+                    {
+                        width = getAttribute<int64_t>(*graph, latchOp, "width").value_or(width);
+                    }
+                }
+                if (width <= 0)
+                {
+                    width = 1;
+                }
+                return width;
+            };
+            auto memoryWidthForSymbol = [&](const std::string &symbol) -> int64_t
+            {
+                int64_t width = 1;
+                const grh::ir::OperationId memOpId = graph->findOperation(symbol);
+                if (memOpId.valid())
+                {
+                    const grh::ir::Operation memOp = graph->getOperation(memOpId);
+                    width = getAttribute<int64_t>(*graph, memOp, "width").value_or(width);
+                }
+                if (width <= 0)
+                {
+                    width = 1;
+                }
+                return width;
+            };
+            for (const auto valueId : graph->values())
+            {
+                const grh::ir::Value value = graph->getValue(valueId);
+                const grh::ir::OperationId defOpId = value.definingOp();
+                if (!defOpId.valid())
+                {
+                    continue;
+                }
+                const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                if (defOp.kind() != grh::ir::OperationKind::kConstant)
+                {
+                    continue;
+                }
+                auto literalAttr = getAttribute<std::string>(*graph, defOp, "constValue");
+                if (!literalAttr)
+                {
+                    continue;
+                }
+                auto itUses = valueUseMap.find(valueId);
+                if (itUses == valueUseMap.end())
+                {
+                    continue;
+                }
+                bool allUsesAreFullMask = true;
+                for (const auto userOpId : itUses->second)
+                {
+                    if (!userOpId.valid())
+                    {
+                        continue;
+                    }
+                    const grh::ir::Operation userOp = graph->getOperation(userOpId);
+                    const auto &ops = userOp.operands();
+                    auto usedOnlyAt = [&](std::size_t index) -> bool
+                    {
+                        bool found = false;
+                        for (std::size_t i = 0; i < ops.size(); ++i)
+                        {
+                            if (ops[i] != valueId)
+                            {
+                                continue;
+                            }
+                            if (i != index)
+                            {
+                                return false;
+                            }
+                            found = true;
+                        }
+                        return found;
+                    };
+                    switch (userOp.kind())
+                    {
+                    case grh::ir::OperationKind::kRegisterWritePort:
+                    {
+                        if (ops.size() < 3 || !usedOnlyAt(2))
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        auto regSymbolAttr = getAttribute<std::string>(*graph, userOp, "regSymbol");
+                        if (!regSymbolAttr)
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        const int64_t width = registerWidthForSymbol(*regSymbolAttr, ops[1]);
+                        if (!maskAllOnesLiteral(*literalAttr, width))
+                        {
+                            allUsesAreFullMask = false;
+                        }
+                        break;
+                    }
+                    case grh::ir::OperationKind::kLatchWritePort:
+                    {
+                        if (ops.size() < 3 || !usedOnlyAt(2))
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        auto latchSymbolAttr = getAttribute<std::string>(*graph, userOp, "latchSymbol");
+                        if (!latchSymbolAttr)
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        const int64_t width = latchWidthForSymbol(*latchSymbolAttr, ops[1]);
+                        if (!maskAllOnesLiteral(*literalAttr, width))
+                        {
+                            allUsesAreFullMask = false;
+                        }
+                        break;
+                    }
+                    case grh::ir::OperationKind::kMemoryWritePort:
+                    {
+                        if (ops.size() < 4 || !usedOnlyAt(3))
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        auto memSymbolAttr = resolveMemorySymbol(userOp);
+                        if (!memSymbolAttr)
+                        {
+                            allUsesAreFullMask = false;
+                            break;
+                        }
+                        const int64_t width = memoryWidthForSymbol(*memSymbolAttr);
+                        if (!maskAllOnesLiteral(*literalAttr, width))
+                        {
+                            allUsesAreFullMask = false;
+                        }
+                        break;
+                    }
+                    default:
+                        allUsesAreFullMask = false;
+                        break;
+                    }
+                    if (!allUsesAreFullMask)
+                    {
+                        break;
+                    }
+                }
+                if (allUsesAreFullMask)
+                {
+                    elidedConstValues.insert(valueId);
+                }
+            }
+
             // -------------------------
             // Port bindings (handle ports mapped to internal nets with different names)
             // -------------------------
@@ -3818,13 +4264,17 @@ namespace grh::emit
 
             auto bindOutputPort = [&](const std::string &portName, grh::ir::ValueId valueId)
             {
-                const std::string valueSymbol = valueName(valueId);
-                if (portName == valueSymbol)
+                const std::string rhsExpr = valueExpr(valueId);
+                if (storageBackedPorts.find(portName) != storageBackedPorts.end())
+                {
+                    return;
+                }
+                if (rhsExpr.empty() || portName == rhsExpr)
                 {
                     return;
                 }
                 portBindingStmts.emplace_back(
-                    "assign " + portName + " = " + valueSymbol + ";", grh::ir::OperationId::invalid());
+                    "assign " + portName + " = " + rhsExpr + ";", grh::ir::OperationId::invalid());
             };
 
             for (const auto &port : graph->inputPorts())
@@ -4025,13 +4475,23 @@ namespace grh::emit
                         reportError("kConstant missing result", opContext);
                         break;
                     }
-                    auto constValue = getAttribute<std::string>(*graph, op, "constValue");
-                    if (!constValue)
+                    if (elidedConstValues.find(results[0]) != elidedConstValues.end())
+                    {
+                        break;
+                    }
+                    const grh::ir::Value constVal = graph->getValue(results[0]);
+                    if (!constVal.isInput() && !constVal.isOutput() && !constVal.isInout() &&
+                        constVal.users().empty())
+                    {
+                        break;
+                    }
+                    auto constAttr = getAttribute<std::string>(*graph, op, "constValue");
+                    if (!constAttr)
                     {
                         reportError("kConstant missing constValue attribute", opContext);
                         break;
                     }
-                    addValueAssign(results[0], formatConstLiteral(results[0], *constValue), opId);
+                    addValueAssign(results[0], formatConstLiteral(results[0], *constAttr), opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -4271,6 +4731,30 @@ namespace grh::emit
                         reportError("kConcat missing operands or results", opContext);
                         break;
                     }
+                    const int64_t resultWidth = graph->getValue(results[0]).width();
+                    int64_t concatWidth = 0;
+                    bool concatWidthKnown = true;
+                    for (const auto operand : operands)
+                    {
+                        if (!operand.valid())
+                        {
+                            concatWidthKnown = false;
+                            break;
+                        }
+                        const grh::ir::Value opVal = graph->getValue(operand);
+                        if (opVal.type() != grh::ir::ValueType::Logic)
+                        {
+                            concatWidthKnown = false;
+                            break;
+                        }
+                        const int64_t w = opVal.width();
+                        if (w <= 0)
+                        {
+                            concatWidthKnown = false;
+                            break;
+                        }
+                        concatWidth += w;
+                    }
                     if (operands.size() == 1)
                     {
                         addValueAssign(results[0], valueExpr(operands[0]), opId);
@@ -4307,7 +4791,22 @@ namespace grh::emit
                         }
                         expr << "  }";
                     }
-                    addValueAssign(results[0], expr.str(), opId);
+                    std::string exprText = expr.str();
+                    if (concatWidthKnown && resultWidth > 0 && concatWidth > resultWidth)
+                    {
+                        const std::string tempName = makeConcatTempName();
+                        wireDecls.emplace(tempName, NetDecl{concatWidth, false, std::nullopt});
+                        addAssign("assign " + tempName + " = " + exprText + ";", opId);
+                        if (resultWidth == 1)
+                        {
+                            exprText = tempName + "[0]";
+                        }
+                        else
+                        {
+                            exprText = tempName + "[" + std::to_string(resultWidth - 1) + ":0]";
+                        }
+                    }
+                    addValueAssign(results[0], exprText, opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -4326,7 +4825,32 @@ namespace grh::emit
                     }
                     std::ostringstream expr;
                     expr << "{" << *rep << "{" << baseExpr.concatOperandExpr(operands[0]) << "}}";
-                    addValueAssign(results[0], expr.str(), opId);
+                    std::string exprText = expr.str();
+                    const int64_t resultWidth = graph->getValue(results[0]).width();
+                    const grh::ir::Value opVal = graph->getValue(operands[0]);
+                    if (resultWidth > 0 && opVal.type() == grh::ir::ValueType::Logic)
+                    {
+                        const int64_t opWidth = opVal.width();
+                        if (opWidth > 0)
+                        {
+                            const int64_t repWidth = opWidth * (*rep);
+                            if (repWidth > resultWidth)
+                            {
+                                const std::string tempName = makeConcatTempName();
+                                wireDecls.emplace(tempName, NetDecl{repWidth, false, std::nullopt});
+                                addAssign("assign " + tempName + " = " + exprText + ";", opId);
+                                if (resultWidth == 1)
+                                {
+                                    exprText = tempName + "[0]";
+                                }
+                                else
+                                {
+                                    exprText = tempName + "[" + std::to_string(resultWidth - 1) + ":0]";
+                                }
+                            }
+                        }
+                    }
+                    addValueAssign(results[0], exprText, opId);
                     ensureWireDecl(results[0]);
                     break;
                 }
@@ -4385,6 +4909,14 @@ namespace grh::emit
                         break;
                     }
                     const int64_t operandWidth = graph->getValue(operands[0]).width();
+                    auto indexExpr = [&](grh::ir::ValueId indexId) -> std::string
+                    {
+                        if (auto literal = inlineConstExprFor(indexId))
+                        {
+                            return *literal;
+                        }
+                        return baseExpr.clampIndexExpr(indexId, operandWidth);
+                    };
                     std::ostringstream expr;
                     if (operandWidth == 1)
                     {
@@ -4397,12 +4929,12 @@ namespace grh::emit
                     else if (*width == 1)
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << baseExpr.clampIndexExpr(operands[1], operandWidth) << "]";
+                             << indexExpr(operands[1]) << "]";
                     }
                     else
                     {
                         expr << parenIfNeeded(valueExpr(operands[0])) << "["
-                             << baseExpr.clampIndexExpr(operands[1], operandWidth) << " +: " << *width << "]";
+                             << indexExpr(operands[1]) << " +: " << *width << "]";
                     }
                     addValueAssign(results[0], expr.str(), opId);
                     ensureWireDecl(results[0]);
@@ -4422,6 +4954,14 @@ namespace grh::emit
                         break;
                     }
                     const int64_t operandWidth = graph->getValue(operands[0]).width();
+                    auto indexExpr = [&](grh::ir::ValueId indexId) -> std::string
+                    {
+                        if (auto literal = inlineConstExprFor(indexId))
+                        {
+                            return *literal;
+                        }
+                        return valueExpr(indexId);
+                    };
                     std::ostringstream expr;
                     if (*width == 1 && operandWidth == 1)
                     {
@@ -4432,11 +4972,11 @@ namespace grh::emit
                         expr << parenIfNeeded(valueExpr(operands[0])) << "[";
                         if (*width == 1)
                         {
-                            expr << parenIfNeeded(valueExpr(operands[1]));
+                            expr << parenIfNeeded(indexExpr(operands[1]));
                         }
                         else
                         {
-                            expr << parenIfNeeded(valueExpr(operands[1])) << " * " << *width << " +: " << *width;
+                            expr << parenIfNeeded(indexExpr(operands[1])) << " * " << *width << " +: " << *width;
                         }
                         expr << "]";
                     }
@@ -4444,149 +4984,54 @@ namespace grh::emit
                     ensureWireDecl(results[0]);
                     break;
                 }
-                case grh::ir::OperationKind::kLatch:
-                {
-                    if (operands.size() < 2 || results.empty())
-                    {
-                        reportError("kLatch missing operands or results", opContext);
-                        break;
-                    }
-                    const grh::ir::ValueId updateCond = operands[0];
-                    const grh::ir::ValueId nextValue = operands[1];
-                    if (!updateCond.valid() || !nextValue.valid())
-                    {
-                        reportError("kLatch missing updateCond/nextValue operands", opContext);
-                        break;
-                    }
-                    if (graph->getValue(updateCond).width() != 1)
-                    {
-                        reportError("kLatch updateCond must be 1 bit", opContext);
-                        break;
-                    }
-
-                    const grh::ir::ValueId q = results[0];
-                    const std::string &valueSym = valueName(q);
-                    const std::string &regName = !valueSym.empty() ? valueSym : opContext;
-                    const grh::ir::Value dValue = graph->getValue(nextValue);
-                    if (graph->getValue(q).width() != dValue.width())
-                    {
-                        reportError("kLatch data/output width mismatch", opContext);
-                        break;
-                    }
-                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), dValue.type(),
-                                  op.srcLoc());
-                    const bool directDrive = valueName(q) == regName;
-                    if (directDrive)
-                    {
-                        markPortAsRegIfNeeded(q);
-                    }
-                    else
-                    {
-                        ensureWireDecl(q);
-                        addValueAssign(q, regName, opId);
-                    }
-
-                    std::ostringstream block;
-                    std::string updateExpr;
-                    std::string nextExpr;
-                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
-                    {
-                        withDpiInlineSink(opId, [&]() {
-                            updateExpr = valueExprSeq(updateCond);
-                            nextExpr = valueExprSeq(nextValue);
-                        });
-                    }
-                    else
-                    {
-                        updateExpr = valueExprSeq(updateCond);
-                        nextExpr = valueExprSeq(nextValue);
-                    }
-                    if (isAlwaysTrue(updateCond))
-                    {
-                        appendIndented(block, 1, "always @* begin");
-                        appendIndented(block, 2, regName + " = " + nextExpr + ";");
-                        appendIndented(block, 1, "end");
-                    }
-                    else
-                    {
-                        std::ostringstream stmt;
-                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
-                        appendIndented(stmt, 3, regName + " = " + nextExpr + ";");
-                        appendIndented(stmt, 2, "end");
-                        block << "  always_latch begin\n";
-                        block << stmt.str();
-                        block << "  end";
-                    }
-                    addLatchBlock(block.str(), opId);
-                    break;
-                }
                 case grh::ir::OperationKind::kRegister:
                 {
-                    if (operands.size() < 3 || results.empty())
+                    if (!operands.empty() || !results.empty())
                     {
-                        reportError("kRegister missing operands or results", opContext);
+                        reportError("kRegister should not have operands or results", opContext);
                         break;
                     }
-
-                    const grh::ir::ValueId updateCond = operands[0];
-                    const grh::ir::ValueId nextValue = operands[1];
-                    if (!updateCond.valid() || !nextValue.valid())
+                    auto widthAttr = getAttribute<int64_t>(*graph, op, "width");
+                    auto isSignedAttr = getAttribute<bool>(*graph, op, "isSigned");
+                    if (!widthAttr || !isSignedAttr)
                     {
-                        reportError("kRegister missing updateCond/nextValue operands", opContext);
+                        reportError("kRegister missing width/isSigned", opContext);
                         break;
                     }
-                    if (graph->getValue(updateCond).width() != 1)
+                    if (opContext.empty())
                     {
-                        reportError("kRegister updateCond must be 1 bit", opContext);
+                        reportError("kRegister missing symbol", opContext);
                         break;
                     }
-
-                    auto seqKey = buildEventKey(op, 2);
-                    if (!seqKey)
+                    int64_t width = *widthAttr;
+                    if (width <= 0)
                     {
-                        break;
+                        reportError("kRegister width must be > 0", opContext);
+                        width = 1;
+                    }
+                    if (storageBackedPorts.find(opContext) == storageBackedPorts.end())
+                    {
+                        ensureRegDecl(opContext, width, *isSignedAttr, grh::ir::ValueType::Logic,
+                                      op.srcLoc());
                     }
 
-                    const grh::ir::ValueId q = results[0];
-                    const std::string &valueSym = valueName(q);
-                    const std::string &regName = !valueSym.empty() ? valueSym : opContext;
-                    const grh::ir::Value dValue = graph->getValue(nextValue);
-                    if (graph->getValue(q).width() != dValue.width())
-                    {
-                        reportError("kRegister data/output width mismatch", opContext);
-                        break;
-                    }
-
-                    ensureRegDecl(regName, dValue.width(), dValue.isSigned(), dValue.type(),
-                                  op.srcLoc());
-                    const bool directDrive = valueName(q) == regName;
-                    if (directDrive)
-                    {
-                        markPortAsRegIfNeeded(q);
-                    }
-                    else
-                    {
-                        ensureWireDecl(q);
-                        addValueAssign(q, regName, opId);
-                    }
-
-                    // Handle register initialization
                     auto initKinds = getAttribute<std::vector<std::string>>(*graph, op, "initKind");
                     auto initValues = getAttribute<std::vector<std::string>>(*graph, op, "initValue");
-                    if (initKinds && initValues && !initKinds->empty())
+                    if (initKinds || initValues)
                     {
+                        if (!initKinds || !initValues || initKinds->size() != initValues->size())
+                        {
+                            reportError("kRegister initKind/initValue size mismatch", opContext);
+                            break;
+                        }
                         for (std::size_t i = 0; i < initKinds->size(); ++i)
                         {
-                            const std::string& kind = (*initKinds)[i];
-                            const std::string& value = (*initValues)[i];
+                            const std::string &kind = (*initKinds)[i];
+                            const std::string &value = (*initValues)[i];
                             std::string stmt;
-                            if (kind == "literal")
+                            if (kind == "literal" || kind == "random")
                             {
-                                stmt = regName + " = " + value + ";";
-                            }
-                            else if (kind == "random")
-                            {
-                                stmt = regName + " = " + value + ";";
+                                stmt = opContext + " = " + value + ";";
                             }
                             if (!stmt.empty())
                             {
@@ -4596,33 +5041,466 @@ namespace grh::emit
                             }
                         }
                     }
+                    break;
+                }
+                case grh::ir::OperationKind::kLatch:
+                {
+                    if (!operands.empty() || !results.empty())
+                    {
+                        reportError("kLatch should not have operands or results", opContext);
+                        break;
+                    }
+                    auto widthAttr = getAttribute<int64_t>(*graph, op, "width");
+                    auto isSignedAttr = getAttribute<bool>(*graph, op, "isSigned");
+                    if (!widthAttr || !isSignedAttr)
+                    {
+                        reportError("kLatch missing width/isSigned", opContext);
+                        break;
+                    }
+                    if (opContext.empty())
+                    {
+                        reportError("kLatch missing symbol", opContext);
+                        break;
+                    }
+                    int64_t width = *widthAttr;
+                    if (width <= 0)
+                    {
+                        reportError("kLatch width must be > 0", opContext);
+                        width = 1;
+                    }
+                    if (storageBackedPorts.find(opContext) == storageBackedPorts.end())
+                    {
+                        ensureRegDecl(opContext, width, *isSignedAttr, grh::ir::ValueType::Logic,
+                                      op.srcLoc());
+                    }
+                    break;
+                }
+                case grh::ir::OperationKind::kRegisterReadPort:
+                {
+                    if (!operands.empty() || results.empty())
+                    {
+                        reportError("kRegisterReadPort missing results", opContext);
+                        break;
+                    }
+                    if (elidedReadPortValues.find(results[0]) != elidedReadPortValues.end())
+                    {
+                        break;
+                    }
+                    auto regSymbolAttr = getAttribute<std::string>(*graph, op, "regSymbol");
+                    if (!regSymbolAttr)
+                    {
+                        reportError("kRegisterReadPort missing regSymbol", opContext);
+                        break;
+                    }
+                    const std::string &regName = *regSymbolAttr;
+                    if (valueName(results[0]) == regName)
+                    {
+                        markPortAsRegIfNeeded(results[0]);
+                        break;
+                    }
+                    addAssign("assign " + valueName(results[0]) + " = " + regName + ";", opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
+                case grh::ir::OperationKind::kLatchReadPort:
+                {
+                    if (!operands.empty() || results.empty())
+                    {
+                        reportError("kLatchReadPort missing results", opContext);
+                        break;
+                    }
+                    if (elidedReadPortValues.find(results[0]) != elidedReadPortValues.end())
+                    {
+                        break;
+                    }
+                    auto latchSymbolAttr = getAttribute<std::string>(*graph, op, "latchSymbol");
+                    if (!latchSymbolAttr)
+                    {
+                        reportError("kLatchReadPort missing latchSymbol", opContext);
+                        break;
+                    }
+                    const std::string &latchName = *latchSymbolAttr;
+                    if (valueName(results[0]) == latchName)
+                    {
+                        markPortAsRegIfNeeded(results[0]);
+                        break;
+                    }
+                    addAssign("assign " + valueName(results[0]) + " = " + latchName + ";", opId);
+                    ensureWireDecl(results[0]);
+                    break;
+                }
+                case grh::ir::OperationKind::kRegisterWritePort:
+                {
+                    if (operands.size() < 3)
+                    {
+                        reportError("kRegisterWritePort missing operands", opContext);
+                        break;
+                    }
+                    const grh::ir::ValueId updateCond = operands[0];
+                    const grh::ir::ValueId nextValue = operands[1];
+                    const grh::ir::ValueId mask = operands[2];
+                    if (!updateCond.valid() || !nextValue.valid() || !mask.valid())
+                    {
+                        reportError("kRegisterWritePort missing operands", opContext);
+                        break;
+                    }
+                    if (graph->getValue(updateCond).width() != 1)
+                    {
+                        reportError("kRegisterWritePort updateCond must be 1 bit", opContext);
+                        break;
+                    }
+                    auto regSymbolAttr = getAttribute<std::string>(*graph, op, "regSymbol");
+                    if (!regSymbolAttr)
+                    {
+                        reportError("kRegisterWritePort missing regSymbol", opContext);
+                        break;
+                    }
+                    const std::string &regName = *regSymbolAttr;
+                    auto seqKey = buildEventKey(op, 3);
+                    if (!seqKey)
+                    {
+                        break;
+                    }
 
-                    std::ostringstream stmt;
+                    int64_t regWidth = graph->getValue(nextValue).width();
+                    const grh::ir::OperationId regOpId = graph->findOperation(*regSymbolAttr);
+                    if (regOpId.valid())
+                    {
+                        const grh::ir::Operation regOp = graph->getOperation(regOpId);
+                        if (regOp.kind() == grh::ir::OperationKind::kRegister)
+                        {
+                            regWidth = getAttribute<int64_t>(*graph, regOp, "width").value_or(regWidth);
+                        }
+                    }
+                    if (regWidth <= 0)
+                    {
+                        regWidth = 1;
+                    }
+
                     std::string updateExpr;
                     std::string nextExpr;
+                    std::string maskExpr;
+                    std::string nextExprFull;
+                    auto extendSeqOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+                    {
+                        ExprTools seqExpr = baseExpr;
+                        seqExpr.valueExpr = valueExprSeq;
+                        return seqExpr.extendOperand(valueId, targetWidth);
+                    };
                     if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
                     {
                         withDpiInlineSink(opId, [&]() {
                             updateExpr = valueExprSeq(updateCond);
                             nextExpr = valueExprSeq(nextValue);
+                            maskExpr = valueExprSeq(mask);
+                            nextExprFull = extendSeqOperand(nextValue, regWidth);
                         });
                     }
                     else
                     {
                         updateExpr = valueExprSeq(updateCond);
                         nextExpr = valueExprSeq(nextValue);
+                        maskExpr = valueExprSeq(mask);
+                        nextExprFull = extendSeqOperand(nextValue, regWidth);
                     }
-                    if (isConstOne(updateCond))
+                    if (auto inlineUpdate = inlineConstExprFor(updateCond))
                     {
-                        appendIndented(stmt, 2, regName + " <= " + nextExpr + ";");
+                        updateExpr = *inlineUpdate;
                     }
-                    else
+                    if (nextExprFull.empty())
+                    {
+                        nextExprFull = extendSeqOperand(nextValue, regWidth);
+                    }
+
+                    const bool guardUpdate = !isConstOne(updateCond);
+                    const int baseIndent = guardUpdate ? 3 : 2;
+                    std::optional<std::vector<uint8_t>> maskBits;
+                    if (auto maskLiteral = constLiteralFor(mask))
+                    {
+                        maskBits = parseConstMaskBits(*maskLiteral, regWidth);
+                    }
+                    auto maskAll = [&](uint8_t value) -> bool
+                    {
+                        if (!maskBits)
+                        {
+                            return false;
+                        }
+                        for (uint8_t bit : *maskBits)
+                        {
+                            if (bit != value)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+                    const int64_t dataWidth = graph->getValue(nextValue).width();
+                    const bool maskAllOnes = maskBits ? maskAll(1) : false;
+                    if (dataWidth > 0 && regWidth > 0 && dataWidth != regWidth && !maskAllOnes)
+                    {
+                        reportWarning("kRegisterWritePort data width does not match register width", opContext);
+                    }
+                    std::ostringstream stmt;
+                    if (guardUpdate)
                     {
                         appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
-                        appendIndented(stmt, 3, regName + " <= " + nextExpr + ";");
+                    }
+                    if (maskBits)
+                    {
+                        const bool allZero = maskAll(0);
+                        const bool allOnes = maskAll(1);
+                        if (allZero)
+                        {
+                            break;
+                        }
+                        if (allOnes || regWidth <= 1)
+                        {
+                            appendIndented(stmt, baseIndent, regName + " <= " + nextExprFull + ";");
+                        }
+                        else
+                        {
+                            for (int64_t bit = 0; bit < regWidth; ++bit)
+                            {
+                                if ((*maskBits)[static_cast<std::size_t>(bit)] != 0)
+                                {
+                                    appendIndented(stmt, baseIndent,
+                                                   regName + "[" + std::to_string(bit) + "] <= " +
+                                                       nextExpr + "[" + std::to_string(bit) + "];");
+                                }
+                            }
+                        }
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                        addSequentialStmt(*seqKey, stmt.str(), opId);
+                        break;
+                    }
+                    if (regWidth <= 1)
+                    {
+                        appendIndented(stmt, baseIndent, "if (" + maskExpr + ") begin");
+                        appendIndented(stmt, baseIndent + 1, regName + " <= " + nextExprFull + ";");
+                        appendIndented(stmt, baseIndent, "end");
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                        addSequentialStmt(*seqKey, stmt.str(), opId);
+                        break;
+                    }
+                    appendIndented(stmt, baseIndent,
+                                   "if (" + maskExpr + " == {" + std::to_string(regWidth) + "{1'b1}}) begin");
+                    appendIndented(stmt, baseIndent + 1, regName + " <= " + nextExprFull + ";");
+                    appendIndented(stmt, baseIndent, "end else begin");
+                    appendIndented(stmt, baseIndent + 1, "integer i;");
+                    appendIndented(stmt, baseIndent + 1,
+                                   "for (i = 0; i < " + std::to_string(regWidth) + "; i = i + 1) begin");
+                    appendIndented(stmt, baseIndent + 2, "if (" + maskExpr + "[i]) begin");
+                    appendIndented(stmt, baseIndent + 3,
+                                   regName + "[i] <= " + nextExpr + "[i];");
+                    appendIndented(stmt, baseIndent + 2, "end");
+                    appendIndented(stmt, baseIndent + 1, "end");
+                    appendIndented(stmt, baseIndent, "end");
+                    if (guardUpdate)
+                    {
                         appendIndented(stmt, 2, "end");
                     }
                     addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
+                }
+                case grh::ir::OperationKind::kLatchWritePort:
+                {
+                    if (operands.size() < 3)
+                    {
+                        reportError("kLatchWritePort missing operands", opContext);
+                        break;
+                    }
+                    const grh::ir::ValueId updateCond = operands[0];
+                    const grh::ir::ValueId nextValue = operands[1];
+                    const grh::ir::ValueId mask = operands[2];
+                    if (!updateCond.valid() || !nextValue.valid() || !mask.valid())
+                    {
+                        reportError("kLatchWritePort missing operands", opContext);
+                        break;
+                    }
+                    if (graph->getValue(updateCond).width() != 1)
+                    {
+                        reportError("kLatchWritePort updateCond must be 1 bit", opContext);
+                        break;
+                    }
+                    auto latchSymbolAttr = getAttribute<std::string>(*graph, op, "latchSymbol");
+                    if (!latchSymbolAttr)
+                    {
+                        reportError("kLatchWritePort missing latchSymbol", opContext);
+                        break;
+                    }
+                    const std::string &latchName = *latchSymbolAttr;
+                    auto eventEdges = getAttribute<std::vector<std::string>>(*graph, op, "eventEdge");
+                    if (eventEdges && !eventEdges->empty())
+                    {
+                        reportError("kLatchWritePort must not have eventEdge", opContext);
+                        break;
+                    }
+
+                    int64_t latchWidth = graph->getValue(nextValue).width();
+                    const grh::ir::OperationId latchOpId = graph->findOperation(*latchSymbolAttr);
+                    if (latchOpId.valid())
+                    {
+                        const grh::ir::Operation latchOp = graph->getOperation(latchOpId);
+                        if (latchOp.kind() == grh::ir::OperationKind::kLatch)
+                        {
+                            latchWidth = getAttribute<int64_t>(*graph, latchOp, "width").value_or(latchWidth);
+                        }
+                    }
+                    if (latchWidth <= 0)
+                    {
+                        latchWidth = 1;
+                    }
+
+                    std::string updateExpr;
+                    std::string nextExpr;
+                    std::string maskExpr;
+                    std::string nextExprFull;
+                    auto extendSeqOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+                    {
+                        ExprTools seqExpr = baseExpr;
+                        seqExpr.valueExpr = valueExprSeq;
+                        return seqExpr.extendOperand(valueId, targetWidth);
+                    };
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
+                    {
+                        withDpiInlineSink(opId, [&]() {
+                            updateExpr = valueExprSeq(updateCond);
+                            nextExpr = valueExprSeq(nextValue);
+                            maskExpr = valueExprSeq(mask);
+                            nextExprFull = extendSeqOperand(nextValue, latchWidth);
+                        });
+                    }
+                    else
+                    {
+                        updateExpr = valueExprSeq(updateCond);
+                        nextExpr = valueExprSeq(nextValue);
+                        maskExpr = valueExprSeq(mask);
+                        nextExprFull = extendSeqOperand(nextValue, latchWidth);
+                    }
+                    if (auto inlineUpdate = inlineConstExprFor(updateCond))
+                    {
+                        updateExpr = *inlineUpdate;
+                    }
+                    if (nextExprFull.empty())
+                    {
+                        nextExprFull = extendSeqOperand(nextValue, latchWidth);
+                    }
+
+                    const bool guardUpdate = !isAlwaysTrue(updateCond);
+                    const int baseIndent = guardUpdate ? 3 : 2;
+                    std::optional<std::vector<uint8_t>> maskBits;
+                    if (auto maskLiteral = constLiteralFor(mask))
+                    {
+                        maskBits = parseConstMaskBits(*maskLiteral, latchWidth);
+                    }
+                    auto maskAll = [&](uint8_t value) -> bool
+                    {
+                        if (!maskBits)
+                        {
+                            return false;
+                        }
+                        for (uint8_t bit : *maskBits)
+                        {
+                            if (bit != value)
+                            {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+                    const int64_t dataWidth = graph->getValue(nextValue).width();
+                    const bool maskAllOnes = maskBits ? maskAll(1) : false;
+                    if (dataWidth > 0 && latchWidth > 0 && dataWidth != latchWidth && !maskAllOnes)
+                    {
+                        reportWarning("kLatchWritePort data width does not match latch width", opContext);
+                    }
+                    if (!guardUpdate && maskBits && maskAllOnes)
+                    {
+                        std::ostringstream combStmt;
+                        appendIndented(combStmt, 2, latchName + " = " + nextExprFull + ";");
+                        addSimpleStmt("always_comb", combStmt.str(), opId);
+                        break;
+                    }
+
+                    std::ostringstream stmt;
+                    if (guardUpdate)
+                    {
+                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
+                    }
+                    if (maskBits)
+                    {
+                        const bool allZero = maskAll(0);
+                        const bool allOnes = maskAll(1);
+                        if (allZero)
+                        {
+                            break;
+                        }
+                        if (allOnes || latchWidth <= 1)
+                        {
+                            appendIndented(stmt, baseIndent, latchName + " = " + nextExprFull + ";");
+                        }
+                        else
+                        {
+                            for (int64_t bit = 0; bit < latchWidth; ++bit)
+                            {
+                                if ((*maskBits)[static_cast<std::size_t>(bit)] != 0)
+                                {
+                                    appendIndented(stmt, baseIndent,
+                                                   latchName + "[" + std::to_string(bit) + "] = " +
+                                                       nextExpr + "[" + std::to_string(bit) + "];");
+                                }
+                            }
+                        }
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                    }
+                    else if (latchWidth <= 1)
+                    {
+                        appendIndented(stmt, baseIndent, "if (" + maskExpr + ") begin");
+                        appendIndented(stmt, baseIndent + 1, latchName + " = " + nextExprFull + ";");
+                        appendIndented(stmt, baseIndent, "end");
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                    }
+                    else
+                    {
+                        appendIndented(stmt, baseIndent,
+                                       "if (" + maskExpr + " == {" + std::to_string(latchWidth) + "{1'b1}}) begin");
+                        appendIndented(stmt, baseIndent + 1, latchName + " = " + nextExprFull + ";");
+                        appendIndented(stmt, baseIndent, "end else begin");
+                        appendIndented(stmt, baseIndent + 1, "integer i;");
+                        appendIndented(stmt, baseIndent + 1,
+                                       "for (i = 0; i < " + std::to_string(latchWidth) + "; i = i + 1) begin");
+                        appendIndented(stmt, baseIndent + 2, "if (" + maskExpr + "[i]) begin");
+                        appendIndented(stmt, baseIndent + 3,
+                                       latchName + "[i] = " + nextExpr + "[i];");
+                        appendIndented(stmt, baseIndent + 2, "end");
+                        appendIndented(stmt, baseIndent + 1, "end");
+                        appendIndented(stmt, baseIndent, "end");
+                        if (guardUpdate)
+                        {
+                            appendIndented(stmt, 2, "end");
+                        }
+                    }
+
+                    if (!stmt.str().empty())
+                    {
+                        std::ostringstream block;
+                        block << "  always_latch begin\n";
+                        block << stmt.str();
+                        block << "  end";
+                        addLatchBlock(block.str(), opId);
+                    }
                     break;
                 }
                 case grh::ir::OperationKind::kMemory:
@@ -4807,6 +5685,13 @@ namespace grh::emit
                     std::string addrExpr;
                     std::string dataExpr;
                     std::string maskExpr;
+                    std::string dataExprFull;
+                    auto extendSeqOperand = [&](grh::ir::ValueId valueId, int64_t targetWidth) -> std::string
+                    {
+                        ExprTools seqExpr = baseExpr;
+                        seqExpr.valueExpr = valueExprSeq;
+                        return seqExpr.extendOperand(valueId, targetWidth);
+                    };
                     if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
                     {
                         withDpiInlineSink(opId, [&]() {
@@ -4814,6 +5699,7 @@ namespace grh::emit
                             addrExpr = valueExprSeq(addr);
                             dataExpr = valueExprSeq(data);
                             maskExpr = valueExprSeq(mask);
+                            dataExprFull = extendSeqOperand(data, memWidth);
                         });
                     }
                     else
@@ -4822,6 +5708,15 @@ namespace grh::emit
                         addrExpr = valueExprSeq(addr);
                         dataExpr = valueExprSeq(data);
                         maskExpr = valueExprSeq(mask);
+                        dataExprFull = extendSeqOperand(data, memWidth);
+                    }
+                    if (auto inlineUpdate = inlineConstExprFor(updateCond))
+                    {
+                        updateExpr = *inlineUpdate;
+                    }
+                    if (dataExprFull.empty())
+                    {
+                        dataExprFull = extendSeqOperand(data, memWidth);
                     }
 
                     const bool guardUpdate = !isConstOne(updateCond);
@@ -4867,7 +5762,7 @@ namespace grh::emit
                         }
                         if (allOnes || memWidth <= 1)
                         {
-                            appendIndented(stmt, baseIndent, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
+                            appendIndented(stmt, baseIndent, memSymbol + "[" + addrExpr + "] <= " + dataExprFull + ";");
                         }
                         else
                         {
@@ -4891,7 +5786,7 @@ namespace grh::emit
                     if (memWidth <= 1)
                     {
                         appendIndented(stmt, baseIndent, "if (" + maskExpr + ") begin");
-                        appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
+                        appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExprFull + ";");
                         appendIndented(stmt, baseIndent, "end");
                         if (guardUpdate)
                         {
@@ -4901,7 +5796,7 @@ namespace grh::emit
                         break;
                     }
                     appendIndented(stmt, baseIndent, "if (" + maskExpr + " == {" + std::to_string(memWidth) + "{1'b1}}) begin");
-                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExpr + ";");
+                    appendIndented(stmt, baseIndent + 1, memSymbol + "[" + addrExpr + "] <= " + dataExprFull + ";");
                     appendIndented(stmt, baseIndent, "end else begin");
                     appendIndented(stmt, baseIndent + 1, "integer i;");
                     appendIndented(stmt, baseIndent + 1, "for (i = 0; i < " + std::to_string(memWidth) + "; i = i + 1) begin");
@@ -5467,6 +6362,19 @@ namespace grh::emit
                 if (val.isInput() || val.isOutput() || val.isInout())
                 {
                     continue;
+                }
+                if (elidedReadPortValues.find(valueId) != elidedReadPortValues.end())
+                {
+                    continue;
+                }
+                const grh::ir::OperationId defOpId = val.definingOp();
+                if (defOpId.valid())
+                {
+                    const grh::ir::Operation defOp = graph->getOperation(defOpId);
+                    if (defOp.kind() == grh::ir::OperationKind::kConstant)
+                    {
+                        continue;
+                    }
                 }
                 ensureWireDecl(valueId);
             }

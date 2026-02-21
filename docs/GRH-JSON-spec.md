@@ -30,15 +30,65 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
   - `attrs`: 可选属性对象，键为属性名，值为属性负载。
   - `loc`: 可选，源码位置 `{ file, line, col, endLine, endCol }`。
 
+## 存储单元 Port 操作
+- 存储声明类操作使用 `sym` 作为声明名，`attrs` 仅承载类型信息。
+- `kRegister`
+  - `in`: 为空
+  - `out`: 为空
+  - `attrs.width`: int
+  - `attrs.isSigned`: bool
+- `kRegisterReadPort`
+  - `in`: 为空
+  - `out`: 单个 result（读值）
+  - `attrs.regSymbol`: string
+- `kRegisterWritePort`
+  - `in`: `[updateCond, nextValue, mask, event0, event1, ...]`
+  - `out`: 为空
+  - `attrs.regSymbol`: string
+  - `attrs.eventEdge`: string[]
+- `kLatch`
+  - `in`: 为空
+  - `out`: 为空
+  - `attrs.width`: int
+  - `attrs.isSigned`: bool
+- `kLatchReadPort`
+  - `in`: 为空
+  - `out`: 单个 result（读值）
+  - `attrs.latchSymbol`: string
+- `kLatchWritePort`
+  - `in`: `[updateCond, nextValue, mask]`
+  - `out`: 为空
+  - `attrs.latchSymbol`: string
+- `kMemory`
+  - `in`: 为空
+  - `out`: 为空
+  - `attrs.width`: int
+  - `attrs.row`: int
+  - `attrs.isSigned`: bool
+- `kMemoryReadPort`
+  - `in`: `[addr]`
+  - `out`: 单个 result（读值）
+  - `attrs.memSymbol`: string
+- `kMemoryWritePort`
+  - `in`: `[updateCond, addr, data, mask, event0, event1, ...]`
+  - `out`: 为空
+  - `attrs.memSymbol`: string
+  - `attrs.eventEdge`: string[]
+
 ## XMR 操作
 - `kXMRRead`
   - `in`: 为空
   - `out`: 单个 result
   - `attrs.xmrPath`: string，层次路径
 - `kXMRWrite`
-  - `in`: 单个 operand（写入值）
+  - `in`：
+    - 非存储目标：`[data]`
+    - `kRegister`：`[updateCond, nextValue, mask, event0, event1, ...]`
+    - `kLatch`：`[updateCond, nextValue, mask]`
+    - `kMemory`：`[updateCond, addr, data, mask, event0, event1, ...]`
   - `out`: 为空
   - `attrs.xmrPath`: string，层次路径
+  - `attrs.eventEdge`: string[]，仅 `kRegister/kMemory` 目标必需（长度需匹配事件 operand 数）
 
 说明：`kXMRRead/kXMRWrite` 是中间表示，必须在 emit 之前被 resolve pass 展开，
 JSON 中若仍保留该 op，表示流程未完成。

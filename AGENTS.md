@@ -39,3 +39,9 @@
 - Commits follow conventional prefixes (`feat`, `fix`, `test`, `docs`, `chore`, `bump`); keep scopes brief (e.g., `feat: optimize slice emit`).
 - Keep changes atomic and include updated fixtures/docs when behavior shifts; run `ctest` and relevant `make run_hdlbits_test` targets before pushing.
 - PRs should explain intent, list tests executed, and link related issues; include CLI output snippets or artifact notes when helpful for reviewers.
+
+## AI Agent Notifications
+- When completing a significant milestone or reaching a point that requires user interaction, send a notification using the notification tool.
+- Use the MCP tool `wechat_work_notify` (server in `tools/mcp-notify-server.py`, configured via `.codex/config.toml`) to send a WeChat Work notification.
+- The tool reads the webhook URL from the `WX_WEBHOOK_URL` environment variable (already configured in the environment), unless overridden per call.
+- **Message content**: Use the same summary text already reported to the user in CLI (keep it concise).
