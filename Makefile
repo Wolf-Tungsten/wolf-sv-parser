@@ -150,8 +150,8 @@ XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D "$(d)")
 XS_WOLF_DEFINE_FLAGS_LOG := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
 
 .PHONY: all build check-id run_hdlbits_test run_all_hdlbits_tests \
-	run_c910_test xs-rtl xs-wolf-filelist xs-wolf-emit xs-ref-emu xs-wolf-emu \
-	xs-diff-clean run_xs_ref_emu run_xs_wolf_emu run_xs_diff clean
+	run_c910_test xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu \
+	xs_diff_clean run_xs_ref_emu run_xs_wolf_emu run_xs_diff clean
 
 all: build
 
@@ -251,7 +251,7 @@ $(XS_SIM_TOP_V):
 		NUM_CORES=$(XS_NUM_CORES) \
 		RTL_SUFFIX=$(XS_RTL_SUFFIX)
 
-xs-rtl: $(XS_SIM_TOP_V)
+xs_rtl: $(XS_SIM_TOP_V)
 
 $(XS_WOLF_FILELIST_ABS): $(XS_SIM_TOP_V)
 	@mkdir -p "$(dir $@)"
@@ -260,13 +260,13 @@ $(XS_WOLF_FILELIST_ABS): $(XS_SIM_TOP_V)
 		find "$(XS_VSRC_DIR_ABS)" -type f -name "*.sv" -o -type f -name "*.v"; \
 	} | LC_ALL=C sort > "$@"
 
-xs-wolf-filelist: $(XS_WOLF_FILELIST_ABS)
+xs_wolf_filelist: $(XS_WOLF_FILELIST_ABS)
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 XS_WOLF_DEPS := $(WOLF_PARSER)
 endif
 
-xs-wolf-emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
+xs_wolf_emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
 	@mkdir -p "$(XS_WOLF_EMIT_DIR_ABS)"
 	@mkdir -p "$(XS_LOG_DIR_ABS)"
 	@$(eval RUN_ID := $(RUN_ID))
@@ -280,7 +280,7 @@ xs-wolf-emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
 		-f $(XS_WOLF_FILELIST_ABS) \
 		2>&1 | tee -a "$(BUILD_LOG_FILE)"
 
-xs-ref-emu: $(XS_SIM_TOP_V)
+xs_ref_emu: $(XS_SIM_TOP_V)
 	@echo "[RUN] Building XiangShan ref emu..."
 	@mkdir -p "$(XS_LOG_DIR_ABS)"
 	@$(eval RUN_ID := $(if $(RUN_ID),$(RUN_ID),$(shell date +%Y%m%d_%H%M%S)))
@@ -304,7 +304,7 @@ xs-ref-emu: $(XS_SIM_TOP_V)
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
 		2>&1 | tee "$(BUILD_LOG_FILE)"
 
-xs-wolf-emu: xs-wolf-emit
+xs_wolf_emu: xs_wolf_emit
 	@echo "[RUN] Building XiangShan wolf emu..."
 	@mkdir -p "$(XS_LOG_DIR_ABS)"
 	@$(eval RUN_ID := $(if $(RUN_ID),$(RUN_ID),$(shell date +%Y%m%d_%H%M%S)))
@@ -329,7 +329,7 @@ xs-wolf-emu: xs-wolf-emit
 		$(if $(filter 1,$(XS_WAVEFORM)),EMU_TRACE=fst,) \
 		2>&1 | tee -a "$(BUILD_LOG_FILE)"
 
-xs-diff-clean:
+xs_diff_clean:
 	rm -rf "$(XS_REF_BUILD_ABS)/verilator-compile" \
 		"$(XS_WOLF_BUILD_ABS)/verilator-compile" \
 		"$(XS_WOLF_EMIT_DIR_ABS)"
@@ -383,8 +383,8 @@ run_xs_wolf_emu:
 		2>&1 | tee "$$WOLF_LOG"
 
 run_xs_diff:
-	@$(MAKE) --no-print-directory xs-diff-clean
-	@$(MAKE) --no-print-directory xs-ref-emu xs-wolf-emu
+	@$(MAKE) --no-print-directory xs_diff_clean
+	@$(MAKE) --no-print-directory xs_ref_emu xs_wolf_emu
 	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
 	echo "[RUN] parallel xs diff"; \
 	{ start=$$(date +%s); \

@@ -1,15 +1,6 @@
 [submodule "external/slang"]
 	path = external/slang
 	url = https://github.com/MikePopoloski/slang
-[submodule "docs/reference/slang-netlist"]
-	path = docs/reference/slang-netlist
-	url = https://github.com/jameshanlon/slang-netlist
-[submodule "docs/reference/yosys"]
-	path = docs/reference/yosys
-	url = https://github.com/YosysHQ/yosys.git
-[submodule "docs/reference/verilator"]
-	path = docs/reference/verilator
-	url = https://github.com/verilator/verilator.git
 [submodule "tests/data/hdlbits"]
 	path = tests/data/hdlbits
 	url = git@github.com:Wolf-Tungsten/HDLBits-Verilog-Solutions.git
