@@ -29,8 +29,8 @@ The memory port lowerer treated any memory read used inside a sequential stateme
 ### Code changes
 
 - `src/convert.cpp`: convert memory reads used by memory writes to combinational reads, with a post-pass over `memoryWrites` to catch read-modify-write usage reliably.
-- `tests/data/convert/memory_ports.sv`: add `mem_read_seq_self_hold` fixture.
-- `tests/convert/test_convert_memory_port_lowerer.cpp`: add a unit test for the self-hold read classification.
+- `tests/ingest/data/memory_ports.sv`: add `mem_read_seq_self_hold` fixture.
+- `tests/ingest/test_ingest_memory_port_lowerer.cpp`: add a unit test for the self-hold read classification.
 
 ## Validation
 
@@ -41,7 +41,7 @@ The memory port lowerer treated any memory read used inside a sequential stateme
   - `make -C tests/data/openc910/bug_cases/case_031 run_c910_bug_case`
   - Coverage: 95.95% (71/74)
 - Targeted unit test:
-  - `ctest --test-dir build --output-on-failure -R convert-memory-port-lowerer`
+  - `ctest --test-dir build --output-on-failure -R ingest-memory-port-lowerer`
 
 ## Risks and follow-ups
 

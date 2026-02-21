@@ -1,5 +1,5 @@
 #include "grh.hpp"
-#include "pass/xmr_resolve.hpp"
+#include "transform/xmr_resolve.hpp"
 #include "transform.hpp"
 
 #include <iostream>
@@ -8,8 +8,7 @@
 #include <string_view>
 #include <vector>
 
-using namespace wolf_sv_parser;
-using namespace wolf_sv_parser::transform;
+using namespace wolvrix::lib::transform;
 
 namespace
 {
@@ -20,7 +19,7 @@ int fail(const std::string &message)
     return 1;
 }
 
-std::optional<std::string> getAttrString(const grh::ir::Operation &op,
+std::optional<std::string> getAttrString(const wolvrix::lib::grh::Operation &op,
                                          std::string_view key)
 {
     auto attr = op.attr(key);
@@ -35,7 +34,7 @@ std::optional<std::string> getAttrString(const grh::ir::Operation &op,
     return std::nullopt;
 }
 
-std::optional<std::vector<std::string>> getAttrStrings(const grh::ir::Operation &op,
+std::optional<std::vector<std::string>> getAttrStrings(const wolvrix::lib::grh::Operation &op,
                                                        std::string_view key)
 {
     auto attr = op.attr(key);
@@ -56,14 +55,14 @@ bool startsWith(const std::string &value, const std::string &prefix)
            value.compare(0, prefix.size(), prefix) == 0;
 }
 
-bool hasPortOp(const grh::ir::Graph &graph,
-               grh::ir::OperationKind kind,
+bool hasPortOp(const wolvrix::lib::grh::Graph &graph,
+               wolvrix::lib::grh::OperationKind kind,
                std::string_view attrKey,
                std::string_view attrValue)
 {
     for (const auto opId : graph.operations())
     {
-        const grh::ir::Operation op = graph.getOperation(opId);
+        const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
         if (op.kind() != kind)
         {
             continue;
@@ -77,7 +76,7 @@ bool hasPortOp(const grh::ir::Graph &graph,
     return false;
 }
 
-bool hasRegisterReadOutput(const grh::ir::Graph &graph)
+bool hasRegisterReadOutput(const wolvrix::lib::grh::Graph &graph)
 {
     for (const auto &port : graph.outputPorts())
     {
@@ -90,18 +89,18 @@ bool hasRegisterReadOutput(const grh::ir::Graph &graph)
         {
             continue;
         }
-        const grh::ir::ValueId value = port.value;
+        const wolvrix::lib::grh::ValueId value = port.value;
         if (!value.valid())
         {
             continue;
         }
-        const grh::ir::OperationId defOpId = graph.getValue(value).definingOp();
+        const wolvrix::lib::grh::OperationId defOpId = graph.getValue(value).definingOp();
         if (!defOpId.valid())
         {
             continue;
         }
-        const grh::ir::Operation defOp = graph.getOperation(defOpId);
-        if (defOp.kind() != grh::ir::OperationKind::kRegisterReadPort)
+        const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
+        if (defOp.kind() != wolvrix::lib::grh::OperationKind::kRegisterReadPort)
         {
             continue;
         }
@@ -114,13 +113,13 @@ bool hasRegisterReadOutput(const grh::ir::Graph &graph)
     return false;
 }
 
-bool hasNoXmrOps(const grh::ir::Graph &graph)
+bool hasNoXmrOps(const wolvrix::lib::grh::Graph &graph)
 {
     for (const auto opId : graph.operations())
     {
-        const grh::ir::Operation op = graph.getOperation(opId);
-        if (op.kind() == grh::ir::OperationKind::kXMRRead ||
-            op.kind() == grh::ir::OperationKind::kXMRWrite)
+        const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
+        if (op.kind() == wolvrix::lib::grh::OperationKind::kXMRRead ||
+            op.kind() == wolvrix::lib::grh::OperationKind::kXMRWrite)
         {
             return false;
         }
@@ -132,17 +131,17 @@ bool hasNoXmrOps(const grh::ir::Graph &graph)
 
 int main()
 {
-    grh::ir::Netlist netlist;
-    grh::ir::Graph &leaf = netlist.createGraph("leaf");
-    grh::ir::Graph &top = netlist.createGraph("top");
+    wolvrix::lib::grh::Netlist netlist;
+    wolvrix::lib::grh::Graph &leaf = netlist.createGraph("leaf");
+    wolvrix::lib::grh::Graph &top = netlist.createGraph("top");
     netlist.markAsTop("top");
 
-    const auto regOp = leaf.createOperation(grh::ir::OperationKind::kRegister,
+    const auto regOp = leaf.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
                                             leaf.internSymbol("reg_a"));
     leaf.setAttr(regOp, "width", static_cast<int64_t>(8));
     leaf.setAttr(regOp, "isSigned", false);
 
-    const auto latchOp = leaf.createOperation(grh::ir::OperationKind::kLatch,
+    const auto latchOp = leaf.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
                                               leaf.internSymbol("lat_b"));
     leaf.setAttr(latchOp, "width", static_cast<int64_t>(4));
     leaf.setAttr(latchOp, "isSigned", false);
@@ -155,8 +154,8 @@ int main()
     const auto latchData = top.createValue(top.internSymbol("latch_data"), 4, false);
     const auto latchMask = top.createValue(top.internSymbol("latch_mask"), 4, false);
 
-    grh::ir::OperationId instOp =
-        top.createOperation(grh::ir::OperationKind::kInstance,
+    wolvrix::lib::grh::OperationId instOp =
+        top.createOperation(wolvrix::lib::grh::OperationKind::kInstance,
                             top.internSymbol("_op_test_xmr_inst"));
     top.setAttr(instOp, "moduleName", std::string("leaf"));
     top.setAttr(instOp, "instanceName", std::string("u_leaf"));
@@ -166,13 +165,13 @@ int main()
 
     const auto readValue = top.createValue(top.internSymbol("xmr_read"), 8, false);
     const auto xmrRead =
-        top.createOperation(grh::ir::OperationKind::kXMRRead,
+        top.createOperation(wolvrix::lib::grh::OperationKind::kXMRRead,
                             top.internSymbol("_op_test_xmr_read"));
     top.addResult(xmrRead, readValue);
     top.setAttr(xmrRead, "xmrPath", std::string("u_leaf.reg_a"));
 
     const auto xmrWriteReg =
-        top.createOperation(grh::ir::OperationKind::kXMRWrite,
+        top.createOperation(wolvrix::lib::grh::OperationKind::kXMRWrite,
                             top.internSymbol("_op_test_xmr_write_reg"));
     top.addOperand(xmrWriteReg, cond);
     top.addOperand(xmrWriteReg, data);
@@ -182,7 +181,7 @@ int main()
     top.setAttr(xmrWriteReg, "eventEdge", std::vector<std::string>{"posedge"});
 
     const auto xmrWriteLatch =
-        top.createOperation(grh::ir::OperationKind::kXMRWrite,
+        top.createOperation(wolvrix::lib::grh::OperationKind::kXMRWrite,
                             top.internSymbol("_op_test_xmr_write_latch"));
     top.addOperand(xmrWriteLatch, latchCond);
     top.addOperand(xmrWriteLatch, latchData);
@@ -206,16 +205,16 @@ int main()
     {
         return fail("Register XMR read port not created");
     }
-    if (!hasPortOp(leaf, grh::ir::OperationKind::kRegisterWritePort, "regSymbol", "reg_a"))
+    if (!hasPortOp(leaf, wolvrix::lib::grh::OperationKind::kRegisterWritePort, "regSymbol", "reg_a"))
     {
         return fail("Register XMR write port not created");
     }
-    if (!hasPortOp(leaf, grh::ir::OperationKind::kLatchWritePort, "latchSymbol", "lat_b"))
+    if (!hasPortOp(leaf, wolvrix::lib::grh::OperationKind::kLatchWritePort, "latchSymbol", "lat_b"))
     {
         return fail("Latch XMR write port not created");
     }
 
-    const grh::ir::Operation inst = top.getOperation(instOp);
+    const wolvrix::lib::grh::Operation inst = top.getOperation(instOp);
     const auto inputNames = getAttrStrings(inst, "inputPortName");
     const auto outputNames = getAttrStrings(inst, "outputPortName");
     if (!inputNames || !outputNames)

@@ -1,5 +1,5 @@
 #include "grh.hpp"
-#include "pass/const_fold.hpp"
+#include "transform/const_fold.hpp"
 #include "transform.hpp"
 
 #include "slang/numeric/SVInt.h"
@@ -9,8 +9,7 @@
 #include <string>
 #include <vector>
 
-using namespace wolf_sv_parser;
-using namespace wolf_sv_parser::transform;
+using namespace wolvrix::lib::transform;
 
 namespace
 {
@@ -21,18 +20,18 @@ namespace
         return 1;
     }
 
-    grh::ir::ValueId makeConst(grh::ir::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
+    wolvrix::lib::grh::ValueId makeConst(wolvrix::lib::grh::Graph &graph, const std::string &valueName, const std::string &opName, int64_t width, bool isSigned, const std::string &literal)
     {
-        const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
-        const grh::ir::SymbolId opSym = graph.internSymbol(opName);
-        const grh::ir::ValueId val = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
-        const grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
+        const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
+        const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+        const wolvrix::lib::grh::ValueId val = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned);
+        const wolvrix::lib::grh::OperationId op = graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant, opSym);
         graph.addResult(op, val);
         graph.setAttr(op, "constValue", literal);
         return val;
     }
 
-    std::optional<slang::SVInt> getConstLiteral(const grh::ir::Graph &graph, const grh::ir::Operation &op)
+    std::optional<slang::SVInt> getConstLiteral(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op)
     {
         (void)graph;
         auto attr = op.attr("constValue");
@@ -61,36 +60,36 @@ int main()
 {
     // Case 1: multi-iteration folding rewires downstream users
     {
-        grh::ir::Netlist netlist;
-        grh::ir::Graph &graph = netlist.createGraph("g");
-        grh::ir::ValueId c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
-        grh::ir::ValueId c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
+        wolvrix::lib::grh::Netlist netlist;
+        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g");
+        wolvrix::lib::grh::ValueId c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
+        wolvrix::lib::grh::ValueId c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
 
-        grh::ir::ValueId sum = graph.createValue(graph.internSymbol("sum"), 4, false);
-        grh::ir::OperationId add = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add0"));
+        wolvrix::lib::grh::ValueId sum = graph.createValue(graph.internSymbol("sum"), 4, false);
+        wolvrix::lib::grh::OperationId add = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(add, c0);
         graph.addOperand(add, c1);
         graph.addResult(add, sum);
 
-        grh::ir::ValueId pass = graph.createValue(graph.internSymbol("pass"), 4, false);
-        grh::ir::OperationId assign = graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("assign0"));
+        wolvrix::lib::grh::ValueId pass = graph.createValue(graph.internSymbol("pass"), 4, false);
+        wolvrix::lib::grh::OperationId assign = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("assign0"));
         graph.addOperand(assign, sum);
         graph.addResult(assign, pass);
 
-        grh::ir::ValueId neg = graph.createValue(graph.internSymbol("neg"), 4, false);
-        grh::ir::OperationId invert = graph.createOperation(grh::ir::OperationKind::kNot, graph.internSymbol("not0"));
+        wolvrix::lib::grh::ValueId neg = graph.createValue(graph.internSymbol("neg"), 4, false);
+        wolvrix::lib::grh::OperationId invert = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot, graph.internSymbol("not0"));
         graph.addOperand(invert, pass);
         graph.addResult(invert, neg);
 
-        grh::ir::ValueId finalSum = graph.createValue(graph.internSymbol("finalSum"), 4, false);
-        grh::ir::OperationId add2 = graph.createOperation(grh::ir::OperationKind::kAdd, graph.internSymbol("add1"));
+        wolvrix::lib::grh::ValueId finalSum = graph.createValue(graph.internSymbol("finalSum"), 4, false);
+        wolvrix::lib::grh::OperationId add2 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd, graph.internSymbol("add1"));
         graph.addOperand(add2, neg);
         graph.addOperand(add2, c1);
         graph.addResult(add2, finalSum);
 
-        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 4, false);
+        wolvrix::lib::grh::ValueId out = graph.createValue(graph.internSymbol("out"), 4, false);
         graph.bindOutputPort(graph.internSymbol("out"), out);
-        grh::ir::OperationId assignOut = graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("assign1"));
+        wolvrix::lib::grh::OperationId assignOut = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("assign1"));
         graph.addOperand(assignOut, finalSum);
         graph.addResult(assignOut, out);
 
@@ -121,14 +120,14 @@ int main()
         {
             return fail("assign1 should be removed after folding");
         }
-        grh::ir::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
         if (!outVal.valid())
         {
             return fail("Output port was not rewired to a constant");
         }
-        grh::ir::Value outValue = graph.getValue(outVal);
+        wolvrix::lib::grh::Value outValue = graph.getValue(outVal);
         if (!outValue.definingOp().valid() ||
-            graph.getOperation(outValue.definingOp()).kind() != grh::ir::OperationKind::kConstant)
+            graph.getOperation(outValue.definingOp()).kind() != wolvrix::lib::grh::OperationKind::kConstant)
         {
             return fail("Output port was not rewired to a constant");
         }
@@ -146,13 +145,13 @@ int main()
 
     // Case 2: X operand blocks folding when allowXPropagation=false
     {
-        grh::ir::Netlist netlist;
-        grh::ir::Graph &graph = netlist.createGraph("g2");
-        grh::ir::ValueId xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
-        grh::ir::ValueId one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
+        wolvrix::lib::grh::Netlist netlist;
+        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g2");
+        wolvrix::lib::grh::ValueId xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
+        wolvrix::lib::grh::ValueId one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
 
-        grh::ir::ValueId andOut = graph.createValue(graph.internSymbol("andOut"), 1, false);
-        grh::ir::OperationId op = graph.createOperation(grh::ir::OperationKind::kAnd, graph.internSymbol("and0"));
+        wolvrix::lib::grh::ValueId andOut = graph.createValue(graph.internSymbol("andOut"), 1, false);
+        wolvrix::lib::grh::OperationId op = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd, graph.internSymbol("and0"));
         graph.addOperand(op, xval);
         graph.addOperand(op, one);
         graph.addResult(op, andOut);
@@ -177,7 +176,7 @@ int main()
         {
             return fail("Pass should not change graph when blocked by X");
         }
-        const grh::ir::Operation opView = graph.getOperation(op);
+        const wolvrix::lib::grh::Operation opView = graph.getOperation(op);
         if (opView.operands()[0] != xval || opView.operands()[1] != one)
         {
             return fail("Operands should remain unchanged when folding is skipped");
@@ -186,12 +185,12 @@ int main()
 
     // Case 3: missing attribute triggers failure
     {
-        grh::ir::Netlist netlist;
-        grh::ir::Graph &graph = netlist.createGraph("g3");
-        grh::ir::ValueId c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
+        wolvrix::lib::grh::Netlist netlist;
+        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g3");
+        wolvrix::lib::grh::ValueId c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
 
-        grh::ir::ValueId repOut = graph.createValue(graph.internSymbol("repOut"), 4, false);
-        grh::ir::OperationId rep = graph.createOperation(grh::ir::OperationKind::kReplicate, graph.internSymbol("rep0"));
+        wolvrix::lib::grh::ValueId repOut = graph.createValue(graph.internSymbol("repOut"), 4, false);
+        wolvrix::lib::grh::OperationId rep = graph.createOperation(wolvrix::lib::grh::OperationKind::kReplicate, graph.internSymbol("rep0"));
         graph.addOperand(rep, c);
         graph.addResult(rep, repOut);
         // Intentionally omit the "rep" attribute.
@@ -216,21 +215,21 @@ int main()
 
     // Case 4: kSystemFunction $clog2 folds to constant
     {
-        grh::ir::Netlist netlist;
-        grh::ir::Graph &graph = netlist.createGraph("g4");
-        grh::ir::ValueId arg = makeConst(graph, "arg", "arg_op", 8, false, "8'h8");
+        wolvrix::lib::grh::Netlist netlist;
+        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g4");
+        wolvrix::lib::grh::ValueId arg = makeConst(graph, "arg", "arg_op", 8, false, "8'h8");
 
-        grh::ir::ValueId result = graph.createValue(graph.internSymbol("clog2_out"), 32, false);
-        grh::ir::OperationId sys = graph.createOperation(grh::ir::OperationKind::kSystemFunction,
+        wolvrix::lib::grh::ValueId result = graph.createValue(graph.internSymbol("clog2_out"), 32, false);
+        wolvrix::lib::grh::OperationId sys = graph.createOperation(wolvrix::lib::grh::OperationKind::kSystemFunction,
                                                          graph.internSymbol("sys_clog2"));
         graph.addOperand(sys, arg);
         graph.addResult(sys, result);
         graph.setAttr(sys, "name", std::string("clog2"));
         graph.setAttr(sys, "hasSideEffects", false);
 
-        grh::ir::ValueId out = graph.createValue(graph.internSymbol("out"), 32, false);
+        wolvrix::lib::grh::ValueId out = graph.createValue(graph.internSymbol("out"), 32, false);
         graph.bindOutputPort(graph.internSymbol("out"), out);
-        grh::ir::OperationId assign = graph.createOperation(grh::ir::OperationKind::kAssign,
+        wolvrix::lib::grh::OperationId assign = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign,
                                                             graph.internSymbol("assign_out"));
         graph.addOperand(assign, result);
         graph.addResult(assign, out);
@@ -261,14 +260,14 @@ int main()
             return fail("kSystemFunction $clog2 op should be removed after folding");
         }
 
-        grh::ir::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
         if (!outVal.valid())
         {
             return fail("Output port missing after $clog2 folding");
         }
-        grh::ir::Value outValue = graph.getValue(outVal);
+        wolvrix::lib::grh::Value outValue = graph.getValue(outVal);
         if (!outValue.definingOp().valid() ||
-            graph.getOperation(outValue.definingOp()).kind() != grh::ir::OperationKind::kConstant)
+            graph.getOperation(outValue.definingOp()).kind() != wolvrix::lib::grh::OperationKind::kConstant)
         {
             return fail("Output port was not rewired to a constant after $clog2 folding");
         }

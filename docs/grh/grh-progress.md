@@ -32,12 +32,12 @@
 实施：
 - 基线采样信息：gprof 总时长 174.41s，采样粒度 0.01s（见 call graph 头部）
 - 前 20 热点（self time）：
-  - 23.07%（40.24s）grh::ir::Graph::valueFromBuilder(ValueId) const
-  - 6.10%（10.64s）grh::ir::GraphBuilder::replaceAllUses(ValueId, ValueId)
+  - 23.07%（40.24s）wolvrix::lib::grh::Graph::valueFromBuilder(ValueId) const
+  - 6.10%（10.64s）wolvrix::lib::grh::GraphBuilder::replaceAllUses(ValueId, ValueId)
   - 5.42%（9.45s）std::vector<GraphBuilder::OperationData>::operator[] const
   - 5.38%（9.38s）std::vector<GraphBuilder::OperationData>::size const
-  - 4.97%（8.66s）grh::ir::operator==(ValueId, ValueId)
-  - 4.94%（8.62s）grh::ir::Graph::ensureCaches() const
+  - 4.97%（8.66s）wolvrix::lib::grh::operator==(ValueId, ValueId)
+  - 4.94%（8.62s）wolvrix::lib::grh::Graph::ensureCaches() const
   - 3.59%（6.27s）std::vector<ValueId>::size const
   - 3.59%（6.26s）_init
   - 2.43%（4.23s）std::vector<ValueId>::operator[] const
@@ -48,7 +48,7 @@
   - 1.24%（2.16s）std::vector<ValueId>::push_back
   - 1.16%（2.03s）std::vector<OperationId>::push_back
   - 0.98%（1.71s）std::vector<GraphBuilder::ValueData>::size const
-  - 0.96%（1.68s）grh::ir::GraphId::GraphId()
+  - 0.96%（1.68s）wolvrix::lib::grh::GraphId::GraphId()
   - 0.86%（1.50s）std::vector<GraphBuilder::ValueData>::operator[] const
   - 0.84%（1.46s）std::construct_at<ValueId>
   - 0.80%（1.40s）allocator_traits<OperationId>::construct

@@ -1,4 +1,4 @@
-#include "emit.hpp"
+#include "store.hpp"
 #include "grh.hpp"
 
 #include <array>
@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-using namespace grh::ir;
-using namespace grh::emit;
+using namespace wolvrix::lib::grh;
+using namespace wolvrix::lib::store;
 
 namespace
 {
@@ -181,10 +181,10 @@ int main()
 
         netlist.markAsTop("demo");
 
-        EmitDiagnostics emitDiagnostics;
-        EmitJSON emitter(&emitDiagnostics);
-        EmitOptions emitOptions;
-        auto jsonOpt = emitter.emitToString(netlist, emitOptions);
+        StoreDiagnostics emitDiagnostics;
+        StoreJson emitter(&emitDiagnostics);
+        StoreOptions emitOptions;
+        auto jsonOpt = emitter.storeToString(netlist, emitOptions);
         if (!jsonOpt || emitDiagnostics.hasError())
         {
             return fail("Failed to emit JSON for netlist");
@@ -276,7 +276,7 @@ int main()
         }
 
         emitDiagnostics.clear();
-        auto jsonAgainOpt = emitter.emitToString(parsed, emitOptions);
+        auto jsonAgainOpt = emitter.storeToString(parsed, emitOptions);
         if (!jsonAgainOpt || emitDiagnostics.hasError())
         {
             return fail("Failed to re-emit JSON after parse");
@@ -367,7 +367,7 @@ int main()
         }
 
         {
-            namespace grh_ir = grh::ir;
+            namespace grh_ir = wolvrix::lib::grh;
 
             grh_ir::NetlistSymbolTable netlistSymbols;
             auto demoSym = netlistSymbols.intern("demo");
@@ -450,7 +450,7 @@ int main()
         }
 
         {
-            namespace grh_ir = grh::ir;
+            namespace grh_ir = wolvrix::lib::grh;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -551,7 +551,7 @@ int main()
         }
 
         {
-            namespace grh_ir = grh::ir;
+            namespace grh_ir = wolvrix::lib::grh;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -650,7 +650,7 @@ int main()
         }
 
         {
-            namespace grh_ir = grh::ir;
+            namespace grh_ir = wolvrix::lib::grh;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
@@ -705,7 +705,7 @@ int main()
         }
 
         {
-            namespace grh_ir = grh::ir;
+            namespace grh_ir = wolvrix::lib::grh;
 
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);

@@ -70,7 +70,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 同步更新架构与工作流文档中的代码落位
 
 实施：
-- 新增 `include/convert.hpp` 与 `src/convert.cpp` 的骨架定义
+- 新增 `lib/include/ingest.hpp` 与 `lib/src/ingest.cpp` 的骨架定义
 - 新增 `convert` 静态库目标并接入 `CMakeLists.txt`
 - 更新 `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md`
 
@@ -97,7 +97,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - `docs/convert/convert-architecture.md` 补充 ModulePlanner 数据结构与并行化策略
 - `docs/convert/convert-workflow.md` 标注可并行模块计划阶段
-- `include/convert.hpp`/`src/convert.cpp` 更新 PlanSymbolTable 与索引化结构骨架
+- `lib/include/ingest.hpp`/`lib/src/ingest.cpp` 更新 PlanSymbolTable 与索引化结构骨架
 - 进一步明确并行化方法（任务单元、调度模型、去重与阶段边界）
 - 新增 PlanCache/PlanTaskQueue 并接入 ConvertContext 骨架
 
@@ -110,7 +110,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 为后续 Pass 实现提供最小可用骨架
 
 实施：
-- `include/convert.hpp` 新增 LoweringPlan/WriteBackPlan/PlanArtifacts 骨架
+- `lib/include/ingest.hpp` 新增 LoweringPlan/WriteBackPlan/PlanArtifacts 骨架
 - `PlanEntry` 扩展以持有 artifacts
 
 完成情况：已完成
@@ -156,7 +156,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新架构与工作流文档保持一致
 
 实施：
-- `src/convert.cpp` 新增 TypeResolverPass 与类型解析辅助逻辑
+- `lib/src/ingest.cpp` 新增 TypeResolverPass 与类型解析辅助逻辑
 - ConvertDriver 在 Pass1 后调用 TypeResolverPass 更新 ModulePlan
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
@@ -174,7 +174,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 更新架构与工作流文档保持一致
 
 实施：
-- `src/convert.cpp` 新增 RWAnalyzerPass 与 AST 遍历/控制域分类逻辑
+- `lib/src/ingest.cpp` 新增 RWAnalyzerPass 与 AST 遍历/控制域分类逻辑
 - ConvertDriver 在 Pass2 后调用 RWAnalyzerPass 更新 ModulePlan
 - 新增 `convert-rw-analyzer` HDLBits 测试与 CMake 注册
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
@@ -188,8 +188,8 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 接入 Convert 主流程并补充测试
 
 实施：
-- `include/convert.hpp` 增补 LoweringPlan 节点结构与 ExprLowererPass 声明
-- `src/convert.cpp` 实现 ExprLowererPass，覆盖常见 unary/binary/conditional/concat/replicate/select
+- `lib/include/ingest.hpp` 增补 LoweringPlan 节点结构与 ExprLowererPass 声明
+- `lib/src/ingest.cpp` 实现 ExprLowererPass，覆盖常见 unary/binary/conditional/concat/replicate/select
 - ~~ConvertDriver 在 Pass3 后生成并缓存 `loweringPlan`~~
 - ConvertDriver 在 Pass2 后生成并缓存 `loweringPlan`
 - 新增 `convert-expr-lowerer` 测试与 fixture
@@ -205,10 +205,10 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增补测试覆盖 if/else 与连续赋值场景
 
 实施：
-- `include/convert.hpp` 新增 WriteIntent 与 `LoweringPlan.writes`
-- `src/convert.cpp` 实现 StmtLowererPass，支持 if/else guard 叠加与写回意图生成
+- `lib/include/ingest.hpp` 新增 WriteIntent 与 `LoweringPlan.writes`
+- `lib/src/ingest.cpp` 实现 StmtLowererPass，支持 if/else guard 叠加与写回意图生成
 - ConvertDriver 接入 Pass5
-- 新增 `convert-stmt-lowerer` 测试与 fixture
+- 新增 `ingest-stmt-lowerer` 测试与 fixture
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -223,7 +223,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 计划：
 - 扩展 StmtLowerer 的 Conditional 处理，支持多条件链遍历
 - Guard 组合规则明确化（`base && cond` / `base && !cond`）
-- 新增 `convert-stmt-lowerer` 对应用例与断言
+- 新增 `ingest-stmt-lowerer` 对应用例与断言
 - 更新 workflow/architecture 文档描述
 
 实施：
@@ -332,7 +332,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - StmtLowerer 将 pattern condition 与 pattern case 升级为 error 并直接跳过分支
 - ~~while/do-while/forever 直接报错并停止对 body 的降级~~（已被 STEP 0026 替代）
-- 新增 `convert-stmt-lowerer-errors` 测试与 fixture 覆盖错误路径
+- 新增 `ingest-stmt-lowerer-errors` 测试与 fixture 覆盖错误路径
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -394,7 +394,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - StmtLowerer 的 repeat/for/foreach 静态展开支持 break/continue，并在 guard 可静态求值时执行
 - 若循环体含 break/continue 且 guard 不可静态求值 -> 直接报错不支持
-- 新增 break/continue 相关 fixture 与 `convert-stmt-lowerer` 断言
+- 新增 break/continue 相关 fixture 与 `ingest-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -416,7 +416,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - StmtLowerer 为 repeat/for/foreach 引入动态 break/continue 的 flow guard 传播（loopAlive/flowGuard）
 - break 更新 `loopAlive`，continue 更新 `flowGuard`，保证后续语句与迭代被正确屏蔽
-- 新增动态 break/continue 的 fixture 与 `convert-stmt-lowerer` 断言
+- 新增动态 break/continue 的 fixture 与 `ingest-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -427,15 +427,15 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 覆盖 case inside、pattern 条件报错、while/do/forever 报错、展开上限、位选/范围选 LHS
 
 计划：
-- 扩展 `tests/data/convert/stmt_lowerer.sv` 增加新模块用例
-- 在 `tests/convert/test_convert_stmt_lowerer.cpp` 增加断言与诊断验证
+- 扩展 `tests/ingest/data/stmt_lowerer.sv` 增加新模块用例
+- 在 `tests/ingest/test_ingest_stmt_lowerer.cpp` 增加断言与诊断验证
 - 需要时新增独立测试目标以区分错误路径与正常路径
 
 实施：
-- `tests/data/convert/stmt_lowerer.sv` 增补 case inside、展开上限与 LHS 选择用例
-- `tests/convert/test_convert_stmt_lowerer.cpp` 增加 case inside/展开上限/LHS 选择断言
-- `tests/data/convert/stmt_lowerer_errors.sv` 增补 pattern/while/do/forever 错误用例
-- `tests/convert/test_convert_stmt_lowerer_errors.cpp` 覆盖 pattern/while/do/forever 错误路径断言
+- `tests/ingest/data/stmt_lowerer.sv` 增补 case inside、展开上限与 LHS 选择用例
+- `tests/ingest/test_ingest_stmt_lowerer.cpp` 增加 case inside/展开上限/LHS 选择断言
+- `tests/ingest/data/stmt_lowerer_errors.sv` 增补 pattern/while/do/forever 错误用例
+- `tests/ingest/test_ingest_stmt_lowerer_errors.cpp` 覆盖 pattern/while/do/forever 错误路径断言
 
 完成情况：已完成
 
@@ -455,7 +455,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - 扩展 `WriteSliceKind` 支持 MemberSelect 并在 StmtLowerer 解析 struct/array member LHS
 - StmtLowerer 支持 concat/streaming concat LHS，拆分 RHS 为多条 WriteIntent
-- 新增 `stmt_lowerer_lhs_concat/stream/member` fixture 与 `convert-stmt-lowerer` 断言
+- 新增 `stmt_lowerer_lhs_concat/stream/member` fixture 与 `ingest-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -498,7 +498,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 实施：
 - StmtLowerer 新增 while/do-while/forever 静态展开路径与 EvalContext 评估逻辑
 - 循环展开统一先 dry-run，失败直接报错并不产出写回
-- 新增 while/do-while/forever 静态展开 fixture 与 `convert-stmt-lowerer` 断言
+- 新增 while/do-while/forever 静态展开 fixture 与 `ingest-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -530,7 +530,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `ExpressionStatement` 支持 `$display/$write/$strobe` 与 `$info/$warning/$error/$fatal` 降级
 - DPI-C import function 语句调用支持 input/output 方向与可选返回值占位
 - 非支持的过程块上下文给出 warning 诊断
-- 新增 `stmt_lowerer_display/dpi` fixture 与 `convert-stmt-lowerer` 断言
+- 新增 `stmt_lowerer_display/dpi` fixture 与 `ingest-stmt-lowerer` 断言
 - `docs/convert/convert-workflow.md` 与 `docs/convert/convert-architecture.md` 同步更新
 
 完成情况：已完成
@@ -557,7 +557,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 新增 Pass6 WriteBackPass：按 `target + domain + event` 聚合写回，生成 `updateCond/nextValue`
 - 顺序域缺失 edge-sensitive 事件时给出 warning 并跳过写回
 - 写回合并暂不支持 LHS 切片，遇到切片写回记录报错
-- 新增 `tests/data/convert/write_back.sv` 与 `convert-write-back` 用例，覆盖顺序/锁存与缺失事件
+- 新增 `tests/ingest/data/write_back.sv` 与 `ingest-write-back` 用例，覆盖顺序/锁存与缺失事件
 - 更新 workflow/architecture 文档对齐 Pass6 写回合并流程
 
 完成情况：已完成
@@ -581,7 +581,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - Pass7 MemoryPortLowerer：从 `loweredStmts` 中识别 `mem[addr]` 读写访问
 - 读端口：顺序域要求 edge-sensitive 事件绑定，缺失则 warning 丢弃
 - 写端口：支持全写与 bit/range 掩码写，生成 `updateCond/data/mask`
-- 新增 `memory_ports.sv` fixture 与 `convert-memory-port-lowerer` 断言
+- 新增 `memory_ports.sv` fixture 与 `ingest-memory-port-lowerer` 断言
 - 更新 workflow/architecture 文档对齐 MemoryPortLowerer 输出
 
 完成情况：已完成
@@ -604,7 +604,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - MemoryPortLowerer 支持 IndexedUp/IndexedDown 动态掩码写，生成 mask/data shift 表达式
 - 多维 unpacked memory 支持地址线性化，按 `idx*stride` 聚合
 - 顺序读端口记录 `updateCond` 作为 enable 建模入口
-- 新增 `memory_ports.sv` 动态范围与多维写用例，扩展 `convert-memory-port-lowerer` 断言
+- 新增 `memory_ports.sv` 动态范围与多维写用例，扩展 `ingest-memory-port-lowerer` 断言
 - 更新 workflow/architecture 文档对齐 MemoryPortLowerer 输出细节
 
 完成情况：已完成
@@ -628,7 +628,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - MemoryPortLowerer 线性化前按范围方向修正索引（升序 `idx-left`，降序 `left-idx`）
 - Indexed part-select width/越界检查加入 warning 诊断，非法写入直接跳过
 - 新增 `memory_ports.sv` 下界/降序、非法 width、越界动态范围用例
-- 扩展 `convert-memory-port-lowerer` 断言覆盖索引修正与诊断
+- 扩展 `ingest-memory-port-lowerer` 断言覆盖索引修正与诊断
 - 更新 workflow/architecture 文档对齐新约束
 
 完成情况：已完成
@@ -712,14 +712,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - ExprNode 发射：kConstant/kAssign/逻辑运算/kMux/kSlice/kConcat/kReplicate 等
 - WriteBackPlan 发射：comb -> kAssign，seq -> kRegister，latch -> kLatch
 - ConvertDriver 在 Pass7 后调用 GraphAssembler，写入 Netlist 并标记顶层 Graph
-- 新增 `convert-graph-assembly-basic` 测试覆盖组合/时序/锁存基本路径
+- 新增 `ingest-graph-assembly-basic` 测试覆盖组合/时序/锁存基本路径
 - 更新 workflow/architecture 文档对齐 Pass8 基础流程
 
 实施：
 - GraphAssembler 落地 GraphAssemblyState，完成端口/信号 Value 与 ExprNode 发射
 - WriteBackPlan 落地为 kAssign/kRegister/kLatch，并生成 eventEdge 属性
 - ConvertDriver 接入 GraphAssembler 并标记顶层 graph
-- 新增 `convert-graph-assembly-basic` 测试与 `graph_assembly_basic.sv` fixture
+- 新增 `ingest-graph-assembly-basic` 测试与 `graph_assembly_basic.sv` fixture
 - 更新 workflow/architecture 文档对齐 Pass8 基础流程
 
 完成情况：已完成
@@ -735,13 +735,13 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - memoryReads：kMemoryReadPort + (isSync ? kRegister : 直接返回)
 - memoryWrites：kMemoryWritePort，填充 updateCond/addr/data/mask/eventEdge
 - 缺失 edge-sensitive 事件时保持诊断与跳过策略
-- 新增 `convert-graph-assembly-memory` 测试覆盖 async/sync read 与 mask write
+- 新增 `ingest-graph-assembly-memory` 测试覆盖 async/sync read 与 mask write
 - 更新 workflow/architecture 文档对齐 memory 组装策略
 
 实施：
 - GraphAssembly 支持 kMemory/kMemoryReadPort/kMemoryWritePort 与同步读寄存器
 - memoryReads/memoryWrites 依据 memSymbol 与 eventEdge 完成属性填充与诊断
-- 新增 `convert-graph-assembly-memory` 测试与 `graph_assembly_memory.sv` fixture
+- 新增 `ingest-graph-assembly-memory` 测试与 `graph_assembly_memory.sv` fixture
 - 更新 workflow/architecture 文档对齐 memory 组装策略
 
 完成情况：已完成
@@ -756,14 +756,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - LoweredStmt(SystemTask/DpiCall) 发射为 kSystemTask/kDpicCall
 - 建立 DPI import 扫描与 kDpicImport 生成（argsName/argsWidth/argsSigned 等）
 - kDpicCall 写入 targetImportSymbol/inArgName/outArgName/hasReturn/eventEdge
-- 新增 `convert-graph-assembly-dpi-display` 测试覆盖 system task/dpi 调用链路
+- 新增 `ingest-graph-assembly-dpi-display` 测试覆盖 system task/dpi 调用链路
 - 更新 workflow/architecture 文档对齐副作用语句与 DPI 约束
 
 实施：
 - StmtLowerer 记录 `LoweringPlan.dpiImports` 并校验 DPI import 签名一致性
 - GraphAssembly 发射 kSystemTask/kDpicCall 与 kDpicImport，补齐 eventEdge/返回值元数据
 - Emit 支持 eventEdge 驱动 system task/dpi 调用，并解析 argsSigned/return 信息
-- 新增 `convert-graph-assembly-dpi-display` 测试与 `graph_assembly_dpi_display.sv` fixture
+- 新增 `ingest-graph-assembly-dpi-display` 测试与 `graph_assembly_dpi_display.sv` fixture
 - 更新 workflow/architecture 文档对齐 DPI/副作用语句组装规则
 
 完成情况：已完成
@@ -780,7 +780,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - kBlackbox：附带 parameterNames/parameterValues
 - inout 端口采用 __in/__out/__oe 连接；不支持形态给出诊断并跳过
 - 顶层实例写入 topGraphs 与 alias（instance/definition 名）
-- 新增 `convert-graph-assembly-instance` 测试覆盖普通实例与黑盒参数
+- 新增 `ingest-graph-assembly-instance` 测试覆盖普通实例与黑盒参数
 - 更新 workflow/architecture 文档对齐实例化规则
 
 实施：
@@ -790,7 +790,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - inout 连接使用 `__out/__oe` 操作数与 `__in` 结果；输出端口仅允许简单 symbol
 - 黑盒实例补齐 `parameterNames/parameterValues`，普通实例使用 GraphName 映射
 - 顶层实例注册 alias（instance/definition 名）并保留 topGraphs
-- 新增 `graph_assembly_instance.sv` fixture 与 `convert-graph-assembly-instance` 测试
+- 新增 `graph_assembly_instance.sv` fixture 与 `ingest-graph-assembly-instance` 测试
 - 更新 workflow/architecture 文档对齐实例化规则
 
 完成情况：已完成
@@ -805,7 +805,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - WriteBackPass：允许 slices，生成目标值的 read/modify/write nextValue
 - GraphAssembly：使用 kSliceStatic/kSliceDynamic/kConcat 组装更新值
 - 多 slice 合并与 guard 优先级按语句顺序处理
-- 新增 `convert-write-back-slice` 与 `convert-graph-assembly-slice` 测试
+- 新增 `ingest-write-back-slice` 与 `ingest-graph-assembly-slice` 测试
 - 更新 workflow/architecture 文档对齐切片写回流程
 
 实施：待开始
@@ -814,8 +814,8 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - WriteBackPass 支持带 slices 的写回合并，按语句顺序进行 read/modify/write
 - 静态 bit/range/member select 使用 kSliceDynamic + kConcat 生成 nextValue
 - 动态 bit/part-select 使用 mask + shift 生成 nextValue，并保留诊断
-- 新增 `convert-write-back-slice` 与 `write_back_slice.sv` fixture 覆盖静态/动态/member
-- 新增 `convert-graph-assembly-slice` 与 `graph_assembly_slice.sv` fixture 覆盖图组装
+- 新增 `ingest-write-back-slice` 与 `write_back_slice.sv` fixture 覆盖静态/动态/member
+- 新增 `ingest-graph-assembly-slice` 与 `graph_assembly_slice.sv` fixture 覆盖图组装
 - 更新 workflow/architecture 文档对齐切片写回流程
 
 完成情况：已完成
@@ -873,7 +873,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 实施：
 - `src/emit.cpp` 恢复 `logicalOperand` 对多位信号包 `(|value)` 的输出形式
-- `src/pass/const_fold.cpp` 新增 `kSliceStatic` + `kConcat` 的窥孔简化：当切片范围完全覆盖某个 concat 片段时直接替换为该片段
+- `lib/transform/const_fold.cpp` 新增 `kSliceStatic` + `kConcat` 的窥孔简化：当切片范围完全覆盖某个 concat 片段时直接替换为该片段
 
 完成情况：已完成
 
@@ -886,7 +886,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 清理 HDLBits 017 输出中的冗余中间信号
 
 实施：
-- `src/convert.cpp` 在 WriteBack 生成阶段识别全覆盖静态切片，直接拼接 RHS 片段生成 `nextValue`
+- `lib/src/ingest.cpp` 在 WriteBack 生成阶段识别全覆盖静态切片，直接拼接 RHS 片段生成 `nextValue`
 - 保持非覆盖/有重叠/动态切片路径不变
 
 完成情况：已完成
@@ -941,7 +941,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 计划：
 - 删除 `RWAnalyzerPass`、`RWAnalyzerState`、`RWVisitor` 与相关辅助函数（`encodeRWKey`/`encodeMemKey` 等）
 - 移除 `ModulePlan.rwOps`/`memPorts` 与 `RWOp`/`MemoryPortInfo` 数据结构（若无其他依赖）
-- 移除 `tests/convert/test_convert_rw_analyzer.cpp` 并更新 `CMakeLists.txt` 测试目标
+- 移除 `tests/ingest/test_ingest_rw_analyzer.cpp` 并更新 `CMakeLists.txt` 测试目标
 - 更新文档：`docs/convert/convert-architecture.md`、`docs/convert/convert-workflow.md`、`docs/convert/convert-kimi.md` 中的 Pass3/RWOp/memPorts 描述
 
 实施：
@@ -969,7 +969,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 移除 `LoweringPlan.roots`/`nextRoot` 等跨 Pass 依赖，统一由单 Pass 生成 `LoweringPlan`
 
 计划：
-- 在 `src/convert.cpp` 里合并两套 `lowerExpression` 实现，保留 Pass5 版本并删除 Pass4 版本
+- 在 `lib/src/ingest.cpp` 里合并两套 `lowerExpression` 实现，保留 Pass5 版本并删除 Pass4 版本
 - 移除 `LoweredRoot` 与 `LoweringPlan.roots`，以及 `ExprLowererState` 与 `takeNextRoot/resolveAssignmentRoot`
 - 调整 `StmtLowererState::handleAssignment` 与 `scanExpression`，直接对 RHS 统一降级并缓存
 - 更新 `ConvertDriver` 调度，删除 Pass4 实例与调用（保留 Pass5）

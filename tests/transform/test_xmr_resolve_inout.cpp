@@ -1,6 +1,6 @@
 #include "grh.hpp"
 #include "transform.hpp"
-#include "pass/xmr_resolve.hpp"
+#include "transform/xmr_resolve.hpp"
 
 #include <iostream>
 #include <optional>
@@ -8,8 +8,7 @@
 #include <string_view>
 #include <vector>
 
-using namespace wolf_sv_parser;
-using namespace wolf_sv_parser::transform;
+using namespace wolvrix::lib::transform;
 
 namespace
 {
@@ -20,7 +19,7 @@ int fail(const std::string &message)
     return 1;
 }
 
-std::optional<std::vector<std::string>> getAttrStrings(const grh::ir::Operation &op,
+std::optional<std::vector<std::string>> getAttrStrings(const wolvrix::lib::grh::Operation &op,
                                                        std::string_view key)
 {
     auto attr = op.attr(key);
@@ -45,9 +44,9 @@ bool startsWith(const std::string &value, const std::string &prefix)
 
 int main()
 {
-    grh::ir::Netlist netlist;
-    grh::ir::Graph &child = netlist.createGraph("child");
-    grh::ir::Graph &top = netlist.createGraph("top");
+    wolvrix::lib::grh::Netlist netlist;
+    wolvrix::lib::grh::Graph &child = netlist.createGraph("child");
+    wolvrix::lib::grh::Graph &top = netlist.createGraph("top");
     netlist.markAsTop("top");
 
     const auto childA = child.createValue(child.internSymbol("a"), 1, false);
@@ -67,8 +66,8 @@ int main()
     const auto topIoOe = top.createValue(top.internSymbol("io__oe"), 1, false);
     const auto topIoIn = top.createValue(top.internSymbol("io__in"), 1, false);
 
-    grh::ir::OperationId instOp =
-        top.createOperation(grh::ir::OperationKind::kInstance,
+    wolvrix::lib::grh::OperationId instOp =
+        top.createOperation(wolvrix::lib::grh::OperationKind::kInstance,
                             top.internSymbol("_op_test_xmr_inst"));
     top.addOperand(instOp, topA);
     top.addOperand(instOp, topIoOut);
@@ -82,15 +81,15 @@ int main()
     top.setAttr(instOp, "inoutPortName", std::vector<std::string>{"io"});
 
     const auto readValue = top.createValue(top.internSymbol("xmr_read"), 1, false);
-    grh::ir::OperationId xmrRead =
-        top.createOperation(grh::ir::OperationKind::kXMRRead,
+    wolvrix::lib::grh::OperationId xmrRead =
+        top.createOperation(wolvrix::lib::grh::OperationKind::kXMRRead,
                             top.internSymbol("_op_test_xmr_read"));
     top.addResult(xmrRead, readValue);
     top.setAttr(xmrRead, "xmrPath", std::string("u_child.leaf_r"));
 
     const auto writeValue = top.createValue(top.internSymbol("xmr_write"), 1, false);
-    grh::ir::OperationId xmrWrite =
-        top.createOperation(grh::ir::OperationKind::kXMRWrite,
+    wolvrix::lib::grh::OperationId xmrWrite =
+        top.createOperation(wolvrix::lib::grh::OperationKind::kXMRWrite,
                             top.internSymbol("_op_test_xmr_write"));
     top.addOperand(xmrWrite, writeValue);
     top.setAttr(xmrWrite, "xmrPath", std::string("u_child.leaf_w"));
@@ -104,7 +103,7 @@ int main()
         return fail("XMR resolve pass failed");
     }
 
-    const grh::ir::Operation op = top.getOperation(instOp);
+    const wolvrix::lib::grh::Operation op = top.getOperation(instOp);
     const auto inputNames = getAttrStrings(op, "inputPortName");
     const auto outputNames = getAttrStrings(op, "outputPortName");
     const auto inoutNames = getAttrStrings(op, "inoutPortName");

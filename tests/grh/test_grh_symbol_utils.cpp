@@ -1,11 +1,10 @@
 #include "grh.hpp"
-#include "grh_symbol_utils.hpp"
 
 #include <cctype>
 #include <iostream>
 #include <string>
 
-using namespace grh::ir;
+using namespace wolvrix::lib::grh;
 
 namespace
 {
@@ -44,10 +43,10 @@ int main()
 {
     try
     {
-        using grh::ir::symbol_utils::makeInternalBase;
-        using grh::ir::symbol_utils::makeInternalSymbol;
-        using grh::ir::symbol_utils::makeInternalSymbolText;
-        using grh::ir::symbol_utils::normalizeComponent;
+        using wolvrix::lib::grh::symbol_utils::makeInternalBase;
+        using wolvrix::lib::grh::symbol_utils::makeInternalSymbol;
+        using wolvrix::lib::grh::symbol_utils::makeInternalSymbolText;
+        using wolvrix::lib::grh::symbol_utils::normalizeComponent;
 
         const std::string normalized = normalizeComponent("a-b.c$");
         if (normalized != "a_b_c_")

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(wolf-sv-parser VERSION 0.1.0 LANGUAGES CXX)
+project(wolvrix VERSION 0.1.0 LANGUAGES CXX)
 
 # Toolchain / language
 set(CMAKE_CXX_STANDARD 20)
@@ -14,6 +14,9 @@ endif()
 # Generate compile_commands.json for IDEs by default.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Ensure static dependencies can link into shared libs.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # Output directories (avoid per-target duplication)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -21,67 +24,46 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
 add_subdirectory(external/slang)
-add_subdirectory(src/pass)
 
 # Libraries
-## grh
-add_library(grh STATIC
-    src/grh.cpp
-    src/load.cpp
-    src/emit.cpp
+set(WOLVRIX_LIB_SOURCES
+    lib/src/diagnostics.cpp
+    lib/src/grh.cpp
+    lib/src/load.cpp
+    lib/src/emit.cpp
+    lib/src/store.cpp
+    lib/src/ingest.cpp
+    lib/src/transform.cpp
+    lib/transform/demo_stats.cpp
+    lib/transform/const_fold.cpp
+    lib/transform/redundant_elim.cpp
+    lib/transform/dead_code_elim.cpp
+    lib/transform/memory_init_check.cpp
+    lib/transform/xmr_resolve.cpp
 )
 
-target_include_directories(grh
+add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
+
+target_include_directories(wolvrix-lib
     PUBLIC
-        include
+        lib/include
 )
 
-target_link_libraries(grh
+target_link_libraries(wolvrix-lib
     PUBLIC
         slang::slang
 )
 
-## transform
-add_library(transform STATIC
-    src/transform.cpp
-    ${TRANSFORM_PASS_SOURCES}
-)
-
-target_include_directories(transform
-    PUBLIC
-        include
-)
-
-target_link_libraries(transform
-    PUBLIC
-        grh
-)
-
-## convert
-add_library(convert STATIC
-    src/convert.cpp
-)
-
-target_include_directories(convert
-    PUBLIC
-        include
-)
-
-target_link_libraries(convert
-    PUBLIC
-        grh
-)
+add_library(wolvrix::lib ALIAS wolvrix-lib)
 
 # Application
-add_executable(wolf-sv-parser
-    src/main.cpp
+add_executable(wolvrix-cli
+    app/cli/main.cpp
 )
 
-target_link_libraries(wolf-sv-parser
+target_link_libraries(wolvrix-cli
     PRIVATE
-        transform
-        convert
-        grh
+        wolvrix-lib
 )
 
 enable_testing()
@@ -91,6 +73,7 @@ enable_testing()
 # -----------------------------------------------------------------------------
 # Common test paths
 set(WOLF_SV_TEST_INPUT_DIR "${CMAKE_SOURCE_DIR}/tests/data")
+set(WOLF_SV_INGEST_TEST_DATA_DIR "${CMAKE_SOURCE_DIR}/tests/ingest/data")
 set(WOLF_SV_TEST_ARTIFACT_DIR "${CMAKE_BINARY_DIR}/artifacts")
 
 set(EMIT_ARTIFACT_DIR "${WOLF_SV_TEST_ARTIFACT_DIR}/emit")
@@ -111,7 +94,7 @@ add_executable(grh-tests
 
 target_link_libraries(grh-tests
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 target_compile_definitions(grh-tests
@@ -128,7 +111,7 @@ add_executable(grh-roundtrip-tests
 
 target_link_libraries(grh-roundtrip-tests
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 register_test_exe(grh-roundtrip-tests)
@@ -140,7 +123,7 @@ add_executable(grh-symbol-utils-tests
 
 target_link_libraries(grh-symbol-utils-tests
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 register_test_exe(grh-symbol-utils-tests)
@@ -152,7 +135,7 @@ add_executable(emit-base
 
 target_link_libraries(emit-base
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 target_compile_definitions(emit-base
@@ -162,37 +145,37 @@ target_compile_definitions(emit-base
 
 register_test_exe(emit-base)
 
-add_executable(emit-json
-    tests/emit/test_emit_json.cpp
+add_executable(store-json
+    tests/store/test_store_json.cpp
 )
 
-target_link_libraries(emit-json
+target_link_libraries(store-json
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
-target_compile_definitions(emit-json
-    PRIVATE
-        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
-)
-
-register_test_exe(emit-json)
-
-add_executable(emit-json-ir
-    tests/emit/test_emit_json_ir.cpp
-)
-
-target_link_libraries(emit-json-ir
-    PRIVATE
-        grh
-)
-
-target_compile_definitions(emit-json-ir
+target_compile_definitions(store-json
     PRIVATE
         WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
 )
 
-register_test_exe(emit-json-ir)
+register_test_exe(store-json)
+
+add_executable(store-json-ir
+    tests/store/test_store_json_ir.cpp
+)
+
+target_link_libraries(store-json-ir
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(store-json-ir
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(store-json-ir)
 
 add_executable(emit-sv-readmem
     tests/emit/test_emit_sv_readmem.cpp
@@ -200,7 +183,7 @@ add_executable(emit-sv-readmem
 
 target_link_libraries(emit-sv-readmem
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 target_compile_definitions(emit-sv-readmem
@@ -216,7 +199,7 @@ add_executable(emit-sv-storage-ports
 
 target_link_libraries(emit-sv-storage-ports
     PRIVATE
-        grh
+        wolvrix-lib
 )
 
 target_compile_definitions(emit-sv-storage-ports
@@ -233,7 +216,7 @@ add_executable(transform-pass-manager
 
 target_link_libraries(transform-pass-manager
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-pass-manager)
@@ -244,7 +227,7 @@ add_executable(transform-const-fold
 
 target_link_libraries(transform-const-fold
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-const-fold)
@@ -255,7 +238,7 @@ add_executable(transform-dead-code-elim
 
 target_link_libraries(transform-dead-code-elim
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-dead-code-elim)
@@ -266,7 +249,7 @@ add_executable(transform-redundant-elim
 
 target_link_libraries(transform-redundant-elim
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-redundant-elim)
@@ -277,7 +260,7 @@ add_executable(transform-xmr-resolve-inout
 
 target_link_libraries(transform-xmr-resolve-inout
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-xmr-resolve-inout)
@@ -288,221 +271,213 @@ add_executable(transform-xmr-resolve-storage
 
 target_link_libraries(transform-xmr-resolve-storage
     PRIVATE
-        transform
+        wolvrix-lib
 )
 
 register_test_exe(transform-xmr-resolve-storage)
 
-# convert: symbol collector
-add_executable(convert-symbol-collector
-    tests/convert/test_convert_symbol_collector.cpp
+# ingest: symbol collector
+add_executable(ingest-symbol-collector
+    tests/ingest/test_ingest_symbol_collector.cpp
 )
 
-target_link_libraries(convert-symbol-collector
+target_link_libraries(ingest-symbol-collector
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
 
-target_compile_definitions(convert-symbol-collector
+target_compile_definitions(ingest-symbol-collector
     PRIVATE
-        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+        WOLF_SV_INGEST_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
 )
 
-register_test_exe(convert-symbol-collector)
+register_test_exe(ingest-symbol-collector)
 
-# convert: type resolver
-add_executable(convert-type-resolver
-    tests/convert/test_convert_type_resolver.cpp
-)
-
-target_link_libraries(convert-type-resolver
-    PRIVATE
-        convert
-        grh
+# ingest: type resolver
+add_executable(ingest-type-resolver
+    tests/ingest/test_ingest_type_resolver.cpp
 )
 
-target_compile_definitions(convert-type-resolver
+target_link_libraries(ingest-type-resolver
     PRIVATE
-        WOLF_SV_CONVERT_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+        wolvrix-lib
 )
 
-register_test_exe(convert-type-resolver)
+target_compile_definitions(ingest-type-resolver
+    PRIVATE
+        WOLF_SV_INGEST_HDLBITS_DUT_DIR="${WOLF_SV_TEST_INPUT_DIR}/hdlbits/dut"
+)
 
-# convert: stmt lowerer
-add_executable(convert-stmt-lowerer
-    tests/convert/test_convert_stmt_lowerer.cpp
-)
-target_link_libraries(convert-stmt-lowerer
-    PRIVATE
-        convert
-)
-target_compile_definitions(convert-stmt-lowerer
-    PRIVATE
-        WOLF_SV_CONVERT_STMT_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/stmt_lowerer.sv"
-)
-register_test_exe(convert-stmt-lowerer)
+register_test_exe(ingest-type-resolver)
 
-# convert: stmt lowerer error paths
-add_executable(convert-stmt-lowerer-errors
-    tests/convert/test_convert_stmt_lowerer_errors.cpp
+# ingest: stmt lowerer
+add_executable(ingest-stmt-lowerer
+    tests/ingest/test_ingest_stmt_lowerer.cpp
 )
-target_link_libraries(convert-stmt-lowerer-errors
+target_link_libraries(ingest-stmt-lowerer
     PRIVATE
-        convert
+        wolvrix-lib
 )
-target_compile_definitions(convert-stmt-lowerer-errors
+target_compile_definitions(ingest-stmt-lowerer
     PRIVATE
-        WOLF_SV_CONVERT_STMT_ERROR_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/stmt_lowerer_errors.sv"
+        WOLF_SV_INGEST_STMT_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/stmt_lowerer.sv"
 )
-register_test_exe(convert-stmt-lowerer-errors)
+register_test_exe(ingest-stmt-lowerer)
 
-# convert: write-back
-add_executable(convert-write-back
-    tests/convert/test_convert_write_back.cpp
+# ingest: stmt lowerer error paths
+add_executable(ingest-stmt-lowerer-errors
+    tests/ingest/test_ingest_stmt_lowerer_errors.cpp
 )
-target_link_libraries(convert-write-back
+target_link_libraries(ingest-stmt-lowerer-errors
     PRIVATE
-        convert
+        wolvrix-lib
 )
-target_compile_definitions(convert-write-back
+target_compile_definitions(ingest-stmt-lowerer-errors
     PRIVATE
-        WOLF_SV_CONVERT_WRITE_BACK_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/write_back.sv"
+        WOLF_SV_INGEST_STMT_ERROR_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/stmt_lowerer_errors.sv"
 )
-register_test_exe(convert-write-back)
+register_test_exe(ingest-stmt-lowerer-errors)
 
-# convert: write-back slice
-add_executable(convert-write-back-slice
-    tests/convert/test_convert_write_back_slice.cpp
+# ingest: write-back
+add_executable(ingest-write-back
+    tests/ingest/test_ingest_write_back.cpp
 )
-target_link_libraries(convert-write-back-slice
+target_link_libraries(ingest-write-back
     PRIVATE
-        convert
+        wolvrix-lib
 )
-target_compile_definitions(convert-write-back-slice
+target_compile_definitions(ingest-write-back
     PRIVATE
-        WOLF_SV_CONVERT_WRITE_BACK_SLICE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/write_back_slice.sv"
+        WOLF_SV_INGEST_WRITE_BACK_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/write_back.sv"
 )
-register_test_exe(convert-write-back-slice)
+register_test_exe(ingest-write-back)
 
-# convert: memory port lowerer
-add_executable(convert-memory-port-lowerer
-    tests/convert/test_convert_memory_port_lowerer.cpp
+# ingest: write-back slice
+add_executable(ingest-write-back-slice
+    tests/ingest/test_ingest_write_back_slice.cpp
 )
-target_link_libraries(convert-memory-port-lowerer
+target_link_libraries(ingest-write-back-slice
     PRIVATE
-        convert
+        wolvrix-lib
 )
-target_compile_definitions(convert-memory-port-lowerer
+target_compile_definitions(ingest-write-back-slice
     PRIVATE
-        WOLF_SV_CONVERT_MEMORY_PORT_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/memory_ports.sv"
+        WOLF_SV_INGEST_WRITE_BACK_SLICE_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/write_back_slice.sv"
 )
-register_test_exe(convert-memory-port-lowerer)
+register_test_exe(ingest-write-back-slice)
 
-# convert: graph assembly basic
-add_executable(convert-graph-assembly-basic
-    tests/convert/test_convert_graph_assembly_basic.cpp
+# ingest: memory port lowerer
+add_executable(ingest-memory-port-lowerer
+    tests/ingest/test_ingest_memory_port_lowerer.cpp
 )
-target_link_libraries(convert-graph-assembly-basic
+target_link_libraries(ingest-memory-port-lowerer
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-basic
+target_compile_definitions(ingest-memory-port-lowerer
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_basic.sv"
+        WOLF_SV_INGEST_MEMORY_PORT_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/memory_ports.sv"
 )
-register_test_exe(convert-graph-assembly-basic)
+register_test_exe(ingest-memory-port-lowerer)
 
-# convert: graph assembly register multi-write
-add_executable(convert-graph-assembly-register-multi
-    tests/convert/test_convert_graph_assembly_register_multi.cpp
+# ingest: graph assembly basic
+add_executable(ingest-graph-assembly-basic
+    tests/ingest/test_ingest_graph_assembly_basic.cpp
 )
-target_link_libraries(convert-graph-assembly-register-multi
+target_link_libraries(ingest-graph-assembly-basic
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-register-multi
+target_compile_definitions(ingest-graph-assembly-basic
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_REGISTER_MULTI_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_register_multi.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_basic.sv"
 )
-register_test_exe(convert-graph-assembly-register-multi)
+register_test_exe(ingest-graph-assembly-basic)
 
-# convert: graph assembly memory
-add_executable(convert-graph-assembly-memory
-    tests/convert/test_convert_graph_assembly_memory.cpp
+# ingest: graph assembly register multi-write
+add_executable(ingest-graph-assembly-register-multi
+    tests/ingest/test_ingest_graph_assembly_register_multi.cpp
 )
-target_link_libraries(convert-graph-assembly-memory
+target_link_libraries(ingest-graph-assembly-register-multi
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-memory
+target_compile_definitions(ingest-graph-assembly-register-multi
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_MEMORY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_memory.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_REGISTER_MULTI_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_register_multi.sv"
 )
-register_test_exe(convert-graph-assembly-memory)
+register_test_exe(ingest-graph-assembly-register-multi)
 
-# convert: graph assembly slice
-add_executable(convert-graph-assembly-slice
-    tests/convert/test_convert_graph_assembly_slice.cpp
+# ingest: graph assembly memory
+add_executable(ingest-graph-assembly-memory
+    tests/ingest/test_ingest_graph_assembly_memory.cpp
 )
-target_link_libraries(convert-graph-assembly-slice
+target_link_libraries(ingest-graph-assembly-memory
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-slice
+target_compile_definitions(ingest-graph-assembly-memory
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_SLICE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_slice.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_MEMORY_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_memory.sv"
 )
-register_test_exe(convert-graph-assembly-slice)
+register_test_exe(ingest-graph-assembly-memory)
 
-# convert: graph assembly dpi/display
-add_executable(convert-graph-assembly-dpi-display
-    tests/convert/test_convert_graph_assembly_dpi_display.cpp
+# ingest: graph assembly slice
+add_executable(ingest-graph-assembly-slice
+    tests/ingest/test_ingest_graph_assembly_slice.cpp
 )
-target_link_libraries(convert-graph-assembly-dpi-display
+target_link_libraries(ingest-graph-assembly-slice
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-dpi-display
+target_compile_definitions(ingest-graph-assembly-slice
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_DPI_DISPLAY_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_dpi_display.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_SLICE_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_slice.sv"
 )
-register_test_exe(convert-graph-assembly-dpi-display)
+register_test_exe(ingest-graph-assembly-slice)
 
-# convert: graph assembly instance
-add_executable(convert-graph-assembly-instance
-    tests/convert/test_convert_graph_assembly_instance.cpp
+# ingest: graph assembly dpi/display
+add_executable(ingest-graph-assembly-dpi-display
+    tests/ingest/test_ingest_graph_assembly_dpi_display.cpp
 )
-target_link_libraries(convert-graph-assembly-instance
+target_link_libraries(ingest-graph-assembly-dpi-display
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-instance
+target_compile_definitions(ingest-graph-assembly-dpi-display
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_INSTANCE_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_instance.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_DPI_DISPLAY_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_dpi_display.sv"
 )
-register_test_exe(convert-graph-assembly-instance)
+register_test_exe(ingest-graph-assembly-dpi-display)
 
-# convert: graph assembly instance dedup
-add_executable(convert-graph-assembly-instance-dedup
-    tests/convert/test_convert_graph_assembly_instance_dedup.cpp
+# ingest: graph assembly instance
+add_executable(ingest-graph-assembly-instance
+    tests/ingest/test_ingest_graph_assembly_instance.cpp
 )
-target_link_libraries(convert-graph-assembly-instance-dedup
+target_link_libraries(ingest-graph-assembly-instance
     PRIVATE
-        convert
-        grh
+        wolvrix-lib
 )
-target_compile_definitions(convert-graph-assembly-instance-dedup
+target_compile_definitions(ingest-graph-assembly-instance
     PRIVATE
-        WOLF_SV_CONVERT_GRAPH_ASSEMBLY_INSTANCE_DEDUP_DATA_PATH="${WOLF_SV_TEST_INPUT_DIR}/convert/graph_assembly_instance_dedup.sv"
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_INSTANCE_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_instance.sv"
 )
-register_test_exe(convert-graph-assembly-instance-dedup)
+register_test_exe(ingest-graph-assembly-instance)
+
+# ingest: graph assembly instance dedup
+add_executable(ingest-graph-assembly-instance-dedup
+    tests/ingest/test_ingest_graph_assembly_instance_dedup.cpp
+)
+target_link_libraries(ingest-graph-assembly-instance-dedup
+    PRIVATE
+        wolvrix-lib
+)
+target_compile_definitions(ingest-graph-assembly-instance-dedup
+    PRIVATE
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_INSTANCE_DEDUP_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_instance_dedup.sv"
+)
+register_test_exe(ingest-graph-assembly-instance-dedup)
 
 # Installation rules
-install(TARGETS wolf-sv-parser DESTINATION bin)
+install(TARGETS wolvrix-cli RUNTIME DESTINATION bin)
+install(TARGETS wolvrix-lib LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)

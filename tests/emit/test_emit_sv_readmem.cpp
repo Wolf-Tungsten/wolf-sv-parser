@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-using namespace grh::emit;
-using namespace grh::ir;
+using namespace wolvrix::lib::emit;
+using namespace wolvrix::lib::grh;
 
 namespace
 {

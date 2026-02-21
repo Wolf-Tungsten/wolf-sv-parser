@@ -4,7 +4,7 @@
 #include <optional>
 #include <string>
 
-using namespace grh::ir;
+using namespace wolvrix::lib::grh;
 
 namespace
 {
@@ -230,7 +230,7 @@ int main()
 {
     try
     {
-        namespace grh_ir = grh::ir;
+        namespace grh_ir = wolvrix::lib::grh;
 
         grh_ir::GraphSymbolTable graphSymbols;
         grh_ir::GraphBuilder builder(graphSymbols);

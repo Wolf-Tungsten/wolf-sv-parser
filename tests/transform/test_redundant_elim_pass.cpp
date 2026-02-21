@@ -1,12 +1,11 @@
 #include "grh.hpp"
-#include "pass/redundant_elim.hpp"
+#include "transform/redundant_elim.hpp"
 #include "transform.hpp"
 
 #include <iostream>
 #include <string>
 
-using namespace wolf_sv_parser;
-using namespace wolf_sv_parser::transform;
+using namespace wolvrix::lib::transform;
 
 namespace
 {
@@ -21,29 +20,29 @@ namespace
 
 int main()
 {
-    grh::ir::Netlist netlist;
-    grh::ir::Graph &graph = netlist.createGraph("g");
+    wolvrix::lib::grh::Netlist netlist;
+    wolvrix::lib::grh::Graph &graph = netlist.createGraph("g");
 
-    const grh::ir::SymbolId resetSym = graph.internSymbol("reset");
-    grh::ir::ValueId reset = graph.createValue(resetSym, 1, false);
+    const wolvrix::lib::grh::SymbolId resetSym = graph.internSymbol("reset");
+    wolvrix::lib::grh::ValueId reset = graph.createValue(resetSym, 1, false);
     graph.bindInputPort(resetSym, reset);
 
-    grh::ir::ValueId notReset = graph.createValue(graph.internSymbol("not_reset"), 1, false);
-    grh::ir::OperationId notOp =
-        graph.createOperation(grh::ir::OperationKind::kLogicNot,
+    wolvrix::lib::grh::ValueId notReset = graph.createValue(graph.internSymbol("not_reset"), 1, false);
+    wolvrix::lib::grh::OperationId notOp =
+        graph.createOperation(wolvrix::lib::grh::OperationKind::kLogicNot,
                               graph.internSymbol("not_op"));
     graph.addOperand(notOp, reset);
     graph.addResult(notOp, notReset);
 
-    grh::ir::ValueId guard = graph.createValue(graph.internSymbol("guard"), 1, false);
-    grh::ir::OperationId orOp =
-        graph.createOperation(grh::ir::OperationKind::kLogicOr,
+    wolvrix::lib::grh::ValueId guard = graph.createValue(graph.internSymbol("guard"), 1, false);
+    wolvrix::lib::grh::OperationId orOp =
+        graph.createOperation(wolvrix::lib::grh::OperationKind::kLogicOr,
                               graph.internSymbol("or_op"));
     graph.addOperand(orOp, reset);
     graph.addOperand(orOp, notReset);
     graph.addResult(orOp, guard);
 
-    const grh::ir::SymbolId outSym = graph.internSymbol("out");
+    const wolvrix::lib::grh::SymbolId outSym = graph.internSymbol("out");
     graph.bindOutputPort(outSym, guard);
 
     PassManager manager;
@@ -73,7 +72,7 @@ int main()
         return fail("or_op should be removed");
     }
 
-    grh::ir::ValueId outValueId = grh::ir::ValueId::invalid();
+    wolvrix::lib::grh::ValueId outValueId = wolvrix::lib::grh::ValueId::invalid();
     for (const auto &port : graph.outputPorts())
     {
         if (port.name == outSym)
@@ -87,14 +86,14 @@ int main()
         return fail("Output port not found");
     }
 
-    grh::ir::Value outValue = graph.getValue(outValueId);
-    grh::ir::OperationId defOpId = outValue.definingOp();
+    wolvrix::lib::grh::Value outValue = graph.getValue(outValueId);
+    wolvrix::lib::grh::OperationId defOpId = outValue.definingOp();
     if (!defOpId.valid())
     {
         return fail("Output should be driven by a constant");
     }
-    grh::ir::Operation defOp = graph.getOperation(defOpId);
-    if (defOp.kind() != grh::ir::OperationKind::kConstant)
+    wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
+    if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
     {
         return fail("Output should be driven by kConstant");
     }

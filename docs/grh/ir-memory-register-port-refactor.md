@@ -345,7 +345,7 @@ kRegisterReadPort { regSymbol: "reg_a", results: ["xmr_out"] }
 
 **阶段 2：Convert**
 - 交付：寄存器/锁存器拆分为声明 + ReadPort/WritePort；同一 always 合并为单 WritePort；多 always 支持
-- 出口：`tests/convert/*` 覆盖单写与多写，fixture 全更新
+- 出口：`tests/ingest/*` 覆盖单写与多写，fixture 全更新
 
 **阶段 3：Emit + XMR**
 - 交付：ReadPort 生成 `assign`，WritePort 生成 `always/always_latch`；XMR resolve 走 Port
@@ -566,7 +566,7 @@ XMR 写入存储单元时，resolve pass 应在**目标模块**创建新的 Writ
 
 ## 实施记录
 - 2026-02-20：完成阶段 1（IR/JSON 基础），新增 OperationKind（kRegisterReadPort/kRegisterWritePort/kLatchReadPort/kLatchWritePort），更新 `docs/GRH-JSON-spec.md` 与 `docs/GRH-representation.md` 说明新的存储 Port 结构。测试：`ctest --test-dir build --output-on-failure`（24/24 通过），**局限性**：仅覆盖既有测试用例，未新增针对新 OperationKind 的专项测试。
-- 2026-02-20：完成阶段 2（Convert）。Convert 输出 `kRegister`/`kLatch` 声明与对应 ReadPort/WritePort，写回端口使用 mask；更新 `convert-graph-assembly-basic` 断言 Port 模型，并新增多 always 写端口用例 `convert-graph-assembly-register-multi` 与 fixture。测试：`ctest --test-dir build --output-on-failure`（24/25 通过），失败项：`transform-pass-manager`（报错：Stats pass should emit a diagnostic with counts）。
+- 2026-02-20：完成阶段 2（Convert）。Convert 输出 `kRegister`/`kLatch` 声明与对应 ReadPort/WritePort，写回端口使用 mask；更新 `ingest-graph-assembly-basic` 断言 Port 模型，并新增多 always 写端口用例 `ingest-graph-assembly-register-multi` 与 fixture。测试：`ctest --test-dir build --output-on-failure`（24/25 通过），失败项：`transform-pass-manager`（报错：Stats pass should emit a diagnostic with counts）。
 - 2026-02-20：修复 `StatsPass` 使用诊断通道输出统计信息，`ctest --test-dir build --output-on-failure`（25/25 通过）。
 - 2026-02-21：完成阶段 3（Emit + XMR）。Emit 支持 `kRegister/kLatch` 声明、`kRegisterReadPort/kLatchReadPort` 生成 `assign`，`kRegisterWritePort/kLatchWritePort` 生成 `always/always_latch`（含 mask）；XMR resolve 对存储单元生成 ReadPort/WritePort，`kXMRWrite` 校验事件信息并扩展多 operand 传递。新增测试：`emit-sv-storage-ports`、`transform-xmr-resolve-storage`。测试：`ctest --test-dir build --output-on-failure`（27/27 通过）。
 - 2026-02-21：完成阶段 4（Passes 与回归）。更新 `dead_code_elim`/`redundant_elim` 识别新的寄存器/锁存器 ReadPort/WritePort，避免将存储访问视为可消除表达式；回归通过。测试：`ctest --test-dir build --output-on-failure`（27/27 通过）。

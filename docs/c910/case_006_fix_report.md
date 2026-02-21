@@ -45,4 +45,4 @@ Notes:
 
 ## Open questions / follow-ups
 
-- None for this fix. If desired, we could add a targeted unit test under `convert-memory-port-lowerer` for unpacked array reads to guard against regressions.
+- None for this fix. If desired, we could add a targeted unit test under `ingest-memory-port-lowerer` for unpacked array reads to guard against regressions.

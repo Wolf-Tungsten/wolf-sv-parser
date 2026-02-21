@@ -272,7 +272,7 @@ current `src/emit.cpp` implementation, the likely hot spots are:
 ### Possible optimizations (low-risk first)
 
 1) **Memoize `dpiInlineExpr` results per ValueId.**  
-   Add a `std::unordered_map<grh::ir::ValueId, std::string, ValueIdHash>`
+   Add a `std::unordered_map<wolvrix::lib::grh::ValueId, std::string, ValueIdHash>`
    cache. Once an inline expression is built, reuse it for all later uses.
    Keep `dpiInlineResolving` to break cycles. This directly cuts the repeated
    rebuild cost in large graphs.

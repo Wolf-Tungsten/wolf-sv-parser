@@ -1,13 +1,12 @@
 #include "grh.hpp"
 #include "transform.hpp"
-#include "pass/demo_stats.hpp"
+#include "transform/demo_stats.hpp"
 
 #include <iostream>
 #include <string>
 #include <vector>
 
-using namespace wolf_sv_parser;
-using namespace wolf_sv_parser::transform;
+using namespace wolvrix::lib::transform;
 
 namespace
 {
@@ -135,7 +134,7 @@ namespace
 
 int main()
 {
-    grh::ir::Netlist netlist;
+    wolvrix::lib::grh::Netlist netlist;
     netlist.createGraph("top");
 
     // Case 1: pipeline order and aggregated changed flag
@@ -317,11 +316,11 @@ int main()
 
     // Case 6: built-in stats pass reports counts
     {
-        grh::ir::Netlist netlistStats;
-        grh::ir::Graph &graph = netlistStats.createGraph("g");
+        wolvrix::lib::grh::Netlist netlistStats;
+        wolvrix::lib::grh::Graph &graph = netlistStats.createGraph("g");
         graph.createValue(graph.internSymbol("v0"), 1, false);
         graph.createValue(graph.internSymbol("v1"), 1, false);
-        graph.createOperation(grh::ir::OperationKind::kAssign, graph.internSymbol("op0"));
+        graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("op0"));
 
         PassManager manager;
         manager.options().verbosity = PassVerbosity::Info;
@@ -337,7 +336,6 @@ int main()
         {
             return fail("Stats pass should not record errors");
         }
-#if WOLF_SV_TRANSFORM_ENABLE_INFO_DIAGNOSTICS
         if (diags.messages().empty())
         {
             return fail("Stats pass should emit a diagnostic with counts");
@@ -353,18 +351,6 @@ int main()
         {
             return fail("Stats pass diagnostic did not contain expected counts");
         }
-#else
-        if (!diags.messages().empty())
-        {
-            const auto &message = diags.messages().front();
-            if (message.message.find("graphs=1") == std::string::npos ||
-                message.message.find("operations=1") == std::string::npos ||
-                message.message.find("values=2") == std::string::npos)
-            {
-                return fail("Stats pass diagnostic did not contain expected counts");
-            }
-        }
-#endif
     }
 
     return 0;

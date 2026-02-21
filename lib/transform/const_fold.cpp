@@ -1,0 +1,1249 @@
+#include "transform/const_fold.hpp"
+
+#include "grh.hpp"
+
+#include "slang/numeric/SVInt.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace wolvrix::lib::transform
+{
+
+    // Definitions for forward-declared types from the header
+    struct ConstantValue
+    {
+        slang::SVInt value;
+        bool hasUnknown = false;
+    };
+
+    struct ConstantKey
+    {
+        std::string literal;
+        int32_t width = 0;
+        bool isSigned = false;
+
+        bool operator==(const ConstantKey &other) const
+        {
+            return width == other.width &&
+                   isSigned == other.isSigned &&
+                   literal == other.literal;
+        }
+    };
+
+    struct ConstantKeyHash
+    {
+        std::size_t operator()(const ConstantKey &key) const
+        {
+            std::size_t seed = std::hash<std::string>{}(key.literal);
+            seed ^= std::hash<int32_t>{}(key.width) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            seed ^= std::hash<bool>{}(key.isSigned) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
+        }
+    };
+
+    namespace
+    {
+        struct FoldOptions
+        {
+            bool allowXPropagation = false;
+        };
+
+        using ConstantStore = std::unordered_map<wolvrix::lib::grh::ValueId, ConstantValue, wolvrix::lib::grh::ValueIdHash>;
+        using ConstantPool = std::unordered_map<ConstantKey, wolvrix::lib::grh::ValueId, ConstantKeyHash>;
+
+        bool isFoldable(wolvrix::lib::grh::OperationKind kind)
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kSystemFunction:
+            case wolvrix::lib::grh::OperationKind::kAdd:
+            case wolvrix::lib::grh::OperationKind::kSub:
+            case wolvrix::lib::grh::OperationKind::kMul:
+            case wolvrix::lib::grh::OperationKind::kDiv:
+            case wolvrix::lib::grh::OperationKind::kMod:
+            case wolvrix::lib::grh::OperationKind::kEq:
+            case wolvrix::lib::grh::OperationKind::kNe:
+            case wolvrix::lib::grh::OperationKind::kCaseEq:
+            case wolvrix::lib::grh::OperationKind::kCaseNe:
+            case wolvrix::lib::grh::OperationKind::kWildcardEq:
+            case wolvrix::lib::grh::OperationKind::kWildcardNe:
+            case wolvrix::lib::grh::OperationKind::kLt:
+            case wolvrix::lib::grh::OperationKind::kLe:
+            case wolvrix::lib::grh::OperationKind::kGt:
+            case wolvrix::lib::grh::OperationKind::kGe:
+            case wolvrix::lib::grh::OperationKind::kAnd:
+            case wolvrix::lib::grh::OperationKind::kOr:
+            case wolvrix::lib::grh::OperationKind::kXor:
+            case wolvrix::lib::grh::OperationKind::kXnor:
+            case wolvrix::lib::grh::OperationKind::kNot:
+            case wolvrix::lib::grh::OperationKind::kLogicAnd:
+            case wolvrix::lib::grh::OperationKind::kLogicOr:
+            case wolvrix::lib::grh::OperationKind::kLogicNot:
+            case wolvrix::lib::grh::OperationKind::kReduceAnd:
+            case wolvrix::lib::grh::OperationKind::kReduceOr:
+            case wolvrix::lib::grh::OperationKind::kReduceXor:
+            case wolvrix::lib::grh::OperationKind::kReduceNor:
+            case wolvrix::lib::grh::OperationKind::kReduceNand:
+            case wolvrix::lib::grh::OperationKind::kReduceXnor:
+            case wolvrix::lib::grh::OperationKind::kShl:
+            case wolvrix::lib::grh::OperationKind::kLShr:
+            case wolvrix::lib::grh::OperationKind::kAShr:
+            case wolvrix::lib::grh::OperationKind::kMux:
+            case wolvrix::lib::grh::OperationKind::kAssign:
+            case wolvrix::lib::grh::OperationKind::kConcat:
+            case wolvrix::lib::grh::OperationKind::kReplicate:
+            case wolvrix::lib::grh::OperationKind::kSliceStatic:
+            case wolvrix::lib::grh::OperationKind::kSliceDynamic:
+            case wolvrix::lib::grh::OperationKind::kSliceArray:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        std::optional<std::string> getStringAttr(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, std::string_view key)
+        {
+            (void)graph;
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<std::string>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
+        std::optional<bool> getBoolAttr(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, std::string_view key)
+        {
+            (void)graph;
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<bool>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
+        std::optional<int64_t> getIntAttr(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, std::string_view key)
+        {
+            (void)graph;
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<int64_t>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
+        bool isValuePortBound(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId value)
+        {
+            for (const auto &port : graph.inputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                if (port.in == value || port.out == value || port.oe == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::optional<ConstantValue> parseConstLiteral(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, const wolvrix::lib::grh::Value &value, const std::string &literal, const std::function<void(std::string)> &onError)
+        {
+            if (!literal.empty() && literal.front() == '"')
+            {
+                return std::nullopt;
+            }
+            if (!literal.empty() && literal.front() == '$')
+            {
+                return std::nullopt;
+            }
+            try
+            {
+                slang::SVInt parsed = slang::SVInt::fromString(literal);
+                if (value.width() <= 0)
+                {
+                    onError("Value width must be positive for constant propagation: " + std::string(value.symbolText()));
+                    return std::nullopt;
+                }
+                parsed.setSigned(value.isSigned());
+                parsed = parsed.resize(static_cast<slang::bitwidth_t>(value.width()));
+                ConstantValue result{parsed, parsed.hasUnknown()};
+                return result;
+            }
+            catch (const std::exception &ex)
+            {
+                std::ostringstream oss;
+                oss << "Failed to parse constValue '" << literal << "': " << ex.what();
+                onError(oss.str());
+                return std::nullopt;
+            }
+        }
+
+        std::optional<ConstantValue> parseConstValue(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, const wolvrix::lib::grh::Value &value, const std::function<void(std::string)> &onError)
+        {
+            auto literalOpt = getStringAttr(graph, op, "constValue");
+            if (!literalOpt)
+            {
+                onError("kConstant missing constValue attribute");
+                return std::nullopt;
+            }
+            return parseConstLiteral(graph, op, value, *literalOpt, onError);
+        }
+
+        bool operandsAreConstant(const wolvrix::lib::grh::Operation &op, const ConstantStore &store)
+        {
+            const auto operands = op.operands();
+            for (std::size_t i = 0; i < operands.size(); ++i)
+            {
+                const auto valId = operands[i];
+                if (!valId.valid())
+                {
+                    return false;
+                }
+                if (store.find(valId) == store.end())
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        slang::SVInt normalizeToValue(const wolvrix::lib::grh::Value &value, const slang::SVInt &raw)
+        {
+            slang::SVInt adjusted = raw;
+            adjusted.setSigned(value.isSigned());
+            adjusted = adjusted.resize(static_cast<slang::bitwidth_t>(value.width()));
+            adjusted.setSigned(value.isSigned());
+            return adjusted;
+        }
+
+        std::optional<slang::SVInt> foldBinary(const wolvrix::lib::grh::Operation &op, wolvrix::lib::grh::OperationKind kind, const std::vector<slang::SVInt> &operands)
+        {
+            const slang::SVInt &lhs = operands[0];
+            const slang::SVInt &rhs = operands[1];
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kAdd:
+                return lhs + rhs;
+            case wolvrix::lib::grh::OperationKind::kSub:
+                return lhs - rhs;
+            case wolvrix::lib::grh::OperationKind::kMul:
+                return lhs * rhs;
+            case wolvrix::lib::grh::OperationKind::kDiv:
+                return lhs / rhs;
+            case wolvrix::lib::grh::OperationKind::kMod:
+                return lhs % rhs;
+            case wolvrix::lib::grh::OperationKind::kAnd:
+                return lhs & rhs;
+            case wolvrix::lib::grh::OperationKind::kOr:
+                return lhs | rhs;
+            case wolvrix::lib::grh::OperationKind::kXor:
+                return lhs ^ rhs;
+            case wolvrix::lib::grh::OperationKind::kXnor:
+                return ~(lhs ^ rhs);
+            case wolvrix::lib::grh::OperationKind::kEq:
+                return slang::SVInt(lhs == rhs);
+            case wolvrix::lib::grh::OperationKind::kNe:
+                return slang::SVInt(lhs != rhs);
+            case wolvrix::lib::grh::OperationKind::kCaseEq:
+                return slang::SVInt(exactlyEqual(lhs, rhs));
+            case wolvrix::lib::grh::OperationKind::kCaseNe:
+                return slang::SVInt(!exactlyEqual(lhs, rhs));
+            case wolvrix::lib::grh::OperationKind::kWildcardEq:
+                return slang::SVInt(caseXWildcardEqual(lhs, rhs));
+            case wolvrix::lib::grh::OperationKind::kWildcardNe:
+                return slang::SVInt(!caseXWildcardEqual(lhs, rhs));
+            case wolvrix::lib::grh::OperationKind::kLt:
+                return slang::SVInt(lhs < rhs);
+            case wolvrix::lib::grh::OperationKind::kLe:
+                return slang::SVInt(lhs <= rhs);
+            case wolvrix::lib::grh::OperationKind::kGt:
+                return slang::SVInt(lhs > rhs);
+            case wolvrix::lib::grh::OperationKind::kGe:
+                return slang::SVInt(lhs >= rhs);
+            case wolvrix::lib::grh::OperationKind::kLogicAnd:
+                return slang::SVInt(lhs && rhs);
+            case wolvrix::lib::grh::OperationKind::kLogicOr:
+                return slang::SVInt(lhs || rhs);
+            case wolvrix::lib::grh::OperationKind::kShl:
+                return lhs.shl(rhs);
+            case wolvrix::lib::grh::OperationKind::kLShr:
+                return lhs.lshr(rhs);
+            case wolvrix::lib::grh::OperationKind::kAShr:
+                return lhs.ashr(rhs);
+            default:
+                (void)op;
+                return std::nullopt;
+            }
+        }
+
+        std::optional<slang::SVInt> foldUnary(const wolvrix::lib::grh::Operation &op, wolvrix::lib::grh::OperationKind kind, const slang::SVInt &operand)
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kNot:
+                return ~operand;
+            case wolvrix::lib::grh::OperationKind::kLogicNot:
+                return slang::SVInt(!operand);
+            case wolvrix::lib::grh::OperationKind::kReduceAnd:
+                return slang::SVInt(operand.reductionAnd());
+            case wolvrix::lib::grh::OperationKind::kReduceOr:
+                return slang::SVInt(operand.reductionOr());
+            case wolvrix::lib::grh::OperationKind::kReduceXor:
+                return slang::SVInt(operand.reductionXor());
+            case wolvrix::lib::grh::OperationKind::kReduceNor:
+                return slang::SVInt(!operand.reductionOr());
+            case wolvrix::lib::grh::OperationKind::kReduceNand:
+                return slang::SVInt(!operand.reductionAnd());
+            case wolvrix::lib::grh::OperationKind::kReduceXnor:
+                return slang::SVInt(!operand.reductionXor());
+            default:
+                (void)op;
+                return std::nullopt;
+            }
+        }
+
+        std::optional<std::vector<slang::SVInt>> foldOperation(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op, const ConstantStore &store, const FoldOptions options, const std::function<void(std::string)> &onError, const std::function<void(std::string)> &onWarning)
+        {
+            if (op.results().empty())
+            {
+                return std::nullopt;
+            }
+
+            std::vector<slang::SVInt> operands;
+            operands.reserve(op.operands().size());
+            bool hasUnknown = false;
+            for (std::size_t i = 0; i < op.operands().size(); ++i)
+            {
+                const auto valId = op.operands()[i];
+                if (!valId.valid())
+                {
+                    onError("Operand missing during constant propagation");
+                    return std::nullopt;
+                }
+                auto it = store.find(valId);
+                if (it == store.end())
+                {
+                    return std::nullopt;
+                }
+                hasUnknown = hasUnknown || it->second.hasUnknown;
+                operands.push_back(it->second.value);
+            }
+
+            if (!options.allowXPropagation && hasUnknown)
+            {
+                return std::nullopt;
+            }
+
+            std::optional<slang::SVInt> folded;
+            switch (op.kind())
+            {
+            case wolvrix::lib::grh::OperationKind::kSystemFunction: {
+                auto name = getStringAttr(graph, op, "name");
+                if (!name || name->empty())
+                {
+                    return std::nullopt;
+                }
+                if (auto sideEffect = getBoolAttr(graph, op, "hasSideEffects"); sideEffect && *sideEffect)
+                {
+                    return std::nullopt;
+                }
+                if (*name == "clog2")
+                {
+                    if (operands.size() != 1)
+                    {
+                        onError("$clog2 expects exactly one operand");
+                        return std::nullopt;
+                    }
+                    const uint32_t result = slang::clog2(operands[0]);
+                    folded = slang::SVInt(static_cast<uint64_t>(result));
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+                break;
+            }
+            case wolvrix::lib::grh::OperationKind::kAdd:
+            case wolvrix::lib::grh::OperationKind::kSub:
+            case wolvrix::lib::grh::OperationKind::kMul:
+            case wolvrix::lib::grh::OperationKind::kDiv:
+            case wolvrix::lib::grh::OperationKind::kMod:
+            case wolvrix::lib::grh::OperationKind::kEq:
+            case wolvrix::lib::grh::OperationKind::kNe:
+            case wolvrix::lib::grh::OperationKind::kCaseEq:
+            case wolvrix::lib::grh::OperationKind::kCaseNe:
+            case wolvrix::lib::grh::OperationKind::kWildcardEq:
+            case wolvrix::lib::grh::OperationKind::kWildcardNe:
+            case wolvrix::lib::grh::OperationKind::kLt:
+            case wolvrix::lib::grh::OperationKind::kLe:
+            case wolvrix::lib::grh::OperationKind::kGt:
+            case wolvrix::lib::grh::OperationKind::kGe:
+            case wolvrix::lib::grh::OperationKind::kAnd:
+            case wolvrix::lib::grh::OperationKind::kOr:
+            case wolvrix::lib::grh::OperationKind::kXor:
+            case wolvrix::lib::grh::OperationKind::kXnor:
+            case wolvrix::lib::grh::OperationKind::kLogicAnd:
+            case wolvrix::lib::grh::OperationKind::kLogicOr:
+            case wolvrix::lib::grh::OperationKind::kShl:
+            case wolvrix::lib::grh::OperationKind::kLShr:
+            case wolvrix::lib::grh::OperationKind::kAShr:
+                folded = foldBinary(op, op.kind(), operands);
+                break;
+            case wolvrix::lib::grh::OperationKind::kNot:
+            case wolvrix::lib::grh::OperationKind::kLogicNot:
+            case wolvrix::lib::grh::OperationKind::kReduceAnd:
+            case wolvrix::lib::grh::OperationKind::kReduceOr:
+            case wolvrix::lib::grh::OperationKind::kReduceXor:
+            case wolvrix::lib::grh::OperationKind::kReduceNor:
+            case wolvrix::lib::grh::OperationKind::kReduceNand:
+            case wolvrix::lib::grh::OperationKind::kReduceXnor:
+                folded = foldUnary(op, op.kind(), operands[0]);
+                break;
+            case wolvrix::lib::grh::OperationKind::kAssign:
+                folded = operands[0];
+                break;
+            case wolvrix::lib::grh::OperationKind::kConcat:
+                folded = slang::SVInt::concat(operands);
+                break;
+            case wolvrix::lib::grh::OperationKind::kReplicate:
+            {
+                auto repOpt = getIntAttr(graph, op, "rep");
+                if (!repOpt)
+                {
+                    onError("kReplicate missing required 'rep' attribute");
+                    return std::nullopt;
+                }
+                if (*repOpt <= 0)
+                {
+                    onError("kReplicate requires positive rep attribute");
+                    return std::nullopt;
+                }
+                slang::SVInt times(static_cast<uint64_t>(*repOpt));
+                folded = operands[0].replicate(times);
+                break;
+            }
+            case wolvrix::lib::grh::OperationKind::kMux:
+                folded = slang::SVInt::conditional(operands[0], operands[1], operands[2]);
+                break;
+            case wolvrix::lib::grh::OperationKind::kSliceStatic:
+            {
+                auto startOpt = getIntAttr(graph, op, "sliceStart");
+                auto endOpt = getIntAttr(graph, op, "sliceEnd");
+                if (!startOpt || !endOpt)
+                {
+                    onError("kSliceStatic missing sliceStart/sliceEnd attributes");
+                    return std::nullopt;
+                }
+                int64_t start = *startOpt;
+                int64_t end = *endOpt;
+                if (start < 0 || end < start)
+                {
+                    onError("kSliceStatic has invalid slice range");
+                    return std::nullopt;
+                }
+                uint64_t width = static_cast<uint64_t>(end - start + 1);
+                folded = operands[0].lshr(static_cast<slang::bitwidth_t>(start)).trunc(static_cast<slang::bitwidth_t>(width));
+                break;
+            }
+            case wolvrix::lib::grh::OperationKind::kSliceDynamic:
+            case wolvrix::lib::grh::OperationKind::kSliceArray:
+            {
+                auto widthOpt = getIntAttr(graph, op, "sliceWidth");
+                if (!widthOpt)
+                {
+                    onError("Slice operation missing sliceWidth attribute");
+                    return std::nullopt;
+                }
+                if (*widthOpt <= 0)
+                {
+                    onError("sliceWidth must be positive");
+                    return std::nullopt;
+                }
+                uint64_t width = static_cast<uint64_t>(*widthOpt);
+                const slang::SVInt &input = operands[0];
+                const slang::SVInt &offset = operands[1];
+                slang::SVInt shifted = input.lshr(offset);
+                folded = shifted.trunc(static_cast<slang::bitwidth_t>(width));
+                break;
+            }
+            default:
+                return std::nullopt;
+            }
+
+            if (!folded)
+            {
+                return std::nullopt;
+            }
+
+            // Warn when allowing X propagation and folding produces X/Z
+            if (options.allowXPropagation && folded->hasUnknown())
+            {
+                onWarning("Folding produced X/Z result while allowXPropagation=true");
+            }
+
+            std::vector<slang::SVInt> results;
+            results.reserve(op.results().size());
+            for (std::size_t i = 0; i < op.results().size(); ++i)
+            {
+                const auto resId = op.results()[i];
+                if (!resId.valid())
+                {
+                    onError("Result missing during constant propagation");
+                    return std::nullopt;
+                }
+                results.push_back(normalizeToValue(graph.getValue(resId), *folded));
+            }
+            return results;
+        }
+
+        std::string makeInternalSymbol(const wolvrix::lib::grh::Graph &graph,
+                                       std::string_view kind,
+                                       std::string_view purpose,
+                                       std::atomic<int> &counter)
+        {
+            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind, "const_fold", purpose);
+            int id = counter.fetch_add(1, std::memory_order_relaxed);
+            std::string candidate = base + "_" + std::to_string(id);
+            while (graph.findOperation(candidate).valid() || graph.findValue(candidate).valid())
+            {
+                id = counter.fetch_add(1, std::memory_order_relaxed);
+                candidate = base + "_" + std::to_string(id);
+            }
+            return candidate;
+        }
+
+        std::string formatConstLiteral(const slang::SVInt &value)
+        {
+            const slang::bitwidth_t width = value.getBitWidth();
+            return value.toString(slang::LiteralBase::Hex, true, width);
+        }
+
+        ConstantKey makeConstantKey(const wolvrix::lib::grh::Value &value, const slang::SVInt &sv)
+        {
+            ConstantKey key;
+            key.width = value.width();
+            key.isSigned = value.isSigned();
+            key.literal = formatConstLiteral(sv);
+            return key;
+        }
+
+        wolvrix::lib::grh::ValueId createConstant(wolvrix::lib::grh::Graph &graph, ConstantPool &pool,
+                                        const wolvrix::lib::grh::Operation &sourceOp, std::size_t resultIndex,
+                                        const wolvrix::lib::grh::Value &resultValue,
+                                        const slang::SVInt &value,
+                                        std::atomic<int> &symbolCounter)
+        {
+            ConstantKey key = makeConstantKey(resultValue, value);
+            if (auto it = pool.find(key); it != pool.end())
+            {
+                return it->second;
+            }
+
+            std::string purpose = "const_";
+            purpose.append(wolvrix::lib::grh::symbol_utils::normalizeComponent(sourceOp.symbolText()));
+            purpose.push_back('_');
+            purpose.append(std::to_string(resultIndex));
+            std::string valueName = makeInternalSymbol(graph, "val", purpose, symbolCounter);
+            std::string opName = makeInternalSymbol(graph, "op", purpose, symbolCounter);
+
+            const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
+            const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+            int32_t width = resultValue.width();
+            if (width <= 0)
+            {
+                width = static_cast<int32_t>(value.getBitWidth());
+            }
+            const wolvrix::lib::grh::ValueId newValue =
+                graph.createValue(valueSym, width, resultValue.isSigned(),
+                                  resultValue.type());
+            const wolvrix::lib::grh::OperationId constOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant, opSym);
+            graph.addResult(constOp, newValue);
+            graph.setAttr(constOp, "constValue", formatConstLiteral(value));
+            std::string note = "from_";
+            note.append(wolvrix::lib::grh::toString(sourceOp.kind()));
+            const wolvrix::lib::grh::SrcLoc genLoc = makeTransformSrcLoc("const-fold", note);
+            graph.setValueSrcLoc(newValue, genLoc);
+            graph.setOpSrcLoc(constOp, genLoc);
+            pool.emplace(std::move(key), newValue);
+            return newValue;
+        }
+
+        void replaceUsers(wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId oldValue, wolvrix::lib::grh::ValueId newValue, const std::function<void(std::string)> &onError)
+        {
+            try
+            {
+                graph.replaceAllUses(oldValue, newValue);
+            }
+            catch (const std::exception &ex)
+            {
+                onError(std::string("Failed to replace operands for constant folding: ") + ex.what());
+            }
+
+            std::vector<wolvrix::lib::grh::SymbolId> outputPortsToUpdate;
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == oldValue)
+                {
+                    outputPortsToUpdate.push_back(port.name);
+                }
+            }
+
+            for (const auto portName : outputPortsToUpdate)
+            {
+                try
+                {
+                    graph.bindOutputPort(portName, newValue);
+                }
+                catch (const std::exception &ex)
+                {
+                    onError(std::string("Failed to rebind output port during constant folding: ") + ex.what());
+                }
+            }
+        }
+
+    } // namespace
+
+    ConstantFoldPass::ConstantFoldPass()
+        : Pass("const-fold", "const-fold"), options_({})
+    {
+    }
+
+    ConstantFoldPass::ConstantFoldPass(ConstantFoldOptions options)
+        : Pass("const-fold", "const-fold"), options_(options)
+    {
+    }
+
+    bool ConstantFoldPass::collectConstants(GraphFoldContext &ctx)
+    {
+        bool dedupedConstants = false;
+
+        for (const auto opId : ctx.graph.operations())
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            if (op.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+            {
+                continue;
+            }
+            for (const auto resId : op.results())
+            {
+                if (!resId.valid())
+                {
+                    error(ctx.graph, op, "kConstant missing result");
+                    ctx.failed = true;
+                    continue;
+                }
+                if (ctx.constants.find(resId) != ctx.constants.end())
+                {
+                    continue;
+                }
+                auto reportError = [&](const std::string &msg)
+                { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                wolvrix::lib::grh::Value res = ctx.graph.getValue(resId);
+                if (res.type() != wolvrix::lib::grh::ValueType::Logic)
+                {
+                    continue;
+                }
+                auto parsed = parseConstValue(ctx.graph, op, res, reportError);
+                if (!parsed)
+                {
+                    continue;
+                }
+                ctx.constants.emplace(resId, *parsed);
+                ConstantKey key = makeConstantKey(res, parsed->value);
+                if (auto it = ctx.pool->find(key); it != ctx.pool->end())
+                {
+                    if (it->second != resId && !res.isInput() && !res.isInout())
+                    {
+                        replaceUsers(ctx.graph, resId, it->second, reportError);
+                        dedupedConstants = true;
+                        ++ctx.dedupedConstants;
+                    }
+                    continue;
+                }
+                ctx.pool->emplace(std::move(key), resId);
+            }
+        }
+
+        return dedupedConstants;
+    }
+
+    bool ConstantFoldPass::iterativeFolding(GraphFoldContext &ctx)
+    {
+        bool anyChanged = false;
+        size_t totalFolded = 0;
+        FoldOptions foldOpts{options_.allowXPropagation};
+
+        for (int iter = 0; iter < options_.maxIterations; ++iter)
+        {
+            bool iterationChanged = false;
+            std::vector<wolvrix::lib::grh::OperationId> opOrder(ctx.graph.operations().begin(), ctx.graph.operations().end());
+            std::vector<wolvrix::lib::grh::OperationId> opsToErase;
+
+            for (const auto opId : opOrder)
+            {
+                const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kConstant || !isFoldable(op.kind()))
+                {
+                    continue;
+                }
+                if (ctx.foldedOps.find(opId) != ctx.foldedOps.end())
+                {
+                    continue;
+                }
+                bool nonLogicResult = false;
+                for (const auto resId : op.results())
+                {
+                    if (resId.valid() &&
+                        ctx.graph.getValue(resId).type() != wolvrix::lib::grh::ValueType::Logic)
+                    {
+                        nonLogicResult = true;
+                        break;
+                    }
+                }
+                if (nonLogicResult)
+                {
+                    continue;
+                }
+                if (!operandsAreConstant(op, ctx.constants))
+                {
+                    continue;
+                }
+
+                auto onError = [&](const std::string &msg)
+                { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                auto onWarning = [&](const std::string &msg)
+                { this->warning(ctx.graph, op, msg); };
+
+                std::optional<std::vector<slang::SVInt>> folded = foldOperation(ctx.graph, op, ctx.constants, foldOpts, onError, onWarning);
+                if (!folded)
+                {
+                    continue;
+                }
+
+                bool createdAllResults = true;
+                for (std::size_t idx = 0; idx < folded->size(); ++idx)
+                {
+                    const slang::SVInt &sv = (*folded)[idx];
+                    const auto resId = op.results()[idx];
+                    if (!resId.valid())
+                    {
+                        error(ctx.graph, op, "Result missing during folding");
+                        ctx.failed = true;
+                        createdAllResults = false;
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Value resValue = ctx.graph.getValue(resId);
+                    wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, idx, resValue, sv, ctx.symbolCounter);
+                    replaceUsers(ctx.graph, resId, newValue, [&](const std::string &msg)
+                                 { this->error(ctx.graph, op, msg); ctx.failed = true; });
+                    ctx.constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
+                    iterationChanged = true;
+                }
+
+                if (createdAllResults)
+                {
+                    ctx.foldedOps.insert(opId);
+                    opsToErase.push_back(opId);
+                    ++totalFolded;
+                    ++ctx.foldedOpsCount;
+                }
+            }
+
+            for (const auto opId : opsToErase)
+            {
+                if (!ctx.graph.eraseOp(opId))
+                {
+                    const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+                    error(ctx.graph, op, "Failed to erase folded operation");
+                    ctx.failed = true;
+                }
+                else
+                {
+                    ++ctx.opsErased;
+                }
+            }
+
+            anyChanged = anyChanged || iterationChanged;
+            if (!iterationChanged)
+            {
+                break;
+            }
+        }
+
+        return anyChanged;
+    }
+
+    bool ConstantFoldPass::simplifySlices(GraphFoldContext &ctx)
+    {
+        bool simplifiedSlices = false;
+        std::vector<wolvrix::lib::grh::OperationId> opOrder(ctx.graph.operations().begin(), ctx.graph.operations().end());
+        std::vector<wolvrix::lib::grh::OperationId> opsToErase;
+
+        for (const auto opId : opOrder)
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            if (op.kind() != wolvrix::lib::grh::OperationKind::kSliceStatic)
+            {
+                continue;
+            }
+            const auto &operands = op.operands();
+            const auto &results = op.results();
+            if (operands.size() != 1 || results.size() != 1)
+            {
+                continue;
+            }
+            auto sliceStart = getIntAttr(ctx.graph, op, "sliceStart");
+            auto sliceEnd = getIntAttr(ctx.graph, op, "sliceEnd");
+            if (!sliceStart || !sliceEnd)
+            {
+                continue;
+            }
+            const int64_t low = *sliceStart;
+            const int64_t high = *sliceEnd;
+            if (low < 0 || high < low)
+            {
+                continue;
+            }
+            const wolvrix::lib::grh::ValueId baseValueId = operands[0];
+            if (!baseValueId.valid())
+            {
+                continue;
+            }
+            const wolvrix::lib::grh::Value baseValue = ctx.graph.getValue(baseValueId);
+            const wolvrix::lib::grh::OperationId baseDefId = baseValue.definingOp();
+            if (!baseDefId.valid())
+            {
+                continue;
+            }
+            const wolvrix::lib::grh::Operation baseDef = ctx.graph.getOperation(baseDefId);
+            if (baseDef.kind() != wolvrix::lib::grh::OperationKind::kConcat)
+            {
+                continue;
+            }
+            const auto &concatOperands = baseDef.operands();
+            if (concatOperands.empty())
+            {
+                continue;
+            }
+            std::vector<int64_t> widths;
+            widths.reserve(concatOperands.size());
+            int64_t totalWidth = 0;
+            bool widthsOk = true;
+            for (const auto operandId : concatOperands)
+            {
+                if (!operandId.valid())
+                {
+                    widthsOk = false;
+                    break;
+                }
+                const int64_t width = ctx.graph.getValue(operandId).width();
+                if (width <= 0)
+                {
+                    widthsOk = false;
+                    break;
+                }
+                widths.push_back(width);
+                totalWidth += width;
+            }
+            if (!widthsOk || totalWidth <= 0)
+            {
+                continue;
+            }
+            if (high >= totalWidth)
+            {
+                continue;
+            }
+            const wolvrix::lib::grh::ValueId resultId = results[0];
+            if (!resultId.valid())
+            {
+                continue;
+            }
+            const wolvrix::lib::grh::Value resultValue = ctx.graph.getValue(resultId);
+            int64_t cursor = totalWidth;
+            for (std::size_t i = 0; i < concatOperands.size(); ++i)
+            {
+                const int64_t width = widths[i];
+                const int64_t hi = cursor - 1;
+                const int64_t lo = cursor - width;
+                cursor = lo;
+                if (lo != low || hi != high)
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::ValueId operandId = concatOperands[i];
+                if (!operandId.valid())
+                {
+                    break;
+                }
+                const wolvrix::lib::grh::Value operandValue = ctx.graph.getValue(operandId);
+                if (operandValue.width() != resultValue.width() ||
+                    operandValue.isSigned() != resultValue.isSigned())
+                {
+                    break;
+                }
+                auto onError = [&](const std::string &msg)
+                { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                replaceUsers(ctx.graph, resultId, operandId, onError);
+                opsToErase.push_back(opId);
+                simplifiedSlices = true;
+                ++ctx.simplifiedSlices;
+                break;
+            }
+        }
+
+        for (const auto opId : opsToErase)
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            if (!ctx.graph.eraseOp(opId))
+            {
+                error(ctx.graph, op, "Failed to erase simplified kSliceStatic op");
+                ctx.failed = true;
+            }
+            else
+            {
+                ++ctx.opsErased;
+            }
+        }
+
+        return simplifiedSlices;
+    }
+
+    bool ConstantFoldPass::eliminateDeadConstants(GraphFoldContext &ctx)
+    {
+        bool removedDeadConstants = false;
+        std::vector<wolvrix::lib::grh::OperationId> deadConstOps;
+
+        for (const auto opId : ctx.graph.operations())
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            if (op.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+            {
+                continue;
+            }
+            const auto &results = op.results();
+            if (results.empty())
+            {
+                error(ctx.graph, op, "kConstant missing result");
+                ctx.failed = true;
+                continue;
+            }
+            bool live = false;
+            for (const auto resId : results)
+            {
+                if (!resId.valid())
+                {
+                    error(ctx.graph, op, "kConstant missing result");
+                    ctx.failed = true;
+                    live = true;
+                    break;
+                }
+                if (isValuePortBound(ctx.graph, resId))
+                {
+                    live = true;
+                    break;
+                }
+                if (!ctx.graph.getValue(resId).users().empty())
+                {
+                    live = true;
+                    break;
+                }
+            }
+            if (!live)
+            {
+                deadConstOps.push_back(opId);
+            }
+        }
+
+        for (const auto opId : deadConstOps)
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            if (!ctx.graph.eraseOp(opId))
+            {
+                error(ctx.graph, op, "Failed to erase dead kConstant op");
+                ctx.failed = true;
+            }
+            else
+            {
+                removedDeadConstants = true;
+                ++ctx.deadConstantsRemoved;
+                ++ctx.opsErased;
+            }
+        }
+
+        return removedDeadConstants;
+    }
+
+    bool ConstantFoldPass::simplifyUnsignedComparisons(GraphFoldContext &ctx)
+    {
+        bool simplified = false;
+        std::vector<wolvrix::lib::grh::OperationId> opOrder(ctx.graph.operations().begin(), ctx.graph.operations().end());
+        std::vector<wolvrix::lib::grh::OperationId> opsToErase;
+
+        for (const auto opId : opOrder)
+        {
+            const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+            const auto kind = op.kind();
+            
+            // Handle unsigned >= 0 (always true) and unsigned <= max (always true)
+            bool isGe = (kind == wolvrix::lib::grh::OperationKind::kGe);
+            bool isLe = (kind == wolvrix::lib::grh::OperationKind::kLe);
+            
+            if (!isGe && !isLe)
+            {
+                continue;
+            }
+            
+            const auto &operands = op.operands();
+            const auto &results = op.results();
+            if (operands.size() < 2 || results.empty())
+            {
+                continue;
+            }
+            
+            const wolvrix::lib::grh::ValueId lhsId = operands[0];
+            const wolvrix::lib::grh::ValueId rhsId = operands[1];
+            const wolvrix::lib::grh::ValueId resultId = results[0];
+            
+            if (!lhsId.valid() || !rhsId.valid() || !resultId.valid())
+            {
+                continue;
+            }
+            
+            const wolvrix::lib::grh::Value lhsValue = ctx.graph.getValue(lhsId);
+            const wolvrix::lib::grh::Value rhsValue = ctx.graph.getValue(rhsId);
+            
+            // Check for unsigned >= 0 (always true for unsigned)
+            // LHS must be unsigned, RHS must be constant 0
+            if (isGe && !lhsValue.isSigned())
+            {
+                auto rhsConstIt = ctx.constants.find(rhsId);
+                if (rhsConstIt != ctx.constants.end())
+                {
+                    const auto &rhsSv = rhsConstIt->second.value;
+                    // Check if RHS is zero
+                    if (rhsSv.getBitWidth() > 0 && rhsSv.getActiveBits() == 0)
+                    {
+                        // Replace with constant 1'b1
+                        slang::SVInt trueValue(1, 1, false);
+                        auto onError = [&](const std::string &msg)
+                        { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                        wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0, 
+                            ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                        replaceUsers(ctx.graph, resultId, newValue, onError);
+                        ctx.constants[newValue] = ConstantValue{trueValue, false};
+                        opsToErase.push_back(opId);
+                        simplified = true;
+                        ++ctx.unsignedCmpSimplified;
+                        continue;
+                    }
+                }
+            }
+            
+            // Check for unsigned <= max_value (always true for unsigned)
+            // LHS must be unsigned, RHS must be constant with all 1s at LHS width
+            if (isLe && !lhsValue.isSigned())
+            {
+                auto rhsConstIt = ctx.constants.find(rhsId);
+                if (rhsConstIt != ctx.constants.end())
+                {
+                    const auto &rhsSv = rhsConstIt->second.value;
+                    int64_t lhsWidth = lhsValue.width();
+                    
+                    if (lhsWidth > 0 && rhsSv.getBitWidth() > 0)
+                    {
+                        // Check if RHS is all 1s up to LHS width
+                        // Resize RHS to LHS width and check if all bits are 1
+                        slang::SVInt resizedRhs = rhsSv.resize(static_cast<slang::bitwidth_t>(lhsWidth));
+                        bool allOnes = true;
+                        for (int i = 0; i < lhsWidth; ++i)
+                        {
+                            if (!resizedRhs[i])
+                            {
+                                allOnes = false;
+                                break;
+                            }
+                        }
+                        
+                        if (allOnes)
+                        {
+                            // Replace with constant 1'b1
+                            slang::SVInt trueValue(1, 1, false);
+                            auto onError = [&](const std::string &msg)
+                            { this->error(ctx.graph, op, msg); ctx.failed = true; };
+                            wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0,
+                                ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                            replaceUsers(ctx.graph, resultId, newValue, onError);
+                            ctx.constants[newValue] = ConstantValue{trueValue, false};
+                            opsToErase.push_back(opId);
+                            simplified = true;
+                            ++ctx.unsignedCmpSimplified;
+                        }
+                    }
+                }
+            }
+        }
+        
+        for (const auto opId : opsToErase)
+        {
+            if (!ctx.graph.eraseOp(opId))
+            {
+                const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
+                error(ctx.graph, op, "Failed to erase simplified unsigned comparison op");
+                ctx.failed = true;
+            }
+            else
+            {
+                ++ctx.opsErased;
+            }
+        }
+        
+        return simplified;
+    }
+
+    bool ConstantFoldPass::processSingleGraph(GraphFoldContext &ctx)
+    {
+        bool graphChanged = false;
+
+        // Phase 1: Collect constants from existing kConstant ops and dedupe
+        graphChanged = collectConstants(ctx) || graphChanged;
+
+        // Phase 2: Iterative folding until convergence or max iterations
+        graphChanged = iterativeFolding(ctx) || graphChanged;
+
+        // Phase 3: Simplify slice operations
+        graphChanged = simplifySlices(ctx) || graphChanged;
+
+        // Phase 4: Eliminate dead constants
+        graphChanged = eliminateDeadConstants(ctx) || graphChanged;
+
+        // Phase 5: Simplify unsigned comparisons (e.g., x >= 0, x <= MAX)
+        graphChanged = simplifyUnsignedComparisons(ctx) || graphChanged;
+
+        return graphChanged;
+    }
+
+    PassResult ConstantFoldPass::run()
+    {
+        PassResult result;
+        ConstantStore constants;
+        bool failed = false;
+        const std::size_t graphCount = netlist().graphs().size();
+        logDebug("begin graphs=" + std::to_string(graphCount));
+        std::size_t changedGraphs = 0;
+        std::size_t totalDedupedConstants = 0;
+        std::size_t totalFoldedOps = 0;
+        std::size_t totalSimplifiedSlices = 0;
+        std::size_t totalDeadConstants = 0;
+        std::size_t totalUnsignedCmp = 0;
+        std::size_t totalOpsErased = 0;
+
+        auto handleException = [&](const std::exception &ex)
+        {
+            this->error(std::string("Unhandled exception: ") + ex.what());
+            failed = true;
+        };
+
+        try
+        {
+            // Iterate over all graphs
+            for (const auto &graphEntry : netlist().graphs())
+            {
+                wolvrix::lib::grh::Graph &graph = *graphEntry.second;
+
+                // Create per-graph context with fresh state
+                GraphFoldContext ctx{
+                    graph,
+                    constants,  // Shared across graphs (constants can reference values from other graphs)
+                    std::make_unique<ConstantPool>(),  // Fresh constant pool for this graph
+                    {},         // Fresh symbol counter
+                    {},         // Fresh folded operations set
+                    failed
+                };
+
+                // Process the graph
+                bool graphChanged = processSingleGraph(ctx);
+                result.changed = result.changed || graphChanged;
+                if (graphChanged)
+                {
+                    ++changedGraphs;
+                }
+                totalDedupedConstants += ctx.dedupedConstants;
+                totalFoldedOps += ctx.foldedOpsCount;
+                totalSimplifiedSlices += ctx.simplifiedSlices;
+                totalDeadConstants += ctx.deadConstantsRemoved;
+                totalUnsignedCmp += ctx.unsignedCmpSimplified;
+                totalOpsErased += ctx.opsErased;
+            }
+
+            if (failed)
+            {
+                result.failed = true;
+            }
+
+            std::string message = "graphs=" + std::to_string(graphCount);
+            message.append(", changedGraphs=");
+            message.append(std::to_string(changedGraphs));
+            message.append(", foldedOps=");
+            message.append(std::to_string(totalFoldedOps));
+            message.append(", dedupedConsts=");
+            message.append(std::to_string(totalDedupedConstants));
+            message.append(", sliceSimplified=");
+            message.append(std::to_string(totalSimplifiedSlices));
+            message.append(", deadConsts=");
+            message.append(std::to_string(totalDeadConstants));
+            message.append(", unsignedCmp=");
+            message.append(std::to_string(totalUnsignedCmp));
+            message.append(", opsErased=");
+            message.append(std::to_string(totalOpsErased));
+            message.append(result.failed ? ", failed=true" : ", failed=false");
+            logDebug(std::move(message));
+            return result;
+        }
+        catch (const std::exception &ex)
+        {
+            handleException(ex);
+            logError(std::string("aborted: ") + ex.what());
+            result.failed = true;
+            return result;
+        }
+    }
+
+} // namespace wolvrix::lib::transform

@@ -1,6 +1,6 @@
-# GRH JSON 规范（EmitJSON）
+# GRH JSON 规范（StoreJson）
 
-EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口。默认写入 `grh.json`（位于 `EmitOptions::outputDir`，缺省为当前工作目录），并通过 `EmitOptions::jsonMode` 控制排版：
+StoreJson 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口。默认写入 `grh.json`（位于 `StoreOptions::outputDir`，缺省为当前工作目录），并通过 `StoreOptions::jsonMode` 控制排版：
 - `Compact`: 单行最紧凑格式。
 - `PrettyCompact`（默认）：保持顶层/Graph 缩进，但 `vals`/`ports`/`ops` 元素各占一行。
 - `Pretty`: 全量缩进换行（每个字段独立一行）。
@@ -8,7 +8,7 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
 ## 顶层结构
 - `graphs`: 按图名升序排列的数组，每个元素为单个 Graph 描述。
 - `declaredSymbols`: 用户定义模块名数组（必需，缺失视为错误）。
-- `tops`: 顶层图名数组，顺序遵循 `Emit` 解析后的顶层列表（包括 `topOverrides`）。
+- `tops`: 顶层图名数组，顺序遵循 `Store` 解析后的顶层列表（包括 `topOverrides`）。
 
 ## Graph 结构（按字段顺序输出）
 - `symbol`: 图名称（必需，缺失视为错误）。
@@ -27,7 +27,7 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
   - `inout`: inout 端口数组，每项 `{ name, in, out, oe }`。
 - `ops`: 操作列表，保持创建顺序。每个操作包含：
   - `sym`: 符号名（必需，缺失视为错误）。
-  - `kind`: 操作类型字符串（来自 `grh::toString(OperationKind)`）。
+  - `kind`: 操作类型字符串（来自 `wolvrix::lib::grh::toString(OperationKind)`）。
   - `in` / `out`: 操作数与结果符号数组，保持插入顺序。
   - `attrs`: 可选属性对象，键为属性名，值为属性负载。
   - `loc`: 可选，源码位置与扩展调试信息 `{ file, line, col, endLine, endCol, origin, pass, note }`。
@@ -108,4 +108,30 @@ JSON 中若仍保留该 op，表示流程未完成。
 - Netlist 解析要求使用 `graphs/vals/ports/ops` 等新键名；属性对象支持 `t/k/kind` 与 `v/value`、`vs/values` 的兼容别名。
 
 ## 示例
-- `tests/data/emit/demo_expected.json` 提供了压缩键风格的示例输出片段，可用于格式对齐或黄金回归。
+```json
+{
+  "graphs": [
+    {
+      "name": "sample",
+      "vals": [
+        {"sym": "in", "w": 1, "sgn": false, "in": true, "out": false, "users": []},
+        {"sym": "out", "w": 1, "sgn": false, "in": false, "out": true, "users": []}
+      ],
+      "ports": {
+        "in": [
+          {"name": "in", "val": "in"}
+        ],
+        "out": [
+          {"name": "out", "val": "out"}
+        ]
+      },
+      "ops": [
+        {"sym": "drv", "kind": "kAssign", "in": ["in"], "out": ["out"]}
+      ]
+    }
+  ],
+  "tops": [
+    "sample"
+  ]
+}
+```

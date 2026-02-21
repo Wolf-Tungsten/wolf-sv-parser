@@ -1,10 +1,10 @@
-# wolf-sv-parser
+# wolvrix
 
-wolf-sv-parser converts high-level behavioral RTL (Verilog-2005/SystemVerilog subset) into a structured GRH (Graph RTL Hierarchy) representation, which can then be emitted back as structural Verilog netlists. It supports configurable logic transformations and plugin extensions for simulation, synthesis, formal verification, and custom analysis workflows.
+wolvrix converts high-level behavioral RTL (Verilog-2005/SystemVerilog subset) into a structured GRH (Graph RTL Hierarchy) representation, which can then be emitted back as structural Verilog netlists. It supports configurable logic transformations and plugin extensions for simulation, synthesis, formal verification, and custom analysis workflows.
 
 ## Project Overview
 
-Wolf-SV-Parser is a SystemVerilog parser built on [slang](https://github.com/MikePopoloski/slang), designed for analyzing and processing SystemVerilog RTL designs.
+wolvrix is a SystemVerilog parser built on [slang](https://github.com/MikePopoloski/slang), designed for analyzing and processing SystemVerilog RTL designs.
 
 ## Building the Project
 
@@ -51,7 +51,7 @@ cmake ..
 cmake --build . -j$(nproc)
 ```
 
-The resulting binary will be available at `build/bin/wolf-sv-parser`.
+The resulting binary will be available at `build/bin/wolvrix-cli`.
 
 ## Usage
 
@@ -59,13 +59,13 @@ The resulting binary will be available at `build/bin/wolf-sv-parser`.
 
 ```bash
 # Parse a single SystemVerilog file
-./wolf-sv-parser <file.sv>
+./build/bin/wolvrix-cli <file.sv>
 
 # Parse multiple files
-./wolf-sv-parser file1.sv file2.sv
+./build/bin/wolvrix-cli file1.sv file2.sv
 
 # Specify top module
-./wolf-sv-parser --top <module_name> <file.sv>
+./build/bin/wolvrix-cli --top <module_name> <file.sv>
 ```
 
 ### Command Line Options
@@ -114,19 +114,19 @@ For additional options inherited from slang, refer to the [slang documentation](
 #### Parse SV and Output JSON
 
 ```bash
-./wolf-sv-parser --emit-json -o output.json --top my_top design.sv
+./build/bin/wolvrix-cli --emit-json -o output.json --top my_top design.sv
 ```
 
 #### Parse SV and Output Transformed SV
 
 ```bash
-./wolf-sv-parser --emit-sv -o transformed.sv --top my_top design.sv
+./build/bin/wolvrix-cli --emit-sv -o transformed.sv --top my_top design.sv
 ```
 
 #### Parse with Include Paths and Macros
 
 ```bash
-./wolf-sv-parser --emit-sv --emit-json \
+./build/bin/wolvrix-cli --emit-sv --emit-json \
     -I ./include -I ./rtl \
     --define SYNTHESIS \
     --define CLOCK_PERIOD=10 \
@@ -136,42 +136,40 @@ For additional options inherited from slang, refer to the [slang documentation](
 #### Debug with Logging
 
 ```bash
-./wolf-sv-parser --emit-sv --convert-log --convert-log-level debug design.sv
+./build/bin/wolvrix-cli --emit-sv --convert-log --convert-log-level debug design.sv
 ```
 
 #### Skip Transform Passes (Raw Netlist)
 
 ```bash
-./wolf-sv-parser --emit-sv --skip-transform -o raw.sv design.sv
+./build/bin/wolvrix-cli --emit-sv --skip-transform -o raw.sv design.sv
 ```
 
 #### Using File Lists
 
 ```bash
-./wolf-sv-parser --emit-sv --emit-json -o output.sv -f filelist.f
+./build/bin/wolvrix-cli --emit-sv --emit-json -o output.sv -f filelist.f
 ```
 
 ## Project Structure
 
 ```
-wolf-sv-parser/
+wolvrix/
 ├── CMakeLists.txt          # CMake build configuration
 ├── Makefile                # Top-level Makefile with test targets
 ├── env.sh.template         # Environment configuration template
-├── src/                    # Source code
-│   ├── main.cpp           # Main entry point
-│   ├── grh.cpp            # GRH (Graph RTL Hierarchy) implementation
-│   ├── load.cpp           # Load GRH from JSON
-│   ├── emit.cpp           # Code emission
-│   ├── convert.cpp        # Convert SystemVerilog AST to GRH
-│   └── transform.cpp      # Transformation passes
-├── include/               # Header files
-├── tests/                 # Test suites
-│   ├── data/             # Test data and fixtures
-│   └── ...               # Unit tests
-├── external/              # External dependencies
-│   └── slang/            # slang submodule
-└── build/                # Build directory (generated)
+├── app/                    # Executable applications
+│   └── cli/                # CLI app (wolvrix-cli)
+├── lib/                    # Core library (SDK)
+│   ├── include/            # Public headers
+│   ├── src/                # Core implementations
+│   └── transform/          # Built-in transform passes
+├── tests/                  # Test suites
+│   ├── data/               # Test data and fixtures
+│   └── ...                 # Unit tests
+├── external/               # External dependencies
+│   └── slang/              # slang submodule
+└── build/                  # Build directory (generated)
 ```
 
 ## License

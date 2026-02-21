@@ -21,7 +21,7 @@
 
 ## 方案概述
 
-在 `grh::ir::Graph` 与 `grh::ir::Netlist` 两个层级增加 declaredSymbols 表，
+在 `wolvrix::lib::grh::Graph` 与 `wolvrix::lib::grh::Netlist` 两个层级增加 declaredSymbols 表，
 但语义不同：
 
 - Graph 级：记录“模块内部的用户声明符号”（wire/var/端口/存储等）。

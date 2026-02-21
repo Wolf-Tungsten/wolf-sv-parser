@@ -1,6 +1,6 @@
 # Convert 技术文档
 
-> 本文档整合 Convert 的架构、工作流程与实现细节，对照 `include/convert.hpp` 与 `src/convert.cpp` 源码，以 Verilog 案例驱动方式讲解数据结构与算法流程。
+> 本文档整合 Convert 的架构、工作流程与实现细节，对照 `lib/include/ingest.hpp` 与 `lib/src/ingest.cpp` 源码，以 Verilog 案例驱动方式讲解数据结构与算法流程。
 
 ---
 
@@ -20,7 +20,7 @@
 
 ### 1.1 目标与边界
 
-Convert 将 slang AST（`slang::ast::*`）转换为 GRH IR（`grh::ir::Netlist` / `Graph` / `Value` / `Operation`）。
+Convert 将 slang AST（`slang::ast::*`）转换为 GRH IR（`wolvrix::lib::grh::Netlist` / `Graph` / `Value` / `Operation`）。
 
 - **输入**：已解析并类型化的 slang AST（`Compilation` + `RootSymbol`）
 - **输出**：结构化网表（`Netlist`），包含层次化的 `Graph` 表示
@@ -112,7 +112,7 @@ endmodule
 #### 3.1.1 PlanKey：模块的唯一标识
 
 ```cpp
-// include/convert.hpp (line 494-505)
+// lib/include/ingest.hpp (line 494-505)
 struct PlanKey {
     const slang::ast::DefinitionSymbol* definition = nullptr;
     const slang::ast::InstanceBodySymbol* body = nullptr;
@@ -729,7 +729,7 @@ struct LoweringPlan {
 // line 329-340
 struct ExprNode {
     ExprNodeKind kind;                      // Constant/Symbol/XmrRead/Operation
-    grh::ir::OperationKind op;              // 操作类型（仅 Operation 有效）
+    wolvrix::lib::grh::OperationKind op;              // 操作类型（仅 Operation 有效）
     PlanSymbolId symbol;                    // 命名值符号（Symbol 类型）
     PlanSymbolId tempSymbol;                // 临时符号（Operation 类型）
     std::string literal;                    // 常量文本（如 "8'b1010"）
@@ -1016,7 +1016,7 @@ WriteSlice{
 // line 423-434
 struct LoweredStmt {
     LoweredStmtKind kind;               // Write/SystemTask/DpiCall
-    grh::ir::OperationKind op;          // 对应的 GRH 操作
+    wolvrix::lib::grh::OperationKind op;          // 对应的 GRH 操作
     ExprNodeId updateCond;              // 触发条件（无条件时为常量 1）
     ProcKind procKind;                  // initial/final/always_*
     bool hasTiming;                     // 是否显式 timing control
@@ -1421,11 +1421,11 @@ ConvertContext {
 ### 4.1 ConvertDriver：入口与主流程
 
 ```cpp
-// include/convert.hpp (line 639-654)
+// lib/include/ingest.hpp (line 639-654)
 class ConvertDriver {
 public:
     explicit ConvertDriver(ConvertOptions options = {});
-    grh::ir::Netlist convert(const slang::ast::RootSymbol& root);
+    wolvrix::lib::grh::Netlist convert(const slang::ast::RootSymbol& root);
     // ...
 };
 ```
@@ -1433,8 +1433,8 @@ public:
 **主流程**：
 
 ```cpp
-grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
-    grh::ir::Netlist netlist;
+wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
+    wolvrix::lib::grh::Netlist netlist;
     planCache_.clear();
     planQueue_.reset();
 
@@ -1469,7 +1469,7 @@ grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
         
         // Pass4: Memory 端口 + 图组装
         memoryPortLowerer.lower(plan, lowering);
-        grh::ir::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
+        wolvrix::lib::grh::Graph& graph = graphAssembler.build(key, plan, lowering, writeBackPlan);
 
         planCache_.storePlan(key, std::move(plan));
     }
@@ -1705,9 +1705,9 @@ ConvertContext {
 
 | 文件 | 说明 |
 |------|------|
-| `include/convert.hpp` | 数据结构定义（~658 行） |
-| `src/convert.cpp` | Pass 实现（~12000 行） |
-| `tests/data/convert/*.sv` | 测试 fixture |
+| `lib/include/ingest.hpp` | 数据结构定义（~658 行） |
+| `lib/src/ingest.cpp` | Pass 实现（~12000 行） |
+| `tests/ingest/data/*.sv` | 测试 fixture |
 
 ### 6.2 关键定义
 
@@ -1726,8 +1726,8 @@ ModulePlan ModulePlanner::plan(const slang::ast::InstanceBodySymbol& body);     
 void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);              // ~6825
 WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering);       // ~7026
 void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);        // ~8721
-grh::ir::Graph& GraphAssembler::build(const PlanKey& key, ...);                     // ~11804
-grh::ir::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root);        // ~11833
+wolvrix::lib::grh::Graph& GraphAssembler::build(const PlanKey& key, ...);                     // ~11804
+wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root);        // ~11833
 ```
 
 ---

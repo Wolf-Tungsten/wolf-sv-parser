@@ -37,7 +37,7 @@
 - 仍保留旧 Value（仅删除旧 op），未做 Value 级垃圾回收。
 
 ## 相关文件
-- Pass 实现：`src/pass/const_fold.cpp`
-- Pass 接口与配置：`include/pass/const_fold.hpp`
+- Pass 实现：`lib/transform/const_fold.cpp`
+- Pass 接口与配置：`lib/include/transform/const_fold.hpp`
 - 管线集成：`src/main.cpp`
 - 测试：`tests/transform/test_const_fold_pass.cpp`

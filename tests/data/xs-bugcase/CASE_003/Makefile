@@ -17,7 +17,7 @@ WOLF_DIR := $(OUT_DIR_BASE)/wolf
 
 export CCACHE_DIR := $(OUT_DIR_BASE)/ccache
 
-WOLF_SV_PARSER ?= $(ROOT)/build/bin/wolf-sv-parser
+WOLF_SV_PARSER ?= $(ROOT)/build/bin/wolvrix-cli
 WOLF_SV := $(WOLF_DIR)/wolf_emit.sv
 
 VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
@@ -69,8 +69,8 @@ run: $(BIN)
 
 $(WOLF_SV): $(FILELIST)
 	@if [ ! -x "$(WOLF_SV_PARSER)" ]; then \
-		echo "[$(CASE_TAG)] wolf-sv-parser not found: $(WOLF_SV_PARSER)"; \
-		echo "[$(CASE_TAG)] Build it from repo root: cmake -S . -B build && cmake --build build --target wolf-sv-parser"; \
+		echo "[$(CASE_TAG)] wolvrix-cli not found: $(WOLF_SV_PARSER)"; \
+		echo "[$(CASE_TAG)] Build it from repo root: cmake -S . -B build && cmake --build build --target wolvrix-cli"; \
 		exit 1; \
 	fi
 	@mkdir -p $(WOLF_DIR)

@@ -35,7 +35,7 @@
 > 目标：Transform 以独立 pass 的形式实现，实现支持 pass 的基本框架。
 
 ## 框架定位与拆分
-- 在 `wolf_sv_parser::transform` 命名空间新增公共头 `include/transform.hpp` 与实现 `src/transform.cpp`，所有与Pass相关的基础设施（基类）都在上述两个文件中实现，创建 src/pass 文件夹 和 include/pass 文件夹，存放具体pass的实现（子类）
+- 在 `wolvrix::lib::transform` 命名空间新增公共头 `lib/include/transform.hpp` 与实现 `lib/src/transform.cpp`，所有与 Pass 相关的基础设施（基类）都在上述两个文件中实现；具体 pass 实现在 `lib/transform/`，头文件放在 `lib/include/transform/`。
 - Pass 持有对 `grh::Netlist` 的可变引用，明确 transform 仅在 Elaborate → Emit 之间运行。
 - Pass 以就地修改 Netlist/Graph 为原则，不直接处理 I/O；与 emit/elaborate 同样使用轻量诊断结构，主流程统一汇总/打印。
 - 约定 pass id（短字符串）与可读 name/desc，id 用于 CLI/注册，desc 用于日志/诊断，便于后续扩展内置/自定义 pass。
@@ -52,8 +52,8 @@
 - 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Netlist 的不同管线；`options.verbosity` 控制最低诊断保留级别以及调试级别的 start/finish 日志。
 
 ## KR3：main 集成 Elaborate→Transform→Emit
-- 在 `src/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(netlist, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
-- CMake 将 `src/transform/*.cpp` 与 `include/transform/*.hpp` 编译入主二进制；新增最小单元测试覆盖管线顺序、参数绑定与错误短路，后续可用 fake pass 验证 changed/diagnostics 聚合。
+- 在 `app/cli/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(netlist, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
+- CMake 将 `lib/transform/*.cpp` 与 `lib/include/transform/*.hpp` 编译入主二进制；新增最小单元测试覆盖管线顺序、参数绑定与错误短路，后续可用 fake pass 验证 changed/diagnostics 聚合。
 - 日志格式与 emit/elaborate 对齐（前缀 `[transform]` + pass id），保持 JSON/SV 输出不受影响，若 pipeline 为空则完全复用当前输出路径。
 
 # Objective 3
@@ -66,7 +66,7 @@
 - 检查顺序：先 schema（kind 与 operand/result/attr 的约束），再 symbol 存在性，最后指针缓存/用户列表一致性；可在致命错误后继续收集其余错误以便一次性暴露问题。
 
 ## KR1：创建 GRHVerifyPass 骨架
-- 文件落在 `include/pass/grh_verify.hpp` 与 `src/pass/grh_verify.cpp`，通过 PassRegistry 注册 id/name/desc；构造函数参数仅控制是否自动修复指针缓存（默认开启）。
+- 文件落在 `lib/include/transform/grh_verify.hpp` 与 `lib/transform/grh_verify.cpp`，通过 PassRegistry 注册 id/name/desc；构造函数参数仅控制是否自动修复指针缓存（默认开启）。
 - PassContext 复用 diagnostics，增加轻量统计结构记录修复次数/错误计数；遍历入口覆盖所有 Graph/Operation/Value（含子图），保持拓扑遍历封装在私有辅助函数中。
 - 失败条件：遇到不可修复的缺失 symbol/未知 kind 等直接标记 `failed`，并写入 diag；可修复项完成修复后仅计入 warn/info。
 
@@ -94,7 +94,7 @@
 - 新生成的常量 op/result 与原 Graph 同级创建，命名使用稳定前缀（如 `__constfold_${op.symbol()}_${resIdx}`），在 debug/info 级诊断中记录替换来源与 constValue。
 
 ## KR1：ConstantFoldPass 骨架与配置
-- 新增 `include/pass/const_fold.hpp`、`src/pass/const_fold.cpp`，注册到 PassManager；选项包含 `maxIterations`（默认 8）、`allowXProp`（遇到 X/Z 是否仍折叠）、`verbosity` 透传。
+- 新增 `lib/include/transform/const_fold.hpp`、`lib/transform/const_fold.cpp`，注册到 PassManager；选项包含 `maxIterations`（默认 8）、`allowXProp`（遇到 X/Z 是否仍折叠）、`verbosity` 透传。
 - 运行前扫描所有 Graph，解析现有 `kConstant` 的 constValue 建立常量表（Value symbol → 解析后的 SVInt）；解析失败直接报错并返回 failed，避免污染后续计算。
 - Pass 内维护 `ConstantStore`（符号到 SVInt+sign+width）与 `FoldCandidate` 辅助结构，减少重复解析与字符串拷贝；每轮清零 changed，结束后累积到 PassResult.changed。
 
