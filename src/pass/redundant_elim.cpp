@@ -1,6 +1,7 @@
 #include "pass/redundant_elim.hpp"
 
 #include "grh.hpp"
+#include "grh_symbol_utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -155,22 +156,18 @@ namespace wolf_sv_parser::transform
             return !value.users().empty();
         }
 
-        bool isTemporarySymbol(const grh::ir::Value &value)
+        bool isTemporarySymbol(const grh::ir::Graph &graph, const grh::ir::Value &value)
         {
             if (value.isInput() || value.isOutput() || value.isInout())
             {
                 return false;
             }
+            if (graph.isDeclaredSymbol(value.symbol()))
+            {
+                return false;
+            }
             const std::string_view name = value.symbolText();
-            if (name.rfind("__expr_", 0) == 0)
-            {
-                return true;
-            }
-            if (name.rfind("__constfold__", 0) == 0)
-            {
-                return true;
-            }
-            if (name.rfind("_expr_tmp_", 0) == 0)
+            if (name.rfind("_val_", 0) == 0)
             {
                 return true;
             }
@@ -223,7 +220,7 @@ namespace wolf_sv_parser::transform
             {
                 return false;
             }
-            if (!isTemporarySymbol(resultValue))
+            if (!isTemporarySymbol(graph, resultValue))
             {
                 return false;
             }
@@ -294,52 +291,54 @@ namespace wolf_sv_parser::transform
             return !ops.empty() && ops.front() == operand;
         }
 
-        grh::ir::SymbolId makeInlineConstSymbol(grh::ir::Graph &graph,
-                                                std::string_view baseName)
+        std::string makeInlineConstName(const grh::ir::Graph &graph,
+                                        std::string_view kind,
+                                        std::string_view baseName,
+                                        uint32_t &counter)
         {
-            std::string base;
+            std::string purpose = "const";
             if (!baseName.empty())
             {
-                base = std::string(baseName);
+                purpose.push_back('_');
+                purpose.append(grh::ir::symbol_utils::normalizeComponent(baseName));
             }
-            else
+            std::string base = grh::ir::symbol_utils::makeInternalBase(kind, "redundant_elim", purpose);
+            for (;;)
             {
-                base = "__const_inline";
+                std::string candidate = base + "_" + std::to_string(counter++);
+                if (!graph.findOperation(candidate).valid() &&
+                    !graph.findValue(candidate).valid())
+                {
+                    return candidate;
+                }
             }
-            std::string candidate = base + "__const_inline";
-            std::size_t suffix = 0;
-            while (graph.symbols().contains(candidate))
-            {
-                candidate = base + "__const_inline_" + std::to_string(++suffix);
-            }
-            return graph.internSymbol(candidate);
         }
 
         grh::ir::ValueId createInlineConst(grh::ir::Graph &graph,
                                            std::string_view baseName,
                                            int32_t width,
                                            bool isSigned,
-                                           std::string_view literal)
+                                           std::string_view literal,
+                                           uint32_t &counter)
         {
             std::string base;
             if (!baseName.empty())
             {
                 base = std::string(baseName);
             }
-            else
-            {
-                base = "__const_inline";
-            }
-            const grh::ir::SymbolId valueSym =
-                makeInlineConstSymbol(graph, base + "__value");
-            const grh::ir::SymbolId opSym =
-                makeInlineConstSymbol(graph, base + "__op");
+            const std::string valueName = makeInlineConstName(graph, "val", base, counter);
+            const std::string opName = makeInlineConstName(graph, "op", base, counter);
+            const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
+            const grh::ir::SymbolId opSym = graph.internSymbol(opName);
             const grh::ir::ValueId val =
                 graph.createValue(valueSym, width, isSigned, grh::ir::ValueType::Logic);
             const grh::ir::OperationId op =
                 graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(op, val);
             graph.setAttr(op, "constValue", std::string(literal));
+            const grh::ir::SrcLoc genLoc = makeTransformSrcLoc("redundant-elim", "inline_const");
+            graph.setValueSrcLoc(val, genLoc);
+            graph.setOpSrcLoc(op, genLoc);
             return val;
         }
 
@@ -402,6 +401,7 @@ namespace wolf_sv_parser::transform
             grh::ir::Graph &graph = *entry.second;
             bool graphChanged = false;
             bool progress = true;
+            uint32_t inlineConstCounter = 0;
             auto eraseOp = [&](auto opId, auto... args) -> bool {
                 if (graph.eraseOp(opId, args...))
                 {
@@ -474,13 +474,17 @@ namespace wolf_sv_parser::transform
                                         }
                                     }
 
-                                    grh::ir::SymbolId opSym =
-                                        makeInlineConstSymbol(graph, dstValue.symbolText());
+                                    const std::string opName =
+                                        makeInlineConstName(graph, "op", dstValue.symbolText(),
+                                                            inlineConstCounter);
+                                    grh::ir::SymbolId opSym = graph.internSymbol(opName);
                                     grh::ir::OperationId newConst =
                                         graph.createOperation(grh::ir::OperationKind::kConstant,
                                                               opSym);
                                     graph.addResult(newConst, dstId);
                                     graph.setAttr(newConst, "constValue", *literalText);
+                                    graph.setOpSrcLoc(newConst,
+                                                      makeTransformSrcLoc("redundant-elim", "clone_const"));
                                     graphChanged = true;
                                     progress = true;
                                     continue;
@@ -500,7 +504,7 @@ namespace wolf_sv_parser::transform
                         }
                         const grh::ir::Value operandValue = graph.getValue(operandId);
                         const grh::ir::Value resultValue = graph.getValue(resultId);
-                        if (!isTemporarySymbol(resultValue))
+                        if (!isTemporarySymbol(graph, resultValue))
                         {
                             continue;
                         }
@@ -562,7 +566,8 @@ namespace wolf_sv_parser::transform
                             { this->error(graph, op, msg); };
                             grh::ir::ValueId constOne =
                                 createInlineConst(graph, resultValue.symbolText(),
-                                                  1, resultValue.isSigned(), "1'b1");
+                                                  1, resultValue.isSigned(), "1'b1",
+                                                  inlineConstCounter);
                             replaceUsers(graph, resultId, constOne, onError);
                             eraseOp(opId);
                             graphChanged = true;
@@ -648,7 +653,7 @@ namespace wolf_sv_parser::transform
                         {
                             continue;
                         }
-                        if (!isTemporarySymbol(srcValue))
+                        if (!isTemporarySymbol(graph, srcValue))
                         {
                             continue;
                         }
@@ -712,7 +717,7 @@ namespace wolf_sv_parser::transform
                             continue;
                         }
                         const grh::ir::Value operandValue = graph.getValue(operandId);
-                        if (!isTemporarySymbol(operandValue))
+                        if (!isTemporarySymbol(graph, operandValue))
                         {
                             continue;
                         }

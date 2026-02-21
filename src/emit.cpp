@@ -580,6 +580,19 @@ namespace grh::emit
             }
             writer.endArray();
 
+            writer.writeProperty("declaredSymbols");
+            writer.startArray();
+            for (const auto sym : netlist.declaredSymbols())
+            {
+                std::string_view text = netlist.symbolText(sym);
+                if (text.empty())
+                {
+                    throw std::runtime_error("Netlist declared symbol is empty");
+                }
+                writer.writeValue(text);
+            }
+            writer.endArray();
+
             writer.writeProperty("tops");
             writer.startArray();
             for (const grh::ir::Graph *graph : topGraphs)
@@ -627,16 +640,46 @@ namespace grh::emit
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
-                                  prop("file", [&]
-                                       { appendQuotedString(out, debugInfo->file); });
-                                  prop("line", [&]
-                                       { out.append(std::to_string(debugInfo->line)); });
-                                  prop("col", [&]
-                                       { out.append(std::to_string(debugInfo->column)); });
-                                  prop("endLine", [&]
-                                       { out.append(std::to_string(debugInfo->endLine)); });
-                                  prop("endCol", [&]
-                                       { out.append(std::to_string(debugInfo->endColumn)); });
+                                  if (!debugInfo->file.empty())
+                                  {
+                                      prop("file", [&]
+                                           { appendQuotedString(out, debugInfo->file); });
+                                  }
+                                  if (debugInfo->line != 0)
+                                  {
+                                      prop("line", [&]
+                                           { out.append(std::to_string(debugInfo->line)); });
+                                  }
+                                  if (debugInfo->column != 0)
+                                  {
+                                      prop("col", [&]
+                                           { out.append(std::to_string(debugInfo->column)); });
+                                  }
+                                  if (debugInfo->endLine != 0)
+                                  {
+                                      prop("endLine", [&]
+                                           { out.append(std::to_string(debugInfo->endLine)); });
+                                  }
+                                  if (debugInfo->endColumn != 0)
+                                  {
+                                      prop("endCol", [&]
+                                           { out.append(std::to_string(debugInfo->endColumn)); });
+                                  }
+                                  if (!debugInfo->origin.empty())
+                                  {
+                                      prop("origin", [&]
+                                           { appendQuotedString(out, debugInfo->origin); });
+                                  }
+                                  if (!debugInfo->pass.empty())
+                                  {
+                                      prop("pass", [&]
+                                           { appendQuotedString(out, debugInfo->pass); });
+                                  }
+                                  if (!debugInfo->note.empty())
+                                  {
+                                      prop("note", [&]
+                                           { appendQuotedString(out, debugInfo->note); });
+                                  }
                               });
         }
 
@@ -697,18 +740,74 @@ namespace grh::emit
             return oss.str();
         }
 
-        std::string opSymbolOrFallback(const grh::ir::Operation &op)
+        std::string opSymbolRequired(const grh::ir::Operation &op)
         {
             std::string sym(op.symbolText());
             if (!sym.empty())
             {
                 return sym;
             }
-            if (op.id().valid())
+            throw std::runtime_error("Operation missing symbol during emit");
+        }
+
+        std::string graphSymbolRequired(const grh::ir::Graph &graph, grh::ir::SymbolId sym, std::string_view context)
+        {
+            if (!sym.valid())
             {
-                return "op_" + std::to_string(op.id().index);
+                throw std::runtime_error(std::string(context) + " symbol is invalid during emit");
             }
-            return {};
+            std::string text(graph.symbolText(sym));
+            if (!text.empty())
+            {
+                return text;
+            }
+            throw std::runtime_error(std::string(context) + " symbol is empty during emit");
+        }
+
+        std::string valueSymbolRequired(const grh::ir::Value &value)
+        {
+            std::string sym(value.symbolText());
+            if (!sym.empty())
+            {
+                return sym;
+            }
+            throw std::runtime_error("Value missing symbol during emit");
+        }
+
+        void validateGraphSymbols(const grh::ir::Graph &graph)
+        {
+            if (graph.symbol().empty())
+            {
+                throw std::runtime_error("Graph missing symbol during emit");
+            }
+            for (const auto valueId : graph.values())
+            {
+                const grh::ir::Value value = graph.getValue(valueId);
+                if (value.symbolText().empty())
+                {
+                    throw std::runtime_error("Graph value missing symbol during emit");
+                }
+            }
+            for (const auto opId : graph.operations())
+            {
+                const grh::ir::Operation op = graph.getOperation(opId);
+                if (op.symbolText().empty())
+                {
+                    throw std::runtime_error("Graph operation missing symbol during emit");
+                }
+            }
+            for (const auto &port : graph.inputPorts())
+            {
+                (void)graphSymbolRequired(graph, port.name, "Input port");
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                (void)graphSymbolRequired(graph, port.name, "Output port");
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                (void)graphSymbolRequired(graph, port.name, "Inout port");
+            }
         }
 
         void writeUsersInline(std::string &out, const grh::ir::Graph &graph, std::span<const grh::ir::ValueUser> users, JsonPrintMode mode)
@@ -726,14 +825,11 @@ namespace grh::emit
                                   {
                                       prop("op", [&]
                                            {
-                                               if (user.operation.valid())
+                                               if (!user.operation.valid())
                                                {
-                                                   appendQuotedString(out, opSymbolOrFallback(graph.getOperation(user.operation)));
+                                                   throw std::runtime_error("Value user missing operation during emit");
                                                }
-                                               else
-                                               {
-                                                   appendQuotedString(out, "");
-                                               }
+                                               appendQuotedString(out, opSymbolRequired(graph.getOperation(user.operation)));
                                            });
                                       prop("idx", [&]
                                            { out.append(std::to_string(static_cast<int64_t>(user.operandIndex))); });
@@ -880,7 +976,7 @@ namespace grh::emit
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, value.symbolText()); });
+                                       { appendQuotedString(out, valueSymbolRequired(value)); });
                                   prop("w", [&]
                                        { out.append(std::to_string(value.width())); });
                                   prop("sgn", [&]
@@ -896,7 +992,7 @@ namespace grh::emit
                                   if (value.definingOp())
                                   {
                                       prop("def", [&]
-                                           { appendQuotedString(out, opSymbolOrFallback(graph.getOperation(value.definingOp()))); });
+                                           { appendQuotedString(out, opSymbolRequired(graph.getOperation(value.definingOp()))); });
                                   }
                                   prop("users", [&]
                                        { writeUsersInline(out, graph, value.users(), mode); });
@@ -912,6 +1008,10 @@ namespace grh::emit
         {
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
+                                  if (name.empty() || valueSymbol.empty())
+                                  {
+                                      throw std::runtime_error("Port name or value symbol missing during emit");
+                                  }
                                   prop("name", [&]
                                        { appendQuotedString(out, name); });
                                   prop("val", [&]
@@ -924,7 +1024,7 @@ namespace grh::emit
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, opSymbolOrFallback(op)); });
+                                       { appendQuotedString(out, opSymbolRequired(op)); });
                                   prop("kind", [&]
                                        { appendQuotedString(out, grh::ir::toString(op.kind())); });
                                   prop("in", [&]
@@ -938,7 +1038,7 @@ namespace grh::emit
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, graph.getValue(operandId).symbolText());
+                                               appendQuotedString(out, valueSymbolRequired(graph.getValue(operandId)));
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -954,7 +1054,7 @@ namespace grh::emit
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, graph.getValue(resultId).symbolText());
+                                               appendQuotedString(out, valueSymbolRequired(graph.getValue(resultId)));
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -1012,8 +1112,8 @@ namespace grh::emit
                 }
                 appendNewlineAndIndent(out, indent);
                 writePortInline(out,
-                                graph.symbolText(port.name),
-                                graph.getValue(port.value).symbolText(),
+                                graphSymbolRequired(graph, port.name, "Port name"),
+                                valueSymbolRequired(graph.getValue(port.value)),
                                 mode);
                 first = false;
             }
@@ -1043,13 +1143,13 @@ namespace grh::emit
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
                                       prop("name", [&]
-                                           { appendQuotedString(out, graph.symbolText(port.name)); });
+                                           { appendQuotedString(out, graphSymbolRequired(graph, port.name, "Inout port name")); });
                                       prop("in", [&]
-                                           { appendQuotedString(out, graph.getValue(port.in).symbolText()); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.in))); });
                                       prop("out", [&]
-                                           { appendQuotedString(out, graph.getValue(port.out).symbolText()); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.out))); });
                                       prop("oe", [&]
-                                           { appendQuotedString(out, graph.getValue(port.oe).symbolText()); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.oe))); });
                                   });
                 first = false;
             }
@@ -1069,6 +1169,21 @@ namespace grh::emit
             appendQuotedString(out, "symbol");
             out.append(": ");
             appendQuotedString(out, graph.symbol());
+            out.push_back(',');
+
+            appendNewlineAndIndent(out, indent);
+            appendQuotedString(out, "declaredSymbols");
+            out.append(": ");
+            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.declaredSymbols(),
+                             [&](const grh::ir::SymbolId sym)
+                             {
+                                 std::string_view text = graph.symbolText(sym);
+                                 if (text.empty())
+                                 {
+                                     throw std::runtime_error("Graph declared symbol is empty");
+                                 }
+                                 appendQuotedString(out, text);
+                             });
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
@@ -1313,6 +1428,33 @@ namespace grh::emit
                     appendNewlineAndIndent(out, indent + 1);
                     writeGraphPrettyCompact(out, *graph, indent + 1);
                     first = false;
+                }
+                appendNewlineAndIndent(out, indent);
+            }
+            out.push_back(']');
+            out.push_back(',');
+            appendNewlineAndIndent(out, indent);
+
+            appendQuotedString(out, "declaredSymbols");
+            out.append(": [");
+            const auto netlistDeclared = netlist.declaredSymbols();
+            if (!netlistDeclared.empty())
+            {
+                bool firstDecl = true;
+                for (const auto sym : netlistDeclared)
+                {
+                    if (!firstDecl)
+                    {
+                        out.push_back(',');
+                    }
+                    appendNewlineAndIndent(out, indent + 1);
+                    std::string_view text = netlist.symbolText(sym);
+                    if (text.empty())
+                    {
+                        throw std::runtime_error("Netlist declared symbol is empty");
+                    }
+                    appendQuotedString(out, text);
+                    firstDecl = false;
                 }
                 appendNewlineAndIndent(out, indent);
             }
@@ -2095,7 +2237,7 @@ namespace grh::emit
                 const grh::ir::Operation op = graph.getOperation(opId);
                 if (op.kind() == grh::ir::OperationKind::kDpicImport)
                 {
-                    dpicImports.emplace(std::string(op.symbolText()), DpiImportRef{&graph, opId});
+                    dpicImports.emplace(opSymbolRequired(op), DpiImportRef{&graph, opId});
                 }
             }
         }
@@ -2141,6 +2283,8 @@ namespace grh::emit
             }
             firstModule = false;
 
+            validateGraphSymbols(*graph);
+
             const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
             const std::string &moduleName = moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : graph->symbol();
 
@@ -2154,55 +2298,6 @@ namespace grh::emit
             {
                 maxOpIndex = std::max(maxOpIndex, opId.index);
             }
-            std::unordered_set<std::string> usedValueNames;
-            usedValueNames.reserve(static_cast<std::size_t>(maxValueIndex) + 8);
-            for (const auto valueId : graph->values())
-            {
-                if (!valueId.valid() || valueId.graph != graph->id())
-                {
-                    continue;
-                }
-                const grh::ir::Value value = graph->getValue(valueId);
-                const std::string name = std::string(value.symbolText());
-                if (!name.empty())
-                {
-                    usedValueNames.insert(name);
-                }
-            }
-            for (const auto &port : graph->inputPorts())
-            {
-                if (port.name.valid())
-                {
-                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
-                }
-            }
-            for (const auto &port : graph->outputPorts())
-            {
-                if (port.name.valid())
-                {
-                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
-                }
-            }
-            for (const auto &port : graph->inoutPorts())
-            {
-                if (port.name.valid())
-                {
-                    usedValueNames.insert(std::string(graph->symbolText(port.name)));
-                }
-            }
-            auto makeUniqueValueName = [&](uint32_t idx) -> std::string
-            {
-                std::string base = "__wolf_v" + std::to_string(idx);
-                std::string name = base;
-                int suffix = 0;
-                while (usedValueNames.find(name) != usedValueNames.end())
-                {
-                    ++suffix;
-                    name = base + "_" + std::to_string(suffix);
-                }
-                usedValueNames.insert(name);
-                return name;
-            };
             std::vector<std::string> valueNameCache(maxValueIndex + 1);
             std::vector<std::string> opNameCache(maxOpIndex + 1);
             const std::string emptyName;
@@ -2221,11 +2316,7 @@ namespace grh::emit
                 if (slot.empty())
                 {
                     grh::ir::Value value = graph->getValue(valueId);
-                    slot = std::string(value.symbolText());
-                    if (slot.empty())
-                    {
-                        slot = makeUniqueValueName(idx);
-                    }
+                    slot = valueSymbolRequired(value);
                 }
                 return slot;
             };
@@ -2244,7 +2335,7 @@ namespace grh::emit
                 if (slot.empty())
                 {
                     grh::ir::Operation op = graph->getOperation(opId);
-                    slot = std::string(op.symbolText());
+                    slot = opSymbolRequired(op);
                 }
                 return slot;
             };
@@ -2665,6 +2756,15 @@ namespace grh::emit
                 wireDecls.emplace(name, NetDecl{value.width(), value.isSigned(), value.srcLoc()});
                 declaredNames.insert(name);
             };
+
+            for (const auto sym : graph->declaredSymbols())
+            {
+                const grh::ir::ValueId valueId = graph->findValue(sym);
+                if (valueId.valid())
+                {
+                    ensureWireDecl(valueId);
+                }
+            }
 
             auto addAssign = [&](std::string stmt, grh::ir::OperationId sourceOp)
             {

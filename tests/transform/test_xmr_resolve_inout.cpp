@@ -69,7 +69,7 @@ int main()
 
     grh::ir::OperationId instOp =
         top.createOperation(grh::ir::OperationKind::kInstance,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_inst"));
     top.addOperand(instOp, topA);
     top.addOperand(instOp, topIoOut);
     top.addOperand(instOp, topIoOe);
@@ -84,14 +84,14 @@ int main()
     const auto readValue = top.createValue(top.internSymbol("xmr_read"), 1, false);
     grh::ir::OperationId xmrRead =
         top.createOperation(grh::ir::OperationKind::kXMRRead,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_read"));
     top.addResult(xmrRead, readValue);
     top.setAttr(xmrRead, "xmrPath", std::string("u_child.leaf_r"));
 
     const auto writeValue = top.createValue(top.internSymbol("xmr_write"), 1, false);
     grh::ir::OperationId xmrWrite =
         top.createOperation(grh::ir::OperationKind::kXMRWrite,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_write"));
     top.addOperand(xmrWrite, writeValue);
     top.setAttr(xmrWrite, "xmrPath", std::string("u_child.leaf_w"));
 

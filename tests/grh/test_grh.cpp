@@ -54,6 +54,9 @@ int main()
         graph.bindInputPort(graph.internSymbol("b"), b);
         graph.bindOutputPort(graph.internSymbol("sum"), sum);
         graph.bindOutputPort(graph.internSymbol("sum_copy"), sumCopy);
+        graph.addDeclaredSymbol(graph.internSymbol("a"));
+        graph.addDeclaredSymbol(graph.internSymbol("sum"));
+        netlist.addDeclaredSymbol(netlist.internSymbol("demo"));
 
         OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(op, a);
@@ -229,6 +232,16 @@ int main()
         {
             return fail("Parsed graph missing");
         }
+        SymbolId parsedSymA = parsedGraph->lookupSymbol("a");
+        if (!parsedSymA.valid() || !parsedGraph->isDeclaredSymbol(parsedSymA))
+        {
+            return fail("Declared symbol not preserved in graph");
+        }
+        SymbolId parsedModuleSym = parsed.lookupSymbol("demo");
+        if (!parsedModuleSym.valid() || !parsed.isDeclaredSymbol(parsedModuleSym))
+        {
+            return fail("Declared symbol not preserved in netlist");
+        }
 
         const OperationId parsedOpId = parsedGraph->findOperation("add0");
         if (!parsedOpId.valid())
@@ -277,11 +290,13 @@ int main()
         const std::string nestedArrayJson = R"({
   "graphs": [
     {
-      "name": "illegal_nested_array",
+      "symbol": "illegal_nested_array",
+      "declaredSymbols": [],
       "vals": [],
       "ports": {
         "in": [],
-        "out": []
+        "out": [],
+        "inout": []
       },
       "ops": [
         {
@@ -302,6 +317,7 @@ int main()
       ]
     }
   ],
+  "declaredSymbols": [],
   "tops": []
 })";
         bool threwOnNestedArrayAttribute = expectThrows([&]
@@ -314,11 +330,13 @@ int main()
         const std::string objectAttributeJson = R"({
   "graphs": [
     {
-      "name": "illegal_object_attr",
+      "symbol": "illegal_object_attr",
+      "declaredSymbols": [],
       "vals": [],
       "ports": {
         "in": [],
-        "out": []
+        "out": [],
+        "inout": []
       },
       "ops": [
         {
@@ -338,6 +356,7 @@ int main()
       ]
     }
   ],
+  "declaredSymbols": [],
   "tops": []
 })";
         bool threwOnObjectAttribute = expectThrows([&]
@@ -544,26 +563,25 @@ int main()
             auto symVb = graphSymbols.intern("vb");
             auto symSum = graphSymbols.intern("sum");
             auto symOutVal = graphSymbols.intern("out_val");
+            auto symOutTmp = graphSymbols.intern("_val_test_out_tmp");
             auto symAdd = graphSymbols.intern("add0");
             auto symAssign = graphSymbols.intern("assign0");
+            auto symAssignTmp = graphSymbols.intern("_op_test_assign_tmp");
             auto vA = builder.addValue(symVa, 1, false);
             auto vB = builder.addValue(symVb, 1, false);
             auto vSum = builder.addValue(symSum, 1, false);
-            auto vOut = builder.addValue(symOutVal, 1, false);
+            auto vOut = builder.addValue(symOutTmp, 1, false);
 
             auto opAdd = builder.addOp(OperationKind::kAdd, symAdd);
             builder.addOperand(opAdd, vA);
             builder.addOperand(opAdd, vB);
             builder.addResult(opAdd, vSum);
 
-            auto opAssign = builder.addOp(OperationKind::kAssign, grh_ir::SymbolId::invalid());
-            builder.setOpSymbol(opAssign, symAssign);
-            builder.clearOpSymbol(opAssign);
+            auto opAssign = builder.addOp(OperationKind::kAssign, symAssignTmp);
             builder.setOpSymbol(opAssign, symAssign);
             builder.addOperand(opAssign, vSum);
             builder.addResult(opAssign, vOut);
 
-            builder.clearValueSymbol(vOut);
             builder.setValueSymbol(vOut, symOutVal);
 
             builder.bindInputPort(symPortB, vB);

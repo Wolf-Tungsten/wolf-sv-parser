@@ -157,7 +157,7 @@ int main()
 
     grh::ir::OperationId instOp =
         top.createOperation(grh::ir::OperationKind::kInstance,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_inst"));
     top.setAttr(instOp, "moduleName", std::string("leaf"));
     top.setAttr(instOp, "instanceName", std::string("u_leaf"));
     top.setAttr(instOp, "inputPortName", std::vector<std::string>{});
@@ -167,13 +167,13 @@ int main()
     const auto readValue = top.createValue(top.internSymbol("xmr_read"), 8, false);
     const auto xmrRead =
         top.createOperation(grh::ir::OperationKind::kXMRRead,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_read"));
     top.addResult(xmrRead, readValue);
     top.setAttr(xmrRead, "xmrPath", std::string("u_leaf.reg_a"));
 
     const auto xmrWriteReg =
         top.createOperation(grh::ir::OperationKind::kXMRWrite,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_write_reg"));
     top.addOperand(xmrWriteReg, cond);
     top.addOperand(xmrWriteReg, data);
     top.addOperand(xmrWriteReg, mask);
@@ -183,7 +183,7 @@ int main()
 
     const auto xmrWriteLatch =
         top.createOperation(grh::ir::OperationKind::kXMRWrite,
-                            grh::ir::SymbolId::invalid());
+                            top.internSymbol("_op_test_xmr_write_latch"));
     top.addOperand(xmrWriteLatch, latchCond);
     top.addOperand(xmrWriteLatch, latchData);
     top.addOperand(xmrWriteLatch, latchMask);

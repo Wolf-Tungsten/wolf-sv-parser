@@ -249,6 +249,7 @@ struct ModulePlan {
     const slang::ast::InstanceBodySymbol* body = nullptr;
     PlanSymbolTable symbolTable;
     PlanSymbolId moduleSymbol;
+    uint32_t nextInternalSymbol = 0;
     std::vector<PortInfo> ports;
     std::vector<SignalInfo> signals;
     std::vector<InstanceInfo> instances;

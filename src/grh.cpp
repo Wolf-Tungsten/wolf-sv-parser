@@ -65,19 +65,48 @@ namespace grh::ir
 
         std::string formatSrcLocForDebug(const std::optional<SrcLoc> &srcLoc)
         {
-            if (!srcLoc || srcLoc->file.empty() || srcLoc->line == 0)
+            if (!srcLoc)
             {
                 return {};
             }
-            std::string out = srcLoc->file;
-            out.push_back(':');
-            out += std::to_string(srcLoc->line);
-            if (srcLoc->column != 0)
+            if (!srcLoc->file.empty() && srcLoc->line != 0)
             {
+                std::string out = srcLoc->file;
                 out.push_back(':');
-                out += std::to_string(srcLoc->column);
+                out += std::to_string(srcLoc->line);
+                if (srcLoc->column != 0)
+                {
+                    out.push_back(':');
+                    out += std::to_string(srcLoc->column);
+                }
+                return out;
             }
-            return out;
+            if (!srcLoc->origin.empty() || !srcLoc->pass.empty() || !srcLoc->note.empty())
+            {
+                std::string out;
+                if (!srcLoc->origin.empty())
+                {
+                    out.append(srcLoc->origin);
+                }
+                if (!srcLoc->pass.empty())
+                {
+                    if (!out.empty())
+                    {
+                        out.push_back(':');
+                    }
+                    out.append(srcLoc->pass);
+                }
+                if (!srcLoc->note.empty())
+                {
+                    if (!out.empty())
+                    {
+                        out.push_back(':');
+                    }
+                    out.append(srcLoc->note);
+                }
+                return out;
+            }
+            return {};
         }
 
         ValueId findPortValue(std::span<const Port> ports, SymbolId name) noexcept
@@ -579,10 +608,7 @@ namespace grh::ir
 
             ValueData data;
             data.symbol = view.valueSymbols_[i];
-            if (data.symbol.valid())
-            {
-                builder.validateSymbol(data.symbol, "Value");
-            }
+            builder.validateSymbol(data.symbol, "Value");
             const int32_t width = view.valueWidths_[i];
             ValueType type = ValueType::Logic;
             if (!view.valueTypes_.empty())
@@ -620,10 +646,7 @@ namespace grh::ir
             OperationData opData;
             opData.kind = view.opKinds_[i];
             opData.symbol = view.opSymbols_[i];
-            if (opData.symbol.valid())
-            {
-                builder.validateSymbol(opData.symbol, "Operation");
-            }
+            builder.validateSymbol(opData.symbol, "Operation");
             opData.srcLoc = view.opSrcLocs_[i];
             opData.alive = true;
             builder.bindSymbol(opData.symbol,
@@ -826,10 +849,7 @@ namespace grh::ir
 
     OperationId GraphBuilder::addOp(OperationKind kind, SymbolId sym)
     {
-        if (sym.valid())
-        {
-            validateSymbol(sym, "Operation");
-        }
+        validateSymbol(sym, "Operation");
 
         OperationId id;
         id.index = static_cast<uint32_t>(operations_.size() + 1);
@@ -1672,32 +1692,12 @@ namespace grh::ir
 
     void GraphBuilder::clearOpSymbol(OperationId op)
     {
-        const std::size_t opIdx = opIndex(op);
-        if (!operations_[opIdx].alive)
-        {
-            throw std::runtime_error("OperationId refers to erased operation");
-        }
-        const SymbolId old = operations_[opIdx].symbol;
-        if (old.valid())
-        {
-            unbindSymbol(old, SymbolKind::kOperation, static_cast<uint32_t>(opIdx + 1));
-            operations_[opIdx].symbol = SymbolId::invalid();
-        }
+        throw std::runtime_error("Clearing operation symbol is not allowed");
     }
 
     void GraphBuilder::clearValueSymbol(ValueId value)
     {
-        const std::size_t valIdx = valueIndex(value);
-        if (!values_[valIdx].alive)
-        {
-            throw std::runtime_error("ValueId refers to erased value");
-        }
-        const SymbolId old = values_[valIdx].symbol;
-        if (old.valid())
-        {
-            unbindSymbol(old, SymbolKind::kValue, static_cast<uint32_t>(valIdx + 1));
-            values_[valIdx].symbol = SymbolId::invalid();
-        }
+        throw std::runtime_error("Clearing value symbol is not allowed");
     }
 
     GraphView GraphBuilder::freeze() const
@@ -2134,13 +2134,21 @@ namespace grh::ir
         {
             throw std::runtime_error(std::string(context) + " symbol is not in the symbol table");
         }
+        if (symbols_)
+        {
+            std::string_view text = symbols_->text(sym);
+            if (text.empty())
+            {
+                throw std::runtime_error(std::string(context) + " symbol is empty");
+            }
+        }
     }
 
     void GraphBuilder::bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context)
     {
         if (!sym.valid())
         {
-            return;
+            throw std::runtime_error(std::string(context) + " symbol is invalid");
         }
         auto [it, inserted] = symbolIndex_.emplace(sym.value, SymbolBinding{kind, index});
         if (!inserted)
@@ -2195,12 +2203,16 @@ namespace grh::ir
             graphAliasBySymbol_ = std::move(other.graphAliasBySymbol_);
             graphOrder_ = std::move(other.graphOrder_);
             topGraphs_ = std::move(other.topGraphs_);
+            declaredSymbols_ = std::move(other.declaredSymbols_);
+            declaredSymbolSet_ = std::move(other.declaredSymbolSet_);
             netlistSymbols_ = std::move(other.netlistSymbols_);
             resetGraphOwners();
 
             other.graphAliasBySymbol_.clear();
             other.graphOrder_.clear();
             other.topGraphs_.clear();
+            other.declaredSymbols_.clear();
+            other.declaredSymbolSet_.clear();
         }
         return *this;
     }
@@ -2375,22 +2387,58 @@ namespace grh::ir
 
         void writeSrcLoc(slang::JsonWriter &writer, const std::optional<SrcLoc> &srcLoc)
         {
-            if (!srcLoc || srcLoc->file.empty())
+            if (!srcLoc)
+            {
+                return;
+            }
+            if (srcLoc->file.empty() && srcLoc->line == 0 && srcLoc->column == 0 &&
+                srcLoc->endLine == 0 && srcLoc->endColumn == 0 &&
+                srcLoc->origin.empty() && srcLoc->pass.empty() && srcLoc->note.empty())
             {
                 return;
             }
             writer.writeProperty("loc");
             writer.startObject();
-            writer.writeProperty("file");
-            writer.writeValue(srcLoc->file);
-            writer.writeProperty("line");
-            writer.writeValue(static_cast<int64_t>(srcLoc->line));
-            writer.writeProperty("col");
-            writer.writeValue(static_cast<int64_t>(srcLoc->column));
-            writer.writeProperty("endLine");
-            writer.writeValue(static_cast<int64_t>(srcLoc->endLine));
-            writer.writeProperty("endCol");
-            writer.writeValue(static_cast<int64_t>(srcLoc->endColumn));
+            if (!srcLoc->file.empty())
+            {
+                writer.writeProperty("file");
+                writer.writeValue(srcLoc->file);
+            }
+            if (srcLoc->line != 0)
+            {
+                writer.writeProperty("line");
+                writer.writeValue(static_cast<int64_t>(srcLoc->line));
+            }
+            if (srcLoc->column != 0)
+            {
+                writer.writeProperty("col");
+                writer.writeValue(static_cast<int64_t>(srcLoc->column));
+            }
+            if (srcLoc->endLine != 0)
+            {
+                writer.writeProperty("endLine");
+                writer.writeValue(static_cast<int64_t>(srcLoc->endLine));
+            }
+            if (srcLoc->endColumn != 0)
+            {
+                writer.writeProperty("endCol");
+                writer.writeValue(static_cast<int64_t>(srcLoc->endColumn));
+            }
+            if (!srcLoc->origin.empty())
+            {
+                writer.writeProperty("origin");
+                writer.writeValue(srcLoc->origin);
+            }
+            if (!srcLoc->pass.empty())
+            {
+                writer.writeProperty("pass");
+                writer.writeValue(srcLoc->pass);
+            }
+            if (!srcLoc->note.empty())
+            {
+                writer.writeProperty("note");
+                writer.writeValue(srcLoc->note);
+            }
             writer.endObject();
         }
 
@@ -2533,6 +2581,36 @@ namespace grh::ir
             return std::string_view{};
         }
         return symbols_.text(id);
+    }
+
+    void Graph::addDeclaredSymbol(SymbolId sym)
+    {
+        if (!sym.valid())
+        {
+            throw std::runtime_error("Declared symbol is invalid");
+        }
+        if (!symbols_.valid(sym))
+        {
+            throw std::runtime_error("Declared symbol is not in the graph symbol table");
+        }
+        if (declaredSymbolSet_.insert(sym.value).second)
+        {
+            declaredSymbols_.push_back(sym);
+        }
+    }
+
+    bool Graph::isDeclaredSymbol(SymbolId sym) const noexcept
+    {
+        if (!sym.valid())
+        {
+            return false;
+        }
+        return declaredSymbolSet_.find(sym.value) != declaredSymbolSet_.end();
+    }
+
+    std::span<const SymbolId> Graph::declaredSymbols() const noexcept
+    {
+        return std::span<const SymbolId>(declaredSymbols_.data(), declaredSymbols_.size());
     }
 
     const GraphView *Graph::viewIfFrozen() const noexcept
@@ -2983,14 +3061,39 @@ namespace grh::ir
 
     void Graph::writeJson(slang::JsonWriter &writer) const
     {
-        auto symbolTextOrEmpty = [&](SymbolId sym) -> std::string_view
+        auto requireSymbolText = [&](SymbolId sym, std::string_view context) -> std::string_view
         {
-            return sym.valid() ? symbols_.text(sym) : std::string_view{};
+            if (!sym.valid())
+            {
+                throw std::runtime_error(std::string(context) + " symbol is invalid");
+            }
+            if (!symbols_.valid(sym))
+            {
+                throw std::runtime_error(std::string(context) + " symbol is not in the symbol table");
+            }
+            std::string_view text = symbols_.text(sym);
+            if (text.empty())
+            {
+                throw std::runtime_error(std::string(context) + " symbol is empty");
+            }
+            return text;
         };
 
         writer.startObject();
         writer.writeProperty("symbol");
+        if (symbol_.empty())
+        {
+            throw std::runtime_error("Graph symbol is empty");
+        }
         writer.writeValue(symbol_);
+
+        writer.writeProperty("declaredSymbols");
+        writer.startArray();
+        for (const auto sym : declaredSymbols_)
+        {
+            writer.writeValue(requireSymbolText(sym, "Declared symbol"));
+        }
+        writer.endArray();
 
         writer.writeProperty("vals");
         writer.startArray();
@@ -2999,7 +3102,7 @@ namespace grh::ir
             const Value value = getValue(valueId);
             writer.startObject();
             writer.writeProperty("sym");
-            writer.writeValue(symbolTextOrEmpty(value.symbol()));
+            writer.writeValue(requireSymbolText(value.symbol(), "Value"));
             writer.writeProperty("w");
             writer.writeValue(static_cast<int64_t>(value.width()));
             writer.writeProperty("sgn");
@@ -3016,7 +3119,7 @@ namespace grh::ir
             {
                 Operation defOp = getOperation(value.definingOp());
                 writer.writeProperty("def");
-                writer.writeValue(symbolTextOrEmpty(defOp.symbol()));
+                writer.writeValue(requireSymbolText(defOp.symbol(), "Operation"));
             }
 
             writer.writeProperty("users");
@@ -3026,7 +3129,7 @@ namespace grh::ir
                 writer.startObject();
                 writer.writeProperty("op");
                 Operation userOp = getOperation(user.operation);
-                writer.writeValue(symbolTextOrEmpty(userOp.symbol()));
+                writer.writeValue(requireSymbolText(userOp.symbol(), "Operation"));
                 writer.writeProperty("idx");
                 writer.writeValue(static_cast<int64_t>(user.operandIndex));
                 writer.endObject();
@@ -3046,10 +3149,10 @@ namespace grh::ir
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(symbolTextOrEmpty(port.name));
+            writer.writeValue(requireSymbolText(port.name, "Port"));
             writer.writeProperty("val");
             Value value = getValue(port.value);
-            writer.writeValue(symbolTextOrEmpty(value.symbol()));
+            writer.writeValue(requireSymbolText(value.symbol(), "Value"));
             writer.endObject();
         }
         writer.endArray();
@@ -3060,10 +3163,10 @@ namespace grh::ir
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(symbolTextOrEmpty(port.name));
+            writer.writeValue(requireSymbolText(port.name, "Port"));
             writer.writeProperty("val");
             Value value = getValue(port.value);
-            writer.writeValue(symbolTextOrEmpty(value.symbol()));
+            writer.writeValue(requireSymbolText(value.symbol(), "Value"));
             writer.endObject();
         }
         writer.endArray();
@@ -3074,13 +3177,13 @@ namespace grh::ir
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(symbolTextOrEmpty(port.name));
+            writer.writeValue(requireSymbolText(port.name, "Port"));
             writer.writeProperty("in");
-            writer.writeValue(symbolTextOrEmpty(getValue(port.in).symbol()));
+            writer.writeValue(requireSymbolText(getValue(port.in).symbol(), "Value"));
             writer.writeProperty("out");
-            writer.writeValue(symbolTextOrEmpty(getValue(port.out).symbol()));
+            writer.writeValue(requireSymbolText(getValue(port.out).symbol(), "Value"));
             writer.writeProperty("oe");
-            writer.writeValue(symbolTextOrEmpty(getValue(port.oe).symbol()));
+            writer.writeValue(requireSymbolText(getValue(port.oe).symbol(), "Value"));
             writer.endObject();
         }
         writer.endArray();
@@ -3094,7 +3197,7 @@ namespace grh::ir
             const Operation op = getOperation(opId);
             writer.startObject();
             writer.writeProperty("sym");
-            writer.writeValue(symbolTextOrEmpty(op.symbol()));
+            writer.writeValue(requireSymbolText(op.symbol(), "Operation"));
             writer.writeProperty("kind");
             writer.writeValue(toString(op.kind()));
 
@@ -3103,7 +3206,7 @@ namespace grh::ir
             for (const auto &operand : op.operands())
             {
                 Value value = getValue(operand);
-                writer.writeValue(symbolTextOrEmpty(value.symbol()));
+                writer.writeValue(requireSymbolText(value.symbol(), "Value"));
             }
             writer.endArray();
 
@@ -3112,7 +3215,7 @@ namespace grh::ir
             for (const auto &result : op.results())
             {
                 Value value = getValue(result);
-                writer.writeValue(symbolTextOrEmpty(value.symbol()));
+                writer.writeValue(requireSymbolText(value.symbol(), "Value"));
             }
             writer.endArray();
 
@@ -3428,6 +3531,59 @@ namespace grh::ir
             }
         }
         return nullptr;
+    }
+
+    SymbolId Netlist::internSymbol(std::string_view text)
+    {
+        if (netlistSymbols_.contains(text))
+        {
+            return netlistSymbols_.lookup(text);
+        }
+        return netlistSymbols_.intern(text);
+    }
+
+    SymbolId Netlist::lookupSymbol(std::string_view text) const
+    {
+        return netlistSymbols_.lookup(text);
+    }
+
+    std::string_view Netlist::symbolText(SymbolId id) const
+    {
+        if (!id.valid())
+        {
+            return std::string_view{};
+        }
+        return netlistSymbols_.text(id);
+    }
+
+    void Netlist::addDeclaredSymbol(SymbolId sym)
+    {
+        if (!sym.valid())
+        {
+            throw std::runtime_error("Declared symbol is invalid");
+        }
+        if (!netlistSymbols_.valid(sym))
+        {
+            throw std::runtime_error("Declared symbol is not in the netlist symbol table");
+        }
+        if (declaredSymbolSet_.insert(sym.value).second)
+        {
+            declaredSymbols_.push_back(sym);
+        }
+    }
+
+    bool Netlist::isDeclaredSymbol(SymbolId sym) const noexcept
+    {
+        if (!sym.valid())
+        {
+            return false;
+        }
+        return declaredSymbolSet_.find(sym.value) != declaredSymbolSet_.end();
+    }
+
+    std::span<const SymbolId> Netlist::declaredSymbols() const noexcept
+    {
+        return std::span<const SymbolId>(declaredSymbols_.data(), declaredSymbols_.size());
     }
 
     std::vector<std::string> Netlist::aliasesForGraph(std::string_view symbol) const

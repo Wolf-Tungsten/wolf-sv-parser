@@ -97,6 +97,7 @@ namespace wolf_sv_parser::transform
         PassVerbosity verbosity = PassVerbosity::Info;
         LogLevel logLevel = LogLevel::Warn;
         std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
+        bool keepDeclaredSymbols = true;
         std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>> scratchpad;
     };
 
@@ -106,6 +107,16 @@ namespace wolf_sv_parser::transform
         bool failed = false;
         std::vector<std::string> artifacts;
     };
+
+    inline grh::ir::SrcLoc makeTransformSrcLoc(std::string_view passId,
+                                               std::string_view note = {})
+    {
+        grh::ir::SrcLoc loc{};
+        loc.origin = "transform";
+        loc.pass = std::string(passId);
+        loc.note = std::string(note);
+        return loc;
+    }
 
     class Pass
     {
@@ -215,6 +226,7 @@ namespace wolf_sv_parser::transform
         void warning(const grh::ir::Graph &graph, std::string message);
         void info(const grh::ir::Graph &graph, std::string message);
         void debug(const grh::ir::Graph &graph, std::string message);
+        bool keepDeclaredSymbols() const noexcept { return context_ ? context_->keepDeclaredSymbols : true; }
 
     private:
         friend class PassManager;
@@ -237,6 +249,7 @@ namespace wolf_sv_parser::transform
         PassVerbosity verbosity = PassVerbosity::Info;
         LogLevel logLevel = LogLevel::Warn;
         std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
+        bool keepDeclaredSymbols = true;
     };
 
     struct PassManagerResult

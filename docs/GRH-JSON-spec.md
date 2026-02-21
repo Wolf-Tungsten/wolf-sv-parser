@@ -7,28 +7,30 @@ EmitJSON 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口�
 
 ## 顶层结构
 - `graphs`: 按图名升序排列的数组，每个元素为单个 Graph 描述。
+- `declaredSymbols`: 用户定义模块名数组（必需，缺失视为错误）。
 - `tops`: 顶层图名数组，顺序遵循 `Emit` 解析后的顶层列表（包括 `topOverrides`）。
 
 ## Graph 结构（按字段顺序输出）
-- `symbol`: 图名称。
+- `symbol`: 图名称（必需，缺失视为错误）。
+- `declaredSymbols`: 模块内部声明的符号名数组（必需）。
 - `vals`: 值列表，保持创建顺序。每个值包含：
-  - `sym`: 符号名。
+  - `sym`: 符号名（必需，缺失视为错误）。
   - `w`: 位宽。
   - `sgn`: 是否有符号。
   - `in` / `out` / `inout`: 输入/输出/inout 标记（不可同时为真）。
   - `def`: 可选，定义该值的 Operation 符号。
   - `users`: 使用者数组 `{ op, idx }`，描述操作与操作数索引。
-  - `loc`: 可选，源码位置 `{ file, line, col, endLine, endCol }`。
+  - `loc`: 可选，源码位置与扩展调试信息 `{ file, line, col, endLine, endCol, origin, pass, note }`。
 - `ports`: 端口对象。
   - `in`: 输入端口数组，每项 `{ name, val }`。
   - `out`: 输出端口数组，每项 `{ name, val }`。
   - `inout`: inout 端口数组，每项 `{ name, in, out, oe }`。
 - `ops`: 操作列表，保持创建顺序。每个操作包含：
-  - `sym`: 符号名。
+  - `sym`: 符号名（必需，缺失视为错误）。
   - `kind`: 操作类型字符串（来自 `grh::toString(OperationKind)`）。
   - `in` / `out`: 操作数与结果符号数组，保持插入顺序。
   - `attrs`: 可选属性对象，键为属性名，值为属性负载。
-  - `loc`: 可选，源码位置 `{ file, line, col, endLine, endCol }`。
+  - `loc`: 可选，源码位置与扩展调试信息 `{ file, line, col, endLine, endCol, origin, pass, note }`。
 
 ## 存储单元 Port 操作
 - 存储声明类操作使用 `sym` 作为声明名，`attrs` 仅承载类型信息。

@@ -321,7 +321,7 @@ namespace wolf_sv_parser::transform
     PassManagerResult PassManager::run(grh::ir::Netlist &netlist, PassDiagnostics &diags)
     {
         PassManagerResult result;
-        PassContext context{netlist, diags, options_.verbosity, options_.logLevel, options_.logSink};
+        PassContext context{netlist, diags, options_.verbosity, options_.logLevel, options_.logSink, options_.keepDeclaredSymbols};
         bool encounteredFailure = false;
         auto emitLog = [&](LogLevel level, std::string_view tag, std::string_view message) {
             if (!options_.logSink)

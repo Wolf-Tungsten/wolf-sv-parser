@@ -29,7 +29,10 @@ namespace
                lhs->line == rhs->line &&
                lhs->column == rhs->column &&
                lhs->endLine == rhs->endLine &&
-               lhs->endColumn == rhs->endColumn;
+               lhs->endColumn == rhs->endColumn &&
+               lhs->origin == rhs->origin &&
+               lhs->pass == rhs->pass &&
+               lhs->note == rhs->note;
     }
 
     std::string compareViews(const GraphView &lhs, const GraphView &rhs)
@@ -274,9 +277,6 @@ int main()
         valLoc.line = 22;
         valLoc.column = 1;
         builder.setValueSrcLoc(vA, valLoc);
-
-        builder.clearValueSymbol(vTmp);
-        builder.clearOpSymbol(opAssign);
 
         grh_ir::GraphView view = builder.freeze();
         grh_ir::GraphBuilder rebuilt = grh_ir::GraphBuilder::fromView(view, graphSymbols);

@@ -42,6 +42,9 @@ int main()
 
     grh::ir::ValueId liveConst = makeConst(graph, "c_live", "c_live_op", 1, false, "1'b1");
     grh::ir::ValueId deadConst = makeConst(graph, "c_dead", "c_dead_op", 1, false, "1'b0");
+    grh::ir::ValueId keptConst = makeConst(graph, "c_keep", "c_keep_op", 1, false, "1'b0");
+    graph.addDeclaredSymbol(graph.internSymbol("c_keep"));
+    (void)keptConst;
 
     grh::ir::ValueId deadTmp = graph.createValue(graph.internSymbol("dead_tmp"), 1, false);
     grh::ir::OperationId deadNot = graph.createOperation(grh::ir::OperationKind::kNot, graph.internSymbol("dead_not"));
@@ -99,6 +102,14 @@ int main()
     if (!graph.findOperation("assign_out").valid())
     {
         return fail("assign_out should remain");
+    }
+    if (!graph.findOperation("c_keep_op").valid())
+    {
+        return fail("c_keep_op should remain because it is declared");
+    }
+    if (!graph.findValue("c_keep").valid())
+    {
+        return fail("c_keep value should remain because it is declared");
     }
 
     return 0;

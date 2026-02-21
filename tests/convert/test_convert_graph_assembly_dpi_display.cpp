@@ -347,7 +347,7 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     if (capCallResults.size() != 1) {
         return fail("dpi_capture call result count mismatch");
     }
-    if (graph->getValue(capCallResults[0]).symbolText().find("_dpi_ret_") != 0) {
+    if (graph->getValue(capCallResults[0]).symbolText().find("_val_") != 0) {
         return fail("dpi_capture call result mismatch");
     }
 
@@ -384,7 +384,7 @@ int testGraphAssemblyDpiDisplay(const std::filesystem::path& sourcePath) {
     if (addCallResults.size() != 1) {
         return fail("dpi_add call result count mismatch");
     }
-    if (graph->getValue(addCallResults[0]).symbolText().find("_dpi_ret_") != 0) {
+    if (graph->getValue(addCallResults[0]).symbolText().find("_val_") != 0) {
         return fail("dpi_add call return symbol mismatch");
     }
 

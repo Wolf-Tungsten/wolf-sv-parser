@@ -133,6 +133,18 @@ target_link_libraries(grh-roundtrip-tests
 
 register_test_exe(grh-roundtrip-tests)
 
+# grh symbol utils tests
+add_executable(grh-symbol-utils-tests
+    tests/grh/test_grh_symbol_utils.cpp
+)
+
+target_link_libraries(grh-symbol-utils-tests
+    PRIVATE
+        grh
+)
+
+register_test_exe(grh-symbol-utils-tests)
+
 # emit base
 add_executable(emit-base
     tests/emit/test_emit_base.cpp

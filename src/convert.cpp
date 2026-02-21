@@ -1,4 +1,5 @@
 #include "convert.hpp"
+#include "grh_symbol_utils.hpp"
 
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
@@ -36,6 +37,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <iomanip>
 #include <future>
 #include <iterator>
 #include <limits>
@@ -1080,6 +1082,7 @@ std::optional<grh::ir::OperationKind> mapBinaryOp(slang::ast::BinaryOperator op)
 PlanSymbolId resolveSimpleSymbolForPlan(const slang::ast::Expression& expr,
                                         const ModulePlan& plan);
 const SignalInfo* findSignalBySymbol(const ModulePlan& plan, PlanSymbolId symbol);
+PlanSymbolId makeInternalPlanValueSymbol(ModulePlan& plan);
 
 struct StmtLowererState {
     class AssignmentExprVisitor;
@@ -1106,8 +1109,6 @@ struct StmtLowererState {
     std::unordered_map<const slang::ast::Expression*, ExprNodeId> lowered;
     int32_t widthContext = 0;
     uint32_t maxLoopIterations = 0;
-    uint32_t nextTemp = 0;
-    uint32_t nextDpiResult = 0;
     ControlDomain domain = ControlDomain::Unknown;
     std::vector<ExprNodeId> guardStack;
     std::vector<ExprNodeId> flowStack;
@@ -1193,7 +1194,6 @@ struct StmtLowererState {
           lowering(lowering),
           maxLoopIterations(maxLoopIterations)
     {
-        nextTemp = static_cast<uint32_t>(lowering.tempSymbols.size());
     }
 
     const PortInfo* findPortBySymbol(PlanSymbolId symbol) const
@@ -5689,8 +5689,7 @@ private:
 
     PlanSymbolId makeDpiResultSymbol()
     {
-        const std::string name = "_dpi_ret_" + std::to_string(nextDpiResult++);
-        return plan.symbolTable.intern(name);
+        return makeInternalPlanValueSymbol(plan);
     }
 
     ExprNodeId makeSymbolExpr(PlanSymbolId symbol, slang::SourceLocation location)
@@ -5704,8 +5703,7 @@ private:
 
     PlanSymbolId makeTempSymbol()
     {
-        const std::string name = "_expr_tmp_" + std::to_string(nextTemp++);
-        PlanSymbolId id = plan.symbolTable.intern(name);
+        PlanSymbolId id = makeInternalPlanValueSymbol(plan);
         lowering.tempSymbols.push_back(id);
         return id;
     }
@@ -8787,6 +8785,25 @@ void lowerStmtGenerateBlockArray(const slang::ast::GenerateBlockArraySymbol& arr
     }
 }
 
+PlanSymbolId makeInternalPlanValueSymbol(ModulePlan& plan)
+{
+    for (;;)
+    {
+        std::string name =
+            grh::ir::symbol_utils::makeInternalSymbolText("val", "convert", "plan",
+                                                         plan.nextInternalSymbol++);
+        if (!plan.symbolTable.lookup(name).valid())
+        {
+            return plan.symbolTable.intern(name);
+        }
+    }
+}
+
+PlanSymbolId makeInoutAuxSymbol(ModulePlan& plan)
+{
+    return makeInternalPlanValueSymbol(plan);
+}
+
 void collectPorts(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan,
                   ConvertDiagnostics* diagnostics)
 {
@@ -8833,11 +8850,10 @@ void collectPorts(const slang::ast::InstanceBodySymbol& body, ModulePlan& plan,
 
             if (info.direction == PortDirection::Inout)
             {
-                std::string base(port->name);
                 info.inoutSymbol = PortInfo::InoutBinding{
-                    plan.symbolTable.intern(base + "__in"),
-                    plan.symbolTable.intern(base + "__out"),
-                    plan.symbolTable.intern(base + "__oe")};
+                    makeInoutAuxSymbol(plan),
+                    makeInoutAuxSymbol(plan),
+                    makeInoutAuxSymbol(plan)};
             }
 
             TypeResolution typeInfo = analyzePortType(port->getType(), *port, diagnostics);
@@ -9069,10 +9085,9 @@ void collectInoutSignals(ModulePlan& plan)
             {
                 continue;
             }
-            std::string base(name);
             PortInfo::InoutBinding binding{symbol,
-                                           plan.symbolTable.intern(base + "__out"),
-                                           plan.symbolTable.intern(base + "__oe")};
+                                           makeInoutAuxSymbol(plan),
+                                           makeInoutAuxSymbol(plan)};
             plan.inoutSignals.push_back(InoutSignalInfo{symbol, binding});
         }
     }
@@ -9736,7 +9751,6 @@ public:
     WriteBackBuilder(ModulePlan& plan, LoweringPlan& lowering)
         : plan_(plan), lowering_(lowering)
     {
-        nextTemp_ = static_cast<uint32_t>(lowering_.tempSymbols.size());
     }
 
     ExprNodeId ensureGuardExpr(ExprNodeId guard, slang::SourceLocation location)
@@ -9861,8 +9875,7 @@ public:
 private:
     PlanSymbolId makeTempSymbol()
     {
-        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
-        PlanSymbolId id = plan_.symbolTable.intern(name);
+        PlanSymbolId id = makeInternalPlanValueSymbol(plan_);
         lowering_.tempSymbols.push_back(id);
         return id;
     }
@@ -9876,7 +9889,6 @@ private:
 
     ModulePlan& plan_;
     LoweringPlan& lowering_;
-    uint32_t nextTemp_ = 0;
     std::optional<ExprNodeId> constOne_;
 };
 
@@ -11367,7 +11379,6 @@ public:
     MemoryPortBuilder(ModulePlan& plan, LoweringPlan& lowering)
         : plan_(plan), lowering_(lowering)
     {
-        nextTemp_ = static_cast<uint32_t>(lowering_.tempSymbols.size());
     }
 
     ExprNodeId ensureGuardExpr(ExprNodeId guard, slang::SourceLocation location)
@@ -11428,8 +11439,7 @@ public:
 private:
     PlanSymbolId makeTempSymbol()
     {
-        const std::string name = "_expr_tmp_" + std::to_string(nextTemp_++);
-        PlanSymbolId id = plan_.symbolTable.intern(name);
+        PlanSymbolId id = makeInternalPlanValueSymbol(plan_);
         lowering_.tempSymbols.push_back(id);
         return id;
     }
@@ -11443,7 +11453,6 @@ private:
 
     ModulePlan& plan_;
     LoweringPlan& lowering_;
-    uint32_t nextTemp_ = 0;
     std::optional<ExprNodeId> constOne_;
 };
 
@@ -12844,6 +12853,7 @@ public:
 
     void build()
     {
+        preloadPlanSymbols();
         createStorageDeclarations();
         createPortValues();
         createSignalValues();
@@ -12885,6 +12895,21 @@ private:
         return out;
     }
 
+    void preloadPlanSymbols()
+    {
+        const std::size_t count = plan_.symbolTable.size();
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            PlanSymbolId id{static_cast<PlanIndex>(i)};
+            std::string_view text = plan_.symbolTable.text(id);
+            if (text.empty())
+            {
+                continue;
+            }
+            symbolIds_[i] = graph_.internSymbol(text);
+        }
+    }
+
     void maybeSetOpSrcLoc(grh::ir::OperationId op, slang::SourceLocation location)
     {
         if (auto loc = resolveSrcLoc(location))
@@ -12896,6 +12921,10 @@ private:
     grh::ir::OperationId createOp(grh::ir::OperationKind kind, grh::ir::SymbolId symbol,
                                   slang::SourceLocation location)
     {
+        if (!symbol.valid())
+        {
+            symbol = makeInternalOpSymbol(std::string(grh::ir::toString(kind)));
+        }
         grh::ir::OperationId op = graph_.createOperation(kind, symbol);
         maybeSetOpSrcLoc(op, location);
         return op;
@@ -12918,6 +12947,15 @@ private:
         }
         symbolIds_[id.index] = graph_.internSymbol(text);
         return symbolIds_[id.index];
+    }
+
+    void markDeclaredSymbol(PlanSymbolId id)
+    {
+        grh::ir::SymbolId sym = symbolForPlan(id);
+        if (sym.valid())
+        {
+            graph_.addDeclaredSymbol(sym);
+        }
     }
 
     grh::ir::ValueId valueForSymbol(PlanSymbolId id)
@@ -13032,14 +13070,16 @@ private:
             return grh::ir::ValueId::invalid();
         }
         const bool isRegister = kind == StorageKind::Register;
-        grh::ir::SymbolId opSym =
-            makeOpSymbol(id, isRegister ? "reg_read" : "latch_read");
+        std::string opPurpose = isRegister ? "reg_read_" : "latch_read_";
+        opPurpose.append(name);
+        grh::ir::SymbolId opSym = makeInternalOpSymbol(opPurpose);
         grh::ir::OperationId op =
             createOp(isRegister ? grh::ir::OperationKind::kRegisterReadPort
                                 : grh::ir::OperationKind::kLatchReadPort,
                      opSym, location);
-        grh::ir::SymbolId valSym =
-            makeOpSymbol(id, isRegister ? "reg_val" : "latch_val");
+        std::string valPurpose = isRegister ? "reg_val_" : "latch_val_";
+        valPurpose.append(name);
+        grh::ir::SymbolId valSym = makeInternalValueSymbol(valPurpose);
         grh::ir::ValueId value =
             graph_.createValue(valSym, info->width, info->isSigned, info->valueType);
         graph_.addResult(op, value);
@@ -13114,6 +13154,7 @@ private:
             {
                 continue;
             }
+            markDeclaredSymbol(symbol);
             const auto info = resolveStorageInfo(symbol);
             if (!info)
             {
@@ -13146,6 +13187,7 @@ private:
             {
                 continue;
             }
+            markDeclaredSymbol(port.symbol);
             const int32_t width = normalizeWidth(port.width);
             if (port.direction == PortDirection::Input)
             {
@@ -13230,6 +13272,7 @@ private:
             {
                 continue;
             }
+            markDeclaredSymbol(signal.symbol);
             if (isStorageSymbol(signal.symbol))
             {
                 continue;
@@ -13447,14 +13490,10 @@ private:
         grh::ir::SymbolId sym = graph_.internSymbol(finalName);
         if (graph_.findValue(sym).valid() || graph_.findOperation(sym).valid())
         {
-            std::string base = name + "__mem";
-            std::size_t suffix = 0;
-            finalName = base;
-            while (graph_.symbols().contains(finalName))
-            {
-                finalName = base + "_" + std::to_string(++suffix);
-            }
-            sym = graph_.internSymbol(finalName);
+            std::string purpose = "mem_";
+            purpose.append(name);
+            sym = makeInternalOpSymbol(purpose);
+            finalName = std::string(graph_.symbolText(sym));
         }
 
         const int64_t width = normalizeWidth(info->width);
@@ -13564,8 +13603,9 @@ private:
         }
 
         const int32_t width = normalizeWidth(info->width);
-        grh::ir::SymbolId dataSym =
-            graph_.internSymbol("__mem_data_" + std::to_string(nextMemValueId_++));
+        std::string dataPurpose = "mem_data_";
+        dataPurpose.append(memSymbol);
+        grh::ir::SymbolId dataSym = makeInternalValueSymbol(dataPurpose);
         grh::ir::ValueId dataValue =
             graph_.createValue(dataSym, width, info->isSigned, info->valueType);
 
@@ -13575,7 +13615,9 @@ private:
             return grh::ir::ValueId::invalid();
         }
 
-        grh::ir::SymbolId readSym = makeOpSymbol(entry.memory, "mem_read");
+        std::string readPurpose = "mem_read_";
+        readPurpose.append(memSymbol);
+        grh::ir::SymbolId readSym = makeInternalOpSymbol(readPurpose);
         grh::ir::OperationId readOp =
             createOp(grh::ir::OperationKind::kMemoryReadPort, readSym, entry.location);
         graph_.addOperand(readOp, addressValue);
@@ -13622,7 +13664,9 @@ private:
                 continue;
             }
 
-            grh::ir::SymbolId opSym = makeOpSymbol(entry.memory, "mem_write");
+            std::string writePurpose = "mem_write_";
+            writePurpose.append(memSymbol);
+            grh::ir::SymbolId opSym = makeInternalOpSymbol(writePurpose);
             grh::ir::OperationId op =
                 createOp(grh::ir::OperationKind::kMemoryWritePort, opSym, entry.location);
             graph_.addOperand(op, updateCond);
@@ -14440,7 +14484,7 @@ private:
                                      : static_cast<int32_t>(width);
                 const int32_t normalizedWidth = normalizeWidth(boundedWidth);
                 grh::ir::SymbolId sym =
-                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                    makeInternalValueSymbol("expr");
                 grh::ir::ValueId result =
                     graph_.createValue(sym, normalizedWidth, isSigned, valueType);
                 grh::ir::OperationId op =
@@ -14546,7 +14590,7 @@ private:
                         outputNames.emplace_back(port->name);
                         const int64_t width = portWidth > 0 ? portWidth : 1;
                         grh::ir::SymbolId tempSym =
-                            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                            makeInternalValueSymbol("expr");
                         grh::ir::ValueId tempValue =
                             graph_.createValue(tempSym, width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
@@ -14579,7 +14623,7 @@ private:
                             break;
                         }
                         grh::ir::SymbolId tempSym =
-                            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                            makeInternalValueSymbol("expr");
                         grh::ir::ValueId tempValue =
                             graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
@@ -14626,7 +14670,7 @@ private:
                         break;
                     }
                     grh::ir::SymbolId tempSym =
-                        graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                        makeInternalValueSymbol("expr");
                     grh::ir::ValueId tempValue =
                         graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                     outputResults.push_back(tempValue);
@@ -14817,7 +14861,7 @@ private:
             graph_.setAttr(op, "sliceStart", low);
             graph_.setAttr(op, "sliceEnd", high);
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             const grh::ir::ValueType baseType = graph_.getValue(base).type();
             grh::ir::ValueId result =
                 graph_.createValue(sym, width, false, baseType);
@@ -14831,7 +14875,7 @@ private:
                 return grh::ir::ValueId::invalid();
             }
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             grh::ir::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(width), false,
                                    grh::ir::ValueType::Logic);
@@ -14864,7 +14908,7 @@ private:
             graph_.addOperand(op, value);
             graph_.setAttr(op, "rep", count);
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             grh::ir::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(width),
                                    graph_.getValue(value).isSigned(),
@@ -14917,7 +14961,7 @@ private:
             graph_.addOperand(op, padValue);
             graph_.addOperand(op, value);
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             grh::ir::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(targetWidth),
                                    signExtend, graph_.getValue(value).type());
@@ -15094,7 +15138,7 @@ private:
                     graph_.addOperand(op, operand);
                 }
                 grh::ir::SymbolId sym =
-                    graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                    makeInternalValueSymbol("expr");
                 grh::ir::ValueId result =
                     graph_.createValue(sym, targetWidth, false,
                                        graph_.getValue(targetValue).type());
@@ -16054,8 +16098,7 @@ private:
 
     grh::ir::ValueId emitConstant(const ExprNode& node)
     {
-        const std::string name = "__const_" + std::to_string(nextConstId_++);
-        grh::ir::SymbolId symbol = graph_.internSymbol(name);
+        grh::ir::SymbolId symbol = makeConstValueSymbol();
         int32_t width = node.widthHint;
         if (width <= 0)
         {
@@ -16123,8 +16166,7 @@ private:
         if (node.kind == ExprNodeKind::XmrRead)
         {
             const int32_t width = normalizeWidth(node.widthHint);
-            grh::ir::SymbolId sym =
-                graph_.internSymbol("__xmr_read_" + std::to_string(nextTempId_++));
+            grh::ir::SymbolId sym = makeInternalValueSymbol("xmr_read");
             grh::ir::ValueId result =
                 graph_.createValue(sym, width, node.isSigned, node.valueType);
             grh::ir::OperationId op =
@@ -16173,7 +16215,7 @@ private:
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "rep", static_cast<int64_t>(*count));
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             const int32_t width = normalizeWidth(node.widthHint);
             grh::ir::ValueId result =
                 graph_.createValue(sym, width, false, node.valueType);
@@ -16235,7 +16277,7 @@ private:
                     graph_.setAttr(op, "sliceStart", start);
                     graph_.setAttr(op, "sliceEnd", end);
                     grh::ir::SymbolId sym =
-                        graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                        makeInternalValueSymbol("expr");
                     grh::ir::ValueId result =
                         graph_.createValue(sym, width, false, node.valueType);
                     graph_.addResult(op, result);
@@ -16252,7 +16294,7 @@ private:
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
             grh::ir::SymbolId sym =
-                graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+                makeInternalValueSymbol("expr");
             grh::ir::ValueId result =
                 graph_.createValue(sym, width, false, node.valueType);
             graph_.addResult(op, result);
@@ -16279,7 +16321,7 @@ private:
         }
 
         grh::ir::SymbolId sym =
-            graph_.internSymbol("__expr_" + std::to_string(nextTempId_++));
+            makeInternalValueSymbol("expr");
         int32_t width = node.widthHint;
         if (width <= 0)
         {
@@ -16368,8 +16410,7 @@ private:
         };
         auto makeMaskValue = [&](int32_t width, int64_t low, int64_t span,
                                  slang::SourceLocation location) -> grh::ir::ValueId {
-            grh::ir::SymbolId sym =
-                graph_.internSymbol("__mask_" + std::to_string(nextConstId_++));
+            grh::ir::SymbolId sym = makeInternalValueSymbol("mask");
             const int32_t normalized = normalizeWidth(width);
             grh::ir::ValueId value =
                 graph_.createValue(sym, normalized, false, grh::ir::ValueType::Logic);
@@ -16561,29 +16602,141 @@ private:
     uint32_t nextConstId_ = 0;
     uint32_t nextTempId_ = 0;
     uint32_t nextOpId_ = 0;
-    uint32_t nextMemValueId_ = 0;
-    uint32_t nextMemReadValueId_ = 0;
+
+    grh::ir::SymbolId makeInternalOpSymbol(std::string_view purpose)
+    {
+        return grh::ir::symbol_utils::makeInternalSymbol(graph_, "op", "convert",
+                                                         purpose, nextOpId_);
+    }
+
+    grh::ir::SymbolId makeInternalValueSymbol(std::string_view purpose)
+    {
+        return grh::ir::symbol_utils::makeInternalSymbol(graph_, "val", "convert",
+                                                         purpose, nextTempId_);
+    }
+
+    grh::ir::SymbolId makeConstValueSymbol()
+    {
+        return grh::ir::symbol_utils::makeInternalSymbol(graph_, "val", "convert",
+                                                         "const", nextConstId_);
+    }
 
     grh::ir::SymbolId makeOpSymbol(PlanSymbolId id, std::string_view suffix)
     {
-        std::string base;
+        std::string purpose = std::string(suffix);
         if (id.valid())
         {
-            base = std::string(plan_.symbolTable.text(id));
+            const std::string target = std::string(plan_.symbolTable.text(id));
+            if (!target.empty())
+            {
+                purpose.push_back('_');
+                purpose.append(target);
+            }
         }
-        if (base.empty())
-        {
-            base = "__op";
-        }
-        std::string candidate = base + "__" + std::string(suffix);
-        while (graph_.symbols().contains(candidate))
-        {
-            candidate = base + "__" + std::string(suffix) + "_" +
-                        std::to_string(nextOpId_++);
-        }
-        return graph_.internSymbol(candidate);
+        return makeInternalOpSymbol(purpose);
     }
 };
+
+namespace {
+
+std::string normalizeGraphIdent(std::string_view text, std::string_view fallback)
+{
+    std::string out = grh::ir::symbol_utils::normalizeComponent(text);
+    if (out.empty())
+    {
+        out = std::string(fallback);
+    }
+    unsigned char first = static_cast<unsigned char>(out.front());
+    if (!(std::isalpha(first) || first == '_'))
+    {
+        out.insert(out.begin(), '_');
+    }
+    return out;
+}
+
+std::string formatShortHash(std::string_view signature)
+{
+    const uint64_t hash = std::hash<std::string_view>{}(signature);
+    std::ostringstream oss;
+    oss << std::hex << std::nouppercase << std::setw(8) << std::setfill('0')
+        << static_cast<uint32_t>(hash);
+    return oss.str();
+}
+
+std::string buildReadableParamSuffix(std::string_view signature, std::string_view base)
+{
+    if (signature.empty())
+    {
+        return {};
+    }
+    std::string suffix = "__p_";
+    bool hasPart = false;
+    std::size_t start = 0;
+    while (start <= signature.size())
+    {
+        const std::size_t end = signature.find(';', start);
+        const std::size_t span =
+            (end == std::string_view::npos ? signature.size() : end) - start;
+        std::string_view entry = signature.substr(start, span);
+        if (!entry.empty())
+        {
+            const std::size_t eq = entry.find('=');
+            std::string_view name = eq == std::string_view::npos ? entry : entry.substr(0, eq);
+            std::string_view value = eq == std::string_view::npos ? std::string_view{}
+                                                                  : entry.substr(eq + 1);
+            std::string nameNorm = normalizeGraphIdent(name, "param");
+            std::string valueNorm = normalizeGraphIdent(value, "val");
+            if (hasPart)
+            {
+                suffix.append("__");
+            }
+            suffix.append(nameNorm);
+            suffix.push_back('_');
+            suffix.append(valueNorm);
+            hasPart = true;
+        }
+        if (end == std::string_view::npos)
+        {
+            break;
+        }
+        start = end + 1;
+    }
+    if (!hasPart)
+    {
+        return {};
+    }
+
+    constexpr std::size_t kMaxGraphName = 120;
+    if (base.size() + suffix.size() <= kMaxGraphName)
+    {
+        return suffix;
+    }
+
+    const std::string hashTag = "__h" + formatShortHash(signature);
+    const std::size_t maxSuffix =
+        base.size() < kMaxGraphName ? kMaxGraphName - base.size() : 0;
+    if (maxSuffix <= hashTag.size() + 3)
+    {
+        return "__p" + hashTag;
+    }
+
+    const std::size_t keep = maxSuffix - hashTag.size();
+    if (suffix.size() > keep)
+    {
+        suffix.resize(keep);
+    }
+    while (!suffix.empty() && suffix.back() == '_')
+    {
+        suffix.pop_back();
+    }
+    if (suffix.empty())
+    {
+        suffix = "__p";
+    }
+    return suffix + hashTag;
+}
+
+} // namespace
 
 const std::string& GraphAssembler::resolveGraphName(const PlanKey& key,
                                                     std::string_view moduleName)
@@ -16599,8 +16752,9 @@ const std::string& GraphAssembler::resolveGraphName(const PlanKey& key,
     std::string candidate = base;
     if (!key.paramSignature.empty())
     {
-        const std::size_t hash = std::hash<std::string>{}(key.paramSignature);
-        candidate = base + "__p" + std::to_string(hash);
+        const std::string suffix =
+            buildReadableParamSuffix(key.paramSignature, base);
+        candidate = suffix.empty() ? base : base + suffix;
     }
     std::string finalName = candidate;
     std::size_t suffix = 0;
@@ -16628,10 +16782,12 @@ grh::ir::Graph& GraphAssembler::build(const PlanKey& key, const ModulePlan& plan
     {
         std::lock_guard<std::mutex> lock(*netlistMutex_);
         graph = &netlist_.createGraph(std::string(finalSymbol));
+        netlist_.addDeclaredSymbol(netlist_.internSymbol(finalSymbol));
     }
     else
     {
         graph = &netlist_.createGraph(std::string(finalSymbol));
+        netlist_.addDeclaredSymbol(netlist_.internSymbol(finalSymbol));
     }
     GraphAssemblyState state(context_, *this, *graph, plan, lowering, writeBack);
     state.build();

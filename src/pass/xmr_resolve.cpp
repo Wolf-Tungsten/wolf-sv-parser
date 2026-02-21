@@ -1,6 +1,7 @@
 #include "pass/xmr_resolve.hpp"
 
 #include "grh.hpp"
+#include "grh_symbol_utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -233,6 +234,43 @@ namespace wolf_sv_parser::transform
         std::vector<PendingPort> pendingOutputPorts;
         std::vector<PendingPort> pendingInputPorts;
         std::unordered_map<std::string, std::unordered_map<std::string, grh::ir::ValueId>> inputPadCache;
+        uint32_t internalSymbolCounter = 0;
+
+        auto makeInternalValueSymbol = [&](grh::ir::Graph &graph, std::string_view purpose)
+        {
+            return grh::ir::symbol_utils::makeInternalSymbol(graph, "val", "xmr_resolve",
+                                                             purpose, internalSymbolCounter);
+        };
+
+        auto makeInternalOpSymbol = [&](grh::ir::Graph &graph, std::string_view purpose)
+        {
+            return grh::ir::symbol_utils::makeInternalSymbol(graph, "op", "xmr_resolve",
+                                                             purpose, internalSymbolCounter);
+        };
+
+        auto makeLoc = [&](std::string_view note) {
+            return makeTransformSrcLoc("xmr-resolve", note);
+        };
+
+        auto createValue = [&](grh::ir::Graph &graph,
+                               grh::ir::SymbolId sym,
+                               int32_t width,
+                               bool isSigned,
+                               grh::ir::ValueType type,
+                               std::string_view note) -> grh::ir::ValueId {
+            grh::ir::ValueId value = graph.createValue(sym, width, isSigned, type);
+            graph.setValueSrcLoc(value, makeLoc(note));
+            return value;
+        };
+
+        auto createOp = [&](grh::ir::Graph &graph,
+                            grh::ir::OperationKind kind,
+                            grh::ir::SymbolId sym,
+                            std::string_view note) -> grh::ir::OperationId {
+            grh::ir::OperationId op = graph.createOperation(kind, sym);
+            graph.setOpSrcLoc(op, makeLoc(note));
+            return op;
+        };
 
         enum class StorageKind
         {
@@ -258,14 +296,14 @@ namespace wolf_sv_parser::transform
             {
                 return it->second;
             }
-            std::string base = "__xmr_pad_in_" + key;
-            std::string symName = makeUniqueSymbol(graph, base);
-            grh::ir::SymbolId sym = graph.internSymbol(symName);
+            std::string purpose = "pad_in_" + key;
+            grh::ir::SymbolId sym = makeInternalValueSymbol(graph, purpose);
             grh::ir::ValueId value =
-                graph.createValue(sym, normalized, isSigned, grh::ir::ValueType::Logic);
+                createValue(graph, sym, normalized, isSigned, grh::ir::ValueType::Logic,
+                            "pad_in");
+            grh::ir::SymbolId opSym = makeInternalOpSymbol(graph, "pad_in_const_" + key);
             grh::ir::OperationId op =
-                graph.createOperation(grh::ir::OperationKind::kConstant,
-                                      grh::ir::SymbolId::invalid());
+                createOp(graph, grh::ir::OperationKind::kConstant, opSym, "pad_in_const");
             graph.addResult(op, value);
             graph.setAttr(op, "constValue", std::to_string(normalized) + "'b0");
             graphCache.emplace(key, value);
@@ -358,8 +396,8 @@ namespace wolf_sv_parser::transform
             grh::ir::ValueId value = graph.findValue(sym);
             if (!value.valid())
             {
-                value = graph.createValue(sym, normalizeWidth(width), isSigned,
-                                          grh::ir::ValueType::Logic);
+                value = createValue(graph, sym, normalizeWidth(width), isSigned,
+                                    grh::ir::ValueType::Logic, "input_port");
             }
             graph.bindInputPort(sym, value);
             result.changed = true;
@@ -377,15 +415,15 @@ namespace wolf_sv_parser::transform
                 storage.kind == StorageKind::Register
                     ? grh::ir::OperationKind::kRegisterReadPort
                     : grh::ir::OperationKind::kLatchReadPort;
-            std::string base = "__xmr_read_";
-            base.append(storageName);
-            std::string symName = makeUniqueSymbol(graph, base);
-            grh::ir::SymbolId valueSym = graph.internSymbol(symName);
+            std::string purpose = "read_";
+            purpose.append(storageName);
+            grh::ir::SymbolId valueSym = makeInternalValueSymbol(graph, purpose);
             grh::ir::ValueId value =
-                graph.createValue(valueSym, storage.width, storage.isSigned,
-                                  grh::ir::ValueType::Logic);
+                createValue(graph, valueSym, storage.width, storage.isSigned,
+                            grh::ir::ValueType::Logic, "storage_read");
+            grh::ir::SymbolId opSym = makeInternalOpSymbol(graph, purpose);
             grh::ir::OperationId op =
-                graph.createOperation(kind, grh::ir::SymbolId::invalid());
+                createOp(graph, kind, opSym, "storage_read");
             graph.addResult(op, value);
             if (storage.kind == StorageKind::Register)
             {
@@ -416,13 +454,12 @@ namespace wolf_sv_parser::transform
                     return resultsSpan[i];
                 }
             }
-            std::string base = "__xmr_out_";
-            base.append(portName);
-            std::string symName = makeUniqueSymbol(graph, base);
-            grh::ir::SymbolId sym = graph.internSymbol(symName);
+            std::string purpose = "out_";
+            purpose.append(portName);
+            grh::ir::SymbolId sym = makeInternalValueSymbol(graph, purpose);
             grh::ir::ValueId value =
-                graph.createValue(sym, normalizeWidth(width), isSigned,
-                                  grh::ir::ValueType::Logic);
+                createValue(graph, sym, normalizeWidth(width), isSigned,
+                            grh::ir::ValueType::Logic, "instance_out");
             const std::size_t inoutCount = inoutNames.size();
             const std::size_t resultCount = resultsSpan.size();
             const std::size_t outputLimit =
@@ -499,13 +536,12 @@ namespace wolf_sv_parser::transform
                 warning(graph, graph.getOperation(contextOp),
                         "XMR write overrides input; leaving input port unconnected for " +
                             symbolText);
-                std::string base = "__xmr_override_";
-                base.append(symbolText);
-                std::string symName = makeUniqueSymbol(graph, base);
-                grh::ir::SymbolId sym = graph.internSymbol(symName);
+                std::string purpose = "override_";
+                purpose.append(symbolText);
+                grh::ir::SymbolId sym = makeInternalValueSymbol(graph, purpose);
                 grh::ir::ValueId replacement =
-                    graph.createValue(sym, normalizeWidth(value.width()), value.isSigned(),
-                                      value.type());
+                    createValue(graph, sym, normalizeWidth(value.width()), value.isSigned(),
+                                value.type(), "override_input");
                 graph.replaceAllUses(target, replacement);
                 result.changed = true;
                 return replacement;
@@ -521,11 +557,15 @@ namespace wolf_sv_parser::transform
                     }
                 }
             }
-            graph.clearValueSymbol(target);
-            grh::ir::SymbolId sym = graph.internSymbol(symbolText);
+            const grh::ir::SymbolId originalSym = value.symbol();
+            std::string rebindPurpose = "rebind_";
+            rebindPurpose.append(symbolText);
+            grh::ir::SymbolId tempSym = makeInternalValueSymbol(graph, rebindPurpose);
+            graph.setValueSymbol(target, tempSym);
+            grh::ir::SymbolId sym = originalSym;
             grh::ir::ValueId replacement =
-                graph.createValue(sym, normalizeWidth(value.width()), value.isSigned(),
-                                  value.type());
+                createValue(graph, sym, normalizeWidth(value.width()), value.isSigned(),
+                            value.type(), "rebind_output");
             graph.replaceAllUses(target, replacement);
             for (const auto &name : outputNames)
             {
@@ -849,9 +889,12 @@ namespace wolf_sv_parser::transform
             {
                 if (storage->kind == StorageKind::Register)
                 {
+                    std::string purpose = "reg_write_";
+                    purpose.append(leafName);
+                    grh::ir::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
                     grh::ir::OperationId writeOp =
-                        leafGraph->createOperation(grh::ir::OperationKind::kRegisterWritePort,
-                                                   grh::ir::SymbolId::invalid());
+                        createOp(*leafGraph, grh::ir::OperationKind::kRegisterWritePort,
+                                 opSym, "reg_write_port");
                     for (const auto value : drivers)
                     {
                         leafGraph->addOperand(writeOp, value);
@@ -863,9 +906,12 @@ namespace wolf_sv_parser::transform
                 }
                 if (storage->kind == StorageKind::Latch)
                 {
+                    std::string purpose = "latch_write_";
+                    purpose.append(leafName);
+                    grh::ir::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
                     grh::ir::OperationId writeOp =
-                        leafGraph->createOperation(grh::ir::OperationKind::kLatchWritePort,
-                                                   grh::ir::SymbolId::invalid());
+                        createOp(*leafGraph, grh::ir::OperationKind::kLatchWritePort,
+                                 opSym, "latch_write_port");
                     for (const auto value : drivers)
                     {
                         leafGraph->addOperand(writeOp, value);
@@ -874,9 +920,12 @@ namespace wolf_sv_parser::transform
                     result.changed = true;
                     return true;
                 }
+                std::string purpose = "mem_write_";
+                purpose.append(leafName);
+                grh::ir::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
                 grh::ir::OperationId writeOp =
-                    leafGraph->createOperation(grh::ir::OperationKind::kMemoryWritePort,
-                                               grh::ir::SymbolId::invalid());
+                    createOp(*leafGraph, grh::ir::OperationKind::kMemoryWritePort,
+                             opSym, "mem_write_port");
                 for (const auto value : drivers)
                 {
                     leafGraph->addOperand(writeOp, value);
@@ -899,9 +948,12 @@ namespace wolf_sv_parser::transform
             {
                 return false;
             }
+            std::string purpose = "assign_";
+            purpose.append(leafName);
+            grh::ir::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
             grh::ir::OperationId assign =
-                leafGraph->createOperation(grh::ir::OperationKind::kAssign,
-                                           grh::ir::SymbolId::invalid());
+                createOp(*leafGraph, grh::ir::OperationKind::kAssign,
+                         opSym, "assign_write");
             leafGraph->addOperand(assign, drivers.front());
             leafGraph->addResult(assign, *replacement);
             result.changed = true;

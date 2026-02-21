@@ -665,7 +665,24 @@ namespace grh::ir::load
                 info.endColumn = static_cast<uint32_t>(endColIt->second.asInt(std::string(context) + ".endCol"));
             }
 
-            if (info.file.empty() && info.line == 0)
+            if (auto originIt = object.find("origin"); originIt != object.end())
+            {
+                info.origin = originIt->second.asString(std::string(context) + ".origin");
+            }
+
+            if (auto passIt = object.find("pass"); passIt != object.end())
+            {
+                info.pass = passIt->second.asString(std::string(context) + ".pass");
+            }
+
+            if (auto noteIt = object.find("note"); noteIt != object.end())
+            {
+                info.note = noteIt->second.asString(std::string(context) + ".note");
+            }
+
+            if (info.file.empty() && info.line == 0 && info.column == 0 &&
+                info.endLine == 0 && info.endColumn == 0 &&
+                info.origin.empty() && info.pass.empty() && info.note.empty())
             {
                 return std::nullopt;
             }
@@ -694,7 +711,27 @@ namespace grh::ir::load
             {
                 throw std::runtime_error("Graph JSON missing symbol");
             }
-            Graph &graph = netlist.createGraph(symbolIt->second.asString("graph.symbol"));
+            const std::string graphSymbol = symbolIt->second.asString("graph.symbol");
+            if (graphSymbol.empty())
+            {
+                throw std::runtime_error("Graph JSON symbol is empty");
+            }
+            Graph &graph = netlist.createGraph(graphSymbol);
+
+            auto declaredIt = graphObj.find("declaredSymbols");
+            if (declaredIt == graphObj.end())
+            {
+                throw std::runtime_error("Graph JSON missing declaredSymbols");
+            }
+            for (const auto &entry : declaredIt->second.asArray("graph.declaredSymbols"))
+            {
+                const std::string name = entry.asString("graph.declaredSymbols[]");
+                if (name.empty())
+                {
+                    throw std::runtime_error("Graph declared symbol is empty");
+                }
+                graph.addDeclaredSymbol(graph.internSymbol(name));
+            }
 
             const auto valuesIt = graphObj.find("vals");
             if (valuesIt == graphObj.end())
@@ -712,6 +749,10 @@ namespace grh::ir::load
             {
                 const auto &valueObj = valueEntry.asObject("value");
                 const auto &symbol = valueObj.at("sym").asString("value.sym");
+                if (symbol.empty())
+                {
+                    throw std::runtime_error("Value symbol is empty");
+                }
                 int64_t width = valueObj.at("w").asInt("value.w");
                 bool isSigned = valueObj.at("sgn").asBool("value.sgn");
                 grh::ir::ValueType valueType = grh::ir::ValueType::Logic;
@@ -785,13 +826,22 @@ namespace grh::ir::load
                         {
                             throw std::runtime_error("Port entry missing name or val");
                         }
+                        const std::string portNameText = nameField->second.asString("graph.port.name");
+                        if (portNameText.empty())
+                        {
+                            throw std::runtime_error("Port name is empty");
+                        }
                         const std::string valueName = valField->second.asString("graph.port.val");
+                        if (valueName.empty())
+                        {
+                            throw std::runtime_error("Port value symbol is empty");
+                        }
                         auto valueIt = valueBySymbol.find(valueName);
                         if (valueIt == valueBySymbol.end())
                         {
                             throw std::runtime_error("Port references unknown value: " + valueName);
                         }
-                        SymbolId portName = graph.internSymbol(nameField->second.asString("graph.port.name"));
+                        SymbolId portName = graph.internSymbol(portNameText);
                         if (isInput)
                         {
                             graph.bindInputPort(portName, valueIt->second);
@@ -821,9 +871,18 @@ namespace grh::ir::load
                         {
                             throw std::runtime_error("Inout port entry missing name/in/out/oe");
                         }
+                        const std::string portNameText = nameField->second.asString("graph.port.name");
+                        if (portNameText.empty())
+                        {
+                            throw std::runtime_error("Inout port name is empty");
+                        }
                         const std::string inName = inField->second.asString("graph.port.in");
                         const std::string outName = outField->second.asString("graph.port.out");
                         const std::string oeName = oeField->second.asString("graph.port.oe");
+                        if (inName.empty() || outName.empty() || oeName.empty())
+                        {
+                            throw std::runtime_error("Inout port value symbol is empty");
+                        }
                         auto inIt = valueBySymbol.find(inName);
                         auto outIt = valueBySymbol.find(outName);
                         auto oeIt = valueBySymbol.find(oeName);
@@ -832,7 +891,7 @@ namespace grh::ir::load
                         {
                             throw std::runtime_error("Inout port references unknown value");
                         }
-                        SymbolId portName = graph.internSymbol(nameField->second.asString("graph.port.name"));
+                        SymbolId portName = graph.internSymbol(portNameText);
                         graph.bindInoutPort(portName, inIt->second, outIt->second, oeIt->second);
                     }
                 }
@@ -950,6 +1009,10 @@ namespace grh::ir::load
                     }
 
                     const std::string opSymbol = symIt->second.asString("operation.sym");
+                    if (opSymbol.empty())
+                    {
+                        throw std::runtime_error("Operation symbol is empty");
+                    }
                     SymbolId opSym = graph.internSymbol(opSymbol);
                     OperationId opId = graph.createOperation(*kind, opSym);
 
@@ -1003,6 +1066,21 @@ namespace grh::ir::load
                     }
                 }
             }
+        }
+
+        auto declaredIt = rootObj.find("declaredSymbols");
+        if (declaredIt == rootObj.end())
+        {
+            throw std::runtime_error("Netlist JSON missing declaredSymbols");
+        }
+        for (const auto &entry : declaredIt->second.asArray("netlist.declaredSymbols"))
+        {
+            const std::string name = entry.asString("netlist.declaredSymbols[]");
+            if (name.empty())
+            {
+                throw std::runtime_error("Netlist declared symbol is empty");
+            }
+            netlist.addDeclaredSymbol(netlist.internSymbol(name));
         }
 
         if (auto topIt = rootObj.find("tops"); topIt != rootObj.end())

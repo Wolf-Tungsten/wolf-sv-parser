@@ -38,7 +38,8 @@ namespace wolf_sv_parser::transform
             return value.isInput() || value.isOutput() || value.isInout();
         }
 
-        bool isDeadOp(const grh::ir::Graph &graph, const grh::ir::Operation &op)
+        bool isDeadOp(const grh::ir::Graph &graph, const grh::ir::Operation &op,
+                      const std::vector<uint8_t> &isDeclared)
         {
             if (isSideEffectOp(op.kind()))
             {
@@ -56,6 +57,10 @@ namespace wolf_sv_parser::transform
                 }
                 const grh::ir::Value res = graph.getValue(resId);
                 if (isPortValue(res))
+                {
+                    return false;
+                }
+                if (resId.index < isDeclared.size() && isDeclared[resId.index] != 0)
                 {
                     return false;
                 }
@@ -112,11 +117,13 @@ namespace wolf_sv_parser::transform
             }
 
             std::vector<uint8_t> isPort;
+            std::vector<uint8_t> isDeclared;
             std::vector<std::size_t> useCounts;
             std::vector<grh::ir::OperationId> defOpByValue;
             if (maxValueIndex > 0)
             {
                 isPort.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
+                isDeclared.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
                 useCounts.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
                 defOpByValue.assign(static_cast<std::size_t>(maxValueIndex + 1),
                                     grh::ir::OperationId::invalid());
@@ -146,6 +153,18 @@ namespace wolf_sv_parser::transform
                 markPort(port.in);
                 markPort(port.out);
                 markPort(port.oe);
+            }
+            if (keepDeclaredSymbols())
+            {
+                for (const auto sym : graph.declaredSymbols())
+                {
+                    const grh::ir::ValueId valueId = graph.findValue(sym);
+                    if (!valueId.valid() || valueId.index >= isDeclared.size())
+                    {
+                        continue;
+                    }
+                    isDeclared[valueId.index] = 1;
+                }
             }
 
             struct OpInfo
@@ -216,6 +235,10 @@ namespace wolf_sv_parser::transform
                         continue;
                     }
                     if (isPort[valueId.index] != 0)
+                    {
+                        return false;
+                    }
+                    if (valueId.index < isDeclared.size() && isDeclared[valueId.index] != 0)
                     {
                         return false;
                     }
@@ -310,6 +333,10 @@ namespace wolf_sv_parser::transform
                     continue;
                 }
                 if (isPort[valueId.index] != 0)
+                {
+                    continue;
+                }
+                if (valueId.index < isDeclared.size() && isDeclared[valueId.index] != 0)
                 {
                     continue;
                 }

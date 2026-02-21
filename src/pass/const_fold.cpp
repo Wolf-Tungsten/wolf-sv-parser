@@ -1,6 +1,7 @@
 #include "pass/const_fold.hpp"
 
 #include "grh.hpp"
+#include "grh_symbol_utils.hpp"
 
 #include "slang/numeric/SVInt.h"
 
@@ -534,19 +535,15 @@ namespace wolf_sv_parser::transform
             return results;
         }
 
-        std::string makeUniqueSymbol(const grh::ir::Graph &graph, std::string base, bool isOperation, std::atomic<int> &counter)
+        std::string makeInternalSymbol(const grh::ir::Graph &graph,
+                                       std::string_view kind,
+                                       std::string_view purpose,
+                                       std::atomic<int> &counter)
         {
-            std::string candidate = std::move(base);
-            // Fast path: assume no collision, append atomic counter
+            std::string base = grh::ir::symbol_utils::makeInternalBase(kind, "const_fold", purpose);
             int id = counter.fetch_add(1, std::memory_order_relaxed);
-            candidate.append("_").append(std::to_string(id));
-            
-            // Slow path: handle collision (rare)
-            const auto exists = [&](const std::string &symbol)
-            {
-                return isOperation ? graph.findOperation(symbol).valid() : graph.findValue(symbol).valid();
-            };
-            while (exists(candidate))
+            std::string candidate = base + "_" + std::to_string(id);
+            while (graph.findOperation(candidate).valid() || graph.findValue(candidate).valid())
             {
                 id = counter.fetch_add(1, std::memory_order_relaxed);
                 candidate = base + "_" + std::to_string(id);
@@ -581,13 +578,12 @@ namespace wolf_sv_parser::transform
                 return it->second;
             }
 
-            std::ostringstream base;
-            base << "__constfold_" << sourceOp.symbolText() << "_" << resultIndex;
-            std::string valueName = makeUniqueSymbol(graph, base.str(), /*isOperation=*/false, symbolCounter);
-
-            std::ostringstream opBase;
-            opBase << "__constfold_op_" << sourceOp.symbolText() << "_" << resultIndex;
-            std::string opName = makeUniqueSymbol(graph, opBase.str(), /*isOperation=*/true, symbolCounter);
+            std::string purpose = "const_";
+            purpose.append(grh::ir::symbol_utils::normalizeComponent(sourceOp.symbolText()));
+            purpose.push_back('_');
+            purpose.append(std::to_string(resultIndex));
+            std::string valueName = makeInternalSymbol(graph, "val", purpose, symbolCounter);
+            std::string opName = makeInternalSymbol(graph, "op", purpose, symbolCounter);
 
             const grh::ir::SymbolId valueSym = graph.internSymbol(valueName);
             const grh::ir::SymbolId opSym = graph.internSymbol(opName);
@@ -602,6 +598,11 @@ namespace wolf_sv_parser::transform
             const grh::ir::OperationId constOp = graph.createOperation(grh::ir::OperationKind::kConstant, opSym);
             graph.addResult(constOp, newValue);
             graph.setAttr(constOp, "constValue", formatConstLiteral(value));
+            std::string note = "from_";
+            note.append(grh::ir::toString(sourceOp.kind()));
+            const grh::ir::SrcLoc genLoc = makeTransformSrcLoc("const-fold", note);
+            graph.setValueSrcLoc(newValue, genLoc);
+            graph.setOpSrcLoc(constOp, genLoc);
             pool.emplace(std::move(key), newValue);
             return newValue;
         }

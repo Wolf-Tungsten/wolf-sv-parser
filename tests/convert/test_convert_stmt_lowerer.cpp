@@ -1354,7 +1354,7 @@ int testDpiCallLowering(const std::filesystem::path& sourcePath) {
         return fail("Missing DPI output symbol in " + sourcePath.string());
     }
     const std::string_view resultName = plan.symbolTable.text(resultSymbol);
-    if (resultName.find("_dpi_ret_") != 0) {
+    if (resultName.find("_val_") != 0) {
         return fail("Unexpected DPI output symbol in " + sourcePath.string());
     }
     bool hasWriteToY = false;
@@ -1403,7 +1403,7 @@ int testDpiReturnLowering(const std::filesystem::path& sourcePath) {
         return fail("Missing DPI return symbol in " + sourcePath.string());
     }
     const std::string_view retName = plan.symbolTable.text(retSymbol);
-    if (retName.find("_dpi_ret_") != 0) {
+    if (retName.find("_val_") != 0) {
         return fail("Unexpected DPI return symbol name in " + sourcePath.string());
     }
     if (diagnostics.hasError()) {

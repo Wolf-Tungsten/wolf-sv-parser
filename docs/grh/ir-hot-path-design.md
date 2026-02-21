@@ -151,7 +151,7 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 
 ### 基本类型
 
-- `SymbolId`：由 `GraphSymbolTable` 产生的图内符号 id；`invalid` 表示“无符号”（允许 op 缺失 symbol）。
+- `SymbolId`：由 `GraphSymbolTable` 产生的图内符号 id；`invalid` 仅用于可选引用（如 valueDef），op/value 的 symbol 必须有效。
 - `ValueId/OperationId/GraphId`：句柄（index + 可选 generation）。
 - `Span<T>`：连续只读视图（`data + size`）。
 - `Port`：`{ SymbolId name, ValueId value }`。
@@ -168,10 +168,10 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 - `OperationKind opKind(OperationId op)`。
 - `Span<ValueId> opOperands(OperationId op)`。
 - `Span<ValueId> opResults(OperationId op)`。
-- `SymbolId opSymbol(OperationId op)`：可能为 invalid，表示未设置符号。
+- `SymbolId opSymbol(OperationId op)`：必须有效。
 - `Span<AttrKV> opAttrs(OperationId op)`。
 - `std::optional<AttrValue> opAttr(OperationId op, SymbolId key)`：按 key 查询单个属性（可线性查找或使用缓存索引）。
-- `SymbolId valueSymbol(ValueId v)`。
+- `SymbolId valueSymbol(ValueId v)`：必须有效。
 - `int32_t valueWidth(ValueId v)`，`bool valueSigned(ValueId v)`。
 - `bool valueIsInput(ValueId v)` / `bool valueIsOutput(ValueId v)`。
 - `OperationId valueDef(ValueId v)`：无定义时返回 invalid。

@@ -102,7 +102,7 @@
 > 目标：补齐元数据与变更接口（符号/端口/属性/调试 + 修改删除）。
 
 ## KR1：符号、端口、属性、调试信息
-- `setOpSymbol/setValueSymbol/clear*Symbol`；允许 op 无符号但 set 不允许 invalid。
+- `setOpSymbol/setValueSymbol/clear*Symbol`；op/value 必须有有效符号，clear 仅用于符号迁移过渡，最终不可留空。
 - 端口绑定与排序；`AttrValue` 与 `opAttr` 按 key 访问。
 - `SrcLoc`/debug table 接入 GraphView。
 - 测试：端口顺序、opAttr 查找、符号迁移（clear + set）与 srcLoc 读写。

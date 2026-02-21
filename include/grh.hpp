@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <span>
 #include <vector>
@@ -110,6 +111,9 @@ struct SrcLoc
     uint32_t column = 0;
     uint32_t endLine = 0;
     uint32_t endColumn = 0;
+    std::string origin;
+    std::string pass;
+    std::string note;
 };
 
 using DebugInfo = SrcLoc;
@@ -525,6 +529,9 @@ public:
     SymbolId internSymbol(std::string_view text);
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;
+    void addDeclaredSymbol(SymbolId sym);
+    bool isDeclaredSymbol(SymbolId sym) const noexcept;
+    std::span<const SymbolId> declaredSymbols() const noexcept;
 
     bool frozen() const noexcept { return !builder_.has_value(); }
     const GraphView* viewIfFrozen() const noexcept;
@@ -603,6 +610,8 @@ private:
     GraphSymbolTable symbols_;
     std::optional<GraphView> view_;
     std::optional<GraphBuilder> builder_;
+    std::vector<SymbolId> declaredSymbols_;
+    std::unordered_set<uint32_t> declaredSymbolSet_;
     mutable std::vector<ValueId> valuesCache_;
     mutable std::vector<OperationId> operationsCache_;
     mutable std::vector<Port> inputPortsCache_;
@@ -624,6 +633,12 @@ public:
     Graph& createGraph(std::string name);
     Graph* findGraph(std::string_view name) noexcept;
     const Graph* findGraph(std::string_view name) const noexcept;
+    SymbolId internSymbol(std::string_view text);
+    SymbolId lookupSymbol(std::string_view text) const;
+    std::string_view symbolText(SymbolId id) const;
+    void addDeclaredSymbol(SymbolId sym);
+    bool isDeclaredSymbol(SymbolId sym) const noexcept;
+    std::span<const SymbolId> declaredSymbols() const noexcept;
     std::vector<std::string> aliasesForGraph(std::string_view name) const;
     void registerGraphAlias(std::string alias, Graph& graph);
 
@@ -644,6 +659,8 @@ private:
     std::unordered_map<std::string, std::string> graphAliasBySymbol_;
     std::vector<std::string> graphOrder_;
     std::vector<std::string> topGraphs_;
+    std::vector<SymbolId> declaredSymbols_;
+    std::unordered_set<uint32_t> declaredSymbolSet_;
 };
 
 } // namespace ir

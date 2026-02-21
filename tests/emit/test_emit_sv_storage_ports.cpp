@@ -34,7 +34,8 @@ ValueId addConstant(Graph &graph, std::string_view name, int32_t width, std::str
     const auto value =
         graph.createValue(graph.internSymbol(std::string(name)), width, false);
     const auto op =
-        graph.createOperation(OperationKind::kConstant, SymbolId::invalid());
+        graph.createOperation(OperationKind::kConstant,
+                              graph.internSymbol(std::string("_op_emit_const_") + std::string(name)));
     graph.addResult(op, value);
     graph.setAttr(op, "constValue", std::move(literal));
     return value;
@@ -81,21 +82,21 @@ Netlist buildNetlist()
     graph.setAttr(latch, "isSigned", false);
 
     const auto regRead = graph.createOperation(OperationKind::kRegisterReadPort,
-                                               SymbolId::invalid());
+                                               graph.internSymbol("_op_emit_reg_read"));
     const auto regReadValue =
         graph.createValue(graph.internSymbol("reg_full_q"), 8, false);
     graph.addResult(regRead, regReadValue);
     graph.setAttr(regRead, "regSymbol", std::string("reg_full"));
 
     const auto latchRead = graph.createOperation(OperationKind::kLatchReadPort,
-                                                 SymbolId::invalid());
+                                                 graph.internSymbol("_op_emit_latch_read"));
     const auto latchReadValue =
         graph.createValue(graph.internSymbol("lat_q"), 4, false);
     graph.addResult(latchRead, latchReadValue);
     graph.setAttr(latchRead, "latchSymbol", std::string("lat_a"));
 
     const auto regWrite = graph.createOperation(OperationKind::kRegisterWritePort,
-                                                SymbolId::invalid());
+                                                graph.internSymbol("_op_emit_reg_write"));
     graph.addOperand(regWrite, en);
     graph.addOperand(regWrite, data);
     graph.addOperand(regWrite, fullMask);
@@ -104,7 +105,7 @@ Netlist buildNetlist()
     graph.setAttr(regWrite, "eventEdge", std::vector<std::string>{"posedge"});
 
     const auto regMaskWrite = graph.createOperation(OperationKind::kRegisterWritePort,
-                                                    SymbolId::invalid());
+                                                    graph.internSymbol("_op_emit_reg_mask_write"));
     graph.addOperand(regMaskWrite, condAlways);
     graph.addOperand(regMaskWrite, dataMask);
     graph.addOperand(regMaskWrite, halfMask);
@@ -113,7 +114,7 @@ Netlist buildNetlist()
     graph.setAttr(regMaskWrite, "eventEdge", std::vector<std::string>{"posedge"});
 
     const auto latchWrite = graph.createOperation(OperationKind::kLatchWritePort,
-                                                  SymbolId::invalid());
+                                                  graph.internSymbol("_op_emit_latch_write"));
     graph.addOperand(latchWrite, latchEn);
     graph.addOperand(latchWrite, latchData);
     graph.addOperand(latchWrite, latchMask);

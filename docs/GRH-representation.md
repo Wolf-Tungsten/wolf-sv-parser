@@ -37,7 +37,7 @@ GRH 表示在编译流程中的功能定位如下：
 # 顶点 - Operation
 
 - Operation 具有类型：由枚举 `OperationKind` 表示，类型有限且预定义
-- Operation 可被符号索引：使用 `SymbolId`（由 `GraphSymbolTable` 驻留的字符串），在 Graph 作用域内建议唯一；允许为空（invalid）
+- Operation 可被符号索引：使用 `SymbolId`（由 `GraphSymbolTable` 驻留的字符串），在 Graph 作用域内必须唯一且非空；不允许为 invalid；JSON load/emit 缺失 symbol 视为错误
 - Operation 接受操作数作为输入：`operands` 为 `ValueId` 列表
 - Operation 输出结果：`results` 为 `ValueId` 列表
 - Operation 的属性：`attrs` 为 `AttrKV` 列表（`{SymbolId key, AttributeValue value}`）
@@ -62,10 +62,13 @@ GRH 表示在编译流程中的功能定位如下：
 
 满足静态单赋值SSA特性，只能由一个 Operation 写入，可以被多个 Operation 读取。
 
-每个 Value 会显式生成为 SystemVerilog 的信号或变量声明。Logic 类型使用 wire/reg，
-Real/String 类型使用 real/string 变量声明（非 net），因此不能使用 continuous assign。
+Value 必须具有有效 symbol。
+若该 symbol 被标记为 declaredSymbols，emit **保证**生成具名声明；
+否则即使具有有效 symbol，若未被引用或被内联/别名，也可能省略独立声明。
+Logic 类型通常映射为 wire/reg，Real/String 类型映射为 real/string 变量（非 net），
+因此不能使用 continuous assign。
 
-- 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内建议唯一且非空；`Graph::internSymbol()` 负责驻留字符串
+- 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内必须唯一且非空；JSON load/emit 缺失 symbol 视为错误；`Graph::internSymbol()` 负责驻留字符串
 - 具有一个 `ValueType` 字段：`Logic/Real/String`
 - 对于 `Logic`，具有一个 `int32_t` 类型的 width 字段表示位宽（`width` 必须大于 0）
 - 对于 `Logic`，具有一个 bool 类型 signed 标记是否为有符号
@@ -73,7 +76,7 @@ Real/String 类型使用 real/string 变量声明（非 net），因此不能使
 - `Real/String` 为变量类型，`width/isSigned` 不参与语义（发射时忽略）
 - Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
-生成语义（简化）
+生成语义（可能生成的声明，简化）
 
 ```
 wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
@@ -103,7 +106,7 @@ string ${symbol};
 
 建模一个参数化后的 module：
 
-- 具有一个 graph symbol（module 名称），符合 verilog 标识符规范，在网表中唯一，并由 `NetlistSymbolTable` 分配 `GraphId`
+- 具有一个 graph symbol（module 名称），符合 verilog 标识符规范，在网表中唯一，并由 `NetlistSymbolTable` 分配 `GraphId`；JSON load/emit 缺失 graph symbol 视为错误
 - 具有一个 `GraphSymbolTable` 管理图内符号，`Graph::internSymbol/lookupSymbol/symbolText` 为主要入口
 - 端口分为 input/output/inout：input/output 以 `std::vector<Port>` 存储，元素为 `{SymbolId name, ValueId value}`；inout 以 `std::vector<InoutPort>` 存储，元素为 `{SymbolId name, ValueId in, ValueId out, ValueId oe}`；`bindInputPort/bindOutputPort/bindInoutPort` 负责绑定
 - Graph 内部采用 `GraphBuilder`（可变）与 `GraphView`（只读快照）双态；`freeze()` 生成只读视图并可能重排 id

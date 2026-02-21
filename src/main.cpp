@@ -176,6 +176,9 @@ int main(int argc, char **argv)
     std::optional<bool> skipTransform;
     driver.cmdLine.add("--skip-transform", skipTransform,
                        "Skip transform passes and emit raw Convert netlist");
+    std::optional<bool> dropDeclaredSymbols;
+    driver.cmdLine.add("--transform-drop-declared", dropDeclaredSymbols,
+                       "Allow transform to drop user-declared symbols (default keeps them)");
     std::optional<std::string> logLevel;
     driver.cmdLine.add("--log", logLevel,
                        "Log level: none|error|warn|info|debug|trace", "<level>");
@@ -634,6 +637,10 @@ int main(int argc, char **argv)
                 std::string_view tag, std::string_view message) {
                 logLine(level, "transform", tag, message);
             };
+        if (dropDeclaredSymbols)
+        {
+            passManager.options().keepDeclaredSymbols = false;
+        }
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::XmrResolvePass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::ConstantFoldPass>());
         passManager.addPass(std::make_unique<wolf_sv_parser::transform::RedundantElimPass>());
