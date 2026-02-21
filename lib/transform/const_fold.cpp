@@ -536,10 +536,9 @@ namespace wolvrix::lib::transform
 
         std::string makeInternalSymbol(const wolvrix::lib::grh::Graph &graph,
                                        std::string_view kind,
-                                       std::string_view purpose,
                                        std::atomic<int> &counter)
         {
-            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind, "const_fold", purpose);
+            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind);
             int id = counter.fetch_add(1, std::memory_order_relaxed);
             std::string candidate = base + "_" + std::to_string(id);
             while (graph.findOperation(candidate).valid() || graph.findValue(candidate).valid())
@@ -577,12 +576,8 @@ namespace wolvrix::lib::transform
                 return it->second;
             }
 
-            std::string purpose = "const_";
-            purpose.append(wolvrix::lib::grh::symbol_utils::normalizeComponent(sourceOp.symbolText()));
-            purpose.push_back('_');
-            purpose.append(std::to_string(resultIndex));
-            std::string valueName = makeInternalSymbol(graph, "val", purpose, symbolCounter);
-            std::string opName = makeInternalSymbol(graph, "op", purpose, symbolCounter);
+            std::string valueName = makeInternalSymbol(graph, "val", symbolCounter);
+            std::string opName = makeInternalSymbol(graph, "op", symbolCounter);
 
             const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
             const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);

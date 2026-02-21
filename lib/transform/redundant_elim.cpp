@@ -295,13 +295,8 @@ namespace wolvrix::lib::transform
                                         std::string_view baseName,
                                         uint32_t &counter)
         {
-            std::string purpose = "const";
-            if (!baseName.empty())
-            {
-                purpose.push_back('_');
-                purpose.append(wolvrix::lib::grh::symbol_utils::normalizeComponent(baseName));
-            }
-            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind, "redundant_elim", purpose);
+            (void)baseName;
+            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind);
             for (;;)
             {
                 std::string candidate = base + "_" + std::to_string(counter++);

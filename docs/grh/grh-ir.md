@@ -1,22 +1,17 @@
-# Graph RTL Hierarchy（GRH）Representation
+# Graph RTL Hierarchy（GRH IR）
 
 借鉴 MLIR SSA 形式的描述，融合 RTL 设计特点定制的表示方法。
 
-GRH 表示提供一种基于图的分析、操作 RTL 的入口。
+GRH IR 提供一种基于图的分析、操作 RTL 的编程接口。
 
-GRH 表示在编译流程中的功能定位如下：
+GRH IR 在编译流程中的功能定位如下：
 
-高层次行为化的 SystemVerilog - slang AST - **GRH 表示** - 低层次网表化的 SystemVerilog
+高层次行为化的 SystemVerilog - slang AST - **GRH IR** - 低层次网表化的 SystemVerilog
 
 上述过程可视为 RTL-to-RTL 的变换，变换过程应当保持功能等价
 
-变换过程中，GRH表示尽可能避免对RTL语义的分析，语义应当由处理低层次 SystemVerilog 的仿真器、逻辑综合工具解释。
 
-典型的案例是 GRH 不关心各种操作数、地址位宽之间的匹配规则，如果出现截断或者越界，应当由处理低层次SystemVerilog的工具处理。
-
-
-
-# GRH 表示的层次结构（自底向上）
+# GRH IR 表示的层次结构（自底向上）
 
 - 顶点（Operation）和超边（Value）
     - 顶点：用 Operation 建模组合逻辑、寄存器、模块实例化、调试、DPI；
@@ -30,7 +25,7 @@ GRH 表示在编译流程中的功能定位如下：
 
 # 符号表与句柄
 
-- GRH API 以 `SymbolId` 作为符号句柄，通过 `GraphSymbolTable`/`NetlistSymbolTable` 驻留字符串
+- GRH IR API 以 `SymbolId` 作为符号句柄，通过 `GraphSymbolTable`/`NetlistSymbolTable` 驻留字符串
 - `ValueId/OperationId/GraphId` 为强类型句柄（index + generation + GraphId），用于跨图校验；`invalid` 表示无效
 - `SymbolId`/`ValueId`/`OperationId` 只在各自符号表或 Graph 生命周期内稳定，不保证跨进程持久化
 
@@ -40,8 +35,8 @@ GRH 表示在编译流程中的功能定位如下：
 - Operation 可被符号索引：使用 `SymbolId`（由 `GraphSymbolTable` 驻留的字符串），在 Graph 作用域内必须唯一且非空；不允许为 invalid；JSON load/emit 缺失 symbol 视为错误
 - Operation 接受操作数作为输入：`operands` 为 `ValueId` 列表
 - Operation 输出结果：`results` 为 `ValueId` 列表
-- Operation 的属性：`attrs` 为 `AttrKV` 列表（`{SymbolId key, AttributeValue value}`）
-    - key 由图内符号表驻留
+- Operation 的属性：`attrs` 为 `AttrKV` 列表（`{std::string key, AttributeValue value}`）
+    - key 为普通字符串，不经符号表；JSON 序列化时作为对象 key
     - value 允许的类型
         - 基本类型：`bool`、`int64_t`、`double`、`std::string`
         - 包含基本类型的数组：`std::vector<basic_type>`
@@ -54,7 +49,7 @@ GRH 表示在编译流程中的功能定位如下：
 - 组合逻辑：`kAdd`、`kSub`、`kMul`、`kDiv`、`kMod`、`kEq`、`kNe`、`kCaseEq`、`kCaseNe`、`kWildcardEq`、`kWildcardNe`、`kLt`、`kLe`、`kGt`、`kGe`、`kAnd`、`kOr`、`kXor`、`kXnor`、`kNot`、`kLogicAnd`、`kLogicOr`、`kLogicNot`、`kReduceAnd`、`kReduceOr`、`kReduceXor`、`kReduceNor`、`kReduceNand`、`kReduceXnor`、`kShl`、`kLShr`、`kAShr`、`kMux`
 - 连线：`kAssign`、`kConcat`、`kReplicate`、`kSliceStatic`、`kSliceDynamic`、`kSliceArray`
 - 时序/存储：`kLatch`、`kLatchReadPort`、`kLatchWritePort`、`kRegister`、`kRegisterReadPort`、`kRegisterWritePort`、`kMemory`、`kMemoryReadPort`、`kMemoryWritePort`
-- 层次：`kInstance`、`kBlackbox`
+- 层次：`kInstance`、`kBlackbox`、`kXMRRead`、`kXMRWrite`
 - System call：`kSystemFunction`、`kSystemTask`
 - DPI：`kDpicImport`、`kDpicCall`
 
@@ -70,15 +65,43 @@ Logic 类型通常映射为 wire/reg，Real/String 类型映射为 real/string �
 
 - 具有一个 `SymbolId` 类型的 symbol 字段，用于识别信号，符号来自 `GraphSymbolTable`，在 Graph 作用域内必须唯一且非空；JSON load/emit 缺失 symbol 视为错误；`Graph::internSymbol()` 负责驻留字符串
 - 具有一个 `ValueType` 字段：`Logic/Real/String`
+- JSON 中 `type` 字段可省略，缺省为 `Logic`；序列化时使用小写 `logic/real/string`
 - 对于 `Logic`，具有一个 `int32_t` 类型的 width 字段表示位宽（`width` 必须大于 0）
 - 对于 `Logic`，具有一个 bool 类型 signed 标记是否为有符号
 - `Logic` 支持 SystemVerilog 四态逻辑（0/1/x/z），Value 与 Operation 的语义均按四态传播；常量允许使用 x/z 字面量
-- `Real/String` 为变量类型，`width/isSigned` 不参与语义（发射时忽略）
+- `Real/String` 为变量类型，`width/isSigned` 不参与语义（发射时忽略）；构建期若 `width <= 0` 会被归一化为 1
 - Value 数据类型对数组和结构体进行扁平化，对于数组和结构体的读写操作通过 kSlice 和 kConcat 实现，不能破坏SSA特性。扁平化顺序遵循 SystemVerilog 的 packed array 和结构体布局规则：同一层级内自左向右（MSB→LSB）展开，多维数组先按最高维（左侧索引）递增，再在每个元素内部继续按 MSB→LSB 展开。
 
-生成语义（可能生成的声明，简化）
+伪 JSON（`graph.vals` 内单条 Value）
 
+```json
+{
+  "sym": "sig",
+  "w": 8,
+  "sgn": false,
+  "type": "logic",
+  "in": false,
+  "out": false,
+  "inout": false,
+  "def": "op_sym",
+  "users": [
+    { "op": "use_op", "idx": 0 }
+  ],
+  "loc": { "...": "..." }
+}
 ```
+
+伪 SV（声明与赋值位置）
+
+```sv
+wire signed [w-1:0] sym;  // Logic
+real sym;                 // Real
+string sym;               // String
+```
+
+说明：
+- `def/users` 以 Operation 的 symbol 字符串表示引用关系（JSON 里不使用 id）；输入端口的 Value 允许省略 `def`
+- 非 Logic 的 Value 在组合逻辑中通过 `always_comb` 赋值；String 常量可用声明时初始化
 wire ${signed ? "signed" : ""} [${width}-1:0] ${symbol};
 real ${symbol};
 string ${symbol};
@@ -98,7 +121,7 @@ string ${symbol};
 辅助字段
 
 - 具有一个 `ValueId` 句柄（index + generation + GraphId），用于跨 API 传递与跨图校验
-- 具有一个 defineOp 字段，类型为 `OperationId`，指向写入 Op；若 Value 是模块的输入参数，则为 invalid
+- 具有一个 definingOp 字段，类型为 `OperationId`，指向写入 Op；若 Value 是模块的输入参数，则为 invalid
 - 具有一个 users 数组，元素为 `ValueUser{OperationId operation, uint32_t operandIndex}` 二元组，记录该 Value 在各 Operation 中作为第几个操作数被引用；同一 Operation 多次使用同一个 Value 时会存储多个条目
 - Graph 创建 Value 时即拥有其生命周期，禁止在多个 Graph 之间共享 ValueId；`OperationId/ValueId` 内含 GraphId 用于运行时校验
 
@@ -114,9 +137,9 @@ string ${symbol};
 - inout 采用 3-value 模型，读/写/使能为独立 Value，禁止单个 Value 同时作为 input/output 以保持 SSA
 - inout 相关 Value 命名约定为 `BASE__in/__out/__oe`，`BASE` 与端口名对应
 
-生成语义
+伪 SV（端口与 inout 展开）
 
-```
+```sv
 module ${graphSymbol} (
     ${CommaSeparatedList(
         for (const auto& port : inputPorts)
@@ -192,6 +215,27 @@ Graph JSON 序列化中，端口字段位于 `graph.ports`：
 
 # Operation 分类详解
 
+## Operation JSON 形态（通用）
+
+```json
+{
+  "sym": "op_sym",
+  "kind": "kAdd",
+  "in": ["a", "b"],
+  "out": ["res"],
+  "attrs": {
+    "width": { "t": "int", "v": 32 },
+    "eventEdge": { "t": "string[]", "vs": ["posedge"] }
+  },
+  "loc": { "...": "..." }
+}
+```
+
+说明：
+- `sym`、`in/out` 均为 symbol 字符串（JSON 不使用 id）
+- `attrs` 以 `{"t": "...", "v": ...}` 或 `{"t": "...[]", "vs": [...]}` 记录类型化属性
+- `loc` 结构见文末的 `SrcLoc`
+
 ## 常量定义操作 kConstant
 
 - operands：无
@@ -200,9 +244,21 @@ Graph JSON 序列化中，端口字段位于 `graph.ports`：
 - attributes：
     - constValue：string 类型，使用 verilog 常量语法记录常量值，例如 `8'hEF`, `16'sd-5`
 
-生成语义：
+伪 JSON：
+```json
+{
+  "kind": "kConstant",
+  "in": [],
+  "out": ["res"],
+  "attrs": {
+    "constValue": { "t": "string", "v": "8'hEF" }
+  }
+}
 ```
-assign ${res.symbol} = ${constValue}
+
+伪 SV：
+```sv
+assign ${res.symbol} = ${constValue};
 
 ```
 
@@ -221,6 +277,8 @@ assign ${res.symbol} = ${constValue}
 - 算术/移位（`kAdd`/`kSub`/`kMul`/`kDiv`/`kMod`/`kShl`/`kLShr`/`kAShr`）：任一操作数含 `X/Z` 时结果为全 `X`（保守语义）。
 - `kMux`：`sel=1` 取真分支，`sel=0` 取假分支；`sel=X/Z` 时逐位融合（`a[i]==b[i]` 则取该值，否则为 `X`）。
 
+说明：伪 SV 中的 `assign` 适用于 Logic 结果；Real/String 结果在 emit 中转换为 `always_comb` 或声明初始化（字符串常量）。
+
 ### 二元操作符
 
 包含 `kAdd`(+)、`kSub`(-)、`kMul`(*)、`kDiv`(/)、`kMod`(%)、`kEq`(==)、`kNe`(!=)、`kCaseEq`(===)、`kCaseNe`(!==)、`kWildcardEq`(==?)、`kWildcardNe`(!=?)、`kLt`(<)、`kLe`(<=)、`kGt`(>)、`kGe`(>=)、`kAnd`(&)、`kOr`(|)、`kXor`(^)、`kXnor`(~^)、`kLogicAnd`(&&)、`kLogicOr`(||)、`kShl`(<<)、`kLShr`(>>)、`kAShr`(>>>)。
@@ -231,9 +289,18 @@ assign ${res.symbol} = ${constValue}
 - results：
     - res：操作结果
 
-生成语义：
-<operator> 指代 verilog 操作符，例如 kAdd 的 <operator> 为 +
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kAdd",
+  "in": ["op0", "op1"],
+  "out": ["res"]
+}
 ```
+
+说明：<operator> 指代 verilog 操作符，例如 kAdd 的 <operator> 为 +。
+伪 SV：
+```sv
 assign ${res.symbol} = ${op0.symbol} <operator> ${op1.symbol};
 ```
 
@@ -246,9 +313,18 @@ assign ${res.symbol} = ${op0.symbol} <operator> ${op1.symbol};
 - results：
     - res：操作结果
 
-生成语义：
-<operator> 指代 verilog 操作符，例如 kNot 的 <operator> 为 ~
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kNot",
+  "in": ["op"],
+  "out": ["res"]
+}
 ```
+
+说明：<operator> 指代 verilog 操作符，例如 kNot 的 <operator> 为 ~。
+伪 SV：
+```sv
 assign ${res.symbol} = <operator> ${op.symbol};
 ```
 
@@ -261,8 +337,17 @@ assign ${res.symbol} = <operator> ${op.symbol};
 - result：
     - res：选择结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kMux",
+  "in": ["sel", "trueValue", "falseValue"],
+  "out": ["res"]
+}
 ```
+
+伪 SV：
+```sv
 assign ${res.symbol} = ${op0.symbol} ? ${op1.symbol} : ${op2.symbol};
 ```
 
@@ -275,8 +360,17 @@ assign ${res.symbol} = ${op0.symbol} ? ${op1.symbol} : ${op2.symbol};
 - results：
     - res：赋值后的输出结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kAssign",
+  "in": ["input"],
+  "out": ["res"]
+}
 ```
+
+伪 SV：
+```sv
 assign ${res.symbol} = ${input.symbol};
 ```
 
@@ -286,8 +380,17 @@ assign ${res.symbol} = ${input.symbol};
 - results：
     - res：操作结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kConcat",
+  "in": ["op0", "op1", "..."],
+  "out": ["res"]
+}
 ```
+
+伪 SV：
+```sv
 assign ${res.symbol} = {${CommaSeparatedList(
         for (ValueId operand : operands)
             -> valueSymbol(operand)
@@ -303,8 +406,20 @@ assign ${res.symbol} = {${CommaSeparatedList(
 - result：
     - res：操作结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kReplicate",
+  "in": ["op"],
+  "out": ["res"],
+  "attrs": {
+    "rep": { "t": "int", "v": 4 }
+  }
+}
 ```
+
+伪 SV：
+```sv
 assign ${res.symbol} = {${rep}{op.symbol}};
 ```
 
@@ -319,15 +434,28 @@ assign ${res.symbol} = {${rep}{op.symbol}};
 - result：
     - res：操作结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kSliceStatic",
+  "in": ["input"],
+  "out": ["res"],
+  "attrs": {
+    "sliceStart": { "t": "int", "v": 0 },
+    "sliceEnd": { "t": "int", "v": 7 }
+  }
+}
 ```
+
+伪 SV：
+```sv
 // 更偏向 Verilog 的紧凑写法：单比特切片用 bit-select，多比特用 range-select。
 assign ${res.symbol} = (sliceEnd == sliceStart)
     ? ${input.symbol}[${sliceStart}]
     : ${input.symbol}[${sliceEnd}:${sliceStart}];
 ```
 
-GRH 的 Value 不保留结构体、数组结构语义，但需要支持数组和结构体的访问，使用 kSlice* 系列操作符实现。
+GRH IR 的 Value 不保留结构体、数组结构语义，但需要支持数组和结构体的访问，使用 kSlice* 系列操作符实现。
 
 ### 动态位截取操作 kSliceDynamic
 
@@ -339,8 +467,20 @@ GRH 的 Value 不保留结构体、数组结构语义，但需要支持数组和
 - result：
     - res：操作结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kSliceDynamic",
+  "in": ["input", "offset"],
+  "out": ["res"],
+  "attrs": {
+    "sliceWidth": { "t": "int", "v": 8 }
+  }
+}
 ```
+
+伪 SV：
+```sv
 assign ${res.symbol} = ${input.symbol}[${offset.symbol} +: ${sliceWidth}];
 ```
 
@@ -353,18 +493,30 @@ assign ${res.symbol} = ${input.symbol}[${offset.symbol} +: ${sliceWidth}];
 - result：
     - res：操作结果
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kSliceArray",
+  "in": ["input", "index"],
+  "out": ["res"],
+  "attrs": {
+    "sliceWidth": { "t": "int", "v": 8 }
+  }
+}
 ```
+
+伪 SV：
+```sv
 // 单比特数组元素用 bit-select，多比特保持 indexed part-select。
 assign ${res.symbol} = (sliceWidth == 1)
     ? ${input.symbol}[${index.symbol}]
     : ${input.symbol}[${index.symbol} * ${sliceWidth} +: ${sliceWidth}];
 ```
 
-GRH 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
+GRH IR 支持多维数组，但不记录多维数组的层次结构，当访问多维数组时通过 kSliceArray 级联实现。
 
 ## 时序/存储操作
-GRH 使用 **声明 + ReadPort + WritePort** 的 Port 模型统一 `kLatch`/`kRegister`/`kMemory`。
+GRH IR 使用 **声明 + ReadPort + WritePort** 的 Port 模型统一 `kLatch`/`kRegister`/`kMemory`。
 所有对存储单元的访问必须通过对应的 ReadPort/WritePort。
 
 ### 锁存器声明 kLatch
@@ -377,10 +529,27 @@ kLatch 的 symbol 是必须定义的，且必须符合 verilog 标识符规范�
     - width（int64_t）：位宽
     - isSigned（bool）：是否有符号
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kLatch",
+  "in": [],
+  "out": [],
+  "attrs": {
+    "width": { "t": "int", "v": 32 },
+    "isSigned": { "t": "bool", "v": false }
+  }
+}
 ```
+
+伪 SV：
+```sv
 reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
 ```
+
+说明：当存在 `initKind/initValue` 且项为 `literal`/`random` 时，emit 会生成 `initial ${symbol} = <initValue>;`。
+
+说明：当存在 `initKind/initValue` 且项为 `literal`/`random` 时，emit 会生成 `initial ${symbol} = <initValue>;`。
 
 ### 锁存器读端口 kLatchReadPort
 
@@ -390,8 +559,20 @@ reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
 - attributes：
     - latchSymbol：指向目标 kLatch 的 symbol
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kLatchReadPort",
+  "in": [],
+  "out": ["data"],
+  "attrs": {
+    "latchSymbol": { "t": "string", "v": "latch_name" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 assign ${data.symbol} = ${latchSymbol};
 ```
 
@@ -405,8 +586,20 @@ assign ${data.symbol} = ${latchSymbol};
 - attributes：
     - latchSymbol：指向目标 kLatch 的 symbol
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kLatchWritePort",
+  "in": ["updateCond", "nextValue", "mask"],
+  "out": [],
+  "attrs": {
+    "latchSymbol": { "t": "string", "v": "latch_name" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 always_latch begin
     if (${updateCond.symbol}) begin
         if (${mask.symbol} == {${latchSymbol.width}{1'b1}}) begin
@@ -431,11 +624,31 @@ kRegister 的 symbol 是必须定义的，且必须符合 verilog 标识符规�
 - attributes：
     - width（int64_t）：位宽
     - isSigned（bool）：是否有符号
+    - initKind（vector<string>，可选）：初始化类型列表，支持 `literal`/`random`
+    - initValue（vector<string>，可选）：与 `initKind` 对应的初始化值列表
+    - `initKind`/`initValue` 同时存在时长度必须一致
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kRegister",
+  "in": [],
+  "out": [],
+  "attrs": {
+    "width": { "t": "int", "v": 32 },
+    "isSigned": { "t": "bool", "v": false },
+    "initKind": { "t": "string[]", "vs": ["literal"] },
+    "initValue": { "t": "string[]", "vs": ["32'h0"] }
+  }
+}
 ```
+
+伪 SV：
+```sv
 reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
 ```
+
+说明：当存在 `initKind/initValue` 且项为 `literal`/`random` 时，emit 会生成 `initial ${symbol} = <initValue>;`。
 
 ### 寄存器读端口 kRegisterReadPort
 
@@ -445,8 +658,20 @@ reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol};
 - attributes：
     - regSymbol：指向目标 kRegister 的 symbol
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kRegisterReadPort",
+  "in": [],
+  "out": ["data"],
+  "attrs": {
+    "regSymbol": { "t": "string", "v": "reg_name" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 assign ${data.symbol} = ${regSymbol};
 ```
 
@@ -464,8 +689,21 @@ assign ${data.symbol} = ${regSymbol};
     - `eventEdge` 长度必须等于事件信号数量（operand 总数减 3）
     - `eventOperands` = operands[3..]（按顺序与 `eventEdge` 配对）
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kRegisterWritePort",
+  "in": ["updateCond", "nextValue", "mask", "clk", "rst_n"],
+  "out": [],
+  "attrs": {
+    "regSymbol": { "t": "string", "v": "reg_name" },
+    "eventEdge": { "t": "string[]", "vs": ["posedge", "negedge"] }
+  }
+}
 ```
+
+伪 SV：
+```sv
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
     if (${updateCond.symbol}) begin
         if (${mask.symbol} == {${regSymbol.width}{1'b1}}) begin
@@ -497,11 +735,38 @@ kMemory 的 symbol 是必须定义的，且必须符合 verilog 标识符规范�
     - width（int64_t）：每一行（word）的 bit 宽度
     - row（int64_t）：总行数，决定寻址空间
     - isSigned（bool）：标记存储内容是否为有符号数
+    - initKind（vector<string>，可选）：初始化类型列表，支持 `readmemh`/`readmemb`/`literal`/`random`
+    - initFile（vector<string>，可选）：与 `initKind` 对应的初始化文件列表（readmem* 需要）
+    - initValue（vector<string>，可选）：与 `initKind` 对应的初始化值列表（literal/random 使用）
+    - initHasStart/initHasFinish（vector<bool>，可选）：readmem* 是否包含 start/finish
+    - initStart/initFinish（vector<int64_t>，可选）：readmem* 的 start/finish
+    - initAddress（vector<int64_t>，可选）：literal/random 的目标地址（<0 表示全量初始化）
+    - 当 `initKind`/`initFile` 存在时长度必须一致；其余可选数组若存在也需与之同长
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kMemory",
+  "in": [],
+  "out": [],
+  "attrs": {
+    "width": { "t": "int", "v": 32 },
+    "row": { "t": "int", "v": 256 },
+    "isSigned": { "t": "bool", "v": false },
+    "initKind": { "t": "string[]", "vs": ["readmemh"] },
+    "initFile": { "t": "string[]", "vs": ["mem.hex"] }
+  }
+}
 ```
+
+伪 SV：
+```sv
 reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol} [0:${row}-1];
 ```
+
+说明：
+- `readmemh/readmemb` 会生成 `$readmemh("file", mem[, start[, finish]]);`
+- `literal/random` 会生成 `mem[addr] = value;`，当 `addr < 0` 时会展开为全量初始化循环
 
 ### 片上存储器读端口 kMemoryReadPort
 
@@ -510,10 +775,22 @@ reg ${isSigned ? "signed" : ""} [${width}-1:0] ${symbol} [0:${row}-1];
 - results：
     - data：读数据输出信号
 - attributes：
-    - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，生成语义时可基于该 Operation 的位宽、符号属性等信息。
+    - memSymbol：指向目标 kMemory 的 symbol。该 symbol 必须在当前 Graph 内解析到一个 kMemory Operation，emit 时可基于该 Operation 的位宽、符号属性等信息。
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kMemoryReadPort",
+  "in": ["addr"],
+  "out": ["data"],
+  "attrs": {
+    "memSymbol": { "t": "string", "v": "mem_name" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 assign ${data.symbol} = ${memSymbol}[${addr.symbol}];
 ```
 
@@ -537,8 +814,21 @@ assign ${data.symbol} = ${memSymbol}[${addr.symbol}];
     - `eventEdge` 长度必须等于事件信号数量（operand 总数减 4）
     - `eventOperands` = operands[4..]（按顺序与 `eventEdge` 配对）
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kMemoryWritePort",
+  "in": ["updateCond", "addr", "data", "mask", "clk"],
+  "out": [],
+  "attrs": {
+    "memSymbol": { "t": "string", "v": "mem_name" },
+    "eventEdge": { "t": "string[]", "vs": ["posedge"] }
+  }
+}
 ```
+
+伪 SV：
+```sv
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
     if (${updateCond.symbol}) begin
         if (${mask.symbol} == {${memSymbol.width}{1'b1}}) begin
@@ -569,6 +859,18 @@ end
 - attributes：
     - xmrPath（string）：层次路径（相对当前 Graph 的实例路径 + 目标信号）
 
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kXMRRead",
+  "in": [],
+  "out": ["out"],
+  "attrs": {
+    "xmrPath": { "t": "string", "v": "u_top.u_sub.sig" }
+  }
+}
+```
+
 #### kXMRWrite
 - operands：
     - 非存储目标：`data`（单个 operand）
@@ -579,6 +881,24 @@ end
 - attributes：
     - xmrPath（string）：层次路径（相对当前 Graph 的实例路径 + 目标信号）
     - eventEdge（vector<string>）：仅 `kRegister/kMemory` 目标必需，长度需与事件 operand 数一致
+
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kXMRWrite",
+  "in": ["data"],
+  "out": [],
+  "attrs": {
+    "xmrPath": { "t": "string", "v": "u_top.u_sub.sig" }
+  }
+}
+```
+
+伪 SV：
+```sv
+// resolve pass 展开为端口/实例连接与 kAssign/k*Port
+// 未展开的 kXMRRead/kXMRWrite 在 emit 阶段视为错误
+```
 
 说明：
 - resolve pass 会沿层次路径为中间模块添加端口、更新实例端口连接；
@@ -593,7 +913,7 @@ end
 
 kInstance 用于实例化完整定义的模块（Graph），通过 moduleName 关联。
 
-GRH 中的图都是进行参数特化后的，因此 kInstance 不需要参数化支持。
+GRH IR 中的图都是进行参数特化后的，因此 kInstance 不需要参数化支持。
 
 - operands：可变数量的输入信号，m 个 + inout 驱动/使能信号，q 个
     - in0，in1，... in_m-1：模块输入信号
@@ -609,8 +929,24 @@ GRH 中的图都是进行参数特化后的，因此 kInstance 不需要参数�
     - inoutPortName（vector<string>，长度 q）：每个 inout 信号对应的模块端口名
     - instanceName（string）：实例名称
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kInstance",
+  "in": ["in0", "...", "inoutOut0", "inoutOe0"],
+  "out": ["out0", "...", "inoutIn0"],
+  "attrs": {
+    "moduleName": { "t": "string", "v": "Child" },
+    "inputPortName": { "t": "string[]", "vs": ["a", "b"] },
+    "outputPortName": { "t": "string[]", "vs": ["y"] },
+    "inoutPortName": { "t": "string[]", "vs": ["pad"] },
+    "instanceName": { "t": "string", "v": "u0" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 ${moduleName} ${instanceName} (
     .${inputPortName[0]}(${in0.symbol}),
     ...
@@ -643,8 +979,26 @@ kBlackbox 用于实例化未定义的黑盒模块，支持参数化，生成实�
     - parameterValues（vector<string>，长度 p）：每个参数化信号对应的参数值
     - instanceName（string）：实例名称
 
-生成语义：
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kBlackbox",
+  "in": ["in0", "...", "inoutOut0", "inoutOe0"],
+  "out": ["out0", "...", "inoutIn0"],
+  "attrs": {
+    "moduleName": { "t": "string", "v": "BBX" },
+    "inputPortName": { "t": "string[]", "vs": ["a"] },
+    "outputPortName": { "t": "string[]", "vs": ["y"] },
+    "inoutPortName": { "t": "string[]", "vs": ["pad"] },
+    "parameterNames": { "t": "string[]", "vs": ["WIDTH"] },
+    "parameterValues": { "t": "string[]", "vs": ["8"] },
+    "instanceName": { "t": "string", "v": "u0" }
+  }
+}
 ```
+
+伪 SV：
+```sv
 ${moduleName} #(
     .${parameterNames[0]}(${parameterValues[0]}),
     .${parameterNames[1]}(${parameterValues[1]}),
@@ -681,6 +1035,19 @@ assign ${inoutIn0.symbol} = ${inoutWire0};
     - name（string）：系统函数名（去掉 `$` 的规范化名称）
     - hasSideEffects（bool，可选）：标记 `$random/$urandom` 等带副作用函数
 
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kSystemFunction",
+  "in": ["arg0", "arg1"],
+  "out": ["result"],
+  "attrs": {
+    "name": { "t": "string", "v": "time" },
+    "hasSideEffects": { "t": "bool", "v": true }
+  }
+}
+```
+
 已支持的 system function（kSystemFunction）：
 - 运行期函数（保留为 kSystemFunction）：
   - `$time/$stime/$realtime`
@@ -703,9 +1070,9 @@ assign ${inoutIn0.symbol} = ${inoutWire0};
 - `$sformatf/$psprintf`：至少 1 个参数（format string + 可变参数）
 - `$clog2/$size`：仅支持 1 个参数
 
-生成语义：
-```
-${result.symbol} = $${name}(${arg0.symbol}, ${arg1.symbol}, ...);
+伪 SV：
+```sv
+assign ${result.symbol} = $${name}(${arg0.symbol}, ${arg1.symbol}, ...); // Logic 结果
 ```
 
 ### System task 操作 kSystemTask
@@ -737,11 +1104,26 @@ ${result.symbol} = $${name}(${arg0.symbol}, ${arg1.symbol}, ...);
 - `eventEdge` 长度必须等于 event 操作数数量
 - `eventOperands` = operands[1 + args ..]
 
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kSystemTask",
+  "in": ["callCond", "arg0", "arg1", "event0"],
+  "out": [],
+  "attrs": {
+    "name": { "t": "string", "v": "display" },
+    "eventEdge": { "t": "string[]", "vs": ["posedge"] },
+    "procKind": { "t": "string", "v": "always" },
+    "hasTiming": { "t": "bool", "v": false }
+  }
+}
+```
+
 说明：
 - 当 `eventEdge` 为空时，emit 依据 `procKind` 生成 `initial/final/always_*` 过程块
 
-生成语义：
-```
+伪 SV：
+```sv
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
     if (${callCond.symbol}) begin
         $${name}(${arg0.symbol}, ${arg1.symbol}, ...);
@@ -753,14 +1135,14 @@ end
 
 ### DPI 导入操作 kDpicImport
 
-GRH 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向仅支持 input/output；返回类型可选（void 或有返回值）。
+GRH IR 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type2 arg2, ...);` 的建模支持，export、task、context、pure 等特性暂不支持。arg 方向支持 input/output/inout；返回类型可选（void 或有返回值）。
 
 具有一个唯一标识符 symbol，供 kDpicCall 引用。
 
 - operands：无
 - results：无
 - attributes：
-    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output
+    - argsDirection (vector<string>，n个)：记录每个形参的传递方向，取值为 input / output / inout
     - argsWidth (vector<int64_t>，n个)：记录每个形参的位宽
     - argsName (vector<string>，n个)：记录每个形参的名称
     - argsSigned (vector<bool>，n个)：记录每个形参是否为有符号（仅对 integral 类型有效）
@@ -772,13 +1154,33 @@ GRH 目前只提供对 `import "DPI-C" function svName (arg_type1 arg1, arg_type
     - returnSigned (bool)：返回值是否有符号（hasReturn 为 true 时有效，仅对 integral 类型有效）
     - returnType (string)：返回值类型（hasReturn 为 true 时有效）；缺省视为 "logic"。取值范围同 argsType
 
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kDpicImport",
+  "in": [],
+  "out": [],
+  "attrs": {
+    "argsDirection": { "t": "string[]", "vs": ["input", "inout"] },
+    "argsWidth": { "t": "int[]", "vs": [32, 32] },
+    "argsName": { "t": "string[]", "vs": ["a", "b"] },
+    "argsSigned": { "t": "bool[]", "vs": [false, false] },
+    "argsType": { "t": "string[]", "vs": ["logic", "logic"] },
+    "hasReturn": { "t": "bool", "v": true },
+    "returnWidth": { "t": "int", "v": 32 },
+    "returnSigned": { "t": "bool", "v": false },
+    "returnType": { "t": "string", "v": "logic" }
+  }
+}
+```
+
 约束：
 - `hasReturn == true` 且 `returnType` 为 integral 时，`returnWidth > 0` 且 `returnSigned` 有效
 - `argsSigned/argsType` 与 `argsName/argsDirection/argsWidth` 长度一致
 - `argsType/returnType` 为 non-integral 时，`argsWidth/returnWidth` 仅保留为信息字段，emit 会忽略
 
-生成语义：
-```
+伪 SV：
+```sv
 import "DPI-C" function ${
     hasReturn ? (
         (returnType == "logic" || returnType == "bit")
@@ -800,32 +1202,55 @@ import "DPI-C" function ${
 - operands：
     - updateCond：调用触发条件，必须为 1 bit；无条件触发时使用常量 `1'b1`
     - inArg0，inArg1，... 可变数量的输入参数, m 个
+    - inoutArg0，inoutArg1，... 可变数量的 inout 参数输入侧, q 个
     - event0, event1, ...：触发事件信号（Value）
 - results:
     - retVal（可选）：当 `hasReturn` 为 true 时，第一个 result 作为返回值
     - outArg0，outArg1，... 可变数量的输出参数, p 个
+    - inoutArg0，inoutArg1，... 可变数量的 inout 参数输出侧, q 个
 - attributes：
     - eventEdge（vector<string>）：触发事件边沿类型列表，取值 `posedge` / `negedge`
     - targetImportSymbol（string）：记录被调用 kDpicImport Operation 的 symbol
     - inArgName (vector<string>，m 个)：记录每个输入参数的名称
     - outArgName (vector<string>，p 个)：记录每个输出参数的名称
+    - inoutArgName (vector<string>，q 个，可选)：记录每个 inout 参数的名称
     - hasReturn (bool)：是否有返回值
 
+伪 JSON（关键字段）：
+```json
+{
+  "kind": "kDpicCall",
+  "in": ["updateCond", "inArg0", "inoutArg0", "event0"],
+  "out": ["retVal", "outArg0", "inoutArg0"],
+  "attrs": {
+    "eventEdge": { "t": "string[]", "vs": ["posedge"] },
+    "targetImportSymbol": { "t": "string", "v": "dpi_func" },
+    "inArgName": { "t": "string[]", "vs": ["a"] },
+    "outArgName": { "t": "string[]", "vs": ["b"] },
+    "inoutArgName": { "t": "string[]", "vs": ["c"] },
+    "hasReturn": { "t": "bool", "v": true }
+  }
+}
+```
+
 约束：
-- `eventEdge` 长度必须等于事件信号数量（operand 总数减 1 - m）
-- `eventOperands` = operands[1 + m ..]（按顺序与 `eventEdge` 配对）
+- `eventEdge` 必须存在且非空；长度必须等于事件信号数量
+- `operands` 总数必须满足 `1 + m + q + eventEdge.size()`（`m=inArg`，`q=inoutArg`）
+- `eventOperands` = operands[1 + m + q ..]（按顺序与 `eventEdge` 配对）
 - `targetImportSymbol` 必须在当前 Netlist 中解析到唯一的 kDpicImport；
   前端需从该 Operation 注入 `argsName/argsDirection` 等元数据
-- `hasReturn == true` 时，`results[0]` 为返回值，`results[1..]` 为输出参数；
-  `hasReturn == false` 时，results 仅包含输出参数
+- `results` 总数必须满足 `(hasReturn ? 1 : 0) + p + q`（`p=outArg`，`q=inoutArg`）
+- `hasReturn == true` 时，`results[0]` 为返回值，`results[1..]` 为输出/ inout 参数；
+  `hasReturn == false` 时，results 仅包含输出/ inout 参数
+- 若目标 import 形参方向包含 `inout`，则必须提供 `inoutArgName` 并与其一一对应
 
 构图或变换流程在处理 `kDpicCall` 时，需使用 `targetImportSymbol` 字符串到 Netlist 中解析出对应的 `kDpicImport` Operation，并从该 Operation 的 attributes 中读取形参方向、位宽与名称等信息；若解析失败或发现多个候选项，必须立即报错。下文伪代码中的 `importOp` 表示解析得到的 kDpicImport Operation，`importOp.argsName` 等字段均来自该 Operation 的 attributes。
 
-生成语义：
-```
-logic ${retVal.signed ? "signed" : ""} [${retVal.width}-1:0] ${retVal.symbol}_intm; // hasReturn 为 true 时生成
-logic [${outArg0.width}-1:0] ${outArg0.symbol}_intm;
-logic [${outArg1.width}-1:0] ${outArg1.symbol}_intm;
+伪 SV：
+```sv
+reg ${retVal.signed ? "signed" : ""} [${retVal.width}-1:0] ${retVal.symbol}_intm; // hasReturn 为 true 时生成
+reg [${outArg0.width}-1:0] ${outArg0.symbol}_intm;
+reg [${outArg1.width}-1:0] ${outArg1.symbol}_intm;
 ...
 
 always @(${CommaSeparatedList(zip(eventEdge, eventOperands, " "))}) begin
@@ -855,6 +1280,7 @@ assign ${outArg1.symbol} = ${outArg1.symbol}_intm;
 - 输出实参在 DPI 函数调用处以 `_intm` 后缀的中间变量形式传入。
 - 当 `hasReturn` 为 true 时，`results[0]` 视为返回值，`results[1..]` 对应输出参数；
   返回值通过 `_intm` 中间变量写回。
+- inout 参数通过 `_intm` 中间变量实现双向：operand 提供输入侧，result 接收输出侧。
 
 # 编译符号信息
 
@@ -862,4 +1288,7 @@ assign ${outArg1.symbol} = ${outArg1.symbol}_intm;
     - 字段 `file`：字符串，源文件路径
     - 字段 `line` / `column`：起始行列
     - 字段 `endLine` / `endColumn`：结束行列
+    - 字段 `origin`：来源描述（例如前端/转换阶段）
+    - 字段 `pass`：产生该信息的 pass 名称
+    - 字段 `note`：额外说明
 - `file` 为空或 `line == 0` 时视为无效位置

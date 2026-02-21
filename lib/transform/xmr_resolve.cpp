@@ -235,16 +235,16 @@ namespace wolvrix::lib::transform
         std::unordered_map<std::string, std::unordered_map<std::string, wolvrix::lib::grh::ValueId>> inputPadCache;
         uint32_t internalSymbolCounter = 0;
 
-        auto makeInternalValueSymbol = [&](wolvrix::lib::grh::Graph &graph, std::string_view purpose)
+        auto makeInternalValueSymbol = [&](wolvrix::lib::grh::Graph &graph)
         {
-            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "val", "xmr_resolve",
-                                                             purpose, internalSymbolCounter);
+            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "val",
+                                                             internalSymbolCounter);
         };
 
-        auto makeInternalOpSymbol = [&](wolvrix::lib::grh::Graph &graph, std::string_view purpose)
+        auto makeInternalOpSymbol = [&](wolvrix::lib::grh::Graph &graph)
         {
-            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "op", "xmr_resolve",
-                                                             purpose, internalSymbolCounter);
+            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "op",
+                                                             internalSymbolCounter);
         };
 
         auto makeLoc = [&](std::string_view note) {
@@ -295,12 +295,11 @@ namespace wolvrix::lib::transform
             {
                 return it->second;
             }
-            std::string purpose = "pad_in_" + key;
-            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph, purpose);
+            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph);
             wolvrix::lib::grh::ValueId value =
                 createValue(graph, sym, normalized, isSigned, wolvrix::lib::grh::ValueType::Logic,
                             "pad_in");
-            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(graph, "pad_in_const_" + key);
+            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(graph);
             wolvrix::lib::grh::OperationId op =
                 createOp(graph, wolvrix::lib::grh::OperationKind::kConstant, opSym, "pad_in_const");
             graph.addResult(op, value);
@@ -414,13 +413,11 @@ namespace wolvrix::lib::transform
                 storage.kind == StorageKind::Register
                     ? wolvrix::lib::grh::OperationKind::kRegisterReadPort
                     : wolvrix::lib::grh::OperationKind::kLatchReadPort;
-            std::string purpose = "read_";
-            purpose.append(storageName);
-            wolvrix::lib::grh::SymbolId valueSym = makeInternalValueSymbol(graph, purpose);
+            wolvrix::lib::grh::SymbolId valueSym = makeInternalValueSymbol(graph);
             wolvrix::lib::grh::ValueId value =
                 createValue(graph, valueSym, storage.width, storage.isSigned,
                             wolvrix::lib::grh::ValueType::Logic, "storage_read");
-            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(graph, purpose);
+            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(graph);
             wolvrix::lib::grh::OperationId op =
                 createOp(graph, kind, opSym, "storage_read");
             graph.addResult(op, value);
@@ -453,9 +450,7 @@ namespace wolvrix::lib::transform
                     return resultsSpan[i];
                 }
             }
-            std::string purpose = "out_";
-            purpose.append(portName);
-            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph, purpose);
+            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph);
             wolvrix::lib::grh::ValueId value =
                 createValue(graph, sym, normalizeWidth(width), isSigned,
                             wolvrix::lib::grh::ValueType::Logic, "instance_out");
@@ -535,9 +530,7 @@ namespace wolvrix::lib::transform
                 warning(graph, graph.getOperation(contextOp),
                         "XMR write overrides input; leaving input port unconnected for " +
                             symbolText);
-                std::string purpose = "override_";
-                purpose.append(symbolText);
-                wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph, purpose);
+                wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol(graph);
                 wolvrix::lib::grh::ValueId replacement =
                     createValue(graph, sym, normalizeWidth(value.width()), value.isSigned(),
                                 value.type(), "override_input");
@@ -559,7 +552,7 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::SymbolId originalSym = value.symbol();
             std::string rebindPurpose = "rebind_";
             rebindPurpose.append(symbolText);
-            wolvrix::lib::grh::SymbolId tempSym = makeInternalValueSymbol(graph, rebindPurpose);
+            wolvrix::lib::grh::SymbolId tempSym = makeInternalValueSymbol(graph);
             graph.setValueSymbol(target, tempSym);
             wolvrix::lib::grh::SymbolId sym = originalSym;
             wolvrix::lib::grh::ValueId replacement =
@@ -888,9 +881,7 @@ namespace wolvrix::lib::transform
             {
                 if (storage->kind == StorageKind::Register)
                 {
-                    std::string purpose = "reg_write_";
-                    purpose.append(leafName);
-                    wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
+                    wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph);
                     wolvrix::lib::grh::OperationId writeOp =
                         createOp(*leafGraph, wolvrix::lib::grh::OperationKind::kRegisterWritePort,
                                  opSym, "reg_write_port");
@@ -905,9 +896,7 @@ namespace wolvrix::lib::transform
                 }
                 if (storage->kind == StorageKind::Latch)
                 {
-                    std::string purpose = "latch_write_";
-                    purpose.append(leafName);
-                    wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
+                    wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph);
                     wolvrix::lib::grh::OperationId writeOp =
                         createOp(*leafGraph, wolvrix::lib::grh::OperationKind::kLatchWritePort,
                                  opSym, "latch_write_port");
@@ -919,9 +908,7 @@ namespace wolvrix::lib::transform
                     result.changed = true;
                     return true;
                 }
-                std::string purpose = "mem_write_";
-                purpose.append(leafName);
-                wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
+                wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph);
                 wolvrix::lib::grh::OperationId writeOp =
                     createOp(*leafGraph, wolvrix::lib::grh::OperationKind::kMemoryWritePort,
                              opSym, "mem_write_port");
@@ -947,9 +934,7 @@ namespace wolvrix::lib::transform
             {
                 return false;
             }
-            std::string purpose = "assign_";
-            purpose.append(leafName);
-            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph, purpose);
+            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(*leafGraph);
             wolvrix::lib::grh::OperationId assign =
                 createOp(*leafGraph, wolvrix::lib::grh::OperationKind::kAssign,
                          opSym, "assign_write");

@@ -54,18 +54,18 @@ int main()
             return fail("normalizeComponent should replace non-identifier chars");
         }
 
-        const std::string base = makeInternalBase("op", "const-fold", "tmp*value");
+        const std::string base = makeInternalBase("op");
         if (base != "_op")
         {
-            return fail("makeInternalBase should ignore pass/purpose");
+            return fail("makeInternalBase should use kind");
         }
         if (!isIdentifier(base))
         {
             return fail("makeInternalBase should generate a valid identifier");
         }
 
-        const std::string baseVal = makeInternalBase("val", "convert", "tmp");
-        const std::string textVal = makeInternalSymbolText("val", "convert", "tmp", 7);
+        const std::string baseVal = makeInternalBase("val");
+        const std::string textVal = makeInternalSymbolText("val", 7);
         if (textVal != baseVal + "_7")
         {
             return fail("makeInternalSymbolText format mismatch");
@@ -77,12 +77,12 @@ int main()
 
         Netlist netlist;
         Graph &graph = netlist.createGraph("g");
-        const std::string uniqBase = makeInternalBase("val", "convert", "uniq");
+        const std::string uniqBase = makeInternalBase("val");
         const auto sym0 = graph.internSymbol(uniqBase + "_0");
         const auto sym1 = graph.internSymbol(uniqBase + "_1");
 
         uint32_t counter = 0;
-        const auto sym2 = makeInternalSymbol(graph, "val", "convert", "uniq", counter);
+        const auto sym2 = makeInternalSymbol(graph, "val", counter);
         const std::string symText = std::string(graph.symbolText(sym2));
         if (symText != uniqBase + "_2")
         {

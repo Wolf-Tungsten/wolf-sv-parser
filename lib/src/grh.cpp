@@ -2599,6 +2599,35 @@ namespace wolvrix::lib::grh
         }
     }
 
+    bool Graph::removeDeclaredSymbol(SymbolId sym)
+    {
+        if (!sym.valid())
+        {
+            throw std::runtime_error("Declared symbol is invalid");
+        }
+        if (!symbols_.valid(sym))
+        {
+            throw std::runtime_error("Declared symbol is not in the graph symbol table");
+        }
+        if (declaredSymbolSet_.erase(sym.value) == 0)
+        {
+            return false;
+        }
+        auto it = std::remove_if(declaredSymbols_.begin(), declaredSymbols_.end(),
+                                 [&](SymbolId entry) { return entry == sym; });
+        if (it != declaredSymbols_.end())
+        {
+            declaredSymbols_.erase(it, declaredSymbols_.end());
+        }
+        return true;
+    }
+
+    void Graph::clearDeclaredSymbols()
+    {
+        declaredSymbols_.clear();
+        declaredSymbolSet_.clear();
+    }
+
     bool Graph::isDeclaredSymbol(SymbolId sym) const noexcept
     {
         if (!sym.valid())
@@ -2613,16 +2642,7 @@ namespace wolvrix::lib::grh
         return std::span<const SymbolId>(declaredSymbols_.data(), declaredSymbols_.size());
     }
 
-    const GraphView *Graph::viewIfFrozen() const noexcept
-    {
-        if (builder_)
-        {
-            return nullptr;
-        }
-        return view_ ? &*view_ : nullptr;
-    }
-
-    const GraphView &Graph::freeze()
+    void Graph::freeze()
     {
         if (builder_)
         {
@@ -2635,7 +2655,6 @@ namespace wolvrix::lib::grh
             GraphBuilder builder(symbols_, graphId_);
             view_ = builder.freeze();
         }
-        return *view_;
     }
 
     std::span<const OperationId> Graph::operations() const
@@ -3572,6 +3591,35 @@ namespace wolvrix::lib::grh
         }
     }
 
+    bool Netlist::removeDeclaredSymbol(SymbolId sym)
+    {
+        if (!sym.valid())
+        {
+            throw std::runtime_error("Declared symbol is invalid");
+        }
+        if (!netlistSymbols_.valid(sym))
+        {
+            throw std::runtime_error("Declared symbol is not in the netlist symbol table");
+        }
+        if (declaredSymbolSet_.erase(sym.value) == 0)
+        {
+            return false;
+        }
+        auto it = std::remove_if(declaredSymbols_.begin(), declaredSymbols_.end(),
+                                 [&](SymbolId entry) { return entry == sym; });
+        if (it != declaredSymbols_.end())
+        {
+            declaredSymbols_.erase(it, declaredSymbols_.end());
+        }
+        return true;
+    }
+
+    void Netlist::clearDeclaredSymbols()
+    {
+        declaredSymbols_.clear();
+        declaredSymbolSet_.clear();
+    }
+
     bool Netlist::isDeclaredSymbol(SymbolId sym) const noexcept
     {
         if (!sym.valid())
@@ -3620,6 +3668,20 @@ namespace wolvrix::lib::grh
         if (std::find(topGraphs_.begin(), topGraphs_.end(), symbolStr) == topGraphs_.end())
         {
             topGraphs_.push_back(std::move(symbolStr));
+        }
+    }
+
+    void Netlist::unmarkAsTop(std::string_view graphSymbol)
+    {
+        if (!findGraph(graphSymbol))
+        {
+            throw std::runtime_error("Cannot unmark unknown graph as top: " + std::string(graphSymbol));
+        }
+        auto symbolStr = std::string(graphSymbol);
+        auto it = std::remove(topGraphs_.begin(), topGraphs_.end(), symbolStr);
+        if (it != topGraphs_.end())
+        {
+            topGraphs_.erase(it, topGraphs_.end());
         }
     }
 

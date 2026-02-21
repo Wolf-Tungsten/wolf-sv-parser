@@ -529,12 +529,13 @@ public:
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;
     void addDeclaredSymbol(SymbolId sym);
+    bool removeDeclaredSymbol(SymbolId sym);
+    void clearDeclaredSymbols();
     bool isDeclaredSymbol(SymbolId sym) const noexcept;
     std::span<const SymbolId> declaredSymbols() const noexcept;
 
     bool frozen() const noexcept { return !builder_.has_value(); }
-    const GraphView* viewIfFrozen() const noexcept;
-    const GraphView& freeze();
+    void freeze();
 
     std::span<const OperationId> operations() const;
     std::span<const ValueId> values() const;
@@ -636,12 +637,15 @@ public:
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;
     void addDeclaredSymbol(SymbolId sym);
+    bool removeDeclaredSymbol(SymbolId sym);
+    void clearDeclaredSymbols();
     bool isDeclaredSymbol(SymbolId sym) const noexcept;
     std::span<const SymbolId> declaredSymbols() const noexcept;
     std::vector<std::string> aliasesForGraph(std::string_view name) const;
     void registerGraphAlias(std::string alias, Graph& graph);
 
     void markAsTop(std::string_view graphName);
+    void unmarkAsTop(std::string_view graphName);
     const std::vector<std::string>& topGraphs() const noexcept { return topGraphs_; }
 
     const std::unordered_map<std::string, std::unique_ptr<Graph>>& graphs() const noexcept { return graphs_; }
@@ -683,12 +687,8 @@ namespace symbol_utils
         return out;
     }
 
-    inline std::string makeInternalBase(std::string_view kind,
-                                        std::string_view pass,
-                                        std::string_view purpose)
+    inline std::string makeInternalBase(std::string_view kind)
     {
-        (void)pass;
-        (void)purpose;
         std::string base;
         base.reserve(kind.size() + 2);
         base.push_back('_');
@@ -697,11 +697,9 @@ namespace symbol_utils
     }
 
     inline std::string makeInternalSymbolText(std::string_view kind,
-                                              std::string_view pass,
-                                              std::string_view purpose,
                                               uint32_t counter)
     {
-        std::string base = makeInternalBase(kind, pass, purpose);
+        std::string base = makeInternalBase(kind);
         base.push_back('_');
         base.append(std::to_string(counter));
         return base;
@@ -709,11 +707,9 @@ namespace symbol_utils
 
     inline SymbolId makeInternalSymbol(Graph &graph,
                                        std::string_view kind,
-                                       std::string_view pass,
-                                       std::string_view purpose,
                                        uint32_t &counter)
     {
-        std::string base = makeInternalBase(kind, pass, purpose);
+        std::string base = makeInternalBase(kind);
         for (;;)
         {
             std::string candidate = base;

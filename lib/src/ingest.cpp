@@ -8789,8 +8789,7 @@ PlanSymbolId makeInternalPlanValueSymbol(ModulePlan& plan)
     for (;;)
     {
         std::string name =
-            wolvrix::lib::grh::symbol_utils::makeInternalSymbolText("val", "convert", "plan",
-                                                         plan.nextInternalSymbol++);
+            wolvrix::lib::grh::symbol_utils::makeInternalSymbolText("val", plan.nextInternalSymbol++);
         if (!plan.symbolTable.lookup(name).valid())
         {
             return plan.symbolTable.intern(name);
@@ -12858,7 +12857,7 @@ private:
     {
         if (!symbol.valid())
         {
-            symbol = makeInternalOpSymbol(std::string(wolvrix::lib::grh::toString(kind)));
+            symbol = makeInternalOpSymbol();
         }
         wolvrix::lib::grh::OperationId op = graph_.createOperation(kind, symbol);
         maybeSetOpSrcLoc(op, location);
@@ -13005,16 +13004,12 @@ private:
             return wolvrix::lib::grh::ValueId::invalid();
         }
         const bool isRegister = kind == StorageKind::Register;
-        std::string opPurpose = isRegister ? "reg_read_" : "latch_read_";
-        opPurpose.append(name);
-        wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(opPurpose);
+        wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol();
         wolvrix::lib::grh::OperationId op =
             createOp(isRegister ? wolvrix::lib::grh::OperationKind::kRegisterReadPort
                                 : wolvrix::lib::grh::OperationKind::kLatchReadPort,
                      opSym, location);
-        std::string valPurpose = isRegister ? "reg_val_" : "latch_val_";
-        valPurpose.append(name);
-        wolvrix::lib::grh::SymbolId valSym = makeInternalValueSymbol(valPurpose);
+        wolvrix::lib::grh::SymbolId valSym = makeInternalValueSymbol();
         wolvrix::lib::grh::ValueId value =
             graph_.createValue(valSym, info->width, info->isSigned, info->valueType);
         graph_.addResult(op, value);
@@ -13425,9 +13420,7 @@ private:
         wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(finalName);
         if (graph_.findValue(sym).valid() || graph_.findOperation(sym).valid())
         {
-            std::string purpose = "mem_";
-            purpose.append(name);
-            sym = makeInternalOpSymbol(purpose);
+            sym = makeInternalOpSymbol();
             finalName = std::string(graph_.symbolText(sym));
         }
 
@@ -13538,9 +13531,7 @@ private:
         }
 
         const int32_t width = normalizeWidth(info->width);
-        std::string dataPurpose = "mem_data_";
-        dataPurpose.append(memSymbol);
-        wolvrix::lib::grh::SymbolId dataSym = makeInternalValueSymbol(dataPurpose);
+        wolvrix::lib::grh::SymbolId dataSym = makeInternalValueSymbol();
         wolvrix::lib::grh::ValueId dataValue =
             graph_.createValue(dataSym, width, info->isSigned, info->valueType);
 
@@ -13550,9 +13541,7 @@ private:
             return wolvrix::lib::grh::ValueId::invalid();
         }
 
-        std::string readPurpose = "mem_read_";
-        readPurpose.append(memSymbol);
-        wolvrix::lib::grh::SymbolId readSym = makeInternalOpSymbol(readPurpose);
+        wolvrix::lib::grh::SymbolId readSym = makeInternalOpSymbol();
         wolvrix::lib::grh::OperationId readOp =
             createOp(wolvrix::lib::grh::OperationKind::kMemoryReadPort, readSym, entry.location);
         graph_.addOperand(readOp, addressValue);
@@ -13599,9 +13588,7 @@ private:
                 continue;
             }
 
-            std::string writePurpose = "mem_write_";
-            writePurpose.append(memSymbol);
-            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol(writePurpose);
+            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol();
             wolvrix::lib::grh::OperationId op =
                 createOp(wolvrix::lib::grh::OperationKind::kMemoryWritePort, opSym, entry.location);
             graph_.addOperand(op, updateCond);
@@ -14419,7 +14406,7 @@ private:
                                      : static_cast<int32_t>(width);
                 const int32_t normalizedWidth = normalizeWidth(boundedWidth);
                 wolvrix::lib::grh::SymbolId sym =
-                    makeInternalValueSymbol("expr");
+                    makeInternalValueSymbol();
                 wolvrix::lib::grh::ValueId result =
                     graph_.createValue(sym, normalizedWidth, isSigned, valueType);
                 wolvrix::lib::grh::OperationId op =
@@ -14525,7 +14512,7 @@ private:
                         outputNames.emplace_back(port->name);
                         const int64_t width = portWidth > 0 ? portWidth : 1;
                         wolvrix::lib::grh::SymbolId tempSym =
-                            makeInternalValueSymbol("expr");
+                            makeInternalValueSymbol();
                         wolvrix::lib::grh::ValueId tempValue =
                             graph_.createValue(tempSym, width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
@@ -14558,7 +14545,7 @@ private:
                             break;
                         }
                         wolvrix::lib::grh::SymbolId tempSym =
-                            makeInternalValueSymbol("expr");
+                            makeInternalValueSymbol();
                         wolvrix::lib::grh::ValueId tempValue =
                             graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                         outputResults.push_back(tempValue);
@@ -14605,7 +14592,7 @@ private:
                         break;
                     }
                     wolvrix::lib::grh::SymbolId tempSym =
-                        makeInternalValueSymbol("expr");
+                        makeInternalValueSymbol();
                     wolvrix::lib::grh::ValueId tempValue =
                         graph_.createValue(tempSym, binding.width, portSigned, portValueType);
                     outputResults.push_back(tempValue);
@@ -14796,7 +14783,7 @@ private:
             graph_.setAttr(op, "sliceStart", low);
             graph_.setAttr(op, "sliceEnd", high);
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             const wolvrix::lib::grh::ValueType baseType = graph_.getValue(base).type();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, width, false, baseType);
@@ -14810,7 +14797,7 @@ private:
                 return wolvrix::lib::grh::ValueId::invalid();
             }
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(width), false,
                                    wolvrix::lib::grh::ValueType::Logic);
@@ -14843,7 +14830,7 @@ private:
             graph_.addOperand(op, value);
             graph_.setAttr(op, "rep", count);
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(width),
                                    graph_.getValue(value).isSigned(),
@@ -14896,7 +14883,7 @@ private:
             graph_.addOperand(op, padValue);
             graph_.addOperand(op, value);
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, static_cast<int32_t>(targetWidth),
                                    signExtend, graph_.getValue(value).type());
@@ -15073,7 +15060,7 @@ private:
                     graph_.addOperand(op, operand);
                 }
                 wolvrix::lib::grh::SymbolId sym =
-                    makeInternalValueSymbol("expr");
+                    makeInternalValueSymbol();
                 wolvrix::lib::grh::ValueId result =
                     graph_.createValue(sym, targetWidth, false,
                                        graph_.getValue(targetValue).type());
@@ -16101,7 +16088,7 @@ private:
         if (node.kind == ExprNodeKind::XmrRead)
         {
             const int32_t width = normalizeWidth(node.widthHint);
-            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol("xmr_read");
+            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, width, node.isSigned, node.valueType);
             wolvrix::lib::grh::OperationId op =
@@ -16150,7 +16137,7 @@ private:
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "rep", static_cast<int64_t>(*count));
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             const int32_t width = normalizeWidth(node.widthHint);
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, width, false, node.valueType);
@@ -16212,7 +16199,7 @@ private:
                     graph_.setAttr(op, "sliceStart", start);
                     graph_.setAttr(op, "sliceEnd", end);
                     wolvrix::lib::grh::SymbolId sym =
-                        makeInternalValueSymbol("expr");
+                        makeInternalValueSymbol();
                     wolvrix::lib::grh::ValueId result =
                         graph_.createValue(sym, width, false, node.valueType);
                     graph_.addResult(op, result);
@@ -16229,7 +16216,7 @@ private:
             graph_.addOperand(op, operands[1]);
             graph_.setAttr(op, "sliceWidth", static_cast<int64_t>(width));
             wolvrix::lib::grh::SymbolId sym =
-                makeInternalValueSymbol("expr");
+                makeInternalValueSymbol();
             wolvrix::lib::grh::ValueId result =
                 graph_.createValue(sym, width, false, node.valueType);
             graph_.addResult(op, result);
@@ -16256,7 +16243,7 @@ private:
         }
 
         wolvrix::lib::grh::SymbolId sym =
-            makeInternalValueSymbol("expr");
+            makeInternalValueSymbol();
         int32_t width = node.widthHint;
         if (width <= 0)
         {
@@ -16345,7 +16332,7 @@ private:
         };
         auto makeMaskValue = [&](int32_t width, int64_t low, int64_t span,
                                  slang::SourceLocation location) -> wolvrix::lib::grh::ValueId {
-            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol("mask");
+            wolvrix::lib::grh::SymbolId sym = makeInternalValueSymbol();
             const int32_t normalized = normalizeWidth(width);
             wolvrix::lib::grh::ValueId value =
                 graph_.createValue(sym, normalized, false, wolvrix::lib::grh::ValueType::Logic);
@@ -16458,7 +16445,7 @@ private:
                 {
                     continue;
                 }
-                wolvrix::lib::grh::SymbolId opSym = makeOpSymbol(entry.target, "reg_write");
+                wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol();
                 wolvrix::lib::grh::OperationId op =
                     createOp(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
                              opSym, entry.location);
@@ -16490,7 +16477,7 @@ private:
             {
                 continue;
             }
-            wolvrix::lib::grh::SymbolId opSym = makeOpSymbol(entry.target, "latch_write");
+            wolvrix::lib::grh::SymbolId opSym = makeInternalOpSymbol();
             wolvrix::lib::grh::OperationId op =
                 createOp(wolvrix::lib::grh::OperationKind::kLatchWritePort,
                          opSym, entry.location);
@@ -16538,37 +16525,19 @@ private:
     uint32_t nextTempId_ = 0;
     uint32_t nextOpId_ = 0;
 
-    wolvrix::lib::grh::SymbolId makeInternalOpSymbol(std::string_view purpose)
+    wolvrix::lib::grh::SymbolId makeInternalOpSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "op", "convert",
-                                                         purpose, nextOpId_);
+        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "op", nextOpId_);
     }
 
-    wolvrix::lib::grh::SymbolId makeInternalValueSymbol(std::string_view purpose)
+    wolvrix::lib::grh::SymbolId makeInternalValueSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", "convert",
-                                                         purpose, nextTempId_);
+        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", nextTempId_);
     }
 
     wolvrix::lib::grh::SymbolId makeConstValueSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", "convert",
-                                                         "const", nextConstId_);
-    }
-
-    wolvrix::lib::grh::SymbolId makeOpSymbol(PlanSymbolId id, std::string_view suffix)
-    {
-        std::string purpose = std::string(suffix);
-        if (id.valid())
-        {
-            const std::string target = std::string(plan_.symbolTable.text(id));
-            if (!target.empty())
-            {
-                purpose.push_back('_');
-                purpose.append(target);
-            }
-        }
-        return makeInternalOpSymbol(purpose);
+        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", nextConstId_);
     }
 };
 
