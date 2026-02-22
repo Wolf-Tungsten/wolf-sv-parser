@@ -2899,7 +2899,6 @@ private:
             }
             if (auto startConst = evalConstInt(plan, lowering, startExpr))
             {
-                init.hasStart = true;
                 init.start = *startConst;
             }
             else if (diagnostics)
@@ -2911,7 +2910,7 @@ private:
 
         if (args.size() > 3 && args[3])
         {
-            if (!init.hasStart)
+            if (init.start < 0)
             {
                 if (diagnostics)
                 {
@@ -2929,8 +2928,7 @@ private:
                 }
                 if (auto finishConst = evalConstInt(plan, lowering, finishExpr))
                 {
-                    init.hasFinish = true;
-                    init.finish = *finishConst;
+                    init.len = *finishConst - init.start + 1;
                 }
                 else if (diagnostics)
                 {
@@ -2952,11 +2950,8 @@ private:
                 existing.kind != init.kind ||
                 existing.file != init.file ||
                 existing.initValue != init.initValue ||
-                existing.hasStart != init.hasStart ||
-                existing.hasFinish != init.hasFinish ||
                 existing.start != init.start ||
-                existing.finish != init.finish ||
-                existing.address != init.address ||
+                existing.len != init.len ||
                 existing.location != init.location)
             {
                 continue;
@@ -8327,11 +8322,9 @@ private:
         MemoryInit init;
         init.memory = memorySym;
         init.kind = "literal";
-        if (initValue.find("$random") != std::string::npos) {
-            init.kind = "random";
-        }
         init.initValue = std::move(initValue);
-        init.address = -1;  // Unknown index (loop variable)
+        init.start = -1;  // Unknown index (loop variable)
+        init.len = 0;
         init.location = expr.sourceRange.start();
 
         lowering.memoryInits.push_back(std::move(init));
@@ -8383,10 +8376,6 @@ private:
         // Record the register init
         RegisterInit init;
         init.reg = regSym;
-        init.kind = "literal";
-        if (initValue.find("$random") != std::string::npos) {
-            init.kind = "random";
-        }
         init.initValue = std::move(initValue);
         init.location = expr.sourceRange.start();
 
@@ -8615,7 +8604,8 @@ public:
                     init.memory = id;
                     init.kind = "literal";
                     init.initValue = literals[0];
-                    init.address = -1;
+                    init.start = -1;
+                    init.len = 0;
                     init.location = block.location;
                     memInits.push_back(std::move(init));
                 }
@@ -8627,7 +8617,8 @@ public:
                         init.memory = id;
                         init.kind = "literal";
                         init.initValue = literals[i];
-                        init.address = static_cast<int64_t>(i);
+                        init.start = static_cast<int64_t>(i);
+                        init.len = 1;
                         init.location = block.location;
                         memInits.push_back(std::move(init));
                     }
@@ -8642,7 +8633,6 @@ public:
             }
             RegisterInit init;
             init.reg = id;
-            init.kind = "literal";
             init.initValue = *literal;
             init.location = block.location;
             regInits.push_back(std::move(init));
@@ -13348,10 +13338,7 @@ private:
         std::vector<std::string> files;
         std::vector<std::string> initValues;
         std::vector<int64_t> starts;
-        std::vector<int64_t> finishes;
-        std::vector<int64_t> addresses;
-        std::vector<bool> hasStart;
-        std::vector<bool> hasFinish;
+        std::vector<int64_t> lens;
         for (const auto& init : lowering_.memoryInits)
         {
             if (init.memory.index != memory.index)
@@ -13361,11 +13348,8 @@ private:
             kinds.push_back(init.kind);
             files.push_back(init.file);
             initValues.push_back(init.initValue);
-            hasStart.push_back(init.hasStart);
-            hasFinish.push_back(init.hasFinish);
             starts.push_back(init.start);
-            finishes.push_back(init.finish);
-            addresses.push_back(init.address);
+            lens.push_back(init.len);
         }
         if (kinds.empty())
         {
@@ -13374,11 +13358,8 @@ private:
         graph_.setAttr(op, "initKind", std::move(kinds));
         graph_.setAttr(op, "initFile", std::move(files));
         graph_.setAttr(op, "initValue", std::move(initValues));
-        graph_.setAttr(op, "initHasStart", std::move(hasStart));
-        graph_.setAttr(op, "initHasFinish", std::move(hasFinish));
         graph_.setAttr(op, "initStart", std::move(starts));
-        graph_.setAttr(op, "initFinish", std::move(finishes));
-        graph_.setAttr(op, "initAddress", std::move(addresses));
+        graph_.setAttr(op, "initLen", std::move(lens));
     }
 
     void applyRegisterInit(wolvrix::lib::grh::OperationId op, PlanSymbolId reg)
@@ -13387,23 +13368,20 @@ private:
         {
             return;
         }
-        std::vector<std::string> kinds;
-        std::vector<std::string> initValues;
+        const RegisterInit* finalInit = nullptr;
         for (const auto& init : lowering_.registerInits)
         {
             if (init.reg.index != reg.index)
             {
                 continue;
             }
-            kinds.push_back(init.kind);
-            initValues.push_back(init.initValue);
+            finalInit = &init;
         }
-        if (kinds.empty())
+        if (!finalInit)
         {
             return;
         }
-        graph_.setAttr(op, "initKind", std::move(kinds));
-        graph_.setAttr(op, "initValue", std::move(initValues));
+        graph_.setAttr(op, "initValue", finalInit->initValue);
     }
 
     bool ensureMemoryOp(PlanSymbolId memory, SignalId signal, slang::SourceLocation location)

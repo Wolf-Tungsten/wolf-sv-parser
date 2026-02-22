@@ -31,30 +31,24 @@ namespace wolvrix::lib::transform
         {
             std::vector<std::string> kinds;
             std::vector<std::string> files;
-            std::vector<bool> hasStart;
-            std::vector<bool> hasFinish;
             std::vector<int64_t> starts;
-            std::vector<int64_t> finishes;
+            std::vector<int64_t> lens;
         };
 
         bool hasAnyInitAttrs(const wolvrix::lib::grh::Operation &op)
         {
             return op.attr("initKind").has_value() ||
                    op.attr("initFile").has_value() ||
-                   op.attr("initHasStart").has_value() ||
-                   op.attr("initHasFinish").has_value() ||
                    op.attr("initStart").has_value() ||
-                   op.attr("initFinish").has_value();
+                   op.attr("initLen").has_value();
         }
 
         bool initInfoEquals(const InitInfo &lhs, const InitInfo &rhs)
         {
             return lhs.kinds == rhs.kinds &&
                    lhs.files == rhs.files &&
-                   lhs.hasStart == rhs.hasStart &&
-                   lhs.hasFinish == rhs.hasFinish &&
                    lhs.starts == rhs.starts &&
-                   lhs.finishes == rhs.finishes;
+                   lhs.lens == rhs.lens;
         }
     } // namespace
 
@@ -103,32 +97,17 @@ namespace wolvrix::lib::transform
                     continue;
                 }
 
-                auto hasStart = getAttr<std::vector<bool>>(op, "initHasStart").value_or(std::vector<bool>(count, false));
-                auto hasFinish = getAttr<std::vector<bool>>(op, "initHasFinish").value_or(std::vector<bool>(count, false));
-                auto starts = getAttr<std::vector<int64_t>>(op, "initStart").value_or(std::vector<int64_t>(count, 0));
-                auto finishes = getAttr<std::vector<int64_t>>(op, "initFinish").value_or(std::vector<int64_t>(count, 0));
-
-                if (hasStart.size() != count)
+                auto starts = getAttr<std::vector<int64_t>>(op, "initStart");
+                auto lens = getAttr<std::vector<int64_t>>(op, "initLen");
+                if (!starts || !lens)
                 {
-                    error(graph, op, "kMemory initHasStart size mismatch");
+                    error(graph, op, "kMemory initStart/initLen missing");
                     result.failed = true;
                     continue;
                 }
-                if (hasFinish.size() != count)
+                if (starts->size() != count || lens->size() != count)
                 {
-                    error(graph, op, "kMemory initHasFinish size mismatch");
-                    result.failed = true;
-                    continue;
-                }
-                if (starts.size() != count)
-                {
-                    error(graph, op, "kMemory initStart size mismatch");
-                    result.failed = true;
-                    continue;
-                }
-                if (finishes.size() != count)
-                {
-                    error(graph, op, "kMemory initFinish size mismatch");
+                    error(graph, op, "kMemory initStart/initLen size mismatch");
                     result.failed = true;
                     continue;
                 }
@@ -136,10 +115,8 @@ namespace wolvrix::lib::transform
                 InitInfo info{
                     .kinds = std::move(kinds),
                     .files = std::move(files),
-                    .hasStart = std::move(hasStart),
-                    .hasFinish = std::move(hasFinish),
-                    .starts = std::move(starts),
-                    .finishes = std::move(finishes),
+                    .starts = std::move(*starts),
+                    .lens = std::move(*lens),
                 };
 
                 const std::string symbol = std::string(op.symbolText());

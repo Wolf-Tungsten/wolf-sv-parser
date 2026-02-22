@@ -905,26 +905,24 @@ GRH IR 使用**声明 + ReadPort + WritePort**的组合建模寄存器。所有�
 **attrs**:
 - `width` (int64_t): 位宽
 - `isSigned` (bool): 是否有符号
-- `initKind` (string[], 可选): 初始化类型数组，支持 `literal`/`random`
-- `initValue` (string[], 可选): 与 `initKind` 一一对应的初始化值数组
+- `initValue` (string, 可选): 初始化值
 
 **初始化语义**:
 
-`initKind`/`initValue` 为数组是为了支持多条初始化语句，按数组索引**顺序执行**，越靠后的元素优先级越高（后写入覆盖先写入）。
+`initValue` 为单值。convert 在收集 initial 赋值时会合并为**最终结论**：
+若同一寄存器存在多条 initial 赋值，保留最后一次出现的值。
 
-| `initKind[i]` | 行为 | 生成代码 |
-|---------------|------|----------|
-| `literal` | 字面量初始化 | `<symbol> = <initValue[i]>;` |
-| `random` | 随机初始化 | `<symbol> = $random;` |
+**生成代码**：
+```
+<symbol> = <initValue>;
+```
 
-**示例**（先初始化为 0，再随机化，最终值为随机数）：
-- `initKind` = ["literal", "random"]
-- `initValue` = ["32'h0", ""]
+**示例**（最终结论为 `$random`）：
+- `initValue` = "$random"
 - 生成：
   ```sv
   initial begin
-      reg_name = 32'h0;    // initKind[0]
-      reg_name = $random;  // initKind[1]，覆盖前值
+      reg_name = $random;
   end
   ```
 
@@ -952,6 +950,8 @@ res[0] = <regSymbol>
 ### kRegisterWritePort
 
 寄存器写端口。支持多事件触发（如时钟上升沿 + 异步复位下降沿）。
+
+**注意**: 同一个 kRegister 可以拥有多个 kRegisterWritePort，用于保留完整的语义信息（如时钟域分离、异步复位单独建模等）。
 
 **operands**:
 - `oper[0]` (updateCond): 更新使能条件（1-bit），为 1 时允许更新
@@ -1018,7 +1018,145 @@ always @(posedge clk)
 
 ## 6.5 存储器
 
-（待整理）
+GRH IR 将存储器拆分为声明（kMemory）、读端口（kMemoryReadPort）和写端口（kMemoryWritePort）三种 Operation。所有对存储器的访问必须通过对应的 ReadPort/WritePort。
+
+### kMemory
+
+存储器声明。Operation 的 symbol 作为存储器名称。
+
+**operands**: 无
+
+**results**: 无
+
+**attrs**:
+- `width` (int64_t): 每行（word）的位宽
+- `row` (int64_t): 总行数，决定寻址空间
+- `isSigned` (bool): 是否有符号
+- `initKind` (string[], 可选): 初始化类型数组，支持 `readmemh`/`readmemb`/`literal`
+- `initFile` (string[], 可选): 初始化文件数组（`readmemh`/`readmemb` 使用）
+- `initValue` (string[], 可选): 初始化值数组（`literal` 使用）
+- `initStart` (int64_t[], 可选): 初始化起始地址（`<0` 表示省略 readmem 范围 / literal 全量初始化）
+- `initLen` (int64_t[], 可选): 初始化长度（行数）；`initStart < 0` 时忽略；`initStart >= 0` 且 `initLen <= 0` 表示 readmem 仅给 start（读到末尾）
+
+**初始化语义**:
+
+`initKind` 为数组支持多种初始化方式混合。第 `i` 个元素按索引顺序执行，越靠后的优先级越高。
+
+**长度与默认值**：
+- `initKind` 与 `initFile` **必须同时存在且长度相同**，即使 `initKind` 是 `literal` 也需要占位的 `initFile` 项。
+- `initStart`/`initLen` **必须存在且长度等于 `initKind`**。
+- `initStart < 0`：readmem 发射为简写（不带范围）；literal 表示全量初始化（emit 用 `for` 循环写满每一行）。
+- `initStart >= 0` 且 `initLen <= 0`：readmem 只带 start（读到末尾）；literal 视为非法。
+- `initValue` 缺省或长度不足时默认 `"0"`。  
+  若需要随机初始化，请显式写成 `$random` 或 `$random(seed)`。
+
+| `initKind[i]` | 所需 attr | 生成代码 |
+|---------------|-----------|----------|
+| `readmemh` | `initFile[i]`, `initStart[i]`, `initLen[i]` | `$readmemh("<initFile[i]>", <symbol>[, start[, finish]]);` |
+| `readmemb` | `initFile[i]`, `initStart[i]`, `initLen[i]` | `$readmemb("<initFile[i]>", <symbol>[, start[, finish]]);` |
+| `literal` | `initValue[i]`, `initStart[i]`, `initLen[i]` | `<symbol>[<addr>] = <initValue[i]>;` / 生成区间 `for` 循环 |
+
+**示例**（从文件初始化，再用 `$random` 覆盖部分地址）：
+- `initKind` = ["readmemh", "literal"]
+- `initFile` = ["mem.hex", ""]
+- `initValue` = ["", "$random"]
+- `initStart` = [-1, 0]
+- `initLen` = [0, 1]
+- 生成：
+  ```sv
+  initial begin
+      $readmemh("mem.hex", mem);  // initKind[0]
+      mem[0] = $random;            // initKind[1]，覆盖地址 0
+  end
+  ```
+
+**示例**（literal 区间初始化）：
+- `initKind` = ["literal"]
+- `initFile` = [""]
+- `initValue` = ["8'hFF"]
+- `initStart` = [16]
+- `initLen` = [8]
+- 生成：
+  ```sv
+  initial begin
+      for (int __i = 16; __i < 24; __i = __i + 1)
+          mem[__i] = 8'hFF;
+  end
+  ```
+
+---
+
+### kMemoryReadPort
+
+存储器读端口（异步读）。
+
+**operands**:
+- `oper[0]` (addr): 读地址（位宽由寻址空间决定）
+
+**results**:
+- `res[0]` (data): 读出的数据，位宽同目标 kMemory 的 `width`
+
+**attrs**:
+- `memSymbol` (string): 指向目标 kMemory 的 symbol
+
+**语义**:
+```
+res[0] = <memSymbol>[addr]
+```
+
+**说明**: 同步读通过 `kRegisterWritePort` 捕获 `kMemoryReadPort` 的输出实现。
+
+---
+
+### kMemoryWritePort
+
+存储器写端口。写端口不提供复位语义，复位行为由上层逻辑显式控制 `updateCond`/`data`。
+
+**operands**:
+- `oper[0]` (updateCond): 写入条件（1-bit），为 1 时允许写入
+- `oper[1]` (addr): 写地址
+- `oper[2]` (data): 写数据（位宽同目标 kMemory 的 `width`）
+- `oper[3]` (mask): 逐位写掩码（位宽同目标 kMemory 的 `width`）
+- `oper[4]`..`oper[N-1]` (events): 触发事件信号（如时钟）
+
+**results**: 无
+
+**attrs**:
+- `memSymbol` (string): 指向目标 kMemory 的 symbol
+- `eventEdge` (string[]): 触发边沿列表，长度等于事件信号数
+
+**语义**:
+
+设目标 kMemory 每行位宽为 `W`。
+
+**简单写（时钟上升沿触发，无掩码）**：
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = 1'b1
+- `mask` = {W{1'b1}}
+```sv
+always @(posedge clk)
+    mem[addr] <= data;
+```
+
+**带写使能**：
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = wen
+```sv
+always @(posedge clk)
+    if (wen)
+        mem[addr] <= data;
+```
+
+**带写掩码（字节写）**：
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = wen, `mask` 为变量
+```sv
+always @(posedge clk)
+    if (wen)
+        for (int i = 0; i < W; i++)
+            if (mask[i])
+                mem[addr][i] <= data[i];
+```
 
 ## 6.6 层次结构
 

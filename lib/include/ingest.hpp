@@ -407,20 +407,16 @@ struct MemoryWritePort {
 
 struct MemoryInit {
     PlanSymbolId memory;
-    std::string kind;  // "readmemh", "readmemb", "literal", "random", "random_seeded"
+    std::string kind;  // "readmemh", "readmemb", "literal"
     std::string file;  // for readmemh/readmemb
-    std::string initValue;  // for literal/random: "0", "1", "8'hAB", "$random", "$random(12345)"
-    bool hasStart = false;
-    bool hasFinish = false;
-    int64_t start = 0;
-    int64_t finish = 0;
-    int64_t address = -1;  // for per-element init: -1 means all elements, >=0 means specific address
+    std::string initValue;  // for literal: "0", "1", "8'hAB", "$random", "$random(12345)"
+    int64_t start = -1;  // <0 means omit address range / full init
+    int64_t len = 0;  // <=0 means "no finish" for readmem; ignored when start < 0
     slang::SourceLocation location{};
 };
 
 struct RegisterInit {
     PlanSymbolId reg;
-    std::string kind;  // "literal", "random", "random_seeded"
     std::string initValue;  // "0", "1", "8'hAB", "$random", "$random(12345)"
     slang::SourceLocation location{};
 };

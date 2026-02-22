@@ -41,10 +41,8 @@ Netlist buildNetlist()
     graph.setAttr(memOp, "isSigned", false);
     graph.setAttr(memOp, "initKind", std::vector<std::string>{"readmemh", "readmemb"});
     graph.setAttr(memOp, "initFile", std::vector<std::string>{"mem_init.hex", "mem_init.bin"});
-    graph.setAttr(memOp, "initHasStart", std::vector<bool>{false, true});
-    graph.setAttr(memOp, "initHasFinish", std::vector<bool>{false, true});
-    graph.setAttr(memOp, "initStart", std::vector<int64_t>{0, 2});
-    graph.setAttr(memOp, "initFinish", std::vector<int64_t>{0, 7});
+    graph.setAttr(memOp, "initStart", std::vector<int64_t>{-1, 2});
+    graph.setAttr(memOp, "initLen", std::vector<int64_t>{0, 6});
 
     return netlist;
 }

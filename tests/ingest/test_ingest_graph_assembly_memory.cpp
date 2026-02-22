@@ -174,15 +174,13 @@ int testGraphAssemblyMemory(const std::filesystem::path& sourcePath) {
             }
             auto initKinds = getAttrStrings(op, "initKind");
             auto initFiles = getAttrStrings(op, "initFile");
-            auto hasStart = getAttrBools(op, "initHasStart");
-            auto hasFinish = getAttrBools(op, "initHasFinish");
             auto starts = getAttrInts(op, "initStart");
-            auto finishes = getAttrInts(op, "initFinish");
-            if (!initKinds || !initFiles || !hasStart || !hasFinish || !starts || !finishes) {
+            auto lens = getAttrInts(op, "initLen");
+            if (!initKinds || !initFiles || !starts || !lens) {
                 return fail("kMemory missing init attributes");
             }
-            if (initKinds->size() != 2 || initFiles->size() != 2 || hasStart->size() != 2 ||
-                hasFinish->size() != 2 || starts->size() != 2 || finishes->size() != 2) {
+            if (initKinds->size() != 2 || initFiles->size() != 2 || starts->size() != 2 ||
+                lens->size() != 2) {
                 return fail("kMemory init attribute sizes do not match expected count");
             }
             if ((*initKinds)[0] != "readmemh" || (*initKinds)[1] != "readmemb") {
@@ -191,11 +189,11 @@ int testGraphAssemblyMemory(const std::filesystem::path& sourcePath) {
             if ((*initFiles)[0] != "mem_init.hex" || (*initFiles)[1] != "mem_init.bin") {
                 return fail("kMemory initFile order mismatch");
             }
-            if ((*hasStart)[0] || !(*hasStart)[1] || (*hasFinish)[0] || !(*hasFinish)[1]) {
-                return fail("kMemory initHasStart/initHasFinish mismatch");
+            if ((*starts)[0] != -1 || (*lens)[0] != 0) {
+                return fail("kMemory initStart/initLen mismatch for readmemh");
             }
-            if ((*starts)[1] != 2 || (*finishes)[1] != 7) {
-                return fail("kMemory initStart/initFinish mismatch");
+            if ((*starts)[1] != 2 || (*lens)[1] != 6) {
+                return fail("kMemory initStart/initLen mismatch for readmemb");
             }
             memoryAttrsOk = true;
             break;

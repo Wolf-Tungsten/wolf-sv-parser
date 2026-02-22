@@ -4172,31 +4172,12 @@ namespace wolvrix::lib::emit
                                       op.srcLoc());
                     }
 
-                    auto initKinds = getAttribute<std::vector<std::string>>(*graph, op, "initKind");
-                    auto initValues = getAttribute<std::vector<std::string>>(*graph, op, "initValue");
-                    if (initKinds || initValues)
+                    auto initValue = getAttribute<std::string>(*graph, op, "initValue");
+                    if (initValue)
                     {
-                        if (!initKinds || !initValues || initKinds->size() != initValues->size())
-                        {
-                            reportError("kRegister initKind/initValue size mismatch", opContext);
-                            break;
-                        }
-                        for (std::size_t i = 0; i < initKinds->size(); ++i)
-                        {
-                            const std::string &kind = (*initKinds)[i];
-                            const std::string &value = (*initValues)[i];
-                            std::string stmt;
-                            if (kind == "literal" || kind == "random")
-                            {
-                                stmt = opContext + " = " + value + ";";
-                            }
-                            if (!stmt.empty())
-                            {
-                                std::ostringstream oss;
-                                appendIndented(oss, 2, stmt);
-                                addSimpleStmt("initial", oss.str(), opId);
-                            }
-                        }
+                        std::ostringstream oss;
+                        appendIndented(oss, 2, opContext + " = " + *initValue + ";");
+                        addSimpleStmt("initial", oss.str(), opId);
                     }
                     break;
                 }
@@ -4686,36 +4667,15 @@ namespace wolvrix::lib::emit
                             break;
                         }
                         const std::size_t count = initKinds->size();
-                        auto hasStart = getAttribute<std::vector<bool>>(*graph, op, "initHasStart");
-                        auto hasFinish = getAttribute<std::vector<bool>>(*graph, op, "initHasFinish");
                         auto starts = getAttribute<std::vector<int64_t>>(*graph, op, "initStart");
-                        auto finishes = getAttribute<std::vector<int64_t>>(*graph, op, "initFinish");
-                        auto addresses = getAttribute<std::vector<int64_t>>(*graph, op, "initAddress");
-                        if (hasStart && hasStart->size() != count)
+                        auto lens = getAttribute<std::vector<int64_t>>(*graph, op, "initLen");
+                        if (!starts || !lens || starts->size() != count || lens->size() != count)
                         {
-                            reportError("kMemory initHasStart size mismatch", opContext);
+                            reportError("kMemory initStart/initLen size mismatch", opContext);
                             break;
                         }
-                        if (hasFinish && hasFinish->size() != count)
-                        {
-                            reportError("kMemory initHasFinish size mismatch", opContext);
-                            break;
-                        }
-                        if (starts && starts->size() != count)
-                        {
-                            reportError("kMemory initStart size mismatch", opContext);
-                            break;
-                        }
-                        if (finishes && finishes->size() != count)
-                        {
-                            reportError("kMemory initFinish size mismatch", opContext);
-                            break;
-                        }
-                        std::vector<bool> localHasStart = hasStart.value_or(std::vector<bool>(count, false));
-                        std::vector<bool> localHasFinish = hasFinish.value_or(std::vector<bool>(count, false));
-                        std::vector<int64_t> localStarts = starts.value_or(std::vector<int64_t>(count, 0));
-                        std::vector<int64_t> localFinishes = finishes.value_or(std::vector<int64_t>(count, 0));
-                        std::vector<int64_t> localAddresses = addresses.value_or(std::vector<int64_t>(count, -1));
+                        const std::vector<int64_t> &localStarts = *starts;
+                        const std::vector<int64_t> &localLens = *lens;
                         for (std::size_t i = 0; i < count; ++i)
                         {
                             const std::string& kind = (*initKinds)[i];
@@ -4725,32 +4685,44 @@ namespace wolvrix::lib::emit
                             {
                                 // readmemh/readmemb: $readmemh("file", memory, start, finish);
                                 stmt = "$" + kind + "(\"" + escapeSvString((*initFiles)[i]) + "\", " + opContext;
-                                if (localHasStart[i])
+                                if (localStarts[i] >= 0)
                                 {
                                     stmt.append(", ");
                                     stmt.append(std::to_string(localStarts[i]));
-                                    if (localHasFinish[i])
+                                    if (localLens[i] > 0)
                                     {
                                         stmt.append(", ");
-                                        stmt.append(std::to_string(localFinishes[i]));
+                                        stmt.append(std::to_string(localStarts[i] + localLens[i] - 1));
                                     }
                                 }
                                 stmt.append(");");
                             }
-                            else if (kind == "literal" || kind == "random")
+                            else if (kind == "literal")
                             {
                                 // Direct assignment: memory[addr] = value;
                                 std::string value = (initValues && i < initValues->size()) ? (*initValues)[i] : "0";
-                                if (localAddresses[i] >= 0)
+                                if (localStarts[i] < 0)
+                                {
+                                    // Full init
+                                    stmt = "for (int __i = 0; __i < " + std::to_string(*rowAttr) + "; __i = __i + 1) " +
+                                           opContext + "[__i] = " + value + ";";
+                                }
+                                else if (localLens[i] <= 0)
+                                {
+                                    reportError("kMemory literal initLen must be > 0", opContext);
+                                    break;
+                                }
+                                else if (localLens[i] == 1)
                                 {
                                     // Specific address
-                                    stmt = opContext + "[" + std::to_string(localAddresses[i]) + "] = " + value + ";";
+                                    stmt = opContext + "[" + std::to_string(localStarts[i]) + "] = " + value + ";";
                                 }
                                 else
                                 {
-                                    // Unknown address (e.g., loop variable) - need to init all elements
-                                    // Generate a for loop to initialize all entries
-                                    stmt = "for (int __i = 0; __i < " + std::to_string(*rowAttr) + "; __i = __i + 1) " + opContext + "[__i] = " + value + ";";
+                                    // Address range init
+                                    stmt = "for (int __i = " + std::to_string(localStarts[i]) + "; __i < " +
+                                           std::to_string(localStarts[i] + localLens[i]) +
+                                           "; __i = __i + 1) " + opContext + "[__i] = " + value + ";";
                                 }
                             }
                             else
