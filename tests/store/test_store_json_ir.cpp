@@ -52,9 +52,9 @@ int main()
     const auto vSum = graph.createValue(symSum, 8, false);
     const auto vOut = graph.createValue(symOut, 8, false);
 
-    graph.bindInputPort(symA, vA);
-    graph.bindInputPort(symB, vB);
-    graph.bindOutputPort(symOut, vOut);
+    graph.bindInputPort("a", vA);
+    graph.bindInputPort("b", vB);
+    graph.bindOutputPort("out", vOut);
 
     const auto opAdd = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd, symAdd);
     graph.addOperand(opAdd, vA);

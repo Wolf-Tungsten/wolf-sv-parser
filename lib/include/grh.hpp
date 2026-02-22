@@ -255,12 +255,12 @@ struct ValueUser {
 };
 
 struct Port {
-    SymbolId name;
+    std::string name;
     ValueId value;
 };
 
 struct InoutPort {
-    SymbolId name;
+    std::string name;
     ValueId in;
     ValueId out;
     ValueId oe;
@@ -368,9 +368,12 @@ public:
     bool eraseOpUnchecked(OperationId op);
     bool eraseValue(ValueId value);
     bool eraseValueUnchecked(ValueId value);
-    void bindInputPort(SymbolId name, ValueId value);
-    void bindOutputPort(SymbolId name, ValueId value);
-    void bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe);
+    void bindInputPort(std::string_view name, ValueId value);
+    void bindOutputPort(std::string_view name, ValueId value);
+    void bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe);
+    bool removeInputPort(std::string_view name);
+    bool removeOutputPort(std::string_view name);
+    bool removeInoutPort(std::string_view name);
     void setAttr(OperationId op, std::string_view key, AttributeValue value);
     void setOpKind(OperationId op, OperationKind kind);
     bool eraseAttr(OperationId op, std::string_view key);
@@ -432,9 +435,11 @@ private:
     void validateSymbol(SymbolId sym, std::string_view context) const;
     void bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context);
     void unbindSymbol(SymbolId sym, SymbolKind kind, uint32_t index);
-    void bindPort(std::vector<Port>& ports, SymbolId name, ValueId value, std::string_view context);
-    void bindInoutPort(std::vector<InoutPort>& ports, SymbolId name, ValueId in, ValueId out,
+    void bindPort(std::vector<Port>& ports, std::string_view name, ValueId value, std::string_view context);
+    void bindInoutPort(std::vector<InoutPort>& ports, std::string_view name, ValueId in, ValueId out,
                        ValueId oe, std::string_view context);
+    bool removePort(std::vector<Port>& ports, std::string_view name, std::string_view context);
+    bool removeInoutPort(std::vector<InoutPort>& ports, std::string_view name, std::string_view context);
 
     GraphId graphId_;
     GraphSymbolTable* symbols_ = nullptr;
@@ -518,6 +523,10 @@ class Netlist;
 class Graph {
 public:
     Graph(Netlist& owner, std::string symbol, GraphId graphId);
+    Graph(const Graph&) = delete;
+    Graph& operator=(const Graph&) = delete;
+    Graph(Graph&&) = delete;
+    Graph& operator=(Graph&&) = delete;
 
     const std::string& symbol() const noexcept { return symbol_; }
     const GraphId& id() const noexcept { return graphId_; }
@@ -528,6 +537,8 @@ public:
     SymbolId internSymbol(std::string_view text);
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;
+    SymbolId makeInternalOpSym();
+    SymbolId makeInternalValSym();
     void addDeclaredSymbol(SymbolId sym);
     bool removeDeclaredSymbol(SymbolId sym);
     void clearDeclaredSymbols();
@@ -545,7 +556,10 @@ public:
 
     ValueId createValue(SymbolId symbol, int32_t width, bool isSigned,
                         ValueType type = ValueType::Logic);
+    ValueId createValue(int32_t width, bool isSigned,
+                        ValueType type = ValueType::Logic);
     OperationId createOperation(OperationKind kind, SymbolId symbol);
+    OperationId createOperation(OperationKind kind);
 
     ValueId findValue(SymbolId symbol) const noexcept;
     OperationId findOperation(SymbolId symbol) const noexcept;
@@ -554,11 +568,14 @@ public:
     Value getValue(ValueId id) const;
     Operation getOperation(OperationId id) const;
 
-    void bindInputPort(SymbolId name, ValueId value);
-    void bindOutputPort(SymbolId name, ValueId value);
-    void bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe);
-    ValueId inputPortValue(SymbolId name) const noexcept;
-    ValueId outputPortValue(SymbolId name) const noexcept;
+    void bindInputPort(std::string_view name, ValueId value);
+    void bindOutputPort(std::string_view name, ValueId value);
+    void bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe);
+    bool removeInputPort(std::string_view name);
+    bool removeOutputPort(std::string_view name);
+    bool removeInoutPort(std::string_view name);
+    ValueId inputPortValue(std::string_view name) const noexcept;
+    ValueId outputPortValue(std::string_view name) const noexcept;
 
     void addOperand(OperationId op, ValueId value);
     void addResult(OperationId op, ValueId value);
@@ -620,6 +637,8 @@ private:
     mutable bool valuesCacheDirty_ = true;
     mutable bool operationsCacheDirty_ = true;
     mutable bool portsCacheDirty_ = true;
+    uint32_t nextInternalOpSym_ = 0;
+    uint32_t nextInternalValSym_ = 0;
 };
 
 class Netlist {
@@ -631,6 +650,8 @@ public:
     Netlist& operator=(const Netlist&) = delete;
 
     Graph& createGraph(std::string name);
+    Graph& cloneGraph(std::string_view sourceName, std::string newName);
+    Netlist clone() const;
     Graph* findGraph(std::string_view name) noexcept;
     const Graph* findGraph(std::string_view name) const noexcept;
     SymbolId internSymbol(std::string_view text);
@@ -694,32 +715,6 @@ namespace symbol_utils
         base.push_back('_');
         base.append(kind);
         return base;
-    }
-
-    inline std::string makeInternalSymbolText(std::string_view kind,
-                                              uint32_t counter)
-    {
-        std::string base = makeInternalBase(kind);
-        base.push_back('_');
-        base.append(std::to_string(counter));
-        return base;
-    }
-
-    inline SymbolId makeInternalSymbol(Graph &graph,
-                                       std::string_view kind,
-                                       uint32_t &counter)
-    {
-        std::string base = makeInternalBase(kind);
-        for (;;)
-        {
-            std::string candidate = base;
-            candidate.push_back('_');
-            candidate.append(std::to_string(counter++));
-            if (!graph.symbols().contains(candidate))
-            {
-                return graph.internSymbol(candidate);
-            }
-        }
     }
 
 } // namespace symbol_utils

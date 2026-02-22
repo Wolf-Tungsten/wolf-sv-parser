@@ -25,7 +25,7 @@ int main()
 
     const wolvrix::lib::grh::SymbolId resetSym = graph.internSymbol("reset");
     wolvrix::lib::grh::ValueId reset = graph.createValue(resetSym, 1, false);
-    graph.bindInputPort(resetSym, reset);
+    graph.bindInputPort("reset", reset);
 
     wolvrix::lib::grh::ValueId notReset = graph.createValue(graph.internSymbol("not_reset"), 1, false);
     wolvrix::lib::grh::OperationId notOp =
@@ -42,8 +42,8 @@ int main()
     graph.addOperand(orOp, notReset);
     graph.addResult(orOp, guard);
 
-    const wolvrix::lib::grh::SymbolId outSym = graph.internSymbol("out");
-    graph.bindOutputPort(outSym, guard);
+    const std::string outName = "out";
+    graph.bindOutputPort(outName, guard);
 
     PassManager manager;
     manager.addPass(std::make_unique<RedundantElimPass>());
@@ -75,7 +75,7 @@ int main()
     wolvrix::lib::grh::ValueId outValueId = wolvrix::lib::grh::ValueId::invalid();
     for (const auto &port : graph.outputPorts())
     {
-        if (port.name == outSym)
+        if (port.name == outName)
         {
             outValueId = port.value;
             break;

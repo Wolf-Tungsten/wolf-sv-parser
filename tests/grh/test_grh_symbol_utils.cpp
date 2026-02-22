@@ -44,8 +44,6 @@ int main()
     try
     {
         using wolvrix::lib::grh::symbol_utils::makeInternalBase;
-        using wolvrix::lib::grh::symbol_utils::makeInternalSymbol;
-        using wolvrix::lib::grh::symbol_utils::makeInternalSymbolText;
         using wolvrix::lib::grh::symbol_utils::normalizeComponent;
 
         const std::string normalized = normalizeComponent("a-b.c$");
@@ -64,41 +62,36 @@ int main()
             return fail("makeInternalBase should generate a valid identifier");
         }
 
-        const std::string baseVal = makeInternalBase("val");
-        const std::string textVal = makeInternalSymbolText("val", 7);
-        if (textVal != baseVal + "_7")
-        {
-            return fail("makeInternalSymbolText format mismatch");
-        }
-        if (!isIdentifier(textVal))
-        {
-            return fail("makeInternalSymbolText should generate a valid identifier");
-        }
-
         Netlist netlist;
         Graph &graph = netlist.createGraph("g");
         const std::string uniqBase = makeInternalBase("val");
         const auto sym0 = graph.internSymbol(uniqBase + "_0");
         const auto sym1 = graph.internSymbol(uniqBase + "_1");
 
-        uint32_t counter = 0;
-        const auto sym2 = makeInternalSymbol(graph, "val", counter);
+        const auto sym2 = graph.makeInternalValSym();
         const std::string symText = std::string(graph.symbolText(sym2));
         if (symText != uniqBase + "_2")
         {
-            return fail("makeInternalSymbol should skip existing names");
-        }
-        if (counter != 3)
-        {
-            return fail("makeInternalSymbol should advance counter correctly");
+            return fail("makeInternalValSym should skip existing names");
         }
         if (sym2 == sym0 || sym2 == sym1)
         {
-            return fail("makeInternalSymbol should return a unique symbol");
+            return fail("makeInternalValSym should return a unique symbol");
         }
         if (!isIdentifier(symText))
         {
-            return fail("makeInternalSymbol should generate a valid identifier");
+            return fail("makeInternalValSym should generate a valid identifier");
+        }
+
+        const auto opSym = graph.makeInternalOpSym();
+        const std::string opText = std::string(graph.symbolText(opSym));
+        if (opText.find("_op_") != 0)
+        {
+            return fail("makeInternalOpSym should generate op-prefixed symbols");
+        }
+        if (!isIdentifier(opText))
+        {
+            return fail("makeInternalOpSym should generate a valid identifier");
         }
     }
     catch (const std::exception &ex)

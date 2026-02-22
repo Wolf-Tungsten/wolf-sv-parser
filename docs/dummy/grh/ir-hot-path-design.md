@@ -36,7 +36,7 @@
 - `SymbolId` 只保证在同一个 `SymbolTable` 生命周期内稳定，不跨进程持久化；跨层不可直接比较。
 - 约束：Netlist 层只驻留 Graph 名称；跨图引用（例如 instance 目标）统一走 NetlistSymbolTable，Graph 层不保存跨图符号。
 - 典型 API 形态（区分申请与查询）：
-  - `SymbolId intern(std::string_view text)`：申请新符号；若已存在则返回 invalid 或抛错。
+  - `SymbolId intern(std::string_view text)`：申请新符号；若已存在则返回已有 id。
   - `SymbolId lookup(std::string_view text)`：仅查询，存在则返回 id；缺失返回 invalid。
   - `bool contains(std::string_view text)`：是否已驻留。
   - `std::string_view text(SymbolId id)`：从 id 取回字符串视图。
@@ -154,7 +154,7 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 - `SymbolId`：由 `GraphSymbolTable` 产生的图内符号 id；`invalid` 仅用于可选引用（如 valueDef），op/value 的 symbol 必须有效。
 - `ValueId/OperationId/GraphId`：句柄（index + 可选 generation）。
 - `Span<T>`：连续只读视图（`data + size`）。
-- `Port`：`{ SymbolId name, ValueId value }`。
+- `Port`：`{ std::string name, ValueId value }`。
 - `ValueUser`：`{ OperationId op, uint32_t operandIndex }`。
 - `AttrKV`：`{ SymbolId key, AttrValue value }`。
 - `AttrValue`：`variant<bool, int64_t, double, std::string, vector<bool>, vector<int64_t>, vector<double>, vector<std::string>>`。
@@ -199,7 +199,7 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 - `bool eraseOp(OperationId op)`：移除 op，并在构建期更新 operands 的 useList；若其结果仍被使用则失败。
 - `bool eraseOp(OperationId op, Span<ValueId> replacementResults)`：允许删除仍被使用的 op，将其每个 result 的所有 uses 替换为对应 replacement（数量需一致）。
 - `bool eraseValue(ValueId v)`：仅当无 users、非端口、且不再作为 op result 时允许；否则失败。
-- `void bindInputPort(SymbolId name, ValueId v)` / `void bindOutputPort(SymbolId name, ValueId v)`。
+- `void bindInputPort(std::string_view name, ValueId v)` / `void bindOutputPort(std::string_view name, ValueId v)`。
 - `void setAttr(OperationId op, SymbolId key, AttrValue value)`。
 - `bool eraseAttr(OperationId op, SymbolId key)`。
 - `void setValueSrcLoc(ValueId v, SrcLoc loc)`。

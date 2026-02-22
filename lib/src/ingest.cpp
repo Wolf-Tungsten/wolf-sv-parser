@@ -8788,8 +8788,8 @@ PlanSymbolId makeInternalPlanValueSymbol(ModulePlan& plan)
 {
     for (;;)
     {
-        std::string name =
-            wolvrix::lib::grh::symbol_utils::makeInternalSymbolText("val", plan.nextInternalSymbol++);
+        std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase("val");
+        std::string name = base + "_" + std::to_string(plan.nextInternalSymbol++);
         if (!plan.symbolTable.lookup(name).valid())
         {
             return plan.symbolTable.intern(name);
@@ -12840,7 +12840,13 @@ private:
             {
                 continue;
             }
-            symbolIds_[i] = graph_.internSymbol(text);
+            wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(text);
+            if (!sym.valid())
+            {
+                throw std::runtime_error("Plan symbol already bound to value/operation: " +
+                                         std::string(text));
+            }
+            symbolIds_[i] = sym;
         }
     }
 
@@ -12879,7 +12885,12 @@ private:
         {
             return wolvrix::lib::grh::SymbolId::invalid();
         }
-        symbolIds_[id.index] = graph_.internSymbol(text);
+        wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(text);
+        if (!sym.valid())
+        {
+            throw std::runtime_error("Plan symbol already bound to value/operation: " + text);
+        }
+        symbolIds_[id.index] = sym;
         return symbolIds_[id.index];
     }
 
@@ -13094,7 +13105,16 @@ private:
             const wolvrix::lib::grh::OperationKind kind =
                 isRegister ? wolvrix::lib::grh::OperationKind::kRegister
                            : wolvrix::lib::grh::OperationKind::kLatch;
-            wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(name);
+            wolvrix::lib::grh::SymbolId sym = graph_.lookupSymbol(name);
+            if (!sym.valid())
+            {
+                sym = graph_.internSymbol(name);
+            }
+            if (!sym.valid())
+            {
+                throw std::runtime_error("Storage symbol already bound to value/operation: " +
+                                         std::string(name));
+            }
             slang::SourceLocation location = storageLocation_[index];
             wolvrix::lib::grh::OperationId op = createOp(kind, sym, location);
             graph_.setAttr(op, "width", static_cast<int64_t>(info->width));
@@ -13118,6 +13138,11 @@ private:
                 continue;
             }
             markDeclaredSymbol(port.symbol);
+            const std::string_view portName = plan_.symbolTable.text(port.symbol);
+            if (portName.empty())
+            {
+                continue;
+            }
             const int32_t width = normalizeWidth(port.width);
             if (port.direction == PortDirection::Input)
             {
@@ -13135,7 +13160,7 @@ private:
                     createValue(port.symbol, width, port.isSigned, port.valueType);
                 if (value.valid())
                 {
-                    graph_.bindInputPort(symbolForPlan(port.symbol), value);
+                    graph_.bindInputPort(portName, value);
                 }
                 continue;
             }
@@ -13158,7 +13183,7 @@ private:
                 }
                 if (value.valid())
                 {
-                    graph_.bindOutputPort(symbolForPlan(port.symbol), value);
+                    graph_.bindOutputPort(portName, value);
                 }
                 continue;
             }
@@ -13180,7 +13205,7 @@ private:
                     createValue(binding.oeSymbol, width, false, wolvrix::lib::grh::ValueType::Logic);
                 if (inValue.valid() && outValue.valid() && oeValue.valid())
                 {
-                    graph_.bindInoutPort(symbolForPlan(port.symbol), inValue, outValue,
+                    graph_.bindInoutPort(portName, inValue, outValue,
                                          oeValue);
                 }
                 continue;
@@ -13417,11 +13442,23 @@ private:
             return false;
         }
         std::string finalName = name;
-        wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(finalName);
-        if (graph_.findValue(sym).valid() || graph_.findOperation(sym).valid())
+        wolvrix::lib::grh::SymbolId sym = graph_.lookupSymbol(finalName);
+        if (sym.valid())
         {
-            sym = makeInternalOpSymbol();
-            finalName = std::string(graph_.symbolText(sym));
+            if (graph_.findValue(sym).valid() || graph_.findOperation(sym).valid())
+            {
+                sym = makeInternalOpSymbol();
+                finalName = std::string(graph_.symbolText(sym));
+            }
+        }
+        else
+        {
+            sym = graph_.internSymbol(finalName);
+            if (!sym.valid())
+            {
+                sym = makeInternalOpSymbol();
+                finalName = std::string(graph_.symbolText(sym));
+            }
         }
 
         const int64_t width = normalizeWidth(info->width);
@@ -13654,30 +13691,48 @@ private:
             {
                 continue;
             }
-            wolvrix::lib::grh::SymbolId sym = graph_.internSymbol(info.symbol);
-            wolvrix::lib::grh::OperationId existing = graph_.findOperation(sym);
-            if (existing.valid())
+            wolvrix::lib::grh::SymbolId sym = graph_.lookupSymbol(info.symbol);
+            if (sym.valid())
             {
-                if (graph_.getOperation(existing).kind() != wolvrix::lib::grh::OperationKind::kDpicImport &&
-                    context_.diagnostics)
+                wolvrix::lib::grh::OperationId existing = graph_.findOperation(sym);
+                if (existing.valid())
                 {
-                    context_.diagnostics->warn(
-                        slang::SourceLocation{},
-                        std::string("Skipping DPI import with conflicting symbol ") +
-                            info.symbol);
+                    if (graph_.getOperation(existing).kind() != wolvrix::lib::grh::OperationKind::kDpicImport &&
+                        context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            slang::SourceLocation{},
+                            std::string("Skipping DPI import with conflicting symbol ") +
+                                info.symbol);
+                    }
+                    continue;
                 }
-                continue;
+                if (graph_.findValue(sym).valid())
+                {
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            slang::SourceLocation{},
+                            std::string("Skipping DPI import with conflicting value ") +
+                                info.symbol);
+                    }
+                    continue;
+                }
             }
-            if (graph_.findValue(sym).valid())
+            else
             {
-                if (context_.diagnostics)
+                sym = graph_.internSymbol(info.symbol);
+                if (!sym.valid())
                 {
-                    context_.diagnostics->warn(
-                        slang::SourceLocation{},
-                        std::string("Skipping DPI import with conflicting value ") +
-                            info.symbol);
+                    if (context_.diagnostics)
+                    {
+                        context_.diagnostics->warn(
+                            slang::SourceLocation{},
+                            std::string("Skipping DPI import with conflicting symbol ") +
+                                info.symbol);
+                    }
+                    continue;
                 }
-                continue;
             }
 
             wolvrix::lib::grh::OperationId op =
@@ -16521,23 +16576,19 @@ private:
     std::vector<InstanceXmrWrite> instanceXmrWrites_;
     std::unordered_map<uint32_t, std::vector<InstanceSliceWrite>> instanceSliceWrites_;
     std::unordered_set<uint32_t> instanceMergedTargets_;
-    uint32_t nextConstId_ = 0;
-    uint32_t nextTempId_ = 0;
-    uint32_t nextOpId_ = 0;
-
     wolvrix::lib::grh::SymbolId makeInternalOpSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "op", nextOpId_);
+        return graph_.makeInternalOpSym();
     }
 
     wolvrix::lib::grh::SymbolId makeInternalValueSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", nextTempId_);
+        return graph_.makeInternalValSym();
     }
 
     wolvrix::lib::grh::SymbolId makeConstValueSymbol()
     {
-        return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph_, "val", nextConstId_);
+        return graph_.makeInternalValSym();
     }
 };
 

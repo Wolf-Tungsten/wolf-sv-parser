@@ -610,15 +610,24 @@ namespace wolvrix::lib::emit
             }
             for (const auto &port : graph.inputPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Input port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Input port name is empty during emit");
+                }
             }
             for (const auto &port : graph.outputPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Output port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Output port name is empty during emit");
+                }
             }
             for (const auto &port : graph.inoutPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Inout port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Inout port name is empty during emit");
+                }
             }
         }
 
@@ -1572,33 +1581,33 @@ namespace wolvrix::lib::emit
             std::map<std::string, PortDecl, std::less<>> portDecls;
             for (const auto &port : graph->inputPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                const std::string name = std::string(graph->symbolText(port.name));
+                const std::string &name = port.name;
                 wolvrix::lib::grh::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Input, value.width(), value.isSigned(), false,
                                            value.type(), value.srcLoc()};
             }
             for (const auto &port : graph->outputPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                const std::string name = std::string(graph->symbolText(port.name));
+                const std::string &name = port.name;
                 wolvrix::lib::grh::Value value = graph->getValue(port.value);
                 portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
                                            value.type(), value.srcLoc()};
             }
             for (const auto &port : graph->inoutPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                const std::string name = std::string(graph->symbolText(port.name));
+                const std::string &name = port.name;
                 wolvrix::lib::grh::Value value = graph->getValue(port.out);
                 portDecls[name] = PortDecl{PortDir::Inout, value.width(), value.isSigned(), false,
                                            value.type(), value.srcLoc()};
@@ -1642,11 +1651,11 @@ namespace wolvrix::lib::emit
             std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> elidedReadPortValues;
             for (const auto &port : graph->outputPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                const std::string portName = std::string(graph->symbolText(port.name));
+                const std::string &portName = port.name;
                 if (storageBackedPorts.find(portName) == storageBackedPorts.end())
                 {
                     continue;
@@ -3427,19 +3436,19 @@ namespace wolvrix::lib::emit
 
             for (const auto &port : graph->inputPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                bindInputPort(std::string(graph->symbolText(port.name)), port.value);
+                bindInputPort(port.name, port.value);
             }
             for (const auto &port : graph->outputPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                bindOutputPort(std::string(graph->symbolText(port.name)), port.value);
+                bindOutputPort(port.name, port.value);
             }
             auto emitInoutAssign = [&](const std::string &dest,
                                        wolvrix::lib::grh::ValueId oeValue,
@@ -3545,11 +3554,11 @@ namespace wolvrix::lib::emit
             };
             for (const auto &port : graph->inoutPorts())
             {
-                if (!port.name.valid())
+                if (port.name.empty())
                 {
                     continue;
                 }
-                const std::string portName = std::string(graph->symbolText(port.name));
+                const std::string &portName = port.name;
                 const std::string inName = valueName(port.in);
                 const int64_t width = graph->getValue(port.out).width();
                 ensureWireDecl(port.in);
@@ -5647,27 +5656,27 @@ namespace wolvrix::lib::emit
 
                 for (const auto &port : graph->inputPorts())
                 {
-                    if (!port.name.valid())
+                    if (port.name.empty())
                     {
                         continue;
                     }
-                    emitPortLine(std::string(graph->symbolText(port.name)));
+                    emitPortLine(port.name);
                 }
                 for (const auto &port : graph->outputPorts())
                 {
-                    if (!port.name.valid())
+                    if (port.name.empty())
                     {
                         continue;
                     }
-                    emitPortLine(std::string(graph->symbolText(port.name)));
+                    emitPortLine(port.name);
                 }
                 for (const auto &port : graph->inoutPorts())
                 {
-                    if (!port.name.valid())
+                    if (port.name.empty())
                     {
                         continue;
                     }
-                    emitPortLine(std::string(graph->symbolText(port.name)));
+                    emitPortLine(port.name);
                 }
                 out << "\n);\n";
             }

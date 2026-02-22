@@ -61,10 +61,9 @@ std::unique_ptr<CompilationBundle> compileInput(const std::filesystem::path& sou
     return bundle;
 }
 
-bool hasPort(std::span<const wolvrix::lib::grh::Port> ports, const wolvrix::lib::grh::Graph& graph,
-             std::string_view name) {
+bool hasPort(std::span<const wolvrix::lib::grh::Port> ports, std::string_view name) {
     for (const auto& port : ports) {
-        if (graph.symbolText(port.name) == name) {
+        if (port.name == name) {
             return true;
         }
     }
@@ -92,16 +91,16 @@ int testGraphAssemblyBasic(const std::filesystem::path& sourcePath) {
         return fail("Missing graph_assembly_basic graph");
     }
 
-    if (!hasPort(graph->inputPorts(), *graph, "clk") ||
-        !hasPort(graph->inputPorts(), *graph, "a") ||
-        !hasPort(graph->inputPorts(), *graph, "b") ||
-        !hasPort(graph->inputPorts(), *graph, "en")) {
+    if (!hasPort(graph->inputPorts(), "clk") ||
+        !hasPort(graph->inputPorts(), "a") ||
+        !hasPort(graph->inputPorts(), "b") ||
+        !hasPort(graph->inputPorts(), "en")) {
         return fail("Missing expected input ports");
     }
 
-    if (!hasPort(graph->outputPorts(), *graph, "y") ||
-        !hasPort(graph->outputPorts(), *graph, "q") ||
-        !hasPort(graph->outputPorts(), *graph, "l")) {
+    if (!hasPort(graph->outputPorts(), "y") ||
+        !hasPort(graph->outputPorts(), "q") ||
+        !hasPort(graph->outputPorts(), "l")) {
         return fail("Missing expected output ports");
     }
 

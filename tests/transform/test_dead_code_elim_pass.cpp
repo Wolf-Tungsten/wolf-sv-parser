@@ -42,7 +42,7 @@ int main()
     wolvrix::lib::grh::ValueId liveConst = makeConst(graph, "c_live", "c_live_op", 1, false, "1'b1");
     wolvrix::lib::grh::ValueId deadConst = makeConst(graph, "c_dead", "c_dead_op", 1, false, "1'b0");
     wolvrix::lib::grh::ValueId keptConst = makeConst(graph, "c_keep", "c_keep_op", 1, false, "1'b0");
-    graph.addDeclaredSymbol(graph.internSymbol("c_keep"));
+    graph.addDeclaredSymbol(graph.lookupSymbol("c_keep"));
     (void)keptConst;
 
     wolvrix::lib::grh::ValueId deadTmp = graph.createValue(graph.internSymbol("dead_tmp"), 1, false);
@@ -51,7 +51,7 @@ int main()
     graph.addResult(deadNot, deadTmp);
 
     wolvrix::lib::grh::ValueId out = graph.createValue(graph.internSymbol("out"), 1, false);
-    graph.bindOutputPort(graph.internSymbol("out"), out);
+    graph.bindOutputPort("out", out);
     wolvrix::lib::grh::OperationId assign = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("assign_out"));
     graph.addOperand(assign, liveConst);
     graph.addResult(assign, out);

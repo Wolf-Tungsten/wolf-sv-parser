@@ -233,18 +233,14 @@ namespace wolvrix::lib::transform
         std::vector<PendingPort> pendingOutputPorts;
         std::vector<PendingPort> pendingInputPorts;
         std::unordered_map<std::string, std::unordered_map<std::string, wolvrix::lib::grh::ValueId>> inputPadCache;
-        uint32_t internalSymbolCounter = 0;
-
         auto makeInternalValueSymbol = [&](wolvrix::lib::grh::Graph &graph)
         {
-            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "val",
-                                                             internalSymbolCounter);
+            return graph.makeInternalValSym();
         };
 
         auto makeInternalOpSymbol = [&](wolvrix::lib::grh::Graph &graph)
         {
-            return wolvrix::lib::grh::symbol_utils::makeInternalSymbol(graph, "op",
-                                                             internalSymbolCounter);
+            return graph.makeInternalOpSym();
         };
 
         auto makeLoc = [&](std::string_view note) {
@@ -357,8 +353,7 @@ namespace wolvrix::lib::transform
             {
                 *added = false;
             }
-            wolvrix::lib::grh::SymbolId sym = graph.internSymbol(portName);
-            wolvrix::lib::grh::ValueId existing = graph.outputPortValue(sym);
+            wolvrix::lib::grh::ValueId existing = graph.outputPortValue(portName);
             if (existing.valid() && existing != value)
             {
                 warning(graph, "XMR output port already bound; keeping existing binding");
@@ -366,7 +361,7 @@ namespace wolvrix::lib::transform
             }
             if (!existing.valid())
             {
-                graph.bindOutputPort(sym, value);
+                graph.bindOutputPort(portName, value);
                 result.changed = true;
                 if (added)
                 {
@@ -385,19 +380,24 @@ namespace wolvrix::lib::transform
             {
                 *added = false;
             }
-            wolvrix::lib::grh::SymbolId sym = graph.internSymbol(portName);
-            wolvrix::lib::grh::ValueId existing = graph.inputPortValue(sym);
+            wolvrix::lib::grh::ValueId existing = graph.inputPortValue(portName);
             if (existing.valid())
             {
                 return existing;
             }
-            wolvrix::lib::grh::ValueId value = graph.findValue(sym);
+            wolvrix::lib::grh::ValueId value = graph.findValue(portName);
             if (!value.valid())
             {
+                wolvrix::lib::grh::SymbolId sym = graph.internSymbol(portName);
+                if (!sym.valid())
+                {
+                    warning(graph, "XMR input port name already bound; using internal value symbol");
+                    sym = makeInternalValueSymbol(graph);
+                }
                 value = createValue(graph, sym, normalizeWidth(width), isSigned,
                                     wolvrix::lib::grh::ValueType::Logic, "input_port");
             }
-            graph.bindInputPort(sym, value);
+            graph.bindInputPort(portName, value);
             result.changed = true;
             if (added)
             {
@@ -538,7 +538,7 @@ namespace wolvrix::lib::transform
                 result.changed = true;
                 return replacement;
             }
-            std::vector<wolvrix::lib::grh::SymbolId> outputNames;
+            std::vector<std::string> outputNames;
             if (value.isOutput())
             {
                 for (const auto &port : graph.outputPorts())
@@ -656,8 +656,7 @@ namespace wolvrix::lib::transform
                     return std::nullopt;
                 }
                 const std::string portName = getPortName(*leafGraph, readPortNames, path, "xmr_r");
-                wolvrix::lib::grh::SymbolId portSym = leafGraph->internSymbol(portName);
-                propagated = leafGraph->outputPortValue(portSym);
+                propagated = leafGraph->outputPortValue(portName);
                 if (!propagated.valid())
                 {
                     propagated = createStorageReadPort(*leafGraph, *storage, leafName);

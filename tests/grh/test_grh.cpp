@@ -45,17 +45,21 @@ int main()
         Netlist netlist;
         Graph &graph = netlist.createGraph("demo");
 
-        ValueId a = graph.createValue(graph.internSymbol("a"), 8, false);
-        ValueId b = graph.createValue(graph.internSymbol("b"), 8, false);
-        ValueId sum = graph.createValue(graph.internSymbol("sum"), 8, false);
-        ValueId sumCopy = graph.createValue(graph.internSymbol("sum_copy"), 8, false);
+        SymbolId symA = graph.internSymbol("a");
+        SymbolId symB = graph.internSymbol("b");
+        SymbolId symSum = graph.internSymbol("sum");
+        SymbolId symSumCopy = graph.internSymbol("sum_copy");
+        ValueId a = graph.createValue(symA, 8, false);
+        ValueId b = graph.createValue(symB, 8, false);
+        ValueId sum = graph.createValue(symSum, 8, false);
+        ValueId sumCopy = graph.createValue(symSumCopy, 8, false);
 
-        graph.bindInputPort(graph.internSymbol("a"), a);
-        graph.bindInputPort(graph.internSymbol("b"), b);
-        graph.bindOutputPort(graph.internSymbol("sum"), sum);
-        graph.bindOutputPort(graph.internSymbol("sum_copy"), sumCopy);
-        graph.addDeclaredSymbol(graph.internSymbol("a"));
-        graph.addDeclaredSymbol(graph.internSymbol("sum"));
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindOutputPort("sum", sum);
+        graph.bindOutputPort("sum_copy", sumCopy);
+        graph.addDeclaredSymbol(symA);
+        graph.addDeclaredSymbol(symSum);
         netlist.addDeclaredSymbol(netlist.internSymbol("demo"));
 
         OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
@@ -99,7 +103,7 @@ int main()
         }
 
         ValueId c = graph.createValue(graph.internSymbol("c"), 8, false);
-        graph.bindInputPort(graph.internSymbol("c"), c);
+        graph.bindInputPort("c", c);
 
         graph.replaceOperand(op, 1, c);
         if (graph.getOperation(op).operands()[1] != c)
@@ -393,9 +397,9 @@ int main()
                 return fail("NetlistSymbolTable lookup should miss unknown symbol");
             }
             auto dupSym = netlistSymbols.intern("demo");
-            if (dupSym.valid())
+            if (!dupSym.valid() || dupSym != demoSym)
             {
-                return fail("Expected duplicate intern to return invalid SymbolId");
+                return fail("Expected duplicate intern to return existing SymbolId");
             }
             if (netlistSymbols.valid(grh_ir::SymbolId::invalid()))
             {
@@ -556,9 +560,8 @@ int main()
             grh_ir::GraphSymbolTable graphSymbols;
             grh_ir::GraphBuilder builder(graphSymbols);
 
-            auto symPortB = graphSymbols.intern("b");
-            auto symPortA = graphSymbols.intern("a");
-            auto symPortOut = graphSymbols.intern("out");
+            auto symPortA = std::string("a");
+            auto symPortOut = std::string("out");
             auto symVa = graphSymbols.intern("va");
             auto symVb = graphSymbols.intern("vb");
             auto symSum = graphSymbols.intern("sum");
@@ -584,7 +587,7 @@ int main()
 
             builder.setValueSymbol(vOut, symOutVal);
 
-            builder.bindInputPort(symPortB, vB);
+            builder.bindInputPort("b", vB);
             builder.bindInputPort(symPortA, vA);
             builder.bindOutputPort(symPortOut, vOut);
 
@@ -603,12 +606,12 @@ int main()
             grh_ir::GraphView view = builder.freeze();
 
             auto inPorts = view.inputPorts();
-            if (inPorts.size() != 2 || graphSymbols.text(inPorts[0].name) != "a" || graphSymbols.text(inPorts[1].name) != "b")
+            if (inPorts.size() != 2 || inPorts[0].name != "a" || inPorts[1].name != "b")
             {
                 return fail("GraphView input port ordering mismatch");
             }
             auto outPorts = view.outputPorts();
-            if (outPorts.size() != 1 || graphSymbols.text(outPorts[0].name) != "out")
+            if (outPorts.size() != 1 || outPorts[0].name != "out")
             {
                 return fail("GraphView output port ordering mismatch");
             }
@@ -763,6 +766,47 @@ int main()
             if (assignOperands.size() != 1 || assignOperands[0] != vA)
             {
                 return fail("GraphBuilder eraseOp replacement did not update uses");
+            }
+        }
+
+        {
+            Graph &symbolGraph = netlist.createGraph("symbol_checks");
+            SymbolId sym = symbolGraph.internSymbol("dup_symbol");
+            ValueId val = symbolGraph.createValue(sym, 1, false);
+            (void)val;
+
+            if (symbolGraph.internSymbol("dup_symbol").valid())
+            {
+                return fail("internSymbol should return invalid for bound symbol");
+            }
+            if (!symbolGraph.lookupSymbol("dup_symbol").valid())
+            {
+                return fail("lookupSymbol should resolve existing symbol");
+            }
+
+            bool threwInvalid = expectThrows([&]
+                                             { symbolGraph.createValue(SymbolId::invalid(), 1, false); });
+            if (!threwInvalid)
+            {
+                return fail("Expected createValue to throw on invalid SymbolId");
+            }
+
+            bool threwConflict = expectThrows([&]
+                                              { symbolGraph.createOperation(OperationKind::kAdd, sym); });
+            if (!threwConflict)
+            {
+                return fail("Expected createOperation to throw on bound SymbolId");
+            }
+
+            ValueId portValue = symbolGraph.createValue(symbolGraph.internSymbol("port_value"), 1, false);
+            symbolGraph.bindInputPort("port_only", portValue);
+            if (symbolGraph.lookupSymbol("port_only").valid())
+            {
+                return fail("Port name should not be interned into symbol table");
+            }
+            if (symbolGraph.findValue("port_only").valid())
+            {
+                return fail("Port name should not resolve as a value symbol");
             }
         }
 

@@ -80,11 +80,11 @@ bool hasRegisterReadOutput(const wolvrix::lib::grh::Graph &graph)
 {
     for (const auto &port : graph.outputPorts())
     {
-        if (!port.name.valid())
+        if (port.name.empty())
         {
             continue;
         }
-        const std::string name = std::string(graph.symbolText(port.name));
+        const std::string &name = port.name;
         if (!startsWith(name, "__xmr_r_"))
         {
             continue;

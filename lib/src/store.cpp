@@ -798,15 +798,24 @@ namespace wolvrix::lib::store
             }
             for (const auto &port : graph.inputPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Input port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Input port name is empty during emit");
+                }
             }
             for (const auto &port : graph.outputPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Output port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Output port name is empty during emit");
+                }
             }
             for (const auto &port : graph.inoutPorts())
             {
-                (void)graphSymbolRequired(graph, port.name, "Inout port");
+                if (port.name.empty())
+                {
+                    throw std::runtime_error("Inout port name is empty during emit");
+                }
             }
         }
 
@@ -1112,7 +1121,7 @@ namespace wolvrix::lib::store
                 }
                 appendNewlineAndIndent(out, indent);
                 writePortInline(out,
-                                graphSymbolRequired(graph, port.name, "Port name"),
+                                port.name,
                                 valueSymbolRequired(graph.getValue(port.value)),
                                 mode);
                 first = false;
@@ -1143,7 +1152,13 @@ namespace wolvrix::lib::store
                 writeInlineObject(out, mode, [&](auto &&prop)
                                   {
                                       prop("name", [&]
-                                           { appendQuotedString(out, graphSymbolRequired(graph, port.name, "Inout port name")); });
+                                           {
+                                               if (port.name.empty())
+                                               {
+                                                   throw std::runtime_error("Inout port name is empty during emit");
+                                               }
+                                               appendQuotedString(out, port.name);
+                                           });
                                       prop("in", [&]
                                            { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.in))); });
                                       prop("out", [&]

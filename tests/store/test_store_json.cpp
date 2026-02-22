@@ -34,10 +34,10 @@ namespace
         Graph &graph = netlist.createGraph("demo");
 
         ValueId in = graph.createValue(graph.internSymbol("in"), 8, false);
-        graph.bindInputPort(graph.internSymbol("in"), in);
+        graph.bindInputPort("in", in);
 
         ValueId out = graph.createValue(graph.internSymbol("out"), 8, false);
-        graph.bindOutputPort(graph.internSymbol("out"), out);
+        graph.bindOutputPort("out", out);
 
         OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(add, in);

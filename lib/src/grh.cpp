@@ -109,9 +109,9 @@ namespace wolvrix::lib::grh
             return {};
         }
 
-        ValueId findPortValue(std::span<const Port> ports, SymbolId name) noexcept
+        ValueId findPortValue(std::span<const Port> ports, std::string_view name) noexcept
         {
-            if (!name.valid())
+            if (name.empty())
             {
                 return ValueId::invalid();
             }
@@ -123,6 +123,143 @@ namespace wolvrix::lib::grh
                 }
             }
             return ValueId::invalid();
+        }
+
+        void cloneGraphContents(const Graph &source, Graph &clone)
+        {
+            std::unordered_map<uint32_t, SymbolId> symbolMap;
+            symbolMap.reserve(source.values().size() + source.operations().size());
+
+            auto mapSymbol = [&](SymbolId sym) -> SymbolId {
+                if (!sym.valid())
+                {
+                    return SymbolId::invalid();
+                }
+                auto it = symbolMap.find(sym.value);
+                if (it != symbolMap.end())
+                {
+                    return it->second;
+                }
+                std::string_view text = source.symbolText(sym);
+                if (text.empty())
+                {
+                    throw std::runtime_error("Source symbol text is empty during clone");
+                }
+                SymbolId cloned = clone.lookupSymbol(text);
+                if (!cloned.valid())
+                {
+                    cloned = clone.internSymbol(text);
+                }
+                if (!cloned.valid())
+                {
+                    throw std::runtime_error("Failed to clone symbol: " + std::string(text));
+                }
+                symbolMap.emplace(sym.value, cloned);
+                return cloned;
+            };
+
+            std::unordered_map<ValueId, ValueId, ValueIdHash> valueMap;
+            valueMap.reserve(source.values().size());
+            for (const auto srcValueId : source.values())
+            {
+                const Value srcValue = source.getValue(srcValueId);
+                SymbolId dstSym = mapSymbol(srcValue.symbol());
+                ValueId dstValue = clone.createValue(dstSym,
+                                                     srcValue.width(),
+                                                     srcValue.isSigned(),
+                                                     srcValue.type());
+                if (srcValue.srcLoc())
+                {
+                    clone.setValueSrcLoc(dstValue, *srcValue.srcLoc());
+                }
+                valueMap.emplace(srcValueId, dstValue);
+            }
+
+            for (const auto srcOpId : source.operations())
+            {
+                const Operation srcOp = source.getOperation(srcOpId);
+                SymbolId dstSym = mapSymbol(srcOp.symbol());
+                OperationId dstOp = clone.createOperation(srcOp.kind(), dstSym);
+                for (const auto &attr : srcOp.attrs())
+                {
+                    clone.setAttr(dstOp, attr.key, attr.value);
+                }
+                for (const auto srcOperand : srcOp.operands())
+                {
+                    auto it = valueMap.find(srcOperand);
+                    if (it == valueMap.end())
+                    {
+                        throw std::runtime_error("Missing operand during graph clone");
+                    }
+                    clone.addOperand(dstOp, it->second);
+                }
+                for (const auto srcResult : srcOp.results())
+                {
+                    auto it = valueMap.find(srcResult);
+                    if (it == valueMap.end())
+                    {
+                        throw std::runtime_error("Missing result during graph clone");
+                    }
+                    clone.addResult(dstOp, it->second);
+                }
+                if (srcOp.srcLoc())
+                {
+                    clone.setOpSrcLoc(dstOp, *srcOp.srcLoc());
+                }
+            }
+
+            for (const auto &port : source.inputPorts())
+            {
+                auto it = valueMap.find(port.value);
+                if (it == valueMap.end())
+                {
+                    throw std::runtime_error("Missing input port value during graph clone");
+                }
+                clone.bindInputPort(port.name, it->second);
+            }
+            for (const auto &port : source.outputPorts())
+            {
+                auto it = valueMap.find(port.value);
+                if (it == valueMap.end())
+                {
+                    throw std::runtime_error("Missing output port value during graph clone");
+                }
+                clone.bindOutputPort(port.name, it->second);
+            }
+            for (const auto &port : source.inoutPorts())
+            {
+                auto itIn = valueMap.find(port.in);
+                auto itOut = valueMap.find(port.out);
+                auto itOe = valueMap.find(port.oe);
+                if (itIn == valueMap.end() || itOut == valueMap.end() || itOe == valueMap.end())
+                {
+                    throw std::runtime_error("Missing inout port value during graph clone");
+                }
+                clone.bindInoutPort(port.name, itIn->second, itOut->second, itOe->second);
+            }
+
+            for (const auto srcSym : source.declaredSymbols())
+            {
+                if (!srcSym.valid())
+                {
+                    continue;
+                }
+                std::string_view text = source.symbolText(srcSym);
+                if (text.empty())
+                {
+                    throw std::runtime_error("Declared symbol text is empty during clone");
+                }
+                SymbolId dstSym = clone.lookupSymbol(text);
+                if (!dstSym.valid())
+                {
+                    dstSym = clone.internSymbol(text);
+                }
+                if (!dstSym.valid())
+                {
+                    throw std::runtime_error("Failed to clone declared symbol: " + std::string(text));
+                }
+                clone.addDeclaredSymbol(dstSym);
+            }
         }
     } // namespace
 
@@ -224,9 +361,10 @@ namespace wolvrix::lib::grh
 
     SymbolId SymbolTable::intern(std::string_view text)
     {
-        if (symbolsByText_.find(text) != symbolsByText_.end())
+        auto it = symbolsByText_.find(text);
+        if (it != symbolsByText_.end())
         {
-            return SymbolId::invalid();
+            return it->second;
         }
 
         SymbolId id;
@@ -727,7 +865,10 @@ namespace wolvrix::lib::grh
 
         for (const auto &port : builder.inputPorts_)
         {
-            builder.validateSymbol(port.name, "Input port");
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Input port name is empty");
+            }
             port.value.assertGraph(view.graphId_);
             require(port.value.generation == 0, "GraphView input port value generation must be zero");
             if (port.value.index == 0 || port.value.index > valueCount)
@@ -737,7 +878,10 @@ namespace wolvrix::lib::grh
         }
         for (const auto &port : builder.outputPorts_)
         {
-            builder.validateSymbol(port.name, "Output port");
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Output port name is empty");
+            }
             port.value.assertGraph(view.graphId_);
             require(port.value.generation == 0, "GraphView output port value generation must be zero");
             if (port.value.index == 0 || port.value.index > valueCount)
@@ -747,7 +891,10 @@ namespace wolvrix::lib::grh
         }
         for (const auto &port : builder.inoutPorts_)
         {
-            builder.validateSymbol(port.name, "Inout port");
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Inout port name is empty");
+            }
             port.in.assertGraph(view.graphId_);
             port.out.assertGraph(view.graphId_);
             port.oe.assertGraph(view.graphId_);
@@ -1498,9 +1645,12 @@ namespace wolvrix::lib::grh
         return true;
     }
 
-    void GraphBuilder::bindPort(std::vector<Port> &ports, SymbolId name, ValueId value, std::string_view context)
+    void GraphBuilder::bindPort(std::vector<Port> &ports, std::string_view name, ValueId value, std::string_view context)
     {
-        validateSymbol(name, context);
+        if (name.empty())
+        {
+            throw std::runtime_error(std::string(context) + " name is empty");
+        }
         const std::size_t valIdx = valueIndex(value);
         if (!values_[valIdx].alive)
         {
@@ -1518,15 +1668,18 @@ namespace wolvrix::lib::grh
         }
         if (!updated)
         {
-            ports.push_back(Port{name, value});
+            ports.push_back(Port{std::string(name), value});
         }
         recomputePortFlags();
     }
 
-    void GraphBuilder::bindInoutPort(std::vector<InoutPort> &ports, SymbolId name, ValueId in,
+    void GraphBuilder::bindInoutPort(std::vector<InoutPort> &ports, std::string_view name, ValueId in,
                                      ValueId out, ValueId oe, std::string_view context)
     {
-        validateSymbol(name, context);
+        if (name.empty())
+        {
+            throw std::runtime_error(std::string(context) + " name is empty");
+        }
         const std::size_t inIdx = valueIndex(in);
         const std::size_t outIdx = valueIndex(out);
         const std::size_t oeIdx = valueIndex(oe);
@@ -1548,24 +1701,75 @@ namespace wolvrix::lib::grh
         }
         if (!updated)
         {
-            ports.push_back(InoutPort{name, in, out, oe});
+            ports.push_back(InoutPort{std::string(name), in, out, oe});
         }
         recomputePortFlags();
     }
 
-    void GraphBuilder::bindInputPort(SymbolId name, ValueId value)
+    bool GraphBuilder::removePort(std::vector<Port> &ports, std::string_view name, std::string_view context)
+    {
+        if (name.empty())
+        {
+            throw std::runtime_error(std::string(context) + " name is empty");
+        }
+        for (auto it = ports.begin(); it != ports.end(); ++it)
+        {
+            if (it->name == name)
+            {
+                ports.erase(it);
+                recomputePortFlags();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool GraphBuilder::removeInoutPort(std::vector<InoutPort> &ports, std::string_view name, std::string_view context)
+    {
+        if (name.empty())
+        {
+            throw std::runtime_error(std::string(context) + " name is empty");
+        }
+        for (auto it = ports.begin(); it != ports.end(); ++it)
+        {
+            if (it->name == name)
+            {
+                ports.erase(it);
+                recomputePortFlags();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void GraphBuilder::bindInputPort(std::string_view name, ValueId value)
     {
         bindPort(inputPorts_, name, value, "Input port");
     }
 
-    void GraphBuilder::bindOutputPort(SymbolId name, ValueId value)
+    void GraphBuilder::bindOutputPort(std::string_view name, ValueId value)
     {
         bindPort(outputPorts_, name, value, "Output port");
     }
 
-    void GraphBuilder::bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe)
+    void GraphBuilder::bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe)
     {
         bindInoutPort(inoutPorts_, name, in, out, oe, "Inout port");
+    }
+
+    bool GraphBuilder::removeInputPort(std::string_view name)
+    {
+        return removePort(inputPorts_, name, "Input port");
+    }
+
+    bool GraphBuilder::removeOutputPort(std::string_view name)
+    {
+        return removePort(outputPorts_, name, "Output port");
+    }
+
+    bool GraphBuilder::removeInoutPort(std::string_view name)
+    {
+        return removeInoutPort(inoutPorts_, name, "Inout port");
     }
 
     void GraphBuilder::setAttr(OperationId op, std::string_view key, AttributeValue value)
@@ -1763,18 +1967,10 @@ namespace wolvrix::lib::grh
         };
 
         auto portLess = [&](const Port &lhs, const Port &rhs) {
-            if (symbols_)
-            {
-                return symbols_->text(lhs.name) < symbols_->text(rhs.name);
-            }
-            return lhs.name.value < rhs.name.value;
+            return lhs.name < rhs.name;
         };
         auto inoutPortLess = [&](const InoutPort &lhs, const InoutPort &rhs) {
-            if (symbols_)
-            {
-                return symbols_->text(lhs.name) < symbols_->text(rhs.name);
-            }
-            return lhs.name.value < rhs.name.value;
+            return lhs.name < rhs.name;
         };
 
         auto bindViewSymbol = [&](SymbolId sym, GraphView::SymbolKind kind, uint32_t index, std::string_view context) {
@@ -2562,9 +2758,14 @@ namespace wolvrix::lib::grh
 
     SymbolId Graph::internSymbol(std::string_view text)
     {
-        if (symbols_.contains(text))
+        SymbolId existing = symbols_.lookup(text);
+        if (existing.valid())
         {
-            return symbols_.lookup(text);
+            if (findValue(existing).valid() || findOperation(existing).valid())
+            {
+                return SymbolId::invalid();
+            }
+            return existing;
         }
         return symbols_.intern(text);
     }
@@ -2581,6 +2782,44 @@ namespace wolvrix::lib::grh
             return std::string_view{};
         }
         return symbols_.text(id);
+    }
+
+    SymbolId Graph::makeInternalOpSym()
+    {
+        std::string base = symbol_utils::makeInternalBase("op");
+        for (;;)
+        {
+            std::string candidate = base;
+            candidate.push_back('_');
+            candidate.append(std::to_string(nextInternalOpSym_++));
+            if (!symbols_.contains(candidate))
+            {
+                SymbolId sym = internSymbol(candidate);
+                if (sym.valid())
+                {
+                    return sym;
+                }
+            }
+        }
+    }
+
+    SymbolId Graph::makeInternalValSym()
+    {
+        std::string base = symbol_utils::makeInternalBase("val");
+        for (;;)
+        {
+            std::string candidate = base;
+            candidate.push_back('_');
+            candidate.append(std::to_string(nextInternalValSym_++));
+            if (!symbols_.contains(candidate))
+            {
+                SymbolId sym = internSymbol(candidate);
+                if (sym.valid())
+                {
+                    return sym;
+                }
+            }
+        }
     }
 
     void Graph::addDeclaredSymbol(SymbolId sym)
@@ -2739,6 +2978,11 @@ namespace wolvrix::lib::grh
         return id;
     }
 
+    ValueId Graph::createValue(int32_t width, bool isSigned, ValueType type)
+    {
+        return createValue(makeInternalValSym(), width, isSigned, type);
+    }
+
     OperationId Graph::createOperation(OperationKind kind, SymbolId symbol)
     {
         GraphBuilder &builder = ensureBuilder();
@@ -2749,6 +2993,11 @@ namespace wolvrix::lib::grh
             operationsCache_.push_back(id);
         }
         return id;
+    }
+
+    OperationId Graph::createOperation(OperationKind kind)
+    {
+        return createOperation(kind, makeInternalOpSym());
     }
 
     ValueId Graph::findValue(SymbolId symbol) const noexcept
@@ -2831,7 +3080,7 @@ namespace wolvrix::lib::grh
         return operationFromView(id);
     }
 
-    void Graph::bindInputPort(SymbolId name, ValueId value)
+    void Graph::bindInputPort(std::string_view name, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
         builder.bindInputPort(name, value);
@@ -2843,7 +3092,7 @@ namespace wolvrix::lib::grh
         }
     }
 
-    void Graph::bindOutputPort(SymbolId name, ValueId value)
+    void Graph::bindOutputPort(std::string_view name, ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
         builder.bindOutputPort(name, value);
@@ -2855,7 +3104,7 @@ namespace wolvrix::lib::grh
         }
     }
 
-    void Graph::bindInoutPort(SymbolId name, ValueId in, ValueId out, ValueId oe)
+    void Graph::bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe)
     {
         GraphBuilder &builder = ensureBuilder();
         builder.bindInoutPort(name, in, out, oe);
@@ -2867,7 +3116,43 @@ namespace wolvrix::lib::grh
         }
     }
 
-    ValueId Graph::inputPortValue(SymbolId name) const noexcept
+    bool Graph::removeInputPort(std::string_view name)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        bool removed = builder.removeInputPort(name);
+        if (removed && !portsCacheDirty_)
+        {
+            inputPortsCache_.clear();
+            inputPortsCache_ = builder.inputPorts_;
+        }
+        return removed;
+    }
+
+    bool Graph::removeOutputPort(std::string_view name)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        bool removed = builder.removeOutputPort(name);
+        if (removed && !portsCacheDirty_)
+        {
+            outputPortsCache_.clear();
+            outputPortsCache_ = builder.outputPorts_;
+        }
+        return removed;
+    }
+
+    bool Graph::removeInoutPort(std::string_view name)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        bool removed = builder.removeInoutPort(name);
+        if (removed && !portsCacheDirty_)
+        {
+            inoutPortsCache_.clear();
+            inoutPortsCache_ = builder.inoutPorts_;
+        }
+        return removed;
+    }
+
+    ValueId Graph::inputPortValue(std::string_view name) const noexcept
     {
         if (builder_)
         {
@@ -2882,7 +3167,7 @@ namespace wolvrix::lib::grh
         return findPortValue(view_->inputPorts(), name);
     }
 
-    ValueId Graph::outputPortValue(SymbolId name) const noexcept
+    ValueId Graph::outputPortValue(std::string_view name) const noexcept
     {
         if (builder_)
         {
@@ -3097,6 +3382,14 @@ namespace wolvrix::lib::grh
             }
             return text;
         };
+        auto requirePortName = [&](std::string_view name, std::string_view context) -> std::string_view
+        {
+            if (name.empty())
+            {
+                throw std::runtime_error(std::string(context) + " name is empty");
+            }
+            return name;
+        };
 
         writer.startObject();
         writer.writeProperty("symbol");
@@ -3168,7 +3461,7 @@ namespace wolvrix::lib::grh
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(requireSymbolText(port.name, "Port"));
+            writer.writeValue(requirePortName(port.name, "Input port"));
             writer.writeProperty("val");
             Value value = getValue(port.value);
             writer.writeValue(requireSymbolText(value.symbol(), "Value"));
@@ -3182,7 +3475,7 @@ namespace wolvrix::lib::grh
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(requireSymbolText(port.name, "Port"));
+            writer.writeValue(requirePortName(port.name, "Output port"));
             writer.writeProperty("val");
             Value value = getValue(port.value);
             writer.writeValue(requireSymbolText(value.symbol(), "Value"));
@@ -3196,7 +3489,7 @@ namespace wolvrix::lib::grh
         {
             writer.startObject();
             writer.writeProperty("name");
-            writer.writeValue(requireSymbolText(port.name, "Port"));
+            writer.writeValue(requirePortName(port.name, "Inout port"));
             writer.writeProperty("in");
             writer.writeValue(requireSymbolText(getValue(port.in).symbol(), "Value"));
             writer.writeProperty("out");
@@ -3518,6 +3811,87 @@ namespace wolvrix::lib::grh
         return addGraphInternal(std::move(instance));
     }
 
+    Graph &Netlist::cloneGraph(std::string_view sourceName, std::string newName)
+    {
+        Graph *source = findGraph(sourceName);
+        if (!source)
+        {
+            throw std::runtime_error("Source graph not found: " + std::string(sourceName));
+        }
+        if (newName.empty())
+        {
+            throw std::invalid_argument("Graph symbol must not be empty");
+        }
+        if (graphs_.contains(newName))
+        {
+            throw std::runtime_error("Duplicated graph symbol: " + newName);
+        }
+
+        SymbolId graphSymbol = netlistSymbols_.contains(newName)
+                                   ? netlistSymbols_.lookup(newName)
+                                   : netlistSymbols_.intern(newName);
+        GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
+        auto instance = std::make_unique<Graph>(*this, std::move(newName), graphId);
+        Graph &clone = addGraphInternal(std::move(instance));
+        cloneGraphContents(*source, clone);
+
+        return clone;
+    }
+
+    Netlist Netlist::clone() const
+    {
+        Netlist cloned;
+        for (const auto &name : graphOrder_)
+        {
+            const Graph *source = findGraph(name);
+            if (!source)
+            {
+                throw std::runtime_error("Graph not found during netlist clone: " + name);
+            }
+            Graph &dest = cloned.createGraph(name);
+            cloneGraphContents(*source, dest);
+        }
+
+        for (const auto &name : graphOrder_)
+        {
+            Graph *dest = cloned.findGraph(name);
+            if (!dest)
+            {
+                throw std::runtime_error("Graph missing during netlist clone alias copy: " + name);
+            }
+            for (const auto &alias : aliasesForGraph(name))
+            {
+                cloned.registerGraphAlias(alias, *dest);
+            }
+        }
+
+        for (const auto &name : topGraphs_)
+        {
+            cloned.markAsTop(name);
+        }
+
+        for (const auto sym : declaredSymbols_)
+        {
+            if (!sym.valid())
+            {
+                continue;
+            }
+            std::string_view text = symbolText(sym);
+            if (text.empty())
+            {
+                throw std::runtime_error("Declared symbol text is empty during netlist clone");
+            }
+            SymbolId dstSym = cloned.internSymbol(text);
+            if (!dstSym.valid())
+            {
+                throw std::runtime_error("Failed to clone netlist declared symbol: " + std::string(text));
+            }
+            cloned.addDeclaredSymbol(dstSym);
+        }
+
+        return cloned;
+    }
+
     Graph *Netlist::findGraph(std::string_view symbol) noexcept
     {
         std::string key(symbol);
@@ -3554,10 +3928,6 @@ namespace wolvrix::lib::grh
 
     SymbolId Netlist::internSymbol(std::string_view text)
     {
-        if (netlistSymbols_.contains(text))
-        {
-            return netlistSymbols_.lookup(text);
-        }
         return netlistSymbols_.intern(text);
     }
 

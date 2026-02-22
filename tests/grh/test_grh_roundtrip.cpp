@@ -235,9 +235,6 @@ int main()
         grh_ir::GraphSymbolTable graphSymbols;
         grh_ir::GraphBuilder builder(graphSymbols);
 
-        auto symPortA = graphSymbols.intern("in_a");
-        auto symPortB = graphSymbols.intern("in_b");
-        auto symPortOut = graphSymbols.intern("out");
         auto symA = graphSymbols.intern("a");
         auto symB = graphSymbols.intern("b");
         auto symTmp = graphSymbols.intern("tmp");
@@ -259,9 +256,9 @@ int main()
         builder.addOperand(opAssign, vTmp);
         builder.addResult(opAssign, vOut);
 
-        builder.bindInputPort(symPortA, vA);
-        builder.bindInputPort(symPortB, vB);
-        builder.bindOutputPort(symPortOut, vOut);
+        builder.bindInputPort("in_a", vA);
+        builder.bindInputPort("in_b", vB);
+        builder.bindOutputPort("out", vOut);
 
         builder.setAttr(opAdd, "delay", AttributeValue(int64_t(3)));
         builder.setAttr(opAdd, "label", AttributeValue(std::string("fast")));

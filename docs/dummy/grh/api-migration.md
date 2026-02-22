@@ -34,7 +34,7 @@ This document captures the current grh API shape so follow-on migrations can upd
 ## Symbol Handling
 
 - Graph-local names use `ir::GraphSymbolTable`.
-- `Graph::internSymbol()` is an intern-or-lookup helper and returns the existing id on duplicates.
+- `Graph::internSymbol()` returns the existing id only when the symbol text is unbound; if the symbol is already bound to a value/op it returns invalid.
 - `Graph::symbolText(SymbolId)` returns the string for a symbol.
 - `Value`/`Operation` snapshots expose `symbolText()` for convenience.
 
@@ -119,7 +119,7 @@ graph.bindInputPort("in", value);
 After:
 
 ```cpp
-graph.bindInputPort(graph.internSymbol("in"), valueId);
+graph.bindInputPort("in", valueId);
 ```
 
 ## Read/Write Behavior

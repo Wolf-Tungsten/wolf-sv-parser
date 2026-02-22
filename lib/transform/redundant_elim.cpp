@@ -351,7 +351,7 @@ namespace wolvrix::lib::transform
                 return;
             }
 
-            std::vector<wolvrix::lib::grh::SymbolId> outputPortsToUpdate;
+            std::vector<std::string> outputPortsToUpdate;
             for (const auto &port : graph.outputPorts())
             {
                 if (port.value == from)
@@ -359,7 +359,7 @@ namespace wolvrix::lib::transform
                     outputPortsToUpdate.push_back(port.name);
                 }
             }
-            for (const auto portName : outputPortsToUpdate)
+            for (const auto &portName : outputPortsToUpdate)
             {
                 try
                 {
@@ -811,12 +811,12 @@ namespace wolvrix::lib::transform
 
             for (const auto &port : graph.outputPorts())
             {
-                if (!port.name.valid() || !port.value.valid())
+                if (port.name.empty() || !port.value.valid())
                 {
                     continue;
                 }
                 wolvrix::lib::grh::Value value = graph.getValue(port.value);
-                if (value.symbol() == port.name)
+                if (value.symbolText() == port.name)
                 {
                     continue;
                 }
@@ -846,7 +846,16 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
-                graph.setValueSymbol(port.value, port.name);
+                wolvrix::lib::grh::SymbolId portSym = graph.lookupSymbol(port.name);
+                if (!portSym.valid())
+                {
+                    portSym = graph.internSymbol(port.name);
+                }
+                if (!portSym.valid())
+                {
+                    continue;
+                }
+                graph.setValueSymbol(port.value, portSym);
                 graphChanged = true;
             }
 

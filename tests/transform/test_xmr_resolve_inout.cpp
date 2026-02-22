@@ -54,9 +54,9 @@ int main()
     const auto childIoIn = child.createValue(child.internSymbol("io__in"), 1, false);
     const auto childIoOut = child.createValue(child.internSymbol("io__out"), 1, false);
     const auto childIoOe = child.createValue(child.internSymbol("io__oe"), 1, false);
-    child.bindInputPort(child.internSymbol("a"), childA);
-    child.bindOutputPort(child.internSymbol("y"), childY);
-    child.bindInoutPort(child.internSymbol("io"), childIoIn, childIoOut, childIoOe);
+    child.bindInputPort("a", childA);
+    child.bindOutputPort("y", childY);
+    child.bindInoutPort("io", childIoIn, childIoOut, childIoOe);
     child.createValue(child.internSymbol("leaf_r"), 1, false);
     child.createValue(child.internSymbol("leaf_w"), 1, false);
 

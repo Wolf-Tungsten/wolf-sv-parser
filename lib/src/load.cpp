@@ -730,7 +730,16 @@ namespace wolvrix::lib::load
                 {
                     throw std::runtime_error("Graph declared symbol is empty");
                 }
-                graph.addDeclaredSymbol(graph.internSymbol(name));
+                SymbolId sym = graph.lookupSymbol(name);
+                if (!sym.valid())
+                {
+                    sym = graph.internSymbol(name);
+                }
+                if (!sym.valid())
+                {
+                    throw std::runtime_error("Declared symbol is already bound to value/operation: " + name);
+                }
+                graph.addDeclaredSymbol(sym);
             }
 
             const auto valuesIt = graphObj.find("vals");
@@ -769,6 +778,10 @@ namespace wolvrix::lib::load
                     }
                 }
                 SymbolId valueSym = graph.internSymbol(symbol);
+                if (!valueSym.valid())
+                {
+                    throw std::runtime_error("Value symbol already bound to value/operation: " + symbol);
+                }
                 ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned, valueType);
                 valueBySymbol.emplace(symbol, valueId);
 
@@ -841,14 +854,13 @@ namespace wolvrix::lib::load
                         {
                             throw std::runtime_error("Port references unknown value: " + valueName);
                         }
-                        SymbolId portName = graph.internSymbol(portNameText);
                         if (isInput)
                         {
-                            graph.bindInputPort(portName, valueIt->second);
+                            graph.bindInputPort(portNameText, valueIt->second);
                         }
                         else
                         {
-                            graph.bindOutputPort(portName, valueIt->second);
+                            graph.bindOutputPort(portNameText, valueIt->second);
                         }
                     }
                 };
@@ -891,8 +903,7 @@ namespace wolvrix::lib::load
                         {
                             throw std::runtime_error("Inout port references unknown value");
                         }
-                        SymbolId portName = graph.internSymbol(portNameText);
-                        graph.bindInoutPort(portName, inIt->second, outIt->second, oeIt->second);
+                        graph.bindInoutPort(portNameText, inIt->second, outIt->second, oeIt->second);
                     }
                 }
             }
@@ -1014,6 +1025,10 @@ namespace wolvrix::lib::load
                         throw std::runtime_error("Operation symbol is empty");
                     }
                     SymbolId opSym = graph.internSymbol(opSymbol);
+                    if (!opSym.valid())
+                    {
+                        throw std::runtime_error("Operation symbol already bound to value/operation: " + opSymbol);
+                    }
                     OperationId opId = graph.createOperation(*kind, opSym);
 
                     auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>

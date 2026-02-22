@@ -54,12 +54,12 @@ Netlist buildNetlist()
     const auto latchEn = graph.createValue(graph.internSymbol("latch_en"), 1, false);
     const auto latchData = graph.createValue(graph.internSymbol("latch_data"), 4, false);
 
-    graph.bindInputPort(graph.internSymbol("clk"), clk);
-    graph.bindInputPort(graph.internSymbol("en"), en);
-    graph.bindInputPort(graph.internSymbol("data"), data);
-    graph.bindInputPort(graph.internSymbol("data_mask"), dataMask);
-    graph.bindInputPort(graph.internSymbol("latch_en"), latchEn);
-    graph.bindInputPort(graph.internSymbol("latch_data"), latchData);
+    graph.bindInputPort("clk", clk);
+    graph.bindInputPort("en", en);
+    graph.bindInputPort("data", data);
+    graph.bindInputPort("data_mask", dataMask);
+    graph.bindInputPort("latch_en", latchEn);
+    graph.bindInputPort("latch_data", latchData);
 
     const auto fullMask = addConstant(graph, "mask_full", 8, "8'hFF");
     const auto halfMask = addConstant(graph, "mask_half", 8, "8'h0F");

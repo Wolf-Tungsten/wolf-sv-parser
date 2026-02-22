@@ -88,7 +88,7 @@ int main()
         graph.addResult(add2, finalSum);
 
         wolvrix::lib::grh::ValueId out = graph.createValue(graph.internSymbol("out"), 4, false);
-        graph.bindOutputPort(graph.internSymbol("out"), out);
+        graph.bindOutputPort("out", out);
         wolvrix::lib::grh::OperationId assignOut = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("assign1"));
         graph.addOperand(assignOut, finalSum);
         graph.addResult(assignOut, out);
@@ -120,7 +120,7 @@ int main()
         {
             return fail("assign1 should be removed after folding");
         }
-        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue("out");
         if (!outVal.valid())
         {
             return fail("Output port was not rewired to a constant");
@@ -228,7 +228,7 @@ int main()
         graph.setAttr(sys, "hasSideEffects", false);
 
         wolvrix::lib::grh::ValueId out = graph.createValue(graph.internSymbol("out"), 32, false);
-        graph.bindOutputPort(graph.internSymbol("out"), out);
+        graph.bindOutputPort("out", out);
         wolvrix::lib::grh::OperationId assign = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign,
                                                             graph.internSymbol("assign_out"));
         graph.addOperand(assign, result);
@@ -260,7 +260,7 @@ int main()
             return fail("kSystemFunction $clog2 op should be removed after folding");
         }
 
-        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue(graph.internSymbol("out"));
+        wolvrix::lib::grh::ValueId outVal = graph.outputPortValue("out");
         if (!outVal.valid())
         {
             return fail("Output port missing after $clog2 folding");

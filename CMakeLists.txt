@@ -128,6 +128,18 @@ target_link_libraries(grh-symbol-utils-tests
 
 register_test_exe(grh-symbol-utils-tests)
 
+# grh clone tests
+add_executable(grh-clone-tests
+    tests/grh/test_grh_clone.cpp
+)
+
+target_link_libraries(grh-clone-tests
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(grh-clone-tests)
+
 # emit base
 add_executable(emit-base
     tests/emit/test_emit_base.cpp

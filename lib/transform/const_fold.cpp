@@ -5,7 +5,6 @@
 #include "slang/numeric/SVInt.h"
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -534,21 +533,6 @@ namespace wolvrix::lib::transform
             return results;
         }
 
-        std::string makeInternalSymbol(const wolvrix::lib::grh::Graph &graph,
-                                       std::string_view kind,
-                                       std::atomic<int> &counter)
-        {
-            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind);
-            int id = counter.fetch_add(1, std::memory_order_relaxed);
-            std::string candidate = base + "_" + std::to_string(id);
-            while (graph.findOperation(candidate).valid() || graph.findValue(candidate).valid())
-            {
-                id = counter.fetch_add(1, std::memory_order_relaxed);
-                candidate = base + "_" + std::to_string(id);
-            }
-            return candidate;
-        }
-
         std::string formatConstLiteral(const slang::SVInt &value)
         {
             const slang::bitwidth_t width = value.getBitWidth();
@@ -567,8 +551,7 @@ namespace wolvrix::lib::transform
         wolvrix::lib::grh::ValueId createConstant(wolvrix::lib::grh::Graph &graph, ConstantPool &pool,
                                         const wolvrix::lib::grh::Operation &sourceOp, std::size_t resultIndex,
                                         const wolvrix::lib::grh::Value &resultValue,
-                                        const slang::SVInt &value,
-                                        std::atomic<int> &symbolCounter)
+                                        const slang::SVInt &value)
         {
             ConstantKey key = makeConstantKey(resultValue, value);
             if (auto it = pool.find(key); it != pool.end())
@@ -576,11 +559,8 @@ namespace wolvrix::lib::transform
                 return it->second;
             }
 
-            std::string valueName = makeInternalSymbol(graph, "val", symbolCounter);
-            std::string opName = makeInternalSymbol(graph, "op", symbolCounter);
-
-            const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
-            const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+            const wolvrix::lib::grh::SymbolId valueSym = graph.makeInternalValSym();
+            const wolvrix::lib::grh::SymbolId opSym = graph.makeInternalOpSym();
             int32_t width = resultValue.width();
             if (width <= 0)
             {
@@ -612,7 +592,7 @@ namespace wolvrix::lib::transform
                 onError(std::string("Failed to replace operands for constant folding: ") + ex.what());
             }
 
-            std::vector<wolvrix::lib::grh::SymbolId> outputPortsToUpdate;
+            std::vector<std::string> outputPortsToUpdate;
             for (const auto &port : graph.outputPorts())
             {
                 if (port.value == oldValue)
@@ -621,7 +601,7 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            for (const auto portName : outputPortsToUpdate)
+            for (const auto &portName : outputPortsToUpdate)
             {
                 try
                 {
@@ -766,7 +746,7 @@ namespace wolvrix::lib::transform
                         continue;
                     }
                     const wolvrix::lib::grh::Value resValue = ctx.graph.getValue(resId);
-                    wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, idx, resValue, sv, ctx.symbolCounter);
+                    wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, idx, resValue, sv);
                     replaceUsers(ctx.graph, resId, newValue, [&](const std::string &msg)
                                  { this->error(ctx.graph, op, msg); ctx.failed = true; });
                     ctx.constants[newValue] = ConstantValue{sv, sv.hasUnknown()};
@@ -1060,8 +1040,8 @@ namespace wolvrix::lib::transform
                         slang::SVInt trueValue(1, 1, false);
                         auto onError = [&](const std::string &msg)
                         { this->error(ctx.graph, op, msg); ctx.failed = true; };
-                        wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0, 
-                            ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                        wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0,
+                                                                              ctx.graph.getValue(resultId), trueValue);
                         replaceUsers(ctx.graph, resultId, newValue, onError);
                         ctx.constants[newValue] = ConstantValue{trueValue, false};
                         opsToErase.push_back(opId);
@@ -1104,7 +1084,7 @@ namespace wolvrix::lib::transform
                             auto onError = [&](const std::string &msg)
                             { this->error(ctx.graph, op, msg); ctx.failed = true; };
                             wolvrix::lib::grh::ValueId newValue = createConstant(ctx.graph, *ctx.pool, op, 0,
-                                ctx.graph.getValue(resultId), trueValue, ctx.symbolCounter);
+                                                                                  ctx.graph.getValue(resultId), trueValue);
                             replaceUsers(ctx.graph, resultId, newValue, onError);
                             ctx.constants[newValue] = ConstantValue{trueValue, false};
                             opsToErase.push_back(opId);
@@ -1188,7 +1168,6 @@ namespace wolvrix::lib::transform
                     graph,
                     constants,  // Shared across graphs (constants can reference values from other graphs)
                     std::make_unique<ConstantPool>(),  // Fresh constant pool for this graph
-                    {},         // Fresh symbol counter
                     {},         // Fresh folded operations set
                     failed
                 };

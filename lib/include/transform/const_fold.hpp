@@ -4,7 +4,6 @@
 #include "grh.hpp"
 #include "transform.hpp"
 
-#include <atomic>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,7 +41,6 @@ namespace wolvrix::lib::transform
             wolvrix::lib::grh::Graph &graph;
             ConstantStore &constants;  // Shared across graphs (values can reference constants from other graphs)
             std::unique_ptr<ConstantPool> pool;  // Per-graph constant pool for deduplication
-            std::atomic<int> symbolCounter{0};  // Per-graph counter for unique symbol generation
             std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> foldedOps;  // Per-graph folded operations
             bool &failed;
             std::size_t dedupedConstants = 0;
