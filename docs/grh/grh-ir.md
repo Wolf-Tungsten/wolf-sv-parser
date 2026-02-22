@@ -10,6 +10,15 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 - [4. Graph 详解](#4-graph-详解)
 - [5. Netlist 详解](#5-netlist-详解)
 - [6. Operation 分类参考](#6-operation-分类参考)
+  - [6.1 常量](#61-常量)
+  - [6.2 组合运算](#62-组合运算)
+  - [6.3 锁存器](#63-锁存器)
+  - [6.4 寄存器](#64-寄存器)
+  - [6.5 存储器](#65-存储器)
+  - [6.6 层次结构](#66-层次结构)
+  - [6.7 XMR](#67-xmr)
+  - [6.8 系统调用](#68-系统调用)
+  - [6.9 DPI](#69-dpi)
 
 ---
 
@@ -551,9 +560,13 @@ res[0] = constValue
 
 ---
 
-## 6.2 算术运算
+## 6.2 组合运算
 
-二元算术运算。四态语义：任一操作数位含 `X`/`Z` 时，结果为全 `X`。
+输出仅取决于当前输入的组合逻辑运算。
+
+### 6.2.1 算术运算
+
+四态语义：任一操作数位含 `X`/`Z` 时，结果为全 `X`。
 
 **operands**:
 - `oper[0]` (`L`): 左操作数
@@ -572,20 +585,17 @@ res[0] = constValue
 | `kDiv` | `oper[0] / oper[1]` | `L`（除数 0 行为由 SV 标准定义）|
 | `kMod` | `oper[0] % oper[1]` | `R`（除数 0 行为由 SV 标准定义）|
 
-## 6.3 位运算
+---
+
+### 6.2.2 位运算
 
 按位逻辑运算。四态语义：遵循 SV 四态真值表；`0`/`1` 优先确定，无法确定时返回 `X`。
 
-### 二元位运算（kAnd / kOr / kXor / kXnor）
+**二元位运算（kAnd / kOr / kXor / kXnor）**
 
-**operands**:
-- `oper[0]` (`L`): 左操作数
-- `oper[1]` (`R`): 右操作数
-
-**results**:
-- `res[0]`: 运算结果，位宽 `max(L, R)`（较短操作数按无符号扩展）
-
-**attrs**: 无
+- **operands**: `oper[0]` (`L`), `oper[1]` (`R`)
+- **results**: `res[0]`，位宽 `max(L, R)`
+- **attrs**: 无
 
 | 操作符 | 语义 |
 |--------|------|
@@ -594,24 +604,16 @@ res[0] = constValue
 | `kXor` | `oper[0] ^ oper[1]` |
 | `kXnor` | `oper[0] ~^ oper[1]` |
 
+**一元位运算（kNot）**
+
+- **operands**: `oper[0]`
+- **results**: `res[0]`，位宽 `width(oper[0])`
+- **attrs**: 无
+- **语义**: `res[0] = ~oper[0]`
+
 ---
 
-### 一元位运算（kNot）
-
-**operands**:
-- `oper[0]`: 操作数
-
-**results**:
-- `res[0]`: 运算结果，位宽 `width(oper[0])`
-
-**attrs**: 无
-
-**语义**:
-```
-res[0] = ~oper[0]
-```
-
-## 6.4 比较运算
+### 6.2.3 比较运算
 
 关系比较运算，结果均为 1-bit Logic。
 
@@ -637,46 +639,33 @@ res[0] = ~oper[0]
 | `kWildcardEq` | `oper[0] ==? oper[1]` | 任一操作数的 `X`/`Z` 视为通配符，结果恒为 `0`/`1` |
 | `kWildcardNe` | `oper[0] !=? oper[1]` | 任一操作数的 `X`/`Z` 视为通配符，结果恒为 `0`/`1` |
 
-## 6.5 逻辑运算
+---
+
+### 6.2.4 逻辑运算
 
 先将操作数规约为 1-bit 逻辑值 `{0,1,X}` 再计算，`X` 保持传播。
 
-### 二元逻辑运算（kLogicAnd / kLogicOr）
+**二元逻辑运算（kLogicAnd / kLogicOr）**
 
-**operands**:
-- `oper[0]` (`L`): 左操作数
-- `oper[1]` (`R`): 右操作数
-
-**results**:
-- `res[0]`: 运算结果，1-bit
-
-**attrs**: 无
+- **operands**: `oper[0]`, `oper[1]`
+- **results**: `res[0]`，1-bit
+- **attrs**: 无
 
 | 操作符 | 语义 |
 |--------|------|
 | `kLogicAnd` | `oper[0] && oper[1]` |
 | `kLogicOr` | `oper[0] \|\| oper[1]` |
 
----
+**一元逻辑运算（kLogicNot）**
 
-### 一元逻辑运算（kLogicNot）
-
-**operands**:
-- `oper[0]`: 操作数
-
-**results**:
-- `res[0]`: 运算结果，1-bit
-
-**attrs**: 无
-
-**语义**:
-```
-res[0] = !oper[0]
-```
+- **operands**: `oper[0]`
+- **results**: `res[0]`，1-bit
+- **attrs**: 无
+- **语义**: `res[0] = !oper[0]`
 
 ---
 
-## 6.6 规约运算
+### 6.2.5 规约运算
 
 对操作数所有位进行归约运算，结果为 1-bit。任一位含 `X`/`Z` 且无法确定结果时返回 `X`。
 
@@ -690,21 +679,21 @@ res[0] = !oper[0]
 
 | 操作符 | 语义 |
 |--------|------|
-| `kReduceAnd` | `&oper[0]`（全 1 为 1，有 0 为 0） |
-| `kReduceNand` | `~&oper[0]`（kReduceAnd 取反） |
-| `kReduceOr` | `\|oper[0]`（有 1 为 1，全 0 为 0） |
-| `kReduceNor` | `~\|oper[0]`（kReduceOr 取反） |
-| `kReduceXor` | `^oper[0]`（奇数个 1 为 1，偶数个 1 为 0） |
-| `kReduceXnor` | `~^oper[0]`（kReduceXor 取反） |
+| `kReduceAnd` | `&oper[0]` |
+| `kReduceNand` | `~&oper[0]` |
+| `kReduceOr` | `\|oper[0]` |
+| `kReduceNor` | `~\|oper[0]` |
+| `kReduceXor` | `^oper[0]` |
+| `kReduceXnor` | `~^oper[0]` |
 
 ---
 
-## 6.7 移位运算
+### 6.2.6 移位运算
 
 四态语义：任一操作数位含 `X`/`Z` 时，结果为全 `X`。
 
 **operands**:
-- `oper[0]` (`L`): 被移位操作数（位宽 `L`）
+- `oper[0]` (`L`): 被移位操作数
 - `oper[1]`: 移位位数（无符号解释）
 
 **results**:
@@ -714,46 +703,146 @@ res[0] = !oper[0]
 
 | 操作符 | 语义 |
 |--------|------|
-| `kShl` | `oper[0] << oper[1]`，逻辑左移，右侧补 0 |
-| `kLShr` | `oper[0] >> oper[1]`，逻辑右移，左侧补 0 |
-| `kAShr` | `oper[0] >>> oper[1]`，算术右移，左侧补符号位 |
+| `kShl` | `oper[0] << oper[1]`，逻辑左移 |
+| `kLShr` | `oper[0] >> oper[1]`，逻辑右移 |
+| `kAShr` | `oper[0] >>> oper[1]`，算术右移 |
 
-## 6.8 数据选择
+---
+
+### 6.2.7 数据选择（kMux）
+
+**operands**:
+- `oper[0]`: 选择条件（1-bit）
+- `oper[1]` (`W`): 真分支值
+- `oper[2]` (`W`): 假分支值
+
+**results**:
+- `res[0]`: 选择结果，位宽 `W`
+
+**attrs**: 无
+
+**语义**:
+```
+res[0] = oper[0] ? oper[1] : oper[2]
+```
+
+四态语义：
+- `oper[0] = 1` 时，`res[0] = oper[1]`
+- `oper[0] = 0` 时，`res[0] = oper[2]`
+- `oper[0] = X/Z` 时，逐位融合：`oper[1][i] == oper[2][i]` 则取该值，否则为 `X`
+
+---
+
+### 6.2.8 切片
+
+位/数组切片操作，用于从信号中提取部分位或数组元素。
+
+**kSliceStatic**（静态常量切片）
+
+**operands**:
+- `oper[0]`: 被截取信号（位宽 `W`）
+
+**results**:
+- `res[0]`: 截取结果，位宽 `sliceEnd - sliceStart + 1`
+
+**attrs**:
+- `sliceStart` (int64_t): 起始位（含），LSB=0
+- `sliceEnd` (int64_t): 结束位（含），要求 `sliceEnd >= sliceStart`
+
+**语义**:
+- 当 `sliceStart == sliceEnd` 时：`res[0] = oper[0][sliceStart]`（1-bit 位选择）
+- 当 `sliceStart < sliceEnd` 时：`res[0] = oper[0][sliceEnd : sliceStart]`（范围选择）
+
+---
+
+**kSliceDynamic**（动态偏移切片）
+
+**operands**:
+- `oper[0]`: 被截取信号（位宽 `W`）
+- `oper[1]`: 起始偏移（无符号解释）
+
+**results**:
+- `res[0]`: 截取结果，位宽 `sliceWidth`
+
+**attrs**:
+- `sliceWidth` (int64_t): 截取位宽，必须大于 0
+
+**语义**:
+- 当 `sliceWidth == 1` 时：`res[0] = oper[0][oper[1]]`（1-bit 位选择）
+- 当 `sliceWidth > 1` 时：`res[0] = oper[0][oper[1] +: sliceWidth]`（索引部分选择）
+
+---
+
+**kSliceArray**（数组元素访问）
+
+**operands**:
+- `oper[0]`: 扁平化数组信号（位宽 `W`）
+- `oper[1]`: 数组下标（无符号解释）
+
+**results**:
+- `res[0]`: 数组元素，位宽 `sliceWidth`
+
+**attrs**:
+- `sliceWidth` (int64_t): 单个元素位宽，必须整除 `W`
+
+**语义**:
+```
+res[0] = oper[0][oper[1] * sliceWidth +: sliceWidth]
+```
+
+**说明**: 多维数组访问通过 `kSliceArray` 级联实现
+
+---
+
+### 6.2.9 赋值与数据重组
+
+**kAssign**（连续赋值）
+
+- **operands**: `oper[0]`（输入信号，位宽 `W`）
+- **results**: `res[0]`，位宽 `W`
+- **attrs**: 无
+- **语义**: `res[0] = oper[0]`
+
+**kConcat**（位拼接）
+
+- **operands**: `oper[0]`, `oper[1]`, ..., `oper[N-1]`（待拼接信号）
+- **results**: `res[0]`，位宽 `sum(width(oper[i]))`
+- **attrs**: 无
+- **语义**: `res[0] = {oper[0], oper[1], ..., oper[N-1]}`
+- **说明**: `oper[0]` 在高位，`oper[N-1]` 在低位
+
+**kReplicate**（位复制）
+
+- **operands**: `oper[0]`（被复制信号，位宽 `W`）
+- **results**: `res[0]`，位宽 `W * rep`
+- **attrs**:
+  - `rep` (int64_t): 复制次数，必须大于 0
+- **语义**: `res[0] = {rep{oper[0]}}`
+
+## 6.3 锁存器
 
 （待整理）
 
-## 6.9 切片
+## 6.4 寄存器
 
 （待整理）
 
-## 6.10 赋值
+## 6.5 存储器
 
 （待整理）
 
-## 6.11 锁存器
+## 6.6 层次结构
 
 （待整理）
 
-## 6.12 寄存器
+## 6.7 XMR
 
 （待整理）
 
-## 6.13 存储器
+## 6.8 系统调用
 
 （待整理）
 
-## 6.14 层次结构
-
-（待整理）
-
-## 6.15 XMR
-
-（待整理）
-
-## 6.16 系统调用
-
-（待整理）
-
-## 6.17 DPI
+## 6.9 DPI
 
 （待整理）
