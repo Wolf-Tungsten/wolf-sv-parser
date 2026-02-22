@@ -821,7 +821,74 @@ res[0] = oper[0][oper[1] * sliceWidth +: sliceWidth]
 
 ## 6.3 锁存器
 
-（待整理）
+GRH IR 使用**声明 + ReadPort + WritePort**的 Port 模型建模锁存器。所有对锁存器的访问必须通过对应的 ReadPort/WritePort。
+
+### kLatch
+
+锁存器声明。Operation 的 symbol 作为锁存器名称。
+
+**operands**: 无
+
+**results**: 无
+
+**attrs**:
+- `width` (int64_t): 位宽
+- `isSigned` (bool): 是否有符号
+
+---
+
+### kLatchReadPort
+
+锁存器读端口。
+
+**operands**: 无
+
+**results**:
+- `res[0]`: 读出的锁存器值，位宽同目标 kLatch
+
+**attrs**:
+- `latchSymbol` (string): 指向目标 kLatch 的 symbol
+
+**语义**:
+```
+res[0] = <latchSymbol>
+```
+
+---
+
+### kLatchWritePort
+
+锁存器写端口。
+
+**operands**:
+- `oper[0]` (updateCond): 更新使能条件（1-bit），为 1 时允许更新
+- `oper[1]` (nextValue): 更新值（位宽同目标 kLatch），reset/enable 优先级需通过 `kMux` 在外部编码
+- `oper[2]` (mask): 逐位写掩码（位宽同目标 kLatch），`mask[i]=1` 时写入第 `i` 位
+
+**results**: 无
+
+**attrs**:
+- `latchSymbol` (string): 指向目标 kLatch 的 symbol
+
+**语义**:
+
+设目标 kLatch 位宽为 `W`。以 `updateCond` 非常量（有条件更新）为例：
+
+**Mask 全 1**：
+```sv
+always_latch
+    if (updateCond)
+        <latchSymbol> <= nextValue;
+```
+
+**Mask 为变量**：
+```sv
+always_latch
+    if (updateCond)
+        for (int i = 0; i < W; i++)
+            if (mask[i])
+                <latchSymbol>[i] <= nextValue[i];
+```
 
 ## 6.4 寄存器
 
