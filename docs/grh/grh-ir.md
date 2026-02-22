@@ -309,13 +309,306 @@ Operation 的核心特性：
 
 # 4. Graph 详解
 
-（待整理）
+## 4.1 Graph 是什么
+
+Graph 是 GRH IR 中**模块级别**的核心容器，对应一个 SystemVerilog 模块（`module`）。
+
+一个 Graph 包含：
+- **Operation 集合**：模块内的所有操作节点
+- **Value 集合**：模块内的所有数据流边（SSA 形式）
+- **端口声明**：与外部模块交互的接口定义
+- **符号表**：管理 Value 和 Operation 的符号名
+
+## 4.2 端口系统
+
+Graph 支持三种端口类型，对应 SystemVerilog 的端口方向：
+
+| 类型 | SystemVerilog | IR 表示 | 说明 |
+|------|---------------|---------|------|
+| **Input** | `input` | `Port{name, value}` | 外部输入到模块 |
+| **Output** | `output` | `Port{name, value}` | 模块输出到外部 |
+| **Inout** | `inout` | `InoutPort{name, in, out, oe}` | 双向端口，三态分解 |
+
+### 4.2.1 Input / Output 端口
+
+Input 和 Output 端口通过 **Value** 与 Graph 内部连接：
+
+- **Input**：外部驱动 Value，内部可以读取
+  - Value 的 `definingOp` 为 invalid（不由内部 Operation 定义）
+  - Value 标记为 `isInput = true`
+
+- **Output**：内部驱动 Value，外部可以读取  
+  - Value 由某个 Operation 的结果产生
+  - Value 标记为 `isOutput = true`
+
+### 4.2.2 Inout 端口的三态分解
+
+SystemVerilog 的 `inout` 在 GRH 中被分解为**三个信号**：
+
+| 信号 | 方向 | 说明 |
+|------|------|------|
+| `in` | Input | 外部输入到模块的数据 |
+| `out` | Output | 模块输出到外部的数据 |
+| `oe` | Input | 输出使能（Output Enable），控制三态门 |
+
+**示例**：GPIO Pin 控制器
+
+SystemVerilog 实现：
+```sv
+module gpio_pin (
+    inout  wire       pad,      // 物理引脚，双向
+    input  wire       dir,      // 方向控制：1=输出，0=输入
+    input  wire       drv_val,  // 输出驱动值
+    output wire       rd_val    // 读取到的输入值
+);
+    // 三态门控制
+    assign pad = dir ? drv_val : 1'bz;
+    assign rd_val = pad;
+endmodule
+```
+
+对应的 GRH 结构：
+
+```
+Graph "gpio_pin"
+│
+├── InoutPort "pad"
+│   ├── in:  Value pad_in      (1-bit)  ← 外部输入到模块
+│   ├── out: Value pad_out     (1-bit)  → 模块输出到外部
+│   └── oe:  Value pad_oe      (1-bit)  ← 输出使能
+│
+├── InputPort "dir" → Value dir         (1-bit)
+├── InputPort "drv_val" → Value drv_val (1-bit)
+├── OutputPort "rd_val" → Value rd_val  (1-bit)
+│
+├── Operation pad_out_assign (kAssign)
+│   ├── operands: [drv_val]
+│   └── result: pad_out
+│
+├── Operation pad_oe_assign (kAssign)
+│   ├── operands: [dir]
+│   └── result: pad_oe
+│
+└── Operation rd_val_assign (kAssign)
+    ├── operands: [pad_in]
+    └── result: rd_val
+```
+
+**信号流向说明**：
+- 当 `dir = 1`（输出模式）：`pad_oe = 1`，`pad_out = drv_val`，外部读取 `drv_val`
+- 当 `dir = 0`（输入模式）：`pad_oe = 0`，`pad_out` 无效，模块通过 `pad_in` 读取外部信号
+- `rd_val` 始终反映引脚当前状态（无论输入还是输出模式）
+
+这种分解使得三态逻辑的语义更加明确，便于后续的分析和综合。
+
+## 4.3 符号系统（Symbol System）
+
+**符号（Symbol）**是 Graph 内用于**标识** Value 和 Operation 的字符串名称，可以理解为标识符（Identifier）。每个 Symbol 在 Graph 内通过 **Symbol Table**（符号表）进行管理。
+
+在 GRH IR 中：
+- 每个 **Value** 必须关联一个 Symbol（如信号名 `data_reg`）
+- 每个 **Operation** 必须关联一个 Symbol（如操作名 `add_op`）
+- **Symbol Table** 负责 Symbol 的分配、去重和查找
+
+Symbol 的作用：
+1. **可读性**：在调试和 emit 输出时显示有意义的名称
+2. **可查找性**：通过 Symbol 定位特定的 Value 或 Operation
+3. **调试映射**：关联回原始 SystemVerilog 源码中的标识符
+
+### 4.3.1 符号唯一性约束
+
+**关键约束**：同一 Graph 的 Symbol Table 内，所有 Symbol **必须唯一**，任意两个 Value、或任意两个 Operation、或 Value 与 Operation 之间都不能共享同一个 Symbol。
+
+示例（非法）：
+```
+Graph  // 错误！Symbol 冲突
+├── Value with Symbol "data"       // 第一个 "data"
+├── Value with Symbol "data"       // 错误：Value 之间 Symbol 重复
+├── Operation with Symbol "add"
+└── Operation with Symbol "add"    // 错误：Operation 之间 Symbol 重复
+```
+
+此外，Value 与 Operation 的 Symbol 也不能重复：
+```
+Graph  // 错误！Symbol 冲突
+├── Value with Symbol "foo"
+└── Operation with Symbol "foo"    // 错误：不能与 Value 的 Symbol 重复
+```
+
+### 4.3.2 声明符号（Declared Symbol）
+
+Graph 维护一个 **Declared Symbol** 列表，记录来自用户源码的显式声明标识符。
+
+**用途**：
+- 区分**用户声明的信号**（Declared Symbol）与工具生成的内部 Symbol
+- 在代码生成（emit）阶段优先保留用户命名的 Symbol
+- 死代码消除时保护声明但未使用的 Symbol（用于调试或保留接口）
+
+**示例**：
+```sv
+module example (
+    input  wire a,      // "a" 是 Declared Symbol
+    output wire b       // "b" 是 Declared Symbol
+);
+    wire temp;          // "temp" 是 Declared Symbol
+    assign b = a;
+endmodule
+```
+
+上述模块的 Declared Symbol 列表包含：`a`、`b`、`temp`
+
+即使 `temp` 未被使用，由于它是 Declared Symbol，工具可能会保留它用于调试或报告。
 
 ---
 
 # 5. Netlist 详解
 
-（待整理）
+## 5.1 Netlist 是什么
+
+Netlist 是 GRH IR 中**设计级别**的顶层容器，代表整个 SystemVerilog 设计（Design）。它是 Graph 的集合，负责：
+
+1. **管理所有模块**：容纳设计中的全部 Graph（模块）
+2. **标记顶层模块**：指定设计的入口点（顶层模块）
+3. **维护模块别名**：支持参数化模块的实例化映射
+4. **提供全局符号表**：跨模块的符号管理机制
+
+**层级关系**：
+```
+Netlist (Design)
+├── Graph "module_a" (模块 A)
+│   ├── Operation kInstance of "module_b"
+│   └── Operation kInstance of "module_c"
+├── Graph "module_b" (模块 B)
+└── Graph "module_c" (模块 C)
+```
+
+## 5.2 模块管理
+
+### 5.2.1 创建模块
+
+```cpp
+Netlist netlist;
+Graph& graph = netlist.createGraph("adder");  // 创建名为 "adder" 的模块
+```
+
+**创建流程**：
+1. 分配 `GraphId`（通过 `NetlistSymbolTable`）
+2. 创建 `Graph` 对象并初始化符号表
+3. 将 Graph 存入 `graphs_` 映射表
+4. 记录创建顺序到 `graphOrder_`
+
+### 5.2.2 查找模块
+
+```cpp
+Graph* g = netlist.findGraph("adder");  // 通过名称查找
+if (g) {
+    // 找到模块
+}
+```
+
+### 5.2.3 克隆模块
+
+```cpp
+// 克隆现有模块，创建新名称的副本
+Graph& cloned = netlist.cloneGraph("adder", "adder_copy");
+```
+
+**克隆特性**：
+- 深拷贝所有 Value、Operation 和端口
+- 保留原始模块的结构和连接关系
+- 符号表独立，不影响原模块
+
+### 5.2.4 遍历模块
+
+```cpp
+// 按创建顺序遍历
+for (const auto& [name, graphPtr] : netlist.graphs()) {
+    // 处理每个模块
+}
+
+// 获取有序列表
+const std::vector<std::string>& order = netlist.graphOrder();
+```
+
+## 5.3 顶层模块标记
+
+Netlist 支持标记一个或多个顶层模块（Top-Level Modules）：
+
+```cpp
+netlist.markAsTop("top");        // 标记为顶层
+netlist.unmarkAsTop("top");      // 取消顶层标记
+
+const std::vector<std::string>& tops = netlist.topGraphs();  // 获取所有顶层
+```
+
+**用途**：
+- 指定仿真/综合的入口点
+- 支持多顶层设计（如测试平台 + DUT）
+- 在 emit 阶段控制输出顺序
+
+## 5.4 模块别名机制
+
+Netlist 支持为 Graph 注册别名，用于**参数化模块实例化**：
+
+```cpp
+// 为 adder 模块注册别名 "adder_width8"
+Graph& adder = netlist.createGraph("adder");
+netlist.registerGraphAlias("adder_width8", adder);
+
+// 查找时别名等效于原名称
+Graph* g1 = netlist.findGraph("adder");        // 找到 adder
+Graph* g2 = netlist.findGraph("adder_width8"); // 同样找到 adder
+```
+
+**应用场景**：
+- SystemVerilog 参数化模块的不同参数实例
+- 同一模块在网表中的多个"视图"
+
+**获取别名**：
+```cpp
+std::vector<std::string> aliases = netlist.aliasesForGraph("adder");
+// 返回 ["adder_width8", ...]
+```
+
+## 5.5 符号表管理
+
+Netlist 使用两级符号表架构：
+
+| 符号表 | 作用域 | 用途 |
+|--------|--------|------|
+| `NetlistSymbolTable` | Netlist 级别 | 管理 Graph 名称、模块别名 |
+| `GraphSymbolTable` | Graph 级别 | 管理 Value 和 Operation 符号 |
+
+**NetlistSymbolTable 扩展功能**：
+- `allocateGraphId(symbol)`：为 Graph 分配唯一 ID
+- `lookupGraphId(symbol)`：通过符号查找 Graph ID
+- `symbolForGraph(graphId)`：通过 Graph ID 获取符号
+
+## 5.6 声明符号
+
+与 Graph 类似，Netlist 也维护**声明符号列表**：
+
+```cpp
+void addDeclaredSymbol(SymbolId sym);
+bool removeDeclaredSymbol(SymbolId sym);
+void clearDeclaredSymbols();
+bool isDeclaredSymbol(SymbolId sym) const;
+```
+
+用途：
+- 记录设计中显式声明的模块名称
+- 区分用户模块与工具生成的内部模块
+
+## 5.7 序列化与反序列化
+
+Netlist 支持从 JSON 字符串加载：
+
+```cpp
+// 从 JSON 反序列化
+Netlist netlist = Netlist::fromJsonString(jsonString);
+```
+
+**注意**：Netlist 本身不提供直接的 `toJson` 方法，而是通过 `Graph::writeJson()` 逐个序列化模块。
 
 ---
 
