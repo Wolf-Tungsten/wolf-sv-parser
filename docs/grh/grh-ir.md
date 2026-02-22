@@ -102,7 +102,7 @@ Netlist 是 Graph 的集合，代表整个设计（Design）。
 **功能**：
 - 管理多个 Graph（模块）
 - 标记顶层模块（设计入口）
-- 支持模块别名（用于参数化模块实例化）
+- 支持模块别名（为 Graph 提供额外名称）
 
 **示例**：
 
@@ -465,150 +465,66 @@ endmodule
 
 ## 5.1 Netlist 是什么
 
-Netlist 是 GRH IR 中**设计级别**的顶层容器，代表整个 SystemVerilog 设计（Design）。它是 Graph 的集合，负责：
+Netlist 是 GRH IR 中**设计级别**的顶层容器，代表整个 SystemVerilog 设计（Design）。它是 Graph 的集合，容纳设计中的全部模块及其层次关系。
 
-1. **管理所有模块**：容纳设计中的全部 Graph（模块）
-2. **标记顶层模块**：指定设计的入口点（顶层模块）
-3. **维护模块别名**：支持参数化模块的实例化映射
-4. **提供全局符号表**：跨模块的符号管理机制
+一个 Netlist 包含：
+- **Graph 集合**：设计中的所有模块
+- **顶层模块标记**：指定设计的入口点
+- **模块别名映射**：为 Graph 提供额外名称，便于查找/输出
+- **Netlist Symbol Table**：管理 Netlist 级符号（Graph 名称、Declared Symbol 等）
 
-**层级关系**：
-```
-Netlist (Design)
-├── Graph "module_a" (模块 A)
-│   ├── Operation kInstance of "module_b"
-│   └── Operation kInstance of "module_c"
-├── Graph "module_b" (模块 B)
-└── Graph "module_c" (模块 C)
-```
+## 5.2 顶层模块
 
-## 5.2 模块管理
+Netlist 支持标记**一个或多个**顶层模块（Top-Level Module）。
 
-### 5.2.1 创建模块
+## 5.3 参数化模块处理
 
-```cpp
-Netlist netlist;
-Graph& graph = netlist.createGraph("adder");  // 创建名为 "adder" 的模块
+SystemVerilog 支持参数化模块（Parameterized Module）：
+```sv
+module adder #(parameter WIDTH = 8) (input [WIDTH-1:0] a, b, output [WIDTH-1:0] y);
+    assign y = a + b;
+endmodule
+
+adder #(8)  u1 (...);  // 8位加法器
+adder #(16) u2 (...);  // 16位加法器
 ```
 
-**创建流程**：
-1. 分配 `GraphId`（通过 `NetlistSymbolTable`）
-2. 创建 `Graph` 对象并初始化符号表
-3. 将 Graph 存入 `graphs_` 映射表
-4. 记录创建顺序到 `graphOrder_`
+**GRH IR 处理方式**：
+- 不同参数值的实例产生**不同的 Graph**
+- 因为内部 Value 的位宽不同，Operation 的结构也不同
 
-### 5.2.2 查找模块
-
-```cpp
-Graph* g = netlist.findGraph("adder");  // 通过名称查找
-if (g) {
-    // 找到模块
-}
+上例在 GRH 中表示为：
+```
+Netlist
+├── Graph "adder__8"   // WIDTH=8 的实例
+│   └── Value 位宽为 8
+├── Graph "adder__16"  // WIDTH=16 的实例
+│   └── Value 位宽为 16
+└── Graph "top"
+    ├── Operation kInstance of "adder__8"
+    └── Operation kInstance of "adder__16"
 ```
 
-### 5.2.3 克隆模块
+## 5.4 Netlist 符号系统
 
-```cpp
-// 克隆现有模块，创建新名称的副本
-Graph& cloned = netlist.cloneGraph("adder", "adder_copy");
-```
+Netlist 维护 **Netlist Symbol Table** 管理 Graph 名称，与 Graph 内部的 Symbol Table 形成两级架构。
 
-**克隆特性**：
-- 深拷贝所有 Value、Operation 和端口
-- 保留原始模块的结构和连接关系
-- 符号表独立，不影响原模块
+### 5.4.1 两级架构
 
-### 5.2.4 遍历模块
+| 符号表 | 作用域 | 管理对象 |
+|--------|--------|----------|
+| **Netlist Symbol Table** | Netlist 级别 | Graph 名称 |
+| **Graph Symbol Table** | Graph 级别 | Value 和 Operation 的 Symbol |
 
-```cpp
-// 按创建顺序遍历
-for (const auto& [name, graphPtr] : netlist.graphs()) {
-    // 处理每个模块
-}
+Netlist Symbol Table 中每个 Graph 名称必须唯一。
 
-// 获取有序列表
-const std::vector<std::string>& order = netlist.graphOrder();
-```
+### 5.4.2 模块别名
 
-## 5.3 顶层模块标记
-
-Netlist 支持标记一个或多个顶层模块（Top-Level Modules）：
-
-```cpp
-netlist.markAsTop("top");        // 标记为顶层
-netlist.unmarkAsTop("top");      // 取消顶层标记
-
-const std::vector<std::string>& tops = netlist.topGraphs();  // 获取所有顶层
-```
-
-**用途**：
-- 指定仿真/综合的入口点
-- 支持多顶层设计（如测试平台 + DUT）
-- 在 emit 阶段控制输出顺序
-
-## 5.4 模块别名机制
-
-Netlist 支持为 Graph 注册别名，用于**参数化模块实例化**：
-
-```cpp
-// 为 adder 模块注册别名 "adder_width8"
-Graph& adder = netlist.createGraph("adder");
-netlist.registerGraphAlias("adder_width8", adder);
-
-// 查找时别名等效于原名称
-Graph* g1 = netlist.findGraph("adder");        // 找到 adder
-Graph* g2 = netlist.findGraph("adder_width8"); // 同样找到 adder
-```
+**模块别名（Graph Alias）**允许一个 Graph 拥有多个名称，同样由 Netlist Symbol Table 管理。
 
 **应用场景**：
-- SystemVerilog 参数化模块的不同参数实例
-- 同一模块在网表中的多个"视图"
-
-**获取别名**：
-```cpp
-std::vector<std::string> aliases = netlist.aliasesForGraph("adder");
-// 返回 ["adder_width8", ...]
-```
-
-## 5.5 符号表管理
-
-Netlist 使用两级符号表架构：
-
-| 符号表 | 作用域 | 用途 |
-|--------|--------|------|
-| `NetlistSymbolTable` | Netlist 级别 | 管理 Graph 名称、模块别名 |
-| `GraphSymbolTable` | Graph 级别 | 管理 Value 和 Operation 符号 |
-
-**NetlistSymbolTable 扩展功能**：
-- `allocateGraphId(symbol)`：为 Graph 分配唯一 ID
-- `lookupGraphId(symbol)`：通过符号查找 Graph ID
-- `symbolForGraph(graphId)`：通过 Graph ID 获取符号
-
-## 5.6 声明符号
-
-与 Graph 类似，Netlist 也维护**声明符号列表**：
-
-```cpp
-void addDeclaredSymbol(SymbolId sym);
-bool removeDeclaredSymbol(SymbolId sym);
-void clearDeclaredSymbols();
-bool isDeclaredSymbol(SymbolId sym) const;
-```
-
-用途：
-- 记录设计中显式声明的模块名称
-- 区分用户模块与工具生成的内部模块
-
-## 5.7 序列化与反序列化
-
-Netlist 支持从 JSON 字符串加载：
-
-```cpp
-// 从 JSON 反序列化
-Netlist netlist = Netlist::fromJsonString(jsonString);
-```
-
-**注意**：Netlist 本身不提供直接的 `toJson` 方法，而是通过 `Graph::writeJson()` 逐个序列化模块。
+- **提高可读性**：为自动生成的唯一 Graph 名称（如 `adder__p_WIDTH_8`）提供简洁别名（如 `adder_8bit`）
+- **保留原始名称**：防止参数化的顶层模块在 emit 时被强制改名，通过别名保留用户声明的模块名
 
 ---
 
