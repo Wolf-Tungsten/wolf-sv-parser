@@ -599,10 +599,10 @@ res[0] = constValue
 ### 一元位运算（kNot）
 
 **operands**:
-- `oper[0]` (`L`): 操作数
+- `oper[0]`: 操作数
 
 **results**:
-- `res[0]`: 运算结果，位宽 `L`
+- `res[0]`: 运算结果，位宽 `width(oper[0])`
 
 **attrs**: 无
 
@@ -639,15 +639,84 @@ res[0] = ~oper[0]
 
 ## 6.5 逻辑运算
 
-（待整理）
+先将操作数规约为 1-bit 逻辑值 `{0,1,X}` 再计算，`X` 保持传播。
+
+### 二元逻辑运算（kLogicAnd / kLogicOr）
+
+**operands**:
+- `oper[0]` (`L`): 左操作数
+- `oper[1]` (`R`): 右操作数
+
+**results**:
+- `res[0]`: 运算结果，1-bit
+
+**attrs**: 无
+
+| 操作符 | 语义 |
+|--------|------|
+| `kLogicAnd` | `oper[0] && oper[1]` |
+| `kLogicOr` | `oper[0] \|\| oper[1]` |
+
+---
+
+### 一元逻辑运算（kLogicNot）
+
+**operands**:
+- `oper[0]`: 操作数
+
+**results**:
+- `res[0]`: 运算结果，1-bit
+
+**attrs**: 无
+
+**语义**:
+```
+res[0] = !oper[0]
+```
+
+---
 
 ## 6.6 规约运算
 
-（待整理）
+对操作数所有位进行归约运算，结果为 1-bit。任一位含 `X`/`Z` 且无法确定结果时返回 `X`。
+
+**operands**:
+- `oper[0]`: 操作数
+
+**results**:
+- `res[0]`: 运算结果，1-bit
+
+**attrs**: 无
+
+| 操作符 | 语义 |
+|--------|------|
+| `kReduceAnd` | `&oper[0]`（全 1 为 1，有 0 为 0） |
+| `kReduceNand` | `~&oper[0]`（kReduceAnd 取反） |
+| `kReduceOr` | `\|oper[0]`（有 1 为 1，全 0 为 0） |
+| `kReduceNor` | `~\|oper[0]`（kReduceOr 取反） |
+| `kReduceXor` | `^oper[0]`（奇数个 1 为 1，偶数个 1 为 0） |
+| `kReduceXnor` | `~^oper[0]`（kReduceXor 取反） |
+
+---
 
 ## 6.7 移位运算
 
-（待整理）
+四态语义：任一操作数位含 `X`/`Z` 时，结果为全 `X`。
+
+**operands**:
+- `oper[0]` (`L`): 被移位操作数（位宽 `L`）
+- `oper[1]`: 移位位数（无符号解释）
+
+**results**:
+- `res[0]`: 移位结果，位宽 `L`
+
+**attrs**: 无
+
+| 操作符 | 语义 |
+|--------|------|
+| `kShl` | `oper[0] << oper[1]`，逻辑左移，右侧补 0 |
+| `kLShr` | `oper[0] >> oper[1]`，逻辑右移，左侧补 0 |
+| `kAShr` | `oper[0] >>> oper[1]`，算术右移，左侧补符号位 |
 
 ## 6.8 数据选择
 
