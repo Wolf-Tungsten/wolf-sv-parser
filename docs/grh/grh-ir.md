@@ -821,7 +821,7 @@ res[0] = oper[0][oper[1] * sliceWidth +: sliceWidth]
 
 ## 6.3 锁存器
 
-GRH IR 使用**声明 + ReadPort + WritePort**的 Port 模型建模锁存器。所有对锁存器的访问必须通过对应的 ReadPort/WritePort。
+GRH IR 使用**声明 + ReadPort + WritePort**的组合建模锁存器。所有对锁存器的访问必须通过对应的 ReadPort/WritePort。
 
 ### kLatch
 
@@ -892,7 +892,129 @@ always_latch
 
 ## 6.4 寄存器
 
-（待整理）
+GRH IR 使用**声明 + ReadPort + WritePort**的组合建模寄存器。所有对寄存器的访问必须通过对应的 ReadPort/WritePort。
+
+### kRegister
+
+寄存器声明。Operation 的 symbol 作为寄存器名称。
+
+**operands**: 无
+
+**results**: 无
+
+**attrs**:
+- `width` (int64_t): 位宽
+- `isSigned` (bool): 是否有符号
+- `initKind` (string[], 可选): 初始化类型数组，支持 `literal`/`random`
+- `initValue` (string[], 可选): 与 `initKind` 一一对应的初始化值数组
+
+**初始化语义**:
+
+`initKind`/`initValue` 为数组是为了支持多条初始化语句，按数组索引**顺序执行**，越靠后的元素优先级越高（后写入覆盖先写入）。
+
+| `initKind[i]` | 行为 | 生成代码 |
+|---------------|------|----------|
+| `literal` | 字面量初始化 | `<symbol> = <initValue[i]>;` |
+| `random` | 随机初始化 | `<symbol> = $random;` |
+
+**示例**（先初始化为 0，再随机化，最终值为随机数）：
+- `initKind` = ["literal", "random"]
+- `initValue` = ["32'h0", ""]
+- 生成：
+  ```sv
+  initial begin
+      reg_name = 32'h0;    // initKind[0]
+      reg_name = $random;  // initKind[1]，覆盖前值
+  end
+  ```
+
+---
+
+### kRegisterReadPort
+
+寄存器读端口。
+
+**operands**: 无
+
+**results**:
+- `res[0]`: 读出的寄存器值，位宽同目标 kRegister
+
+**attrs**:
+- `regSymbol` (string): 指向目标 kRegister 的 symbol
+
+**语义**:
+```
+res[0] = <regSymbol>
+```
+
+---
+
+### kRegisterWritePort
+
+寄存器写端口。支持多事件触发（如时钟上升沿 + 异步复位下降沿）。
+
+**operands**:
+- `oper[0]` (updateCond): 更新使能条件（1-bit），为 1 时允许更新
+- `oper[1]` (nextValue): 更新值（位宽同目标 kRegister），reset/enable 优先级需通过 `kMux` 在外部编码
+- `oper[2]` (mask): 逐位写掩码（位宽同目标 kRegister），`mask[i]=1` 时写入第 `i` 位
+- `oper[3]`..`oper[N-1]` (events): 触发事件信号（如时钟、复位）
+
+**results**: 无
+
+**attrs**:
+- `regSymbol` (string): 指向目标 kRegister 的 symbol
+- `eventEdge` (string[]): 触发边沿列表，`"posedge"` 或 `"negedge"`，长度等于事件信号数
+
+**语义**:
+
+设目标 kRegister 位宽为 `W`。按 `eventEdge`/`events` 构建敏感列表，`updateCond` 控制是否更新，`nextValue` 为新值。
+
+**案例 1：只有时钟**
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = 1'b1, `nextValue` = d
+```sv
+always @(posedge clk)
+    reg_q <= d;
+```
+
+**案例 2：带使能**
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = en, `nextValue` = d
+```sv
+always @(posedge clk)
+    if (en)
+        reg_q <= d;
+```
+
+**案例 3：带同步复位**
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = 1'b1, `nextValue` = rst ? 0 : d
+```sv
+always @(posedge clk)
+    reg_q <= rst ? 0 : d;
+```
+
+**案例 4：带异步复位（低有效）**
+- `events` = [clk, rst_n], `eventEdge` = ["posedge", "negedge"]
+- `updateCond` = !rst_n || en, `nextValue` = !rst_n ? 0 : d
+```sv
+always @(posedge clk or negedge rst_n)
+    if (!rst_n)
+        reg_q <= 0;
+    else if (en)
+        reg_q <= d;
+```
+
+**案例 5：带写掩码**
+- `events` = [clk], `eventEdge` = ["posedge"]
+- `updateCond` = 1'b1, `nextValue` = new_val
+- `mask` 为变量，位宽 `W`
+```sv
+always @(posedge clk)
+    for (int i = 0; i < W; i++)
+        if (mask[i])
+            reg_q[i] <= new_val[i];
+```
 
 ## 6.5 存储器
 
