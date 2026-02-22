@@ -2,7 +2,7 @@
 
 GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 SystemVerilog 设计的结构和行为。
 
-## 目录
+# 目录
 
 - [1. 核心概念速通](#1-核心概念速通)
 - [2. Value 详解](#2-value-详解)
@@ -13,7 +13,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 
 ---
 
-## 1. 核心概念速通
+# 1. 核心概念速通
 
 | 实体 | 说明 | IR 层级 |
 |------|------|---------|
@@ -22,7 +22,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 | **Graph** | 模块容器 | Module |
 | **Netlist** | 网表，Graph 的集合 | Design |
 
-### 1.1 Value
+## 1.1 Value
 
 数据流边，描述 Operation 之间的数据传递关系，满足 SSA 特性（单定义、多使用）。
 
@@ -38,7 +38,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 - `definingOp` (`OperationId`)：定义该 Value 的 Operation，端口 Value 为 invalid
 - `users` (`ValueUser[]`)：使用该 Value 的 Operation 列表及操作数位置
 
-### 1.2 Operation
+## 1.2 Operation
 
 操作节点，Graph 的顶点，对输入数据执行特定语义操作并产生输出。涵盖组合计算、数据搬运、存储访问、层次调用等多种行为，通过 `OperationKind` 区分具体语义。
 
@@ -53,7 +53,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 - `results` (`ValueId[]`)：输出值列表，通常由本 Operation 创建并绑定
 - `attrs` (`AttrKV[]`)：属性表，存储额外元数据，如常量值、切片范围等
 
-### 1.3 Graph
+## 1.3 Graph
 
 Graph 是 Operation 和 Value 的容器，对应一个 SystemVerilog 模块。
 
@@ -95,7 +95,7 @@ Graph "add_sub"
     └── result: _y
 ```
 
-### 1.4 Netlist
+## 1.4 Netlist
 
 Netlist 是 Graph 的集合，代表整个设计（Design）。
 
@@ -142,9 +142,9 @@ Netlist
 
 ---
 
-## 2. Value 详解
+# 2. Value 详解
 
-### 2.1 Value 是什么
+## 2.1 Value 是什么
 
 Value 是 GRH IR 中表示**数据流**的核心抽象，它是连接 Operation 的边，满足 SSA（静态单赋值）特性：
 
@@ -156,15 +156,15 @@ Value 的本质作用：
 2. **建立依赖**：通过 `definingOp` 和 `users` 形成数据流图
 3. **表示接口**：端口 Value 作为 Graph 与外部模块交互的边界
 
-### 2.2 字段详解
+## 2.2 字段详解
 
-#### `symbol`
+### `symbol`
 
 信号名，本质是字符串，由 Graph 的符号表驻留管理。Value 和 Operation 共享同一符号表，因此：
 - 同一 Graph 内，Value 的 symbol 与 Operation 的 symbol 不能重复
 - 通过 symbol 可以查找对应的 Value（`Graph::findValue`）
 
-#### `type` 与 `width`/`isSigned`
+### `type` 与 `width`/`isSigned`
 
 Value 支持三种数据类型：
 
@@ -183,7 +183,7 @@ Value 支持三种数据类型：
 - 用于存储文本数据
 - `width` 和 `isSigned` 字段不参与语义
 
-#### `definingOp` 与 `users`
+### `definingOp` 与 `users`
 
 这两个字段建立 Value 与 Operation 之间的连接关系：
 
@@ -204,7 +204,7 @@ Value 支持三种数据类型：
 - `add2` Operation 计算 `t + 1`，产生结果 `c`
 - `c.definingOp` = `add2`，`c.users` = []
 
-#### 端口标记
+### 端口标记
 
 - `isInput`：是否绑定到输入端口
 - `isOutput`：是否绑定到输出端口  
@@ -214,7 +214,7 @@ Value 支持三种数据类型：
 - `definingOp` 为 invalid（不由 Operation 定义）
 - 由外部驱动（input/inout）或驱动外部（output/inout）
 
-### 2.3 数组扁平化
+## 2.3 数组扁平化
 
 SystemVerilog 的 packed array、struct、union 等复合类型在 GRH 中被扁平化为单个 Logic Value。
 
@@ -238,9 +238,9 @@ SystemVerilog 的 packed array、struct、union 等复合类型在 GRH 中被扁
 
 ---
 
-## 3. Operation 详解
+# 3. Operation 详解
 
-### 3.1 Operation 是什么
+## 3.1 Operation 是什么
 
 Operation 是 GRH IR 的**操作节点**，Graph 的顶点，代表对数据或系统执行的各种操作。与 Value 配合形成完整的数据流图。
 
@@ -251,9 +251,9 @@ Operation 的核心特性：
 - **输入输出明确**：通过 `operands` 接收 Value，通过 `results` 产生 Value（部分 Operation 可能没有 results）
 - **可携带元数据**：`attrs` 存储额外信息，如常量值、切片范围、实例化参数等
 
-### 3.2 字段详解
+## 3.2 字段详解
 
-#### `kind`
+### `kind`
 
 操作类型，由 `OperationKind` 枚举定义，决定 Operation 的语义。主要分类：
 
@@ -263,14 +263,14 @@ Operation 的核心特性：
 - **层次调用**：`kInstance`, `kBlackbox`, `kXMRRead/Write`，与外部模块交互
 - **系统调用**：`kSystemFunction`, `kSystemTask`, `kDpicCall`，副作用明确
 
-#### `symbol`
+### `symbol`
 
 符号名（字符串），由 Graph 符号表驻留管理。与 Value 共享同一符号表，因此：
 - Operation 的 symbol 不能与 Value 的信号名重复
 - 通过 symbol 可以查找对应的 Operation（`Graph::findOperation`）
 - 部分 Operation（如内部临时节点）可能使用工具生成的内部名
 
-#### `operands` 与 `results`
+### `operands` 与 `results`
 
 - `operands`：输入 Value 列表，表示操作的数据来源
   - 每个 operand 必须是已定义的 Value
@@ -285,7 +285,7 @@ Operation 的核心特性：
 - result 的 Value 的 definingOp 指向本 Operation
 - 删除 Operation 前需处理其 results 的 users
 
-#### `attrs`
+### `attrs`
 
 属性表，存储 kind 无法表达的额外元数据，键值对形式：`{key: value}`
 
@@ -301,92 +301,92 @@ Operation 的核心特性：
 - `kInstance`：`{"module": "adder", "instanceName": "u_add"}`
 - `kRegister`：`{"resetValue": "8'd0", "asyncReset": true}`
 
-### 3.3 Operation 分类
+## 3.3 Operation 分类
 
 所有 OperationKind 的详细分类介绍请参考 [6. Operation 分类参考](#6-operation-分类参考)。
 
 ---
 
-## 4. Graph 详解
+# 4. Graph 详解
 
 （待整理）
 
 ---
 
-## 5. Netlist 详解
+# 5. Netlist 详解
 
 （待整理）
 
 ---
 
-## 6. Operation 分类参考
+# 6. Operation 分类参考
 
 本章按功能分类介绍所有 Operation，包括操作语义、操作数要求、结果数量及常用属性。
 
-### 6.1 常量
+## 6.1 常量
 
 （待整理）
 
-### 6.2 算术运算
+## 6.2 算术运算
 
 （待整理）
 
-### 6.3 位运算
+## 6.3 位运算
 
 （待整理）
 
-### 6.4 比较运算
+## 6.4 比较运算
 
 （待整理）
 
-### 6.5 逻辑运算
+## 6.5 逻辑运算
 
 （待整理）
 
-### 6.6 规约运算
+## 6.6 规约运算
 
 （待整理）
 
-### 6.7 移位运算
+## 6.7 移位运算
 
 （待整理）
 
-### 6.8 数据选择
+## 6.8 数据选择
 
 （待整理）
 
-### 6.9 切片
+## 6.9 切片
 
 （待整理）
 
-### 6.10 赋值
+## 6.10 赋值
 
 （待整理）
 
-### 6.11 锁存器
+## 6.11 锁存器
 
 （待整理）
 
-### 6.12 寄存器
+## 6.12 寄存器
 
 （待整理）
 
-### 6.13 存储器
+## 6.13 存储器
 
 （待整理）
 
-### 6.14 层次结构
+## 6.14 层次结构
 
 （待整理）
 
-### 6.15 XMR
+## 6.15 XMR
 
 （待整理）
 
-### 6.16 系统调用
+## 6.16 系统调用
 
 （待整理）
 
-### 6.17 DPI
+## 6.17 DPI
 
 （待整理）
