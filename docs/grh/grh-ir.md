@@ -1160,11 +1160,152 @@ always @(posedge clk)
 
 ## 6.6 层次结构
 
-（待整理）
+用于建模模块实例化和跨层次引用。
+
+### kInstance
+
+模块实例化，用于实例化 Netlist 中已定义的 Graph。
+
+**operands**:
+- `oper[0]`..`oper[m-1]` (inputs): 输入信号，对应 `inputPortName`
+- `oper[m]`..`oper[m+q-1]` (inoutOuts): inout 驱动值
+- `oper[m+q]`..`oper[m+2q-1]` (inoutOes): inout 输出使能
+
+**results**:
+- `res[0]`..`res[n-1]` (outputs): 输出信号，对应 `outputPortName`
+- `res[n]`..`res[n+q-1]` (inoutIns): inout 读值
+
+**attrs**:
+- `moduleName` (string): 被实例化模块的名称，必须在 Netlist 中存在对应 Graph
+- `instanceName` (string): 实例名称
+- `inputPortName` (string[]): 输入端口名数组，长度等于 inputs 数
+- `outputPortName` (string[]): 输出端口名数组，长度等于 outputs 数
+- `inoutPortName` (string[], 可选): inout 端口名数组，长度等于 inout 数
+
+**案例 1：简单实例化**（模块 `Adder` 有输入 `a, b`，输出 `sum`）：
+```
+operands:  [a_val, b_val]
+results:   [sum_val]
+attrs:
+  moduleName:     "Adder"
+  instanceName:   "u_add"
+  inputPortName:  ["a", "b"]
+  outputPortName: ["sum"]
+```
+生成：
+```sv
+Adder u_add (.a(a_val), .b(b_val), .sum(sum_val));
+```
+
+**案例 2：inout 端口处理**（模块 `IOPad` 有 inout 端口 `pad`）：
+```
+operands:  [drv_val, oe_val]
+results:   [rd_val]
+attrs:
+  moduleName:     "IOPad"
+  instanceName:   "u_pad"
+  inoutPortName:  ["pad"]
+```
+其中 `drv_val` 对应 `inoutOut`，`oe_val` 对应 `inoutOe`，`rd_val` 对应 `inoutIn`。
+
+生成：
+```sv
+IOPad u_pad (.pad(pad_wire));
+assign pad_wire = oe_val ? drv_val : {W{1'bz}};
+assign rd_val = pad_wire;
+```
+
+---
+
+### kBlackbox
+
+黑盒实例化，用于实例化未定义的模块（如工艺原语、仿真模型）。
+
+**operands**:
+- `oper[0]`..`oper[m-1]` (inputs): 输入信号
+- `oper[m]`..`oper[m+q-1]` (inoutOuts): inout 驱动值
+- `oper[m+q]`..`oper[m+2q-1]` (inoutOes): inout 输出使能
+
+**results**:
+- `res[0]`..`res[n-1]` (outputs): 输出信号
+- `res[n]`..`res[n+q-1]` (inoutIns): inout 读值
+
+**attrs**:
+- `moduleName` (string): 黑盒模块名称
+- `instanceName` (string): 实例名称
+- `inputPortName` (string[]): 输入端口名数组
+- `outputPortName` (string[]): 输出端口名数组
+- `inoutPortName` (string[], 可选): inout 端口名数组
+- `parameterNames` (string[], 可选): 参数名数组
+- `parameterValues` (string[], 可选): 参数值数组
+
+**案例：参数化黑盒**（工艺库中的 DFF 带参数 `INIT`）：
+```
+operands:  [d_val, clk_val, rst_n_val]
+results:   [q_val]
+attrs:
+  moduleName:       "DFFR_X1"
+  instanceName:     "u_dff"
+  inputPortName:    ["D", "CK", "RN"]
+  outputPortName:   ["Q"]
+  parameterNames:   ["INIT"]
+  parameterValues:  ["1'b0"]
+```
+生成：
+```sv
+DFFR_X1 #(.INIT(1'b0)) u_dff (.D(d_val), .CK(clk_val), .RN(rst_n_val), .Q(q_val));
+```
+
+**说明**: kBlackbox 与 kInstance 的区别在于 kBlackbox 不需要在 Netlist 中存在对应 Graph，支持参数化。
 
 ## 6.7 XMR
 
-（待整理）
+跨层次引用（XMR）用于访问其他模块层次中的信号或存储单元。XMR Operation 仅作为中间表示存在，必须在 resolve pass 后展开。
+
+### kXMRRead
+
+XMR 读。用于读取其他模块层次中的信号。
+
+**operands**: 无
+
+**results**:
+- `res[0]`: 读出的信号值
+
+**attrs**:
+- `xmrPath` (string): 层次路径，格式为 `"u_top.u_sub.sig"`
+
+**说明**:
+- kXMRRead 必须在 resolve pass 后展开
+- resolve pass 会为中间模块添加端口、更新实例连接；若目标为寄存器/锁存器则创建对应 ReadPort
+- **限制**: 当前实现不支持 XMR 读内存（memory），会报错要求显式地址
+
+---
+
+### kXMRWrite
+
+XMR 写。用于写入其他模块层次中的信号或存储单元。
+
+**operands**（根据目标类型不同）：
+
+| 目标类型 | operands |
+|----------|----------|
+| 普通信号 | `oper[0]` (data) |
+| kLatch | `oper[0]` (updateCond), `oper[1]` (nextValue), `oper[2]` (mask) |
+| kRegister | `oper[0]` (updateCond), `oper[1]` (nextValue), `oper[2]` (mask), `oper[3]`.. (events) |
+| kMemory | `oper[0]` (updateCond), `oper[1]` (addr), `oper[2]` (data), `oper[3]` (mask), `oper[4]`.. (events) |
+
+**results**: 无
+
+**attrs**:
+- `xmrPath` (string): 层次路径
+- `eventEdge` (string[], 可选): 触发边沿列表
+  - latch 目标: 必须为空
+  - register/memory 目标: 数量需与事件操作数匹配
+  - 普通信号目标: 可选
+
+**说明**:
+- kXMRWrite 必须在 resolve pass 后展开
+- 对普通信号展开为 `kAssign`，对存储单元展开为对应的 WritePort
 
 ## 6.8 系统调用
 

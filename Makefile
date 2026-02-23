@@ -141,6 +141,10 @@ XS_WOLF_EMIT_DIR_ABS := $(abspath $(XS_WOLF_EMIT_DIR))
 XS_WOLF_EMIT_ABS := $(abspath $(XS_WOLF_EMIT))
 XS_WOLF_FILELIST_ABS := $(abspath $(XS_WOLF_FILELIST))
 XS_SIM_TOP_V := $(XS_RTL_DIR_ABS)/$(XS_SIM_TOP).$(XS_RTL_SUFFIX)
+XS_WOLF_JSON ?= $(XS_WOLF_EMIT_DIR_ABS)/xs_wolf.json
+XS_JSON_ROUNDTRIP ?= 0
+XS_WOLF_JSON_EMIT_FLAGS ?= --store-json --top $(XS_SIM_TOP)
+XS_WOLF_JSON_LOAD_FLAGS ?= --emit-sv --top $(XS_SIM_TOP)
 
 XS_DIFFTEST_GEN_DIR ?= $(XS_ROOT)/build/generated-src
 XS_DIFFTEST_GEN_DIR_ABS := $(abspath $(XS_DIFFTEST_GEN_DIR))
@@ -150,7 +154,7 @@ XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D "$(d)")
 XS_WOLF_DEFINE_FLAGS_LOG := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
 
 .PHONY: all build check-id run_hdlbits_test run_all_hdlbits_tests \
-	run_c910_test run_c910_json_test xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu \
+	run_c910_test run_c910_json_test xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu run_xs_json_test \
 	xs_diff_clean run_xs_ref_emu run_xs_wolf_emu run_xs_diff clean
 
 all: build
@@ -309,12 +313,24 @@ xs_wolf_emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
 	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_wolf_build_$(RUN_ID).log)
 	@echo "[LOG] Capturing wolf emit output to: $(BUILD_LOG_FILE)"
 	@printf '' > "$(BUILD_LOG_FILE)"
-	@echo "[CMD] $(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)" | tee -a "$(BUILD_LOG_FILE)"
-	$(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) \
-		$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
-		$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
-		-f $(XS_WOLF_FILELIST_ABS) \
-		2>&1 | tee -a "$(BUILD_LOG_FILE)"
+	@{ \
+		if [ "$(XS_JSON_ROUNDTRIP)" = "1" ]; then \
+			echo "[CMD] $(WOLF_PARSER) $(XS_WOLF_JSON_EMIT_FLAGS) -o $(XS_WOLF_JSON) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)"; \
+			$(WOLF_PARSER) $(XS_WOLF_JSON_EMIT_FLAGS) -o $(XS_WOLF_JSON) \
+				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
+				$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
+				-f $(XS_WOLF_FILELIST_ABS); \
+			echo "[CMD] $(WOLF_PARSER) --load-json $(XS_WOLF_JSON) $(XS_WOLF_JSON_LOAD_FLAGS) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS)"; \
+			$(WOLF_PARSER) --load-json $(XS_WOLF_JSON) $(XS_WOLF_JSON_LOAD_FLAGS) -o $(XS_WOLF_EMIT_ABS) \
+				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS); \
+		else \
+			echo "[CMD] $(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)"; \
+			$(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) \
+				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
+				$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
+				-f $(XS_WOLF_FILELIST_ABS); \
+		fi; \
+	} 2>&1 | tee -a "$(BUILD_LOG_FILE)"
 
 xs_ref_emu: $(XS_SIM_TOP_V)
 	@echo "[RUN] Building XiangShan ref emu..."
@@ -417,6 +433,11 @@ run_xs_wolf_emu:
 		$(if $(filter 1,$(XS_WAVEFORM)),$(if $(filter 1,$(XS_WAVEFORM_FULL)),--dump-wave-full,--dump-wave),) \
 		$(if $(filter 1,$(XS_WAVEFORM))$(XS_WAVEFORM_PATH),--wave-path $$WOLF_WAVEFORM,) \
 		2>&1 | tee "$$WOLF_LOG"
+
+run_xs_json_test:
+	@RUN_ID="$$(date +%Y%m%d_%H%M%S)"; \
+	$(MAKE) --no-print-directory xs_wolf_emu RUN_ID=$$RUN_ID XS_JSON_ROUNDTRIP=1; \
+	$(MAKE) --no-print-directory run_xs_wolf_emu RUN_ID=$$RUN_ID
 
 run_xs_diff:
 	@$(MAKE) --no-print-directory xs_diff_clean
