@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -171,7 +172,7 @@ int run(int argc, char **argv)
     std::optional<bool> dumpAst;
     driver.cmdLine.add("--dump-ast", dumpAst, "Dump a summary of the parsed AST");
     std::optional<bool> dumpJson;
-    driver.cmdLine.add("--emit-json", dumpJson, "Emit GRH JSON after convert");
+    driver.cmdLine.add("--store-json", dumpJson, "Store GRH JSON after convert");
     std::optional<bool> dumpSv;
     driver.cmdLine.add("--emit-sv", dumpSv, "Emit SystemVerilog after convert");
     std::optional<bool> emitTraceUnderscore;
@@ -199,6 +200,9 @@ int run(int argc, char **argv)
     driver.cmdLine.add("--emit-out-dir,--emit-out", emitOutputDir, "Directory to write emitted GRH/SV files", "<path>");
     std::optional<std::string> outputPathArg;
     driver.cmdLine.add("-o", outputPathArg, "Output file path for emitted artifacts", "<path>", slang::CommandLineFlags::FilePath);
+    std::optional<std::string> loadJsonPath;
+    driver.cmdLine.add("--load-json", loadJsonPath, "Load GRH JSON instead of parsing sources", "<path>",
+                       slang::CommandLineFlags::FilePath);
     std::optional<int64_t> timeoutSeconds;
     driver.cmdLine.add("--timeout", timeoutSeconds, "Terminate if runtime exceeds timeout seconds", "<sec>");
 
@@ -215,8 +219,13 @@ int run(int argc, char **argv)
         watchdog.emplace(std::chrono::seconds(*timeoutSeconds));
     }
 
-    if (!driver.processOptions()) {
-        return 2;
+    const bool useJsonLoad = loadJsonPath && !loadJsonPath->empty();
+    if (!useJsonLoad)
+    {
+        if (!driver.processOptions())
+        {
+            return 2;
+        }
     }
 
     bool timingEnabled = profileTimer == true;
@@ -260,6 +269,9 @@ int run(int argc, char **argv)
         }
         std::cerr << " " << message << '\n';
     };
+    auto logArtifact = [&](std::string_view prefix, std::string_view message) {
+        std::cerr << "[" << prefix << "] " << message << '\n';
+    };
     const auto pipelineStart = TimingClock::now();
     auto logTimingStage = [&](std::string_view prefix, std::string_view label,
                               TimingClock::time_point stageStart,
@@ -274,66 +286,6 @@ int run(int argc, char **argv)
         message.append(")");
         std::cerr << "[" << prefix << "] [timing] " << message << '\n';
     };
-
-    const auto slangStart = TimingClock::now();
-    std::string slangBegin = "begin sources=";
-    slangBegin.append(std::to_string(driver.sourceLoader.getFilePaths().size()));
-    slangBegin.append(", defines=");
-    slangBegin.append(std::to_string(driver.options.defines.size()));
-    slangBegin.append(", undefs=");
-    slangBegin.append(std::to_string(driver.options.undefines.size()));
-    slangBegin.append(", tops=");
-    slangBegin.append(std::to_string(driver.options.topModules.size()));
-    slangBegin.append(", singleUnit=");
-    slangBegin.append(driver.options.singleUnit.value_or(false) ? "1" : "0");
-    slangBegin.append(", lint=");
-    slangBegin.append(driver.options.lintMode() ? "1" : "0");
-    slangBegin.append(", std=");
-    if (driver.options.languageVersion && !driver.options.languageVersion->empty())
-    {
-        slangBegin.append(*driver.options.languageVersion);
-    }
-    else
-    {
-        slangBegin.append("default");
-    }
-    logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangBegin);
-    if (!driver.parseAllSources()) {
-        std::string slangEnd = "end (parse failed, errors=";
-        slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
-        slangEnd.append(", warnings=");
-        slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
-        slangEnd.append(")");
-        logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangEnd);
-        const auto slangEndTime = TimingClock::now();
-        logTimingStage("slang", "slang", slangStart, slangEndTime);
-        return 3;
-    }
-
-    auto compilation = driver.createCompilation();
-    driver.reportCompilation(*compilation, /* quiet */ false);
-
-    driver.runAnalysis(*compilation);
-    std::string slangEnd = "end (errors=";
-    slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
-    slangEnd.append(", warnings=");
-    slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
-    slangEnd.append(")");
-    logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangEnd);
-    bool diagOk = true;
-    if (driver.diagEngine.getNumErrors() > 0)
-    {
-        diagOk = driver.reportDiagnostics(/* quiet */ false);
-        (void)diagOk;
-        const auto slangEndTime = TimingClock::now();
-        logTimingStage("slang", "slang", slangStart, slangEndTime);
-        return 4;
-    }
-    diagOk = driver.reportDiagnostics(/* quiet */ false);
-    const auto slangEndTime = TimingClock::now();
-    logTimingStage("slang", "slang", slangStart, slangEndTime);
-
-    auto &root = compilation->getRoot();
 
     std::optional<std::string> outputDirOverride;
     std::optional<std::string> jsonOutputName;
@@ -390,6 +342,12 @@ int run(int argc, char **argv)
     };
     applyOutputPath();
 
+    std::vector<std::string> topOverrides;
+    if (useJsonLoad && !driver.options.topModules.empty())
+    {
+        topOverrides.assign(driver.options.topModules.begin(), driver.options.topModules.end());
+    }
+
     auto applyCommonEmitOptions = [&](wolvrix::lib::emit::EmitOptions &emitOptions)
     {
         if (outputDirOverride)
@@ -404,6 +362,10 @@ int run(int argc, char **argv)
         {
             emitOptions.traceUnderscoreValues = true;
         }
+        if (!topOverrides.empty())
+        {
+            emitOptions.topOverrides = topOverrides;
+        }
     };
     auto applyCommonStoreOptions = [&](wolvrix::lib::store::StoreOptions &storeOptions)
     {
@@ -415,199 +377,305 @@ int run(int argc, char **argv)
         {
             storeOptions.outputDir = *emitOutputDir;
         }
+        if (!topOverrides.empty())
+        {
+            storeOptions.topOverrides = topOverrides;
+        }
     };
-
-    if (dumpAst == true) {
-        std::cout << "=== AST JSON ===\n";
-
-        slang::JsonWriter writer;
-        writer.setPrettyPrint(true);
-
-        slang::ast::ASTSerializer serializer(*compilation, writer);
-        serializer.serialize(root);
-        writer.writeNewLine();
-
-        std::cout << writer.view();
-    }
 
     wolvrix::lib::grh::Netlist netlist;
-    const auto *sourceManager = compilation->getSourceManager();
-    auto extractLine = [](std::string_view text, size_t offset) -> std::string_view {
-        if (offset > text.size()) {
-            return {};
-        }
-        size_t lineStart = text.rfind('\n', offset);
-        if (lineStart == std::string_view::npos) {
-            lineStart = 0;
-        } else {
-            lineStart += 1;
-        }
-        size_t lineEnd = text.find('\n', offset);
-        if (lineEnd == std::string_view::npos) {
-            lineEnd = text.size();
-        }
-        return text.substr(lineStart, lineEnd - lineStart);
-    };
-    auto trimLine = [](std::string_view line) -> std::string {
-        size_t start = 0;
-        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) {
-            start++;
-        }
-        size_t end = line.size();
-        while (end > start &&
-               std::isspace(static_cast<unsigned char>(line[end - 1]))) {
-            end--;
-        }
-        return std::string(line.substr(start, end - start));
-    };
-    auto shortenLine = [](const std::string& line, size_t maxLen) -> std::string {
-        if (line.size() <= maxLen) {
-            return line;
-        }
-        std::string clipped = line.substr(0, maxLen);
-        clipped.append("...");
-        return clipped;
-    };
-    auto reportDiagnostics = [&](std::string_view prefix,
-                                 const auto& messages,
-                                 auto kindToLevel,
-                                 auto isErrorKind) -> bool {
-        bool hasError = false;
-        for (const auto &message : messages)
+    bool diagOk = true;
+
+    if (useJsonLoad)
+    {
+        if (dumpAst == true)
         {
-            const auto level = kindToLevel(message.kind);
-            if (isErrorKind(message.kind))
-            {
-                hasError = true;
-            }
-            if (!shouldLog(level))
-            {
-                continue;
-            }
-            std::cerr << "[" << prefix << "] [" << logLevelText(level) << "] ";
+            std::cerr << "[load] load json failed: --dump-ast is not supported with --load-json\n";
+            return 1;
+        }
 
-            bool printedLocation = false;
-            std::string statementSnippet;
-            if (sourceManager && message.location && message.location->valid())
+        const std::filesystem::path jsonPath(*loadJsonPath);
+        const auto loadJsonStart = TimingClock::now();
+        std::ifstream input(jsonPath, std::ios::binary);
+        if (!input)
+        {
+            std::cerr << "[load] load json failed: open " << jsonPath << '\n';
+            return 1;
+        }
+
+        std::string jsonText((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        if (jsonText.empty())
+        {
+            std::cerr << "[load] load json failed: empty file " << jsonPath << '\n';
+            return 1;
+        }
+
+        logArtifact("load", std::string("load json from: ") + jsonPath.string());
+        try
+        {
+            netlist = wolvrix::lib::grh::Netlist::fromJsonString(jsonText);
+        }
+        catch (const std::exception &ex)
+        {
+            std::cerr << "[load] load json failed: " << ex.what() << '\n';
+            return 1;
+        }
+        const auto loadJsonEnd = TimingClock::now();
+        logTimingStage("load", "load", loadJsonStart, loadJsonEnd);
+    }
+    else
+    {
+        const auto slangStart = TimingClock::now();
+        std::string slangBegin = "begin sources=";
+        slangBegin.append(std::to_string(driver.sourceLoader.getFilePaths().size()));
+        slangBegin.append(", defines=");
+        slangBegin.append(std::to_string(driver.options.defines.size()));
+        slangBegin.append(", undefs=");
+        slangBegin.append(std::to_string(driver.options.undefines.size()));
+        slangBegin.append(", tops=");
+        slangBegin.append(std::to_string(driver.options.topModules.size()));
+        slangBegin.append(", singleUnit=");
+        slangBegin.append(driver.options.singleUnit.value_or(false) ? "1" : "0");
+        slangBegin.append(", lint=");
+        slangBegin.append(driver.options.lintMode() ? "1" : "0");
+        slangBegin.append(", std=");
+        if (driver.options.languageVersion && !driver.options.languageVersion->empty())
+        {
+            slangBegin.append(*driver.options.languageVersion);
+        }
+        else
+        {
+            slangBegin.append("default");
+        }
+        logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangBegin);
+        if (!driver.parseAllSources()) {
+            std::string slangEnd = "end (parse failed, errors=";
+            slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
+            slangEnd.append(", warnings=");
+            slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
+            slangEnd.append(")");
+            logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangEnd);
+            const auto slangEndTime = TimingClock::now();
+            logTimingStage("slang", "slang", slangStart, slangEndTime);
+            return 3;
+        }
+
+        auto compilation = driver.createCompilation();
+        driver.reportCompilation(*compilation, /* quiet */ false);
+
+        driver.runAnalysis(*compilation);
+        std::string slangEnd = "end (errors=";
+        slangEnd.append(std::to_string(driver.diagEngine.getNumErrors()));
+        slangEnd.append(", warnings=");
+        slangEnd.append(std::to_string(driver.diagEngine.getNumWarnings()));
+        slangEnd.append(")");
+        logLine(wolvrix::lib::LogLevel::Info, "slang", {}, slangEnd);
+        diagOk = true;
+        if (driver.diagEngine.getNumErrors() > 0)
+        {
+            diagOk = driver.reportDiagnostics(/* quiet */ false);
+            (void)diagOk;
+            const auto slangEndTime = TimingClock::now();
+            logTimingStage("slang", "slang", slangStart, slangEndTime);
+            return 4;
+        }
+        diagOk = driver.reportDiagnostics(/* quiet */ false);
+        const auto slangEndTime = TimingClock::now();
+        logTimingStage("slang", "slang", slangStart, slangEndTime);
+
+        auto &root = compilation->getRoot();
+
+        if (dumpAst == true) {
+            std::cout << "=== AST JSON ===\n";
+
+            slang::JsonWriter writer;
+            writer.setPrettyPrint(true);
+
+            slang::ast::ASTSerializer serializer(*compilation, writer);
+            serializer.serialize(root);
+            writer.writeNewLine();
+
+            std::cout << writer.view();
+        }
+
+        const auto *sourceManager = compilation->getSourceManager();
+        auto extractLine = [](std::string_view text, size_t offset) -> std::string_view {
+            if (offset > text.size()) {
+                return {};
+            }
+            size_t lineStart = text.rfind('\n', offset);
+            if (lineStart == std::string_view::npos) {
+                lineStart = 0;
+            } else {
+                lineStart += 1;
+            }
+            size_t lineEnd = text.find('\n', offset);
+            if (lineEnd == std::string_view::npos) {
+                lineEnd = text.size();
+            }
+            return text.substr(lineStart, lineEnd - lineStart);
+        };
+        auto trimLine = [](std::string_view line) -> std::string {
+            size_t start = 0;
+            while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start]))) {
+                start++;
+            }
+            size_t end = line.size();
+            while (end > start &&
+                   std::isspace(static_cast<unsigned char>(line[end - 1]))) {
+                end--;
+            }
+            return std::string(line.substr(start, end - start));
+        };
+        auto shortenLine = [](const std::string& line, size_t maxLen) -> std::string {
+            if (line.size() <= maxLen) {
+                return line;
+            }
+            std::string clipped = line.substr(0, maxLen);
+            clipped.append("...");
+            return clipped;
+        };
+        auto reportDiagnostics = [&](std::string_view prefix,
+                                     const auto& messages,
+                                     auto kindToLevel,
+                                     auto isErrorKind) -> bool {
+            bool hasError = false;
+            for (const auto &message : messages)
             {
-                const auto loc = sourceManager->getFullyOriginalLoc(*message.location);
-                if (loc.valid() && sourceManager->isFileLoc(loc))
+                const auto level = kindToLevel(message.kind);
+                if (isErrorKind(message.kind))
                 {
-                    auto fileName = sourceManager->getFileName(loc);
-                    auto line = sourceManager->getLineNumber(loc);
-                    auto column = sourceManager->getColumnNumber(loc);
-                    std::cerr << fileName << ":" << line << ":" << column << " ";
-                    printedLocation = true;
+                    hasError = true;
+                }
+                if (!shouldLog(level))
+                {
+                    continue;
+                }
+                std::cerr << "[" << prefix << "] [" << logLevelText(level) << "] ";
 
-                    const std::string_view text = sourceManager->getSourceText(loc.buffer());
-                    if (!text.empty())
+                bool printedLocation = false;
+                std::string statementSnippet;
+                if (sourceManager && message.location && message.location->valid())
+                {
+                    const auto loc = sourceManager->getFullyOriginalLoc(*message.location);
+                    if (loc.valid() && sourceManager->isFileLoc(loc))
                     {
-                        const std::string_view lineText = extractLine(text, loc.offset());
-                        if (!lineText.empty())
+                        auto fileName = sourceManager->getFileName(loc);
+                        auto line = sourceManager->getLineNumber(loc);
+                        auto column = sourceManager->getColumnNumber(loc);
+                        std::cerr << fileName << ":" << line << ":" << column << " ";
+                        printedLocation = true;
+
+                        const std::string_view text = sourceManager->getSourceText(loc.buffer());
+                        if (!text.empty())
                         {
-                            statementSnippet = shortenLine(trimLine(lineText), 200);
+                            const std::string_view lineText = extractLine(text, loc.offset());
+                            if (!lineText.empty())
+                            {
+                                statementSnippet = shortenLine(trimLine(lineText), 200);
+                            }
                         }
                     }
                 }
+                if (!printedLocation && !message.originSymbol.empty())
+                {
+                    std::cerr << message.originSymbol << " ";
+                }
+                std::cerr << "- " << message.message << '\n';
+                if (!statementSnippet.empty())
+                {
+                    std::cerr << "  statement: " << statementSnippet << '\n';
+                }
             }
-            if (!printedLocation && !message.originSymbol.empty())
-            {
-                std::cerr << message.originSymbol << " ";
-            }
-            std::cerr << "- " << message.message << '\n';
-            if (!statementSnippet.empty())
-            {
-                std::cerr << "  statement: " << statementSnippet << '\n';
-            }
-        }
-        return hasError;
-    };
+            return hasError;
+        };
 
-    bool hasFrontendError = false;
-    wolvrix::lib::ingest::ConvertOptions convertOptions;
-    convertOptions.abortOnError = true;
-    convertOptions.enableLogging = globalLogLevel != wolvrix::lib::LogLevel::Off;
-    convertOptions.logLevel = globalLogLevel;
-    convertOptions.enableTiming = timingEnabled;
-    if (convertThreads)
-    {
-        if (*convertThreads <= 0)
+        bool hasFrontendError = false;
+        wolvrix::lib::ingest::ConvertOptions convertOptions;
+        convertOptions.abortOnError = true;
+        convertOptions.enableLogging = globalLogLevel != wolvrix::lib::LogLevel::Off;
+        convertOptions.logLevel = globalLogLevel;
+        convertOptions.enableTiming = timingEnabled;
+        if (convertThreads)
+        {
+            if (*convertThreads <= 0)
+            {
+                logLine(wolvrix::lib::LogLevel::Error, "convert", {},
+                        "--convert-threads must be a positive number");
+                return 1;
+            }
+            convertOptions.threadCount = static_cast<uint32_t>(*convertThreads);
+        }
+        if (singleThread == true)
+        {
+            convertOptions.singleThread = true;
+        }
+
+        wolvrix::lib::ingest::ConvertDriver converter(convertOptions);
+        converter.logger().setSink([&](const wolvrix::lib::LogEvent& event) {
+            logLine(event.level, "convert", event.tag, event.message);
+        });
+        const auto convertStart = TimingClock::now();
+        bool convertAborted = false;
+        try {
+            netlist = converter.convert(root);
+        } catch (const wolvrix::lib::ingest::ConvertAbort&) {
+            // Diagnostics already recorded; stop conversion immediately.
+            convertAborted = true;
+        }
+        const auto convertEnd = TimingClock::now();
+        const std::string convertLabel =
+            convertAborted ? std::string("convert-total (aborted)") : std::string("convert-total");
+        logTimingStage("convert", convertLabel, convertStart, convertEnd);
+
+        auto kindToLevel = [](wolvrix::lib::ingest::ConvertDiagnosticKind kind) {
+            switch (kind)
+            {
+            case wolvrix::lib::ingest::ConvertDiagnosticKind::Todo:
+                return wolvrix::lib::LogLevel::Error;
+            case wolvrix::lib::ingest::ConvertDiagnosticKind::Warning:
+                return wolvrix::lib::LogLevel::Warn;
+            case wolvrix::lib::ingest::ConvertDiagnosticKind::Info:
+                return wolvrix::lib::LogLevel::Info;
+            case wolvrix::lib::ingest::ConvertDiagnosticKind::Debug:
+                return wolvrix::lib::LogLevel::Debug;
+            case wolvrix::lib::ingest::ConvertDiagnosticKind::Error:
+            default:
+                return wolvrix::lib::LogLevel::Error;
+            }
+        };
+        auto isErrorKind = [](wolvrix::lib::ingest::ConvertDiagnosticKind kind) {
+            return kind == wolvrix::lib::ingest::ConvertDiagnosticKind::Error ||
+                   kind == wolvrix::lib::ingest::ConvertDiagnosticKind::Todo;
+        };
+        if (!converter.diagnostics().empty())
+        {
+            hasFrontendError = reportDiagnostics("convert", converter.diagnostics().messages(),
+                                                 kindToLevel, isErrorKind);
+        }
+        if (converter.diagnostics().hasError())
+        {
+            hasFrontendError = true;
+        }
+
+        if (hasFrontendError)
         {
             logLine(wolvrix::lib::LogLevel::Error, "convert", {},
-                    "--convert-threads must be a positive number");
-            return 1;
+                    "Build failed: convert encountered errors");
+            return 2;
         }
-        convertOptions.threadCount = static_cast<uint32_t>(*convertThreads);
-    }
-    if (singleThread == true)
-    {
-        convertOptions.singleThread = true;
-    }
 
-    wolvrix::lib::ingest::ConvertDriver converter(convertOptions);
-    converter.logger().setSink([&](const wolvrix::lib::LogEvent& event) {
-        logLine(event.level, "convert", event.tag, event.message);
-    });
-    const auto convertStart = TimingClock::now();
-    bool convertAborted = false;
-    try {
-        netlist = converter.convert(root);
-    } catch (const wolvrix::lib::ingest::ConvertAbort&) {
-        // Diagnostics already recorded; stop conversion immediately.
-        convertAborted = true;
-    }
-    const auto convertEnd = TimingClock::now();
-    const std::string convertLabel =
-        convertAborted ? std::string("convert-total (aborted)") : std::string("convert-total");
-    logTimingStage("convert", convertLabel, convertStart, convertEnd);
-
-    auto kindToLevel = [](wolvrix::lib::ingest::ConvertDiagnosticKind kind) {
-        switch (kind)
+        if (netlist.graphs().empty())
         {
-        case wolvrix::lib::ingest::ConvertDiagnosticKind::Todo:
-            return wolvrix::lib::LogLevel::Error;
-        case wolvrix::lib::ingest::ConvertDiagnosticKind::Warning:
-            return wolvrix::lib::LogLevel::Warn;
-        case wolvrix::lib::ingest::ConvertDiagnosticKind::Info:
-            return wolvrix::lib::LogLevel::Info;
-        case wolvrix::lib::ingest::ConvertDiagnosticKind::Debug:
-            return wolvrix::lib::LogLevel::Debug;
-        case wolvrix::lib::ingest::ConvertDiagnosticKind::Error:
-        default:
-            return wolvrix::lib::LogLevel::Error;
-        }
-    };
-    auto isErrorKind = [](wolvrix::lib::ingest::ConvertDiagnosticKind kind) {
-        return kind == wolvrix::lib::ingest::ConvertDiagnosticKind::Error ||
-               kind == wolvrix::lib::ingest::ConvertDiagnosticKind::Todo;
-    };
-    if (!converter.diagnostics().empty())
-    {
-        hasFrontendError = reportDiagnostics("convert", converter.diagnostics().messages(),
-                                             kindToLevel, isErrorKind);
-    }
-    if (converter.diagnostics().hasError())
-    {
-        hasFrontendError = true;
-    }
+            logLine(wolvrix::lib::LogLevel::Warn, "convert", {},
+                    "Netlist is empty; skipping transform and emit");
+            return driver.reportDiagnostics(/* quiet */ false) ? 0 : 4;
+        }    }
 
-    if (hasFrontendError)
-    {
-        logLine(wolvrix::lib::LogLevel::Error, "convert", {},
-                "Build failed: convert encountered errors");
-        return 2;
-    }
-
-    if (netlist.graphs().empty())
-    {
-        logLine(wolvrix::lib::LogLevel::Warn, "convert", {},
-                "Netlist is empty; skipping transform and emit");
-        return driver.reportDiagnostics(/* quiet */ false) ? 0 : 4;
-    }
-
+    const bool effectiveSkipTransform = (skipTransform == true) || useJsonLoad;
     bool transformOk = true;
     const auto transformStart = TimingClock::now();
-    if (skipTransform == true)
+    if (effectiveSkipTransform)
     {
         logLine(wolvrix::lib::LogLevel::Info, "transform", {}, "skipped");
         const auto transformEnd = TimingClock::now();
@@ -704,9 +772,8 @@ int run(int argc, char **argv)
     }
 
     bool emitOk = true;
-    const bool wantsEmit = dumpJson == true || dumpSv == true;
     std::optional<TimingClock::time_point> emitStart;
-    if (wantsEmit)
+    if (dumpSv == true)
     {
         emitStart = TimingClock::now();
     }
@@ -715,6 +782,7 @@ int run(int argc, char **argv)
         wolvrix::lib::store::StoreDiagnostics storeDiagnostics;
         wolvrix::lib::store::StoreJson emitter(&storeDiagnostics);
 
+        const auto storeJsonStart = TimingClock::now();
         wolvrix::lib::store::StoreOptions storeOptions;
         storeOptions.jsonMode = wolvrix::lib::store::JsonPrintMode::PrettyCompact;
         applyCommonStoreOptions(storeOptions);
@@ -724,6 +792,8 @@ int run(int argc, char **argv)
         }
 
         wolvrix::lib::store::StoreResult storeResult = emitter.store(netlist, storeOptions);
+        const auto storeJsonEnd = TimingClock::now();
+        logTimingStage("store", "store", storeJsonStart, storeJsonEnd);
         if (!storeDiagnostics.empty())
         {
             for (const auto &message : storeDiagnostics.messages())
@@ -748,20 +818,19 @@ int run(int argc, char **argv)
                     text.append(message.context);
                     text.append(")");
                 }
-                logLine(level, "emit-json", {}, text);
+                logLine(level, "store", {}, text);
             }
         }
 
         emitOk = storeResult.success && !storeDiagnostics.hasError();
         if (storeResult.success && !storeResult.artifacts.empty())
         {
-            logLine(wolvrix::lib::LogLevel::Info, "emit-json", {},
-                    std::string("Wrote GRH JSON to ") + storeResult.artifacts.front());
+            logArtifact("store", std::string("store json to: ") + storeResult.artifacts.front());
         }
         else if (!storeResult.success)
         {
-            logLine(wolvrix::lib::LogLevel::Error, "emit-json", {},
-                    "Failed to emit GRH JSON");
+            logLine(wolvrix::lib::LogLevel::Error, "store", {},
+                    "store json failed");
         }
     }
 
@@ -801,19 +870,18 @@ int run(int argc, char **argv)
                     text.append(message.context);
                     text.append(")");
                 }
-                logLine(level, "emit-sv", {}, text);
+                logLine(level, "emit", {}, text);
             }
         }
         emitOk = emitOk && emitResult.success && !emitDiagnostics.hasError();
         if (emitResult.success && !emitResult.artifacts.empty())
         {
-            logLine(wolvrix::lib::LogLevel::Info, "emit-sv", {},
-                    std::string("Wrote SystemVerilog to ") + emitResult.artifacts.front());
+            logArtifact("emit", std::string("emit sv to: ") + emitResult.artifacts.front());
         }
         else if (!emitResult.success)
         {
-            logLine(wolvrix::lib::LogLevel::Error, "emit-sv", {},
-                    "Failed to emit SystemVerilog");
+            logLine(wolvrix::lib::LogLevel::Error, "emit", {},
+                    "emit sv failed");
         }
     }
 

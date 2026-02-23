@@ -18,7 +18,7 @@ StoreJson 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口
   - `sym`: 符号名（必需，缺失视为错误）。
   - `w`: 位宽。
   - `sgn`: 是否有符号。
-  - `in` / `out` / `inout`: 输入/输出/inout 标记（不可同时为真）。
+  - `in` / `out` / `inout`: 输入/输出/inout 标记（`inout` 不可与 `in/out` 同时为真）。
   - `def`: 可选，定义该值的 Operation 符号。
   - `users`: 使用者数组 `{ op, idx }`，描述操作与操作数索引。
   - `loc`: 可选，源码位置与扩展调试信息 `{ file, line, col, endLine, endCol, origin, pass, note }`。

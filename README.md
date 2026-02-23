@@ -77,7 +77,7 @@ The resulting binary will be available at `build/bin/wolvrix-cli`.
 | `-o <path>` | Output file path for emitted artifacts. Extension determines format (`.sv`/`.v` for SV, `.json` for JSON) |
 | `--emit-out-dir <path>`<br>`--emit-out <path>` | Directory to write emitted GRH/SV files |
 | `--emit-sv` | Emit SystemVerilog after conversion and transformation |
-| `--emit-json` | Emit GRH JSON representation after conversion |
+| `--store-json` | Emit GRH JSON representation after conversion |
 
 #### Design Processing Options
 
@@ -114,7 +114,7 @@ For additional options inherited from slang, refer to the [slang documentation](
 #### Parse SV and Output JSON
 
 ```bash
-./build/bin/wolvrix-cli --emit-json -o output.json --top my_top design.sv
+./build/bin/wolvrix-cli --store-json -o output.json --top my_top design.sv
 ```
 
 #### Parse SV and Output Transformed SV
@@ -126,7 +126,7 @@ For additional options inherited from slang, refer to the [slang documentation](
 #### Parse with Include Paths and Macros
 
 ```bash
-./build/bin/wolvrix-cli --emit-sv --emit-json \
+./build/bin/wolvrix-cli --emit-sv --store-json \
     -I ./include -I ./rtl \
     --define SYNTHESIS \
     --define CLOCK_PERIOD=10 \
@@ -148,7 +148,7 @@ For additional options inherited from slang, refer to the [slang documentation](
 #### Using File Lists
 
 ```bash
-./build/bin/wolvrix-cli --emit-sv --emit-json -o output.sv -f filelist.f
+./build/bin/wolvrix-cli --emit-sv --store-json -o output.sv -f filelist.f
 ```
 
 ## Project Structure

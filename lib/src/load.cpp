@@ -792,9 +792,9 @@ namespace wolvrix::lib::load
                 {
                     isInout = inoutIt->second.asBool("value.inout");
                 }
-                if ((isInput && isOutput) || (isInout && (isInput || isOutput)))
+                if (isInout && (isInput || isOutput))
                 {
-                    throw std::runtime_error("Value cannot be both input/output/inout in JSON");
+                    throw std::runtime_error("Value cannot be both inout and input/output in JSON");
                 }
 
                 if (isInput)

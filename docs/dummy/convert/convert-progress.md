@@ -824,7 +824,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 目标：
 - 在 `wolf-sv-parser` 主流程中接入 Convert + Transform + Emit
-- 支持 HDLBits 流程所需的 `--emit-sv/--emit-json/-o/--emit-out-dir` 参数
+- 支持 HDLBits 流程所需的 `--emit-sv/--store-json/-o/--emit-out-dir` 参数
 
 计划：
 - 主流程创建 `ConvertDriver`，将 Convert 诊断/日志输出到 stderr

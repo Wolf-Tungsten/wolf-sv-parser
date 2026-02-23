@@ -66,7 +66,7 @@ $(WOLF_SV): $(FILELIST)
 		exit 1; \
 	fi
 	@mkdir -p $(WOLF_DIR)
-	@$(WOLF_SV_PARSER) --emit-sv --emit-json --top $(DUT_TOP) -o $(WOLF_SV) $(WOLF_DEFINE_FLAGS) -f $(FILELIST)
+	@$(WOLF_SV_PARSER) --emit-sv --store-json --top $(DUT_TOP) -o $(WOLF_SV) $(WOLF_DEFINE_FLAGS) -f $(FILELIST)
 
 $(REF_LIB): $(TB_V) $(FILELIST)
 	@if ! command -v $(VERILATOR) >/dev/null 2>&1; then \
