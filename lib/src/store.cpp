@@ -568,6 +568,21 @@ namespace wolvrix::lib::store
                                             std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                             bool pretty)
         {
+            auto collectAliases = [&](const wolvrix::lib::grh::Netlist &source)
+                -> std::vector<std::pair<std::string, std::string>> {
+                std::vector<std::pair<std::string, std::string>> result;
+                for (const auto &graphSymbol : source.graphOrder())
+                {
+                    for (const auto &alias : source.aliasesForGraph(graphSymbol))
+                    {
+                        result.emplace_back(alias, graphSymbol);
+                    }
+                }
+                std::sort(result.begin(), result.end(),
+                          [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+                return result;
+            };
+
             slang::JsonWriter writer;
             writer.setPrettyPrint(pretty);
             writer.startObject();
@@ -579,6 +594,15 @@ namespace wolvrix::lib::store
                 graph->writeJson(writer);
             }
             writer.endArray();
+
+            writer.writeProperty("aliases");
+            writer.startObject();
+            for (const auto &[alias, graphSymbol] : collectAliases(netlist))
+            {
+                writer.writeProperty(alias);
+                writer.writeValue(graphSymbol);
+            }
+            writer.endObject();
 
             writer.writeProperty("declaredSymbols");
             writer.startArray();
@@ -1447,6 +1471,39 @@ namespace wolvrix::lib::store
                 appendNewlineAndIndent(out, indent);
             }
             out.push_back(']');
+            out.push_back(',');
+            appendNewlineAndIndent(out, indent);
+
+            appendQuotedString(out, "aliases");
+            out.append(": {");
+            std::vector<std::pair<std::string, std::string>> aliases;
+            for (const auto &graphSymbol : netlist.graphOrder())
+            {
+                for (const auto &alias : netlist.aliasesForGraph(graphSymbol))
+                {
+                    aliases.emplace_back(alias, graphSymbol);
+                }
+            }
+            if (!aliases.empty())
+            {
+                std::sort(aliases.begin(), aliases.end(),
+                          [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+                bool firstAlias = true;
+                for (const auto &[alias, graphSymbol] : aliases)
+                {
+                    if (!firstAlias)
+                    {
+                        out.push_back(',');
+                    }
+                    appendNewlineAndIndent(out, indent + 1);
+                    appendQuotedString(out, alias);
+                    out.append(": ");
+                    appendQuotedString(out, graphSymbol);
+                    firstAlias = false;
+                }
+                appendNewlineAndIndent(out, indent);
+            }
+            out.push_back('}');
             out.push_back(',');
             appendNewlineAndIndent(out, indent);
 

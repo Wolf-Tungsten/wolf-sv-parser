@@ -49,6 +49,7 @@ namespace
         graph.addOperand(assign, sum);
         graph.addResult(assign, out);
 
+        netlist.registerGraphAlias("demo_alias", graph);
         netlist.markAsTop(graph.symbol());
         return netlist;
     }
@@ -107,6 +108,11 @@ int main()
     {
         return fail("Top graph list is missing in prettyCompact JSON");
     }
+    if (prettyCompactJson.find("\"aliases\"") == std::string::npos ||
+        prettyCompactJson.find("demo_alias") == std::string::npos)
+    {
+        return fail("Alias map is missing in prettyCompact JSON");
+    }
     if (prettyCompactJson.find("\"attrs\"") == std::string::npos || prettyCompactJson.find("\"int[]\"") == std::string::npos)
     {
         return fail("Attribute payload missing expected compact layout");
@@ -127,6 +133,11 @@ int main()
     if (!parsed.findGraph("demo"))
     {
         return fail("Round-trip parsed netlist missing demo graph");
+    }
+    Graph *aliasGraph = parsed.findGraph("demo_alias");
+    if (!aliasGraph || aliasGraph->symbol() != "demo")
+    {
+        return fail("Round-trip parsed netlist missing alias mapping");
     }
 
     // Case 3: compact mode should differ from prettyCompact output and avoid newlines.

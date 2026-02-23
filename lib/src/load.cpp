@@ -1098,6 +1098,28 @@ namespace wolvrix::lib::load
             netlist.addDeclaredSymbol(netlist.internSymbol(name));
         }
 
+        if (auto aliasesIt = rootObj.find("aliases"); aliasesIt != rootObj.end())
+        {
+            for (const auto &[alias, value] : aliasesIt->second.asObject("netlist.aliases"))
+            {
+                if (alias.empty())
+                {
+                    throw std::runtime_error("Netlist alias is empty");
+                }
+                const std::string target = value.asString("netlist.aliases[]");
+                if (target.empty())
+                {
+                    throw std::runtime_error("Netlist alias target is empty");
+                }
+                wolvrix::lib::grh::Graph *graph = netlist.findGraph(target);
+                if (!graph)
+                {
+                    throw std::runtime_error("Netlist alias target graph not found: " + target);
+                }
+                netlist.registerGraphAlias(alias, *graph);
+            }
+        }
+
         if (auto topIt = rootObj.find("tops"); topIt != rootObj.end())
         {
             for (const auto &entry : topIt->second.asArray("netlist.tops"))

@@ -296,7 +296,7 @@ namespace wolvrix::lib::transform
                                         uint32_t &counter)
         {
             (void)baseName;
-            std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase(kind);
+            std::string base = wolvrix::lib::grh::Graph::makeInternalBase(kind);
             for (;;)
             {
                 std::string candidate = base + "_" + std::to_string(counter++);

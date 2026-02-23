@@ -8778,7 +8778,7 @@ PlanSymbolId makeInternalPlanValueSymbol(ModulePlan& plan)
 {
     for (;;)
     {
-        std::string base = wolvrix::lib::grh::symbol_utils::makeInternalBase("val");
+        std::string base = wolvrix::lib::grh::Graph::makeInternalBase("val");
         std::string name = base + "_" + std::to_string(plan.nextInternalSymbol++);
         if (!plan.symbolTable.lookup(name).valid())
         {
@@ -16574,7 +16574,7 @@ namespace {
 
 std::string normalizeGraphIdent(std::string_view text, std::string_view fallback)
 {
-    std::string out = wolvrix::lib::grh::symbol_utils::normalizeComponent(text);
+    std::string out = wolvrix::lib::grh::Graph::normalizeComponent(text);
     if (out.empty())
     {
         out = std::string(fallback);

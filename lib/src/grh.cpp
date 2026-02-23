@@ -2786,7 +2786,7 @@ namespace wolvrix::lib::grh
 
     SymbolId Graph::makeInternalOpSym()
     {
-        std::string base = symbol_utils::makeInternalBase("op");
+        std::string base = Graph::makeInternalBase("op");
         for (;;)
         {
             std::string candidate = base;
@@ -2805,7 +2805,7 @@ namespace wolvrix::lib::grh
 
     SymbolId Graph::makeInternalValSym()
     {
-        std::string base = symbol_utils::makeInternalBase("val");
+        std::string base = Graph::makeInternalBase("val");
         for (;;)
         {
             std::string candidate = base;

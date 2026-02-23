@@ -537,6 +537,31 @@ public:
     SymbolId internSymbol(std::string_view text);
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;
+    static std::string normalizeComponent(std::string_view text)
+    {
+        std::string out;
+        out.reserve(text.size());
+        for (unsigned char ch : text)
+        {
+            if (std::isalnum(ch) || ch == '_')
+            {
+                out.push_back(static_cast<char>(ch));
+            }
+            else
+            {
+                out.push_back('_');
+            }
+        }
+        return out;
+    }
+    static std::string makeInternalBase(std::string_view kind)
+    {
+        std::string base;
+        base.reserve(kind.size() + 2);
+        base.push_back('_');
+        base.append(kind);
+        return base;
+    }
     SymbolId makeInternalOpSym();
     SymbolId makeInternalValSym();
     void addDeclaredSymbol(SymbolId sym);
@@ -686,38 +711,6 @@ private:
     std::vector<SymbolId> declaredSymbols_;
     std::unordered_set<uint32_t> declaredSymbolSet_;
 };
-
-namespace symbol_utils
-{
-
-    inline std::string normalizeComponent(std::string_view text)
-    {
-        std::string out;
-        out.reserve(text.size());
-        for (unsigned char ch : text)
-        {
-            if (std::isalnum(ch) || ch == '_')
-            {
-                out.push_back(static_cast<char>(ch));
-            }
-            else
-            {
-                out.push_back('_');
-            }
-        }
-        return out;
-    }
-
-    inline std::string makeInternalBase(std::string_view kind)
-    {
-        std::string base;
-        base.reserve(kind.size() + 2);
-        base.push_back('_');
-        base.append(kind);
-        return base;
-    }
-
-} // namespace symbol_utils
 
 } // namespace wolvrix::lib::grh
 

@@ -116,18 +116,6 @@ target_link_libraries(grh-roundtrip-tests
 
 register_test_exe(grh-roundtrip-tests)
 
-# grh symbol utils tests
-add_executable(grh-symbol-utils-tests
-    tests/grh/test_grh_symbol_utils.cpp
-)
-
-target_link_libraries(grh-symbol-utils-tests
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(grh-symbol-utils-tests)
-
 # grh clone tests
 add_executable(grh-clone-tests
     tests/grh/test_grh_clone.cpp

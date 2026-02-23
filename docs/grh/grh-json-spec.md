@@ -7,6 +7,7 @@ StoreJson 输出 GRH 网表的紧凑 JSON 表示，统一 CLI 与测试的入口
 
 ## 顶层结构
 - `graphs`: 按图名升序排列的数组，每个元素为单个 Graph 描述。
+- `aliases`: 可选，别名对象。键为 alias，值为目标 Graph 名称（symbol）。
 - `declaredSymbols`: 用户定义模块名数组（必需，缺失视为错误）。
 - `tops`: 顶层图名数组，顺序遵循 `Store` 解析后的顶层列表（包括 `topOverrides`）。
 

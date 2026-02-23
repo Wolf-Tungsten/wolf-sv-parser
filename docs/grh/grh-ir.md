@@ -1104,7 +1104,7 @@ GRH IR 将存储器拆分为声明（kMemory）、读端口（kMemoryReadPort）
 res[0] = <memSymbol>[addr]
 ```
 
-**说明**: 同步读通过 `kRegisterWritePort` 捕获 `kMemoryReadPort` 的输出实现。
+**说明**: 同步读通过 `kRegister` 捕获 `kMemoryReadPort` 的输出实现。
 
 ---
 
@@ -1140,14 +1140,14 @@ always @(posedge clk)
 
 **带写使能**：
 - `events` = [clk], `eventEdge` = ["posedge"]
-- `updateCond` = wen
+- `updateCond` = wen, `mask` = {W{1'b1}}
 ```sv
 always @(posedge clk)
     if (wen)
         mem[addr] <= data;
 ```
 
-**带写掩码（字节写）**：
+**带写掩码（逐位）**：
 - `events` = [clk], `eventEdge` = ["posedge"]
 - `updateCond` = wen, `mask` 为变量
 ```sv
