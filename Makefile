@@ -36,7 +36,6 @@ else
 WOLF_LOG_DEFAULT := 0
 endif
 WOLF_TIMER ?= 0
-SKIP_TRANSFORM ?= 0
 WOLF_TIMEOUT ?= 600
 WOLF_EMIT_FLAGS ?=
 
@@ -51,9 +50,6 @@ WOLF_EMIT_FLAGS += --log $(WOLF_LOG)
 endif
 ifneq ($(strip $(WOLF_TIMER)),0)
 WOLF_EMIT_FLAGS += --profile-timer
-endif
-ifneq ($(strip $(SKIP_TRANSFORM)),0)
-WOLF_EMIT_FLAGS += --skip-transform
 endif
 ifneq ($(strip $(WOLF_TIMEOUT)),)
 WOLF_EMIT_FLAGS += --timeout $(WOLF_TIMEOUT)
@@ -84,6 +80,7 @@ SMART_SIM ?= verilator
 SMART_CASE ?= coremark
 C910_SIM_MAX_CYCLE ?= 0
 C910_WAVEFORM ?= 0
+JSON_ROUND_TRIP ?= 0
 C910_LOG_DIR := $(BUILD_DIR)/logs/c910
 C910_WAVEFORM_DIR ?= $(C910_LOG_DIR)
 C910_LOG_DIR_ABS = $(abspath $(C910_LOG_DIR))
@@ -228,6 +225,8 @@ run_c910_test: $(RUN_C910_TEST_DEPS)
 		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
+			BUILD_DIR="$(BUILD_DIR)" \
+			WOLF_JSON_ROUNDTRIP="$(JSON_ROUND_TRIP)" \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 			TOOL_EXTENSION="$$TOOL_EXTENSION" \
 			VERILATOR="$(VERILATOR)" 2>&1 | \
@@ -237,46 +236,15 @@ run_c910_test: $(RUN_C910_TEST_DEPS)
 		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
 			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
 			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
+			BUILD_DIR="$(BUILD_DIR)" \
+			WOLF_JSON_ROUNDTRIP="$(JSON_ROUND_TRIP)" \
 			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
 			TOOL_EXTENSION="$$TOOL_EXTENSION" \
 			VERILATOR="$(VERILATOR)" 2>&1 | tee "$$LOG_FILE"; \
 	fi
 
-run_c910_json_test: $(RUN_C910_TEST_DEPS)
-	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
-	LOG_FILE="$(if $(LOG_FILE),$(LOG_FILE),$(C910_LOG_DIR)/c910_json_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log)"; \
-	WAVEFORM_FILE="$(if $(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_DIR_ABS)/c910_json_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).fst)"; \
-	WAVEFORM_DIR="$$(dirname "$$WAVEFORM_FILE")"; \
-	mkdir -p "$(C910_LOG_DIR_ABS)" "$$WAVEFORM_DIR"; \
-	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
-		. "$(SMART_ENV)"; \
-	fi; \
-	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM) (json roundtrip)"; \
-	echo "[RUN] C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM)"; \
-	echo "[LOG] Capturing output to: $$LOG_FILE"; \
-	if [ "$(C910_WAVEFORM)" = "1" ]; then \
-		echo "[WAVEFORM] Will save FST to: $$WAVEFORM_FILE"; \
-	fi; \
-	if [ "$(LOG_ONLY_SIM)" != "0" ]; then \
-		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
-		WOLF_JSON_ROUNDTRIP=1 \
-		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
-			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
-			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" \
-			VERILATOR="$(VERILATOR)" 2>&1 | \
-			tee >(awk 'f{print} index($$0,"obj_dir/Vsim_top"){f=1; next}' > "$$LOG_FILE"); \
-	else \
-		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
-		WOLF_JSON_ROUNDTRIP=1 \
-		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
-			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
-			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" \
-			VERILATOR="$(VERILATOR)" 2>&1 | tee "$$LOG_FILE"; \
-	fi
+run_c910_json_test:
+	@$(MAKE) --no-print-directory run_c910_test JSON_ROUND_TRIP=1
 
 # XiangShan: generate sim-verilog
 $(XS_SIM_TOP_V):

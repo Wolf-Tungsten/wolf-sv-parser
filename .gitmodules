@@ -10,3 +10,9 @@
 [submodule "tests/data/xiangshan"]
 	path = tests/data/xiangshan
 	url = git@github.com:Wolf-Tungsten/XiangShan.git
+[submodule "external/tcl"]
+	path = external/tcl
+	url = git@github.com:tcltk/tcl
+[submodule "external/linenoise-ng"]
+	path = external/linenoise-ng
+	url = git@github.com:arangodb/linenoise-ng

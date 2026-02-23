@@ -1,6 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
 project(wolvrix VERSION 0.1.0 LANGUAGES CXX)
 
+find_package(Git QUIET)
+set(WOLVRIX_GIT_SHA "unknown")
+set(WOLVRIX_GIT_DATE "unknown")
+if (GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=12 HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE WOLVRIX_GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" show -s --format=%cs HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE WOLVRIX_GIT_DATE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif()
+
 # Toolchain / language
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,7 +43,53 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 # Ensure important runtime/artifact directories exist at configure time
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
+include(ExternalProject)
+find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
+
 add_subdirectory(external/slang)
+
+# Tcl (vendored, external build)
+set(TCL_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/tcl")
+set(TCL_BUILD_DIR "${CMAKE_BINARY_DIR}/tcl-build")
+set(TCL_INSTALL_DIR "${CMAKE_BINARY_DIR}/tcl-install")
+set(TCL_LIB_FILE "${TCL_INSTALL_DIR}/lib/libtcl9.0.a")
+
+ExternalProject_Add(tcl_ext
+    SOURCE_DIR "${TCL_SOURCE_DIR}"
+    BINARY_DIR "${TCL_BUILD_DIR}"
+    CONFIGURE_COMMAND "${TCL_SOURCE_DIR}/unix/configure"
+        --prefix=${TCL_INSTALL_DIR}
+        --enable-64bit
+        --disable-shared
+    BUILD_COMMAND make
+    INSTALL_COMMAND make install
+    BUILD_BYPRODUCTS "${TCL_LIB_FILE}"
+)
+
+add_library(tcl9 STATIC IMPORTED)
+set_target_properties(tcl9 PROPERTIES
+    IMPORTED_LOCATION "${TCL_LIB_FILE}"
+    INTERFACE_INCLUDE_DIRECTORIES "${TCL_SOURCE_DIR}/generic;${TCL_SOURCE_DIR}/unix"
+)
+add_dependencies(tcl9 tcl_ext)
+
+# linenoise-ng (vendored)
+add_library(linenoise-ng STATIC
+    external/linenoise-ng/src/linenoise.cpp
+    external/linenoise-ng/src/ConvertUTF.cpp
+    external/linenoise-ng/src/wcwidth.cpp
+)
+
+set_target_properties(linenoise-ng PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED ON
+)
+
+target_include_directories(linenoise-ng
+    PUBLIC
+        external/linenoise-ng/include
+)
 
 # Libraries
 set(WOLVRIX_LIB_SOURCES
@@ -65,6 +131,30 @@ target_link_libraries(wolvrix-cli
     PRIVATE
         wolvrix-lib
 )
+
+add_executable(wolvrix
+    app/wolvrix/main.cpp
+)
+
+target_compile_definitions(wolvrix
+    PRIVATE
+        WOLVRIX_TCL_LIBRARY_DIR="${TCL_SOURCE_DIR}/library"
+        WOLVRIX_VERSION="${PROJECT_VERSION}"
+        WOLVRIX_GIT_SHA="${WOLVRIX_GIT_SHA}"
+        WOLVRIX_GIT_DATE="${WOLVRIX_GIT_DATE}"
+)
+
+target_link_libraries(wolvrix
+    PRIVATE
+        wolvrix-lib
+        tcl9
+        linenoise-ng
+        Threads::Threads
+        ZLIB::ZLIB
+        ${CMAKE_DL_LIBS}
+)
+
+add_dependencies(wolvrix tcl_ext)
 
 enable_testing()
 
