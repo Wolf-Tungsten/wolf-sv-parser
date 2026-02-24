@@ -52,7 +52,7 @@
 - 提供 `addPass(std::unique_ptr<Pass>)` 以便直接推入定制 pass，`clear()` 用于重复跑同一 Design 的不同管线；`options.verbosity` 控制最低诊断保留级别以及调试级别的 start/finish 日志。
 
 ## KR3：main 集成 Elaborate→Transform→Emit
-- 在 `app/cli/main.cpp` elaboration 成功后创建 `transform::PassManager`，从命令行构建管线后调用 `run(design, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
+- 在 `app/wolvrix/main.cpp` elaboration 成功后创建 `transform::PassManager`，构建管线后调用 `run(design, passDiags)`；若 `success == false` 或 diagnostics 有 error，则打印诊断并返回非零 exit code。
 - CMake 将 `lib/transform/*.cpp` 与 `lib/include/transform/*.hpp` 编译入主二进制；新增最小单元测试覆盖管线顺序、参数绑定与错误短路，后续可用 fake pass 验证 changed/diagnostics 聚合。
 - 日志格式与 emit/elaborate 对齐（前缀 `[transform]` + pass id），保持 JSON/SV 输出不受影响，若 pipeline 为空则完全复用当前输出路径。
 

@@ -123,15 +123,6 @@ target_link_libraries(wolvrix-lib
 add_library(wolvrix::lib ALIAS wolvrix-lib)
 
 # Application
-add_executable(wolvrix-cli
-    app/cli/main.cpp
-)
-
-target_link_libraries(wolvrix-cli
-    PRIVATE
-        wolvrix-lib
-)
-
 add_executable(wolvrix
     app/wolvrix/main.cpp
 )
@@ -586,5 +577,4 @@ target_compile_definitions(ingest-graph-assembly-instance-dedup
 register_test_exe(ingest-graph-assembly-instance-dedup)
 
 # Installation rules
-install(TARGETS wolvrix-cli RUNTIME DESTINATION bin)
 install(TARGETS wolvrix-lib LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)

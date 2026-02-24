@@ -93,15 +93,18 @@ wolf-sv-parser 还需 include/define：
 
 ### Phase 3: wolf_emit 生成
 
-使用 wolf-sv-parser 产出单文件：
+使用 wolvrix app 产出单文件：
 
 ```
-$(WOLF_PARSER) \
-  --emit-sv --top SimTop \
-  -o $(XS_WOLF_EMIT) \
-  -f $(XS_WOLF_FILELIST) \
-  $(XS_WOLF_EMIT_FLAGS) \
-  $(XS_SIM_INCLUDES) $(XS_SIM_DEFINES)
+WOLVRIX_APP := $(BUILD_DIR)/bin/wolvrix
+WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
+
+WOLVRIX_FILELIST=$(XS_WOLF_FILELIST) \
+WOLVRIX_TOP=SimTop \
+WOLVRIX_SV_OUT=$(XS_WOLF_EMIT) \
+WOLVRIX_STORE_JSON=1 \
+WOLVRIX_READ_ARGS="$(XS_SIM_INCLUDES) $(XS_SIM_DEFINES)" \
+$(WOLVRIX_APP) -f $(WOLVRIX_SCRIPT)
 ```
 
 推荐默认输出：
@@ -191,4 +194,3 @@ make run_xs_diff XS_SIM_MAX_CYCLE=5000 XS_WAVEFORM=1
 - 增加 `XS_CASE` / workload 选择接口
 - 对齐 c910 的 `WORK_DIR` 机制与日志格式
 - 加入 waveform diff / 自动信号采样
-

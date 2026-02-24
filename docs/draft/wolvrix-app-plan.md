@@ -1,7 +1,7 @@
-# Wolvrix App (Tcl/REPL) 升级替换 wolvrix-cli 规划草案
+# Wolvrix App (Tcl/REPL) 规划草案
 
 ## 背景与目标
-- **背景**：现有 `wolvrix-cli` 偏批处理风格；新需求希望像主流 EDA 工具一样支持 Tcl 脚本与交互式操作。
+- **背景**：现有流程偏批处理风格；新需求希望像主流 EDA 工具一样支持 Tcl 脚本与交互式操作。
 - **目标**：
   - 支持 `source` 执行 Tcl 脚本、变量/流程控制、以及工具命令。
   - 支持 REPL 交互（含命令历史、自动补全、上下文状态）。
@@ -24,7 +24,7 @@
   - `wolvrix` 进入交互
   - `help` / `help read_verilog`
   - `history`, `quit/exit`
-> 不提供旧 CLI 兼容模式，命令体系重新设计。
+> 不提供兼容模式，命令体系重新设计。
 
 ## 核心架构草案
 - **命令引擎**：统一的命令注册/执行层（支持 Tcl/REPL/CLI 三入口）。
@@ -44,7 +44,7 @@
 > 版本策略：锁定 9.0.3；9.1 预览版本不作为生产依赖。
 
 ## 迁移策略
-- 新 App 与旧 CLI **不兼容**，不提供自动转译。
+- 新 App 与既有批处理流程 **不兼容**，不提供自动转译。
 - 通过文档与示例脚本指导用户迁移到新命令体系。
 
 ## 命令体系与命名规范（草案）
@@ -119,7 +119,7 @@
 - Tcl 9.0 引入不兼容点，需要对脚本/命令进行适配评估。
 
 ## 当前实现（已完成）
-- 新增 `wolvrix` 可执行程序，保留 `wolvrix-cli` 仅作存量使用（无兼容层）。
+- 新增 `wolvrix` 可执行程序，移除旧批处理入口（无兼容层）。
 - 嵌入 Tcl 解释器（vendored `external/tcl`）与 linenoise-ng（vendored `external/linenoise-ng`）。
 - 支持 `-f <script.tcl>`/`-c <cmd>`/REPL 三入口；脚本执行会回显 Tcl 命令（跳过注释）。
 - 统一 Session：单一 design；已加载时禁止再次 `read_*`，必须 `close_design`。
@@ -233,8 +233,7 @@
 - `diagnostic.quiet`：诊断过滤级别或类别列表
 
 ## 代码落点建议（便于实现）
-- `app/cli/main.cpp`：入口与模式选择（REPL/`-f`/`-c`）。
-- `app/cli/repl.cpp`：linenoise 交互、补全、历史。
+- `app/wolvrix/main.cpp`：入口与模式选择（REPL/`-f`/`-c`），含交互逻辑。
 - `lib/src/cli_session.cpp`：Session 与状态管理（单 design 规则）。
 - `lib/src/tcl_bindings.cpp`：命令注册与参数解析。
 - `lib/src/cli_commands/*.cpp`：按类别拆分命令实现（read/write/transform/grh）。
@@ -257,7 +256,7 @@
 - `docs/cli/command-reference.md`
   - 每个命令：功能、参数、返回值、错误、示例。
 - `docs/cli/migration.md`
-  - 从 `wolvrix-cli` 迁移的步骤与常见替代命令。
+  - 迁移的步骤与常见替代命令。
 
 ## 验收标准（示例）
 - 交互：REPL 有补全与历史，`help` 输出清晰且稳定。

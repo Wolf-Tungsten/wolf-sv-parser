@@ -51,105 +51,39 @@ cmake ..
 cmake --build . -j$(nproc)
 ```
 
-The resulting binary will be available at `build/bin/wolvrix-cli`.
+The resulting binary will be available at `build/bin/wolvrix`.
 
 ## Usage
 
-### Basic Usage
+### Wolvrix App (Tcl/REPL)
 
-```bash
-# Parse a single SystemVerilog file
-./build/bin/wolvrix-cli <file.sv>
+Use `-f` for scripts or `-c` for one-liners.
 
-# Parse multiple files
-./build/bin/wolvrix-cli file1.sv file2.sv
-
-# Specify top module
-./build/bin/wolvrix-cli --top <module_name> <file.sv>
+```tcl
+# flow.tcl
+read_sv design.sv --top my_top
+foreach pass {xmr-resolve const-fold redundant-elim memory-init-check dead-code-elim stats} {
+  transform $pass
+}
+write_json -o output.json
+write_sv -o output.sv
 ```
 
-### Command Line Options
-
-#### Input/Output Options
-
-| Option | Description |
-|--------|-------------|
-| `-o <path>` | Output file path for emitted artifacts. Extension determines format (`.sv`/`.v` for SV, `.json` for JSON) |
-| `--emit-out-dir <path>`<br>`--emit-out <path>` | Directory to write emitted GRH/SV files |
-| `--emit-sv` | Emit SystemVerilog after conversion and transformation |
-| `--store-json` | Emit GRH JSON representation after conversion |
-
-#### Design Processing Options
-
-| Option | Description |
-|--------|-------------|
-| `--top <name>` | Specify the top-level module |
-| `--define <macro>=<value>` | Define a preprocessor macro |
-| `-I <path>` | Add include search path |
-| `-L <path>` | Add library search path |
-| `--skip-transform` | Skip transform passes and emit raw converted design |
-| `--single-unit` | Treat all input files as a single compilation unit (enabled by default) |
-
-#### Debug and Logging Options
-
-| Option | Description |
-|--------|-------------|
-| `--dump-ast` | Dump a summary of the parsed AST |
-| `--convert-log` | Enable Convert debug logging |
-| `--convert-log-level <level>` | Set Convert log level: `trace`, `debug`, `info`, `warn`, `error`, `off` |
-| `--convert-log-tag <tag>` | Limit Convert logging to specific tags (comma-separated) |
-
-#### Performance Options
-
-| Option | Description |
-|--------|-------------|
-| `--convert-threads <count>` | Number of Convert worker threads (default: 32) |
-| `--single-thread` | Force single-threaded Convert execution |
-| `--timeout <sec>` | Terminate if runtime exceeds timeout (in seconds) |
-
-For additional options inherited from slang, refer to the [slang documentation](https://sv-lang.com/user-manual.html).
-
-### Usage Examples
-
-#### Parse SV and Output JSON
-
 ```bash
-./build/bin/wolvrix-cli --store-json -o output.json --top my_top design.sv
+./build/bin/wolvrix -f flow.tcl
 ```
 
-#### Parse SV and Output Transformed SV
-
 ```bash
-./build/bin/wolvrix-cli --emit-sv -o transformed.sv --top my_top design.sv
+./build/bin/wolvrix -c "read_sv design.sv --top my_top; write_sv -o output.sv"
 ```
 
-#### Parse with Include Paths and Macros
+### Tcl Command Notes
 
-```bash
-./build/bin/wolvrix-cli --emit-sv --store-json \
-    -I ./include -I ./rtl \
-    --define SYNTHESIS \
-    --define CLOCK_PERIOD=10 \
-    -o output.sv design.sv
-```
-
-#### Debug with Logging
-
-```bash
-./build/bin/wolvrix-cli --emit-sv --convert-log --convert-log-level debug design.sv
-```
-
-#### Skip Transform Passes (Raw Design)
-
-```bash
-./build/bin/wolvrix-cli --emit-sv --skip-transform -o raw.sv design.sv
-```
-
-#### Using File Lists
-
-```bash
-./build/bin/wolvrix-cli --emit-sv --store-json -o output.sv -f filelist.f
-```
+Common Tcl commands include:
+- `read_sv <file> ?<slang-opts>...?`
+- `transform <passname> ?passargs...?`
+- `write_json -o <file>`
+- `write_sv -o <file>`
 
 ## Project Structure
 
@@ -159,7 +93,7 @@ wolvrix/
 ├── Makefile                # Top-level Makefile with test targets
 ├── env.sh.template         # Environment configuration template
 ├── app/                    # Executable applications
-│   └── cli/                # CLI app (wolvrix-cli)
+│   └── wolvrix/            # Tcl/REPL app
 ├── lib/                    # Core library (SDK)
 │   ├── include/            # Public headers
 │   ├── src/                # Core implementations

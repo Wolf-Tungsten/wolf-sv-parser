@@ -96,7 +96,7 @@ class CountConsumer : public Pass {
 ## 注册与集成
 - 在 CMake 中将新实现编译入 `wolvrix-lib`：添加到 `CMakeLists.txt` 的 `WOLVRIX_LIB_SOURCES` 源文件列表。
 - 在需要的入口注册，可按实例命名：
-  - CLI 主流程示例（`app/cli/main.cpp`）：`passManager.addPass(std::make_unique<FooOptPass>(FooOptOptions{/*...*/}), "foo-opt:phase1");`，未显式提供 name 时默认使用 pass 的 id。
+  - 主流程示例（`app/wolvrix/main.cpp`）：`passManager.addPass(std::make_unique<FooOptPass>(FooOptOptions{/*...*/}), "foo-opt:phase1");`，未显式提供 name 时默认使用 pass 的 id。
   - 测试中同样通过 `addPass` 推入 pipeline。
 - 若未来引入 registry/CLI 解析，可在构造层接受来自命令行的选项，再交给 pass 构造函数。
 

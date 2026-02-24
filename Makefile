@@ -20,7 +20,6 @@ LOG_ONLY_SIM ?= 0
 
 BUILD_DIR ?= build
 CMAKE ?= cmake
-WOLF_PARSER := $(BUILD_DIR)/bin/wolvrix-cli
 WOLVRIX_APP := $(BUILD_DIR)/bin/wolvrix
 RUN_ID ?= $(shell date +%Y%m%d_%H%M%S)
 
@@ -171,7 +170,6 @@ build:
 	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
 	$(CMAKE) --build $(BUILD_DIR) 
 
-$(WOLF_PARSER): build
 $(WOLVRIX_APP): build
 
 $(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLVRIX_APP) $(HDLBITS_WOLVRIX_SCRIPT) check-id

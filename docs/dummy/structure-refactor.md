@@ -25,14 +25,14 @@
   - `wolvrix::lib::emit`：专注将 GRH 输出为 SV 等目标格式。
   - `wolvrix::lib::load`：保留用于 JSON -> GRH。
   - `emit` 命名继续沿用，不改动。
-- 现有 `wolf-sv-parser` 归入 `wolvrix::app::cli`（命名空间更简洁清晰）。
-- 编译产出的应用名称为 `wolvrix-cli`。
+- 现有 `wolf-sv-parser` 归入 `wolvrix::app`，提供 Tcl/REPL 应用入口。
+- 编译产出的应用名称为 `wolvrix`。
 - `wolvrix::lib` 需可打包为动态链接库，作为 SDK 提供给第三方开发者使用。
 - 命名策略采用按子系统命名空间隔离：优先使用 `wolvrix::lib::transform::Pass`（以及未来可能的 `wolvrix::lib::<subsystem>::Pass`），避免引入冗长的 `TransformPass` 命名。
 
 ## 推进计划
 1) **命名与定位定稿**
-   - 项目名统一为 `wolvrix`，CLI 应用名为 `wolvrix-cli`。
+   - 项目名统一为 `wolvrix`，主应用为 `wolvrix`。
    - 命名空间根为 `wolvrix`，库与应用分别为 `wolvrix::lib` / `wolvrix::app`。
    - 子系统命名：`wolvrix::lib::{grh, ingest, transform, emit, load, store}`。
 2) **目录结构重组**
@@ -49,8 +49,8 @@
    - pass 实现文件放 `lib/transform/`，不设独立 `pass/` 目录。
    - app 侧可注册自定义 pass，形成可扩展 pipeline。
 5) **App 落地**
-   - 现有 `wolf-sv-parser` 迁入 `wolvrix::app::cli`。
-   - 产出 `wolvrix-cli` 作为首个 app。
+   - 现有 `wolf-sv-parser` 迁入 `wolvrix::app`。
+   - 产出 `wolvrix` 作为主 app。
 6) **SDK 输出能力**
    - `wolvrix::lib` 支持构建为动态链接库，供第三方 SDK 使用。
 7) **文档与验证**
