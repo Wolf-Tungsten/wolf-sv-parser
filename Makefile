@@ -21,6 +21,7 @@ LOG_ONLY_SIM ?= 0
 BUILD_DIR ?= build
 CMAKE ?= cmake
 WOLF_PARSER := $(BUILD_DIR)/bin/wolvrix-cli
+WOLVRIX_APP := $(BUILD_DIR)/bin/wolvrix
 RUN_ID ?= $(shell date +%Y%m%d_%H%M%S)
 
 # Verilator path (can be overridden via environment or env.sh)
@@ -58,6 +59,8 @@ endif
 HDLBITS_ROOT := tests/data/hdlbits
 C910_ROOT := tests/data/openc910
 XS_ROOT := tests/data/xiangshan
+HDLBITS_WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
+XS_WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
 
 # HDLBits paths
 DUT_SRC := $(HDLBITS_ROOT)/dut/dut_$(DUT).v
@@ -169,11 +172,17 @@ build:
 	$(CMAKE) --build $(BUILD_DIR) 
 
 $(WOLF_PARSER): build
+$(WOLVRIX_APP): build
 
-$(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLF_PARSER) check-id
+$(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLVRIX_APP) $(HDLBITS_WOLVRIX_SCRIPT) check-id
 	@mkdir -p $(OUT_DIR)
-	$(WOLF_PARSER) --emit-sv --store-json $(WOLF_EMIT_FLAGS) -o $(EMITTED_DUT) $(DUT_SRC)
-	@if [ -f $(OUT_DIR)/grh.json ]; then mv -f $(OUT_DIR)/grh.json $(EMITTED_JSON); fi
+	WOLVRIX_SOURCES=$(DUT_SRC) \
+	WOLVRIX_TOP=top_module \
+	WOLVRIX_SV_OUT=$(EMITTED_DUT) \
+	WOLVRIX_JSON_OUT=$(EMITTED_JSON) \
+	WOLVRIX_STORE_JSON=1 \
+	WOLVRIX_LOG_LEVEL=$(WOLF_LOG) \
+	$(WOLVRIX_APP) -f $(HDLBITS_WOLVRIX_SCRIPT)
 
 $(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
 	@mkdir -p $(OUT_DIR)
@@ -195,7 +204,7 @@ else
 	@$(MAKE) --no-print-directory run_all_hdlbits_tests
 endif
 
-run_all_hdlbits_tests: $(WOLF_PARSER)
+run_all_hdlbits_tests: $(WOLVRIX_APP)
 	@for dut in $(HDLBITS_DUTS); do \
 		echo "==== Running DUT=$$dut ===="; \
 		$(MAKE) --no-print-directory run_hdlbits_test DUT=$$dut || exit $$?; \
@@ -271,7 +280,7 @@ $(XS_WOLF_FILELIST_ABS): $(XS_SIM_TOP_V)
 xs_wolf_filelist: $(XS_WOLF_FILELIST_ABS)
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
-XS_WOLF_DEPS := $(WOLF_PARSER)
+XS_WOLF_DEPS := $(WOLVRIX_APP)
 endif
 
 xs_wolf_emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
@@ -279,24 +288,30 @@ xs_wolf_emit: $(XS_WOLF_FILELIST_ABS) $(XS_WOLF_DEPS)
 	@mkdir -p "$(XS_LOG_DIR_ABS)"
 	@$(eval RUN_ID := $(RUN_ID))
 	@$(eval BUILD_LOG_FILE := $(XS_LOG_DIR_ABS)/xs_wolf_build_$(RUN_ID).log)
+	@$(eval READ_ARGS_FILE := $(XS_WOLF_EMIT_DIR_ABS)/wolvrix_read_args.txt)
 	@echo "[LOG] Capturing wolf emit output to: $(BUILD_LOG_FILE)"
 	@printf '' > "$(BUILD_LOG_FILE)"
+	@printf '' > "$(READ_ARGS_FILE)"
+	@printf "%s\n" $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) >> "$(READ_ARGS_FILE)"
 	@{ \
 		if [ "$(XS_JSON_ROUNDTRIP)" = "1" ]; then \
-			echo "[CMD] $(WOLF_PARSER) $(XS_WOLF_JSON_EMIT_FLAGS) -o $(XS_WOLF_JSON) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)"; \
-			$(WOLF_PARSER) $(XS_WOLF_JSON_EMIT_FLAGS) -o $(XS_WOLF_JSON) \
-				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
-				$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
-				-f $(XS_WOLF_FILELIST_ABS); \
-			echo "[CMD] $(WOLF_PARSER) --load-json $(XS_WOLF_JSON) $(XS_WOLF_JSON_LOAD_FLAGS) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS)"; \
-			$(WOLF_PARSER) --load-json $(XS_WOLF_JSON) $(XS_WOLF_JSON_LOAD_FLAGS) -o $(XS_WOLF_EMIT_ABS) \
-				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS); \
+			echo "[CMD] WOLVRIX_FILELIST=$(XS_WOLF_FILELIST_ABS) WOLVRIX_TOP=$(XS_SIM_TOP) WOLVRIX_SV_OUT=$(XS_WOLF_EMIT_ABS) WOLVRIX_JSON_OUT=$(XS_WOLF_JSON) WOLVRIX_JSON_ROUNDTRIP=1 WOLVRIX_READ_ARGS_FILE=$(READ_ARGS_FILE) WOLVRIX_LOG_LEVEL=$(WOLF_LOG) $(WOLVRIX_APP) -f $(XS_WOLVRIX_SCRIPT)"; \
+			WOLVRIX_FILELIST=$(XS_WOLF_FILELIST_ABS) \
+			WOLVRIX_TOP=$(XS_SIM_TOP) \
+			WOLVRIX_SV_OUT=$(XS_WOLF_EMIT_ABS) \
+			WOLVRIX_JSON_OUT=$(XS_WOLF_JSON) \
+			WOLVRIX_JSON_ROUNDTRIP=1 \
+			WOLVRIX_READ_ARGS_FILE=$(READ_ARGS_FILE) \
+			WOLVRIX_LOG_LEVEL=$(WOLF_LOG) \
+			$(WOLVRIX_APP) -f $(XS_WOLVRIX_SCRIPT); \
 		else \
-			echo "[CMD] $(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) $(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) $(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS_LOG) -f $(XS_WOLF_FILELIST_ABS)"; \
-			$(WOLF_PARSER) --emit-sv --top $(XS_SIM_TOP) -o $(XS_WOLF_EMIT_ABS) \
-				$(WOLF_EMIT_FLAGS) $(XS_WOLF_EMIT_FLAGS) \
-				$(XS_WOLF_INCLUDE_FLAGS) $(XS_WOLF_DEFINE_FLAGS) \
-				-f $(XS_WOLF_FILELIST_ABS); \
+			echo "[CMD] WOLVRIX_FILELIST=$(XS_WOLF_FILELIST_ABS) WOLVRIX_TOP=$(XS_SIM_TOP) WOLVRIX_SV_OUT=$(XS_WOLF_EMIT_ABS) WOLVRIX_READ_ARGS_FILE=$(READ_ARGS_FILE) WOLVRIX_LOG_LEVEL=$(WOLF_LOG) $(WOLVRIX_APP) -f $(XS_WOLVRIX_SCRIPT)"; \
+			WOLVRIX_FILELIST=$(XS_WOLF_FILELIST_ABS) \
+			WOLVRIX_TOP=$(XS_SIM_TOP) \
+			WOLVRIX_SV_OUT=$(XS_WOLF_EMIT_ABS) \
+			WOLVRIX_READ_ARGS_FILE=$(READ_ARGS_FILE) \
+			WOLVRIX_LOG_LEVEL=$(WOLF_LOG) \
+			$(WOLVRIX_APP) -f $(XS_WOLVRIX_SCRIPT); \
 		fi; \
 	} 2>&1 | tee -a "$(BUILD_LOG_FILE)"
 

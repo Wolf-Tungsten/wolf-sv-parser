@@ -15,7 +15,8 @@ OUT_DIR_BASE := $(ROOT)/build/xs_bugcase/$(CASE_TAG)
 REF_DIR := $(OUT_DIR_BASE)/ref
 WOLF_DIR := $(OUT_DIR_BASE)/wolf
 
-WOLF_SV_PARSER ?= $(ROOT)/build/bin/wolvrix-cli
+WOLVRIX_APP ?= $(ROOT)/build/bin/wolvrix
+WOLVRIX_SCRIPT ?= $(ROOT)/tests/scripts/wolvrix_emit.tcl
 WOLF_SV := $(WOLF_DIR)/wolf_emit.sv
 
 VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
@@ -60,13 +61,25 @@ run: clean $(BIN)
 	@cd $(OUT_DIR_BASE) && ./$(notdir $(BIN))
 
 $(WOLF_SV): $(FILELIST)
-	@if [ ! -x "$(WOLF_SV_PARSER)" ]; then \
-		echo "[$(CASE_TAG)] wolvrix-cli not found: $(WOLF_SV_PARSER)"; \
-		echo "[$(CASE_TAG)] Build it from repo root: cmake -S . -B build && cmake --build build --target wolvrix-cli"; \
+	@if [ ! -x "$(WOLVRIX_APP)" ]; then \
+		echo "[$(CASE_TAG)] wolvrix not found: $(WOLVRIX_APP)"; \
+		echo "[$(CASE_TAG)] Build it from repo root: cmake -S . -B build && cmake --build build --target wolvrix"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(WOLVRIX_SCRIPT)" ]; then \
+		echo "[$(CASE_TAG)] wolvrix script not found: $(WOLVRIX_SCRIPT)"; \
 		exit 1; \
 	fi
 	@mkdir -p $(WOLF_DIR)
-	@$(WOLF_SV_PARSER) --emit-sv --store-json --top $(DUT_TOP) -o $(WOLF_SV) $(WOLF_DEFINE_FLAGS) -f $(FILELIST)
+	@printf '' > "$(WOLF_DIR)/wolvrix_read_args.txt"
+	@printf "%s\n" $(WOLF_DEFINE_FLAGS) >> "$(WOLF_DIR)/wolvrix_read_args.txt"
+	@WOLVRIX_FILELIST=$(FILELIST) \
+		WOLVRIX_TOP=$(DUT_TOP) \
+		WOLVRIX_SV_OUT=$(WOLF_SV) \
+		WOLVRIX_JSON_OUT=$(WOLF_DIR)/grh.json \
+		WOLVRIX_STORE_JSON=1 \
+		WOLVRIX_READ_ARGS_FILE=$(WOLF_DIR)/wolvrix_read_args.txt \
+		$(WOLVRIX_APP) -f $(WOLVRIX_SCRIPT)
 
 $(REF_LIB): $(TB_V) $(FILELIST)
 	@if ! command -v $(VERILATOR) >/dev/null 2>&1; then \
