@@ -57,12 +57,12 @@ namespace wolvrix::lib::store
         explicit Store(StoreDiagnostics *diagnostics = nullptr);
         virtual ~Store() = default;
 
-        StoreResult store(const wolvrix::lib::grh::Netlist &netlist, const StoreOptions &options = StoreOptions());
+        StoreResult store(const wolvrix::lib::grh::Design &design, const StoreOptions &options = StoreOptions());
 
     protected:
         StoreDiagnostics *diagnostics() const noexcept { return diagnostics_; }
 
-        std::vector<const wolvrix::lib::grh::Graph *> resolveTopGraphs(const wolvrix::lib::grh::Netlist &netlist,
+        std::vector<const wolvrix::lib::grh::Graph *> resolveTopGraphs(const wolvrix::lib::grh::Design &design,
                                                                        const StoreOptions &options) const;
         std::filesystem::path resolveOutputDir(const StoreOptions &options) const;
         bool ensureParentDirectory(const std::filesystem::path &path) const;
@@ -72,7 +72,7 @@ namespace wolvrix::lib::store
         void reportWarning(std::string message, std::string context = {}) const;
 
     protected:
-        virtual StoreResult storeImpl(const wolvrix::lib::grh::Netlist &netlist,
+        virtual StoreResult storeImpl(const wolvrix::lib::grh::Design &design,
                                       std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                       const StoreOptions &options) = 0;
 
@@ -87,11 +87,11 @@ namespace wolvrix::lib::store
     public:
         using Store::Store;
 
-        std::optional<std::string> storeToString(const wolvrix::lib::grh::Netlist &netlist,
+        std::optional<std::string> storeToString(const wolvrix::lib::grh::Design &design,
                                                  const StoreOptions &options = StoreOptions());
 
     private:
-        StoreResult storeImpl(const wolvrix::lib::grh::Netlist &netlist,
+        StoreResult storeImpl(const wolvrix::lib::grh::Design &design,
                               std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                               const StoreOptions &options) override;
     };

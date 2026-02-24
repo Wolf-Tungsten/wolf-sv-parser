@@ -218,6 +218,23 @@ target_link_libraries(grh-clone-tests
 
 register_test_exe(grh-clone-tests)
 
+# cli tcl tests
+add_test(NAME wolvrix-tcl-flow-ok
+    COMMAND $<TARGET_FILE:wolvrix> -f ${CMAKE_SOURCE_DIR}/tests/cli/data/flow_ok.tcl
+)
+set_tests_properties(wolvrix-tcl-flow-ok
+    PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+add_test(NAME wolvrix-tcl-flow-fail
+    COMMAND $<TARGET_FILE:wolvrix> -f ${CMAKE_SOURCE_DIR}/tests/cli/data/flow_fail.tcl
+)
+set_tests_properties(wolvrix-tcl-flow-fail
+    PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # emit base
 add_executable(emit-base
     tests/emit/test_emit_base.cpp

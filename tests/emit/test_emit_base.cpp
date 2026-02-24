@@ -28,7 +28,7 @@ namespace
         std::filesystem::path lastOutputPath;
 
     private:
-        EmitResult emitImpl(const Netlist &, std::span<const Graph *const> topGraphs, const EmitOptions &options) override
+        EmitResult emitImpl(const Design &, std::span<const Graph *const> topGraphs, const EmitOptions &options) override
         {
             ++callCount;
             lastTopCount = topGraphs.size();
@@ -65,8 +65,8 @@ int main()
     // Case 1: no tops available
     EmitDiagnostics diagNoTop;
     StubEmit emitterNoTop(&diagNoTop);
-    Netlist emptyNetlist;
-    EmitResult noTopResult = emitterNoTop.emit(emptyNetlist);
+    Design emptyDesign;
+    EmitResult noTopResult = emitterNoTop.emit(emptyDesign);
     if (noTopResult.success)
     {
         return fail("Expected emit to fail when no top graphs are present");
@@ -83,11 +83,11 @@ int main()
     // Case 2: override points to missing top
     EmitDiagnostics diagMissingOverride;
     StubEmit emitterMissingOverride(&diagMissingOverride);
-    Netlist netlistWithTop;
-    netlistWithTop.createGraph("demo");
+    Design designWithTop;
+    designWithTop.createGraph("demo");
     EmitOptions missingOverrideOptions;
     missingOverrideOptions.topOverrides.push_back("absent_top");
-    EmitResult missingOverrideResult = emitterMissingOverride.emit(netlistWithTop, missingOverrideOptions);
+    EmitResult missingOverrideResult = emitterMissingOverride.emit(designWithTop, missingOverrideOptions);
     if (missingOverrideResult.success)
     {
         return fail("Expected emit to fail when override top cannot be resolved");
@@ -104,14 +104,14 @@ int main()
     // Case 3: successful path with output
     EmitDiagnostics diagOk;
     StubEmit emitterOk(&diagOk);
-    Netlist okNetlist;
-    Graph &topGraph = okNetlist.createGraph("top");
-    okNetlist.markAsTop(topGraph.symbol());
+    Design okDesign;
+    Graph &topGraph = okDesign.createGraph("top");
+    okDesign.markAsTop(topGraph.symbol());
 
     EmitOptions okOptions;
     okOptions.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
 
-    EmitResult okResult = emitterOk.emit(okNetlist, okOptions);
+    EmitResult okResult = emitterOk.emit(okDesign, okOptions);
     if (!okResult.success)
     {
         return fail("Expected emit to succeed for valid top and output dir");

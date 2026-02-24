@@ -20,10 +20,10 @@
 
 ### 1.1 目标与边界
 
-Convert 将 slang AST（`slang::ast::*`）转换为 GRH IR（`wolvrix::lib::grh::Netlist` / `Graph` / `Value` / `Operation`）。
+Convert 将 slang AST（`slang::ast::*`）转换为 GRH IR（`wolvrix::lib::grh::Design` / `Graph` / `Value` / `Operation`）。
 
 - **输入**：已解析并类型化的 slang AST（`Compilation` + `RootSymbol`）
-- **输出**：结构化网表（`Netlist`），包含层次化的 `Graph` 表示
+- **输出**：结构化设计（`Design`），包含层次化的 `Graph` 表示
 - **职责边界**：把静态 SystemVerilog 子集转为 SSA 形式的 GRH，保留层次、支持参数特化
 - **非职责**：不覆盖所有 SV 特性，不做全局扁平化，不处理不可综合的动态语义
 
@@ -377,7 +377,7 @@ ConvertContext {
             }
         }
     },
-    // Netlist 已在 Pass4 中填充（通过 GraphAssembler）
+    // Design 已在 Pass4 中填充（通过 GraphAssembler）
 }
 
 ---
@@ -1394,7 +1394,7 @@ ConvertContext {
 }
 
 // ============================================================
-// Pass4 完成后：GRH Graph 写入 Netlist
+// Pass4 完成后：GRH Graph 写入 Design
 // ============================================================
 ConvertContext {
     planCache: {
@@ -1405,7 +1405,7 @@ ConvertContext {
             }
         }
     }
-    // Netlist 已由 GraphAssembler 填充：
+    // Design 已由 GraphAssembler 填充：
     // Graph "adder_acc" {
     //     Input: clk, rst_n, a(8), b(8)
     //     Output: sum(9), acc(8)
@@ -1425,7 +1425,7 @@ ConvertContext {
 class ConvertDriver {
 public:
     explicit ConvertDriver(ConvertOptions options = {});
-    wolvrix::lib::grh::Netlist convert(const slang::ast::RootSymbol& root);
+    wolvrix::lib::grh::Design convert(const slang::ast::RootSymbol& root);
     // ...
 };
 ```
@@ -1433,8 +1433,8 @@ public:
 **主流程**：
 
 ```cpp
-wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root) {
-    wolvrix::lib::grh::Netlist netlist;
+wolvrix::lib::grh::Design ConvertDriver::convert(const slang::ast::RootSymbol& root) {
+    wolvrix::lib::grh::Design design;
     planCache_.clear();
     planQueue_.reset();
 
@@ -1445,7 +1445,7 @@ wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& 
     StmtLowererPass stmtLowerer(context);
     WriteBackPass writeBack(context);
     MemoryPortLowererPass memoryPortLowerer(context);
-    GraphAssembler graphAssembler(context, netlist);
+    GraphAssembler graphAssembler(context, design);
 
     // 投递顶层实例任务
     for (const auto* topInstance : root.topInstances) {
@@ -1474,7 +1474,7 @@ wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& 
         planCache_.storePlan(key, std::move(plan));
     }
 
-    return netlist;
+    return design;
 }
 ```
 
@@ -1688,7 +1688,7 @@ ConvertContext {
             }
         }
     }
-    // Netlist 已填充：
+    // Design 已填充：
     // Graph "counter" {
     //     Input: clk, rst, en
     //     Output: count(4)
@@ -1727,7 +1727,7 @@ void StmtLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);          
 WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering);       // ~7026
 void MemoryPortLowererPass::lower(ModulePlan& plan, LoweringPlan& lowering);        // ~8721
 wolvrix::lib::grh::Graph& GraphAssembler::build(const PlanKey& key, ...);                     // ~11804
-wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root);        // ~11833
+wolvrix::lib::grh::Design ConvertDriver::convert(const slang::ast::RootSymbol& root);        // ~11833
 ```
 
 ---
@@ -1739,7 +1739,7 @@ wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& 
 - **并行粒度**：Graph 创建级别
 - **线程池**：默认 32 线程
 - **去重**：`InstanceRegistry` 基于 `PlanKey`
-- **Netlist 写回**：主线程串行 commit
+- **Design 写回**：主线程串行 commit
 
 ### 7.2 执行流程
 

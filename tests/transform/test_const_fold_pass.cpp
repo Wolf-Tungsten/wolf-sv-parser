@@ -60,8 +60,8 @@ int main()
 {
     // Case 1: multi-iteration folding rewires downstream users
     {
-        wolvrix::lib::grh::Netlist netlist;
-        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g");
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g");
         wolvrix::lib::grh::ValueId c0 = makeConst(graph, "c0", "c0_op", 4, false, "4'h3");
         wolvrix::lib::grh::ValueId c1 = makeConst(graph, "c1", "c1_op", 4, false, "4'h1");
 
@@ -100,7 +100,7 @@ int main()
         PassManagerResult res{};
         try
         {
-            res = manager.run(netlist, diags);
+            res = manager.run(design, diags);
         }
         catch (const std::exception &ex)
         {
@@ -145,8 +145,8 @@ int main()
 
     // Case 2: X operand blocks folding when allowXPropagation=false
     {
-        wolvrix::lib::grh::Netlist netlist;
-        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g2");
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g2");
         wolvrix::lib::grh::ValueId xval = makeConst(graph, "cx", "cx_op", 1, false, "1'bx");
         wolvrix::lib::grh::ValueId one = makeConst(graph, "c1", "c1_op", 1, false, "1'b1");
 
@@ -162,7 +162,7 @@ int main()
         PassManagerResult res{};
         try
         {
-            res = manager.run(netlist, diags);
+            res = manager.run(design, diags);
         }
         catch (const std::exception &ex)
         {
@@ -185,8 +185,8 @@ int main()
 
     // Case 3: missing attribute triggers failure
     {
-        wolvrix::lib::grh::Netlist netlist;
-        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g3");
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g3");
         wolvrix::lib::grh::ValueId c = makeConst(graph, "c", "c_op", 2, false, "2'h1");
 
         wolvrix::lib::grh::ValueId repOut = graph.createValue(graph.internSymbol("repOut"), 4, false);
@@ -201,7 +201,7 @@ int main()
         PassManagerResult res{};
         try
         {
-            res = manager.run(netlist, diags);
+            res = manager.run(design, diags);
         }
         catch (const std::exception &ex)
         {
@@ -215,8 +215,8 @@ int main()
 
     // Case 4: kSystemFunction $clog2 folds to constant
     {
-        wolvrix::lib::grh::Netlist netlist;
-        wolvrix::lib::grh::Graph &graph = netlist.createGraph("g4");
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g4");
         wolvrix::lib::grh::ValueId arg = makeConst(graph, "arg", "arg_op", 8, false, "8'h8");
 
         wolvrix::lib::grh::ValueId result = graph.createValue(graph.internSymbol("clog2_out"), 32, false);
@@ -241,7 +241,7 @@ int main()
         PassManagerResult res{};
         try
         {
-            res = manager.run(netlist, diags);
+            res = manager.run(design, diags);
         }
         catch (const std::exception &ex)
         {

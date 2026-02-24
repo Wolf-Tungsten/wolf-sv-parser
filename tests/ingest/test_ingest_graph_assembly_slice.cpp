@@ -68,16 +68,16 @@ int testGraphAssemblySlice(const std::filesystem::path& sourcePath) {
     }
 
     wolvrix::lib::ingest::ConvertDriver driver;
-    wolvrix::lib::grh::Netlist netlist = driver.convert(bundle->compilation->getRoot());
+    wolvrix::lib::grh::Design design = driver.convert(bundle->compilation->getRoot());
 
-    if (netlist.topGraphs().size() != 1) {
+    if (design.topGraphs().size() != 1) {
         return fail("Expected exactly one top graph");
     }
-    if (netlist.topGraphs().front() != "graph_assembly_slice") {
+    if (design.topGraphs().front() != "graph_assembly_slice") {
         return fail("Unexpected top graph name");
     }
 
-    const wolvrix::lib::grh::Graph* graph = netlist.findGraph("graph_assembly_slice");
+    const wolvrix::lib::grh::Graph* graph = design.findGraph("graph_assembly_slice");
     if (!graph) {
         return fail("Missing graph_assembly_slice graph");
     }

@@ -285,10 +285,10 @@ namespace wolvrix::lib::transform
         pipeline_.clear();
     }
 
-    PassManagerResult PassManager::run(wolvrix::lib::grh::Netlist &netlist, PassDiagnostics &diags)
+    PassManagerResult PassManager::run(wolvrix::lib::grh::Design &design, PassDiagnostics &diags)
     {
         PassManagerResult result;
-        PassContext context{netlist, diags, options_.verbosity, options_.logLevel, options_.logSink, options_.keepDeclaredSymbols};
+        PassContext context{design, diags, options_.verbosity, options_.logLevel, options_.logSink, options_.keepDeclaredSymbols};
         bool encounteredFailure = false;
         auto emitLog = [&](LogLevel level, std::string_view tag, std::string_view message) {
             if (!options_.logSink)

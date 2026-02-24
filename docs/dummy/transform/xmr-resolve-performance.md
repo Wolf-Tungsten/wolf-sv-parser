@@ -18,19 +18,19 @@ ports using a module index:
 
 This reduces work to roughly:
 `O(num_instance_ops + num_pending_ports + (sum over modules: instances * ports_per_module))`
-and removes the expensive full-netlist scan per port.
+and removes the expensive full-design scan per port.
 
 ## Previous Bottleneck (Historical)
-The earlier approach scanned the entire netlist for every pending port:
+The earlier approach scanned the entire design for every pending port:
 
 - For each pending output port:
-  - For every graph in the netlist:
+  - For every graph in the design:
     - For every operation in the graph:
       - If `op.kind` is instance/blackbox and `moduleName` matches, call
         `ensureInstanceOutput`.
 
 - For each pending input port:
-  - For every graph in the netlist:
+  - For every graph in the design:
     - For every operation in the graph:
       - If `op.kind` is instance/blackbox and `moduleName` matches, call
         `ensureInstanceInput` (after padding if needed).

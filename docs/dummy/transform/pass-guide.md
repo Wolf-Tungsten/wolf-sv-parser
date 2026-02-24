@@ -44,7 +44,7 @@ namespace wolvrix::lib::transform {
 
     PassResult FooOptPass::run() {
         PassResult result;
-        // TODO: mutate netlist() / graphs here
+        // TODO: mutate design() / graphs here
         // emit diagnostics via diags()
         return result;
     }
@@ -54,12 +54,12 @@ namespace wolvrix::lib::transform {
 - 参数通过构造参数传入，必要时定义 options 结构体；保持默认值合理，便于调用方直接构造。
 
 ## 诊断与中断策略
-- 基类提供便捷访问器：`netlist()`、`diags()`、`verbosity()`，无需在 run 传参。
+- 基类提供便捷访问器：`design()`、`diags()`、`verbosity()`，无需在 run 传参。
 - 直接在 Pass 内调用辅助方法（自动带上 pass id），低于 `PassContext::verbosity` 的诊断会被过滤，不会写入 `PassDiagnostics`：
   - `debug/info/warning/error(message, context = {})`。
   - `debug/info/warning/error(graph, op|value|graph, message)` 自动生成 `graph::op::val` 上下文。
 - `PassResult`：
-  - `changed = true` 表示已修改 Netlist/Graph。
+  - `changed = true` 表示已修改 Design/Graph。
   - `failed = true` 表示该 pass 自身失败（即使没有 error 诊断）。通常在遇到不可恢复状态时置位。
 - `PassManager` 行为：
   - 如果 `options.stopOnError == true`，遇到 `failed` 或已有 error 诊断会短路后续 pass。
@@ -77,7 +77,7 @@ namespace wolvrix::lib::transform {
 ```cpp
 class CountProducer : public Pass {
     PassResult run() override {
-        setScratchpad("counting/ops", netlist().graph("top").operations().size());
+        setScratchpad("counting/ops", design().graph("top").operations().size());
         return {};
     }
 };
@@ -102,7 +102,7 @@ class CountConsumer : public Pass {
 
 ## 编码风格与最佳实践
 - 遵循仓库 C++20 风格（4 空格缩进、头文件最小化、同一行 brace）。
-- 仅使用 `netlist()` 中的图/节点指针；引用解析应受 graph 范围约束，除非语义要求跨 graph（如 DPI import）。
+- 仅使用 `design()` 中的图/节点指针；引用解析应受 graph 范围约束，除非语义要求跨 graph（如 DPI import）。
 - 对外部输入进行充分的合法性检查；在修复缓存/填充缺省值时同步记录 `changed` 并发出 `info`/`warning`。
 - 遇到不可修复的结构缺陷（缺失 symbol、未知 kind 等）要及时 `error` 并考虑 `failed = true`。
 

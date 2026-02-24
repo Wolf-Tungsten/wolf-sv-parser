@@ -61,10 +61,10 @@ namespace wolvrix::lib::transform
     PassResult MemoryInitCheckPass::run()
     {
         PassResult result;
-        const std::size_t graphCount = netlist().graphs().size();
+        const std::size_t graphCount = design().graphs().size();
         logDebug("begin graphs=" + std::to_string(graphCount));
 
-        for (const auto &entry : netlist().graphs())
+        for (const auto &entry : design().graphs())
         {
             wolvrix::lib::grh::Graph &graph = *entry.second;
             std::unordered_map<std::string, InitInfo> initBySymbol;

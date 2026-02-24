@@ -42,13 +42,25 @@
 namespace wolvrix::app
 {
 
+constexpr int kHistoryMaxLen = 200;
+
 struct Session
 {
-    bool hasNetlist = false;
-    wolvrix::lib::grh::Netlist netlist;
+    bool hasDesign = false;
+    wolvrix::lib::grh::Design design;
+    std::string selectedGraph;
+    std::optional<std::string> lastErrorCode;
+    std::optional<std::string> lastErrorMessage;
+    std::optional<std::string> lastErrorDetail;
+    struct Options {
+        wolvrix::lib::LogLevel logLevel = wolvrix::lib::LogLevel::Info;
+        bool echoTcl = true;
+        bool historyEnabled = true;
+        int historyMaxLines = kHistoryMaxLen;
+        std::string outputDir;
+        std::vector<std::string> diagnosticQuiet;
+    } options;
 };
-
-constexpr int kHistoryMaxLen = 200;
 
 struct CommandHelp
 {
@@ -68,11 +80,11 @@ const CommandHelp kCommandHelp[] = {
     },
     {
         "read_sv",
-        "Parse SystemVerilog into a GRH netlist",
+        "Parse SystemVerilog into a GRH design",
         "read_sv <file> ?<slang-opts>...?\n"
         "\n"
-        "Parse a SystemVerilog design and build a GRH netlist in the session. This must\n"
-        "be the first load command; if a netlist is already loaded, run close_design first.\n"
+        "Parse a SystemVerilog design and build a GRH design in the session. This must\n"
+        "be the first load command; if a design is already loaded, run close_design first.\n"
         "\n"
         "Arguments after <file> are passed directly to the slang driver. Common\n"
         "examples: --top <name>, -I/+incdir <dir>, --isystem <dir>, -D/-U <macro>,\n"
@@ -83,26 +95,28 @@ const CommandHelp kCommandHelp[] = {
     },
     {
         "read_json",
-        "Load a GRH netlist from JSON",
+        "Load a GRH design from JSON",
         "read_json <file>\n"
         "\n"
-        "Load a GRH netlist from JSON. If a netlist is already loaded, run\n"
+        "Load a GRH design from JSON. If a design is already loaded, run\n"
         "close_design first.\n",
     },
     {
         "close_design",
-        "Close the current GRH netlist",
+        "Close the current GRH design",
         "close_design\n"
         "\n"
-        "Release the current GRH netlist so another read_sv/read_json can be issued.\n",
+        "Release the current GRH design so another read_sv/read_json can be issued.\n",
     },
     {
         "transform",
-        "Run a transform pass on the GRH netlist",
+        "Run a transform pass on the GRH design",
         "transform <passname> ?passargs...?\n"
+        "transform -list\n"
         "\n"
-        "Run a transform pass on the current GRH netlist.\n"
+        "Run a transform pass on the current GRH design.\n"
         "Use transform_list to see available passes.\n"
+        "Add -dryrun to evaluate a pass without mutating the design.\n"
         "\n"
         "Pass notes:\n"
         "  const-fold: -max-iter <N> (default 8), -allow-x\n",
@@ -116,49 +130,113 @@ const CommandHelp kCommandHelp[] = {
     },
     {
         "write_sv",
-        "Emit SystemVerilog from the GRH netlist",
+        "Emit SystemVerilog from the GRH design",
         "write_sv -o <file>\n"
         "\n"
-        "Emit SystemVerilog for the current GRH netlist.\n",
+        "Emit SystemVerilog for the current GRH design.\n",
     },
     {
         "write_json",
-        "Store the GRH netlist as JSON",
+        "Store the GRH design as JSON",
         "write_json -o <file>\n"
         "\n"
-        "Store GRH JSON for the current GRH netlist.\n",
+        "Store GRH JSON for the current GRH design.\n",
     },
     {
         "grh_list_graph",
-        "List graphs in the GRH netlist",
+        "List graphs in the GRH design",
         "grh_list_graph\n"
         "\n"
-        "Return a Tcl list of graph names in the current GRH netlist.\n",
+        "Return a Tcl list of graph names in the current GRH design.\n",
     },
     {
         "grh_create_graph",
         "Create an empty GRH graph",
         "grh_create_graph <name>\n"
         "\n"
-        "Create an empty graph with the given name in the current GRH netlist.\n",
+        "Create an empty graph with the given name in the current GRH design.\n",
+    },
+    {
+        "grh_select_graph",
+        "Select a GRH graph by name",
+        "grh_select_graph <name>\n"
+        "\n"
+        "Select a graph by name (or alias) for subsequent commands.\n",
+    },
+    {
+        "grh_delete_graph",
+        "Delete a GRH graph by name",
+        "grh_delete_graph <name>\n"
+        "\n"
+        "Delete a graph by name (or alias) from the current GRH design.\n",
     },
     {
         "grh_show_stats",
-        "Show basic GRH netlist statistics",
+        "Show basic GRH design statistics",
         "grh_show_stats\n"
         "\n"
         "Return a Tcl dict with counts for graphs, operations, and values.\n",
     },
+    {
+        "show_design",
+        "Show high-level design information",
+        "show_design\n"
+        "\n"
+        "Return a Tcl dict summarizing whether a design is loaded, graph counts,\n"
+        "and selected/top graphs when available.\n",
+    },
+    {
+        "show_modules",
+        "List graphs in the current design",
+        "show_modules\n"
+        "\n"
+        "Return a Tcl list of graph names for the current design.\n",
+    },
+    {
+        "show_stats",
+        "Show design statistics",
+        "show_stats\n"
+        "\n"
+        "Return a Tcl dict with counts for graphs, operations, and values.\n",
+    },
+    {
+        "set_option",
+        "Set a session option",
+        "set_option <key> <value>\n"
+        "\n"
+        "Supported keys:\n"
+        "  log.level           trace|debug|info|warn|error|off\n"
+        "  echo_tcl            0|1\n"
+        "  history.enable      0|1\n"
+        "  history.max_lines   integer\n"
+        "  output.dir          path\n"
+        "  diagnostic.quiet    Tcl list or comma-separated patterns\n",
+    },
+    {
+        "get_option",
+        "Get a session option",
+        "get_option <key>\n"
+        "\n"
+        "Return the current value for a supported key.\n",
+    },
+    {
+        "last_error",
+        "Show last command error",
+        "last_error\n"
+        "\n"
+        "Return a Tcl dict with fields: code, message, detail.\n",
+    },
 };
 
 constexpr std::string_view kWolvrixPrefix = "wolvrix";
-constexpr std::string_view kWolvrixPrompt = "wolvrix> ";
+constexpr std::string_view kWolvrixEchoPrompt = "wolvrix> ";
 constexpr std::string_view kWolvrixContinuationPrompt = "... ";
 std::optional<std::size_t> gWelcomeBoxWidth{};
 constexpr std::size_t kBoxHorizPadding = 2;
 constexpr std::size_t kBoxVertPadding = 1;
 bool gPrintedCommandEcho = false;
 bool gLogJustPrinted = false;
+Session *gActiveSession = nullptr;
 constexpr std::string_view kBoxTopLeft = "╔";
 constexpr std::string_view kBoxTopRight = "╗";
 constexpr std::string_view kBoxBottomLeft = "╚";
@@ -217,6 +295,60 @@ std::string_view logLevelText(wolvrix::lib::LogLevel level)
     }
 }
 
+std::string_view logLevelKeyText(wolvrix::lib::LogLevel level)
+{
+    switch (level)
+    {
+    case wolvrix::lib::LogLevel::Trace:
+        return "trace";
+    case wolvrix::lib::LogLevel::Debug:
+        return "debug";
+    case wolvrix::lib::LogLevel::Info:
+        return "info";
+    case wolvrix::lib::LogLevel::Warn:
+        return "warn";
+    case wolvrix::lib::LogLevel::Error:
+        return "error";
+    case wolvrix::lib::LogLevel::Off:
+    default:
+        return "off";
+    }
+}
+
+std::optional<wolvrix::lib::LogLevel> parseLogLevel(std::string_view text)
+{
+    std::string lowered(text);
+    for (char &ch : lowered)
+    {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (lowered == "trace")
+    {
+        return wolvrix::lib::LogLevel::Trace;
+    }
+    if (lowered == "debug")
+    {
+        return wolvrix::lib::LogLevel::Debug;
+    }
+    if (lowered == "info")
+    {
+        return wolvrix::lib::LogLevel::Info;
+    }
+    if (lowered == "warn" || lowered == "warning")
+    {
+        return wolvrix::lib::LogLevel::Warn;
+    }
+    if (lowered == "error")
+    {
+        return wolvrix::lib::LogLevel::Error;
+    }
+    if (lowered == "off" || lowered == "none")
+    {
+        return wolvrix::lib::LogLevel::Off;
+    }
+    return std::nullopt;
+}
+
 std::string indentMessage(std::string_view message)
 {
     std::string output;
@@ -233,8 +365,26 @@ std::string indentMessage(std::string_view message)
     return output;
 }
 
+bool shouldLog(wolvrix::lib::LogLevel level)
+{
+    if (!gActiveSession)
+    {
+        return true;
+    }
+    const auto minLevel = gActiveSession->options.logLevel;
+    if (minLevel == wolvrix::lib::LogLevel::Off)
+    {
+        return false;
+    }
+    return static_cast<int>(level) >= static_cast<int>(minLevel);
+}
+
 void logLine(std::string_view entity, wolvrix::lib::LogLevel level, std::string_view message)
 {
+    if (!shouldLog(level))
+    {
+        return;
+    }
     std::cerr << '\n';
     std::cerr << entity << " " << formatTimestamp() << " " << logLevelText(level) << ":\n";
     std::cerr << indentMessage(message) << '\n';
@@ -388,7 +538,27 @@ bool shouldSuppressDiagnostic(const wolvrix::lib::diag::Diagnostic &message)
     {
         return false;
     }
-    return message.message.find("Ignoring timing control (event)") != std::string::npos;
+    const std::string_view suppressList[] = {
+        "Ignoring timing control (event)",
+    };
+    for (std::string_view pattern : suppressList)
+    {
+        if (message.message.find(pattern) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    if (gActiveSession)
+    {
+        for (const auto &pattern : gActiveSession->options.diagnosticQuiet)
+        {
+            if (!pattern.empty() && message.message.find(pattern) != std::string::npos)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 std::string formatDuration(std::chrono::milliseconds duration)
@@ -702,7 +872,7 @@ void echoTclCommand(std::string_view command)
     gLogJustPrinted = false;
     std::string output;
     output.reserve(command.size() + 8);
-    output.append(kWolvrixPrompt);
+    output.append(kWolvrixEchoPrompt);
     for (char ch : command)
     {
         if (ch == '\n')
@@ -718,8 +888,12 @@ void echoTclCommand(std::string_view command)
     std::cerr << output << '\n';
 }
 
-bool shouldEchoTclCommand(std::string_view command)
+bool shouldEchoTclCommand(const Session &session, std::string_view command)
 {
+    if (!session.options.echoTcl)
+    {
+        return false;
+    }
     if (command.empty())
     {
         return false;
@@ -729,6 +903,24 @@ bool shouldEchoTclCommand(std::string_view command)
         return false;
     }
     return true;
+}
+
+std::string buildPrompt(const Session &session)
+{
+    std::error_code ec;
+    std::filesystem::path cwd = std::filesystem::current_path(ec);
+    std::string cwdText = ec ? "?" : cwd.string();
+    const char *state = session.hasDesign ? "loaded" : "empty";
+
+    std::string prompt;
+    prompt.reserve(cwdText.size() + 24);
+    prompt.append(kWolvrixPrefix);
+    prompt.append("[");
+    prompt.append(state);
+    prompt.append("] ");
+    prompt.append(cwdText);
+    prompt.append("> ");
+    return prompt;
 }
 
 const CommandHelp *findCommandHelp(std::string_view name)
@@ -766,17 +958,127 @@ std::string normalizePassName(std::string_view name)
     return normalized;
 }
 
-int setError(Tcl_Interp *interp, std::string_view message)
+void setLastError(Session &session, std::string_view code,
+                  std::string_view message,
+                  std::string_view detail = {})
 {
+    session.lastErrorCode = std::string(code);
+    session.lastErrorMessage = std::string(message);
+    if (!detail.empty())
+    {
+        session.lastErrorDetail = std::string(detail);
+    }
+    else
+    {
+        session.lastErrorDetail.reset();
+    }
+}
+
+int setError(Session &session, Tcl_Interp *interp,
+             std::string_view code,
+             std::string_view message,
+             std::string_view detail = {})
+{
+    setLastError(session, code, message, detail);
     Tcl_SetObjResult(interp, Tcl_NewStringObj(message.data(), static_cast<int>(message.size())));
     return TCL_ERROR;
 }
 
-bool ensureNetlist(Session &session, Tcl_Interp *interp)
+int setErrorFromInterp(Session &session, Tcl_Interp *interp, std::string_view code)
 {
-    if (!session.hasNetlist)
+    const char *message = Tcl_GetStringResult(interp);
+    setLastError(session, code, message ? message : "");
+    return TCL_ERROR;
+}
+
+Tcl_Obj *buildLastErrorDict(const Session &session)
+{
+    Tcl_Obj *dict = Tcl_NewDictObj();
+    const char *code = session.lastErrorCode ? session.lastErrorCode->c_str() : "";
+    const char *message = session.lastErrorMessage ? session.lastErrorMessage->c_str() : "";
+    const char *detail = session.lastErrorDetail ? session.lastErrorDetail->c_str() : "";
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("code", -1), Tcl_NewStringObj(code, -1));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("message", -1), Tcl_NewStringObj(message, -1));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("detail", -1), Tcl_NewStringObj(detail, -1));
+    return dict;
+}
+
+std::optional<bool> parseBool(std::string_view text)
+{
+    std::string lowered(text);
+    for (char &ch : lowered)
     {
-        setError(interp, "no netlist loaded; run read_sv or read_json first");
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (lowered == "1" || lowered == "true" || lowered == "on" || lowered == "yes")
+    {
+        return true;
+    }
+    if (lowered == "0" || lowered == "false" || lowered == "off" || lowered == "no")
+    {
+        return false;
+    }
+    return std::nullopt;
+}
+
+std::string trimString(std::string_view text)
+{
+    std::string_view trimmed = trimWhitespace(text);
+    return std::string(trimmed);
+}
+
+std::vector<std::string> parseQuietList(Tcl_Interp *interp, Tcl_Obj *obj)
+{
+    std::vector<std::string> patterns;
+    Tcl_Size listCount = 0;
+    Tcl_Obj **listObjv = nullptr;
+    if (Tcl_ListObjGetElements(interp, obj, &listCount, &listObjv) != TCL_OK)
+    {
+        return patterns;
+    }
+    for (Tcl_Size i = 0; i < listCount; ++i)
+    {
+        std::string item = Tcl_GetString(listObjv[i]);
+        if (!item.empty())
+        {
+            patterns.push_back(std::move(item));
+        }
+    }
+    if (patterns.size() == 1 && patterns[0].find(',') != std::string::npos)
+    {
+        std::vector<std::string> split;
+        std::string current;
+        for (char ch : patterns[0])
+        {
+            if (ch == ',')
+            {
+                std::string trimmed = trimString(current);
+                if (!trimmed.empty())
+                {
+                    split.push_back(trimmed);
+                }
+                current.clear();
+            }
+            else
+            {
+                current.push_back(ch);
+            }
+        }
+        std::string trimmed = trimString(current);
+        if (!trimmed.empty())
+        {
+            split.push_back(trimmed);
+        }
+        patterns = std::move(split);
+    }
+    return patterns;
+}
+
+bool ensureDesign(Session &session, Tcl_Interp *interp)
+{
+    if (!session.hasDesign)
+    {
+        setError(session, interp, "NO_DESIGN", "no design loaded; run read_sv or read_json first");
         return false;
     }
     return true;
@@ -789,6 +1091,57 @@ void appendTclList(Tcl_Obj *list, const std::vector<std::string> &items)
         Tcl_ListObjAppendElement(nullptr, list,
                                  Tcl_NewStringObj(item.data(), static_cast<int>(item.size())));
     }
+}
+
+std::vector<std::string> availableTransformPasses()
+{
+    return {
+        "xmr-resolve",
+        "const-fold",
+        "redundant-elim",
+        "memory-init-check",
+        "dead-code-elim",
+        "stats",
+    };
+}
+
+Tcl_Obj *buildTransformListObj()
+{
+    Tcl_Obj *list = Tcl_NewListObj(0, nullptr);
+    appendTclList(list, availableTransformPasses());
+    return list;
+}
+
+Tcl_Obj *buildGraphListObj(const Session &session)
+{
+    Tcl_Obj *list = Tcl_NewListObj(0, nullptr);
+    std::vector<std::string> names;
+    names.reserve(session.design.graphOrder().size());
+    for (const auto &name : session.design.graphOrder())
+    {
+        names.push_back(name);
+    }
+    appendTclList(list, names);
+    return list;
+}
+
+Tcl_Obj *buildStatsDict(const Session &session)
+{
+    std::size_t graphCount = session.design.graphs().size();
+    std::size_t opCount = 0;
+    std::size_t valueCount = 0;
+    for (const auto &entry : session.design.graphs())
+    {
+        const auto &graph = *entry.second;
+        opCount += graph.operations().size();
+        valueCount += graph.values().size();
+    }
+
+    Tcl_Obj *dict = Tcl_NewDictObj();
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("graphs", -1), Tcl_NewWideIntObj(graphCount));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("operations", -1), Tcl_NewWideIntObj(opCount));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("values", -1), Tcl_NewWideIntObj(valueCount));
+    return dict;
 }
 
 std::optional<std::string> readFile(std::string_view path, std::string &error)
@@ -808,7 +1161,10 @@ std::optional<std::string> readFile(std::string_view path, std::string &error)
     return contents;
 }
 
-std::optional<std::filesystem::path> parseOutputPath(int objc, Tcl_Obj *const objv[], Tcl_Interp *interp)
+std::optional<std::filesystem::path> parseOutputPath(Session &session,
+                                                     int objc,
+                                                     Tcl_Obj *const objv[],
+                                                     Tcl_Interp *interp)
 {
     std::optional<std::filesystem::path> output;
     for (int i = 1; i < objc; ++i)
@@ -818,7 +1174,7 @@ std::optional<std::filesystem::path> parseOutputPath(int objc, Tcl_Obj *const ob
         {
             if (i + 1 >= objc)
             {
-                setError(interp, "-o expects a path");
+                setError(session, interp, "ARG_ERROR", "-o expects a path");
                 return std::nullopt;
             }
             output = std::filesystem::path(Tcl_GetString(objv[i + 1]));
@@ -826,14 +1182,18 @@ std::optional<std::filesystem::path> parseOutputPath(int objc, Tcl_Obj *const ob
         }
         else
         {
-            setError(interp, "unknown option for write_* (expected -o)");
+            setError(session, interp, "ARG_ERROR", "unknown option for write_* (expected -o)");
             return std::nullopt;
         }
     }
     if (!output)
     {
-        setError(interp, "-o <file> is required");
+        setError(session, interp, "ARG_ERROR", "-o <file> is required");
         return std::nullopt;
+    }
+    if (output->parent_path().empty() && !session.options.outputDir.empty())
+    {
+        *output = std::filesystem::path(session.options.outputDir) / output->filename();
     }
     return output;
 }
@@ -841,14 +1201,15 @@ std::optional<std::filesystem::path> parseOutputPath(int objc, Tcl_Obj *const ob
 int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (session->hasNetlist)
+    if (session->hasDesign)
     {
-        return setError(interp, "netlist already loaded; run close_design first");
+        return setError(*session, interp, "DESIGN_EXISTS",
+                        "design already loaded; run close_design first");
     }
     if (objc < 2)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "<file> ?<slang-opts>...? ");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
 
     std::vector<std::string> args;
@@ -883,17 +1244,17 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
     if (!driver.parseCommandLine(static_cast<int>(argv.size()), argv.data()))
     {
         reportSlangDiagnostics();
-        return setError(interp, "failed to parse slang options");
+        return setError(*session, interp, "SLANG_ARG_ERROR", "failed to parse slang options");
     }
     if (!driver.processOptions())
     {
         reportSlangDiagnostics();
-        return setError(interp, "failed to apply slang options");
+        return setError(*session, interp, "SLANG_ARG_ERROR", "failed to apply slang options");
     }
     if (!driver.parseAllSources())
     {
         reportSlangDiagnostics();
-        return setError(interp, "failed to parse sources");
+        return setError(*session, interp, "SLANG_PARSE_ERROR", "failed to parse sources");
     }
 
     auto compilation = driver.createCompilation();
@@ -922,7 +1283,7 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
     }
     if (hasSlangErrors)
     {
-        return setError(interp, "slang reported errors; see diagnostics");
+        return setError(*session, interp, "SLANG_ERROR", "slang reported errors; see diagnostics");
     }
 
     const auto &root = compilation->getRoot();
@@ -947,8 +1308,8 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
 
     wolvrix::lib::ingest::ConvertOptions convertOptions;
     convertOptions.abortOnError = true;
-    convertOptions.enableLogging = true;
-    convertOptions.logLevel = wolvrix::lib::LogLevel::Info;
+    convertOptions.enableLogging = session->options.logLevel != wolvrix::lib::LogLevel::Off;
+    convertOptions.logLevel = session->options.logLevel;
     wolvrix::lib::ingest::ConvertDriver converter(convertOptions);
     converter.logger().setSink([&](const wolvrix::lib::LogEvent &event) {
         std::string message;
@@ -964,7 +1325,7 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
     const auto convertStart = std::chrono::steady_clock::now();
     try
     {
-        session->netlist = converter.convert(root);
+        session->design = converter.convert(root);
     }
     catch (const wolvrix::lib::ingest::ConvertAbort &)
     {
@@ -972,7 +1333,7 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
         printDiagnosticsExpanded("read_sv",
                                  converter.diagnostics().messages(),
                                  compilation->getSourceManager());
-        return setError(interp, "convert aborted; see diagnostics");
+        return setError(*session, interp, "CONVERT_ABORT", "convert aborted; see diagnostics");
     }
     const auto convertEnd = std::chrono::steady_clock::now();
     const auto convertMs =
@@ -982,7 +1343,7 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
         printDiagnosticsExpanded("read_sv",
                                  converter.diagnostics().messages(),
                                  compilation->getSourceManager());
-        return setError(interp, "convert failed; see diagnostics");
+        return setError(*session, interp, "CONVERT_ERROR", "convert failed; see diagnostics");
     }
     printDiagnosticsExpanded("read_sv",
                              converter.diagnostics().messages(),
@@ -1009,14 +1370,26 @@ int cmdReadSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *cons
     doneMessage.append("ms");
     logLine("read_sv", wolvrix::lib::LogLevel::Info, doneMessage);
 
-    session->hasNetlist = true;
+    session->hasDesign = true;
+    if (!session->design.topGraphs().empty())
+    {
+        session->selectedGraph = session->design.topGraphs().front();
+    }
+    else if (!session->design.graphOrder().empty())
+    {
+        session->selectedGraph = session->design.graphOrder().front();
+    }
+    else
+    {
+        session->selectedGraph.clear();
+    }
     Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
     return TCL_OK;
 }
 
 int cmdHelp(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
-    (void)clientData;
+    auto *session = static_cast<Session *>(clientData);
     if (objc == 1)
     {
         std::string output;
@@ -1039,27 +1412,28 @@ int cmdHelp(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const 
         const CommandHelp *entry = findCommandHelp(name);
         if (!entry)
         {
-            return setError(interp, "unknown command: " + std::string(name));
+            return setError(*session, interp, "ARG_ERROR", "unknown command: " + std::string(name));
         }
         Tcl_SetObjResult(interp, Tcl_NewStringObj(entry->detail.data(),
                                                   static_cast<int>(entry->detail.size())));
         return TCL_OK;
     }
     Tcl_WrongNumArgs(interp, 1, objv, "?command?");
-    return TCL_ERROR;
+    return setErrorFromInterp(*session, interp, "ARG_ERROR");
 }
 
 int cmdReadJson(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (session->hasNetlist)
+    if (session->hasDesign)
     {
-        return setError(interp, "netlist already loaded; run close_design first");
+        return setError(*session, interp, "DESIGN_EXISTS",
+                        "design already loaded; run close_design first");
     }
     if (objc != 2)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "<file>");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
 
     std::string error;
@@ -1067,19 +1441,31 @@ int cmdReadJson(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *co
     auto jsonText = readFile(path, error);
     if (!jsonText)
     {
-        return setError(interp, error);
+        return setError(*session, interp, "IO_ERROR", error);
     }
 
     try
     {
-        session->netlist = wolvrix::lib::grh::Netlist::fromJsonString(*jsonText);
+        session->design = wolvrix::lib::grh::Design::fromJsonString(*jsonText);
     }
     catch (const std::exception &ex)
     {
-        return setError(interp, std::string("load json failed: ") + ex.what());
+        return setError(*session, interp, "JSON_ERROR", std::string("load json failed: ") + ex.what());
     }
 
-    session->hasNetlist = true;
+    session->hasDesign = true;
+    if (!session->design.topGraphs().empty())
+    {
+        session->selectedGraph = session->design.topGraphs().front();
+    }
+    else if (!session->design.graphOrder().empty())
+    {
+        session->selectedGraph = session->design.graphOrder().front();
+    }
+    else
+    {
+        session->selectedGraph.clear();
+    }
     Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
     return TCL_OK;
 }
@@ -1090,33 +1476,24 @@ int cmdCloseDesign(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj 
     if (objc != 1)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
-    session->netlist = wolvrix::lib::grh::Netlist{};
-    session->hasNetlist = false;
+    session->design = wolvrix::lib::grh::Design{};
+    session->hasDesign = false;
+    session->selectedGraph.clear();
     Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
     return TCL_OK;
 }
 
 int cmdTransformList(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
-    (void)clientData;
+    auto *session = static_cast<Session *>(clientData);
     if (objc != 1)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
-    Tcl_Obj *list = Tcl_NewListObj(0, nullptr);
-    const std::vector<std::string> passes{
-        "xmr-resolve",
-        "const-fold",
-        "redundant-elim",
-        "memory-init-check",
-        "dead-code-elim",
-        "stats",
-    };
-    appendTclList(list, passes);
-    Tcl_SetObjResult(interp, list);
+    Tcl_SetObjResult(interp, buildTransformListObj());
     return TCL_OK;
 }
 
@@ -1213,51 +1590,80 @@ std::unique_ptr<wolvrix::lib::transform::Pass> makePass(std::string_view name,
 int cmdTransform(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
-    {
-        return TCL_ERROR;
-    }
     if (objc < 2)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "<passname> ?passargs...? ");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+    if (objc == 2 && std::string_view(Tcl_GetString(objv[1])) == "-list")
+    {
+        Tcl_SetObjResult(interp, buildTransformListObj());
+        return TCL_OK;
+    }
+    if (!ensureDesign(*session, interp))
+    {
         return TCL_ERROR;
     }
 
+    bool dryRun = false;
     std::vector<std::string_view> args;
     for (int i = 2; i < objc; ++i)
     {
-        args.push_back(Tcl_GetString(objv[i]));
+        std::string_view arg = Tcl_GetString(objv[i]);
+        if (arg == "-list")
+        {
+            return setError(*session, interp, "ARG_ERROR", "-list must be used alone");
+        }
+        if (arg == "-dryrun")
+        {
+            dryRun = true;
+            continue;
+        }
+        args.push_back(arg);
     }
 
     std::string error;
     auto pass = makePass(Tcl_GetString(objv[1]), args, error);
     if (!pass)
     {
-        return setError(interp, error);
+        return setError(*session, interp, "ARG_ERROR", error);
     }
 
     const char *passName = Tcl_GetString(objv[1]);
     const std::string entity = std::string("transform ") + passName;
     wolvrix::lib::transform::PassDiagnostics diagnostics;
     wolvrix::lib::transform::PassManager manager;
-    manager.options().logLevel = wolvrix::lib::LogLevel::Info;
+    manager.options().logLevel = session->options.logLevel;
     manager.options().logSink = nullptr;
     manager.addPass(std::move(pass));
     const auto transformStart = std::chrono::steady_clock::now();
-    wolvrix::lib::transform::PassManagerResult result = manager.run(session->netlist, diagnostics);
+    wolvrix::lib::transform::PassManagerResult result;
+    if (dryRun)
+    {
+        wolvrix::lib::grh::Design temp = session->design.clone();
+        result = manager.run(temp, diagnostics);
+    }
+    else
+    {
+        result = manager.run(session->design, diagnostics);
+    }
     const auto transformEnd = std::chrono::steady_clock::now();
     const auto transformMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(transformEnd - transformStart).count();
     if (diagnostics.hasError() || !result.success)
     {
         printDiagnostics(entity, diagnostics.messages());
-        return setError(interp, "transform failed; see diagnostics");
+        return setError(*session, interp, "TRANSFORM_ERROR", "transform failed; see diagnostics");
     }
     printDiagnostics(entity, diagnostics.messages());
     std::string doneMessage = "done ";
     doneMessage.append(std::to_string(transformMs));
     doneMessage.append("ms ");
     doneMessage.append(result.changed ? "changed" : "ok");
+    if (dryRun)
+    {
+        doneMessage.append(" (dryrun)");
+    }
     logLine(entity, wolvrix::lib::LogLevel::Info, doneMessage);
 
     Tcl_SetObjResult(interp, Tcl_NewStringObj(result.changed ? "changed" : "ok", -1));
@@ -1267,17 +1673,18 @@ int cmdTransform(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *c
 int cmdWriteJson(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
+    if (!ensureDesign(*session, interp))
     {
         return TCL_ERROR;
     }
 
-    auto outputPath = parseOutputPath(objc, objv, interp);
+    auto outputPath = parseOutputPath(*session, objc, objv, interp);
     if (!outputPath)
     {
         return TCL_ERROR;
     }
 
+    const auto storeStart = std::chrono::steady_clock::now();
     wolvrix::lib::store::StoreDiagnostics diagnostics;
     wolvrix::lib::store::StoreJson store(&diagnostics);
     wolvrix::lib::store::StoreOptions options;
@@ -1288,28 +1695,43 @@ int cmdWriteJson(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *c
         options.outputDir = outputPath->parent_path().string();
     }
 
-    wolvrix::lib::store::StoreResult result = store.store(session->netlist, options);
+    wolvrix::lib::store::StoreResult result = store.store(session->design, options);
+    const auto storeEnd = std::chrono::steady_clock::now();
+    const auto storeMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(storeEnd - storeStart).count();
     if (diagnostics.hasError() || !result.success)
     {
-        return setError(interp, "write_json failed; see diagnostics");
+        return setError(*session, interp, "WRITE_ERROR", "write_json failed; see diagnostics");
     }
 
-    Tcl_SetObjResult(interp, Tcl_NewStringObj(result.artifacts.empty()
-                                                  ? outputPath->string().c_str()
-                                                  : result.artifacts.front().c_str(),
-                                              -1));
+    std::string outputFile =
+        result.artifacts.empty() ? outputPath->string() : result.artifacts.front();
+    std::error_code ec;
+    std::uintmax_t fileSize = std::filesystem::file_size(outputFile, ec);
+    std::string sizeText = ec ? "unknown" : formatBytes(fileSize);
+    std::string message = "done ";
+    message.append(std::to_string(storeMs));
+    message.append("ms\n");
+    message.append("path: ");
+    message.append(outputFile);
+    message.append("\n");
+    message.append("size: ");
+    message.append(sizeText);
+    logLine("write_json", wolvrix::lib::LogLevel::Info, message);
+
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(outputFile.c_str(), -1));
     return TCL_OK;
 }
 
 int cmdWriteSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
+    if (!ensureDesign(*session, interp))
     {
         return TCL_ERROR;
     }
 
-    auto outputPath = parseOutputPath(objc, objv, interp);
+    auto outputPath = parseOutputPath(*session, objc, objv, interp);
     if (!outputPath)
     {
         return TCL_ERROR;
@@ -1325,13 +1747,13 @@ int cmdWriteSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *con
         options.outputDir = outputPath->parent_path().string();
     }
 
-    wolvrix::lib::emit::EmitResult result = emitter.emit(session->netlist, options);
+    wolvrix::lib::emit::EmitResult result = emitter.emit(session->design, options);
     const auto emitEnd = std::chrono::steady_clock::now();
     const auto emitMs =
         std::chrono::duration_cast<std::chrono::milliseconds>(emitEnd - emitStart).count();
     if (diagnostics.hasError() || !result.success)
     {
-        return setError(interp, "write_sv failed; see diagnostics");
+        return setError(*session, interp, "WRITE_ERROR", "write_sv failed; see diagnostics");
     }
 
     std::string outputFile =
@@ -1356,51 +1778,105 @@ int cmdWriteSv(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *con
 int cmdGrhListGraph(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
+    if (!ensureDesign(*session, interp))
     {
         return TCL_ERROR;
     }
     if (objc != 1)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
-
-    Tcl_Obj *list = Tcl_NewListObj(0, nullptr);
-    std::vector<std::string> names;
-    names.reserve(session->netlist.graphOrder().size());
-    for (const auto &name : session->netlist.graphOrder())
-    {
-        names.push_back(name);
-    }
-    appendTclList(list, names);
-    Tcl_SetObjResult(interp, list);
+    Tcl_SetObjResult(interp, buildGraphListObj(*session));
     return TCL_OK;
 }
 
 int cmdGrhCreateGraph(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
+    if (!ensureDesign(*session, interp))
     {
         return TCL_ERROR;
     }
     if (objc != 2)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "<name>");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
 
     const char *name = Tcl_GetString(objv[1]);
     try
     {
-        session->netlist.createGraph(name);
+        session->design.createGraph(name);
     }
     catch (const std::exception &ex)
     {
-        return setError(interp, ex.what());
+        return setError(*session, interp, "GRH_ERROR", ex.what());
     }
 
+    Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+    return TCL_OK;
+}
+
+int cmdGrhSelectGraph(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (!ensureDesign(*session, interp))
+    {
+        return TCL_ERROR;
+    }
+    if (objc != 2)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "<name>");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+
+    const char *name = Tcl_GetString(objv[1]);
+    auto *graph = session->design.findGraph(name);
+    if (!graph)
+    {
+        return setError(*session, interp, "NOT_FOUND", "graph not found: " + std::string(name));
+    }
+    session->selectedGraph = graph->symbol();
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(session->selectedGraph.c_str(), -1));
+    return TCL_OK;
+}
+
+int cmdGrhDeleteGraph(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (!ensureDesign(*session, interp))
+    {
+        return TCL_ERROR;
+    }
+    if (objc != 2)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "<name>");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+
+    const char *name = Tcl_GetString(objv[1]);
+    auto *graph = session->design.findGraph(name);
+    if (!graph)
+    {
+        return setError(*session, interp, "NOT_FOUND", "graph not found: " + std::string(name));
+    }
+    const std::string symbol = graph->symbol();
+    if (!session->design.deleteGraph(symbol))
+    {
+        return setError(*session, interp, "GRH_ERROR", "failed to delete graph: " + symbol);
+    }
+    if (session->selectedGraph == symbol)
+    {
+        if (!session->design.graphOrder().empty())
+        {
+            session->selectedGraph = session->design.graphOrder().front();
+        }
+        else
+        {
+            session->selectedGraph.clear();
+        }
+    }
     Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
     return TCL_OK;
 }
@@ -1408,32 +1884,443 @@ int cmdGrhCreateGraph(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_O
 int cmdGrhShowStats(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     auto *session = static_cast<Session *>(clientData);
-    if (!ensureNetlist(*session, interp))
+    if (!ensureDesign(*session, interp))
     {
         return TCL_ERROR;
     }
     if (objc != 1)
     {
         Tcl_WrongNumArgs(interp, 1, objv, "");
-        return TCL_ERROR;
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
 
-    std::size_t graphCount = session->netlist.graphs().size();
-    std::size_t opCount = 0;
-    std::size_t valueCount = 0;
-    for (const auto &entry : session->netlist.graphs())
+    Tcl_SetObjResult(interp, buildStatsDict(*session));
+    return TCL_OK;
+}
+
+int cmdLastError(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (objc != 1)
     {
-        const auto &graph = *entry.second;
-        opCount += graph.operations().size();
-        valueCount += graph.values().size();
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+    Tcl_SetObjResult(interp, buildLastErrorDict(*session));
+    return TCL_OK;
+}
+
+int cmdShowDesign(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (objc != 1)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
     }
 
     Tcl_Obj *dict = Tcl_NewDictObj();
-    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("graphs", -1), Tcl_NewWideIntObj(graphCount));
-    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("operations", -1), Tcl_NewWideIntObj(opCount));
-    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("values", -1), Tcl_NewWideIntObj(valueCount));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("loaded", -1),
+                   Tcl_NewBooleanObj(session->hasDesign ? 1 : 0));
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("graphs", -1),
+                   Tcl_NewWideIntObj(session->hasDesign ? session->design.graphs().size() : 0));
+    Tcl_Obj *tops = Tcl_NewListObj(0, nullptr);
+    if (session->hasDesign)
+    {
+        for (const auto &name : session->design.topGraphs())
+        {
+            Tcl_ListObjAppendElement(nullptr, tops,
+                                     Tcl_NewStringObj(name.c_str(), static_cast<int>(name.size())));
+        }
+    }
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("top_graphs", -1), tops);
+    Tcl_DictObjPut(nullptr, dict, Tcl_NewStringObj("selected_graph", -1),
+                   Tcl_NewStringObj(session->selectedGraph.c_str(), -1));
     Tcl_SetObjResult(interp, dict);
     return TCL_OK;
+}
+
+int cmdShowModules(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (!ensureDesign(*session, interp))
+    {
+        return TCL_ERROR;
+    }
+    if (objc != 1)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+    Tcl_SetObjResult(interp, buildGraphListObj(*session));
+    return TCL_OK;
+}
+
+int cmdShowStats(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (!ensureDesign(*session, interp))
+    {
+        return TCL_ERROR;
+    }
+    if (objc != 1)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+    Tcl_SetObjResult(interp, buildStatsDict(*session));
+    return TCL_OK;
+}
+
+int cmdSetOption(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (objc != 3)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "<key> <value>");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+
+    std::string key = Tcl_GetString(objv[1]);
+    std::string value = Tcl_GetString(objv[2]);
+
+    if (key == "log.level")
+    {
+        auto level = parseLogLevel(value);
+        if (!level.has_value())
+        {
+            return setError(*session, interp, "ARG_ERROR", "invalid log.level value");
+        }
+        session->options.logLevel = *level;
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+        return TCL_OK;
+    }
+    if (key == "echo_tcl")
+    {
+        auto parsed = parseBool(value);
+        if (!parsed.has_value())
+        {
+            return setError(*session, interp, "ARG_ERROR", "echo_tcl expects 0 or 1");
+        }
+        session->options.echoTcl = *parsed;
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+        return TCL_OK;
+    }
+    if (key == "history.enable")
+    {
+        auto parsed = parseBool(value);
+        if (!parsed.has_value())
+        {
+            return setError(*session, interp, "ARG_ERROR", "history.enable expects 0 or 1");
+        }
+        session->options.historyEnabled = *parsed;
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+        return TCL_OK;
+    }
+    if (key == "history.max_lines")
+    {
+        try
+        {
+            int maxLines = std::stoi(value);
+            if (maxLines <= 0)
+            {
+                return setError(*session, interp, "ARG_ERROR", "history.max_lines must be > 0");
+            }
+            session->options.historyMaxLines = maxLines;
+            linenoiseHistorySetMaxLen(maxLines);
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+            return TCL_OK;
+        }
+        catch (const std::exception &)
+        {
+            return setError(*session, interp, "ARG_ERROR", "history.max_lines expects integer");
+        }
+    }
+    if (key == "output.dir")
+    {
+        session->options.outputDir = value;
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+        return TCL_OK;
+    }
+    if (key == "diagnostic.quiet")
+    {
+        session->options.diagnosticQuiet = parseQuietList(interp, objv[2]);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj("ok", -1));
+        return TCL_OK;
+    }
+
+    return setError(*session, interp, "ARG_ERROR", "unknown option key");
+}
+
+int cmdGetOption(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    auto *session = static_cast<Session *>(clientData);
+    if (objc != 2)
+    {
+        Tcl_WrongNumArgs(interp, 1, objv, "<key>");
+        return setErrorFromInterp(*session, interp, "ARG_ERROR");
+    }
+
+    std::string key = Tcl_GetString(objv[1]);
+    if (key == "log.level")
+    {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(logLevelKeyText(session->options.logLevel).data(), -1));
+        return TCL_OK;
+    }
+    if (key == "echo_tcl")
+    {
+        Tcl_SetObjResult(interp, Tcl_NewBooleanObj(session->options.echoTcl ? 1 : 0));
+        return TCL_OK;
+    }
+    if (key == "history.enable")
+    {
+        Tcl_SetObjResult(interp, Tcl_NewBooleanObj(session->options.historyEnabled ? 1 : 0));
+        return TCL_OK;
+    }
+    if (key == "history.max_lines")
+    {
+        Tcl_SetObjResult(interp, Tcl_NewIntObj(session->options.historyMaxLines));
+        return TCL_OK;
+    }
+    if (key == "output.dir")
+    {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(session->options.outputDir.c_str(), -1));
+        return TCL_OK;
+    }
+    if (key == "diagnostic.quiet")
+    {
+        Tcl_Obj *list = Tcl_NewListObj(0, nullptr);
+        for (const auto &pattern : session->options.diagnosticQuiet)
+        {
+            Tcl_ListObjAppendElement(nullptr, list, Tcl_NewStringObj(pattern.c_str(), -1));
+        }
+        Tcl_SetObjResult(interp, list);
+        return TCL_OK;
+    }
+
+    return setError(*session, interp, "ARG_ERROR", "unknown option key");
+}
+
+bool startsWith(std::string_view text, std::string_view prefix)
+{
+    return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
+}
+
+std::vector<std::string_view> splitTokens(std::string_view text)
+{
+    std::vector<std::string_view> tokens;
+    std::size_t i = 0;
+    while (i < text.size())
+    {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i])))
+        {
+            ++i;
+        }
+        if (i >= text.size())
+        {
+            break;
+        }
+        std::size_t start = i;
+        while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i])))
+        {
+            ++i;
+        }
+        tokens.push_back(text.substr(start, i - start));
+    }
+    return tokens;
+}
+
+void addCommandCompletions(std::string_view prefix, linenoiseCompletions *lc)
+{
+    for (const auto &entry : kCommandHelp)
+    {
+        if (startsWith(entry.name, prefix))
+        {
+            linenoiseAddCompletion(lc, std::string(entry.name).c_str());
+        }
+    }
+    if (startsWith("exit", prefix))
+    {
+        linenoiseAddCompletion(lc, "exit");
+    }
+    if (startsWith("quit", prefix))
+    {
+        linenoiseAddCompletion(lc, "quit");
+    }
+}
+
+void addOptionCompletions(std::string_view command, std::string_view prefix, linenoiseCompletions *lc)
+{
+    const std::string_view writeOptions[] = {"-o"};
+    const std::string_view transformOptions[] = {"-list", "-dryrun"};
+    const std::string_view readSvOptions[] = {
+        "--std",
+        "--top",
+        "-I",
+        "+incdir",
+        "--isystem",
+        "-D",
+        "-U",
+        "-G",
+        "-y",
+        "-Y",
+        "-f",
+        "-F",
+        "--single-unit",
+        "--timescale",
+    };
+    const std::string_view *options = nullptr;
+    std::size_t optionCount = 0;
+
+    if (command == "write_sv" || command == "write_json")
+    {
+        options = writeOptions;
+        optionCount = sizeof(writeOptions) / sizeof(writeOptions[0]);
+    }
+    else if (command == "transform")
+    {
+        options = transformOptions;
+        optionCount = sizeof(transformOptions) / sizeof(transformOptions[0]);
+    }
+    else if (command == "read_sv")
+    {
+        options = readSvOptions;
+        optionCount = sizeof(readSvOptions) / sizeof(readSvOptions[0]);
+    }
+
+    if (!options)
+    {
+        return;
+    }
+    for (std::size_t i = 0; i < optionCount; ++i)
+    {
+        if (startsWith(options[i], prefix))
+        {
+            linenoiseAddCompletion(lc, std::string(options[i]).c_str());
+        }
+    }
+}
+
+void addPathCompletions(std::string_view prefix, linenoiseCompletions *lc)
+{
+    std::string prefixStr(prefix);
+    std::filesystem::path dirPath = ".";
+    std::string baseName = prefixStr;
+    if (!prefixStr.empty() && prefixStr.back() == '/')
+    {
+        dirPath = prefixStr;
+        baseName.clear();
+    }
+    else
+    {
+        std::filesystem::path input(prefixStr);
+        if (input.has_parent_path())
+        {
+            dirPath = input.parent_path();
+            baseName = input.filename().string();
+        }
+    }
+
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(dirPath, ec))
+    {
+        if (ec)
+        {
+            break;
+        }
+        const std::string name = entry.path().filename().string();
+        if (!startsWith(name, baseName))
+        {
+            continue;
+        }
+        std::string completion;
+        if (dirPath == ".")
+        {
+            completion = name;
+        }
+        else
+        {
+            completion = (dirPath / name).string();
+        }
+        if (entry.is_directory())
+        {
+            completion.push_back('/');
+        }
+        linenoiseAddCompletion(lc, completion.c_str());
+    }
+}
+
+void replCompletionCallback(const char *buf, linenoiseCompletions *lc)
+{
+    std::string_view buffer(buf ? buf : "");
+    const bool endsWithSpace =
+        !buffer.empty() && std::isspace(static_cast<unsigned char>(buffer.back()));
+    std::vector<std::string_view> tokens = splitTokens(buffer);
+    std::string_view currentToken;
+    if (endsWithSpace)
+    {
+        currentToken = std::string_view{};
+    }
+    else if (!tokens.empty())
+    {
+        currentToken = tokens.back();
+    }
+    else
+    {
+        currentToken = buffer;
+    }
+
+    if (tokens.empty() && !endsWithSpace)
+    {
+        addCommandCompletions(currentToken, lc);
+        return;
+    }
+    if (tokens.empty() && endsWithSpace)
+    {
+        addCommandCompletions({}, lc);
+        return;
+    }
+
+    const std::string_view command = tokens.front();
+    if (tokens.size() == 1 && !endsWithSpace)
+    {
+        addCommandCompletions(currentToken, lc);
+        return;
+    }
+
+    const std::string_view lastToken = tokens.back();
+    const bool previousWasOutput =
+        tokens.size() >= 2 && tokens[tokens.size() - 2] == "-o";
+    if (lastToken == "-o" || previousWasOutput)
+    {
+        addPathCompletions(currentToken, lc);
+        return;
+    }
+    if (currentToken.empty() || currentToken.front() == '-')
+    {
+        addOptionCompletions(command, currentToken, lc);
+        return;
+    }
+    addPathCompletions(currentToken, lc);
+}
+
+std::optional<std::filesystem::path> historyFilePath()
+{
+    const char *home = std::getenv("HOME");
+    if (!home || !*home)
+    {
+        return std::nullopt;
+    }
+    return std::filesystem::path(home) / ".wolvrix" / "history";
+}
+
+void recordEvalError(Session &session, Tcl_Interp *interp)
+{
+    const char *message = Tcl_GetStringResult(interp);
+    if (!session.lastErrorMessage || *session.lastErrorMessage != (message ? message : ""))
+    {
+        setLastError(session, "TCL_ERROR", message ? message : "");
+    }
 }
 
 void registerCommands(Tcl_Interp *interp, Session &session)
@@ -1448,21 +2335,45 @@ void registerCommands(Tcl_Interp *interp, Session &session)
     Tcl_CreateObjCommand(interp, "write_json", cmdWriteJson, &session, nullptr);
     Tcl_CreateObjCommand(interp, "grh_list_graph", cmdGrhListGraph, &session, nullptr);
     Tcl_CreateObjCommand(interp, "grh_create_graph", cmdGrhCreateGraph, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "grh_select_graph", cmdGrhSelectGraph, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "grh_delete_graph", cmdGrhDeleteGraph, &session, nullptr);
     Tcl_CreateObjCommand(interp, "grh_show_stats", cmdGrhShowStats, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "show_design", cmdShowDesign, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "show_modules", cmdShowModules, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "show_stats", cmdShowStats, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "set_option", cmdSetOption, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "get_option", cmdGetOption, &session, nullptr);
+    Tcl_CreateObjCommand(interp, "last_error", cmdLastError, &session, nullptr);
 }
 
-int runRepl(Tcl_Interp *interp)
+int runRepl(Tcl_Interp *interp, Session &session)
 {
+    linenoiseSetCompletionCallback(replCompletionCallback);
     linenoiseSetMultiLine(1);
-    linenoiseHistorySetMaxLen(kHistoryMaxLen);
+    linenoiseHistorySetMaxLen(session.options.historyMaxLines);
+    std::optional<std::filesystem::path> historyPath = historyFilePath();
+    if (historyPath && session.options.historyEnabled)
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(historyPath->parent_path(), ec);
+        (void)linenoiseHistoryLoad(historyPath->string().c_str());
+    }
 
     std::string buffer;
     for (;;)
     {
-        const char *prompt = buffer.empty() ? kWolvrixPrompt.data() : kWolvrixContinuationPrompt.data();
-        char *line = linenoise(prompt);
+        std::string prompt =
+            buffer.empty() ? buildPrompt(session) : std::string(kWolvrixContinuationPrompt);
+        char *line = linenoise(prompt.c_str());
         if (!line)
         {
+            int keyType = linenoiseKeyType();
+            if (keyType == 1)
+            {
+                buffer.clear();
+                std::cerr << '\n';
+                continue;
+            }
             break;
         }
         if (!buffer.empty())
@@ -1477,7 +2388,7 @@ int runRepl(Tcl_Interp *interp)
             continue;
         }
 
-        if (!buffer.empty())
+        if (!buffer.empty() && session.options.historyEnabled)
         {
             linenoiseHistoryAdd(buffer.c_str());
         }
@@ -1485,7 +2396,9 @@ int runRepl(Tcl_Interp *interp)
         int code = Tcl_Eval(interp, buffer.c_str());
         if (code != TCL_OK)
         {
-            std::cerr << Tcl_GetStringResult(interp) << '\n';
+            recordEvalError(session, interp);
+            const char *message = Tcl_GetStringResult(interp);
+            std::cerr << (message ? message : "") << '\n';
         }
         else
         {
@@ -1497,10 +2410,15 @@ int runRepl(Tcl_Interp *interp)
         }
         buffer.clear();
     }
+    if (historyPath && session.options.historyEnabled)
+    {
+        (void)linenoiseHistorySave(historyPath->string().c_str());
+    }
+    linenoiseHistoryFree();
     return 0;
 }
 
-int runScript(Tcl_Interp *interp, const char *path)
+int runScript(Tcl_Interp *interp, Session &session, const char *path)
 {
     std::error_code ec;
     const std::filesystem::path scriptPath = std::filesystem::absolute(path, ec);
@@ -1529,13 +2447,14 @@ int runScript(Tcl_Interp *interp, const char *path)
             continue;
         }
         std::string_view trimmed = trimWhitespace(buffer);
-        if (!trimmed.empty() && shouldEchoTclCommand(trimmed))
+        if (!trimmed.empty() && shouldEchoTclCommand(session, trimmed))
         {
             echoTclCommand(trimmed);
         }
         int code = Tcl_Eval(interp, buffer.c_str());
         if (code != TCL_OK)
         {
+            recordEvalError(session, interp);
             std::cerr << Tcl_GetStringResult(interp) << '\n';
             return 1;
         }
@@ -1549,13 +2468,14 @@ int runScript(Tcl_Interp *interp, const char *path)
             return 1;
         }
         std::string_view trimmed = trimWhitespace(buffer);
-        if (!trimmed.empty() && shouldEchoTclCommand(trimmed))
+        if (!trimmed.empty() && shouldEchoTclCommand(session, trimmed))
         {
             echoTclCommand(trimmed);
         }
         int code = Tcl_Eval(interp, buffer.c_str());
         if (code != TCL_OK)
         {
+            recordEvalError(session, interp);
             std::cerr << Tcl_GetStringResult(interp) << '\n';
             return 1;
         }
@@ -1563,11 +2483,12 @@ int runScript(Tcl_Interp *interp, const char *path)
     return 0;
 }
 
-int runCommand(Tcl_Interp *interp, const char *command)
+int runCommand(Tcl_Interp *interp, Session &session, const char *command)
 {
     int code = Tcl_Eval(interp, command);
     if (code != TCL_OK)
     {
+        recordEvalError(session, interp);
         std::cerr << Tcl_GetStringResult(interp) << '\n';
         return 1;
     }
@@ -1587,6 +2508,7 @@ int entry(int argc, char **argv)
     }
 
     Session session;
+    gActiveSession = &session;
     registerCommands(interp, session);
 
     const auto sessionStart = std::chrono::steady_clock::now();
@@ -1595,15 +2517,15 @@ int entry(int argc, char **argv)
     int result = 0;
     if (argc >= 3 && std::string_view(argv[1]) == "-f")
     {
-        result = runScript(interp, argv[2]);
+        result = runScript(interp, session, argv[2]);
     }
     else if (argc >= 3 && std::string_view(argv[1]) == "-c")
     {
-        result = runCommand(interp, argv[2]);
+        result = runCommand(interp, session, argv[2]);
     }
     else
     {
-        result = runRepl(interp);
+        result = runRepl(interp, session);
     }
 
     const auto sessionEnd = std::chrono::steady_clock::now();
@@ -1619,6 +2541,7 @@ int entry(int argc, char **argv)
 
     Tcl_DeleteInterp(interp);
     Tcl_Finalize();
+    gActiveSession = nullptr;
     return result;
 }
 

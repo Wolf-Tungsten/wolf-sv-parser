@@ -44,10 +44,10 @@ bool startsWith(const std::string &value, const std::string &prefix)
 
 int main()
 {
-    wolvrix::lib::grh::Netlist netlist;
-    wolvrix::lib::grh::Graph &child = netlist.createGraph("child");
-    wolvrix::lib::grh::Graph &top = netlist.createGraph("top");
-    netlist.markAsTop("top");
+    wolvrix::lib::grh::Design design;
+    wolvrix::lib::grh::Graph &child = design.createGraph("child");
+    wolvrix::lib::grh::Graph &top = design.createGraph("top");
+    design.markAsTop("top");
 
     const auto childA = child.createValue(child.internSymbol("a"), 1, false);
     const auto childY = child.createValue(child.internSymbol("y"), 1, false);
@@ -97,7 +97,7 @@ int main()
     PassManager manager;
     manager.addPass(std::make_unique<XmrResolvePass>());
     PassDiagnostics diags;
-    const PassManagerResult result = manager.run(netlist, diags);
+    const PassManagerResult result = manager.run(design, diags);
     if (!result.success || diags.hasError())
     {
         return fail("XMR resolve pass failed");

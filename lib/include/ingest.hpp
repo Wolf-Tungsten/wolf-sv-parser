@@ -582,9 +582,9 @@ private:
 
 class GraphAssembler {
 public:
-    explicit GraphAssembler(ConvertContext& context, wolvrix::lib::grh::Netlist& netlist,
-                            std::mutex* netlistMutex = nullptr)
-        : context_(context), netlist_(netlist), netlistMutex_(netlistMutex) {}
+    explicit GraphAssembler(ConvertContext& context, wolvrix::lib::grh::Design& design,
+                            std::mutex* designMutex = nullptr)
+        : context_(context), design_(design), designMutex_(designMutex) {}
 
     const std::string& resolveGraphName(const PlanKey& key, std::string_view moduleName);
 
@@ -593,8 +593,8 @@ public:
 
 private:
     ConvertContext& context_;
-    wolvrix::lib::grh::Netlist& netlist_;
-    std::mutex* netlistMutex_ = nullptr;
+    wolvrix::lib::grh::Design& design_;
+    std::mutex* designMutex_ = nullptr;
     std::size_t nextAnonymousId_ = 0;
     std::unordered_map<PlanKey, std::string, PlanKeyHash> graphNames_{};
     std::unordered_set<std::string> reservedGraphNames_{};
@@ -605,7 +605,7 @@ class ConvertDriver {
 public:
     explicit ConvertDriver(ConvertOptions options = {});
 
-    wolvrix::lib::grh::Netlist convert(const slang::ast::RootSymbol& root);
+    wolvrix::lib::grh::Design convert(const slang::ast::RootSymbol& root);
 
     ConvertDiagnostics& diagnostics() noexcept { return diagnostics_; }
     Logger& logger() noexcept { return logger_; }

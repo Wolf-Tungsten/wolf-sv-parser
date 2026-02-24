@@ -384,13 +384,13 @@ namespace wolvrix::lib::transform
     {
         PassResult result;
         bool anyChanged = false;
-        const std::size_t graphCount = netlist().graphs().size();
+        const std::size_t graphCount = design().graphs().size();
         logDebug("begin graphs=" + std::to_string(graphCount));
         std::size_t changedGraphs = 0;
         std::size_t opsRemoved = 0;
         std::size_t valuesRemoved = 0;
 
-        for (const auto &entry : netlist().graphs())
+        for (const auto &entry : design().graphs())
         {
             wolvrix::lib::grh::Graph &graph = *entry.second;
             bool graphChanged = false;

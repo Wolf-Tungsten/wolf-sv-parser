@@ -59,7 +59,7 @@ namespace wolvrix::lib::transform
 
     struct PassContext
     {
-        wolvrix::lib::grh::Netlist &netlist;
+        wolvrix::lib::grh::Design &design;
         PassDiagnostics &diags;
         PassVerbosity verbosity = PassVerbosity::Info;
         LogLevel logLevel = LogLevel::Warn;
@@ -105,7 +105,7 @@ namespace wolvrix::lib::transform
         void logWarn(std::string message) { log(LogLevel::Warn, std::move(message)); }
         void logError(std::string message) { log(LogLevel::Error, std::move(message)); }
         void logDebug(std::string message) { log(LogLevel::Debug, std::move(message)); }
-        wolvrix::lib::grh::Netlist &netlist() { return context_->netlist; }
+        wolvrix::lib::grh::Design &design() { return context_->design; }
         PassDiagnostics &diags() { return context_->diags; }
         PassVerbosity verbosity() const noexcept { return context_ ? context_->verbosity : PassVerbosity::Error; }
         bool hasScratchpad(std::string_view key) const noexcept
@@ -233,7 +233,7 @@ namespace wolvrix::lib::transform
         void addPass(std::unique_ptr<Pass> pass, std::string instanceName = {});
         void clear();
 
-        PassManagerResult run(wolvrix::lib::grh::Netlist &netlist, PassDiagnostics &diags);
+        PassManagerResult run(wolvrix::lib::grh::Design &design, PassDiagnostics &diags);
 
         PassManagerOptions &options() noexcept { return options_; }
         const PassManagerOptions &options() const noexcept { return options_; }

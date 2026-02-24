@@ -21,28 +21,28 @@
 
 ## 方案概述
 
-在 `wolvrix::lib::grh::Graph` 与 `wolvrix::lib::grh::Netlist` 两个层级增加 declaredSymbols 表，
+在 `wolvrix::lib::grh::Graph` 与 `wolvrix::lib::grh::Design` 两个层级增加 declaredSymbols 表，
 但语义不同：
 
 - Graph 级：记录“模块内部的用户声明符号”（wire/var/端口/存储等）。
-- Netlist 级：记录“用户定义的模块名”（Graph 对应的 module 符号）。
+- Design 级：记录“用户定义的模块名”（Graph 对应的 module 符号）。
 
 推荐实现形态：
 
 - `DeclaredSymbol` 集合（以 `SymbolId` 为 key）。
 - Graph 级：与 `GraphSymbolTable` 并行存放，表示模块内声明集合。
-- Netlist 级：与 `NetlistSymbolTable` 并行存放，表示“用户定义模块集合”。
+- Design 级：与 `DesignSymbolTable` 并行存放，表示“用户定义模块集合”。
 - API 建议：
   - `void addDeclaredSymbol(SymbolId sym)`
   - `bool isDeclaredSymbol(SymbolId sym) const`
   - （可选）`std::span<const SymbolId> declaredSymbols() const`
 
-Netlist 级 API 可对齐 Graph 级接口，但语义是“用户定义模块集合”，
+Design 级 API 可对齐 Graph 级接口，但语义是“用户定义模块集合”，
 Graph 级则表示“该 graph 内部声明集合”。
 
 注意：Graph 级 declaredSymbols 表示“用户声明的信号名”，不代表一定是 Value，
 也不等价于临时值或编译器生成的内部符号。
-Netlist 级 declaredSymbols 表示“用户定义的模块名”，与 Graph 级语义不同，
+Design 级 declaredSymbols 表示“用户定义的模块名”，与 Graph 级语义不同，
 不要求一一对应。
 
 ## Convert 阶段的填充规则
@@ -54,7 +54,7 @@ Netlist 级 declaredSymbols 表示“用户定义的模块名”，与 Graph 级
   - 端口符号：加入 declaredSymbols。
   - 存储类声明（`kRegister/kLatch/kMemory` 的 symbol）也加入 declaredSymbols
     （它们是 Operation，但也应视为用户声明）。
-- Netlist 级：
+- Design 级：
   - 对“用户定义的模块”（Graph）加入其 module symbol。
 
 具体落点可在 `ModulePlan` 收集阶段或 Graph 组装阶段完成。
@@ -89,7 +89,7 @@ transform 是否保留用户声明的 symbol 应提供参数控制：
 declaredSymbols 必须写入并从 JSON 恢复：
 
 - graph 级新增 `declaredSymbols` 数组（模块内部声明）。
-- netlist 级新增 `declaredSymbols` 数组（用户定义模块名）。
+- design 级新增 `declaredSymbols` 数组（用户定义模块名）。
 
 ## 关联修改清单（必须同步落地）
 
@@ -148,17 +148,17 @@ JSON 的 `loc` 字段扩展为 `{ file, line, col, endLine, endCol, origin, pass
 - 明确并固化“op/value 必须有 symbol、缺失即硬错误”的规范。
 - 确认内部 symbol 命名规范（`_op_`/`_val_` + counter、合法标识符）。
 - 明确 transform 生成节点的 `SrcLoc` 扩展字段规范（`origin/pass/note`）。
-- 给出 Netlist/Graph declaredSymbols 的 API 设计与落点。
+- 给出 Design/Graph declaredSymbols 的 API 设计与落点。
 
 ### 阶段 2：数据结构与 JSON 变更
 
-- 在 Netlist/Graph 增加 declaredSymbols 存储与查询 API。
-- Emit 写出、Load 读回 graph/netlist 级 declaredSymbols。
+- 在 Design/Graph 增加 declaredSymbols 存储与查询 API。
+- Emit 写出、Load 读回 graph/design 级 declaredSymbols。
 - JSON 解析遇到缺失 `symbol/sym` 直接报错。
 
 ### 阶段 3：Convert 填充与 Transform/Emit 行为
 
-- Convert 按规则填充 Graph 级与 Netlist 级 declaredSymbols。
+- Convert 按规则填充 Graph 级与 Design 级 declaredSymbols。
 - Transform（DCE）默认保留 declaredSymbols，对应开关可关闭。
 - Emit 对 declaredSymbols 的值优先保留具名表达，不被无意省略。
 
@@ -185,7 +185,7 @@ JSON 的 `loc` 字段扩展为 `{ file, line, col, endLine, endCol, origin, pass
 已完成：
 
 - 约束落地：op/value 必须有有效 symbol；JSON load/emit 缺失 sym 直接硬错误。
-- 数据结构与 JSON：Graph/Netlist 新增 declaredSymbols 存取 API；JSON 写出与读取覆盖 graph/netlist 级 declaredSymbols。
+- 数据结构与 JSON：Graph/Design 新增 declaredSymbols 存取 API；JSON 写出与读取覆盖 graph/design 级 declaredSymbols。
 - Emit 行为：JSON emit 强制使用 sym；SV emit 在进入时统一校验图内符号完整性，缺失即错误。
 - Transform/DCE：默认保留 declaredSymbols；提供开关允许关闭保留。
 - 内部命名规范接入：convert/const_fold/redundant_elim/xmr_resolve 等内部符号统一使用 `_op_`/`_val_` + counter；transform 生成节点同步写入 `SrcLoc.origin/pass/note`。
@@ -201,7 +201,7 @@ JSON 的 `loc` 字段扩展为 `{ file, line, col, endLine, endCol, origin, pass
 
 - op/value 必须有 symbol，load/emit 缺失即硬错误。
 - internal 命名规范已明确并接入实现（`_op_`/`_val_` + counter）。
-- Graph/Netlist declaredSymbols API 已落地。
+- Graph/Design declaredSymbols API 已落地。
 
 ### 阶段 2：数据结构与 JSON 变更
 
@@ -209,7 +209,7 @@ JSON 的 `loc` 字段扩展为 `{ file, line, col, endLine, endCol, origin, pass
 
 覆盖点：
 
-- Graph/Netlist declaredSymbols 存取 API。
+- Graph/Design declaredSymbols 存取 API。
 - JSON 读写 declaredSymbols；缺失字段直接报错。
 
 ### 阶段 3：Convert 填充与 Transform/Emit 行为
@@ -218,7 +218,7 @@ JSON 的 `loc` 字段扩展为 `{ file, line, col, endLine, endCol, origin, pass
 
 覆盖点：
 
-- Convert 填充 graph/netlist declaredSymbols。
+- Convert 填充 graph/design declaredSymbols。
 - DCE 默认保留 declaredSymbols，提供开关关闭。
 - Emit 对 declaredSymbols 强制保留具名声明。
 

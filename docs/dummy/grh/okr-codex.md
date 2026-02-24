@@ -7,7 +7,7 @@
 
 ## 原则与顺序
 - 统一 symbol 规范（命名规则、唯一性、序列化字段），在 `docs/GRH-representation.md` 与头文件注释落地。
-- 依赖顺序：Graph 命名重命名 → Netlist 容器与 API 重写 → Graph 内部 Value/Operation 存储重写 → Value/Operation 关联关系纯 symbol 化 → 全量测试。
+- 依赖顺序：Graph 命名重命名 → Design 容器与 API 重写 → Graph 内部 Value/Operation 存储重写 → Value/Operation 关联关系纯 symbol 化 → 全量测试。
 - 不留旧字段/别名/兼容 JSON；改动一次到位，保证实现与文档同步。
 
 ## KR1：Graph 的 moduleName 直接替换为 symbol
@@ -15,7 +15,7 @@
 - 使用点清理：更新 `include/grh.hpp`、`src/grh.cpp`、elaboration/emit 流程、测试用例和 `docs/GRH-representation.md`、`docs/grh/okr.md`；所有调用改用 `graph.symbol()`。
 - 序列化：JSON 仅使用 `symbol` 字段，移除 moduleName fallback；旧格式不再支持。
 
-## KR2：Netlist 以 symbol 管理 Graph（无裸指针）
+## KR2：Design 以 symbol 管理 Graph（无裸指针）
 - 容器形态：`graphs_` 仅存 `std::unordered_map<std::string, std::unique_ptr<Graph>>`，对外不暴露指针。
 - API：`createGraph(symbol)` 校验唯一性并返回 `Graph&`；`findGraph(symbol)` 返回可空引用包装或迭代器；alias 映射调整为 `unordered_map<symbol, symbol>`；`topGraphs_` 存 symbol 列表。
 - 生命周期：移除 `graphByName_`、`graphAliasByName_` 裸指针缓存；移动/拷贝语义在重写后确保 Graph.owner 重新绑定。
@@ -77,8 +77,8 @@
 - 每一步都产出可独立测试的最小功能集，允许回归验证。
 
 ## KR1：引入分层 SymbolTable 与 SymbolId
-- 新增 `NetlistSymbolTable` 与 `GraphSymbolTable`，API 包含 `intern/lookup/contains/text/valid`。
-- 约束：Netlist 层仅驻留 Graph 名称，跨图引用统一使用 Netlist 层符号表。
+- 新增 `DesignSymbolTable` 与 `GraphSymbolTable`，API 包含 `intern/lookup/contains/text/valid`。
+- 约束：Design 层仅驻留 Graph 名称，跨图引用统一使用 Design 层符号表。
 - 测试：`tests/grh/test_grh.cpp` 增加符号表用例（重复 intern 拒绝、lookup 命中、text/valid 行为）。
 
 ## KR2：定义句柄类型
@@ -140,12 +140,12 @@
 
 # Objective 8
 
-> 目标：迁移 elaborate 产出热路径 IR，并完成 Netlist 数据结构/API 升级与一致性校验。
+> 目标：迁移 elaborate 产出热路径 IR，并完成 Design 数据结构/API 升级与一致性校验。
 
 ## KR1：elaborate 迁移与转换
 - 在迁移早期对旧路径做一次性备份（分支或备份文件），仅用于对照验证。
 - 在 elaborate 流程中引入 `GraphBuilder`，以构建期 API 生成图结构。
-- 同步升级 `Netlist` 数据结构与 API（Graph/alias/top 管理与访问入口），确保热路径 IR 能统一落地与可追踪。
+- 同步升级 `Design` 数据结构与 API（Graph/alias/top 管理与访问入口），确保热路径 IR 能统一落地与可追踪。
 - 迁移完成后删除旧路径与兼容分支，仅保留热路径构建与 `freeze()` 产物。
 
 ## KR2：一致性校验与测试

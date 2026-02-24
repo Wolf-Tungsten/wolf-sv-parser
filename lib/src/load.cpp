@@ -24,7 +24,7 @@ namespace wolvrix::lib::load
 
         using wolvrix::lib::grh::AttributeValue;
         using wolvrix::lib::grh::Graph;
-        using wolvrix::lib::grh::Netlist;
+        using wolvrix::lib::grh::Design;
         using wolvrix::lib::grh::OperationId;
         using wolvrix::lib::grh::OperationKind;
         using wolvrix::lib::grh::SymbolId;
@@ -691,16 +691,16 @@ namespace wolvrix::lib::load
 
     } // namespace
 
-    wolvrix::lib::grh::Netlist LoadJson::load(std::string_view json)
+    wolvrix::lib::grh::Design LoadJson::load(std::string_view json)
     {
         JsonValue root = parseJson(json);
-        const auto &rootObj = root.asObject("netlist");
+        const auto &rootObj = root.asObject("design");
 
-        Netlist netlist;
+        Design design;
         auto graphsIt = rootObj.find("graphs");
         if (graphsIt == rootObj.end())
         {
-            throw std::runtime_error("Netlist JSON missing graphs field");
+            throw std::runtime_error("Design JSON missing graphs field");
         }
         const auto &graphsArray = graphsIt->second.asArray("graphs");
         for (const auto &graphValue : graphsArray)
@@ -716,7 +716,7 @@ namespace wolvrix::lib::load
             {
                 throw std::runtime_error("Graph JSON symbol is empty");
             }
-            Graph &graph = netlist.createGraph(graphSymbol);
+            Graph &graph = design.createGraph(graphSymbol);
 
             auto declaredIt = graphObj.find("declaredSymbols");
             if (declaredIt == graphObj.end())
@@ -1086,49 +1086,49 @@ namespace wolvrix::lib::load
         auto declaredIt = rootObj.find("declaredSymbols");
         if (declaredIt == rootObj.end())
         {
-            throw std::runtime_error("Netlist JSON missing declaredSymbols");
+            throw std::runtime_error("Design JSON missing declaredSymbols");
         }
-        for (const auto &entry : declaredIt->second.asArray("netlist.declaredSymbols"))
+        for (const auto &entry : declaredIt->second.asArray("design.declaredSymbols"))
         {
-            const std::string name = entry.asString("netlist.declaredSymbols[]");
+            const std::string name = entry.asString("design.declaredSymbols[]");
             if (name.empty())
             {
-                throw std::runtime_error("Netlist declared symbol is empty");
+                throw std::runtime_error("Design declared symbol is empty");
             }
-            netlist.addDeclaredSymbol(netlist.internSymbol(name));
+            design.addDeclaredSymbol(design.internSymbol(name));
         }
 
         if (auto aliasesIt = rootObj.find("aliases"); aliasesIt != rootObj.end())
         {
-            for (const auto &[alias, value] : aliasesIt->second.asObject("netlist.aliases"))
+            for (const auto &[alias, value] : aliasesIt->second.asObject("design.aliases"))
             {
                 if (alias.empty())
                 {
-                    throw std::runtime_error("Netlist alias is empty");
+                    throw std::runtime_error("Design alias is empty");
                 }
-                const std::string target = value.asString("netlist.aliases[]");
+                const std::string target = value.asString("design.aliases[]");
                 if (target.empty())
                 {
-                    throw std::runtime_error("Netlist alias target is empty");
+                    throw std::runtime_error("Design alias target is empty");
                 }
-                wolvrix::lib::grh::Graph *graph = netlist.findGraph(target);
+                wolvrix::lib::grh::Graph *graph = design.findGraph(target);
                 if (!graph)
                 {
-                    throw std::runtime_error("Netlist alias target graph not found: " + target);
+                    throw std::runtime_error("Design alias target graph not found: " + target);
                 }
-                netlist.registerGraphAlias(alias, *graph);
+                design.registerGraphAlias(alias, *graph);
             }
         }
 
         if (auto topIt = rootObj.find("tops"); topIt != rootObj.end())
         {
-            for (const auto &entry : topIt->second.asArray("netlist.tops"))
+            for (const auto &entry : topIt->second.asArray("design.tops"))
             {
-                netlist.markAsTop(entry.asString("netlist.tops[]"));
+                design.markAsTop(entry.asString("design.tops[]"));
             }
         }
 
-        return netlist;
+        return design;
     }
 
 } // namespace wolvrix::lib::load
@@ -1136,7 +1136,7 @@ namespace wolvrix::lib::load
 namespace wolvrix::lib::grh
 {
 
-    Netlist Netlist::fromJsonString(std::string_view json)
+    Design Design::fromJsonString(std::string_view json)
     {
         wolvrix::lib::load::LoadJson loader;
         return loader.load(json);

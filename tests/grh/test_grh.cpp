@@ -42,8 +42,8 @@ int main()
 {
     try
     {
-        Netlist netlist;
-        Graph &graph = netlist.createGraph("demo");
+        Design design;
+        Graph &graph = design.createGraph("demo");
 
         SymbolId symA = graph.internSymbol("a");
         SymbolId symB = graph.internSymbol("b");
@@ -60,7 +60,7 @@ int main()
         graph.bindOutputPort("sum_copy", sumCopy);
         graph.addDeclaredSymbol(symA);
         graph.addDeclaredSymbol(symSum);
-        netlist.addDeclaredSymbol(netlist.internSymbol("demo"));
+        design.addDeclaredSymbol(design.internSymbol("demo"));
 
         OperationId op = graph.createOperation(OperationKind::kAdd, graph.internSymbol("add0"));
         graph.addOperand(op, a);
@@ -121,7 +121,7 @@ int main()
             return fail("New operand usage tracking incorrect after replacement");
         }
 
-        Graph &auxGraph = netlist.createGraph("aux");
+        Graph &auxGraph = design.createGraph("aux");
         ValueId foreignValue = auxGraph.createValue(auxGraph.internSymbol("foreign"), 8, false);
         bool threwOnForeignOperand = expectThrows([&]
                                                   { graph.replaceOperand(op, 0, foreignValue); });
@@ -183,15 +183,15 @@ int main()
             return fail("Expected zero width to throw");
         }
 
-        netlist.markAsTop("demo");
+        design.markAsTop("demo");
 
         StoreDiagnostics emitDiagnostics;
         StoreJson emitter(&emitDiagnostics);
         StoreOptions emitOptions;
-        auto jsonOpt = emitter.storeToString(netlist, emitOptions);
+        auto jsonOpt = emitter.storeToString(design, emitOptions);
         if (!jsonOpt || emitDiagnostics.hasError())
         {
-            return fail("Failed to emit JSON for netlist");
+            return fail("Failed to emit JSON for design");
         }
         std::string json = *jsonOpt;
 
@@ -225,7 +225,7 @@ int main()
         }
 #endif
 
-        Netlist parsed = Netlist::fromJsonString(json);
+        Design parsed = Design::fromJsonString(json);
         if (parsed.topGraphs().size() != 1 || parsed.topGraphs()[0] != "demo")
         {
             return fail("Top graph round-trip failed");
@@ -244,7 +244,7 @@ int main()
         SymbolId parsedModuleSym = parsed.lookupSymbol("demo");
         if (!parsedModuleSym.valid() || !parsed.isDeclaredSymbol(parsedModuleSym))
         {
-            return fail("Declared symbol not preserved in netlist");
+            return fail("Declared symbol not preserved in design");
         }
 
         const OperationId parsedOpId = parsedGraph->findOperation("add0");
@@ -325,7 +325,7 @@ int main()
   "tops": []
 })";
         bool threwOnNestedArrayAttribute = expectThrows([&]
-                                                        { Netlist::fromJsonString(nestedArrayJson); });
+                                                        { Design::fromJsonString(nestedArrayJson); });
         if (!threwOnNestedArrayAttribute)
         {
             return fail("Expected nested array attribute to throw during parse");
@@ -364,7 +364,7 @@ int main()
   "tops": []
 })";
         bool threwOnObjectAttribute = expectThrows([&]
-                                                   { Netlist::fromJsonString(objectAttributeJson); });
+                                                   { Design::fromJsonString(objectAttributeJson); });
         if (!threwOnObjectAttribute)
         {
             return fail("Expected object attribute to throw during parse");
@@ -373,40 +373,40 @@ int main()
         {
             namespace grh_ir = wolvrix::lib::grh;
 
-            grh_ir::NetlistSymbolTable netlistSymbols;
-            auto demoSym = netlistSymbols.intern("demo");
-            if (!netlistSymbols.valid(demoSym))
+            grh_ir::DesignSymbolTable designSymbols;
+            auto demoSym = designSymbols.intern("demo");
+            if (!designSymbols.valid(demoSym))
             {
-                return fail("NetlistSymbolTable did not mark interned symbol as valid");
+                return fail("DesignSymbolTable did not mark interned symbol as valid");
             }
-            if (!netlistSymbols.contains("demo"))
+            if (!designSymbols.contains("demo"))
             {
-                return fail("NetlistSymbolTable contains() failed for interned symbol");
+                return fail("DesignSymbolTable contains() failed for interned symbol");
             }
-            auto demoLookup = netlistSymbols.lookup("demo");
+            auto demoLookup = designSymbols.lookup("demo");
             if (!demoLookup.valid() || demoLookup != demoSym)
             {
-                return fail("NetlistSymbolTable lookup failed for interned symbol");
+                return fail("DesignSymbolTable lookup failed for interned symbol");
             }
-            if (netlistSymbols.text(demoSym) != "demo")
+            if (designSymbols.text(demoSym) != "demo")
             {
-                return fail("NetlistSymbolTable text() mismatch");
+                return fail("DesignSymbolTable text() mismatch");
             }
-            if (netlistSymbols.lookup("missing").valid())
+            if (designSymbols.lookup("missing").valid())
             {
-                return fail("NetlistSymbolTable lookup should miss unknown symbol");
+                return fail("DesignSymbolTable lookup should miss unknown symbol");
             }
-            auto dupSym = netlistSymbols.intern("demo");
+            auto dupSym = designSymbols.intern("demo");
             if (!dupSym.valid() || dupSym != demoSym)
             {
                 return fail("Expected duplicate intern to return existing SymbolId");
             }
-            if (netlistSymbols.valid(grh_ir::SymbolId::invalid()))
+            if (designSymbols.valid(grh_ir::SymbolId::invalid()))
             {
                 return fail("Invalid SymbolId reported as valid");
             }
             bool threwOnInvalidText = expectThrows([&]
-                                                   { netlistSymbols.text(grh_ir::SymbolId::invalid()); });
+                                                   { designSymbols.text(grh_ir::SymbolId::invalid()); });
             if (!threwOnInvalidText)
             {
                 return fail("Expected invalid SymbolId text() to throw");
@@ -770,7 +770,7 @@ int main()
         }
 
         {
-            Graph &symbolGraph = netlist.createGraph("symbol_checks");
+            Graph &symbolGraph = design.createGraph("symbol_checks");
             SymbolId sym = symbolGraph.internSymbol("dup_symbol");
             ValueId val = symbolGraph.createValue(sym, 1, false);
             (void)val;

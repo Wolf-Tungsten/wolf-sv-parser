@@ -28,10 +28,10 @@ namespace
         return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
 
-    Netlist buildDemoNetlist()
+    Design buildDemoDesign()
     {
-        Netlist netlist;
-        Graph &graph = netlist.createGraph("demo");
+        Design design;
+        Graph &graph = design.createGraph("demo");
 
         ValueId in = graph.createValue(graph.internSymbol("in"), 8, false);
         graph.bindInputPort("in", in);
@@ -49,9 +49,9 @@ namespace
         graph.addOperand(assign, sum);
         graph.addResult(assign, out);
 
-        netlist.registerGraphAlias("demo_alias", graph);
-        netlist.markAsTop(graph.symbol());
-        return netlist;
+        design.registerGraphAlias("demo_alias", graph);
+        design.markAsTop(graph.symbol());
+        return design;
     }
 
 } // namespace
@@ -65,8 +65,8 @@ int main()
     // Case 1: missing top graphs should fail gracefully.
     StoreDiagnostics diagNoTop;
     StoreJson emitterNoTop(&diagNoTop);
-    Netlist emptyNetlist;
-    StoreResult resultNoTop = emitterNoTop.store(emptyNetlist);
+    Design emptyDesign;
+    StoreResult resultNoTop = emitterNoTop.store(emptyDesign);
     if (resultNoTop.success)
     {
         return fail("StoreJson should fail when no tops are present");
@@ -76,7 +76,7 @@ int main()
         return fail("Expected diagnostics to capture missing tops for StoreJson");
     }
 
-    Netlist netlist = buildDemoNetlist();
+    Design design = buildDemoDesign();
 
     // Case 2: prettyCompact JSON emission with compact keys.
     StoreDiagnostics diagPrettyCompact;
@@ -84,7 +84,7 @@ int main()
     StoreOptions prettyCompactOptions;
     prettyCompactOptions.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
 
-    StoreResult prettyCompactResult = emitterPrettyCompact.store(netlist, prettyCompactOptions);
+    StoreResult prettyCompactResult = emitterPrettyCompact.store(design, prettyCompactOptions);
     if (!prettyCompactResult.success)
     {
         return fail("StoreJson prettyCompact path failed");
@@ -129,15 +129,15 @@ int main()
         return fail("Value entry spans multiple lines in prettyCompact mode");
     }
 
-    Netlist parsed = Netlist::fromJsonString(prettyCompactJson);
+    Design parsed = Design::fromJsonString(prettyCompactJson);
     if (!parsed.findGraph("demo"))
     {
-        return fail("Round-trip parsed netlist missing demo graph");
+        return fail("Round-trip parsed design missing demo graph");
     }
     Graph *aliasGraph = parsed.findGraph("demo_alias");
     if (!aliasGraph || aliasGraph->symbol() != "demo")
     {
-        return fail("Round-trip parsed netlist missing alias mapping");
+        return fail("Round-trip parsed design missing alias mapping");
     }
 
     // Case 3: compact mode should differ from prettyCompact output and avoid newlines.
@@ -146,7 +146,7 @@ int main()
     StoreOptions compactOptions = prettyCompactOptions;
     compactOptions.jsonMode = JsonPrintMode::Compact;
 
-    StoreResult compactResult = emitterCompact.store(netlist, compactOptions);
+    StoreResult compactResult = emitterCompact.store(design, compactOptions);
     if (!compactResult.success || diagCompact.hasError())
     {
         return fail("Compact emit failed");

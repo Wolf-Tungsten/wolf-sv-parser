@@ -5,7 +5,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，本文档介绍
 ## 目录
 
 - [1. 概述](#1-概述)
-- [2. Netlist 操作](#2-netlist-操作)
+- [2. Design 操作](#2-design-操作)
 - [3. Graph 操作](#3-graph-操作)
 - [4. Graph 的双模态](#4-graph-的双模态)
 
@@ -15,27 +15,27 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，本文档介绍
 
 GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示。本文档介绍 C++ API 的使用方法。
 
-GRH IR 核心概念（Value、Operation、Graph、Netlist）的详细介绍请参考 [grh-ir.md](./grh-ir.md)。
+GRH IR 核心概念（Value、Operation、Graph、Design）的详细介绍请参考 [grh-ir.md](./grh-ir.md)。
 
 ---
 
-## 2. Netlist 操作
+## 2. Design 操作
 
-Netlist 管理 Graph 集合及模块层次关系，Graph 名称直接使用字符串。
+Design 管理 Graph 集合及模块层次关系，Graph 名称直接使用字符串。
 
 ### 2.1 创建与查询
 
 ```cpp
-// 创建 Netlist
-Netlist netlist;
+// 创建 Design
+Design design;
 
 // 遍历所有 Graph
-for (const auto& [name, graphPtr] : netlist.graphs()) {
+for (const auto& [name, graphPtr] : design.graphs()) {
     Graph& graph = *graphPtr;
 }
 
 // 按名称查找
-Graph* found = netlist.findGraph("MyModule");
+Graph* found = design.findGraph("MyModule");
 ```
 
 > `findGraph` 以指针表示“可能不存在”，未命中返回 `nullptr`。
@@ -44,23 +44,23 @@ Graph* found = netlist.findGraph("MyModule");
 
 ```cpp
 // 创建 Graph（同名已存在会抛异常）
-Graph& graph = netlist.createGraph("MyModule");
+Graph& graph = design.createGraph("MyModule");
 
 // 安全创建：先查后建
-if (!netlist.findGraph("MyModule")) {
-    netlist.createGraph("MyModule");
+if (!design.findGraph("MyModule")) {
+    design.createGraph("MyModule");
 }
 ```
 
 ### 2.3 顶层模块
 
 ```cpp
-netlist.markAsTop("TopModule");      // 标记顶层
-netlist.unmarkAsTop("Testbench");    // 取消标记
-bool isTop = netlist.isTopGraph("TopModule");  // 检查
+design.markAsTop("TopModule");      // 标记顶层
+design.unmarkAsTop("Testbench");    // 取消标记
+bool isTop = design.isTopGraph("TopModule");  // 检查
 
-for (const auto& name : netlist.topGraphs()) {  // 遍历顶层
-    Graph* top = netlist.findGraph(name);
+for (const auto& name : design.topGraphs()) {  // 遍历顶层
+    Graph* top = design.findGraph(name);
 }
 ```
 
@@ -68,32 +68,32 @@ for (const auto& name : netlist.topGraphs()) {  // 遍历顶层
 
 ```cpp
 // 为参数化模块注册别名
-Graph& graph = netlist.createGraph("Module_Width8");
-netlist.registerGraphAlias("Module#(8)", graph);
+Graph& graph = design.createGraph("Module_Width8");
+design.registerGraphAlias("Module#(8)", graph);
 
 // 查找时别名自动解析
-Graph* found = netlist.findGraph("Module#(8)");  // 指向 Module_Width8
+Graph* found = design.findGraph("Module#(8)");  // 指向 Module_Width8
 ```
 
 ### 2.5 克隆 Graph
 
 ```cpp
 // 从已有 graph 克隆到新名称（会完整复制 value/op/ports/attrs/srcLoc/declaredSymbols）
-Graph& cloned = netlist.cloneGraph("SrcModule", "DstModule");
+Graph& cloned = design.cloneGraph("SrcModule", "DstModule");
 ```
 
 > 说明：克隆会为新图分配新的 GraphId，不会自动标记为 top graph。  
 > Graph 不支持拷贝/移动，复制只能通过该接口显式进行。
 
-### 2.6 克隆 Netlist
+### 2.6 克隆 Design
 
 ```cpp
-// 完整复制整个 netlist（包含所有 graph/alias/top/declaredSymbols）
-Netlist copied = netlist.clone();
+// 完整复制整个 design（包含所有 graph/alias/top/declaredSymbols）
+Design copied = design.clone();
 ```
 
-> 说明：复制后的 Netlist 与原始对象独立，所有 Graph 都会分配新的 GraphId。  
-> Netlist 不支持拷贝构造，复制应使用 `clone()`。
+> 说明：复制后的 Design 与原始对象独立，所有 Graph 都会分配新的 GraphId。  
+> Design 不支持拷贝构造，复制应使用 `clone()`。
 
 ---
 

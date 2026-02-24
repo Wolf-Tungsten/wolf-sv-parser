@@ -52,12 +52,12 @@ namespace wolvrix::lib::emit
         explicit Emit(EmitDiagnostics *diagnostics = nullptr);
         virtual ~Emit() = default;
 
-        EmitResult emit(const wolvrix::lib::grh::Netlist &netlist, const EmitOptions &options = EmitOptions());
+        EmitResult emit(const wolvrix::lib::grh::Design &design, const EmitOptions &options = EmitOptions());
 
     protected:
         EmitDiagnostics *diagnostics() const noexcept { return diagnostics_; }
 
-        std::vector<const wolvrix::lib::grh::Graph *> resolveTopGraphs(const wolvrix::lib::grh::Netlist &netlist,
+        std::vector<const wolvrix::lib::grh::Graph *> resolveTopGraphs(const wolvrix::lib::grh::Design &design,
                                                          const EmitOptions &options) const;
         std::filesystem::path resolveOutputDir(const EmitOptions &options) const;
         bool ensureParentDirectory(const std::filesystem::path &path) const;
@@ -67,7 +67,7 @@ namespace wolvrix::lib::emit
         void reportWarning(std::string message, std::string context = {}) const;
 
     protected:
-        virtual EmitResult emitImpl(const wolvrix::lib::grh::Netlist &netlist,
+        virtual EmitResult emitImpl(const wolvrix::lib::grh::Design &design,
                                     std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                     const EmitOptions &options) = 0;
 
@@ -83,7 +83,7 @@ namespace wolvrix::lib::emit
         using Emit::Emit;
 
     private:
-        EmitResult emitImpl(const wolvrix::lib::grh::Netlist &netlist,
+        EmitResult emitImpl(const wolvrix::lib::grh::Design &design,
                             std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                             const EmitOptions &options) override;
     };

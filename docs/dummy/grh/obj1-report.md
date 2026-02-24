@@ -1,7 +1,7 @@
 # Objective 1 完成报告：GRH 索引全面 symbol 化
 
 ## 交付摘要
-- Graph/Value/Operation/Netlist 全面改为以 symbol 为唯一索引，移除裸指针缓存与旧的 moduleName/name 字段。
+- Graph/Value/Operation/Design 全面改为以 symbol 为唯一索引，移除裸指针缓存与旧的 moduleName/name 字段。
 - 容器改用 `unordered_map<symbol, unique_ptr>` + `valueOrder/operationOrder/graphOrder` 记录顺序；端口映射存储 ValueId，别名映射存储 symbol→symbol。
 - Value/Operation 关联关系用 symbol 记录定义者与使用者；Operation operands/results 暴露句柄范围访问器。
 - JSON 序列化/反序列化仅支持 symbol 字段（Graph.symbol、Value.sym、def、ports.val、ops.in/out），删除兼容字段。
@@ -9,11 +9,11 @@
 
 ## 主要改动点
 - `include/grh.hpp` / `src/grh.cpp`
-  - 引入 Symbol/ValueId/OperationId，Graph/Netlist/Value/Operation 改为 map 存储；增加 order 向量记录插入顺序。
+  - 引入 Symbol/ValueId/OperationId，Graph/Design/Value/Operation 改为 map 存储；增加 order 向量记录插入顺序。
   - Value 记录 `definingOpSymbol + users (opSymbol, idx)`；提供解引用访问器。
   - Operation operands/results 存 symbol，提供迭代视图与索引解引用。
   - Graph 只保留 `symbol()`；端口为 `map<string, ValueId>`；新增 getValue/getOperation 辅助。
-  - Netlist 以 symbol 管理 Graph，alias 为 symbol→symbol，topGraphs 为 symbol 列表。
+  - Design 以 symbol 管理 Graph，alias 为 symbol→symbol，topGraphs 为 symbol 列表。
   - JSON 写入使用 symbol 字段；解析器仅接受新字段并更新端口/关联关系。
 - `src/emit.cpp`
   - 按 graphOrder 遍历；Graph.symbol 输出；端口/ops 基于 order + symbol 序列化。

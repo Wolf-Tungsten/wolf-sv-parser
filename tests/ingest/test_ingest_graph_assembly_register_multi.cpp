@@ -68,9 +68,9 @@ int testGraphAssemblyRegisterMulti(const std::filesystem::path& sourcePath) {
     }
 
     wolvrix::lib::ingest::ConvertDriver driver;
-    wolvrix::lib::grh::Netlist netlist = driver.convert(bundle->compilation->getRoot());
+    wolvrix::lib::grh::Design design = driver.convert(bundle->compilation->getRoot());
 
-    const wolvrix::lib::grh::Graph* graph = netlist.findGraph("graph_assembly_register_multi");
+    const wolvrix::lib::grh::Graph* graph = design.findGraph("graph_assembly_register_multi");
     if (!graph) {
         return fail("Missing graph_assembly_register_multi graph");
     }

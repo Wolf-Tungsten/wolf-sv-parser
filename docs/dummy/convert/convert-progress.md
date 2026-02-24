@@ -28,7 +28,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 - 确定读写关系后逐步确定变量的类型（wire/reg/mem）
 
-- 由变量构建 Value，读写关系构建 Op，最终形成 Graph 和 Netlist
+- 由变量构建 Value，读写关系构建 Op，最终形成 Graph 和 Design
 
 
 
@@ -57,7 +57,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 实施：
 - 已更新 `docs/convert/convert-architecture.md`，给出 Convert 的静态组件与数据模型
-- 已更新 `docs/convert/convert-workflow.md`，给出运行时从入口到 Netlist 输出的流程
+- 已更新 `docs/convert/convert-workflow.md`，给出运行时从入口到 Design 输出的流程
 - 已补充多顶层模块约束、复杂 always/控制流识别、层次保留与参数特化策略
 - 已补充可控调试日志接口的预留说明
 
@@ -704,14 +704,14 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 目标：
 - 将 ModulePlan + LoweringPlan + WriteBackPlan 落地为 GRH Graph
 - 完成端口/信号/常量/组合逻辑的基础发射
-- ConvertDriver 接入 Pass8 并填充 Netlist/topGraphs
+- ConvertDriver 接入 Pass8 并填充 Design/topGraphs
 
 计划：
 - GraphAssembler 建立 Graph 与符号表映射（PlanSymbolId -> ValueId/OperationId）
 - 端口 Value 建模：input/output/inout（__in/__out/__oe）并绑定 Graph ports
 - ExprNode 发射：kConstant/kAssign/逻辑运算/kMux/kSlice/kConcat/kReplicate 等
 - WriteBackPlan 发射：comb -> kAssign，seq -> kRegister，latch -> kLatch
-- ConvertDriver 在 Pass7 后调用 GraphAssembler，写入 Netlist 并标记顶层 Graph
+- ConvertDriver 在 Pass7 后调用 GraphAssembler，写入 Design 并标记顶层 Graph
 - 新增 `ingest-graph-assembly-basic` 测试覆盖组合/时序/锁存基本路径
 - 更新 workflow/architecture 文档对齐 Pass8 基础流程
 
@@ -828,13 +828,13 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 
 计划：
 - 主流程创建 `ConvertDriver`，将 Convert 诊断/日志输出到 stderr
-- Convert 输出 Netlist 后运行 transform passes，再调用 JSON/SV emit
+- Convert 输出 Design 后运行 transform passes，再调用 JSON/SV emit
 - `-o` 同步输出目录与文件名规则，兼容 HDLBits `make run_hdlbits_test`
 - 更新 workflow/architecture 文档说明 CLI 接入与输出规则
 
 实施：
 - `src/main.cpp` 接入 `ConvertDriver`，按 CLI 参数配置日志与错误处理
-- Transform 阶段保持默认 passes（const-fold + stats），输出 Netlist
+- Transform 阶段保持默认 passes（const-fold + stats），输出 Design
 - Emit 阶段支持 JSON/SV 输出与 `-o/--emit-out-dir` 目录重定向
 - 更新 workflow/architecture 文档补充 CLI 入口与 HDLBits 输出说明
 
@@ -1041,7 +1041,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 目标：
 - 以 Graph 创建为并行粒度，确保单个 Graph 串行创建
 - 遇到新 instance 时创建新的 Graph 任务，确保 instance 不重复创建
-- 明确诊断与 netlist 写回的线程安全策略，保证输出可复现
+- 明确诊断与 design 写回的线程安全策略，保证输出可复现
 
 计划：
 - 引入全局调度器（线程池）管理 Graph 任务队列，任务单元为 Graph 创建
@@ -1050,9 +1050,9 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - 增加 `InstanceRegistry`：基于 `InstanceKey` 的互斥创建与 `future` 复用，避免重复实例
 - Graph 任务调度按实例依赖推进（父 Graph 提交子 Graph 任务，可并发执行）
 - 诊断采用线程本地收集 + 全局取消标志（fatal 时触发），最终统一排序输出
-- netlist 写回采用 “Graph 结果本地化 + 单线程 commit”：写入 `NetlistSymbolTable` 分配 `GraphId` 并维护 `graphOrder`；顺序不要求稳定，只需确保符号可解析
+- design 写回采用 “Graph 结果本地化 + 单线程 commit”：写入 `DesignSymbolTable` 分配 `GraphId` 并维护 `graphOrder`；顺序不要求稳定，只需确保符号可解析
 - commit 阶段集中处理 `topGraphs` 与 `registerGraphAlias`，避免并发写入导致顺序不稳定或 alias 冲突
-- instance 仅保留 `moduleName` 字符串属性；commit 时确保对应 graph 已注册，避免跨网表或未解析引用
+- instance 仅保留 `moduleName` 字符串属性；commit 时确保对应 graph 已注册，避免跨设计或未解析引用
 - 明确线程安全共享缓存策略（只读 AST/符号表无锁，读多写少缓存用 shared_mutex）
 - 新增 `--single-thread` 开关用于调试与回归对比
 - 同步更新 `convert-architecture`/`convert-workflow` 文档与并行相关示例
@@ -1062,7 +1062,7 @@ Convert 在功能上与 Elaborate 等价，由 Slang AST 构建 GRH 表示
 - `PlanTaskQueue` 增加阻塞等待与 drain，配合并行 worker 收敛
 - 引入 `InstanceRegistry` 去重与完成态登记，`enqueuePlanKey` 先判重再入队
 - `ConvertDiagnostics` 支持线程本地缓冲与 flush；`ConvertLogger` 加锁避免并发交错
-- `GraphAssembler` 图名解析加锁，`Netlist` 写回通过互斥串行化
+- `GraphAssembler` 图名解析加锁，`Design` 写回通过互斥串行化
 - `ConvertDriver::convert` 使用线程池并行处理 Graph 任务，topGraphs/alias 在主线程统一注册
 - 同步更新 `docs/convert/convert-architecture.md` 与 `docs/convert/convert-workflow.md`
 

@@ -21,7 +21,7 @@
 - When the same module has additional instances, those instances are not updated with the new port names/results, so the emitted SV instantiation omits the newly-added port.
 
 ## Fix details
-- Track newly-added XMR input/output ports and propagate them to **all** instances of the affected module across the netlist.
+- Track newly-added XMR input/output ports and propagate them to **all** instances of the affected module across the design.
 - For input ports (XMR writes), connect missing instances to a zero pad constant to avoid missing pins.
 - Files changed: `src/pass/xmr_resolve.cpp`.
 - Added repro case: `tests/data/openc910/bug_cases/case_016`.

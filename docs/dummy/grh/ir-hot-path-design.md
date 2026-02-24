@@ -29,12 +29,12 @@
 
 - 引入 `SymbolTable` 进行字符串驻留，产生稳定的 `SymbolId`（uint32_t）。
 - `SymbolTable` 可以设计为多层次：
-  - Netlist 级 `NetlistSymbolTable`：只管理 Graph/alias 等跨图符号。
+  - Design 级 `DesignSymbolTable`：只管理 Graph/alias 等跨图符号。
   - Graph 级 `GraphSymbolTable`：只管理 Value/Operation/port 等图内符号。
 - 这种分层有利于并行性：多个 Graph 可并行构建，避免共享锁争用；Graph 内符号查找也更小、更快。
-- 代价是潜在的字符串重复存储；可选用共享字符串池或只在 Netlist 层做全局驻留。
+- 代价是潜在的字符串重复存储；可选用共享字符串池或只在 Design 层做全局驻留。
 - `SymbolId` 只保证在同一个 `SymbolTable` 生命周期内稳定，不跨进程持久化；跨层不可直接比较。
-- 约束：Netlist 层只驻留 Graph 名称；跨图引用（例如 instance 目标）统一走 NetlistSymbolTable，Graph 层不保存跨图符号。
+- 约束：Design 层只驻留 Graph 名称；跨图引用（例如 instance 目标）统一走 DesignSymbolTable，Graph 层不保存跨图符号。
 - 典型 API 形态（区分申请与查询）：
   - `SymbolId intern(std::string_view text)`：申请新符号；若已存在则返回已有 id。
   - `SymbolId lookup(std::string_view text)`：仅查询，存在则返回 id；缺失返回 invalid。
@@ -55,7 +55,7 @@
 - 引入强类型句柄 `ValueId/OperationId/GraphId`，形如：
   - `struct ValueId { uint32_t index; uint32_t gen; };`
   - 通过 generation 防止悬挂句柄，在 release 模式可仅保留 index。
-- 对外 API 以 `ValueId/OperationId` 作为唯一引用，避免裸指针跨图使用；`GraphId` 仅用于 Netlist 容器内部索引。
+- 对外 API 以 `ValueId/OperationId` 作为唯一引用，避免裸指针跨图使用；`GraphId` 仅用于 Design 容器内部索引。
 
 ### 2) Graph 热路径存储布局
 
@@ -87,9 +87,9 @@ Graph 内部采用“结构数组”或“紧凑记录 + 索引”的布局：
 - 若构建期插入导致 operands 非连续，可在构建期使用每 op 独立的临时向量，`freeze()` 时统一压平为连续数组；热路径只依赖冻结后的连续布局。
 - 这里的“连续”指**每个 op 自己的 operands 列表在全局数组里占一段连续区间**；Value 被多个 op 使用不会破坏这一点，因为每个 op 的 operands 区间彼此独立。
 
-### 3) Netlist 与 Graph 管理
+### 3) Design 与 Graph 管理
 
-- Netlist 保存 Graph 的连续容器（如 vector/arena），以 `GraphId` 或索引访问。
+- Design 保存 Graph 的连续容器（如 vector/arena），以 `GraphId` 或索引访问。
 - Graph 的 symbol/alias 仍可通过 `SymbolId -> GraphId` 的 map 解决，但热路径不应依赖。
 - Graph 之间引用（instance）仅存 GraphId 或 SymbolId（用于序列化/外部兼容）。
 
@@ -273,11 +273,11 @@ for (auto opId : view.operations()) { /* hot path */ }
 ## 术语表
 
 - Graph：GRH 中单个模块的图结构，包含 Value/Operation 与端口。
-- Netlist：Graph 的集合，含顶层与跨图引用信息。
+- Design：Graph 的集合，含顶层与跨图引用信息。
 - Value：SSA 边，代表信号/连线的值。
 - Operation：SSA 顶点，代表逻辑/存储/实例等操作。
 - Symbol：人类可读的名字，驻留在 SymbolTable 中。
-- SymbolId：Symbol 的整数句柄，Graph 内或 Netlist 内有效。
+- SymbolId：Symbol 的整数句柄，Graph 内或 Design 内有效。
 - GraphView：只读快照，用于热路径遍历。
 - GraphBuilder：构建与变换入口，负责一致性维护与 `freeze()`。
 - freeze：将构建期结构压平为连续布局并生成 GraphView。

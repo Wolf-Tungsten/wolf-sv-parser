@@ -216,7 +216,7 @@ namespace wolvrix::lib::transform
     PassResult XmrResolvePass::run()
     {
         PassResult result;
-        const std::size_t graphCount = netlist().graphs().size();
+        const std::size_t graphCount = design().graphs().size();
         logDebug("begin graphs=" + std::to_string(graphCount));
         PortNameCache readPortNames;
         PortNameCache writePortNames;
@@ -634,7 +634,7 @@ namespace wolvrix::lib::transform
                             "XMR read instance missing moduleName");
                     return std::nullopt;
                 }
-                wolvrix::lib::grh::Graph *childGraph = netlist().findGraph(*moduleName);
+                wolvrix::lib::grh::Graph *childGraph = design().findGraph(*moduleName);
                 if (!childGraph)
                 {
                     warning(root, root.getOperation(opId),
@@ -753,7 +753,7 @@ namespace wolvrix::lib::transform
                             "XMR write instance missing moduleName");
                     return false;
                 }
-                wolvrix::lib::grh::Graph *childGraph = netlist().findGraph(*moduleName);
+                wolvrix::lib::grh::Graph *childGraph = design().findGraph(*moduleName);
                 if (!childGraph)
                 {
                     warning(root, root.getOperation(opId),
@@ -943,7 +943,7 @@ namespace wolvrix::lib::transform
             return true;
         };
 
-        for (auto &graphEntry : netlist().graphs())
+        for (auto &graphEntry : design().graphs())
         {
             wolvrix::lib::grh::Graph &graph = *graphEntry.second;
             std::vector<wolvrix::lib::grh::OperationId> xmrOps;
@@ -1053,7 +1053,7 @@ namespace wolvrix::lib::transform
             };
 
             std::unordered_map<std::string, std::vector<InstanceRef>> instancesByModule;
-            for (auto &graphEntry : netlist().graphs())
+            for (auto &graphEntry : design().graphs())
             {
                 wolvrix::lib::grh::Graph &graph = *graphEntry.second;
                 for (const auto opId : graph.operations())

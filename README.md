@@ -1,6 +1,6 @@
 # wolvrix
 
-wolvrix converts high-level behavioral RTL (Verilog-2005/SystemVerilog subset) into a structured GRH (Graph RTL Hierarchy) representation, which can then be emitted back as structural Verilog netlists. It supports configurable logic transformations and plugin extensions for simulation, synthesis, formal verification, and custom analysis workflows.
+wolvrix converts high-level behavioral RTL (Verilog-2005/SystemVerilog subset) into a structured GRH (Graph RTL Hierarchy) representation, which can then be emitted back as structural Verilog designs. It supports configurable logic transformations and plugin extensions for simulation, synthesis, formal verification, and custom analysis workflows.
 
 ## Project Overview
 
@@ -87,7 +87,7 @@ The resulting binary will be available at `build/bin/wolvrix-cli`.
 | `--define <macro>=<value>` | Define a preprocessor macro |
 | `-I <path>` | Add include search path |
 | `-L <path>` | Add library search path |
-| `--skip-transform` | Skip transform passes and emit raw converted netlist |
+| `--skip-transform` | Skip transform passes and emit raw converted design |
 | `--single-unit` | Treat all input files as a single compilation unit (enabled by default) |
 
 #### Debug and Logging Options
@@ -139,7 +139,7 @@ For additional options inherited from slang, refer to the [slang documentation](
 ./build/bin/wolvrix-cli --emit-sv --convert-log --convert-log-level debug design.sv
 ```
 
-#### Skip Transform Passes (Raw Netlist)
+#### Skip Transform Passes (Raw Design)
 
 ```bash
 ./build/bin/wolvrix-cli --emit-sv --skip-transform -o raw.sv design.sv

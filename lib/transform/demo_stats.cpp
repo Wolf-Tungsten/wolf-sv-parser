@@ -16,7 +16,7 @@ namespace wolvrix::lib::transform
         std::size_t opCount = 0;
         std::size_t valueCount = 0;
 
-        for (const auto &entry : netlist().graphs())
+        for (const auto &entry : design().graphs())
         {
             ++graphCount;
             const auto &graph = entry.second;

@@ -20,8 +20,8 @@ namespace
 
 int main()
 {
-    wolvrix::lib::grh::Netlist netlist;
-    wolvrix::lib::grh::Graph &graph = netlist.createGraph("g");
+    wolvrix::lib::grh::Design design;
+    wolvrix::lib::grh::Graph &graph = design.createGraph("g");
 
     const wolvrix::lib::grh::SymbolId resetSym = graph.internSymbol("reset");
     wolvrix::lib::grh::ValueId reset = graph.createValue(resetSym, 1, false);
@@ -52,7 +52,7 @@ int main()
     PassManagerResult res{};
     try
     {
-        res = manager.run(netlist, diags);
+        res = manager.run(design, diags);
     }
     catch (const std::exception &ex)
     {

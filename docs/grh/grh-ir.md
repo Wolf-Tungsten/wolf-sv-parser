@@ -8,7 +8,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 - [2. Value 详解](#2-value-详解)
 - [3. Operation 详解](#3-operation-详解)
 - [4. Graph 详解](#4-graph-详解)
-- [5. Netlist 详解](#5-netlist-详解)
+- [5. Design 详解](#5-design-详解)
 - [6. Operation 分类参考](#6-operation-分类参考)
   - [6.1 常量](#61-常量)
   - [6.2 组合运算](#62-组合运算)
@@ -29,7 +29,7 @@ GRH（Graph RTL Hierarchy）是基于 SSA 的 RTL 中间表示，用于表示 Sy
 | **Value** | SSA 数据流边 | 边 |
 | **Operation** | 计算节点 | 顶点 |
 | **Graph** | 模块容器 | Module |
-| **Netlist** | 网表，Graph 的集合 | Design |
+| **Design** | 设计，Graph 的集合 | Design |
 
 ## 1.1 Value
 
@@ -104,9 +104,9 @@ Graph "add_sub"
     └── result: _y
 ```
 
-## 1.4 Netlist
+## 1.4 Design
 
-Netlist 是 Graph 的集合，代表整个设计（Design）。
+Design 是 Graph 的集合，代表整个设计。
 
 **功能**：
 - 管理多个 Graph（模块）
@@ -131,10 +131,10 @@ module top;
 endmodule
 ```
 
-对应的 Netlist 结构：
+对应的 Design 结构：
 
 ```
-Netlist
+Design
 ├── Graph "child"
 │   ├── InputPort "in"
 │   ├── OutputPort "out"
@@ -470,21 +470,21 @@ endmodule
 
 ---
 
-# 5. Netlist 详解
+# 5. Design 详解
 
-## 5.1 Netlist 是什么
+## 5.1 Design 是什么
 
-Netlist 是 GRH IR 中**设计级别**的顶层容器，代表整个 SystemVerilog 设计（Design）。它是 Graph 的集合，容纳设计中的全部模块及其层次关系。
+Design 是 GRH IR 中**设计级别**的顶层容器，代表整个 SystemVerilog 设计。它是 Graph 的集合，容纳设计中的全部模块及其层次关系。
 
-一个 Netlist 包含：
+一个 Design 包含：
 - **Graph 集合**：设计中的所有模块
 - **顶层模块标记**：指定设计的入口点
 - **模块别名映射**：为 Graph 提供额外名称，便于查找/输出
-- **Netlist Symbol Table**：管理 Netlist 级符号（Graph 名称、Declared Symbol 等）
+- **Design Symbol Table**：管理 Design 级符号（Graph 名称、Declared Symbol 等）
 
 ## 5.2 顶层模块
 
-Netlist 支持标记**一个或多个**顶层模块（Top-Level Module）。
+Design 支持标记**一个或多个**顶层模块（Top-Level Module）。
 
 ## 5.3 参数化模块处理
 
@@ -505,7 +505,7 @@ adder #(16) u2 (...);  // 16位加法器
 
 上例在 GRH 中表示为：
 ```
-Netlist
+Design
 ├── Graph "adder__8"   // WIDTH=8 的实例
 │   └── Value 位宽为 8
 ├── Graph "adder__16"  // WIDTH=16 的实例
@@ -515,22 +515,22 @@ Netlist
     └── Operation kInstance of "adder__16"
 ```
 
-## 5.4 Netlist 符号系统
+## 5.4 Design 符号系统
 
-Netlist 维护 **Netlist Symbol Table** 管理 Graph 名称，与 Graph 内部的 Symbol Table 形成两级架构。
+Design 维护 **Design Symbol Table** 管理 Graph 名称，与 Graph 内部的 Symbol Table 形成两级架构。
 
 ### 5.4.1 两级架构
 
 | 符号表 | 作用域 | 管理对象 |
 |--------|--------|----------|
-| **Netlist Symbol Table** | Netlist 级别 | Graph 名称 |
+| **Design Symbol Table** | Design 级别 | Graph 名称 |
 | **Graph Symbol Table** | Graph 级别 | Value 和 Operation 的 Symbol |
 
-Netlist Symbol Table 中每个 Graph 名称必须唯一。
+Design Symbol Table 中每个 Graph 名称必须唯一。
 
 ### 5.4.2 模块别名
 
-**模块别名（Graph Alias）**允许一个 Graph 拥有多个名称，同样由 Netlist Symbol Table 管理。
+**模块别名（Graph Alias）**允许一个 Graph 拥有多个名称，同样由 Design Symbol Table 管理。
 
 **应用场景**：
 - **提高可读性**：为自动生成的唯一 Graph 名称（如 `adder__p_WIDTH_8`）提供简洁别名（如 `adder_8bit`）
@@ -1160,7 +1160,7 @@ always @(posedge clk)
 
 ### kInstance
 
-模块实例化，用于实例化 Netlist 中已定义的 Graph。
+模块实例化，用于实例化 Design 中已定义的 Graph。
 
 **operands**:
 - `oper[0]`..`oper[m-1]` (inputs): 输入信号，对应 `inputPortName`
@@ -1172,7 +1172,7 @@ always @(posedge clk)
 - `res[n]`..`res[n+q-1]` (inoutIns): inout 读值
 
 **attrs**:
-- `moduleName` (string): 被实例化模块的名称，必须在 Netlist 中存在对应 Graph
+- `moduleName` (string): 被实例化模块的名称，必须在 Design 中存在对应 Graph
 - `instanceName` (string): 实例名称
 - `inputPortName` (string[]): 输入端口名数组，长度等于 inputs 数
 - `outputPortName` (string[]): 输出端口名数组，长度等于 outputs 数
@@ -1252,7 +1252,7 @@ attrs:
 DFFR_X1 #(.INIT(1'b0)) u_dff (.D(d_val), .CK(clk_val), .RN(rst_n_val), .Q(q_val));
 ```
 
-**说明**: kBlackbox 与 kInstance 的区别在于 kBlackbox 不需要在 Netlist 中存在对应 Graph，支持参数化。
+**说明**: kBlackbox 与 kInstance 的区别在于 kBlackbox 不需要在 Design 中存在对应 Graph，支持参数化。
 
 ## 6.7 XMR
 
@@ -1455,7 +1455,7 @@ DPI 函数调用。
 - `hasReturn` (bool): 是否有返回值
 
 **约束**:
-- `targetImportSymbol` 必须在 Netlist 中解析到唯一的 kDpicImport
+- `targetImportSymbol` 必须在 Design 中解析到唯一的 kDpicImport
 - `eventEdge` 长度必须等于事件信号数
 
 **示例 1**（调用 `add` 函数）：

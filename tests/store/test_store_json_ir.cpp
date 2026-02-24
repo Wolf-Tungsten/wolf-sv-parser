@@ -37,8 +37,8 @@ namespace
 
 int main()
 {
-    grh_ir::Netlist netlist;
-    grh_ir::Graph &graph = netlist.createGraph("demo_ir");
+    grh_ir::Design design;
+    grh_ir::Graph &graph = design.createGraph("demo_ir");
 
     const auto symA = graph.internSymbol("a");
     const auto symB = graph.internSymbol("b");
@@ -66,7 +66,7 @@ int main()
     graph.addOperand(opAssign, vSum);
     graph.addResult(opAssign, vOut);
 
-    netlist.markAsTop(graph.symbol());
+    design.markAsTop(graph.symbol());
 
     StoreDiagnostics diagnostics;
     StoreJson emitter(&diagnostics);
@@ -74,7 +74,7 @@ int main()
     options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
     options.outputFilename = std::string("store_json_ir.json");
 
-    StoreResult result = emitter.store(netlist, options);
+    StoreResult result = emitter.store(design, options);
     if (!result.success || diagnostics.hasError())
     {
         return fail("emit failed");
@@ -99,10 +99,10 @@ int main()
         return fail("Missing attribute payload in JSON output");
     }
 
-    wolvrix::lib::grh::Netlist parsed = wolvrix::lib::grh::Netlist::fromJsonString(jsonText);
+    wolvrix::lib::grh::Design parsed = wolvrix::lib::grh::Design::fromJsonString(jsonText);
     if (!parsed.findGraph("demo_ir"))
     {
-        return fail("Parsed netlist missing demo_ir graph");
+        return fail("Parsed design missing demo_ir graph");
     }
 
     return 0;

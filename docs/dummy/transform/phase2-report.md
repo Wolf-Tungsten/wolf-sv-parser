@@ -6,7 +6,7 @@
 
 ## 主要实现
 - 新增 `Pass`/`PassManager`/`PassConfig`/`PassDiagnostics`，以显式 `unique_ptr` 传入的方式串行执行 pipeline，支持 `stopOnError` 与按 `verbosity` 阈值控制的日志。
-- Demo `StatsPass` 统计 netlist 的 graph/operation/value 数量，输出诊断并打印 `[transform][stats]` 摘要，便于观察。
+- Demo `StatsPass` 统计 design 的 graph/operation/value 数量，输出诊断并打印 `[transform][stats]` 摘要，便于观察。
 - CLI 参数精简：移除 transform pipeline 配置，默认挂载 stats pass；JSON 输出参数改为 `--store-json` 并仅提示生成路径。
 
 ## 测试

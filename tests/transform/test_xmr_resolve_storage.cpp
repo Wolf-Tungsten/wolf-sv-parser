@@ -131,10 +131,10 @@ bool hasNoXmrOps(const wolvrix::lib::grh::Graph &graph)
 
 int main()
 {
-    wolvrix::lib::grh::Netlist netlist;
-    wolvrix::lib::grh::Graph &leaf = netlist.createGraph("leaf");
-    wolvrix::lib::grh::Graph &top = netlist.createGraph("top");
-    netlist.markAsTop("top");
+    wolvrix::lib::grh::Design design;
+    wolvrix::lib::grh::Graph &leaf = design.createGraph("leaf");
+    wolvrix::lib::grh::Graph &top = design.createGraph("top");
+    design.markAsTop("top");
 
     const auto regOp = leaf.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
                                             leaf.internSymbol("reg_a"));
@@ -191,7 +191,7 @@ int main()
     PassManager manager;
     manager.addPass(std::make_unique<XmrResolvePass>());
     PassDiagnostics diags;
-    const PassManagerResult result = manager.run(netlist, diags);
+    const PassManagerResult result = manager.run(design, diags);
     if (!result.success || diags.hasError())
     {
         return fail("XMR resolve pass failed");

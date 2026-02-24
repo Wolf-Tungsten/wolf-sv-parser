@@ -13,13 +13,13 @@ namespace wolvrix::lib::load
     public:
         virtual ~Load() = default;
 
-        virtual wolvrix::lib::grh::Netlist load(std::string_view data) = 0;
+        virtual wolvrix::lib::grh::Design load(std::string_view data) = 0;
     };
 
     class LoadJson final : public Load
     {
     public:
-        wolvrix::lib::grh::Netlist load(std::string_view data) override;
+        wolvrix::lib::grh::Design load(std::string_view data) override;
     };
 
 } // namespace wolvrix::lib::load

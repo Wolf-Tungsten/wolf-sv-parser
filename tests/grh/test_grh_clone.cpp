@@ -45,9 +45,9 @@ int main()
 {
     try
     {
-        Netlist netlist;
-        Graph &src = netlist.createGraph("src");
-        netlist.markAsTop("src");
+        Design design;
+        Graph &src = design.createGraph("src");
+        design.markAsTop("src");
 
         SymbolId symA = src.internSymbol("a");
         SymbolId symB = src.internSymbol("b");
@@ -94,7 +94,7 @@ int main()
         src.addDeclaredSymbol(symA);
         src.addDeclaredSymbol(symSum);
 
-        Graph &clone = netlist.cloneGraph("src", "clone");
+        Graph &clone = design.cloneGraph("src", "clone");
         if (clone.symbol() != "clone")
         {
             return fail("Clone graph name mismatch");
@@ -103,7 +103,7 @@ int main()
         {
             return fail("Clone graph should have a distinct GraphId");
         }
-        for (const auto &name : netlist.topGraphs())
+        for (const auto &name : design.topGraphs())
         {
             if (name == "clone")
             {

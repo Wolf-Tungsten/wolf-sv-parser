@@ -161,9 +161,9 @@ private:
 
 struct GraphId;
 
-class NetlistSymbolTable final : public SymbolTable {
+class DesignSymbolTable final : public SymbolTable {
 public:
-    NetlistSymbolTable();
+    DesignSymbolTable();
 
     GraphId allocateGraphId(SymbolId symbol);
     GraphId lookupGraphId(SymbolId symbol) const noexcept;
@@ -518,11 +518,11 @@ private:
     std::optional<SrcLoc> srcLoc_;
 };
 
-class Netlist;
+class Design;
 
 class Graph {
 public:
-    Graph(Netlist& owner, std::string symbol, GraphId graphId);
+    Graph(Design& owner, std::string symbol, GraphId graphId);
     Graph(const Graph&) = delete;
     Graph& operator=(const Graph&) = delete;
     Graph(Graph&&) = delete;
@@ -530,7 +530,7 @@ public:
 
     const std::string& symbol() const noexcept { return symbol_; }
     const GraphId& id() const noexcept { return graphId_; }
-    Netlist& owner() const noexcept { return *owner_; }
+    Design& owner() const noexcept { return *owner_; }
 
     GraphSymbolTable& symbols() noexcept { return symbols_; }
     const GraphSymbolTable& symbols() const noexcept { return symbols_; }
@@ -629,7 +629,7 @@ public:
     void writeJson(slang::JsonWriter& writer) const;
 
 private:
-    friend class Netlist;
+    friend class Design;
 
     void invalidateCaches() const;
     void invalidateValuesCache() const;
@@ -646,7 +646,7 @@ private:
     Operation operationFromView(OperationId id) const;
     Operation operationFromBuilder(OperationId id) const;
 
-    Netlist* owner_;
+    Design* owner_;
     std::string symbol_;
     GraphId graphId_{};
     GraphSymbolTable symbols_;
@@ -666,17 +666,18 @@ private:
     uint32_t nextInternalValSym_ = 0;
 };
 
-class Netlist {
+class Design {
 public:
-    Netlist() = default;
-    Netlist(Netlist&& other) noexcept;
-    Netlist& operator=(Netlist&& other) noexcept;
-    Netlist(const Netlist&) = delete;
-    Netlist& operator=(const Netlist&) = delete;
+    Design() = default;
+    Design(Design&& other) noexcept;
+    Design& operator=(Design&& other) noexcept;
+    Design(const Design&) = delete;
+    Design& operator=(const Design&) = delete;
 
     Graph& createGraph(std::string name);
     Graph& cloneGraph(std::string_view sourceName, std::string newName);
-    Netlist clone() const;
+    bool deleteGraph(std::string_view name);
+    Design clone() const;
     Graph* findGraph(std::string_view name) noexcept;
     const Graph* findGraph(std::string_view name) const noexcept;
     SymbolId internSymbol(std::string_view text);
@@ -697,13 +698,13 @@ public:
     const std::unordered_map<std::string, std::unique_ptr<Graph>>& graphs() const noexcept { return graphs_; }
     const std::vector<std::string>& graphOrder() const noexcept { return graphOrder_; }
 
-    static Netlist fromJsonString(std::string_view json);
+    static Design fromJsonString(std::string_view json);
 
 private:
     Graph& addGraphInternal(std::unique_ptr<Graph> graph);
     void resetGraphOwners();
 
-    NetlistSymbolTable netlistSymbols_;
+    DesignSymbolTable designSymbols_;
     std::unordered_map<std::string, std::unique_ptr<Graph>> graphs_;
     std::unordered_map<std::string, std::string> graphAliasBySymbol_;
     std::vector<std::string> graphOrder_;

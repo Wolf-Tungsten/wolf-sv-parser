@@ -180,7 +180,7 @@ int run(int argc, char **argv)
                        "Emit wd_* aliases for underscore-prefixed internal values to improve tracing");
     std::optional<bool> skipTransform;
     driver.cmdLine.add("--skip-transform", skipTransform,
-                       "Skip transform passes and emit raw Convert netlist");
+                       "Skip transform passes and emit raw Convert design");
     std::optional<bool> dropDeclaredSymbols;
     driver.cmdLine.add("--transform-drop-declared", dropDeclaredSymbols,
                        "Allow transform to drop user-declared symbols (default keeps them)");
@@ -383,7 +383,7 @@ int run(int argc, char **argv)
         }
     };
 
-    wolvrix::lib::grh::Netlist netlist;
+    wolvrix::lib::grh::Design design;
     bool diagOk = true;
 
     if (useJsonLoad)
@@ -413,7 +413,7 @@ int run(int argc, char **argv)
         logArtifact("load", std::string("load json from: ") + jsonPath.string());
         try
         {
-            netlist = wolvrix::lib::grh::Netlist::fromJsonString(jsonText);
+            design = wolvrix::lib::grh::Design::fromJsonString(jsonText);
         }
         catch (const std::exception &ex)
         {
@@ -618,7 +618,7 @@ int run(int argc, char **argv)
         const auto convertStart = TimingClock::now();
         bool convertAborted = false;
         try {
-            netlist = converter.convert(root);
+            design = converter.convert(root);
         } catch (const wolvrix::lib::ingest::ConvertAbort&) {
             // Diagnostics already recorded; stop conversion immediately.
             convertAborted = true;
@@ -665,10 +665,10 @@ int run(int argc, char **argv)
             return 2;
         }
 
-        if (netlist.graphs().empty())
+        if (design.graphs().empty())
         {
             logLine(wolvrix::lib::LogLevel::Warn, "convert", {},
-                    "Netlist is empty; skipping transform and emit");
+                    "Design is empty; skipping transform and emit");
             return driver.reportDiagnostics(/* quiet */ false) ? 0 : 4;
         }    }
 
@@ -736,7 +736,7 @@ int run(int argc, char **argv)
         passManager.addPass(std::make_unique<wolvrix::lib::transform::DeadCodeElimPass>());
         passManager.addPass(std::make_unique<wolvrix::lib::transform::StatsPass>());
         wolvrix::lib::transform::PassManagerResult passManagerResult =
-            passManager.run(netlist, transformDiagnostics);
+            passManager.run(design, transformDiagnostics);
         const auto transformEnd = TimingClock::now();
         logTimingStage("transform", "transform", transformStart, transformEnd);
 
@@ -791,7 +791,7 @@ int run(int argc, char **argv)
             storeOptions.outputFilename = *jsonOutputName;
         }
 
-        wolvrix::lib::store::StoreResult storeResult = emitter.store(netlist, storeOptions);
+        wolvrix::lib::store::StoreResult storeResult = emitter.store(design, storeOptions);
         const auto storeJsonEnd = TimingClock::now();
         logTimingStage("store", "store", storeJsonStart, storeJsonEnd);
         if (!storeDiagnostics.empty())
@@ -845,7 +845,7 @@ int run(int argc, char **argv)
             emitOptions.outputFilename = *svOutputName;
         }
 
-        wolvrix::lib::emit::EmitResult emitResult = emitter.emit(netlist, emitOptions);
+        wolvrix::lib::emit::EmitResult emitResult = emitter.emit(design, emitOptions);
         if (!emitDiagnostics.empty())
         {
             for (const auto &message : emitDiagnostics.messages())

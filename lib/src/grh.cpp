@@ -298,12 +298,12 @@ namespace wolvrix::lib::grh
         textById_.emplace_back();
     }
 
-    NetlistSymbolTable::NetlistSymbolTable()
+    DesignSymbolTable::DesignSymbolTable()
     {
         symbolByGraph_.push_back(SymbolId::invalid());
     }
 
-    GraphId NetlistSymbolTable::allocateGraphId(SymbolId symbol)
+    GraphId DesignSymbolTable::allocateGraphId(SymbolId symbol)
     {
         if (!symbol.valid())
         {
@@ -329,7 +329,7 @@ namespace wolvrix::lib::grh
         return graphId;
     }
 
-    GraphId NetlistSymbolTable::lookupGraphId(SymbolId symbol) const noexcept
+    GraphId DesignSymbolTable::lookupGraphId(SymbolId symbol) const noexcept
     {
         if (!symbol.valid())
         {
@@ -346,7 +346,7 @@ namespace wolvrix::lib::grh
         return graphId;
     }
 
-    SymbolId NetlistSymbolTable::symbolForGraph(GraphId graph) const noexcept
+    SymbolId DesignSymbolTable::symbolForGraph(GraphId graph) const noexcept
     {
         if (!graph.valid())
         {
@@ -2386,12 +2386,12 @@ namespace wolvrix::lib::grh
         symbolIndex_.erase(it);
     }
 
-    Netlist::Netlist(Netlist &&other) noexcept
+    Design::Design(Design &&other) noexcept
     {
         *this = std::move(other);
     }
 
-    Netlist &Netlist::operator=(Netlist &&other) noexcept
+    Design &Design::operator=(Design &&other) noexcept
     {
         if (this != &other)
         {
@@ -2401,7 +2401,7 @@ namespace wolvrix::lib::grh
             topGraphs_ = std::move(other.topGraphs_);
             declaredSymbols_ = std::move(other.declaredSymbols_);
             declaredSymbolSet_ = std::move(other.declaredSymbolSet_);
-            netlistSymbols_ = std::move(other.netlistSymbols_);
+            designSymbols_ = std::move(other.designSymbols_);
             resetGraphOwners();
 
             other.graphAliasBySymbol_.clear();
@@ -2413,7 +2413,7 @@ namespace wolvrix::lib::grh
         return *this;
     }
 
-    void Netlist::resetGraphOwners()
+    void Design::resetGraphOwners()
     {
         for (auto &entry : graphs_)
         {
@@ -2739,7 +2739,7 @@ namespace wolvrix::lib::grh
         return std::nullopt;
     }
 
-    Graph::Graph(Netlist &owner, std::string symbol, GraphId graphId)
+    Graph::Graph(Design &owner, std::string symbol, GraphId graphId)
         : owner_(&owner),
           symbol_(std::move(symbol)),
           graphId_(graphId)
@@ -3783,7 +3783,7 @@ namespace wolvrix::lib::grh
                          data.srcLoc);
     }
 
-    Graph &Netlist::addGraphInternal(std::unique_ptr<Graph> graph)
+    Graph &Design::addGraphInternal(std::unique_ptr<Graph> graph)
     {
         auto sym = graph->symbol();
         auto [it, inserted] = graphs_.emplace(sym, std::move(graph));
@@ -3795,7 +3795,7 @@ namespace wolvrix::lib::grh
         return *it->second;
     }
 
-    Graph &Netlist::createGraph(std::string symbol)
+    Graph &Design::createGraph(std::string symbol)
     {
         if (symbol.empty())
         {
@@ -3805,13 +3805,57 @@ namespace wolvrix::lib::grh
         {
             throw std::runtime_error("Duplicated graph symbol: " + symbol);
         }
-        SymbolId graphSymbol = netlistSymbols_.contains(symbol) ? netlistSymbols_.lookup(symbol) : netlistSymbols_.intern(symbol);
-        GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
+        SymbolId graphSymbol = designSymbols_.contains(symbol) ? designSymbols_.lookup(symbol) : designSymbols_.intern(symbol);
+        GraphId graphId = designSymbols_.allocateGraphId(graphSymbol);
         auto instance = std::make_unique<Graph>(*this, std::move(symbol), graphId);
         return addGraphInternal(std::move(instance));
     }
 
-    Graph &Netlist::cloneGraph(std::string_view sourceName, std::string newName)
+    bool Design::deleteGraph(std::string_view name)
+    {
+        std::string key(name);
+        std::string symbol;
+        if (auto it = graphs_.find(key); it != graphs_.end())
+        {
+            symbol = key;
+        }
+        else if (auto aliasIt = graphAliasBySymbol_.find(key); aliasIt != graphAliasBySymbol_.end())
+        {
+            symbol = aliasIt->second;
+        }
+        else
+        {
+            return false;
+        }
+
+        graphs_.erase(symbol);
+        auto orderIt = std::remove(graphOrder_.begin(), graphOrder_.end(), symbol);
+        if (orderIt != graphOrder_.end())
+        {
+            graphOrder_.erase(orderIt, graphOrder_.end());
+        }
+
+        auto topIt = std::remove(topGraphs_.begin(), topGraphs_.end(), symbol);
+        if (topIt != topGraphs_.end())
+        {
+            topGraphs_.erase(topIt, topGraphs_.end());
+        }
+
+        for (auto it = graphAliasBySymbol_.begin(); it != graphAliasBySymbol_.end();)
+        {
+            if (it->second == symbol)
+            {
+                it = graphAliasBySymbol_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return true;
+    }
+
+    Graph &Design::cloneGraph(std::string_view sourceName, std::string newName)
     {
         Graph *source = findGraph(sourceName);
         if (!source)
@@ -3827,10 +3871,10 @@ namespace wolvrix::lib::grh
             throw std::runtime_error("Duplicated graph symbol: " + newName);
         }
 
-        SymbolId graphSymbol = netlistSymbols_.contains(newName)
-                                   ? netlistSymbols_.lookup(newName)
-                                   : netlistSymbols_.intern(newName);
-        GraphId graphId = netlistSymbols_.allocateGraphId(graphSymbol);
+        SymbolId graphSymbol = designSymbols_.contains(newName)
+                                   ? designSymbols_.lookup(newName)
+                                   : designSymbols_.intern(newName);
+        GraphId graphId = designSymbols_.allocateGraphId(graphSymbol);
         auto instance = std::make_unique<Graph>(*this, std::move(newName), graphId);
         Graph &clone = addGraphInternal(std::move(instance));
         cloneGraphContents(*source, clone);
@@ -3838,15 +3882,15 @@ namespace wolvrix::lib::grh
         return clone;
     }
 
-    Netlist Netlist::clone() const
+    Design Design::clone() const
     {
-        Netlist cloned;
+        Design cloned;
         for (const auto &name : graphOrder_)
         {
             const Graph *source = findGraph(name);
             if (!source)
             {
-                throw std::runtime_error("Graph not found during netlist clone: " + name);
+                throw std::runtime_error("Graph not found during design clone: " + name);
             }
             Graph &dest = cloned.createGraph(name);
             cloneGraphContents(*source, dest);
@@ -3857,7 +3901,7 @@ namespace wolvrix::lib::grh
             Graph *dest = cloned.findGraph(name);
             if (!dest)
             {
-                throw std::runtime_error("Graph missing during netlist clone alias copy: " + name);
+                throw std::runtime_error("Graph missing during design clone alias copy: " + name);
             }
             for (const auto &alias : aliasesForGraph(name))
             {
@@ -3879,12 +3923,12 @@ namespace wolvrix::lib::grh
             std::string_view text = symbolText(sym);
             if (text.empty())
             {
-                throw std::runtime_error("Declared symbol text is empty during netlist clone");
+                throw std::runtime_error("Declared symbol text is empty during design clone");
             }
             SymbolId dstSym = cloned.internSymbol(text);
             if (!dstSym.valid())
             {
-                throw std::runtime_error("Failed to clone netlist declared symbol: " + std::string(text));
+                throw std::runtime_error("Failed to clone design declared symbol: " + std::string(text));
             }
             cloned.addDeclaredSymbol(dstSym);
         }
@@ -3892,7 +3936,7 @@ namespace wolvrix::lib::grh
         return cloned;
     }
 
-    Graph *Netlist::findGraph(std::string_view symbol) noexcept
+    Graph *Design::findGraph(std::string_view symbol) noexcept
     {
         std::string key(symbol);
         if (auto it = graphs_.find(key); it != graphs_.end())
@@ -3909,7 +3953,7 @@ namespace wolvrix::lib::grh
         return nullptr;
     }
 
-    const Graph *Netlist::findGraph(std::string_view symbol) const noexcept
+    const Graph *Design::findGraph(std::string_view symbol) const noexcept
     {
         std::string key(symbol);
         if (auto it = graphs_.find(key); it != graphs_.end())
@@ -3926,34 +3970,34 @@ namespace wolvrix::lib::grh
         return nullptr;
     }
 
-    SymbolId Netlist::internSymbol(std::string_view text)
+    SymbolId Design::internSymbol(std::string_view text)
     {
-        return netlistSymbols_.intern(text);
+        return designSymbols_.intern(text);
     }
 
-    SymbolId Netlist::lookupSymbol(std::string_view text) const
+    SymbolId Design::lookupSymbol(std::string_view text) const
     {
-        return netlistSymbols_.lookup(text);
+        return designSymbols_.lookup(text);
     }
 
-    std::string_view Netlist::symbolText(SymbolId id) const
+    std::string_view Design::symbolText(SymbolId id) const
     {
         if (!id.valid())
         {
             return std::string_view{};
         }
-        return netlistSymbols_.text(id);
+        return designSymbols_.text(id);
     }
 
-    void Netlist::addDeclaredSymbol(SymbolId sym)
+    void Design::addDeclaredSymbol(SymbolId sym)
     {
         if (!sym.valid())
         {
             throw std::runtime_error("Declared symbol is invalid");
         }
-        if (!netlistSymbols_.valid(sym))
+        if (!designSymbols_.valid(sym))
         {
-            throw std::runtime_error("Declared symbol is not in the netlist symbol table");
+            throw std::runtime_error("Declared symbol is not in the design symbol table");
         }
         if (declaredSymbolSet_.insert(sym.value).second)
         {
@@ -3961,15 +4005,15 @@ namespace wolvrix::lib::grh
         }
     }
 
-    bool Netlist::removeDeclaredSymbol(SymbolId sym)
+    bool Design::removeDeclaredSymbol(SymbolId sym)
     {
         if (!sym.valid())
         {
             throw std::runtime_error("Declared symbol is invalid");
         }
-        if (!netlistSymbols_.valid(sym))
+        if (!designSymbols_.valid(sym))
         {
-            throw std::runtime_error("Declared symbol is not in the netlist symbol table");
+            throw std::runtime_error("Declared symbol is not in the design symbol table");
         }
         if (declaredSymbolSet_.erase(sym.value) == 0)
         {
@@ -3984,13 +4028,13 @@ namespace wolvrix::lib::grh
         return true;
     }
 
-    void Netlist::clearDeclaredSymbols()
+    void Design::clearDeclaredSymbols()
     {
         declaredSymbols_.clear();
         declaredSymbolSet_.clear();
     }
 
-    bool Netlist::isDeclaredSymbol(SymbolId sym) const noexcept
+    bool Design::isDeclaredSymbol(SymbolId sym) const noexcept
     {
         if (!sym.valid())
         {
@@ -3999,12 +4043,12 @@ namespace wolvrix::lib::grh
         return declaredSymbolSet_.find(sym.value) != declaredSymbolSet_.end();
     }
 
-    std::span<const SymbolId> Netlist::declaredSymbols() const noexcept
+    std::span<const SymbolId> Design::declaredSymbols() const noexcept
     {
         return std::span<const SymbolId>(declaredSymbols_.data(), declaredSymbols_.size());
     }
 
-    std::vector<std::string> Netlist::aliasesForGraph(std::string_view symbol) const
+    std::vector<std::string> Design::aliasesForGraph(std::string_view symbol) const
     {
         std::vector<std::string> aliases;
         for (const auto &entry : graphAliasBySymbol_)
@@ -4019,7 +4063,7 @@ namespace wolvrix::lib::grh
         return aliases;
     }
 
-    void Netlist::registerGraphAlias(std::string alias, Graph &graph)
+    void Design::registerGraphAlias(std::string alias, Graph &graph)
     {
         if (alias.empty())
         {
@@ -4028,7 +4072,7 @@ namespace wolvrix::lib::grh
         graphAliasBySymbol_[std::move(alias)] = graph.symbol();
     }
 
-    void Netlist::markAsTop(std::string_view graphSymbol)
+    void Design::markAsTop(std::string_view graphSymbol)
     {
         if (!findGraph(graphSymbol))
         {
@@ -4041,7 +4085,7 @@ namespace wolvrix::lib::grh
         }
     }
 
-    void Netlist::unmarkAsTop(std::string_view graphSymbol)
+    void Design::unmarkAsTop(std::string_view graphSymbol)
     {
         if (!findGraph(graphSymbol))
         {

@@ -7,4 +7,4 @@
   - 测试：`tests/store/test_store_json.cpp` 覆盖缺顶层失败、模式差异、round-trip 解析。
   - CLI：`--store-json` 现基于 StoreJson。
 - **验证**：`cmake --build build && ctest` 通过（含 store-json）。
-- **遗留/风险**：尚未做大规模网表的性能/体积评估；attrs 的类型合法性依赖调用方保障。!
+- **遗留/风险**：尚未做大规模设计的性能/体积评估；attrs 的类型合法性依赖调用方保障。!

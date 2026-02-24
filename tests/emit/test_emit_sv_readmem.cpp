@@ -29,11 +29,11 @@ std::string readFile(const std::filesystem::path &path)
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
-Netlist buildNetlist()
+Design buildDesign()
 {
-    Netlist netlist;
-    Graph &graph = netlist.createGraph("mem_init");
-    netlist.markAsTop(graph.symbol());
+    Design design;
+    Graph &graph = design.createGraph("mem_init");
+    design.markAsTop(graph.symbol());
 
     OperationId memOp = graph.createOperation(OperationKind::kMemory, graph.internSymbol("mem"));
     graph.setAttr(memOp, "width", static_cast<int64_t>(8));
@@ -44,7 +44,7 @@ Netlist buildNetlist()
     graph.setAttr(memOp, "initStart", std::vector<int64_t>{-1, 2});
     graph.setAttr(memOp, "initLen", std::vector<int64_t>{0, 6});
 
-    return netlist;
+    return design;
 }
 
 } // namespace
@@ -55,7 +55,7 @@ Netlist buildNetlist()
 
 int main()
 {
-    Netlist netlist = buildNetlist();
+    Design design = buildDesign();
 
     EmitDiagnostics diag;
     EmitSystemVerilog emitter(&diag);
@@ -64,7 +64,7 @@ int main()
     options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
     options.outputFilename = std::string("emit_readmem.sv");
 
-    EmitResult result = emitter.emit(netlist, options);
+    EmitResult result = emitter.emit(design, options);
     if (!result.success)
     {
         return fail("EmitSystemVerilog failed");

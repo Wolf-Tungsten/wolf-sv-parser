@@ -9,7 +9,7 @@
 
 ## Objective2: Transform 以独立 pass 的形式实现，实现支持 pass 的基本框架
 
-- KR1: 创建 Pass 基类，支持参数配置，之后的 Pass 从基类派生，Pass 对 Netlist 进行修改
+- KR1: 创建 Pass 基类，支持参数配置，之后的 Pass 从基类派生，Pass 对 Design 进行修改
 - KR2: 创建 PassManager 类，所有 pass 按顺序注册到 PassManager 中，绑定好参数，按顺序执行
 - KR3: 修改入口 main 函数，在 Elaborate 和 Emit 之间创建 PassManager，注册 Pass，执行变换流程
 

@@ -8,7 +8,7 @@ This document captures the current grh API shape so follow-on migrations can upd
 - Switch mutations to `ir::GraphBuilder` with explicit `freeze()` back to `GraphView`.
 - Make the public `Graph` API id-centric (`ValueId`/`OperationId`).
 - Keep `Value`/`Operation` read-only snapshots created by `Graph`.
-- Preserve netlist alias behavior while centralizing graph id allocation in `NetlistSymbolTable`.
+- Preserve design alias behavior while centralizing graph id allocation in `DesignSymbolTable`.
 
 ## Core Concepts
 
@@ -43,15 +43,15 @@ This document captures the current grh API shape so follow-on migrations can upd
 - Operation symbols are intended to be unique within a graph; avoid creating duplicates at call sites.
 - Attribute keys are per-operation and may repeat across different operations.
 
-## NetlistSymbolTable
+## DesignSymbolTable
 
-`ir::NetlistSymbolTable` now only manages graph-level symbols and ids:
+`ir::DesignSymbolTable` now only manages graph-level symbols and ids:
 
 - `allocateGraphId(SymbolId)` assigns a new `GraphId` for a graph symbol.
 - `lookupGraphId(SymbolId)` returns the `GraphId` for a symbol, if any.
 - `symbolForGraph(GraphId)` returns the symbol for a graph id.
 
-Netlist alias resolution behavior is unchanged.
+Design alias resolution behavior is unchanged.
 
 ## API Changes (Before -> After)
 

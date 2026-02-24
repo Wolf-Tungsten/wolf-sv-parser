@@ -550,13 +550,13 @@ namespace wolvrix::lib::store
             return bits;
         }
 
-        std::vector<const wolvrix::lib::grh::Graph *> graphsSortedByName(const wolvrix::lib::grh::Netlist &netlist)
+        std::vector<const wolvrix::lib::grh::Graph *> graphsSortedByName(const wolvrix::lib::grh::Design &design)
         {
             std::vector<const wolvrix::lib::grh::Graph *> graphs;
-            graphs.reserve(netlist.graphs().size());
-            for (const auto &symbol : netlist.graphOrder())
+            graphs.reserve(design.graphs().size());
+            for (const auto &symbol : design.graphOrder())
             {
-                if (auto it = netlist.graphs().find(symbol); it != netlist.graphs().end())
+                if (auto it = design.graphs().find(symbol); it != design.graphs().end())
                 {
                     graphs.push_back(it->second.get());
                 }
@@ -564,11 +564,11 @@ namespace wolvrix::lib::store
             return graphs;
         }
 
-        std::string serializeWithJsonWriter(const wolvrix::lib::grh::Netlist &netlist,
+        std::string serializeWithJsonWriter(const wolvrix::lib::grh::Design &design,
                                             std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                             bool pretty)
         {
-            auto collectAliases = [&](const wolvrix::lib::grh::Netlist &source)
+            auto collectAliases = [&](const wolvrix::lib::grh::Design &source)
                 -> std::vector<std::pair<std::string, std::string>> {
                 std::vector<std::pair<std::string, std::string>> result;
                 for (const auto &graphSymbol : source.graphOrder())
@@ -589,7 +589,7 @@ namespace wolvrix::lib::store
 
             writer.writeProperty("graphs");
             writer.startArray();
-            for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(netlist))
+            for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(design))
             {
                 graph->writeJson(writer);
             }
@@ -597,7 +597,7 @@ namespace wolvrix::lib::store
 
             writer.writeProperty("aliases");
             writer.startObject();
-            for (const auto &[alias, graphSymbol] : collectAliases(netlist))
+            for (const auto &[alias, graphSymbol] : collectAliases(design))
             {
                 writer.writeProperty(alias);
                 writer.writeValue(graphSymbol);
@@ -606,12 +606,12 @@ namespace wolvrix::lib::store
 
             writer.writeProperty("declaredSymbols");
             writer.startArray();
-            for (const auto sym : netlist.declaredSymbols())
+            for (const auto sym : design.declaredSymbols())
             {
-                std::string_view text = netlist.symbolText(sym);
+                std::string_view text = design.symbolText(sym);
                 if (text.empty())
                 {
-                    throw std::runtime_error("Netlist declared symbol is empty");
+                    throw std::runtime_error("Design declared symbol is empty");
                 }
                 writer.writeValue(text);
             }
@@ -1442,7 +1442,7 @@ namespace wolvrix::lib::store
             out.push_back('}');
         }
 
-        std::string serializePrettyCompact(const wolvrix::lib::grh::Netlist &netlist, std::span<const wolvrix::lib::grh::Graph *const> topGraphs)
+        std::string serializePrettyCompact(const wolvrix::lib::grh::Design &design, std::span<const wolvrix::lib::grh::Graph *const> topGraphs)
         {
             std::string out;
             int indent = 0;
@@ -1454,7 +1454,7 @@ namespace wolvrix::lib::store
             appendQuotedString(out, "graphs");
             out.append(": [");
 
-            const auto graphs = graphsSortedByName(netlist);
+            const auto graphs = graphsSortedByName(design);
             if (!graphs.empty())
             {
                 bool first = true;
@@ -1477,9 +1477,9 @@ namespace wolvrix::lib::store
             appendQuotedString(out, "aliases");
             out.append(": {");
             std::vector<std::pair<std::string, std::string>> aliases;
-            for (const auto &graphSymbol : netlist.graphOrder())
+            for (const auto &graphSymbol : design.graphOrder())
             {
-                for (const auto &alias : netlist.aliasesForGraph(graphSymbol))
+                for (const auto &alias : design.aliasesForGraph(graphSymbol))
                 {
                     aliases.emplace_back(alias, graphSymbol);
                 }
@@ -1509,21 +1509,21 @@ namespace wolvrix::lib::store
 
             appendQuotedString(out, "declaredSymbols");
             out.append(": [");
-            const auto netlistDeclared = netlist.declaredSymbols();
-            if (!netlistDeclared.empty())
+            const auto designDeclared = design.declaredSymbols();
+            if (!designDeclared.empty())
             {
                 bool firstDecl = true;
-                for (const auto sym : netlistDeclared)
+                for (const auto sym : designDeclared)
                 {
                     if (!firstDecl)
                     {
                         out.push_back(',');
                     }
                     appendNewlineAndIndent(out, indent + 1);
-                    std::string_view text = netlist.symbolText(sym);
+                    std::string_view text = design.symbolText(sym);
                     if (text.empty())
                     {
-                        throw std::runtime_error("Netlist declared symbol is empty");
+                        throw std::runtime_error("Design declared symbol is empty");
                     }
                     appendQuotedString(out, text);
                     firstDecl = false;
@@ -1558,19 +1558,19 @@ namespace wolvrix::lib::store
             return out;
         }
 
-        std::string serializeNetlistJson(const wolvrix::lib::grh::Netlist &netlist,
+        std::string serializeDesignJson(const wolvrix::lib::grh::Design &design,
                                          std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                          JsonPrintMode mode)
         {
             switch (mode)
             {
             case JsonPrintMode::Compact:
-                return serializeWithJsonWriter(netlist, topGraphs, /* pretty */ false);
+                return serializeWithJsonWriter(design, topGraphs, /* pretty */ false);
             case JsonPrintMode::Pretty:
-                return serializeWithJsonWriter(netlist, topGraphs, /* pretty */ true);
+                return serializeWithJsonWriter(design, topGraphs, /* pretty */ true);
             case JsonPrintMode::PrettyCompact:
             default:
-                return serializePrettyCompact(netlist, topGraphs);
+                return serializePrettyCompact(design, topGraphs);
             }
         }
     } // namespace
@@ -1603,7 +1603,7 @@ namespace wolvrix::lib::store
         return true;
     }
 
-    std::vector<const wolvrix::lib::grh::Graph *> Store::resolveTopGraphs(const wolvrix::lib::grh::Netlist &netlist,
+    std::vector<const wolvrix::lib::grh::Graph *> Store::resolveTopGraphs(const wolvrix::lib::grh::Design &design,
                                                            const StoreOptions &options) const
     {
         std::vector<const wolvrix::lib::grh::Graph *> result;
@@ -1616,7 +1616,7 @@ namespace wolvrix::lib::store
                 return;
             }
 
-            const wolvrix::lib::grh::Graph *graph = netlist.findGraph(name);
+            const wolvrix::lib::grh::Graph *graph = design.findGraph(name);
             if (graph == nullptr)
             {
                 reportError("Top graph not found", std::string(name));
@@ -1636,7 +1636,7 @@ namespace wolvrix::lib::store
         }
         else
         {
-            for (const auto &name : netlist.topGraphs())
+            for (const auto &name : design.topGraphs())
             {
                 tryAdd(name);
             }
@@ -1688,18 +1688,18 @@ namespace wolvrix::lib::store
         return stream;
     }
 
-    StoreResult Store::store(const wolvrix::lib::grh::Netlist &netlist, const StoreOptions &options)
+    StoreResult Store::store(const wolvrix::lib::grh::Design &design, const StoreOptions &options)
     {
         StoreResult result;
 
-        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(netlist, options);
+        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(design, options);
         if (!validateTopGraphs(topGraphs))
         {
             result.success = false;
             return result;
         }
 
-        result = storeImpl(netlist, topGraphs, options);
+        result = storeImpl(design, topGraphs, options);
         if (diagnostics_ && diagnostics_->hasError())
         {
             result.success = false;
@@ -1707,9 +1707,9 @@ namespace wolvrix::lib::store
         return result;
     }
 
-    std::optional<std::string> StoreJson::storeToString(const wolvrix::lib::grh::Netlist &netlist, const StoreOptions &options)
+    std::optional<std::string> StoreJson::storeToString(const wolvrix::lib::grh::Design &design, const StoreOptions &options)
     {
-        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(netlist, options);
+        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(design, options);
         if (!validateTopGraphs(topGraphs))
         {
             return std::nullopt;
@@ -1717,16 +1717,16 @@ namespace wolvrix::lib::store
 
         try
         {
-            return serializeNetlistJson(netlist, topGraphs, options.jsonMode);
+            return serializeDesignJson(design, topGraphs, options.jsonMode);
         }
         catch (const std::exception &ex)
         {
-            reportError("Failed to serialize netlist to JSON: " + std::string(ex.what()));
+            reportError("Failed to serialize design to JSON: " + std::string(ex.what()));
             return std::nullopt;
         }
     }
 
-    StoreResult StoreJson::storeImpl(const wolvrix::lib::grh::Netlist &netlist,
+    StoreResult StoreJson::storeImpl(const wolvrix::lib::grh::Design &design,
                                   std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                   const StoreOptions &options)
     {
@@ -1735,11 +1735,11 @@ namespace wolvrix::lib::store
         std::string jsonText;
         try
         {
-            jsonText = serializeNetlistJson(netlist, topGraphs, options.jsonMode);
+            jsonText = serializeDesignJson(design, topGraphs, options.jsonMode);
         }
         catch (const std::exception &ex)
         {
-            reportError("Failed to serialize netlist to JSON: " + std::string(ex.what()));
+            reportError("Failed to serialize design to JSON: " + std::string(ex.what()));
             result.success = false;
             return result;
         }

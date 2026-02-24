@@ -16711,16 +16711,16 @@ wolvrix::lib::grh::Graph& GraphAssembler::build(const PlanKey& key, const Module
     }
     const std::string& finalSymbol = resolveGraphName(key, moduleName);
     wolvrix::lib::grh::Graph* graph = nullptr;
-    if (netlistMutex_)
+    if (designMutex_)
     {
-        std::lock_guard<std::mutex> lock(*netlistMutex_);
-        graph = &netlist_.createGraph(std::string(finalSymbol));
-        netlist_.addDeclaredSymbol(netlist_.internSymbol(finalSymbol));
+        std::lock_guard<std::mutex> lock(*designMutex_);
+        graph = &design_.createGraph(std::string(finalSymbol));
+        design_.addDeclaredSymbol(design_.internSymbol(finalSymbol));
     }
     else
     {
-        graph = &netlist_.createGraph(std::string(finalSymbol));
-        netlist_.addDeclaredSymbol(netlist_.internSymbol(finalSymbol));
+        graph = &design_.createGraph(std::string(finalSymbol));
+        design_.addDeclaredSymbol(design_.internSymbol(finalSymbol));
     }
     GraphAssemblyState state(context_, *this, *graph, plan, lowering, writeBack);
     state.build();
@@ -17097,9 +17097,9 @@ void runPlanQueueParallel(PlanTaskQueue& queue, std::size_t threadCount,
     }
 }
 
-void finalizeTopGraphs(wolvrix::lib::grh::Netlist& netlist, GraphAssembler& graphAssembler,
+void finalizeTopGraphs(wolvrix::lib::grh::Design& design, GraphAssembler& graphAssembler,
                        const TopGraphInfo& info, ConvertContext& context,
-                       std::mutex& netlistMutex)
+                       std::mutex& designMutex)
 {
     for (const PlanKey& topKey : info.order)
     {
@@ -17109,7 +17109,7 @@ void finalizeTopGraphs(wolvrix::lib::grh::Netlist& netlist, GraphAssembler& grap
             moduleName = nameIt->second;
         }
         const std::string& graphName = graphAssembler.resolveGraphName(topKey, moduleName);
-        wolvrix::lib::grh::Graph* graph = netlist.findGraph(graphName);
+        wolvrix::lib::grh::Graph* graph = design.findGraph(graphName);
         if (!graph)
         {
             if (context.diagnostics)
@@ -17121,8 +17121,8 @@ void finalizeTopGraphs(wolvrix::lib::grh::Netlist& netlist, GraphAssembler& grap
             continue;
         }
         {
-            std::lock_guard<std::mutex> lock(netlistMutex);
-            netlist.markAsTop(graph->symbol());
+            std::lock_guard<std::mutex> lock(designMutex);
+            design.markAsTop(graph->symbol());
         }
         auto aliasIt = info.aliases.find(topKey);
         if (aliasIt == info.aliases.end())
@@ -17135,7 +17135,7 @@ void finalizeTopGraphs(wolvrix::lib::grh::Netlist& netlist, GraphAssembler& grap
             {
                 continue;
             }
-            const wolvrix::lib::grh::Graph* existing = netlist.findGraph(alias);
+            const wolvrix::lib::grh::Graph* existing = design.findGraph(alias);
             if (existing && existing->symbol() != graph->symbol())
             {
                 if (context.diagnostics)
@@ -17146,8 +17146,8 @@ void finalizeTopGraphs(wolvrix::lib::grh::Netlist& netlist, GraphAssembler& grap
                 }
                 continue;
             }
-            std::lock_guard<std::mutex> lock(netlistMutex);
-            netlist.registerGraphAlias(alias, *graph);
+            std::lock_guard<std::mutex> lock(designMutex);
+            design.registerGraphAlias(alias, *graph);
         }
     }
 }
@@ -17164,9 +17164,9 @@ ConvertDriver::ConvertDriver(ConvertOptions options)
     }
 }
 
-wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& root)
+wolvrix::lib::grh::Design ConvertDriver::convert(const slang::ast::RootSymbol& root)
 {
-    wolvrix::lib::grh::Netlist netlist;
+    wolvrix::lib::grh::Design design;
 
     planCache_.clear();
     planQueue_.reset();
@@ -17194,8 +17194,8 @@ wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& 
         configureAbortHandler(diagnostics_, useParallel, options_.abortOnError,
                               planQueue_, parallel);
 
-    std::mutex netlistMutex;
-    GraphAssembler graphAssembler(context, netlist, &netlistMutex);
+    std::mutex designMutex;
+    GraphAssembler graphAssembler(context, design, &designMutex);
     TopGraphInfo topInfo = collectTopInstances(root, context);
 
     auto processKey = [&](PlanKey key) {
@@ -17213,8 +17213,8 @@ wolvrix::lib::grh::Netlist ConvertDriver::convert(const slang::ast::RootSymbol& 
         runPlanQueueSerial(planQueue_, &diagnostics_, processKey);
     }
 
-    finalizeTopGraphs(netlist, graphAssembler, topInfo, context, netlistMutex);
-    return netlist;
+    finalizeTopGraphs(design, graphAssembler, topInfo, context, designMutex);
+    return design;
 }
 
 } // namespace wolvrix::lib::ingest

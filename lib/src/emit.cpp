@@ -481,13 +481,13 @@ namespace wolvrix::lib::emit
             return bits;
         }
 
-        std::vector<const wolvrix::lib::grh::Graph *> graphsSortedByName(const wolvrix::lib::grh::Netlist &netlist)
+        std::vector<const wolvrix::lib::grh::Graph *> graphsSortedByName(const wolvrix::lib::grh::Design &design)
         {
             std::vector<const wolvrix::lib::grh::Graph *> graphs;
-            graphs.reserve(netlist.graphs().size());
-            for (const auto &symbol : netlist.graphOrder())
+            graphs.reserve(design.graphs().size());
+            for (const auto &symbol : design.graphOrder())
             {
-                if (auto it = netlist.graphs().find(symbol); it != netlist.graphs().end())
+                if (auto it = design.graphs().find(symbol); it != design.graphs().end())
                 {
                     graphs.push_back(it->second.get());
                 }
@@ -661,7 +661,7 @@ namespace wolvrix::lib::emit
         return true;
     }
 
-    std::vector<const wolvrix::lib::grh::Graph *> Emit::resolveTopGraphs(const wolvrix::lib::grh::Netlist &netlist,
+    std::vector<const wolvrix::lib::grh::Graph *> Emit::resolveTopGraphs(const wolvrix::lib::grh::Design &design,
                                                            const EmitOptions &options) const
     {
         std::vector<const wolvrix::lib::grh::Graph *> result;
@@ -674,7 +674,7 @@ namespace wolvrix::lib::emit
                 return;
             }
 
-            const wolvrix::lib::grh::Graph *graph = netlist.findGraph(name);
+            const wolvrix::lib::grh::Graph *graph = design.findGraph(name);
             if (graph == nullptr)
             {
                 reportError("Top graph not found", std::string(name));
@@ -694,7 +694,7 @@ namespace wolvrix::lib::emit
         }
         else
         {
-            for (const auto &name : netlist.topGraphs())
+            for (const auto &name : design.topGraphs())
             {
                 tryAdd(name);
             }
@@ -746,18 +746,18 @@ namespace wolvrix::lib::emit
         return stream;
     }
 
-    EmitResult Emit::emit(const wolvrix::lib::grh::Netlist &netlist, const EmitOptions &options)
+    EmitResult Emit::emit(const wolvrix::lib::grh::Design &design, const EmitOptions &options)
     {
         EmitResult result;
 
-        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(netlist, options);
+        std::vector<const wolvrix::lib::grh::Graph *> topGraphs = resolveTopGraphs(design, options);
         if (!validateTopGraphs(topGraphs))
         {
             result.success = false;
             return result;
         }
 
-        result = emitImpl(netlist, topGraphs, options);
+        result = emitImpl(design, topGraphs, options);
         if (diagnostics_ && diagnostics_->hasError())
         {
             result.success = false;
@@ -1267,24 +1267,24 @@ namespace wolvrix::lib::emit
         }
     } // namespace
 
-    EmitResult EmitSystemVerilog::emitImpl(const wolvrix::lib::grh::Netlist &netlist,
+    EmitResult EmitSystemVerilog::emitImpl(const wolvrix::lib::grh::Design &design,
                                            std::span<const wolvrix::lib::grh::Graph *const> topGraphs,
                                            const EmitOptions &options)
     {
         EmitResult result;
         (void)topGraphs;
 
-        // Index DPI imports across the netlist for later resolution.
+        // Index DPI imports across the design for later resolution.
         struct DpiImportRef
         {
             const wolvrix::lib::grh::Graph *graph = nullptr;
             wolvrix::lib::grh::OperationId op = wolvrix::lib::grh::OperationId::invalid();
         };
         std::unordered_map<std::string, DpiImportRef> dpicImports;
-        for (const auto &graphSymbol : netlist.graphOrder())
+        for (const auto &graphSymbol : design.graphOrder())
         {
-            auto graphIt = netlist.graphs().find(graphSymbol);
-            if (graphIt == netlist.graphs().end() || !graphIt->second)
+            auto graphIt = design.graphs().find(graphSymbol);
+            if (graphIt == design.graphs().end() || !graphIt->second)
             {
                 continue;
             }
@@ -1301,15 +1301,15 @@ namespace wolvrix::lib::emit
 
         std::unordered_map<std::string, std::string> emittedModuleNames;
         std::unordered_set<std::string> usedModuleNames;
-        for (const auto &graphSymbol : netlist.graphOrder())
+        for (const auto &graphSymbol : design.graphOrder())
         {
-            const wolvrix::lib::grh::Graph *graph = netlist.findGraph(graphSymbol);
+            const wolvrix::lib::grh::Graph *graph = design.findGraph(graphSymbol);
             if (!graph)
             {
                 continue;
             }
             std::string emittedName = graphSymbol;
-            auto aliases = netlist.aliasesForGraph(graphSymbol);
+            auto aliases = design.aliasesForGraph(graphSymbol);
             for (const auto &alias : aliases)
             {
                 if (usedModuleNames.find(alias) == usedModuleNames.end())
@@ -1332,7 +1332,7 @@ namespace wolvrix::lib::emit
         }
         std::ostream &out = *stream;
         bool firstModule = true;
-        for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(netlist))
+        for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(design))
         {
             if (!firstModule)
             {

@@ -134,8 +134,8 @@ namespace
 
 int main()
 {
-    wolvrix::lib::grh::Netlist netlist;
-    netlist.createGraph("top");
+    wolvrix::lib::grh::Design design;
+    design.createGraph("top");
 
     // Case 1: pipeline order and aggregated changed flag
     {
@@ -154,7 +154,7 @@ int main()
         auto secondPass = std::make_unique<RecordingPass>("second", secondRecord, order);
         manager.addPass(std::move(secondPass));
 
-        PassManagerResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(design, diags);
         if (!result.success)
         {
             return fail("Expected transform pipeline to succeed");
@@ -196,7 +196,7 @@ int main()
         manager.addPass(std::move(tail));
 
         PassDiagnostics diags;
-        PassManagerResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(design, diags);
         if (result.success)
         {
             return fail("Expected transform pipeline to fail when a pass reports failure");
@@ -228,7 +228,7 @@ int main()
         manager.addPass(std::move(tail));
 
         PassDiagnostics diags;
-        PassManagerResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(design, diags);
         if (order != std::vector<std::string>{"diag", "tail"})
         {
             return fail("stopOnError disabled should allow pipeline to continue after diagnostics error");
@@ -257,13 +257,13 @@ int main()
         manager.addPass(std::make_unique<ScratchpadReader>("read", 7));
 
         PassDiagnostics diags;
-        PassManagerResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(design, diags);
         if (!result.success || diags.hasError())
         {
             return fail("Expected scratchpad pipeline to succeed on first run");
         }
         diags.clear();
-        result = manager.run(netlist, diags);
+        result = manager.run(design, diags);
         if (!result.success || diags.hasError())
         {
             return fail("Expected scratchpad pipeline to succeed on second run");
@@ -281,7 +281,7 @@ int main()
 
         PassDiagnostics diags;
         manager.addPass(std::make_unique<VerbosityEmitter>());
-        PassManagerResult result = manager.run(netlist, diags);
+        PassManagerResult result = manager.run(design, diags);
         if (!result.success)
         {
             return fail("Verbosity filtering should not fail the pipeline without errors");
@@ -316,8 +316,8 @@ int main()
 
     // Case 6: built-in stats pass reports counts
     {
-        wolvrix::lib::grh::Netlist netlistStats;
-        wolvrix::lib::grh::Graph &graph = netlistStats.createGraph("g");
+        wolvrix::lib::grh::Design designStats;
+        wolvrix::lib::grh::Graph &graph = designStats.createGraph("g");
         graph.createValue(graph.internSymbol("v0"), 1, false);
         graph.createValue(graph.internSymbol("v1"), 1, false);
         graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign, graph.internSymbol("op0"));
@@ -327,7 +327,7 @@ int main()
         manager.addPass(std::make_unique<StatsPass>());
 
         PassDiagnostics diags;
-        PassManagerResult result = manager.run(netlistStats, diags);
+        PassManagerResult result = manager.run(designStats, diags);
         if (!result.success)
         {
             return fail("Expected stats pass to succeed");

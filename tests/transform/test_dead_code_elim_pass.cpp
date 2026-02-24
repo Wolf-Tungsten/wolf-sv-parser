@@ -36,8 +36,8 @@ namespace
 
 int main()
 {
-    wolvrix::lib::grh::Netlist netlist;
-    wolvrix::lib::grh::Graph &graph = netlist.createGraph("g");
+    wolvrix::lib::grh::Design design;
+    wolvrix::lib::grh::Graph &graph = design.createGraph("g");
 
     wolvrix::lib::grh::ValueId liveConst = makeConst(graph, "c_live", "c_live_op", 1, false, "1'b1");
     wolvrix::lib::grh::ValueId deadConst = makeConst(graph, "c_dead", "c_dead_op", 1, false, "1'b0");
@@ -63,7 +63,7 @@ int main()
     PassManagerResult res{};
     try
     {
-        res = manager.run(netlist, diags);
+        res = manager.run(design, diags);
     }
     catch (const std::exception &ex)
     {

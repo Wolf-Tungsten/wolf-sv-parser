@@ -41,11 +41,11 @@ ValueId addConstant(Graph &graph, std::string_view name, int32_t width, std::str
     return value;
 }
 
-Netlist buildNetlist()
+Design buildDesign()
 {
-    Netlist netlist;
-    Graph &graph = netlist.createGraph("storage_ports");
-    netlist.markAsTop(graph.symbol());
+    Design design;
+    Graph &graph = design.createGraph("storage_ports");
+    design.markAsTop(graph.symbol());
 
     const auto clk = graph.createValue(graph.internSymbol("clk"), 1, false);
     const auto en = graph.createValue(graph.internSymbol("en"), 1, false);
@@ -120,7 +120,7 @@ Netlist buildNetlist()
     graph.addOperand(latchWrite, latchMask);
     graph.setAttr(latchWrite, "latchSymbol", std::string("lat_a"));
 
-    return netlist;
+    return design;
 }
 
 } // namespace
@@ -131,7 +131,7 @@ Netlist buildNetlist()
 
 int main()
 {
-    Netlist netlist = buildNetlist();
+    Design design = buildDesign();
 
     EmitDiagnostics diag;
     EmitSystemVerilog emitter(&diag);
@@ -140,7 +140,7 @@ int main()
     options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR);
     options.outputFilename = std::string("emit_storage_ports.sv");
 
-    EmitResult result = emitter.emit(netlist, options);
+    EmitResult result = emitter.emit(design, options);
     if (!result.success)
     {
         return fail("EmitSystemVerilog failed");
