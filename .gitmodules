@@ -1,18 +1,9 @@
 [submodule "external/slang"]
 	path = external/slang
 	url = https://github.com/MikePopoloski/slang
-[submodule "tests/data/hdlbits"]
-	path = tests/data/hdlbits
-	url = git@github.com:Wolf-Tungsten/HDLBits-Verilog-Solutions.git
-[submodule "tests/data/openc910"]
-	path = tests/data/openc910
-	url = git@github.com:Wolf-Tungsten/openc910.git
-[submodule "tests/data/xiangshan"]
-	path = tests/data/xiangshan
-	url = git@github.com:Wolf-Tungsten/XiangShan.git
 [submodule "external/tcl"]
 	path = external/tcl
-	url = git@github.com:tcltk/tcl
+	url = https://github.com/tcltk/tcl.git
 [submodule "external/linenoise-ng"]
 	path = external/linenoise-ng
-	url = git@github.com:arangodb/linenoise-ng
+	url = https://github.com/arangodb/linenoise-ng.git
