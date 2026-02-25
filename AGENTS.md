@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - Core sources live in `lib/src/` with headers in `lib/include/`; the Tcl/REPL app lives under `app/wolvrix` and links the core library (`wolvrix-lib`).
-- Tests sit under `tests/{grh,ingest,transform,emit,store}` with module fixtures under `tests/<module>/data` and shared suites in `tests/data/{hdlbits,openc910,xiangshan,xs-bugcase}`; test-only artifacts are written to `build/artifacts` (created by CMake).
+- Tests sit under `tests/{grh,ingest,transform,emit,store}` with module fixtures under `tests/<module>/data` and shared suites in `../testcase/{hdlbits,openc910,xiangshan,xs-bugcase}`; test-only artifacts are written to `build/artifacts` (created by CMake).
 - Source files:
   - `lib/src/grh.cpp` - GRH (Graph RTL Hierarchy) implementation
   - `lib/src/ingest.cpp` - Convert SystemVerilog AST to GRH
