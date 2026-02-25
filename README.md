@@ -16,7 +16,7 @@ wolvrix is a SystemVerilog parser built on [slang](https://github.com/MikePopolo
 
 ### OpenC910 Test Environment Configuration (Optional)
 
-If you need to run OpenC910-related tests (e.g., `make run_c910_test`), configure the environment:
+If you need to run OpenC910-related tests (e.g., from the playground root: `make run_c910_test`), configure the environment:
 
 ```bash
 # 1. Copy the environment template (from repo root)

@@ -13,9 +13,6 @@ endif
 # Auto-load environment from env.sh
 export TOOL_EXTENSION := $(or $(TOOL_EXTENSION),$(shell grep '^export TOOL_EXTENSION=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
 export VERILATOR := $(or $(VERILATOR),$(shell grep '^export VERILATOR=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
-CASE ?=
-LOG_ONLY_SIM ?= 0
-
 BUILD_DIR ?= build
 CMAKE ?= cmake
 WOLVRIX_APP := $(BUILD_DIR)/bin/wolvrix
@@ -53,24 +50,8 @@ ifneq ($(strip $(WOLF_TIMEOUT)),)
 WOLF_EMIT_FLAGS += --timeout $(WOLF_TIMEOUT)
 endif
 
-C910_ROOT := tests/data/openc910
 XS_ROOT := tests/data/xiangshan
 XS_WOLVRIX_SCRIPT := $(abspath $(CURDIR)/../scripts/wolvrix_emit.tcl)
-
-# C910 paths
-C910_SMART_RUN_DIR := $(C910_ROOT)/smart_run
-C910_SMART_CODE_BASE ?= $(abspath $(C910_ROOT)/C910_RTL_FACTORY)
-SMART_ENV ?= $(C910_SMART_RUN_DIR)/env.sh
-SMART_SIM ?= verilator
-SMART_CASE ?= coremark
-C910_SIM_MAX_CYCLE ?= 0
-C910_WAVEFORM ?= 0
-JSON_ROUND_TRIP ?= 0
-C910_LOG_DIR := $(BUILD_DIR)/logs/c910
-C910_WAVEFORM_DIR ?= $(C910_LOG_DIR)
-C910_LOG_DIR_ABS = $(abspath $(C910_LOG_DIR))
-C910_WAVEFORM_DIR_ABS = $(abspath $(C910_WAVEFORM_DIR))
-C910_WAVEFORM_PATH_ABS = $(if $(C910_WAVEFORM_PATH),$(if $(filter /%,$(C910_WAVEFORM_PATH)),$(C910_WAVEFORM_PATH),$(abspath $(C910_WAVEFORM_PATH))),)
 
 # XiangShan paths / options
 XS_SIM_MAX_CYCLE ?= 0
@@ -136,7 +117,7 @@ XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D "$(d)")
 XS_WOLF_DEFINE_FLAGS_LOG := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
 
 .PHONY: all build \
-	run_c910_test run_c910_json_test xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu run_xs_json_test \
+	xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu run_xs_json_test \
 	xs_diff_clean run_xs_ref_emu run_xs_wolf_emu run_xs_diff clean
 
 all: build
@@ -146,52 +127,6 @@ build:
 	$(CMAKE) --build $(BUILD_DIR) 
 
 $(WOLVRIX_APP): build
-
-
-ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
-RUN_C910_TEST_DEPS := build
-endif
-
-run_c910_test: $(RUN_C910_TEST_DEPS)
-	@CASE_NAME="$(if $(CASE),$(CASE),$(SMART_CASE))"; \
-	LOG_FILE="$(if $(LOG_FILE),$(LOG_FILE),$(C910_LOG_DIR)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).log)"; \
-	WAVEFORM_FILE="$(if $(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_PATH_ABS),$(C910_WAVEFORM_DIR_ABS)/c910_$${CASE_NAME}_$(shell date +%Y%m%d_%H%M%S).fst)"; \
-	WAVEFORM_DIR="$$(dirname "$$WAVEFORM_FILE")"; \
-	mkdir -p "$(C910_LOG_DIR_ABS)" "$$WAVEFORM_DIR"; \
-	if [ -z "$(TOOL_EXTENSION)" ] && [ -f "$(SMART_ENV)" ]; then \
-		. "$(SMART_ENV)"; \
-	fi; \
-	echo "[RUN] smart_run CASE=$$CASE_NAME SIM=$(SMART_SIM)"; \
-	echo "[RUN] C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM)"; \
-	echo "[LOG] Capturing output to: $$LOG_FILE"; \
-	if [ "$(C910_WAVEFORM)" = "1" ]; then \
-		echo "[WAVEFORM] Will save FST to: $$WAVEFORM_FILE"; \
-	fi; \
-	if [ "$(LOG_ONLY_SIM)" != "0" ]; then \
-		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
-		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
-			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
-			BUILD_DIR="$(BUILD_DIR)" \
-			WOLF_JSON_ROUNDTRIP="$(JSON_ROUND_TRIP)" \
-			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" \
-			VERILATOR="$(VERILATOR)" 2>&1 | \
-			tee >(awk 'f{print} index($$0,"obj_dir/Vsim_top"){f=1; next}' > "$$LOG_FILE"); \
-	else \
-		C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) C910_WAVEFORM_PATH="$$WAVEFORM_FILE" \
-		$(MAKE) --no-print-directory -C $(C910_SMART_RUN_DIR) runcase \
-			CASE=$$CASE_NAME SIM=$(SMART_SIM) \
-			C910_SIM_MAX_CYCLE=$(C910_SIM_MAX_CYCLE) C910_WAVEFORM=$(C910_WAVEFORM) \
-			BUILD_DIR="$(BUILD_DIR)" \
-			WOLF_JSON_ROUNDTRIP="$(JSON_ROUND_TRIP)" \
-			CODE_BASE_PATH="$${CODE_BASE_PATH:-$(C910_SMART_CODE_BASE)}" \
-			TOOL_EXTENSION="$$TOOL_EXTENSION" \
-			VERILATOR="$(VERILATOR)" 2>&1 | tee "$$LOG_FILE"; \
-	fi
-
-run_c910_json_test:
-	@$(MAKE) --no-print-directory run_c910_test JSON_ROUND_TRIP=1
 
 # XiangShan: generate sim-verilog
 $(XS_SIM_TOP_V):

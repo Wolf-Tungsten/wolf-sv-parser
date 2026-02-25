@@ -135,7 +135,7 @@
 - C910 flow 已迁移到 Tcl：
   - 新增 `tests/data/openc910/smart_run/wolvrix.tcl`
   - `tests/data/openc910/smart_run/Makefile` 使用 `wolvrix` 产物（输出统一到 `build/`）
-  - 顶层 `Makefile` 合并 `run_c910_json_test` 为 `JSON_ROUND_TRIP` 开关
+  - 顶层 `Makefile` 运行 C910 测试时固定执行 JSON round trip
 
 ## 下一步待完善
 - **文档**：
