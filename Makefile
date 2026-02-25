@@ -1,20 +1,18 @@
 SHELL := /bin/bash
 
 # Check env.sh must exist and has been sourced
-ENV_FILE := $(CURDIR)/env.sh
+ENV_FILE := $(if $(wildcard $(CURDIR)/../env.sh),$(CURDIR)/../env.sh,$(CURDIR)/env.sh)
 ifeq (,$(wildcard $(ENV_FILE)))
-    $(error env.sh not found. Please run: cp env.sh.template env.sh && source env.sh)
+    $(error env.sh not found. Please run: cp ../env.sh.template ../env.sh && source ../env.sh)
 endif
 
 ifeq ($(WOLF_ENV_SOURCED),)
-    $(error env.sh exists but not sourced. Please run: source env.sh)
+    $(error env.sh exists but not sourced. Please run: source $(ENV_FILE))
 endif
 
 # Auto-load environment from env.sh
 export TOOL_EXTENSION := $(or $(TOOL_EXTENSION),$(shell grep '^export TOOL_EXTENSION=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
 export VERILATOR := $(or $(VERILATOR),$(shell grep '^export VERILATOR=' $(ENV_FILE) 2>/dev/null | cut -d'"' -f2))
-
-DUT ?=
 CASE ?=
 LOG_ONLY_SIM ?= 0
 
@@ -55,24 +53,9 @@ ifneq ($(strip $(WOLF_TIMEOUT)),)
 WOLF_EMIT_FLAGS += --timeout $(WOLF_TIMEOUT)
 endif
 
-HDLBITS_ROOT := tests/data/hdlbits
 C910_ROOT := tests/data/openc910
 XS_ROOT := tests/data/xiangshan
-HDLBITS_WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
-XS_WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
-
-# HDLBits paths
-DUT_SRC := $(HDLBITS_ROOT)/dut/dut_$(DUT).v
-TB_SRC := $(HDLBITS_ROOT)/tb/tb_$(DUT).cpp
-OUT_DIR := build/hdlbits/$(DUT)
-EMITTED_DUT := $(OUT_DIR)/dut_$(DUT).v
-EMITTED_JSON := $(OUT_DIR)/dut_$(DUT).json
-SIM_BIN_NAME := sim_$(DUT)
-SIM_BIN := $(OUT_DIR)/$(SIM_BIN_NAME)
-VERILATOR_PREFIX := Vdut_$(DUT)
-VERILATOR_MK := $(OUT_DIR)/$(VERILATOR_PREFIX).mk
-TB_SOURCES := $(wildcard $(HDLBITS_ROOT)/tb/tb_*.cpp)
-HDLBITS_DUTS := $(sort $(patsubst tb_%,%,$(basename $(notdir $(TB_SOURCES)))))
+XS_WOLVRIX_SCRIPT := $(abspath $(CURDIR)/../scripts/wolvrix_emit.tcl)
 
 # C910 paths
 C910_SMART_RUN_DIR := $(C910_ROOT)/smart_run
@@ -152,19 +135,11 @@ XS_WOLF_INCLUDE_FLAGS := $(foreach d,$(XS_WOLF_INCLUDE_DIRS),-I $(d))
 XS_WOLF_DEFINE_FLAGS := $(foreach d,$(XS_SIM_DEFINES),-D "$(d)")
 XS_WOLF_DEFINE_FLAGS_LOG := $(foreach d,$(XS_SIM_DEFINES),-D $(d))
 
-.PHONY: all build check-id run_hdlbits_test run_all_hdlbits_tests \
+.PHONY: all build \
 	run_c910_test run_c910_json_test xs_rtl xs_wolf_filelist xs_wolf_emit xs_ref_emu xs_wolf_emu run_xs_json_test \
 	xs_diff_clean run_xs_ref_emu run_xs_wolf_emu run_xs_diff clean
 
 all: build
-
-check-id:
-	@if [[ ! "$(DUT)" =~ ^[0-9]{3}$$ ]]; then \
-		echo "DUT must be a three-digit number (e.g. DUT=001)"; \
-		exit 1; \
-	fi
-	@test -f $(DUT_SRC) || { echo "Missing DUT source: $(DUT_SRC)"; exit 1; }
-	@test -f $(TB_SRC) || { echo "Missing testbench: $(TB_SRC)"; exit 1; }
 
 build:
 	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
@@ -172,41 +147,6 @@ build:
 
 $(WOLVRIX_APP): build
 
-$(EMITTED_DUT) $(EMITTED_JSON): $(DUT_SRC) $(WOLVRIX_APP) $(HDLBITS_WOLVRIX_SCRIPT) check-id
-	@mkdir -p $(OUT_DIR)
-	WOLVRIX_SOURCES=$(DUT_SRC) \
-	WOLVRIX_TOP=top_module \
-	WOLVRIX_SV_OUT=$(EMITTED_DUT) \
-	WOLVRIX_JSON_OUT=$(EMITTED_JSON) \
-	WOLVRIX_STORE_JSON=1 \
-	WOLVRIX_LOG_LEVEL=$(WOLF_LOG) \
-	$(WOLVRIX_APP) -f $(HDLBITS_WOLVRIX_SCRIPT)
-
-$(SIM_BIN): $(EMITTED_DUT) $(TB_SRC) check-id
-	@mkdir -p $(OUT_DIR)
-	$(VERILATOR) $(VERILATOR_FLAGS) --cc $(EMITTED_DUT) --exe $(TB_SRC) \
-		--top-module top_module --prefix $(VERILATOR_PREFIX) -Mdir $(OUT_DIR) -o $(SIM_BIN_NAME)
-	CCACHE_DISABLE=1 $(MAKE) -C $(OUT_DIR) -f $(VERILATOR_PREFIX).mk $(SIM_BIN_NAME)
-
-run_hdlbits_test:
-ifneq ($(strip $(DUT)),)
-  ifeq ($(DUT),$(filter $(DUT),$(HDLBITS_DUTS)))
-	@$(MAKE) --no-print-directory $(SIM_BIN)
-	@echo "[RUN] ./$(SIM_BIN)"
-	@cd $(OUT_DIR) && ./$(SIM_BIN_NAME)
-  else
-	$(error DUT=$(DUT) not found; available: $(HDLBITS_DUTS))
-  endif
-else
-	@echo "DUT not set; running all available DUTs: $(HDLBITS_DUTS)"
-	@$(MAKE) --no-print-directory run_all_hdlbits_tests
-endif
-
-run_all_hdlbits_tests: $(WOLVRIX_APP)
-	@for dut in $(HDLBITS_DUTS); do \
-		echo "==== Running DUT=$$dut ===="; \
-		$(MAKE) --no-print-directory run_hdlbits_test DUT=$$dut || exit $$?; \
-	done
 
 ifneq ($(strip $(SKIP_WOLF_BUILD)),1)
 RUN_C910_TEST_DEPS := build

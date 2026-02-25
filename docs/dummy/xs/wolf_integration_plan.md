@@ -97,7 +97,7 @@ wolf-sv-parser 还需 include/define：
 
 ```
 WOLVRIX_APP := $(BUILD_DIR)/bin/wolvrix
-WOLVRIX_SCRIPT := tests/scripts/wolvrix_emit.tcl
+WOLVRIX_SCRIPT := scripts/wolvrix_emit.tcl
 
 WOLVRIX_FILELIST=$(XS_WOLF_FILELIST) \
 WOLVRIX_TOP=SimTop \

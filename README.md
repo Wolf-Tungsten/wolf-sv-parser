@@ -19,17 +19,17 @@ wolvrix is a SystemVerilog parser built on [slang](https://github.com/MikePopolo
 If you need to run OpenC910-related tests (e.g., `make run_c910_test`), configure the environment:
 
 ```bash
-# 1. Copy the environment template
-cp env.sh.template env.sh
+# 1. Copy the environment template (from repo root)
+cp ../env.sh.template ../env.sh
 
-# 2. Edit env.sh and configure the following variables:
+# 2. Edit ../env.sh and configure the following variables:
 #    - TOOL_EXTENSION: Path to RISC-V toolchain (required for OpenC910 tests)
 #    - VERILATOR:      Path to verilator executable (optional)
 ```
 
 **Note**: 
 - `env.sh` is added to `.gitignore` and will not be tracked by git
-- The top-level Makefile automatically loads `env.sh` if it exists, no manual `source` needed
+- The Makefile expects `env.sh` to be sourced (WOLF_ENV_SOURCED must be set)
 - You can also use `make TOOL_EXTENSION=/path VERILATOR=/path` for one-time overrides
 
 RISC-V Toolchain Download: [Xuantie Toolchain Download Page](https://www.xrvm.com/community/download?id=4058840482644627456)
@@ -91,7 +91,6 @@ Common Tcl commands include:
 wolvrix/
 ├── CMakeLists.txt          # CMake build configuration
 ├── Makefile                # Top-level Makefile with test targets
-├── env.sh.template         # Environment configuration template
 ├── app/                    # Executable applications
 │   └── wolvrix/            # Tcl/REPL app
 ├── lib/                    # Core library (SDK)

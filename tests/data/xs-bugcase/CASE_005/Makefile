@@ -1,4 +1,5 @@
 ROOT := $(abspath ../../../..)
+PLAYGROUND_ROOT := $(abspath $(ROOT)/..)
 
 CASE_ID := 005
 CASE_TAG := CASE_$(CASE_ID)
@@ -16,7 +17,7 @@ REF_DIR := $(OUT_DIR_BASE)/ref
 WOLF_DIR := $(OUT_DIR_BASE)/wolf
 
 WOLVRIX_APP ?= $(ROOT)/build/bin/wolvrix
-WOLVRIX_SCRIPT ?= $(ROOT)/tests/scripts/wolvrix_emit.tcl
+WOLVRIX_SCRIPT ?= $(PLAYGROUND_ROOT)/scripts/wolvrix_emit.tcl
 WOLF_SV := $(WOLF_DIR)/wolf_emit.sv
 
 VERILATOR ?= $(or $(shell echo $$VERILATOR),verilator)
