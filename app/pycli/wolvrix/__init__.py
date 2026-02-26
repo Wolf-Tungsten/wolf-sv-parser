@@ -15,8 +15,14 @@ class Design:
     def __init__(self, capsule):
         self._capsule = capsule
 
-    def run_pass(self, name: str, args: list[str] | None = None, dryrun: bool = False) -> bool:
-        return bool(_native.run_pass(self._capsule, name, args or [], dryrun))
+    def run_pass(
+        self,
+        name: str,
+        args: list[str] | None = None,
+        dryrun: bool = False,
+        diagnostics: str = "warn",
+    ) -> bool:
+        return bool(_native.run_pass(self._capsule, name, args or [], dryrun, diagnostics))
 
     def write_sv(self, output: str, top: list[str] | None = None) -> None:
         _native.write_sv(self._capsule, output, top or [])
@@ -30,8 +36,13 @@ class Design:
             handle.write(text)
 
 
-def read_sv(path: str | None, slang_args: list[str] | None = None, log_level: str = "warn") -> Design:
-    return Design(_native.read_sv(path, slang_args or [], log_level))
+def read_sv(
+    path: str | None,
+    slang_args: list[str] | None = None,
+    log_level: str = "warn",
+    diagnostics: str = "warn",
+) -> Design:
+    return Design(_native.read_sv(path, slang_args or [], log_level, diagnostics))
 
 
 def read_json(path: str) -> Design:

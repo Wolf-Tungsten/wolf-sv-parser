@@ -8,14 +8,21 @@
 #include "transform.hpp"
 
 #include "slang/analysis/AnalysisManager.h"
+#include "slang/ast/Compilation.h"
 #include "slang/driver/Driver.h"
+#include "slang/text/SourceManager.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
+#include <unistd.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,23 +34,50 @@ namespace
 
     constexpr const char *kDesignCapsuleName = "wolvrix.Design";
 
+    struct DesignHandle
+    {
+        wolvrix::lib::grh::Design design;
+        std::shared_ptr<slang::ast::Compilation> compilation;
+    };
+
     void destroyDesignCapsule(PyObject *capsule)
     {
-        auto *design = static_cast<wolvrix::lib::grh::Design *>(
+        auto *handle = static_cast<DesignHandle *>(
             PyCapsule_GetPointer(capsule, kDesignCapsuleName));
-        delete design;
+        delete handle;
+    }
+
+    DesignHandle *getDesignHandle(PyObject *capsule)
+    {
+        return static_cast<DesignHandle *>(
+            PyCapsule_GetPointer(capsule, kDesignCapsuleName));
     }
 
     wolvrix::lib::grh::Design *getDesign(PyObject *capsule)
     {
-        return static_cast<wolvrix::lib::grh::Design *>(
-            PyCapsule_GetPointer(capsule, kDesignCapsuleName));
+        auto *handle = getDesignHandle(capsule);
+        if (!handle)
+        {
+            return nullptr;
+        }
+        return &handle->design;
     }
 
-    PyObject *makeDesignCapsule(wolvrix::lib::grh::Design design)
+    const slang::SourceManager *getDesignSourceManager(PyObject *capsule)
     {
-        auto *heapDesign = new wolvrix::lib::grh::Design(std::move(design));
-        return PyCapsule_New(heapDesign, kDesignCapsuleName, destroyDesignCapsule);
+        auto *handle = getDesignHandle(capsule);
+        if (!handle || !handle->compilation)
+        {
+            return nullptr;
+        }
+        return handle->compilation->getSourceManager();
+    }
+
+    PyObject *makeDesignCapsule(wolvrix::lib::grh::Design design,
+                                std::shared_ptr<slang::ast::Compilation> compilation = {})
+    {
+        auto *handle = new DesignHandle{std::move(design), std::move(compilation)};
+        return PyCapsule_New(handle, kDesignCapsuleName, destroyDesignCapsule);
     }
 
     bool readFileText(const std::string &path, std::string &out, std::string &error)
@@ -154,7 +188,12 @@ namespace
         }
     }
 
-    std::string formatDiagnostics(const std::vector<wolvrix::lib::diag::Diagnostic> &messages)
+    std::string formatDiagnostic(const wolvrix::lib::diag::Diagnostic &message,
+                                 const slang::SourceManager *sourceManager,
+                                 bool useColor);
+
+    std::string formatDiagnostics(const std::vector<wolvrix::lib::diag::Diagnostic> &messages,
+                                  const slang::SourceManager *sourceManager)
     {
         if (messages.empty())
         {
@@ -167,20 +206,7 @@ namespace
             {
                 out.append("\n");
             }
-            out.append(diagnosticKindText(message.kind));
-            out.append(" ");
-            if (!message.passName.empty())
-            {
-                out.append(message.passName);
-                out.append(": ");
-            }
-            out.append(message.message);
-            if (!message.context.empty())
-            {
-                out.append(" (");
-                out.append(message.context);
-                out.append(")");
-            }
+            out.append(formatDiagnostic(message, sourceManager, /* useColor */ false));
         }
         return out;
     }
@@ -209,15 +235,354 @@ namespace
         return wolvrix::lib::store::JsonPrintMode::PrettyCompact;
     }
 
+    bool parseDiagnosticsLevel(std::string_view text, wolvrix::lib::LogLevel &level)
+    {
+        if (text == "none")
+        {
+            level = wolvrix::lib::LogLevel::Off;
+            return true;
+        }
+        bool ok = false;
+        level = parseLogLevel(text, ok);
+        return ok;
+    }
+
+    int logLevelRank(wolvrix::lib::LogLevel level)
+    {
+        return static_cast<int>(level);
+    }
+
+    wolvrix::lib::LogLevel diagnosticToLogLevel(wolvrix::lib::diag::DiagnosticKind kind)
+    {
+        switch (kind)
+        {
+        case wolvrix::lib::diag::DiagnosticKind::Debug:
+            return wolvrix::lib::LogLevel::Debug;
+        case wolvrix::lib::diag::DiagnosticKind::Info:
+            return wolvrix::lib::LogLevel::Info;
+        case wolvrix::lib::diag::DiagnosticKind::Warning:
+            return wolvrix::lib::LogLevel::Warn;
+        case wolvrix::lib::diag::DiagnosticKind::Todo:
+        case wolvrix::lib::diag::DiagnosticKind::Error:
+        default:
+            return wolvrix::lib::LogLevel::Error;
+        }
+    }
+
+    struct DiagnosticLocationInfo
+    {
+        slang::SourceLocation location;
+        std::string filename;
+        std::size_t line = 0;
+        std::size_t column = 0;
+    };
+
+    bool getDiagnosticLocationInfo(const slang::SourceManager *sourceManager,
+                                   slang::SourceLocation location,
+                                   DiagnosticLocationInfo &info)
+    {
+        if (!sourceManager || !location.valid())
+        {
+            return false;
+        }
+        auto resolved = sourceManager->getFullyOriginalLoc(location);
+        if (!resolved.valid())
+        {
+            resolved = location;
+        }
+        if (!sourceManager->isFileLoc(resolved))
+        {
+            auto expanded = sourceManager->getFullyExpandedLoc(location);
+            if (expanded.valid() && sourceManager->isFileLoc(expanded))
+            {
+                resolved = expanded;
+            }
+            else if (!sourceManager->isFileLoc(resolved))
+            {
+                return false;
+            }
+        }
+
+        std::string fileName;
+        const auto nameView = sourceManager->getFileName(resolved);
+        if (!nameView.empty())
+        {
+            fileName.assign(nameView);
+        }
+        if (fileName.empty())
+        {
+            const auto &fullPath = sourceManager->getFullPath(resolved.buffer());
+            if (!fullPath.empty())
+            {
+                fileName = fullPath.string();
+            }
+        }
+        if (fileName.empty())
+        {
+            const auto rawName = sourceManager->getRawFileName(resolved.buffer());
+            if (!rawName.empty())
+            {
+                fileName.assign(rawName);
+            }
+        }
+        if (fileName.empty())
+        {
+            return false;
+        }
+        info.location = resolved;
+        info.filename = std::move(fileName);
+        info.line = sourceManager->getLineNumber(resolved);
+        info.column = sourceManager->getColumnNumber(resolved);
+        return true;
+    }
+
+    std::string formatSourceLineSnippet(const slang::SourceManager *sourceManager,
+                                        const DiagnosticLocationInfo &info)
+    {
+        if (!sourceManager || !info.location.valid())
+        {
+            return {};
+        }
+        const auto bufferId = info.location.buffer();
+        const auto sourceText = sourceManager->getSourceText(bufferId);
+        if (sourceText.empty())
+        {
+            return {};
+        }
+        const std::size_t offset = info.location.offset();
+        if (offset >= sourceText.size())
+        {
+            return {};
+        }
+
+        std::size_t lineStart = sourceText.rfind('\n', offset);
+        if (lineStart == std::string_view::npos)
+        {
+            lineStart = 0;
+        }
+        else
+        {
+            ++lineStart;
+        }
+        std::size_t lineEnd = sourceText.find('\n', offset);
+        if (lineEnd == std::string_view::npos)
+        {
+            lineEnd = sourceText.size();
+        }
+        if (lineEnd <= lineStart)
+        {
+            return {};
+        }
+
+        std::string line(sourceText.substr(lineStart, lineEnd - lineStart));
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+        for (char &ch : line)
+        {
+            if (ch == '\t')
+            {
+                ch = ' ';
+            }
+        }
+
+        std::size_t caretPos = info.column > 0 ? info.column - 1 : 0;
+        if (caretPos > line.size())
+        {
+            caretPos = line.size();
+        }
+
+        const std::size_t maxLen = 200;
+        std::size_t prefixLen = 0;
+        std::size_t sliceStart = 0;
+        std::size_t sliceEnd = line.size();
+        if (line.size() > maxLen)
+        {
+            const std::size_t context = 80;
+            if (caretPos > context)
+            {
+                sliceStart = caretPos - context;
+            }
+            sliceEnd = std::min(sliceStart + maxLen, line.size());
+            if (sliceStart > 0)
+            {
+                prefixLen = 3;
+            }
+            if (sliceEnd < line.size())
+            {
+                line = line.substr(sliceStart, sliceEnd - sliceStart);
+                line.append("...");
+            }
+            else
+            {
+                line = line.substr(sliceStart);
+            }
+            if (sliceStart > 0)
+            {
+                line.insert(0, "...");
+            }
+            caretPos = prefixLen + (caretPos - sliceStart);
+        }
+
+        std::string caretLine;
+        caretLine.assign(caretPos, ' ');
+        caretLine.push_back('^');
+
+        std::string snippet;
+        snippet.append("\n  | ");
+        snippet.append(line);
+        snippet.append("\n  | ");
+        snippet.append(caretLine);
+        return snippet;
+    }
+
+    bool shouldUseColor()
+    {
+        const char *noColor = std::getenv("NO_COLOR");
+        if (noColor && *noColor != '\0')
+        {
+            return false;
+        }
+        const char *env = std::getenv("WOLVRIX_COLOR");
+        if (env && *env != '\0')
+        {
+            std::string value(env);
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            if (value == "1" || value == "true" || value == "yes" || value == "on" ||
+                value == "always")
+            {
+                return true;
+            }
+            if (value == "0" || value == "false" || value == "no" || value == "off" ||
+                value == "never")
+            {
+                return false;
+            }
+        }
+        return isatty(fileno(stderr)) == 1;
+    }
+
+    const char *diagnosticColorCode(wolvrix::lib::diag::DiagnosticKind kind, bool useColor)
+    {
+        if (!useColor)
+        {
+            return "";
+        }
+        switch (kind)
+        {
+        case wolvrix::lib::diag::DiagnosticKind::Error:
+            return "\033[1;31m";
+        case wolvrix::lib::diag::DiagnosticKind::Warning:
+            return "\033[1;33m";
+        case wolvrix::lib::diag::DiagnosticKind::Info:
+            return "\033[1;34m";
+        case wolvrix::lib::diag::DiagnosticKind::Debug:
+            return "\033[2m";
+        case wolvrix::lib::diag::DiagnosticKind::Todo:
+            return "\033[1;35m";
+        default:
+            return "";
+        }
+    }
+
+    const char *diagnosticColorReset(bool useColor)
+    {
+        return useColor ? "\033[0m" : "";
+    }
+
+    std::string formatDiagnostic(const wolvrix::lib::diag::Diagnostic &message,
+                                 const slang::SourceManager *sourceManager,
+                                 bool useColor)
+    {
+        std::string out;
+        out.append(diagnosticColorCode(message.kind, useColor));
+        out.append(diagnosticKindText(message.kind));
+        out.append(diagnosticColorReset(useColor));
+        DiagnosticLocationInfo info;
+        const bool hasLocation =
+            message.location && message.location->valid() &&
+            getDiagnosticLocationInfo(sourceManager, *message.location, info);
+        if (hasLocation)
+        {
+            out.append(" ");
+            out.append(info.filename);
+            out.append(":");
+            out.append(std::to_string(info.line));
+            out.append(":");
+            out.append(std::to_string(info.column));
+        }
+        if (!message.passName.empty())
+        {
+            out.append(" [");
+            out.append(message.passName);
+            out.append("]");
+        }
+        out.append(" ");
+        out.append(message.message);
+        if (!message.context.empty())
+        {
+            out.append(" (");
+            out.append(message.context);
+            out.append(")");
+        }
+        if (!message.originSymbol.empty())
+        {
+            out.append(" <");
+            out.append(message.originSymbol);
+            out.append(">");
+        }
+        if (hasLocation)
+        {
+            out.append(formatSourceLineSnippet(sourceManager, info));
+        }
+        return out;
+    }
+
+    void emitDiagnostics(const std::vector<wolvrix::lib::diag::Diagnostic> &messages,
+                         wolvrix::lib::LogLevel threshold,
+                         const slang::SourceManager *sourceManager)
+    {
+        if (threshold == wolvrix::lib::LogLevel::Off)
+        {
+            return;
+        }
+        if (messages.empty())
+        {
+            return;
+        }
+        std::string out;
+        const bool useColor = shouldUseColor();
+        for (const auto &message : messages)
+        {
+            const auto level = diagnosticToLogLevel(message.kind);
+            if (logLevelRank(level) < logLevelRank(threshold))
+            {
+                continue;
+            }
+            if (!out.empty())
+            {
+                out.append("\n");
+            }
+            out.append(formatDiagnostic(message, sourceManager, useColor));
+        }
+        if (!out.empty())
+        {
+            std::cerr << out << '\n';
+        }
+    }
+
     PyObject *py_read_sv(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
     {
         PyObject *path_obj = nullptr;
         PyObject *slang_args_obj = Py_None;
         const char *log_level_text = "warn";
-        static const char *kwlist[] = {"path", "slang_args", "log_level", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Os",
+        const char *diag_text = "warn";
+        static const char *kwlist[] = {"path", "slang_args", "log_level", "diagnostics", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Oss",
                                          const_cast<char **>(kwlist),
-                                         &path_obj, &slang_args_obj, &log_level_text))
+                                         &path_obj, &slang_args_obj, &log_level_text, &diag_text))
         {
             return nullptr;
         }
@@ -304,7 +669,7 @@ namespace
             return nullptr;
         }
 
-        auto compilation = driver.createCompilation();
+        auto compilation = std::shared_ptr<slang::ast::Compilation>(driver.createCompilation());
         driver.runAnalysis(*compilation);
         const auto &allDiagnostics = compilation->getAllDiagnostics();
         bool hasSlangIssues = false;
@@ -339,6 +704,12 @@ namespace
             PyErr_SetString(PyExc_ValueError, "unknown log_level");
             return nullptr;
         }
+        wolvrix::lib::LogLevel diag_level = wolvrix::lib::LogLevel::Warn;
+        if (!parseDiagnosticsLevel(diag_text, diag_level))
+        {
+            PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
+            return nullptr;
+        }
 
         wolvrix::lib::ingest::ConvertOptions convertOptions;
         convertOptions.abortOnError = true;
@@ -368,18 +739,23 @@ namespace
         catch (const wolvrix::lib::ingest::ConvertAbort &)
         {
             converter.diagnostics().flushThreadLocal();
-            const std::string diagText = formatDiagnostics(converter.diagnostics().messages());
+            emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
+            const std::string diagText = formatDiagnostics(converter.diagnostics().messages(),
+                                                           compilation->getSourceManager());
             PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
         if (converter.diagnostics().hasError())
         {
-            const std::string diagText = formatDiagnostics(converter.diagnostics().messages());
+            emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
+            const std::string diagText = formatDiagnostics(converter.diagnostics().messages(),
+                                                           compilation->getSourceManager());
             PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
+        emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
 
-        return makeDesignCapsule(std::move(design));
+        return makeDesignCapsule(std::move(design), std::move(compilation));
     }
 
     PyObject *py_read_json(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
@@ -472,7 +848,8 @@ namespace
         auto text = store.storeToString(*design, options);
         if (!text || diagnostics.hasError())
         {
-            const std::string diagText = formatDiagnostics(diagnostics.messages());
+            const std::string diagText =
+                formatDiagnostics(diagnostics.messages(), getDesignSourceManager(design_obj));
             PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
@@ -519,7 +896,8 @@ namespace
         const auto result = emitter.emit(*design, options);
         if (diagnostics.hasError() || !result.success)
         {
-            const std::string diagText = formatDiagnostics(diagnostics.messages());
+            const std::string diagText =
+                formatDiagnostics(diagnostics.messages(), getDesignSourceManager(design_obj));
             PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
@@ -533,10 +911,17 @@ namespace
         const char *pass_name = nullptr;
         PyObject *pass_args_obj = Py_None;
         int dryrun = 0;
-        static const char *kwlist[] = {"design", "name", "args", "dryrun", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Op", const_cast<char **>(kwlist),
-                                         &design_obj, &pass_name, &pass_args_obj, &dryrun))
+        const char *diag_text = "warn";
+        static const char *kwlist[] = {"design", "name", "args", "dryrun", "diagnostics", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Ops", const_cast<char **>(kwlist),
+                                         &design_obj, &pass_name, &pass_args_obj, &dryrun, &diag_text))
         {
+            return nullptr;
+        }
+        wolvrix::lib::LogLevel diag_level = wolvrix::lib::LogLevel::Warn;
+        if (!parseDiagnosticsLevel(diag_text, diag_level))
+        {
+            PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
             return nullptr;
         }
         auto *design = getDesign(design_obj);
@@ -583,10 +968,13 @@ namespace
 
         if (diagnostics.hasError() || !result.success)
         {
-            const std::string diagText = formatDiagnostics(diagnostics.messages());
+            const auto *sourceManager = getDesignSourceManager(design_obj);
+            emitDiagnostics(diagnostics.messages(), diag_level, sourceManager);
+            const std::string diagText = formatDiagnostics(diagnostics.messages(), sourceManager);
             PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
+        emitDiagnostics(diagnostics.messages(), diag_level, getDesignSourceManager(design_obj));
 
         return PyBool_FromLong(result.changed ? 1 : 0);
     }
@@ -616,7 +1004,7 @@ namespace
 
 static PyMethodDef WolvrixMethods[] = {
     {"read_sv", reinterpret_cast<PyCFunction>(py_read_sv), METH_VARARGS | METH_KEYWORDS,
-     "read_sv(path, slang_args=None, log_level='warn') -> Design capsule"},
+     "read_sv(path, slang_args=None, log_level='warn', diagnostics='warn') -> Design capsule"},
     {"read_json", reinterpret_cast<PyCFunction>(py_read_json), METH_VARARGS | METH_KEYWORDS,
      "read_json(path) -> Design capsule"},
     {"load_json_string", reinterpret_cast<PyCFunction>(py_load_json_string), METH_VARARGS | METH_KEYWORDS,
@@ -626,7 +1014,7 @@ static PyMethodDef WolvrixMethods[] = {
     {"write_sv", reinterpret_cast<PyCFunction>(py_write_sv), METH_VARARGS | METH_KEYWORDS,
      "write_sv(design, output, top=None)"},
     {"run_pass", reinterpret_cast<PyCFunction>(py_run_pass), METH_VARARGS | METH_KEYWORDS,
-     "run_pass(design, name, args=None, dryrun=False) -> bool"},
+     "run_pass(design, name, args=None, dryrun=False, diagnostics='warn') -> bool"},
     {"list_passes", reinterpret_cast<PyCFunction>(py_list_passes), METH_NOARGS,
      "list_passes() -> list[str]"},
     {nullptr, nullptr, 0, nullptr},
