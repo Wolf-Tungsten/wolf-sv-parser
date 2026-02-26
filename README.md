@@ -19,15 +19,20 @@ cmake --build wolvrix/build -j$(nproc)
 
 The resulting binary will be available at `wolvrix/build/bin/wolvrix`.
 
-## Python CLI (bindings)
+## Python Bindings
 
 ```bash
 # Install editable package (from repo root)
 python3 -m pip install -e wolvrix
 
-# Read SV -> JSON -> emit SV
-wolvrix read-sv path/to/file.sv -- --top top --out out.json
-wolvrix write-sv --in out.json --out out.sv
+# Example script usage
+python3 - <<'PY'
+import wolvrix
+
+design = wolvrix.read_sv("path/to/file.sv", slang_args=["--top", "top"], log_level="warn")
+design.write_json("out.json")
+design.write_sv("out.sv")
+PY
 ```
 
 ## Tests

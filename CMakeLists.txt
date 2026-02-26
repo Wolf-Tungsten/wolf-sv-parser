@@ -76,11 +76,11 @@ target_link_libraries(wolvrix-lib
 
 add_library(wolvrix::lib ALIAS wolvrix-lib)
 
-option(WOLVRIX_BUILD_PYTHON "Build Python bindings and CLI" OFF)
+option(WOLVRIX_BUILD_PYTHON "Build Python bindings" OFF)
 if (WOLVRIX_BUILD_PYTHON)
     find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
-    set(WOLVRIX_PYTHON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/app/pycli")
+    set(WOLVRIX_PYTHON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/app/pybind")
     set(WOLVRIX_PYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/python")
     set(WOLVRIX_PYTHON_PURELIB_DIR ".")
     set(WOLVRIX_PYTHON_PLATLIB_DIR ".")
@@ -97,7 +97,7 @@ if (WOLVRIX_BUILD_PYTHON)
             "${WOLVRIX_PYTHON_BUILD_DIR}"
     )
 
-    Python_add_library(wolvrix_python MODULE app/pycli/wolvrix_native.cpp)
+    Python_add_library(wolvrix_python MODULE app/pybind/wolvrix_native.cpp)
     target_link_libraries(wolvrix_python
         PRIVATE
             wolvrix-lib

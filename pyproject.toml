@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "wolvrix"
 version = "0.1.0"
-description = "Wolvrix Python CLI and bindings"
+description = "Wolvrix Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
@@ -17,9 +17,6 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: C++",
 ]
-
-[project.scripts]
-wolvrix = "wolvrix.cli:main"
 
 [tool.scikit-build]
 cmake.args = ["-DWOLVRIX_BUILD_PYTHON=ON"]

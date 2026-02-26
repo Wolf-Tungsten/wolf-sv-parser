@@ -8,6 +8,7 @@ __all__ = [
     "list_passes",
     "read_json",
     "read_sv",
+    "run_pipeline",
 ]
 
 
@@ -23,6 +24,14 @@ class Design:
         diagnostics: str = "warn",
     ) -> bool:
         return bool(_native.run_pass(self._capsule, name, args or [], dryrun, diagnostics))
+
+    def run_pipeline(
+        self,
+        pipeline: list[str | tuple[str, list[str]] | list],
+        dryrun: bool = False,
+        diagnostics: str = "warn",
+    ) -> bool:
+        return bool(_native.run_pipeline(self._capsule, pipeline, dryrun, diagnostics))
 
     def write_sv(self, output: str, top: list[str] | None = None) -> None:
         _native.write_sv(self._capsule, output, top or [])
@@ -55,3 +64,12 @@ def from_json_string(text: str) -> Design:
 
 def list_passes() -> list[str]:
     return list(_native.list_passes())
+
+
+def run_pipeline(
+    design: Design,
+    pipeline: list[str | tuple[str, list[str]] | list],
+    dryrun: bool = False,
+    diagnostics: str = "warn",
+) -> bool:
+    return design.run_pipeline(pipeline=pipeline, dryrun=dryrun, diagnostics=diagnostics)

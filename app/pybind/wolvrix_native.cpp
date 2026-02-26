@@ -134,6 +134,119 @@ namespace
         return true;
     }
 
+    struct PassSpec
+    {
+        std::string name;
+        std::vector<std::string> args;
+    };
+
+    bool parsePassPipeline(PyObject *obj, std::vector<PassSpec> &out, std::string &error)
+    {
+        if (obj == Py_None)
+        {
+            error = "pipeline must be a non-empty list";
+            return false;
+        }
+
+        PyObject *seq = PySequence_Fast(
+            obj,
+            "pipeline must be a non-empty list of pass specs");
+        if (!seq)
+        {
+            error = "pipeline must be a non-empty list of pass specs";
+            return false;
+        }
+
+        const Py_ssize_t count = PySequence_Fast_GET_SIZE(seq);
+        if (count <= 0)
+        {
+            Py_DECREF(seq);
+            error = "pipeline must be a non-empty list";
+            return false;
+        }
+
+        PyObject **items = PySequence_Fast_ITEMS(seq);
+        out.reserve(static_cast<std::size_t>(count));
+        for (Py_ssize_t i = 0; i < count; ++i)
+        {
+            PyObject *item = items[i];
+            PassSpec spec;
+
+            if (PyUnicode_Check(item))
+            {
+                const char *nameText = PyUnicode_AsUTF8(item);
+                if (!nameText)
+                {
+                    Py_DECREF(seq);
+                    error = "pipeline contains invalid pass name";
+                    return false;
+                }
+                spec.name = nameText;
+            }
+            else
+            {
+                PyObject *pair = PySequence_Fast(
+                    item,
+                    "each pipeline item must be pass name string or [name, args]");
+                if (!pair)
+                {
+                    Py_DECREF(seq);
+                    error = "each pipeline item must be pass name string or [name, args]";
+                    return false;
+                }
+                const Py_ssize_t pairCount = PySequence_Fast_GET_SIZE(pair);
+                if (pairCount != 2)
+                {
+                    Py_DECREF(pair);
+                    Py_DECREF(seq);
+                    error = "pipeline item sequence must have exactly 2 elements: [name, args]";
+                    return false;
+                }
+                PyObject **pairItems = PySequence_Fast_ITEMS(pair);
+                PyObject *nameObj = pairItems[0];
+                PyObject *argsObj = pairItems[1];
+                if (!PyUnicode_Check(nameObj))
+                {
+                    Py_DECREF(pair);
+                    Py_DECREF(seq);
+                    error = "pipeline pass name must be string";
+                    return false;
+                }
+                const char *nameText = PyUnicode_AsUTF8(nameObj);
+                if (!nameText)
+                {
+                    Py_DECREF(pair);
+                    Py_DECREF(seq);
+                    error = "pipeline contains invalid pass name";
+                    return false;
+                }
+                spec.name = nameText;
+
+                std::string parseErr;
+                if (!parseStringList(argsObj, spec.args, parseErr))
+                {
+                    Py_DECREF(pair);
+                    Py_DECREF(seq);
+                    error = "invalid args for pass '" + spec.name + "': " + parseErr;
+                    return false;
+                }
+                Py_DECREF(pair);
+            }
+
+            if (spec.name.empty())
+            {
+                Py_DECREF(seq);
+                error = "pipeline pass name must not be empty";
+                return false;
+            }
+
+            out.push_back(std::move(spec));
+        }
+
+        Py_DECREF(seq);
+        return true;
+    }
+
     wolvrix::lib::LogLevel parseLogLevel(std::string_view text, bool &ok)
     {
         ok = true;
@@ -924,6 +1037,11 @@ namespace
             PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
             return nullptr;
         }
+        if (!pass_name || pass_name[0] == '\0')
+        {
+            PyErr_SetString(PyExc_ValueError, "pass name must be non-empty");
+            return nullptr;
+        }
         auto *design = getDesign(design_obj);
         if (!design)
         {
@@ -954,6 +1072,87 @@ namespace
         wolvrix::lib::transform::PassDiagnostics diagnostics;
         wolvrix::lib::transform::PassManager manager;
         manager.addPass(std::move(pass));
+
+        wolvrix::lib::transform::PassManagerResult result;
+        if (dryrun)
+        {
+            wolvrix::lib::grh::Design temp = design->clone();
+            result = manager.run(temp, diagnostics);
+        }
+        else
+        {
+            result = manager.run(*design, diagnostics);
+        }
+
+        if (diagnostics.hasError() || !result.success)
+        {
+            const auto *sourceManager = getDesignSourceManager(design_obj);
+            emitDiagnostics(diagnostics.messages(), diag_level, sourceManager);
+            const std::string diagText = formatDiagnostics(diagnostics.messages(), sourceManager);
+            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
+            return nullptr;
+        }
+        emitDiagnostics(diagnostics.messages(), diag_level, getDesignSourceManager(design_obj));
+
+        return PyBool_FromLong(result.changed ? 1 : 0);
+    }
+
+    PyObject *py_run_pipeline(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
+    {
+        PyObject *design_obj = nullptr;
+        PyObject *pipeline_obj = Py_None;
+        int dryrun = 0;
+        const char *diag_text = "warn";
+        static const char *kwlist[] = {"design", "pipeline", "dryrun", "diagnostics", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|ps", const_cast<char **>(kwlist),
+                                         &design_obj, &pipeline_obj, &dryrun, &diag_text))
+        {
+            return nullptr;
+        }
+
+        wolvrix::lib::LogLevel diag_level = wolvrix::lib::LogLevel::Warn;
+        if (!parseDiagnosticsLevel(diag_text, diag_level))
+        {
+            PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
+            return nullptr;
+        }
+
+        auto *design = getDesign(design_obj);
+        if (!design)
+        {
+            return nullptr;
+        }
+
+        std::vector<PassSpec> pipeline;
+        std::string parseError;
+        if (!parsePassPipeline(pipeline_obj, pipeline, parseError))
+        {
+            PyErr_SetString(PyExc_ValueError, parseError.c_str());
+            return nullptr;
+        }
+
+        wolvrix::lib::transform::PassDiagnostics diagnostics;
+        wolvrix::lib::transform::PassManager manager;
+
+        for (const auto &spec : pipeline)
+        {
+            std::vector<std::string_view> passArgs;
+            passArgs.reserve(spec.args.size());
+            for (const auto &arg : spec.args)
+            {
+                passArgs.emplace_back(arg);
+            }
+
+            std::string makeErr;
+            auto pass = wolvrix::lib::transform::makePass(spec.name, passArgs, makeErr);
+            if (!pass)
+            {
+                const std::string err = "invalid pass '" + spec.name + "': " + makeErr;
+                PyErr_SetString(PyExc_ValueError, err.c_str());
+                return nullptr;
+            }
+            manager.addPass(std::move(pass));
+        }
 
         wolvrix::lib::transform::PassManagerResult result;
         if (dryrun)
@@ -1015,6 +1214,8 @@ static PyMethodDef WolvrixMethods[] = {
      "write_sv(design, output, top=None)"},
     {"run_pass", reinterpret_cast<PyCFunction>(py_run_pass), METH_VARARGS | METH_KEYWORDS,
      "run_pass(design, name, args=None, dryrun=False, diagnostics='warn') -> bool"},
+    {"run_pipeline", reinterpret_cast<PyCFunction>(py_run_pipeline), METH_VARARGS | METH_KEYWORDS,
+     "run_pipeline(design, pipeline, dryrun=False, diagnostics='warn') -> bool"},
     {"list_passes", reinterpret_cast<PyCFunction>(py_list_passes), METH_NOARGS,
      "list_passes() -> list[str]"},
     {nullptr, nullptr, 0, nullptr},
