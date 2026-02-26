@@ -19,17 +19,27 @@ cmake --build wolvrix/build -j$(nproc)
 
 The resulting binary will be available at `wolvrix/build/bin/wolvrix`.
 
-## Python Bindings
+## Python Bindings (primary usage)
 
 ```bash
 # Install editable package (from repo root)
 python3 -m pip install -e wolvrix
 
-# Example script usage
+# Basic template (bindings + run_pipeline)
 python3 - <<'PY'
 import wolvrix
 
 design = wolvrix.read_sv("path/to/file.sv", slang_args=["--top", "top"], log_level="warn")
+pipeline = [
+    "xmr-resolve",
+    "const-fold",
+    "redundant-elim",
+    "memory-init-check",
+    "dead-code-elim",
+    "stats",
+]
+wolvrix.run_pipeline(design, pipeline)
+
 design.write_json("out.json")
 design.write_sv("out.sv")
 PY
