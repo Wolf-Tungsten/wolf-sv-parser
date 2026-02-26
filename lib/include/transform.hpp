@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -247,6 +248,14 @@ namespace wolvrix::lib::transform
         std::vector<PassEntry> pipeline_;
         PassManagerOptions options_;
     };
+
+    std::string normalizePassName(std::string_view name);
+
+    std::vector<std::string> availableTransformPasses();
+
+    std::unique_ptr<Pass> makePass(std::string_view name,
+                                   std::span<const std::string_view> args,
+                                   std::string &error);
 
 } // namespace wolvrix::lib::transform
 

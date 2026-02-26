@@ -43,53 +43,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 # Ensure important runtime/artifact directories exist at configure time
 file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
-include(ExternalProject)
-find_package(Threads REQUIRED)
-find_package(ZLIB REQUIRED)
-
 add_subdirectory(external/slang)
-
-# Tcl (vendored, external build)
-set(TCL_SOURCE_DIR "${CMAKE_SOURCE_DIR}/external/tcl")
-set(TCL_BUILD_DIR "${CMAKE_BINARY_DIR}/tcl-build")
-set(TCL_INSTALL_DIR "${CMAKE_BINARY_DIR}/tcl-install")
-set(TCL_LIB_FILE "${TCL_INSTALL_DIR}/lib/libtcl9.0.a")
-
-ExternalProject_Add(tcl_ext
-    SOURCE_DIR "${TCL_SOURCE_DIR}"
-    BINARY_DIR "${TCL_BUILD_DIR}"
-    CONFIGURE_COMMAND "${TCL_SOURCE_DIR}/unix/configure"
-        --prefix=${TCL_INSTALL_DIR}
-        --enable-64bit
-        --disable-shared
-    BUILD_COMMAND make
-    INSTALL_COMMAND make install
-    BUILD_BYPRODUCTS "${TCL_LIB_FILE}"
-)
-
-add_library(tcl9 STATIC IMPORTED)
-set_target_properties(tcl9 PROPERTIES
-    IMPORTED_LOCATION "${TCL_LIB_FILE}"
-    INTERFACE_INCLUDE_DIRECTORIES "${TCL_SOURCE_DIR}/generic;${TCL_SOURCE_DIR}/unix"
-)
-add_dependencies(tcl9 tcl_ext)
-
-# linenoise-ng (vendored)
-add_library(linenoise-ng STATIC
-    external/linenoise-ng/src/linenoise.cpp
-    external/linenoise-ng/src/ConvertUTF.cpp
-    external/linenoise-ng/src/wcwidth.cpp
-)
-
-set_target_properties(linenoise-ng PROPERTIES
-    CXX_STANDARD 11
-    CXX_STANDARD_REQUIRED ON
-)
-
-target_include_directories(linenoise-ng
-    PUBLIC
-        external/linenoise-ng/include
-)
 
 # Libraries
 set(WOLVRIX_LIB_SOURCES
@@ -122,30 +76,54 @@ target_link_libraries(wolvrix-lib
 
 add_library(wolvrix::lib ALIAS wolvrix-lib)
 
-# Application
-add_executable(wolvrix
-    app/wolvrix/main.cpp
-)
+option(WOLVRIX_BUILD_PYTHON "Build Python bindings and CLI" OFF)
+if (WOLVRIX_BUILD_PYTHON)
+    find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
-target_compile_definitions(wolvrix
-    PRIVATE
-        WOLVRIX_TCL_LIBRARY_DIR="${TCL_SOURCE_DIR}/library"
-        WOLVRIX_VERSION="${PROJECT_VERSION}"
-        WOLVRIX_GIT_SHA="${WOLVRIX_GIT_SHA}"
-        WOLVRIX_GIT_DATE="${WOLVRIX_GIT_DATE}"
-)
+    set(WOLVRIX_PYTHON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/app/pycli")
+    set(WOLVRIX_PYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/python")
+    set(WOLVRIX_PYTHON_PURELIB_DIR ".")
+    set(WOLVRIX_PYTHON_PLATLIB_DIR ".")
+    if (DEFINED SKBUILD_PURELIB_DIR)
+        set(WOLVRIX_PYTHON_PURELIB_DIR "${SKBUILD_PURELIB_DIR}")
+    endif()
+    if (DEFINED SKBUILD_PLATLIB_DIR)
+        set(WOLVRIX_PYTHON_PLATLIB_DIR "${SKBUILD_PLATLIB_DIR}")
+    endif()
 
-target_link_libraries(wolvrix
-    PRIVATE
-        wolvrix-lib
-        tcl9
-        linenoise-ng
-        Threads::Threads
-        ZLIB::ZLIB
-        ${CMAKE_DL_LIBS}
-)
+    add_custom_target(wolvrix-python-sources
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${WOLVRIX_PYTHON_SOURCE_DIR}"
+            "${WOLVRIX_PYTHON_BUILD_DIR}"
+    )
 
-add_dependencies(wolvrix tcl_ext)
+    Python_add_library(wolvrix_python MODULE app/pycli/wolvrix_native.cpp)
+    target_link_libraries(wolvrix_python
+        PRIVATE
+            wolvrix-lib
+            Python::Module
+    )
+    set_target_properties(wolvrix_python PROPERTIES
+        OUTPUT_NAME "_wolvrix"
+        LIBRARY_OUTPUT_DIRECTORY "${WOLVRIX_PYTHON_BUILD_DIR}/wolvrix"
+        RUNTIME_OUTPUT_DIRECTORY "${WOLVRIX_PYTHON_BUILD_DIR}/wolvrix"
+        BUILD_RPATH "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN"
+    )
+    add_dependencies(wolvrix_python wolvrix-python-sources)
+
+    install(DIRECTORY "${WOLVRIX_PYTHON_SOURCE_DIR}/wolvrix"
+        DESTINATION "${WOLVRIX_PYTHON_PURELIB_DIR}"
+    )
+    install(TARGETS wolvrix_python
+        LIBRARY DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+        RUNTIME DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+    )
+    install(TARGETS wolvrix-lib
+        LIBRARY DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+        RUNTIME DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+    )
+endif()
 
 enable_testing()
 
@@ -208,23 +186,6 @@ target_link_libraries(grh-clone-tests
 )
 
 register_test_exe(grh-clone-tests)
-
-# cli tcl tests
-add_test(NAME wolvrix-tcl-flow-ok
-    COMMAND $<TARGET_FILE:wolvrix> -f ${CMAKE_SOURCE_DIR}/tests/cli/data/flow_ok.tcl
-)
-set_tests_properties(wolvrix-tcl-flow-ok
-    PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-
-add_test(NAME wolvrix-tcl-flow-fail
-    COMMAND $<TARGET_FILE:wolvrix> -f ${CMAKE_SOURCE_DIR}/tests/cli/data/flow_fail.tcl
-)
-set_tests_properties(wolvrix-tcl-flow-fail
-    PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
 
 # emit base
 add_executable(emit-base

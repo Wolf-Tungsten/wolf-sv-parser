@@ -1,6 +1,17 @@
 #include "transform.hpp"
 
+#include "transform/const_fold.hpp"
+#include "transform/dead_code_elim.hpp"
+#include "transform/demo_stats.hpp"
+#include "transform/memory_init_check.hpp"
+#include "transform/redundant_elim.hpp"
+#include "transform/xmr_resolve.hpp"
+
 #include <chrono>
+#include <exception>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace wolvrix::lib::transform
 {
@@ -362,6 +373,121 @@ namespace wolvrix::lib::transform
 
         result.success = !encounteredFailure && !diags.hasError();
         return result;
+    }
+
+    std::string normalizePassName(std::string_view name)
+    {
+        std::string normalized(name);
+        for (char &ch : normalized)
+        {
+            if (ch == '_')
+            {
+                ch = '-';
+            }
+        }
+        return normalized;
+    }
+
+    std::vector<std::string> availableTransformPasses()
+    {
+        return {
+            "xmr-resolve",
+            "const-fold",
+            "redundant-elim",
+            "memory-init-check",
+            "dead-code-elim",
+            "stats",
+        };
+    }
+
+    std::unique_ptr<Pass> makePass(std::string_view name,
+                                   std::span<const std::string_view> args,
+                                   std::string &error)
+    {
+        const std::string normalized = normalizePassName(name);
+        if (normalized == "xmr-resolve")
+        {
+            if (!args.empty())
+            {
+                error = "xmr-resolve does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<XmrResolvePass>();
+        }
+        if (normalized == "const-fold")
+        {
+            ConstantFoldOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-max-iter")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-max-iter expects a value";
+                        return nullptr;
+                    }
+                    try
+                    {
+                        options.maxIterations = std::stoi(std::string(args[++i]));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-iter value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-allow-x")
+                {
+                    options.allowXPropagation = true;
+                }
+                else
+                {
+                    error = "unknown const-fold option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<ConstantFoldPass>(options);
+        }
+        if (normalized == "redundant-elim")
+        {
+            if (!args.empty())
+            {
+                error = "redundant-elim does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<RedundantElimPass>();
+        }
+        if (normalized == "memory-init-check")
+        {
+            if (!args.empty())
+            {
+                error = "memory-init-check does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<MemoryInitCheckPass>();
+        }
+        if (normalized == "dead-code-elim")
+        {
+            if (!args.empty())
+            {
+                error = "dead-code-elim does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<DeadCodeElimPass>();
+        }
+        if (normalized == "stats")
+        {
+            if (!args.empty())
+            {
+                error = "stats does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<StatsPass>();
+        }
+
+        error = "unknown pass: " + normalized;
+        return nullptr;
     }
 
 } // namespace wolvrix::lib::transform

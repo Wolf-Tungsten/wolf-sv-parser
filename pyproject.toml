@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.7", "cmake>=3.20"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "wolvrix"
+version = "0.1.0"
+description = "Wolvrix Python CLI and bindings"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Wolvrix contributors"}]
+keywords = ["systemverilog", "rtl", "eda", "ir", "compiler"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+]
+
+[project.scripts]
+wolvrix = "wolvrix.cli:main"
+
+[tool.scikit-build]
+cmake.args = ["-DWOLVRIX_BUILD_PYTHON=ON"]
