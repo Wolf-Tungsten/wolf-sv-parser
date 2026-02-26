@@ -12,15 +12,30 @@ wolvrix is a SystemVerilog parser built on [slang](https://github.com/MikePopolo
 # Initialize submodules
 git submodule update --init --recursive
 
-# Build with CMake
-mkdir build
-cd build
-cmake ..
-cmake --build . -j$(nproc)
+# Build with CMake (from repo root)
+cmake -S wolvrix -B wolvrix/build
+cmake --build wolvrix/build -j$(nproc)
 ```
 
-The resulting binary will be available at `build/bin/wolvrix`.
+The resulting binary will be available at `wolvrix/build/bin/wolvrix`.
+
+## Python CLI (bindings)
+
+```bash
+# Install editable package (from repo root)
+python3 -m pip install -e wolvrix
+
+# Read SV -> JSON -> emit SV
+wolvrix read-sv path/to/file.sv -- --top top --out out.json
+wolvrix write-sv --in out.json --out out.sv
+```
+
+## Tests
+
+```bash
+ctest --test-dir wolvrix/build --output-on-failure
+```
 
 ## License
 
-This project uses the MIT License, same as slang.
+This project uses the MIT License, same as slang. See `LICENSE`.

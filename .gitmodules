@@ -1,9 +1,3 @@
 [submodule "external/slang"]
 	path = external/slang
 	url = https://github.com/MikePopoloski/slang
-[submodule "external/tcl"]
-	path = external/tcl
-	url = https://github.com/tcltk/tcl.git
-[submodule "external/linenoise-ng"]
-	path = external/linenoise-ng
-	url = https://github.com/arangodb/linenoise-ng.git
