@@ -8,7 +8,7 @@
 #include "transform.hpp"
 
 #include "slang/analysis/AnalysisManager.h"
-#include "slang/ast/Compilation.h"
+x-#include "slang/ast/Compilation.h"
 #include "slang/driver/Driver.h"
 #include "slang/text/SourceManager.h"
 
