@@ -455,7 +455,26 @@ namespace wolvrix::lib::transform
                     return false;
                 }
                 maybeRenameMappedValue(childValue, *targetValue, portName);
-                childPortMap.emplace(childValue, *targetValue);
+                auto [it, inserted] = childPortMap.emplace(childValue, *targetValue);
+                if (!inserted && it->second != *targetValue)
+                {
+                    // Multiple output ports can legally alias the same child value (e.g. XMR read ports
+                    // tied to an existing output). Preserve the first mapping and explicitly drive
+                    // the duplicate output from it.
+                    const wolvrix::lib::grh::Value dstValue = target.getValue(*targetValue);
+                    if (dstValue.definingOp().valid())
+                    {
+                        state.graphError(sourceGraph,
+                                         "Flatten duplicate output mapping already has defining op");
+                        return false;
+                    }
+                    wolvrix::lib::grh::SymbolId opSym = target.makeInternalOpSym();
+                    wolvrix::lib::grh::OperationId assign =
+                        target.createOperation(wolvrix::lib::grh::OperationKind::kAssign, opSym);
+                    target.addOperand(assign, it->second);
+                    target.addResult(assign, *targetValue);
+                    state.changed = true;
+                }
             }
 
             const auto childInouts = child->inoutPorts();
