@@ -4961,8 +4961,8 @@ namespace wolvrix::lib::emit
                         break;
                     }
                     const std::size_t inoutCount = inoutNames ? inoutNames->size() : 0;
-                    if (operands.size() < inputNames->size() + inoutCount * 2 ||
-                        results.size() < outputNames->size() + inoutCount)
+                    if (operands.size() < inputNames->size() + inoutCount ||
+                        results.size() < outputNames->size() + inoutCount * 2)
                     {
                         reportError("Instance port counts do not match operands/results", opContext);
                         break;
@@ -5011,6 +5011,23 @@ namespace wolvrix::lib::emit
                             connections.emplace_back((*outputNames)[i], valueName(results[i]));
                         }
                     }
+                    auto findDirectInoutPort = [&](wolvrix::lib::grh::ValueId inValue,
+                                                   wolvrix::lib::grh::ValueId outValue,
+                                                   wolvrix::lib::grh::ValueId oeValue) -> std::optional<std::string>
+                    {
+                        for (const auto &port : graph->inoutPorts())
+                        {
+                            if (port.name.empty())
+                            {
+                                continue;
+                            }
+                            if (port.in == inValue && port.out == outValue && port.oe == oeValue)
+                            {
+                                return port.name;
+                            }
+                        }
+                        return std::nullopt;
+                    };
                     if (inoutNames)
                     {
                         auto ensureNamedWireDecl = [&](const std::string &base, int64_t width,
@@ -5032,30 +5049,35 @@ namespace wolvrix::lib::emit
                         bool inoutOk = true;
                         for (std::size_t i = 0; i < inoutNames->size(); ++i)
                         {
-                            const std::size_t outIndex = inputNames->size() + i;
-                            const std::size_t oeIndex = inputNames->size() + inoutNames->size() + i;
-                            const std::size_t inIndex = outputNames->size() + i;
-                            if (outIndex >= operands.size() || oeIndex >= operands.size() ||
-                                inIndex >= results.size())
+                            const std::size_t inIndex = inputNames->size() + i;
+                            const std::size_t outIndex = outputNames->size() + i;
+                            const std::size_t oeIndex = outputNames->size() + inoutNames->size() + i;
+                            if (outIndex >= results.size() || oeIndex >= results.size() ||
+                                inIndex >= operands.size())
                             {
                                 reportError("Instance inout index out of range", opContext);
                                 inoutOk = false;
                                 break;
                             }
+                            if (auto directPort = findDirectInoutPort(operands[inIndex], results[outIndex], results[oeIndex]))
+                            {
+                                connections.emplace_back((*inoutNames)[i], *directPort);
+                                continue;
+                            }
                             const std::string wireBase =
                                 instanceName.empty()
                                     ? (*inoutNames)[i] + "_inout"
                                     : instanceName + "_" + (*inoutNames)[i] + "_inout";
-                            const int64_t width = graph->getValue(operands[outIndex]).width();
-                            const bool isSigned = graph->getValue(operands[outIndex]).isSigned();
+                            const int64_t width = graph->getValue(results[outIndex]).width();
+                            const bool isSigned = graph->getValue(results[outIndex]).isSigned();
                             const std::string wireName = ensureNamedWireDecl(wireBase, width, isSigned);
                             connections.emplace_back((*inoutNames)[i], wireName);
-                            ensureWireDecl(operands[outIndex]);
-                            ensureWireDecl(operands[oeIndex]);
-                            ensureWireDecl(results[inIndex]);
-                            emitInoutAssign(wireName, operands[oeIndex], operands[outIndex], width, opId);
+                            ensureWireDecl(results[outIndex]);
+                            ensureWireDecl(results[oeIndex]);
+                            ensureWireDecl(operands[inIndex]);
+                            emitInoutAssign(wireName, results[oeIndex], results[outIndex], width, opId);
                             portBindingStmts.emplace_back(
-                                "assign " + valueName(results[inIndex]) + " = " + wireName + ";",
+                                "assign " + valueName(operands[inIndex]) + " = " + wireName + ";",
                                 opId);
                         }
                         if (!inoutOk)

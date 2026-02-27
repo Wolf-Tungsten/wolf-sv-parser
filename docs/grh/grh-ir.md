@@ -1164,12 +1164,12 @@ always @(posedge clk)
 
 **operands**:
 - `oper[0]`..`oper[m-1]` (inputs): 输入信号，对应 `inputPortName`
-- `oper[m]`..`oper[m+q-1]` (inoutOuts): inout 驱动值
-- `oper[m+q]`..`oper[m+2q-1]` (inoutOes): inout 输出使能
+- `oper[m]`..`oper[m+q-1]` (inoutIns): inout 读值（父图提供给子模块的 inout.in）
 
 **results**:
 - `res[0]`..`res[n-1]` (outputs): 输出信号，对应 `outputPortName`
-- `res[n]`..`res[n+q-1]` (inoutIns): inout 读值
+- `res[n]`..`res[n+q-1]` (inoutOuts): inout 驱动值（子模块 out）
+- `res[n+q]`..`res[n+2q-1]` (inoutOes): inout 输出使能（子模块 oe）
 
 **attrs**:
 - `moduleName` (string): 被实例化模块的名称，必须在 Design 中存在对应 Graph
@@ -1195,8 +1195,8 @@ Adder u_add (.a(a_val), .b(b_val), .sum(sum_val));
 
 **案例 2：inout 端口处理**（模块 `IOPad` 有 inout 端口 `pad`）：
 ```
-operands:  [drv_val, oe_val]
-results:   [rd_val]
+operands:  [rd_val]
+results:   [drv_val, oe_val]
 attrs:
   moduleName:     "IOPad"
   instanceName:   "u_pad"
@@ -1219,12 +1219,12 @@ assign rd_val = pad_wire;
 
 **operands**:
 - `oper[0]`..`oper[m-1]` (inputs): 输入信号
-- `oper[m]`..`oper[m+q-1]` (inoutOuts): inout 驱动值
-- `oper[m+q]`..`oper[m+2q-1]` (inoutOes): inout 输出使能
+- `oper[m]`..`oper[m+q-1]` (inoutIns): inout 读值（父图提供给黑盒的 inout.in）
 
 **results**:
 - `res[0]`..`res[n-1]` (outputs): 输出信号
-- `res[n]`..`res[n+q-1]` (inoutIns): inout 读值
+- `res[n]`..`res[n+q-1]` (inoutOuts): inout 驱动值（黑盒 out）
+- `res[n+q]`..`res[n+2q-1]` (inoutOes): inout 输出使能（黑盒 oe）
 
 **attrs**:
 - `moduleName` (string): 黑盒模块名称

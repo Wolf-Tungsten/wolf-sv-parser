@@ -13298,23 +13298,7 @@ private:
             }
             createValue(info.binding.outSymbol, width, signal->isSigned,
                         wolvrix::lib::grh::ValueType::Logic);
-            wolvrix::lib::grh::ValueId oeValue =
-                createValue(info.binding.oeSymbol, width, false, wolvrix::lib::grh::ValueType::Logic);
-            if (!oeValue.valid())
-            {
-                continue;
-            }
-            if (graph_.getValue(oeValue).definingOp().valid())
-            {
-                continue;
-            }
-            const std::string literal = std::to_string(width) + "'b0";
-            wolvrix::lib::grh::OperationId op =
-                createOp(wolvrix::lib::grh::OperationKind::kConstant,
-                         wolvrix::lib::grh::SymbolId::invalid(),
-                         slang::SourceLocation{});
-            graph_.addResult(op, oeValue);
-            graph_.setAttr(op, "constValue", literal);
+            createValue(info.binding.oeSymbol, width, false, wolvrix::lib::grh::ValueType::Logic);
         }
     }
 
@@ -14425,9 +14409,9 @@ private:
             std::vector<std::string> inoutNames;
             std::vector<wolvrix::lib::grh::ValueId> inputOperands;
             std::vector<wolvrix::lib::grh::ValueId> outputResults;
-            std::vector<wolvrix::lib::grh::ValueId> inoutOutOperands;
-            std::vector<wolvrix::lib::grh::ValueId> inoutOeOperands;
-            std::vector<wolvrix::lib::grh::ValueId> inoutInResults;
+            std::vector<wolvrix::lib::grh::ValueId> inoutInOperands;
+            std::vector<wolvrix::lib::grh::ValueId> inoutOutResults;
+            std::vector<wolvrix::lib::grh::ValueId> inoutOeResults;
             bool ok = true;
             auto makeUnconnectedInput = [&](int64_t width,
                                             bool isSigned,
@@ -14675,9 +14659,9 @@ private:
                         ok = false;
                         break;
                     }
-                    inoutOutOperands.push_back(outValue);
-                    inoutOeOperands.push_back(oeValue);
-                    inoutInResults.push_back(inValue);
+                    inoutInOperands.push_back(inValue);
+                    inoutOutResults.push_back(outValue);
+                    inoutOeResults.push_back(oeValue);
                     break;
                 }
                 default:
@@ -14704,13 +14688,13 @@ private:
 
             std::vector<wolvrix::lib::grh::ValueId> operands;
             std::vector<wolvrix::lib::grh::ValueId> results;
-            operands.reserve(inputOperands.size() + inoutOutOperands.size() + inoutOeOperands.size());
+            operands.reserve(inputOperands.size() + inoutInOperands.size());
             operands.insert(operands.end(), inputOperands.begin(), inputOperands.end());
-            operands.insert(operands.end(), inoutOutOperands.begin(), inoutOutOperands.end());
-            operands.insert(operands.end(), inoutOeOperands.begin(), inoutOeOperands.end());
-            results.reserve(outputResults.size() + inoutInResults.size());
+            operands.insert(operands.end(), inoutInOperands.begin(), inoutInOperands.end());
+            results.reserve(outputResults.size() + inoutOutResults.size() + inoutOeResults.size());
             results.insert(results.end(), outputResults.begin(), outputResults.end());
-            results.insert(results.end(), inoutInResults.begin(), inoutInResults.end());
+            results.insert(results.end(), inoutOutResults.begin(), inoutOutResults.end());
+            results.insert(results.end(), inoutOeResults.begin(), inoutOeResults.end());
 
             const std::string moduleNameText =
                 instanceInfo.moduleSymbol.valid()

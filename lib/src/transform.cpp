@@ -1,8 +1,11 @@
 #include "transform.hpp"
 
+#include "transform/blackbox_guard.hpp"
 #include "transform/const_fold.hpp"
 #include "transform/dead_code_elim.hpp"
 #include "transform/demo_stats.hpp"
+#include "transform/hier_flatten.hpp"
+#include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
 #include "transform/redundant_elim.hpp"
 #include "transform/xmr_resolve.hpp"
@@ -391,6 +394,9 @@ namespace wolvrix::lib::transform
     std::vector<std::string> availableTransformPasses()
     {
         return {
+            "blackbox-guard",
+            "multidriven-guard",
+            "hier-flatten",
             "xmr-resolve",
             "const-fold",
             "redundant-elim",
@@ -413,6 +419,80 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<XmrResolvePass>();
+        }
+        if (normalized == "multidriven-guard")
+        {
+            if (!args.empty())
+            {
+                error = "multidriven-guard does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<MultiDrivenGuardPass>();
+        }
+        if (normalized == "blackbox-guard")
+        {
+            if (!args.empty())
+            {
+                error = "blackbox-guard does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<BlackboxGuardPass>();
+        }
+        if (normalized == "hier-flatten")
+        {
+            HierFlattenOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-preserve-modules")
+                {
+                    options.preserveFlattenedModules = true;
+                }
+                else if (arg == "-sym-protect" || arg.starts_with("-sym-protect="))
+                {
+                    std::string_view value;
+                    if (arg == "-sym-protect")
+                    {
+                        if (i + 1 >= args.size())
+                        {
+                            error = "-sym-protect expects a value";
+                            return nullptr;
+                        }
+                        value = args[++i];
+                    }
+                    else
+                    {
+                        value = arg.substr(std::string_view("-sym-protect=").size());
+                    }
+                    if (value == "all")
+                    {
+                        options.symProtect = HierFlattenOptions::SymProtectMode::All;
+                    }
+                    else if (value == "hierarchy")
+                    {
+                        options.symProtect = HierFlattenOptions::SymProtectMode::Hierarchy;
+                    }
+                    else if (value == "stateful")
+                    {
+                        options.symProtect = HierFlattenOptions::SymProtectMode::Stateful;
+                    }
+                    else if (value == "none")
+                    {
+                        options.symProtect = HierFlattenOptions::SymProtectMode::None;
+                    }
+                    else
+                    {
+                        error = "unknown -sym-protect mode";
+                        return nullptr;
+                    }
+                }
+                else
+                {
+                    error = "unknown hier-flatten option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<HierFlattenPass>(options);
         }
         if (normalized == "const-fold")
         {

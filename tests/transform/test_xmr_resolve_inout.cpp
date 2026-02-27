@@ -70,10 +70,10 @@ int main()
         top.createOperation(wolvrix::lib::grh::OperationKind::kInstance,
                             top.internSymbol("_op_test_xmr_inst"));
     top.addOperand(instOp, topA);
-    top.addOperand(instOp, topIoOut);
-    top.addOperand(instOp, topIoOe);
+    top.addOperand(instOp, topIoIn);
     top.addResult(instOp, topY);
-    top.addResult(instOp, topIoIn);
+    top.addResult(instOp, topIoOut);
+    top.addResult(instOp, topIoOe);
     top.setAttr(instOp, "moduleName", std::string("child"));
     top.setAttr(instOp, "instanceName", std::string("u_child"));
     top.setAttr(instOp, "inputPortName", std::vector<std::string>{"a"});
@@ -134,15 +134,15 @@ int main()
 
     const auto operands = op.operands();
     const auto results = op.results();
-    if (operands.size() != 4 || results.size() != 3)
+    if (operands.size() != 3 || results.size() != 4)
     {
         return fail("Instance operand/result count mismatch after resolve");
     }
-    if (operands[0] != topA || operands[2] != topIoOut || operands[3] != topIoOe)
+    if (operands[0] != topA || operands[2] != topIoIn)
     {
         return fail("Inout operands were reordered by XMR resolve");
     }
-    if (results[0] != topY || results[2] != topIoIn)
+    if (results[0] != topY || results[2] != topIoOut || results[3] != topIoOe)
     {
         return fail("Inout results were reordered by XMR resolve");
     }

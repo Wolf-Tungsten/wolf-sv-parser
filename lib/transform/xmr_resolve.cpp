@@ -457,7 +457,7 @@ namespace wolvrix::lib::transform
             const std::size_t inoutCount = inoutNames.size();
             const std::size_t resultCount = resultsSpan.size();
             const std::size_t outputLimit =
-                resultCount > inoutCount ? resultCount - inoutCount : 0U;
+                resultCount > inoutCount * 2 ? resultCount - inoutCount * 2 : 0U;
             const std::size_t insertIndex = std::min(names.size(), outputLimit);
             graph.insertResult(opId, insertIndex, value);
             names.push_back(portName);
@@ -489,7 +489,7 @@ namespace wolvrix::lib::transform
             const std::size_t inoutCount = inoutNames.size();
             const std::size_t operandCount = operandsSpan.size();
             const std::size_t inputLimit =
-                operandCount > inoutCount * 2 ? operandCount - inoutCount * 2 : 0U;
+                operandCount > inoutCount ? operandCount - inoutCount : 0U;
             const std::size_t insertIndex = std::min(names.size(), inputLimit);
             graph.insertOperand(opId, insertIndex, value);
             names.push_back(portName);

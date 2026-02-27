@@ -170,7 +170,7 @@ int testGraphAssemblyInstance(const std::filesystem::path& sourcePath) {
                 if (!expectStrings(getAttrStrings(op, "inoutPortName"), {"io"})) {
                     return fail("child_inout inoutPortName mismatch");
                 }
-                if (op.operands().size() != 3 || op.results().size() != 2) {
+                if (op.operands().size() != 2 || op.results().size() != 3) {
                     return fail("child_inout operand/result count mismatch");
                 }
                 auto instanceName = getAttrString(op, "instanceName");

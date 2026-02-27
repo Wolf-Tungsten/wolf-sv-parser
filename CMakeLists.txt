@@ -59,6 +59,9 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/redundant_elim.cpp
     lib/transform/dead_code_elim.cpp
     lib/transform/memory_init_check.cpp
+    lib/transform/multidriven_guard.cpp
+    lib/transform/blackbox_guard.cpp
+    lib/transform/hier_flatten.cpp
     lib/transform/xmr_resolve.cpp
 )
 
@@ -312,6 +315,17 @@ target_link_libraries(transform-redundant-elim
 )
 
 register_test_exe(transform-redundant-elim)
+
+add_executable(transform-hier-flatten
+    tests/transform/test_hier_flatten_pass.cpp
+)
+
+target_link_libraries(transform-hier-flatten
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-hier-flatten)
 
 add_executable(transform-xmr-resolve-inout
     tests/transform/test_xmr_resolve_inout.cpp
