@@ -3248,9 +3248,19 @@ namespace wolvrix::lib::grh
     bool Graph::eraseOp(OperationId op)
     {
         GraphBuilder &builder = ensureBuilder();
+        SymbolId declaredSymbol;
+        if (builder.opAlive(op))
+        {
+            const std::size_t opIdx = builder.opIndex(op);
+            declaredSymbol = builder.operations_[opIdx].symbol;
+        }
         bool result = builder.eraseOp(op);
         if (result)
         {
+            if (declaredSymbol.valid() && isDeclaredSymbol(declaredSymbol))
+            {
+                removeDeclaredSymbol(declaredSymbol);
+            }
             invalidateOperationsCache();
         }
         return result;
@@ -3259,9 +3269,19 @@ namespace wolvrix::lib::grh
     bool Graph::eraseOp(OperationId op, std::span<const ValueId> replacementResults)
     {
         GraphBuilder &builder = ensureBuilder();
+        SymbolId declaredSymbol;
+        if (builder.opAlive(op))
+        {
+            const std::size_t opIdx = builder.opIndex(op);
+            declaredSymbol = builder.operations_[opIdx].symbol;
+        }
         bool result = builder.eraseOp(op, replacementResults);
         if (result)
         {
+            if (declaredSymbol.valid() && isDeclaredSymbol(declaredSymbol))
+            {
+                removeDeclaredSymbol(declaredSymbol);
+            }
             invalidateOperationsCache();
         }
         return result;
@@ -3270,9 +3290,19 @@ namespace wolvrix::lib::grh
     bool Graph::eraseOpUnchecked(OperationId op)
     {
         GraphBuilder &builder = ensureBuilder();
+        SymbolId declaredSymbol;
+        if (builder.opAlive(op))
+        {
+            const std::size_t opIdx = builder.opIndex(op);
+            declaredSymbol = builder.operations_[opIdx].symbol;
+        }
         bool result = builder.eraseOpUnchecked(op);
         if (result)
         {
+            if (declaredSymbol.valid() && isDeclaredSymbol(declaredSymbol))
+            {
+                removeDeclaredSymbol(declaredSymbol);
+            }
             invalidateOperationsCache();
         }
         return result;
@@ -3281,9 +3311,19 @@ namespace wolvrix::lib::grh
     bool Graph::eraseValue(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
+        SymbolId declaredSymbol;
+        if (builder.valueAlive(value))
+        {
+            const std::size_t valIdx = builder.valueIndex(value);
+            declaredSymbol = builder.values_[valIdx].symbol;
+        }
         bool result = builder.eraseValue(value);
         if (result)
         {
+            if (declaredSymbol.valid() && isDeclaredSymbol(declaredSymbol))
+            {
+                removeDeclaredSymbol(declaredSymbol);
+            }
             invalidateValuesCache();
         }
         return result;
@@ -3292,9 +3332,19 @@ namespace wolvrix::lib::grh
     bool Graph::eraseValueUnchecked(ValueId value)
     {
         GraphBuilder &builder = ensureBuilder();
+        SymbolId declaredSymbol;
+        if (builder.valueAlive(value))
+        {
+            const std::size_t valIdx = builder.valueIndex(value);
+            declaredSymbol = builder.values_[valIdx].symbol;
+        }
         bool result = builder.eraseValueUnchecked(value);
         if (result)
         {
+            if (declaredSymbol.valid() && isDeclaredSymbol(declaredSymbol))
+            {
+                removeDeclaredSymbol(declaredSymbol);
+            }
             invalidateValuesCache();
         }
         return result;
@@ -3826,6 +3876,12 @@ namespace wolvrix::lib::grh
         else
         {
             return false;
+        }
+
+        SymbolId declaredSymbol = designSymbols_.lookup(symbol);
+        if (declaredSymbol.valid())
+        {
+            removeDeclaredSymbol(declaredSymbol);
         }
 
         graphs_.erase(symbol);

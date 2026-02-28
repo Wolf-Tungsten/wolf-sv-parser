@@ -147,7 +147,8 @@ int main()
         {
             return fail("Final constant value mismatch");
         }
-        if (!graph.getValue(neg).users().empty())
+        const wolvrix::lib::grh::ValueId negValue = graph.findValue("neg");
+        if (negValue.valid() && !graph.getValue(negValue).users().empty())
         {
             return fail("Expected users of intermediate value to be rewired");
         }
