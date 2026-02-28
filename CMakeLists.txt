@@ -58,6 +58,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/const_fold.cpp
     lib/transform/redundant_elim.cpp
     lib/transform/dead_code_elim.cpp
+    lib/transform/simplify.cpp
     lib/transform/memory_init_check.cpp
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
@@ -283,38 +284,16 @@ target_link_libraries(transform-pass-manager
 
 register_test_exe(transform-pass-manager)
 
-add_executable(transform-const-fold
-    tests/transform/test_const_fold_pass.cpp
+add_executable(transform-simplify
+    tests/transform/test_simplify_pass.cpp
 )
 
-target_link_libraries(transform-const-fold
+target_link_libraries(transform-simplify
     PRIVATE
         wolvrix-lib
 )
 
-register_test_exe(transform-const-fold)
-
-add_executable(transform-dead-code-elim
-    tests/transform/test_dead_code_elim_pass.cpp
-)
-
-target_link_libraries(transform-dead-code-elim
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(transform-dead-code-elim)
-
-add_executable(transform-redundant-elim
-    tests/transform/test_redundant_elim_pass.cpp
-)
-
-target_link_libraries(transform-redundant-elim
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(transform-redundant-elim)
+register_test_exe(transform-simplify)
 
 add_executable(transform-hier-flatten
     tests/transform/test_hier_flatten_pass.cpp

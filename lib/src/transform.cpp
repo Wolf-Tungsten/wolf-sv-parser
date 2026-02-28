@@ -1,13 +1,11 @@
 #include "transform.hpp"
 
 #include "transform/blackbox_guard.hpp"
-#include "transform/const_fold.hpp"
-#include "transform/dead_code_elim.hpp"
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
-#include "transform/redundant_elim.hpp"
+#include "transform/simplify.hpp"
 #include "transform/xmr_resolve.hpp"
 
 #include <chrono>
@@ -398,10 +396,8 @@ namespace wolvrix::lib::transform
             "multidriven-guard",
             "hier-flatten",
             "xmr-resolve",
-            "const-fold",
-            "redundant-elim",
             "memory-init-check",
-            "dead-code-elim",
+            "simplify",
             "stats",
         };
     }
@@ -494,9 +490,9 @@ namespace wolvrix::lib::transform
             }
             return std::make_unique<HierFlattenPass>(options);
         }
-        if (normalized == "const-fold")
+        if (normalized == "simplify")
         {
-            ConstantFoldOptions options;
+            SimplifyOptions options;
             for (std::size_t i = 0; i < args.size(); ++i)
             {
                 const std::string_view arg = args[i];
@@ -517,26 +513,77 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
-                else if (arg == "-allow-x")
+                else if (arg == "-x-fold" || arg.starts_with("-x-fold="))
                 {
-                    options.allowXPropagation = true;
+                    std::string_view value;
+                    if (arg == "-x-fold")
+                    {
+                        if (i + 1 >= args.size())
+                        {
+                            error = "-x-fold expects a value";
+                            return nullptr;
+                        }
+                        value = args[++i];
+                    }
+                    else
+                    {
+                        value = arg.substr(std::string_view("-x-fold=").size());
+                    }
+                    if (value == "strict")
+                    {
+                        options.xFold = ConstantFoldOptions::XFoldMode::Strict;
+                    }
+                    else if (value == "known")
+                    {
+                        options.xFold = ConstantFoldOptions::XFoldMode::Known;
+                    }
+                    else if (value == "propagate")
+                    {
+                        options.xFold = ConstantFoldOptions::XFoldMode::Propagate;
+                    }
+                    else
+                    {
+                        error = "unknown -x-fold mode";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-semantics" || arg.starts_with("-semantics="))
+                {
+                    std::string_view value;
+                    if (arg == "-semantics")
+                    {
+                        if (i + 1 >= args.size())
+                        {
+                            error = "-semantics expects a value";
+                            return nullptr;
+                        }
+                        value = args[++i];
+                    }
+                    else
+                    {
+                        value = arg.substr(std::string_view("-semantics=").size());
+                    }
+                    if (value == "2state")
+                    {
+                        options.semantics = ConstantFoldOptions::Semantics::TwoState;
+                    }
+                    else if (value == "4state")
+                    {
+                        options.semantics = ConstantFoldOptions::Semantics::FourState;
+                    }
+                    else
+                    {
+                        error = "unknown -semantics mode";
+                        return nullptr;
+                    }
                 }
                 else
                 {
-                    error = "unknown const-fold option";
+                    error = "unknown simplify option";
                     return nullptr;
                 }
             }
-            return std::make_unique<ConstantFoldPass>(options);
-        }
-        if (normalized == "redundant-elim")
-        {
-            if (!args.empty())
-            {
-                error = "redundant-elim does not accept arguments";
-                return nullptr;
-            }
-            return std::make_unique<RedundantElimPass>();
+            return std::make_unique<SimplifyPass>(options);
         }
         if (normalized == "memory-init-check")
         {
@@ -546,15 +593,6 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<MemoryInitCheckPass>();
-        }
-        if (normalized == "dead-code-elim")
-        {
-            if (!args.empty())
-            {
-                error = "dead-code-elim does not accept arguments";
-                return nullptr;
-            }
-            return std::make_unique<DeadCodeElimPass>();
         }
         if (normalized == "stats")
         {

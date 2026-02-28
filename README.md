@@ -32,10 +32,8 @@ import wolvrix
 design = wolvrix.read_sv("path/to/file.sv", slang_args=["--top", "top"], log_level="warn")
 pipeline = [
     "xmr-resolve",
-    "const-fold",
-    "redundant-elim",
+    "simplify",
     "memory-init-check",
-    "dead-code-elim",
     "stats",
 ]
 wolvrix.run_pipeline(design, pipeline)

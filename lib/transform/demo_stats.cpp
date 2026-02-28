@@ -33,6 +33,7 @@ namespace wolvrix::lib::transform
         result.changed = false;
         result.failed = false;
         result.artifacts.push_back(oss.str());
+
         return result;
     }
 

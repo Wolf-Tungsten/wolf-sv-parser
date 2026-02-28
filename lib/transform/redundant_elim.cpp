@@ -394,7 +394,6 @@ namespace wolvrix::lib::transform
         {
             wolvrix::lib::grh::Graph &graph = *entry.second;
             bool graphChanged = false;
-            bool progress = true;
             uint32_t inlineConstCounter = 0;
             auto eraseOp = [&](auto opId, auto... args) -> bool {
                 if (graph.eraseOp(opId, args...))
@@ -405,249 +404,183 @@ namespace wolvrix::lib::transform
                 return false;
             };
 
-            while (progress)
+            std::vector<wolvrix::lib::grh::OperationId> ops(graph.operations().begin(),
+                                                  graph.operations().end());
+            for (const auto opId : ops)
             {
-                progress = false;
-                std::vector<wolvrix::lib::grh::OperationId> ops(graph.operations().begin(),
-                                                      graph.operations().end());
-                for (const auto opId : ops)
+                const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
+                const auto &operands = op.operands();
+                const auto &results = op.results();
+
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kAssign &&
+                    operands.size() == 1 && results.size() == 1)
                 {
-                    const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                    const auto &operands = op.operands();
-                    const auto &results = op.results();
-
-                    if (op.kind() == wolvrix::lib::grh::OperationKind::kAssign &&
-                        operands.size() == 1 && results.size() == 1)
+                    const wolvrix::lib::grh::ValueId srcId = operands[0];
+                    const wolvrix::lib::grh::ValueId dstId = results[0];
+                    if (!srcId.valid() || !dstId.valid())
                     {
-                        const wolvrix::lib::grh::ValueId srcId = operands[0];
-                        const wolvrix::lib::grh::ValueId dstId = results[0];
-                        if (!srcId.valid() || !dstId.valid())
-                        {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::Value srcValue = graph.getValue(srcId);
-                        const wolvrix::lib::grh::Value dstValue = graph.getValue(dstId);
-
-                        if (isOutputPortValue(dstValue) && !hasOtherUsers(dstValue))
-                        {
-                            const wolvrix::lib::grh::OperationId constOpId = srcValue.definingOp();
-                            if (constOpId.valid())
-                            {
-                                const wolvrix::lib::grh::Operation constOp = graph.getOperation(constOpId);
-                                if (constOp.kind() == wolvrix::lib::grh::OperationKind::kConstant &&
-                                    constOp.results().size() == 1)
-                                {
-                                    auto constLiteral = constOp.attr("constValue");
-                                    if (!constLiteral)
-                                    {
-                                        continue;
-                                    }
-                                    const auto *literalText =
-                                        std::get_if<std::string>(&*constLiteral);
-                                    if (!literalText)
-                                    {
-                                        continue;
-                                    }
-                                    if (!eraseOp(opId))
-                                    {
-                                        continue;
-                                    }
-                                    if (isSingleUser(srcValue, opId) &&
-                                        !srcValue.isOutput())
-                                    {
-                                        try
-                                        {
-                                            graph.replaceResult(constOpId, 0, dstId);
-                                            graphChanged = true;
-                                            progress = true;
-                                            continue;
-                                        }
-                                        catch (const std::exception &)
-                                        {
-                                            // Fall through to clone path.
-                                        }
-                                    }
-
-                                    const std::string opName =
-                                        makeInlineConstName(graph, "op", dstValue.symbolText(),
-                                                            inlineConstCounter);
-                                    wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
-                                    wolvrix::lib::grh::OperationId newConst =
-                                        graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant,
-                                                              opSym);
-                                    graph.addResult(newConst, dstId);
-                                    graph.setAttr(newConst, "constValue", *literalText);
-                                    graph.setOpSrcLoc(newConst,
-                                                      makeTransformSrcLoc("redundant-elim", "clone_const"));
-                                    graphChanged = true;
-                                    progress = true;
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-
-                    if (op.kind() == wolvrix::lib::grh::OperationKind::kConcat &&
-                        operands.size() == 1 && results.size() == 1)
-                    {
-                        const wolvrix::lib::grh::ValueId operandId = operands[0];
-                        const wolvrix::lib::grh::ValueId resultId = results[0];
-                        if (!operandId.valid() || !resultId.valid())
-                        {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::Value operandValue = graph.getValue(operandId);
-                        const wolvrix::lib::grh::Value resultValue = graph.getValue(resultId);
-                        if (!isTemporarySymbol(graph, resultValue))
-                        {
-                            continue;
-                        }
-                        if (operandValue.width() != resultValue.width() ||
-                            operandValue.isSigned() != resultValue.isSigned())
-                        {
-                            continue;
-                        }
-                        auto onError = [&](const std::string &msg)
-                        { this->error(graph, op, msg); };
-                        replaceUsers(graph, resultId, operandId, onError);
-                        if (eraseOp(opId))
-                        {
-                            graphChanged = true;
-                            progress = true;
-                        }
                         continue;
                     }
+                    const wolvrix::lib::grh::Value srcValue = graph.getValue(srcId);
+                    const wolvrix::lib::grh::Value dstValue = graph.getValue(dstId);
 
-                    if (op.kind() == wolvrix::lib::grh::OperationKind::kLogicOr &&
-                        operands.size() >= 2 && results.size() == 1)
+                    if (isOutputPortValue(dstValue) && !hasOtherUsers(dstValue))
                     {
-                        const wolvrix::lib::grh::ValueId resultId = results[0];
-                        if (!resultId.valid())
+                        const wolvrix::lib::grh::OperationId constOpId = srcValue.definingOp();
+                        if (constOpId.valid())
                         {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::Value resultValue = graph.getValue(resultId);
-                        if (resultValue.width() != 1)
-                        {
-                            continue;
-                        }
-                        bool alwaysTrue = false;
-                        for (std::size_t i = 0; i < operands.size() && !alwaysTrue; ++i)
-                        {
-                            const wolvrix::lib::grh::ValueId lhs = operands[i];
-                            if (!lhs.valid())
+                            const wolvrix::lib::grh::Operation constOp = graph.getOperation(constOpId);
+                            if (constOp.kind() == wolvrix::lib::grh::OperationKind::kConstant &&
+                                constOp.results().size() == 1)
                             {
-                                continue;
-                            }
-                            for (std::size_t j = i + 1; j < operands.size(); ++j)
-                            {
-                                const wolvrix::lib::grh::ValueId rhs = operands[j];
-                                if (!rhs.valid())
+                                auto constLiteral = constOp.attr("constValue");
+                                if (!constLiteral)
                                 {
                                     continue;
                                 }
-                                if (isLogicNotOf(graph, lhs, rhs) ||
-                                    isLogicNotOf(graph, rhs, lhs))
+                                const auto *literalText =
+                                    std::get_if<std::string>(&*constLiteral);
+                                if (!literalText)
                                 {
-                                    alwaysTrue = true;
-                                    break;
+                                    continue;
                                 }
+                                if (!eraseOp(opId))
+                                {
+                                    continue;
+                                }
+                                if (isSingleUser(srcValue, opId) &&
+                                    !srcValue.isOutput())
+                                {
+                                    try
+                                    {
+                                        graph.replaceResult(constOpId, 0, dstId);
+                                        graphChanged = true;
+                                        continue;
+                                    }
+                                    catch (const std::exception &)
+                                    {
+                                        // Fall through to clone path.
+                                    }
+                                }
+
+                                const std::string opName =
+                                    makeInlineConstName(graph, "op", dstValue.symbolText(),
+                                                        inlineConstCounter);
+                                wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+                                wolvrix::lib::grh::OperationId newConst =
+                                    graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant,
+                                                          opSym);
+                                graph.addResult(newConst, dstId);
+                                graph.setAttr(newConst, "constValue", *literalText);
+                                graph.setOpSrcLoc(newConst,
+                                                  makeTransformSrcLoc("redundant-elim", "clone_const"));
+                                graphChanged = true;
+                                continue;
                             }
-                        }
-                        if (alwaysTrue)
-                        {
-                            auto onError = [&](const std::string &msg)
-                            { this->error(graph, op, msg); };
-                            wolvrix::lib::grh::ValueId constOne =
-                                createInlineConst(graph, resultValue.symbolText(),
-                                                  1, resultValue.isSigned(), "1'b1",
-                                                  inlineConstCounter);
-                            replaceUsers(graph, resultId, constOne, onError);
-                            eraseOp(opId);
-                            graphChanged = true;
-                            progress = true;
-                            continue;
                         }
                     }
+                }
 
-                    if (op.kind() == wolvrix::lib::grh::OperationKind::kAssign &&
-                        operands.size() == 1 && results.size() == 1)
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kConcat &&
+                    operands.size() == 1 && results.size() == 1)
+                {
+                    const wolvrix::lib::grh::ValueId operandId = operands[0];
+                    const wolvrix::lib::grh::ValueId resultId = results[0];
+                    if (!operandId.valid() || !resultId.valid())
                     {
-                        const wolvrix::lib::grh::ValueId srcId = operands[0];
-                        const wolvrix::lib::grh::ValueId dstId = results[0];
-                        if (!srcId.valid() || !dstId.valid())
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Value operandValue = graph.getValue(operandId);
+                    const wolvrix::lib::grh::Value resultValue = graph.getValue(resultId);
+                    if (!isTemporarySymbol(graph, resultValue))
+                    {
+                        continue;
+                    }
+                    if (operandValue.width() != resultValue.width() ||
+                        operandValue.isSigned() != resultValue.isSigned())
+                    {
+                        continue;
+                    }
+                    auto onError = [&](const std::string &msg)
+                    { this->error(graph, op, msg); };
+                    replaceUsers(graph, resultId, operandId, onError);
+                    if (eraseOp(opId))
+                    {
+                        graphChanged = true;
+                    }
+                    continue;
+                }
+
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kLogicOr &&
+                    operands.size() >= 2 && results.size() == 1)
+                {
+                    const wolvrix::lib::grh::ValueId resultId = results[0];
+                    if (!resultId.valid())
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Value resultValue = graph.getValue(resultId);
+                    if (resultValue.width() != 1)
+                    {
+                        continue;
+                    }
+                    bool alwaysTrue = false;
+                    for (std::size_t i = 0; i < operands.size() && !alwaysTrue; ++i)
+                    {
+                        const wolvrix::lib::grh::ValueId lhs = operands[i];
+                        if (!lhs.valid())
                         {
                             continue;
                         }
-                        const wolvrix::lib::grh::Value srcValue = graph.getValue(srcId);
-                        const wolvrix::lib::grh::Value dstValue = graph.getValue(dstId);
-                        if (isOutputPortValue(dstValue) && !hasOtherUsers(dstValue))
+                        for (std::size_t j = i + 1; j < operands.size(); ++j)
                         {
-                            if (srcValue.isInput() || srcValue.isOutput() || srcValue.isInout())
+                            const wolvrix::lib::grh::ValueId rhs = operands[j];
+                            if (!rhs.valid())
                             {
                                 continue;
                             }
-                            if (!dstValue.definingOp().valid() ||
-                                dstValue.definingOp() != opId)
+                            if (isLogicNotOf(graph, lhs, rhs) ||
+                                isLogicNotOf(graph, rhs, lhs))
                             {
-                                continue;
+                                alwaysTrue = true;
+                                break;
                             }
-                            if (!isSingleUser(srcValue, opId))
-                            {
-                                continue;
-                            }
-                            if (srcValue.width() != dstValue.width() ||
-                                srcValue.isSigned() != dstValue.isSigned())
-                            {
-                                continue;
-                            }
-                            const wolvrix::lib::grh::OperationId defOpId =
-                                srcValue.definingOp();
-                            if (!defOpId.valid() || defOpId == opId)
-                            {
-                                continue;
-                            }
-                            const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
-                            if (defOp.results().empty())
-                            {
-                                continue;
-                            }
-                            std::size_t defIndex = defOp.results().size();
-                            for (std::size_t i = 0; i < defOp.results().size(); ++i)
-                            {
-                                if (defOp.results()[i] == srcId)
-                                {
-                                    defIndex = i;
-                                    break;
-                                }
-                            }
-                            if (defIndex >= defOp.results().size())
-                            {
-                                continue;
-                            }
-                            if (!eraseOp(opId))
-                            {
-                                continue;
-                            }
-                            try
-                            {
-                                graph.replaceResult(defOpId, defIndex, dstId);
-                                graphChanged = true;
-                                progress = true;
-                            }
-                            catch (const std::exception &ex)
-                            {
-                                this->error(graph, defOp,
-                                            std::string("Failed to inline output assign: ") +
-                                                ex.what());
-                            }
-                            continue;
                         }
-                        if (dstValue.isInput() || dstValue.isOutput() || dstValue.isInout())
+                    }
+                    if (alwaysTrue)
+                    {
+                        auto onError = [&](const std::string &msg)
+                        { this->error(graph, op, msg); };
+                        wolvrix::lib::grh::ValueId constOne =
+                            createInlineConst(graph, resultValue.symbolText(),
+                                              1, resultValue.isSigned(), "1'b1",
+                                              inlineConstCounter);
+                        replaceUsers(graph, resultId, constOne, onError);
+                        eraseOp(opId);
+                        graphChanged = true;
+                        continue;
+                    }
+                }
+
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kAssign &&
+                    operands.size() == 1 && results.size() == 1)
+                {
+                    const wolvrix::lib::grh::ValueId srcId = operands[0];
+                    const wolvrix::lib::grh::ValueId dstId = results[0];
+                    if (!srcId.valid() || !dstId.valid())
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Value srcValue = graph.getValue(srcId);
+                    const wolvrix::lib::grh::Value dstValue = graph.getValue(dstId);
+                    if (isOutputPortValue(dstValue) && !hasOtherUsers(dstValue))
+                    {
+                        if (srcValue.isInput() || srcValue.isOutput() || srcValue.isInout())
                         {
                             continue;
                         }
-                        if (!isTemporarySymbol(graph, srcValue))
+                        if (!dstValue.definingOp().valid() ||
+                            dstValue.definingOp() != opId)
                         {
                             continue;
                         }
@@ -660,7 +593,8 @@ namespace wolvrix::lib::transform
                         {
                             continue;
                         }
-                        const wolvrix::lib::grh::OperationId defOpId = srcValue.definingOp();
+                        const wolvrix::lib::grh::OperationId defOpId =
+                            srcValue.definingOp();
                         if (!defOpId.valid() || defOpId == opId)
                         {
                             continue;
@@ -683,7 +617,7 @@ namespace wolvrix::lib::transform
                         {
                             continue;
                         }
-                        if (!eraseOp(opId, std::array<wolvrix::lib::grh::ValueId, 1>{dstId}))
+                        if (!eraseOp(opId))
                         {
                             continue;
                         }
@@ -691,121 +625,174 @@ namespace wolvrix::lib::transform
                         {
                             graph.replaceResult(defOpId, defIndex, dstId);
                             graphChanged = true;
-                            progress = true;
                         }
                         catch (const std::exception &ex)
                         {
                             this->error(graph, defOp,
-                                        std::string("Failed to inline assign: ") + ex.what());
+                                        std::string("Failed to inline output assign: ") +
+                                            ex.what());
                         }
                         continue;
                     }
-
-                    if (op.kind() == wolvrix::lib::grh::OperationKind::kNot &&
-                        operands.size() == 1 && results.size() == 1)
+                    if (dstValue.isInput() || dstValue.isOutput() || dstValue.isInout())
                     {
-                        const wolvrix::lib::grh::ValueId operandId = operands[0];
-                        const wolvrix::lib::grh::ValueId resultId = results[0];
-                        if (!operandId.valid() || !resultId.valid())
-                        {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::Value operandValue = graph.getValue(operandId);
-                        if (!isTemporarySymbol(graph, operandValue))
-                        {
-                            continue;
-                        }
-                        if (!isSingleUser(operandValue, opId))
-                        {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::OperationId defOpId = operandValue.definingOp();
-                        if (!defOpId.valid())
-                        {
-                            continue;
-                        }
-                        const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
-                        if (defOp.kind() != wolvrix::lib::grh::OperationKind::kXor)
-                        {
-                            continue;
-                        }
-                        if (defOp.results().empty())
-                        {
-                            continue;
-                        }
-                        std::size_t defIndex = defOp.results().size();
-                        for (std::size_t i = 0; i < defOp.results().size(); ++i)
-                        {
-                            if (defOp.results()[i] == operandId)
-                            {
-                                defIndex = i;
-                                break;
-                            }
-                        }
-                        if (defIndex >= defOp.results().size())
-                        {
-                            continue;
-                        }
-                        if (!eraseOp(opId, std::array<wolvrix::lib::grh::ValueId, 1>{resultId}))
-                        {
-                            continue;
-                        }
-                        graph.setOpKind(defOpId, wolvrix::lib::grh::OperationKind::kXnor);
-                        try
-                        {
-                            graph.replaceResult(defOpId, defIndex, resultId);
-                            graphChanged = true;
-                            progress = true;
-                        }
-                        catch (const std::exception &ex)
-                        {
-                            this->error(graph, defOp,
-                                        std::string("Failed to fold NOT/XOR: ") + ex.what());
-                        }
                         continue;
                     }
+                    if (!isTemporarySymbol(graph, srcValue))
+                    {
+                        continue;
+                    }
+                    if (!isSingleUser(srcValue, opId))
+                    {
+                        continue;
+                    }
+                    if (srcValue.width() != dstValue.width() ||
+                        srcValue.isSigned() != dstValue.isSigned())
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::OperationId defOpId = srcValue.definingOp();
+                    if (!defOpId.valid() || defOpId == opId)
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
+                    if (defOp.results().empty())
+                    {
+                        continue;
+                    }
+                    std::size_t defIndex = defOp.results().size();
+                    for (std::size_t i = 0; i < defOp.results().size(); ++i)
+                    {
+                        if (defOp.results()[i] == srcId)
+                        {
+                            defIndex = i;
+                            break;
+                        }
+                    }
+                    if (defIndex >= defOp.results().size())
+                    {
+                        continue;
+                    }
+                    if (!eraseOp(opId, std::array<wolvrix::lib::grh::ValueId, 1>{dstId}))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        graph.replaceResult(defOpId, defIndex, dstId);
+                        graphChanged = true;
+                    }
+                    catch (const std::exception &ex)
+                    {
+                        this->error(graph, defOp,
+                                    std::string("Failed to inline assign: ") + ex.what());
+                    }
+                    continue;
                 }
 
-                struct CseEntry
+                if (op.kind() == wolvrix::lib::grh::OperationKind::kNot &&
+                    operands.size() == 1 && results.size() == 1)
                 {
-                    wolvrix::lib::grh::OperationId op;
-                    wolvrix::lib::grh::ValueId value;
-                };
-
-                std::unordered_map<OpSignature, CseEntry, OpSignatureHash> seen;
-                std::vector<wolvrix::lib::grh::OperationId> cseOps(graph.operations().begin(),
-                                                          graph.operations().end());
-                for (const auto opId : cseOps)
-                {
-                    const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                    if (!isCseCandidate(graph, op))
+                    const wolvrix::lib::grh::ValueId operandId = operands[0];
+                    const wolvrix::lib::grh::ValueId resultId = results[0];
+                    if (!operandId.valid() || !resultId.valid())
                     {
                         continue;
                     }
-                    const wolvrix::lib::grh::ValueId resultId = op.results()[0];
-                    if (graph.getValue(resultId).type() != wolvrix::lib::grh::ValueType::Logic)
+                    const wolvrix::lib::grh::Value operandValue = graph.getValue(operandId);
+                    if (!isTemporarySymbol(graph, operandValue))
                     {
                         continue;
                     }
-                    OpSignature sig = makeSignature(graph, op);
-                    auto [it, inserted] = seen.emplace(std::move(sig), CseEntry{opId, resultId});
-                    if (inserted)
+                    if (!isSingleUser(operandValue, opId))
                     {
                         continue;
                     }
-                    const wolvrix::lib::grh::ValueId canonicalValue = it->second.value;
-                    if (canonicalValue == resultId)
+                    const wolvrix::lib::grh::OperationId defOpId = operandValue.definingOp();
+                    if (!defOpId.valid())
                     {
                         continue;
                     }
-                    auto onError = [&](const std::string &msg)
-                    { this->error(graph, op, msg); };
-                    replaceUsers(graph, resultId, canonicalValue, onError);
-                    if (eraseOp(opId))
+                    const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
+                    if (defOp.kind() != wolvrix::lib::grh::OperationKind::kXor)
                     {
+                        continue;
+                    }
+                    if (defOp.results().empty())
+                    {
+                        continue;
+                    }
+                    std::size_t defIndex = defOp.results().size();
+                    for (std::size_t i = 0; i < defOp.results().size(); ++i)
+                    {
+                        if (defOp.results()[i] == operandId)
+                        {
+                            defIndex = i;
+                            break;
+                        }
+                    }
+                    if (defIndex >= defOp.results().size())
+                    {
+                        continue;
+                    }
+                    if (!eraseOp(opId, std::array<wolvrix::lib::grh::ValueId, 1>{resultId}))
+                    {
+                        continue;
+                    }
+                    graph.setOpKind(defOpId, wolvrix::lib::grh::OperationKind::kXnor);
+                    try
+                    {
+                        graph.replaceResult(defOpId, defIndex, resultId);
                         graphChanged = true;
-                        progress = true;
                     }
+                    catch (const std::exception &ex)
+                    {
+                        this->error(graph, defOp,
+                                    std::string("Failed to fold NOT/XOR: ") + ex.what());
+                    }
+                    continue;
+                }
+            }
+
+            struct CseEntry
+            {
+                wolvrix::lib::grh::OperationId op;
+                wolvrix::lib::grh::ValueId value;
+            };
+
+            std::unordered_map<OpSignature, CseEntry, OpSignatureHash> seen;
+            std::vector<wolvrix::lib::grh::OperationId> cseOps(graph.operations().begin(),
+                                                      graph.operations().end());
+            for (const auto opId : cseOps)
+            {
+                const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
+                if (!isCseCandidate(graph, op))
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::ValueId resultId = op.results()[0];
+                if (graph.getValue(resultId).type() != wolvrix::lib::grh::ValueType::Logic)
+                {
+                    continue;
+                }
+                OpSignature sig = makeSignature(graph, op);
+                auto [it, inserted] = seen.emplace(std::move(sig), CseEntry{opId, resultId});
+                if (inserted)
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::ValueId canonicalValue = it->second.value;
+                if (canonicalValue == resultId)
+                {
+                    continue;
+                }
+                auto onError = [&](const std::string &msg)
+                { this->error(graph, op, msg); };
+                replaceUsers(graph, resultId, canonicalValue, onError);
+                if (eraseOp(opId))
+                {
+                    graphChanged = true;
                 }
             }
 

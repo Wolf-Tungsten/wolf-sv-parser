@@ -14,8 +14,19 @@ namespace wolvrix::lib::transform
 
     struct ConstantFoldOptions
     {
-        int maxIterations = 8;
-        bool allowXPropagation = false;
+        enum class XFoldMode
+        {
+            Strict,
+            Known,
+            Propagate
+        };
+        enum class Semantics
+        {
+            FourState,
+            TwoState
+        };
+        XFoldMode xFold = XFoldMode::Known;
+        Semantics semantics = Semantics::FourState;
     };
 
     // Forward declarations for internal types
@@ -43,6 +54,7 @@ namespace wolvrix::lib::transform
             std::unique_ptr<ConstantPool> pool;  // Per-graph constant pool for deduplication
             std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> foldedOps;  // Per-graph folded operations
             bool &failed;
+            bool protectDeclaredSymbols = false;
             std::size_t dedupedConstants = 0;
             std::size_t foldedOpsCount = 0;
             std::size_t simplifiedSlices = 0;
