@@ -3,6 +3,7 @@
 #include "transform/blackbox_guard.hpp"
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
+#include "transform/latch_transparent_read.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
 #include "transform/simplify.hpp"
@@ -393,6 +394,7 @@ namespace wolvrix::lib::transform
     {
         return {
             "blackbox-guard",
+            "latch-transparent-read",
             "multidriven-guard",
             "hier-flatten",
             "xmr-resolve",
@@ -593,6 +595,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<MemoryInitCheckPass>();
+        }
+        if (normalized == "latch-transparent-read")
+        {
+            if (!args.empty())
+            {
+                error = "latch-transparent-read does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<LatchTransparentReadPass>();
         }
         if (normalized == "stats")
         {

@@ -64,6 +64,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/blackbox_guard.cpp
     lib/transform/hier_flatten.cpp
     lib/transform/xmr_resolve.cpp
+    lib/transform/latch_transparent_read.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
@@ -327,6 +328,18 @@ target_link_libraries(transform-xmr-resolve-storage
 )
 
 register_test_exe(transform-xmr-resolve-storage)
+
+# transform: latch-transparent-read
+add_executable(transform-latch-transparent-read
+    tests/transform/test_latch_transparent_read.cpp
+)
+
+target_link_libraries(transform-latch-transparent-read
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-latch-transparent-read)
 
 # ingest: symbol collector
 add_executable(ingest-symbol-collector
