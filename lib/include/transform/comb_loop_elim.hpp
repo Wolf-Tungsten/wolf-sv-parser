@@ -1,0 +1,55 @@
+#ifndef WOLVRIX_TRANSFORM_COMB_LOOP_ELIM_HPP
+#define WOLVRIX_TRANSFORM_COMB_LOOP_ELIM_HPP
+
+#include "transform.hpp"
+
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace wolvrix::lib::transform
+{
+
+    struct CombLoopReport
+    {
+        std::string graphName;
+        std::vector<wolvrix::lib::grh::ValueId> loopValues;
+        std::vector<wolvrix::lib::grh::OperationId> loopOps;
+        std::optional<wolvrix::lib::grh::SrcLoc> sourceLocation;
+        std::string description;
+    };
+
+    struct CombLoopElimOptions
+    {
+        // Maximum number of values to analyze per graph (0 means no limit).
+        std::size_t maxAnalysisNodes = 0;
+
+        // Maximum number of analysis threads (0 means use hardware concurrency).
+        std::size_t numThreads = 0;
+
+        // Whether to split values for detected false loops.
+        bool fixFalseLoops = true;
+
+        // Maximum iterations when fixing false loops.
+        std::size_t maxFixIterations = 100;
+
+        // Treat true loops as pass failures.
+        bool failOnTrueLoop = false;
+    };
+
+    class CombLoopElimPass : public Pass
+    {
+    public:
+        CombLoopElimPass();
+        explicit CombLoopElimPass(CombLoopElimOptions options);
+
+        PassResult run() override;
+
+    private:
+        CombLoopElimOptions options_;
+    };
+
+} // namespace wolvrix::lib::transform
+
+#endif // WOLVRIX_TRANSFORM_COMB_LOOP_ELIM_HPP

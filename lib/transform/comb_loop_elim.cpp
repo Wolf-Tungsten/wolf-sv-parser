@@ -1,0 +1,2052 @@
+#include "transform/comb_loop_elim.hpp"
+
+#include "grh.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace wolvrix::lib::transform
+{
+
+    namespace
+    {
+        using wolvrix::lib::grh::Graph;
+        using wolvrix::lib::grh::Operation;
+        using wolvrix::lib::grh::OperationId;
+        using wolvrix::lib::grh::OperationIdHash;
+        using wolvrix::lib::grh::OperationKind;
+        using wolvrix::lib::grh::SrcLoc;
+        using wolvrix::lib::grh::Value;
+        using wolvrix::lib::grh::ValueId;
+        using wolvrix::lib::grh::ValueIdHash;
+
+        using SuccMap = std::unordered_map<ValueId, std::vector<ValueId>, ValueIdHash>;
+
+        struct LoopInfo
+        {
+            std::vector<ValueId> loopValues;
+            std::vector<OperationId> loopOps;
+            bool isFalseLoop = false;
+            bool wasFalseLoopCandidate = false;
+        };
+
+        struct Scc
+        {
+            std::vector<ValueId> nodes;
+        };
+
+        struct TarjanState
+        {
+            const SuccMap &succ;
+            std::unordered_map<ValueId, int, ValueIdHash> index;
+            std::unordered_map<ValueId, int, ValueIdHash> lowlink;
+            std::vector<ValueId> stack;
+            std::unordered_set<ValueId, ValueIdHash> onStack;
+            std::vector<Scc> sccs;
+            int nextIndex = 0;
+        };
+
+        struct BitRange
+        {
+            int64_t low = 0;
+            int64_t high = -1;
+        };
+
+        struct RangeNode
+        {
+            ValueId value;
+            BitRange range;
+        };
+
+        inline bool operator==(const RangeNode &lhs, const RangeNode &rhs)
+        {
+            return lhs.value == rhs.value &&
+                   lhs.range.low == rhs.range.low &&
+                   lhs.range.high == rhs.range.high;
+        }
+
+        struct RangeNodeHash
+        {
+            std::size_t operator()(const RangeNode &node) const noexcept
+            {
+                std::size_t seed = ValueIdHash{}(node.value);
+                seed = seed * 1315423911u + std::hash<long long>{}(node.range.low);
+                seed = seed * 1315423911u + std::hash<long long>{}(node.range.high);
+                return seed;
+            }
+        };
+
+        using RangeSuccMap = std::unordered_map<RangeNode, std::vector<RangeNode>, RangeNodeHash>;
+        using RangeNodeSet = std::unordered_set<RangeNode, RangeNodeHash>;
+
+        struct RangeScc
+        {
+            std::vector<RangeNode> nodes;
+        };
+
+        struct RangeTarjanState
+        {
+            const RangeSuccMap &succ;
+            std::unordered_map<RangeNode, int, RangeNodeHash> index;
+            std::unordered_map<RangeNode, int, RangeNodeHash> lowlink;
+            std::vector<RangeNode> stack;
+            std::unordered_set<RangeNode, RangeNodeHash> onStack;
+            std::vector<RangeScc> sccs;
+            int nextIndex = 0;
+        };
+
+        bool isBoundaryOp(OperationKind kind)
+        {
+            switch (kind)
+            {
+            case OperationKind::kConstant:
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kDpicCall:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        void tarjanVisit(ValueId v, TarjanState &state)
+        {
+            state.index.emplace(v, state.nextIndex);
+            state.lowlink.emplace(v, state.nextIndex);
+            ++state.nextIndex;
+            state.stack.push_back(v);
+            state.onStack.insert(v);
+
+            auto it = state.succ.find(v);
+            if (it != state.succ.end())
+            {
+                for (ValueId w : it->second)
+                {
+                    if (state.index.find(w) == state.index.end())
+                    {
+                        tarjanVisit(w, state);
+                        state.lowlink[v] = std::min(state.lowlink[v], state.lowlink[w]);
+                    }
+                    else if (state.onStack.find(w) != state.onStack.end())
+                    {
+                        state.lowlink[v] = std::min(state.lowlink[v], state.index[w]);
+                    }
+                }
+            }
+
+            if (state.lowlink[v] == state.index[v])
+            {
+                Scc scc;
+                while (!state.stack.empty())
+                {
+                    ValueId w = state.stack.back();
+                    state.stack.pop_back();
+                    state.onStack.erase(w);
+                    scc.nodes.push_back(w);
+                    if (w == v)
+                    {
+                        break;
+                    }
+                }
+                state.sccs.push_back(std::move(scc));
+            }
+        }
+
+        std::vector<Scc> tarjanScc(std::span<const ValueId> nodes, const SuccMap &succ)
+        {
+            TarjanState state{succ};
+            state.index.reserve(nodes.size());
+            state.lowlink.reserve(nodes.size());
+            state.stack.reserve(nodes.size());
+            for (ValueId v : nodes)
+            {
+                if (state.index.find(v) == state.index.end())
+                {
+                    tarjanVisit(v, state);
+                }
+            }
+            return state.sccs;
+        }
+
+        bool hasSelfLoop(ValueId v, const SuccMap &succ)
+        {
+            auto it = succ.find(v);
+            if (it == succ.end())
+            {
+                return false;
+            }
+            const auto &edges = it->second;
+            return std::find(edges.begin(), edges.end(), v) != edges.end();
+        }
+
+        void rangeTarjanVisit(const RangeNode &v, RangeTarjanState &state)
+        {
+            state.index.emplace(v, state.nextIndex);
+            state.lowlink.emplace(v, state.nextIndex);
+            ++state.nextIndex;
+            state.stack.push_back(v);
+            state.onStack.insert(v);
+
+            auto it = state.succ.find(v);
+            if (it != state.succ.end())
+            {
+                for (const RangeNode &w : it->second)
+                {
+                    if (state.index.find(w) == state.index.end())
+                    {
+                        rangeTarjanVisit(w, state);
+                        state.lowlink[v] = std::min(state.lowlink[v], state.lowlink[w]);
+                    }
+                    else if (state.onStack.find(w) != state.onStack.end())
+                    {
+                        state.lowlink[v] = std::min(state.lowlink[v], state.index[w]);
+                    }
+                }
+            }
+
+            if (state.lowlink[v] == state.index[v])
+            {
+                RangeScc scc;
+                while (!state.stack.empty())
+                {
+                    RangeNode w = state.stack.back();
+                    state.stack.pop_back();
+                    state.onStack.erase(w);
+                    scc.nodes.push_back(w);
+                    if (w == v)
+                    {
+                        break;
+                    }
+                }
+                state.sccs.push_back(std::move(scc));
+            }
+        }
+
+        std::vector<RangeScc> tarjanScc(const std::vector<RangeNode> &nodes, const RangeSuccMap &succ)
+        {
+            RangeTarjanState state{succ};
+            state.index.reserve(nodes.size());
+            state.lowlink.reserve(nodes.size());
+            state.stack.reserve(nodes.size());
+            for (const RangeNode &v : nodes)
+            {
+                if (state.index.find(v) == state.index.end())
+                {
+                    rangeTarjanVisit(v, state);
+                }
+            }
+            return state.sccs;
+        }
+
+        bool hasSelfLoop(const RangeNode &v, const RangeSuccMap &succ)
+        {
+            auto it = succ.find(v);
+            if (it == succ.end())
+            {
+                return false;
+            }
+            const auto &edges = it->second;
+            return std::find(edges.begin(), edges.end(), v) != edges.end();
+        }
+
+        std::optional<int64_t> getIntAttr(const Operation &op, std::string_view key)
+        {
+            auto attr = op.attr(key);
+            if (!attr)
+            {
+                return std::nullopt;
+            }
+            if (const auto *value = std::get_if<int64_t>(&*attr))
+            {
+                return *value;
+            }
+            return std::nullopt;
+        }
+
+        bool rangeWithin(const BitRange &inner, const BitRange &outer)
+        {
+            return inner.low >= outer.low && inner.high <= outer.high;
+        }
+
+        bool rangesOverlap(const BitRange &lhs, const BitRange &rhs)
+        {
+            return !(lhs.high < rhs.low || rhs.high < lhs.low);
+        }
+
+        bool getFullRange(const Graph &graph, ValueId valueId, BitRange &out)
+        {
+            if (!valueId.valid())
+            {
+                return false;
+            }
+            const Value value = graph.getValue(valueId);
+            const int64_t width = value.width();
+            if (width <= 0)
+            {
+                return false;
+            }
+            out.low = 0;
+            out.high = width - 1;
+            return true;
+        }
+
+        bool opTouchesScc(const Operation &op, const std::unordered_set<ValueId, ValueIdHash> &sccSet)
+        {
+            bool hasOperand = false;
+            bool hasResult = false;
+            for (ValueId operand : op.operands())
+            {
+                if (sccSet.find(operand) != sccSet.end())
+                {
+                    hasOperand = true;
+                    break;
+                }
+            }
+            for (ValueId result : op.results())
+            {
+                if (sccSet.find(result) != sccSet.end())
+                {
+                    hasResult = true;
+                    break;
+                }
+            }
+            return hasOperand && hasResult;
+        }
+
+        std::vector<OperationId> collectLoopOps(const Graph &graph, const std::vector<ValueId> &loopValues)
+        {
+            std::unordered_set<ValueId, ValueIdHash> sccSet(loopValues.begin(), loopValues.end());
+            std::unordered_set<OperationId, OperationIdHash> ops;
+
+            for (ValueId valueId : loopValues)
+            {
+                const Value value = graph.getValue(valueId);
+                OperationId def = value.definingOp();
+                if (def.valid())
+                {
+                    const Operation op = graph.getOperation(def);
+                    if (opTouchesScc(op, sccSet))
+                    {
+                        ops.insert(def);
+                    }
+                }
+
+                for (const auto &user : value.users())
+                {
+                    OperationId opId = user.operation;
+                    if (!opId.valid())
+                    {
+                        continue;
+                    }
+                    const Operation op = graph.getOperation(opId);
+                    if (opTouchesScc(op, sccSet))
+                    {
+                        ops.insert(opId);
+                    }
+                }
+            }
+
+            std::vector<OperationId> out(ops.begin(), ops.end());
+            std::sort(out.begin(), out.end(), [](const OperationId &lhs, const OperationId &rhs) {
+                if (lhs.index != rhs.index)
+                {
+                    return lhs.index < rhs.index;
+                }
+                if (lhs.generation != rhs.generation)
+                {
+                    return lhs.generation < rhs.generation;
+                }
+                if (lhs.graph.index != rhs.graph.index)
+                {
+                    return lhs.graph.index < rhs.graph.index;
+                }
+                return lhs.graph.generation < rhs.graph.generation;
+            });
+            return out;
+        }
+
+        void addRangeEdge(RangeSuccMap &succ,
+                          RangeNodeSet &nodes,
+                          const RangeNode &src,
+                          const RangeNode &dst)
+        {
+            succ[src].push_back(dst);
+            nodes.insert(src);
+            nodes.insert(dst);
+        }
+
+        bool mapConcatRanges(const Graph &graph,
+                             const Operation &op,
+                             const std::unordered_set<ValueId, ValueIdHash> &loopSet,
+                             RangeSuccMap &succ,
+                             RangeNodeSet &nodes,
+                             bool &uncertain)
+        {
+            const auto &operands = op.operands();
+            const auto &results = op.results();
+            if (operands.empty() || results.empty())
+            {
+                return true;
+            }
+
+            std::vector<int64_t> widths;
+            widths.reserve(operands.size());
+            int64_t totalWidth = 0;
+            for (ValueId operand : operands)
+            {
+                if (!operand.valid())
+                {
+                    uncertain = true;
+                    return false;
+                }
+                const int64_t width = graph.getValue(operand).width();
+                if (width <= 0)
+                {
+                    uncertain = true;
+                    return false;
+                }
+                widths.push_back(width);
+                totalWidth += width;
+            }
+            if (totalWidth <= 0)
+            {
+                uncertain = true;
+                return false;
+            }
+
+            for (ValueId resultId : results)
+            {
+                if (!resultId.valid())
+                {
+                    continue;
+                }
+                BitRange resultRange{};
+                if (!getFullRange(graph, resultId, resultRange))
+                {
+                    uncertain = true;
+                    return false;
+                }
+                const int64_t resultWidth = resultRange.high - resultRange.low + 1;
+                if (resultWidth != totalWidth)
+                {
+                    uncertain = true;
+                    return false;
+                }
+
+                int64_t cursor = totalWidth;
+                for (std::size_t i = 0; i < operands.size(); ++i)
+                {
+                    const int64_t width = widths[i];
+                    const int64_t hi = cursor - 1;
+                    const int64_t lo = cursor - width;
+                    cursor = lo;
+                    ValueId operand = operands[i];
+                    if (loopSet.find(operand) == loopSet.end() ||
+                        loopSet.find(resultId) == loopSet.end())
+                    {
+                        continue;
+                    }
+                    BitRange operandRange{};
+                    if (!getFullRange(graph, operand, operandRange))
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    BitRange mapped{lo, hi};
+                    addRangeEdge(succ, nodes, RangeNode{operand, operandRange}, RangeNode{resultId, mapped});
+                }
+            }
+            return true;
+        }
+
+        bool buildRangeGraph(const LoopInfo &loop,
+                             const Graph &graph,
+                             RangeSuccMap &succ,
+                             std::vector<RangeNode> &nodes,
+                             bool &uncertain)
+        {
+            RangeNodeSet nodeSet;
+            std::unordered_set<ValueId, ValueIdHash> loopSet(loop.loopValues.begin(), loop.loopValues.end());
+
+            for (OperationId opId : loop.loopOps)
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                if (isBoundaryOp(op.kind()))
+                {
+                    continue;
+                }
+                const auto &operands = op.operands();
+                const auto &results = op.results();
+                if (operands.empty() || results.empty())
+                {
+                    continue;
+                }
+
+                switch (op.kind())
+                {
+                case OperationKind::kSliceStatic:
+                {
+                    if (operands.size() != 1 || results.size() != 1)
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    ValueId base = operands[0];
+                    ValueId resultId = results[0];
+                    if (!base.valid() || !resultId.valid())
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    auto startOpt = getIntAttr(op, "sliceStart");
+                    auto endOpt = getIntAttr(op, "sliceEnd");
+                    if (!startOpt || !endOpt)
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    BitRange baseRange{};
+                    BitRange resultRange{};
+                    if (!getFullRange(graph, base, baseRange) ||
+                        !getFullRange(graph, resultId, resultRange))
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    BitRange sliceRange{*startOpt, *endOpt};
+                    if (sliceRange.low < 0 || sliceRange.high < sliceRange.low ||
+                        !rangeWithin(sliceRange, baseRange))
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    const int64_t sliceWidth = sliceRange.high - sliceRange.low + 1;
+                    const int64_t resultWidth = resultRange.high - resultRange.low + 1;
+                    if (sliceWidth != resultWidth)
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    if (loopSet.find(base) != loopSet.end() &&
+                        loopSet.find(resultId) != loopSet.end())
+                    {
+                        addRangeEdge(succ, nodeSet, RangeNode{base, sliceRange}, RangeNode{resultId, resultRange});
+                    }
+                    break;
+                }
+                case OperationKind::kConcat:
+                    if (!mapConcatRanges(graph, op, loopSet, succ, nodeSet, uncertain))
+                    {
+                        return false;
+                    }
+                    break;
+                case OperationKind::kSliceDynamic:
+                case OperationKind::kSliceArray:
+                    uncertain = true;
+                    return false;
+                case OperationKind::kAssign:
+                {
+                    if (operands.size() != 1 || results.size() != 1)
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    ValueId operandId = operands[0];
+                    ValueId resultId = results[0];
+                    if (!operandId.valid() || !resultId.valid())
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    if (loopSet.find(operandId) == loopSet.end() ||
+                        loopSet.find(resultId) == loopSet.end())
+                    {
+                        break;
+                    }
+                    BitRange operandRange{};
+                    BitRange resultRange{};
+                    if (!getFullRange(graph, operandId, operandRange) ||
+                        !getFullRange(graph, resultId, resultRange))
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    const int64_t operandWidth = operandRange.high - operandRange.low + 1;
+                    const int64_t resultWidth = resultRange.high - resultRange.low + 1;
+                    if (operandWidth != resultWidth)
+                    {
+                        uncertain = true;
+                        return false;
+                    }
+                    addRangeEdge(succ, nodeSet, RangeNode{operandId, operandRange}, RangeNode{resultId, resultRange});
+                    break;
+                }
+                default:
+                {
+                    for (ValueId resultId : results)
+                    {
+                        if (!resultId.valid())
+                        {
+                            continue;
+                        }
+                        if (loopSet.find(resultId) == loopSet.end())
+                        {
+                            continue;
+                        }
+                        BitRange resultRange{};
+                        if (!getFullRange(graph, resultId, resultRange))
+                        {
+                            uncertain = true;
+                            return false;
+                        }
+                        for (ValueId operandId : operands)
+                        {
+                            if (!operandId.valid())
+                            {
+                                continue;
+                            }
+                            if (loopSet.find(operandId) == loopSet.end())
+                            {
+                                continue;
+                            }
+                            BitRange operandRange{};
+                            if (!getFullRange(graph, operandId, operandRange))
+                            {
+                                uncertain = true;
+                                return false;
+                            }
+                            addRangeEdge(succ, nodeSet,
+                                         RangeNode{operandId, operandRange},
+                                         RangeNode{resultId, resultRange});
+                        }
+                    }
+                    break;
+                }
+                }
+            }
+
+            nodes.assign(nodeSet.begin(), nodeSet.end());
+            return true;
+        }
+
+        bool hasOverlapOnSameValue(const RangeScc &scc)
+        {
+            std::unordered_map<ValueId, std::vector<BitRange>, ValueIdHash> rangesByValue;
+            for (const auto &node : scc.nodes)
+            {
+                rangesByValue[node.value].push_back(node.range);
+            }
+            for (auto &entry : rangesByValue)
+            {
+                auto &ranges = entry.second;
+                if (ranges.size() < 2)
+                {
+                    continue;
+                }
+                std::sort(ranges.begin(), ranges.end(),
+                          [](const BitRange &lhs, const BitRange &rhs) {
+                              if (lhs.low != rhs.low)
+                              {
+                                  return lhs.low < rhs.low;
+                              }
+                              return lhs.high < rhs.high;
+                          });
+                BitRange prev = ranges.front();
+                for (std::size_t i = 1; i < ranges.size(); ++i)
+                {
+                    if (rangesOverlap(prev, ranges[i]))
+                    {
+                        return true;
+                    }
+                    if (ranges[i].high > prev.high)
+                    {
+                        prev = ranges[i];
+                    }
+                }
+            }
+            return false;
+        }
+
+        bool classifyFalseLoop(const LoopInfo &loop, const Graph &graph, bool &analysisIncomplete)
+        {
+            RangeSuccMap rangeSucc;
+            std::vector<RangeNode> rangeNodes;
+            bool uncertain = false;
+            if (!buildRangeGraph(loop, graph, rangeSucc, rangeNodes, uncertain))
+            {
+                analysisIncomplete = true;
+                return false;
+            }
+            if (uncertain)
+            {
+                analysisIncomplete = true;
+                return false;
+            }
+            if (rangeNodes.empty())
+            {
+                return true;
+            }
+            std::vector<RangeScc> rangeSccs = tarjanScc(rangeNodes, rangeSucc);
+            for (const auto &scc : rangeSccs)
+            {
+                if (scc.nodes.empty())
+                {
+                    continue;
+                }
+                if (scc.nodes.size() == 1 && !hasSelfLoop(scc.nodes.front(), rangeSucc))
+                {
+                    continue;
+                }
+                if (scc.nodes.size() == 1 && hasSelfLoop(scc.nodes.front(), rangeSucc))
+                {
+                    return false;
+                }
+                if (hasOverlapOnSameValue(scc))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        std::optional<SrcLoc> findLoopSrcLoc(const Graph &graph,
+                                             const std::vector<ValueId> &loopValues,
+                                             const std::vector<OperationId> &loopOps)
+        {
+            for (ValueId valueId : loopValues)
+            {
+                const Value value = graph.getValue(valueId);
+                if (value.srcLoc())
+                {
+                    return value.srcLoc();
+                }
+            }
+            for (OperationId opId : loopOps)
+            {
+                const Operation op = graph.getOperation(opId);
+                if (op.srcLoc())
+                {
+                    return op.srcLoc();
+                }
+            }
+            return std::nullopt;
+        }
+
+        std::string formatValueShort(const Graph &graph, ValueId valueId)
+        {
+            const Value value = graph.getValue(valueId);
+            if (!value.symbolText().empty())
+            {
+                return std::string(value.symbolText());
+            }
+            return "value#" + std::to_string(valueId.index);
+        }
+
+        std::string formatOperationShort(const Graph &graph, OperationId opId)
+        {
+            const Operation op = graph.getOperation(opId);
+            std::string name;
+            if (!op.symbolText().empty())
+            {
+                name = std::string(op.symbolText());
+            }
+            else
+            {
+                name = "op#" + std::to_string(opId.index);
+            }
+            name.append("(");
+            name.append(std::string(wolvrix::lib::grh::toString(op.kind())));
+            name.append(")");
+            return name;
+        }
+
+        template <typename T, typename F>
+        std::string joinList(const std::vector<T> &items, std::size_t maxItems, std::string_view sep, F formatter)
+        {
+            if (items.empty())
+            {
+                return {};
+            }
+            std::string out;
+            const std::size_t count = std::min(items.size(), maxItems);
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                if (i != 0)
+                {
+                    out.append(sep);
+                }
+                out.append(formatter(items[i]));
+            }
+            if (items.size() > maxItems)
+            {
+                out.append(sep);
+                out.append("...");
+            }
+            return out;
+        }
+
+        std::string describeLoop(const LoopInfo &loop, const Graph &graph)
+        {
+            constexpr std::size_t kMaxListItems = 6;
+            std::string desc = "comb loop detected (values=";
+            desc.append(std::to_string(loop.loopValues.size()));
+            desc.append(", ops=");
+            desc.append(std::to_string(loop.loopOps.size()));
+            desc.append(")");
+
+            const std::string values = joinList<ValueId>(
+                loop.loopValues, kMaxListItems, ", ",
+                [&](ValueId id) { return formatValueShort(graph, id); });
+            if (!values.empty())
+            {
+                desc.append(" values=[");
+                desc.append(values);
+                desc.append("]");
+            }
+
+            const std::string ops = joinList<OperationId>(
+                loop.loopOps, kMaxListItems, ", ",
+                [&](OperationId id) { return formatOperationShort(graph, id); });
+            if (!ops.empty())
+            {
+                desc.append(" ops=[");
+                desc.append(ops);
+                desc.append("]");
+            }
+
+            return desc;
+        }
+
+        std::vector<LoopInfo> collectLoopInfos(const Graph &graph,
+                                               const std::span<const ValueId> values,
+                                               const SuccMap &succ)
+        {
+            std::vector<LoopInfo> loops;
+            std::vector<Scc> sccs = tarjanScc(values, succ);
+            for (const auto &scc : sccs)
+            {
+                if (scc.nodes.empty())
+                {
+                    continue;
+                }
+                if (scc.nodes.size() == 1 && !hasSelfLoop(scc.nodes.front(), succ))
+                {
+                    continue;
+                }
+                LoopInfo loop;
+                loop.loopValues = scc.nodes;
+                std::sort(loop.loopValues.begin(), loop.loopValues.end(), [](const ValueId &lhs, const ValueId &rhs) {
+                    if (lhs.index != rhs.index)
+                    {
+                        return lhs.index < rhs.index;
+                    }
+                    if (lhs.generation != rhs.generation)
+                    {
+                        return lhs.generation < rhs.generation;
+                    }
+                    if (lhs.graph.index != rhs.graph.index)
+                    {
+                        return lhs.graph.index < rhs.graph.index;
+                    }
+                    return lhs.graph.generation < rhs.graph.generation;
+                });
+                loop.loopOps = collectLoopOps(graph, loop.loopValues);
+                loops.push_back(std::move(loop));
+            }
+            return loops;
+        }
+
+        [[maybe_unused]] bool retargetSliceOp(Graph &graph,
+                             OperationId opId,
+                             const std::unordered_set<ValueId, ValueIdHash> &loopSet,
+                             std::size_t &retargeted,
+                             const std::function<void(const Operation &, std::string)> &onError)
+        {
+            const Operation op = graph.getOperation(opId);
+            if (op.kind() != OperationKind::kSliceStatic)
+            {
+                return false;
+            }
+            const auto &operands = op.operands();
+            const auto &results = op.results();
+            if (operands.size() != 1 || results.size() != 1)
+            {
+                return false;
+            }
+            ValueId base = operands[0];
+            if (!base.valid())
+            {
+                return false;
+            }
+            if (loopSet.find(base) == loopSet.end())
+            {
+                return false;
+            }
+            auto startOpt = getIntAttr(op, "sliceStart");
+            auto endOpt = getIntAttr(op, "sliceEnd");
+            if (!startOpt || !endOpt)
+            {
+                return false;
+            }
+            const int64_t low = *startOpt;
+            const int64_t high = *endOpt;
+            if (low < 0 || high < low)
+            {
+                return false;
+            }
+
+            const Value baseValue = graph.getValue(base);
+            OperationId baseDefId = baseValue.definingOp();
+            if (!baseDefId.valid())
+            {
+                return false;
+            }
+            const Operation baseDef = graph.getOperation(baseDefId);
+
+            if (baseDef.kind() == OperationKind::kAssign)
+            {
+                const auto &baseOps = baseDef.operands();
+                if (baseOps.size() != 1)
+                {
+                    return false;
+                }
+                ValueId newBase = baseOps[0];
+                if (!newBase.valid() || newBase == base)
+                {
+                    return false;
+                }
+                BitRange baseRange{};
+                BitRange newBaseRange{};
+                if (!getFullRange(graph, base, baseRange) ||
+                    !getFullRange(graph, newBase, newBaseRange))
+                {
+                    return false;
+                }
+                const int64_t baseWidth = baseRange.high - baseRange.low + 1;
+                const int64_t newWidth = newBaseRange.high - newBaseRange.low + 1;
+                if (baseWidth != newWidth)
+                {
+                    return false;
+                }
+                try
+                {
+                    graph.replaceOperand(opId, 0, newBase);
+                }
+                catch (const std::exception &ex)
+                {
+                    onError(baseDef, std::string("Failed to retarget slice through kAssign: ") + ex.what());
+                    return false;
+                }
+                ++retargeted;
+                return true;
+            }
+
+            if (baseDef.kind() == OperationKind::kSliceStatic)
+            {
+                const auto &baseOps = baseDef.operands();
+                if (baseOps.size() != 1)
+                {
+                    return false;
+                }
+                auto baseStart = getIntAttr(baseDef, "sliceStart");
+                auto baseEnd = getIntAttr(baseDef, "sliceEnd");
+                if (!baseStart || !baseEnd)
+                {
+                    return false;
+                }
+                const int64_t baseLow = *baseStart;
+                const int64_t baseHigh = *baseEnd;
+                if (baseLow < 0 || baseHigh < baseLow)
+                {
+                    return false;
+                }
+                ValueId newBase = baseOps[0];
+                if (!newBase.valid())
+                {
+                    return false;
+                }
+                const int64_t newLow = baseLow + low;
+                const int64_t newHigh = baseLow + high;
+                BitRange newBaseRange{};
+                if (!getFullRange(graph, newBase, newBaseRange))
+                {
+                    return false;
+                }
+                if (newLow < 0 || newHigh < newLow || newHigh > newBaseRange.high)
+                {
+                    return false;
+                }
+                bool changed = false;
+                try
+                {
+                    if (newBase != base)
+                    {
+                        graph.replaceOperand(opId, 0, newBase);
+                        changed = true;
+                    }
+                    if (newLow != low)
+                    {
+                        graph.setAttr(opId, "sliceStart", newLow);
+                        changed = true;
+                    }
+                    if (newHigh != high)
+                    {
+                        graph.setAttr(opId, "sliceEnd", newHigh);
+                        changed = true;
+                    }
+                }
+                catch (const std::exception &ex)
+                {
+                    onError(baseDef, std::string("Failed to retarget slice through kSliceStatic: ") + ex.what());
+                    return false;
+                }
+                if (changed)
+                {
+                    ++retargeted;
+                }
+                return changed;
+            }
+
+            if (baseDef.kind() == OperationKind::kConcat)
+            {
+                const auto &concatOps = baseDef.operands();
+                if (concatOps.empty())
+                {
+                    return false;
+                }
+                std::vector<int64_t> widths;
+                widths.reserve(concatOps.size());
+                int64_t totalWidth = 0;
+                for (ValueId operandId : concatOps)
+                {
+                    if (!operandId.valid())
+                    {
+                        return false;
+                    }
+                    const int64_t width = graph.getValue(operandId).width();
+                    if (width <= 0)
+                    {
+                        return false;
+                    }
+                    widths.push_back(width);
+                    totalWidth += width;
+                }
+                if (totalWidth <= 0)
+                {
+                    return false;
+                }
+                BitRange baseRange{};
+                if (!getFullRange(graph, base, baseRange))
+                {
+                    return false;
+                }
+                const int64_t baseWidth = baseRange.high - baseRange.low + 1;
+                if (baseWidth != totalWidth)
+                {
+                    return false;
+                }
+                if (high >= totalWidth)
+                {
+                    return false;
+                }
+
+                int64_t cursor = totalWidth;
+                for (std::size_t i = 0; i < concatOps.size(); ++i)
+                {
+                    const int64_t width = widths[i];
+                    const int64_t opHigh = cursor - 1;
+                    const int64_t opLow = cursor - width;
+                    cursor = opLow;
+                    if (low < opLow || high > opHigh)
+                    {
+                        continue;
+                    }
+                    const int64_t newLow = low - opLow;
+                    const int64_t newHigh = high - opLow;
+                    ValueId newBase = concatOps[i];
+                    if (!newBase.valid())
+                    {
+                        return false;
+                    }
+                    bool changed = false;
+                    try
+                    {
+                        if (newBase != base)
+                        {
+                            graph.replaceOperand(opId, 0, newBase);
+                            changed = true;
+                        }
+                        if (newLow != low)
+                        {
+                            graph.setAttr(opId, "sliceStart", newLow);
+                            changed = true;
+                        }
+                        if (newHigh != high)
+                        {
+                            graph.setAttr(opId, "sliceEnd", newHigh);
+                            changed = true;
+                        }
+                    }
+                    catch (const std::exception &ex)
+                    {
+                        onError(baseDef, std::string("Failed to retarget slice through kConcat: ") + ex.what());
+                        return false;
+                    }
+                    if (changed)
+                    {
+                        ++retargeted;
+                    }
+                    return changed;
+                }
+            }
+
+            return false;
+        }
+
+        struct MappingEdge
+        {
+            ValueId src;
+            ValueId dst;
+            int64_t srcLow = 0;
+            int64_t dstLow = 0;
+            int64_t width = 0;
+        };
+
+        bool collectCopyEdges(const Graph &graph,
+                              const std::vector<OperationId> &loopOps,
+                              std::vector<MappingEdge> &edges)
+        {
+            edges.clear();
+            for (OperationId opId : loopOps)
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                const auto &operands = op.operands();
+                const auto &results = op.results();
+                if (results.size() != 1)
+                {
+                    return false;
+                }
+                const ValueId resultId = results[0];
+                if (!resultId.valid())
+                {
+                    return false;
+                }
+                const int64_t resultWidth = graph.getValue(resultId).width();
+                if (resultWidth <= 0)
+                {
+                    return false;
+                }
+                switch (op.kind())
+                {
+                case OperationKind::kAssign:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    const int64_t operandWidth = graph.getValue(operands[0]).width();
+                    if (operandWidth != resultWidth)
+                    {
+                        return false;
+                    }
+                    edges.push_back(MappingEdge{operands[0], resultId, 0, 0, resultWidth});
+                    break;
+                }
+                case OperationKind::kSliceStatic:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    auto startOpt = getIntAttr(op, "sliceStart");
+                    auto endOpt = getIntAttr(op, "sliceEnd");
+                    if (!startOpt || !endOpt)
+                    {
+                        return false;
+                    }
+                    const int64_t sliceLow = *startOpt;
+                    const int64_t sliceHigh = *endOpt;
+                    if (sliceLow < 0 || sliceHigh < sliceLow)
+                    {
+                        return false;
+                    }
+                    const int64_t sliceWidth = sliceHigh - sliceLow + 1;
+                    if (sliceWidth != resultWidth)
+                    {
+                        return false;
+                    }
+                    edges.push_back(MappingEdge{operands[0], resultId, sliceLow, 0, sliceWidth});
+                    break;
+                }
+                case OperationKind::kConcat:
+                {
+                    if (operands.empty())
+                    {
+                        return false;
+                    }
+                    std::vector<int64_t> widths;
+                    widths.reserve(operands.size());
+                    int64_t totalWidth = 0;
+                    for (ValueId operand : operands)
+                    {
+                        if (!operand.valid())
+                        {
+                            return false;
+                        }
+                        const int64_t width = graph.getValue(operand).width();
+                        if (width <= 0)
+                        {
+                            return false;
+                        }
+                        widths.push_back(width);
+                        totalWidth += width;
+                    }
+                    if (totalWidth != resultWidth)
+                    {
+                        return false;
+                    }
+                    int64_t cursor = totalWidth;
+                    for (std::size_t i = 0; i < operands.size(); ++i)
+                    {
+                        const int64_t width = widths[i];
+                        const int64_t hi = cursor - 1;
+                        const int64_t lo = cursor - width;
+                        cursor = lo;
+                        edges.push_back(MappingEdge{operands[i], resultId, 0, lo, width});
+                    }
+                    break;
+                }
+                default:
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool buildLoopPartitions(const Graph &graph,
+                                 const std::vector<ValueId> &loopValues,
+                                 const std::vector<MappingEdge> &edges,
+                                 std::unordered_map<ValueId, std::vector<BitRange>, ValueIdHash> &segments)
+        {
+            std::unordered_set<ValueId, ValueIdHash> loopSet(loopValues.begin(), loopValues.end());
+            std::unordered_map<ValueId, std::set<int64_t>, ValueIdHash> boundaries;
+            boundaries.reserve(loopValues.size());
+            for (ValueId valueId : loopValues)
+            {
+                const int64_t width = graph.getValue(valueId).width();
+                if (width <= 0)
+                {
+                    return false;
+                }
+                auto &cuts = boundaries[valueId];
+                cuts.insert(0);
+                cuts.insert(width);
+            }
+
+            for (const auto &edge : edges)
+            {
+                if (loopSet.find(edge.dst) != loopSet.end())
+                {
+                    auto &cuts = boundaries[edge.dst];
+                    cuts.insert(edge.dstLow);
+                    cuts.insert(edge.dstLow + edge.width);
+                }
+                if (loopSet.find(edge.src) != loopSet.end())
+                {
+                    auto &cuts = boundaries[edge.src];
+                    cuts.insert(edge.srcLow);
+                    cuts.insert(edge.srcLow + edge.width);
+                }
+            }
+
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (const auto &edge : edges)
+                {
+                    const bool srcInLoop = loopSet.find(edge.src) != loopSet.end();
+                    const bool dstInLoop = loopSet.find(edge.dst) != loopSet.end();
+                    if (!srcInLoop && !dstInLoop)
+                    {
+                        continue;
+                    }
+                    if (srcInLoop && dstInLoop)
+                    {
+                        auto &srcCuts = boundaries[edge.src];
+                        auto &dstCuts = boundaries[edge.dst];
+                        const int64_t srcEnd = edge.srcLow + edge.width;
+                        const int64_t dstEnd = edge.dstLow + edge.width;
+                        for (auto it = srcCuts.lower_bound(edge.srcLow);
+                             it != srcCuts.end() && *it <= srcEnd; ++it)
+                        {
+                            const int64_t mapped = edge.dstLow + (*it - edge.srcLow);
+                            if (dstCuts.insert(mapped).second)
+                            {
+                                changed = true;
+                            }
+                        }
+                        for (auto it = dstCuts.lower_bound(edge.dstLow);
+                             it != dstCuts.end() && *it <= dstEnd; ++it)
+                        {
+                            const int64_t mapped = edge.srcLow + (*it - edge.dstLow);
+                            if (srcCuts.insert(mapped).second)
+                            {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            segments.clear();
+            segments.reserve(loopValues.size());
+            for (ValueId valueId : loopValues)
+            {
+                const int64_t width = graph.getValue(valueId).width();
+                auto it = boundaries.find(valueId);
+                if (it == boundaries.end())
+                {
+                    return false;
+                }
+                auto &cuts = it->second;
+                cuts.insert(0);
+                cuts.insert(width);
+                std::vector<int64_t> ordered(cuts.begin(), cuts.end());
+                if (ordered.empty() || ordered.front() != 0 || ordered.back() != width)
+                {
+                    return false;
+                }
+                std::vector<BitRange> ranges;
+                for (std::size_t i = 0; i + 1 < ordered.size(); ++i)
+                {
+                    const int64_t low = ordered[i];
+                    const int64_t high = ordered[i + 1] - 1;
+                    if (high < low)
+                    {
+                        continue;
+                    }
+                    ranges.push_back(BitRange{low, high});
+                }
+                if (ranges.empty())
+                {
+                    return false;
+                }
+                segments.emplace(valueId, std::move(ranges));
+            }
+            return true;
+        }
+
+        bool splitFalseLoop(Graph &graph,
+                            const LoopInfo &loop,
+                            std::size_t &valuesSplit,
+                            std::size_t &opsRewritten,
+                            const std::function<void(const Operation &, std::string)> &onError)
+        {
+            std::vector<MappingEdge> edges;
+            if (!collectCopyEdges(graph, loop.loopOps, edges))
+            {
+                return false;
+            }
+
+            std::unordered_map<ValueId, std::vector<BitRange>, ValueIdHash> segments;
+            if (!buildLoopPartitions(graph, loop.loopValues, edges, segments))
+            {
+                return false;
+            }
+
+            std::unordered_set<ValueId, ValueIdHash> loopSet(loop.loopValues.begin(), loop.loopValues.end());
+            std::unordered_map<RangeNode, ValueId, RangeNodeHash> fragmentMap;
+            fragmentMap.reserve(loop.loopValues.size() * 2);
+
+            valuesSplit = 0;
+            for (ValueId valueId : loop.loopValues)
+            {
+                const auto segIt = segments.find(valueId);
+                if (segIt == segments.end())
+                {
+                    return false;
+                }
+                const Value baseValue = graph.getValue(valueId);
+                if (segIt->second.size() > 1)
+                {
+                    ++valuesSplit;
+                }
+                for (const auto &range : segIt->second)
+                {
+                    const int64_t width = range.high - range.low + 1;
+                    if (width <= 0)
+                    {
+                        return false;
+                    }
+                    ValueId frag = graph.createValue(static_cast<int32_t>(width),
+                                                     baseValue.isSigned(),
+                                                     baseValue.type());
+                    fragmentMap.emplace(RangeNode{valueId, range}, frag);
+                }
+            }
+
+            std::unordered_map<OperationId, std::vector<std::pair<ValueId, ValueId>>, OperationIdHash> opPairs;
+            opPairs.reserve(loop.loopOps.size());
+            std::unordered_set<ValueId, ValueIdHash> definedFragments;
+
+            auto getFragment = [&](ValueId valueId, const BitRange &range) -> std::optional<ValueId>
+            {
+                const BitRange full{0, graph.getValue(valueId).width() - 1};
+                if (loopSet.find(valueId) != loopSet.end())
+                {
+                    auto it = fragmentMap.find(RangeNode{valueId, range});
+                    if (it == fragmentMap.end())
+                    {
+                        return std::nullopt;
+                    }
+                    return it->second;
+                }
+                if (range.low == full.low && range.high == full.high)
+                {
+                    return valueId;
+                }
+                if (range.low < full.low || range.high > full.high)
+                {
+                    return std::nullopt;
+                }
+                auto it = fragmentMap.find(RangeNode{valueId, range});
+                if (it != fragmentMap.end())
+                {
+                    return it->second;
+                }
+                const int64_t width = range.high - range.low + 1;
+                if (width <= 0)
+                {
+                    return std::nullopt;
+                }
+                OperationId sliceOp = graph.createOperation(OperationKind::kSliceStatic);
+                graph.addOperand(sliceOp, valueId);
+                graph.setAttr(sliceOp, "sliceStart", range.low);
+                graph.setAttr(sliceOp, "sliceEnd", range.high);
+                ValueId frag = graph.createValue(static_cast<int32_t>(width),
+                                                 graph.getValue(valueId).isSigned(),
+                                                 graph.getValue(valueId).type());
+                graph.addResult(sliceOp, frag);
+                fragmentMap.emplace(RangeNode{valueId, range}, frag);
+                return frag;
+            };
+
+            auto addPair = [&](OperationId opId, ValueId srcFrag, ValueId dstFrag) -> bool
+            {
+                if (!srcFrag.valid() || !dstFrag.valid())
+                {
+                    return false;
+                }
+                if (!definedFragments.insert(dstFrag).second)
+                {
+                    return false;
+                }
+                opPairs[opId].push_back(std::make_pair(srcFrag, dstFrag));
+                return true;
+            };
+
+            for (OperationId opId : loop.loopOps)
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                const auto &operands = op.operands();
+                const auto &results = op.results();
+                if (results.size() != 1)
+                {
+                    return false;
+                }
+                const ValueId resultId = results[0];
+                if (loopSet.find(resultId) == loopSet.end())
+                {
+                    continue;
+                }
+                const auto segIt = segments.find(resultId);
+                if (segIt == segments.end())
+                {
+                    return false;
+                }
+                const auto &resultSegments = segIt->second;
+                switch (op.kind())
+                {
+                case OperationKind::kAssign:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        auto srcFrag = getFragment(operands[0], seg);
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!srcFrag || !dstFrag || !addPair(opId, *srcFrag, *dstFrag))
+                        {
+                            return false;
+                        }
+                    }
+                    break;
+                }
+                case OperationKind::kSliceStatic:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    auto startOpt = getIntAttr(op, "sliceStart");
+                    auto endOpt = getIntAttr(op, "sliceEnd");
+                    if (!startOpt || !endOpt)
+                    {
+                        return false;
+                    }
+                    const int64_t sliceLow = *startOpt;
+                    const int64_t sliceHigh = *endOpt;
+                    for (const auto &seg : resultSegments)
+                    {
+                        BitRange baseRange{sliceLow + seg.low, sliceLow + seg.high};
+                        auto srcFrag = getFragment(operands[0], baseRange);
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!srcFrag || !dstFrag || !addPair(opId, *srcFrag, *dstFrag))
+                        {
+                            return false;
+                        }
+                    }
+                    break;
+                }
+                case OperationKind::kConcat:
+                {
+                    if (operands.empty())
+                    {
+                        return false;
+                    }
+                    std::vector<int64_t> widths;
+                    widths.reserve(operands.size());
+                    int64_t totalWidth = 0;
+                    for (ValueId operand : operands)
+                    {
+                        if (!operand.valid())
+                        {
+                            return false;
+                        }
+                        const int64_t width = graph.getValue(operand).width();
+                        if (width <= 0)
+                        {
+                            return false;
+                        }
+                        widths.push_back(width);
+                        totalWidth += width;
+                    }
+                    int64_t cursor = totalWidth;
+                    for (std::size_t i = 0; i < operands.size(); ++i)
+                    {
+                        const int64_t width = widths[i];
+                        const int64_t hi = cursor - 1;
+                        const int64_t lo = cursor - width;
+                        cursor = lo;
+                        for (const auto &seg : resultSegments)
+                        {
+                            if (seg.high < lo || seg.low > hi)
+                            {
+                                continue;
+                            }
+                            if (seg.low < lo || seg.high > hi)
+                            {
+                                return false;
+                            }
+                            BitRange opRange{seg.low - lo, seg.high - lo};
+                            auto srcFrag = getFragment(operands[i], opRange);
+                            auto dstFrag = getFragment(resultId, seg);
+                            if (!srcFrag || !dstFrag || !addPair(opId, *srcFrag, *dstFrag))
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                    break;
+                }
+                default:
+                    return false;
+                }
+            }
+
+            opsRewritten = 0;
+            for (const auto &entry : opPairs)
+            {
+                const OperationId opId = entry.first;
+                const auto &pairs = entry.second;
+                if (pairs.empty())
+                {
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                const ValueId firstSrc = pairs.front().first;
+                const ValueId firstDst = pairs.front().second;
+                try
+                {
+                    graph.setOpKind(opId, OperationKind::kAssign);
+                    if (op.operands().empty())
+                    {
+                        graph.addOperand(opId, firstSrc);
+                    }
+                    else
+                    {
+                        graph.replaceOperand(opId, 0, firstSrc);
+                    }
+                    while (graph.getOperation(opId).operands().size() > 1)
+                    {
+                        graph.eraseOperand(opId, graph.getOperation(opId).operands().size() - 1);
+                    }
+
+                    if (op.results().empty())
+                    {
+                        graph.addResult(opId, firstDst);
+                    }
+                    else
+                    {
+                        graph.replaceResult(opId, 0, firstDst);
+                    }
+                    if (graph.getOperation(opId).results().size() > 1)
+                    {
+                        return false;
+                    }
+                    graph.eraseAttr(opId, "sliceStart");
+                    graph.eraseAttr(opId, "sliceEnd");
+                    graph.eraseAttr(opId, "sliceWidth");
+                    graph.eraseAttr(opId, "rep");
+                }
+                catch (const std::exception &ex)
+                {
+                    onError(op, std::string("Failed to rewrite loop op: ") + ex.what());
+                    return false;
+                }
+                ++opsRewritten;
+                for (std::size_t i = 1; i < pairs.size(); ++i)
+                {
+                    const auto &pair = pairs[i];
+                    OperationId newOp = graph.createOperation(OperationKind::kAssign);
+                    graph.addOperand(newOp, pair.first);
+                    graph.addResult(newOp, pair.second);
+                    if (op.srcLoc())
+                    {
+                        graph.setOpSrcLoc(newOp, *op.srcLoc());
+                    }
+                    ++opsRewritten;
+                }
+            }
+
+            std::unordered_map<ValueId, ValueId, ValueIdHash> viewMap;
+            viewMap.reserve(loop.loopValues.size());
+            for (ValueId valueId : loop.loopValues)
+            {
+                const auto segIt = segments.find(valueId);
+                if (segIt == segments.end())
+                {
+                    return false;
+                }
+                const Value value = graph.getValue(valueId);
+                const auto &ranges = segIt->second;
+                std::vector<std::pair<BitRange, ValueId>> ordered;
+                ordered.reserve(ranges.size());
+                for (const auto &range : ranges)
+                {
+                    auto fragIt = fragmentMap.find(RangeNode{valueId, range});
+                    if (fragIt == fragmentMap.end())
+                    {
+                        return false;
+                    }
+                    ordered.push_back(std::make_pair(range, fragIt->second));
+                }
+                std::sort(ordered.begin(), ordered.end(),
+                          [](const auto &lhs, const auto &rhs) {
+                              if (lhs.first.high != rhs.first.high)
+                              {
+                                  return lhs.first.high > rhs.first.high;
+                              }
+                              return lhs.first.low > rhs.first.low;
+                          });
+                ValueId viewValue = ValueId::invalid();
+                if (ordered.size() == 1)
+                {
+                    viewValue = ordered.front().second;
+                }
+                else
+                {
+                    OperationId concatOp = graph.createOperation(OperationKind::kConcat);
+                    for (const auto &entry : ordered)
+                    {
+                        graph.addOperand(concatOp, entry.second);
+                    }
+                    viewValue = graph.createValue(value.width(), value.isSigned(), value.type());
+                    graph.addResult(concatOp, viewValue);
+                }
+                viewMap.emplace(valueId, viewValue);
+            }
+
+            for (ValueId valueId : loop.loopValues)
+            {
+                const Value value = graph.getValue(valueId);
+                const auto viewIt = viewMap.find(valueId);
+                if (viewIt == viewMap.end())
+                {
+                    continue;
+                }
+                const ValueId viewValue = viewIt->second;
+                std::vector<wolvrix::lib::grh::ValueUser> users(value.users().begin(), value.users().end());
+                for (const auto &user : users)
+                {
+                    if (!user.operation.valid())
+                    {
+                        continue;
+                    }
+                    if (std::find(loop.loopOps.begin(), loop.loopOps.end(), user.operation) != loop.loopOps.end())
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        graph.replaceOperand(user.operation, user.operandIndex, viewValue);
+                    }
+                    catch (const std::exception &ex)
+                    {
+                        onError(graph.getOperation(user.operation),
+                                std::string("Failed to rewire external use: ") + ex.what());
+                        return false;
+                    }
+                }
+            }
+
+            const auto inputPorts = std::vector<wolvrix::lib::grh::Port>(graph.inputPorts().begin(),
+                                                                         graph.inputPorts().end());
+            for (const auto &port : inputPorts)
+            {
+                auto it = viewMap.find(port.value);
+                if (it != viewMap.end())
+                {
+                    graph.bindInputPort(port.name, it->second);
+                }
+            }
+            const auto outputPorts = std::vector<wolvrix::lib::grh::Port>(graph.outputPorts().begin(),
+                                                                          graph.outputPorts().end());
+            for (const auto &port : outputPorts)
+            {
+                auto it = viewMap.find(port.value);
+                if (it != viewMap.end())
+                {
+                    graph.bindOutputPort(port.name, it->second);
+                }
+            }
+            const auto inoutPorts = std::vector<wolvrix::lib::grh::InoutPort>(graph.inoutPorts().begin(),
+                                                                              graph.inoutPorts().end());
+            for (const auto &port : inoutPorts)
+            {
+                ValueId in = port.in;
+                ValueId out = port.out;
+                ValueId oe = port.oe;
+                if (auto it = viewMap.find(in); it != viewMap.end())
+                {
+                    in = it->second;
+                }
+                if (auto it = viewMap.find(out); it != viewMap.end())
+                {
+                    out = it->second;
+                }
+                if (auto it = viewMap.find(oe); it != viewMap.end())
+                {
+                    oe = it->second;
+                }
+                if (in != port.in || out != port.out || oe != port.oe)
+                {
+                    graph.bindInoutPort(port.name, in, out, oe);
+                }
+            }
+
+            return valuesSplit > 0;
+        }
+
+    } // namespace
+
+    CombLoopElimPass::CombLoopElimPass()
+        : Pass("comb-loop-elim", "comb-loop-elim",
+               "Detect combinational loops and record reports"),
+          options_({})
+    {
+    }
+
+    CombLoopElimPass::CombLoopElimPass(CombLoopElimOptions options)
+        : Pass("comb-loop-elim", "comb-loop-elim",
+               "Detect combinational loops and record reports"),
+          options_(options)
+    {
+    }
+
+    PassResult CombLoopElimPass::run()
+    {
+        PassResult result;
+        logDebug("begin graphs=" + std::to_string(design().graphs().size()));
+
+        for (const auto &entry : design().graphs())
+        {
+            Graph &graph = *entry.second;
+            const std::size_t initialValueCount = graph.values().size();
+            if (options_.maxAnalysisNodes > 0 && initialValueCount > options_.maxAnalysisNodes)
+            {
+                warning(graph, "comb-loop-elim skipped graph (node limit exceeded)");
+                continue;
+            }
+
+            auto buildSucc = [&](std::size_t valueCount) {
+                SuccMap succ;
+                succ.reserve(valueCount);
+                for (const auto opId : graph.operations())
+                {
+                    const Operation op = graph.getOperation(opId);
+                    if (isBoundaryOp(op.kind()))
+                    {
+                        continue;
+                    }
+
+                    const auto operands = op.operands();
+                    const auto results = op.results();
+                    if (operands.empty() || results.empty())
+                    {
+                        continue;
+                    }
+
+                    for (ValueId operand : operands)
+                    {
+                        auto &edges = succ[operand];
+                        edges.reserve(edges.size() + results.size());
+                        for (ValueId resultValue : results)
+                        {
+                            edges.push_back(resultValue);
+                        }
+                    }
+                }
+                return succ;
+            };
+
+            auto classifyLoops = [&](std::vector<LoopInfo> &loops,
+                                     std::size_t &falseLoops,
+                                     std::size_t &trueLoops,
+                                     bool analyzeFalseLoops) {
+                falseLoops = 0;
+                trueLoops = 0;
+                if (!analyzeFalseLoops)
+                {
+                    for (auto &loop : loops)
+                    {
+                        loop.isFalseLoop = false;
+                    }
+                    trueLoops = loops.size();
+                    return;
+                }
+                for (auto &loop : loops)
+                {
+                    bool incomplete = false;
+                    loop.isFalseLoop = classifyFalseLoop(loop, graph, incomplete);
+                    (void)incomplete;
+                    if (loop.isFalseLoop)
+                    {
+                        ++falseLoops;
+                    }
+                    else
+                    {
+                        ++trueLoops;
+                    }
+                }
+            };
+
+            auto emitLoopWarning = [&](const LoopInfo &loop, const std::string &message) {
+                for (ValueId valueId : loop.loopValues)
+                {
+                    const Value value = graph.getValue(valueId);
+                    if (value.srcLoc())
+                    {
+                        warning(graph, value, message);
+                        return;
+                    }
+                }
+                for (OperationId opId : loop.loopOps)
+                {
+                    if (!opId.valid())
+                    {
+                        continue;
+                    }
+                    const Operation op = graph.getOperation(opId);
+                    if (op.srcLoc())
+                    {
+                        warning(graph, op, message);
+                        return;
+                    }
+                }
+                warning(graph, message);
+            };
+
+            auto recordTrueLoop = [&](const LoopInfo &loop) {
+                CombLoopReport report;
+                report.graphName = graph.symbol();
+                report.loopValues = loop.loopValues;
+                report.loopOps = loop.loopOps;
+                report.sourceLocation = findLoopSrcLoc(graph, loop.loopValues, loop.loopOps);
+                report.description = describeLoop(loop, graph);
+                if (loop.wasFalseLoopCandidate || loop.isFalseLoop)
+                {
+                    if (options_.fixFalseLoops)
+                    {
+                        report.description.append(" [false loop candidate; unresolved]");
+                    }
+                    else
+                    {
+                        report.description.append(" [false loop candidate; fix disabled]");
+                    }
+                }
+                emitLoopWarning(loop, report.description);
+                auto *existing = getScratchpad<std::vector<CombLoopReport>>("comb_loops");
+                if (existing)
+                {
+                    existing->push_back(report);
+                }
+                else
+                {
+                    setScratchpad("comb_loops", std::vector<CombLoopReport>{report});
+                }
+                if (options_.failOnTrueLoop)
+                {
+                    result.failed = true;
+                }
+            };
+
+            std::size_t fixIterations = 0;
+            std::size_t totalValuesSplit = 0;
+            std::size_t totalOpsRewritten = 0;
+            bool graphChanged = false;
+
+            if (options_.fixFalseLoops)
+            {
+                for (std::size_t iter = 0; iter < options_.maxFixIterations; ++iter)
+                {
+                    const auto valueSpan = graph.values();
+                    SuccMap succ = buildSucc(valueSpan.size());
+                    std::vector<LoopInfo> loops = collectLoopInfos(graph, valueSpan, succ);
+                    if (loops.empty())
+                    {
+                        break;
+                    }
+
+                    std::size_t falseLoops = 0;
+                    std::size_t trueLoops = 0;
+                    classifyLoops(loops, falseLoops, trueLoops, true);
+                    if (falseLoops == 0)
+                    {
+                        break;
+                    }
+
+                    bool changedThisIter = false;
+                    for (const auto &loop : loops)
+                    {
+                        if (!loop.isFalseLoop)
+                        {
+                            continue;
+                        }
+                        auto onError = [&](const Operation &op, std::string msg) {
+                            error(graph, op, std::move(msg));
+                            result.failed = true;
+                        };
+                        std::size_t loopValuesSplit = 0;
+                        std::size_t loopOpsRewritten = 0;
+                        if (splitFalseLoop(graph, loop, loopValuesSplit, loopOpsRewritten, onError))
+                        {
+                            changedThisIter = true;
+                            totalValuesSplit += loopValuesSplit;
+                            totalOpsRewritten += loopOpsRewritten;
+                        }
+                    }
+
+                    if (!changedThisIter)
+                    {
+                        break;
+                    }
+                    graphChanged = true;
+                    ++fixIterations;
+                }
+            }
+
+            const auto finalValues = graph.values();
+            SuccMap finalSucc = buildSucc(finalValues.size());
+            std::vector<LoopInfo> finalLoops = collectLoopInfos(graph, finalValues, finalSucc);
+            std::size_t falseLoops = 0;
+            std::size_t trueLoops = 0;
+            classifyLoops(finalLoops, falseLoops, trueLoops, options_.fixFalseLoops);
+            std::size_t unresolvedFalseLoops = 0;
+            if (options_.fixFalseLoops && falseLoops > 0)
+            {
+                for (auto &loop : finalLoops)
+                {
+                    if (!loop.isFalseLoop)
+                    {
+                        continue;
+                    }
+                    loop.wasFalseLoopCandidate = true;
+                    loop.isFalseLoop = false;
+                    ++unresolvedFalseLoops;
+                }
+                if (unresolvedFalseLoops > 0)
+                {
+                    trueLoops += unresolvedFalseLoops;
+                    falseLoops -= unresolvedFalseLoops;
+                }
+            }
+
+            std::size_t loopsDetected = finalLoops.size();
+            for (const auto &loop : finalLoops)
+            {
+                recordTrueLoop(loop);
+            }
+
+            if (graphChanged)
+            {
+                result.changed = true;
+            }
+
+            if (loopsDetected > 0)
+            {
+                std::string stats = "comb-loop-elim graph=" + graph.symbol();
+                stats.append(" loops=");
+                stats.append(std::to_string(loopsDetected));
+                stats.append(" true=");
+                stats.append(std::to_string(trueLoops));
+                stats.append(" false=");
+                stats.append(std::to_string(falseLoops));
+                stats.append(" split-values=");
+                stats.append(std::to_string(totalValuesSplit));
+                stats.append(" split-ops=");
+                stats.append(std::to_string(totalOpsRewritten));
+                stats.append(" fix-iters=");
+                stats.append(std::to_string(fixIterations));
+                logInfo(std::move(stats));
+            }
+        }
+
+        return result;
+    }
+
+} // namespace wolvrix::lib::transform

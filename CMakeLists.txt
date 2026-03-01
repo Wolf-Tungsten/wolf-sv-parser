@@ -62,6 +62,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/memory_init_check.cpp
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
+    lib/transform/comb_loop_elim.cpp
     lib/transform/hier_flatten.cpp
     lib/transform/xmr_resolve.cpp
     lib/transform/latch_transparent_read.cpp
@@ -306,6 +307,17 @@ target_link_libraries(transform-hier-flatten
 )
 
 register_test_exe(transform-hier-flatten)
+
+add_executable(transform-comb-loop-elim
+    tests/transform/test_comb_loop_elim_pass.cpp
+)
+
+target_link_libraries(transform-comb-loop-elim
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-comb-loop-elim)
 
 add_executable(transform-xmr-resolve-inout
     tests/transform/test_xmr_resolve_inout.cpp
