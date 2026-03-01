@@ -257,8 +257,11 @@ namespace wolvrix::lib::transform
                     wolvrix::lib::grh::ValueId muxResult = graph.createValue(info.width, info.isSigned);
                     graph.addResult(muxOp, muxResult);
                     
-                    // Replace all uses of readResult with mux output
+                    // Replace all uses of readResult with mux output, but keep
+                    // the mux's false branch wired to the original readResult
+                    // to avoid creating a combinational self-loop.
                     graph.replaceAllUses(readResult, muxResult);
+                    graph.replaceOperand(muxOp, 2, readResult);
                     
                     result.changed = true;
                     debug(graph, "Inserted transparent-read mux for latch '" + latchSym + "' read port");
