@@ -1884,6 +1884,59 @@ namespace wolvrix::lib::transform
                     }
                     break;
                 }
+                case OperationKind::kLogicAnd:
+                case OperationKind::kLogicOr:
+                {
+                    if (operands.size() < 2)
+                    {
+                        return false;
+                    }
+                    const int64_t resultWidth = graph.getValue(resultId).width();
+                    if (resultWidth != 1)
+                    {
+                        return false;
+                    }
+                    for (ValueId operand : operands)
+                    {
+                        if (!operand.valid())
+                        {
+                            return false;
+                        }
+                        if (graph.getValue(operand).width() != 1)
+                        {
+                            return false;
+                        }
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        if (seg.low != 0 || seg.high != 0)
+                        {
+                            return false;
+                        }
+                        std::vector<ValueId> segOperands;
+                        segOperands.reserve(operands.size());
+                        for (ValueId operand : operands)
+                        {
+                            auto frag = getFragment(operand, seg);
+                            if (!frag)
+                            {
+                                return false;
+                            }
+                            segOperands.push_back(*frag);
+                        }
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!dstFrag)
+                        {
+                            return false;
+                        }
+                        if (!definedFragments.insert(*dstFrag).second)
+                        {
+                            return false;
+                        }
+                        segmentOps[opId].push_back(SegmentOp{op.kind(), std::move(segOperands), *dstFrag});
+                    }
+                    break;
+                }
                 case OperationKind::kNot:
                 {
                     if (operands.size() != 1 || !operands[0].valid())
@@ -1897,6 +1950,37 @@ namespace wolvrix::lib::transform
                     }
                     for (const auto &seg : resultSegments)
                     {
+                        auto srcFrag = getFragment(operands[0], seg);
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!srcFrag || !dstFrag)
+                        {
+                            return false;
+                        }
+                        if (!definedFragments.insert(*dstFrag).second)
+                        {
+                            return false;
+                        }
+                        segmentOps[opId].push_back(SegmentOp{op.kind(), {*srcFrag}, *dstFrag});
+                    }
+                    break;
+                }
+                case OperationKind::kLogicNot:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    const int64_t resultWidth = graph.getValue(resultId).width();
+                    if (resultWidth != 1 || graph.getValue(operands[0]).width() != 1)
+                    {
+                        return false;
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        if (seg.low != 0 || seg.high != 0)
+                        {
+                            return false;
+                        }
                         auto srcFrag = getFragment(operands[0], seg);
                         auto dstFrag = getFragment(resultId, seg);
                         if (!srcFrag || !dstFrag)
