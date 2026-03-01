@@ -1995,6 +1995,116 @@ namespace wolvrix::lib::transform
                     }
                     break;
                 }
+                case OperationKind::kReduceAnd:
+                case OperationKind::kReduceOr:
+                case OperationKind::kReduceXor:
+                case OperationKind::kReduceNor:
+                case OperationKind::kReduceNand:
+                case OperationKind::kReduceXnor:
+                {
+                    if (operands.size() != 1 || !operands[0].valid())
+                    {
+                        return false;
+                    }
+                    const ValueId operandId = operands[0];
+                    const int64_t resultWidth = graph.getValue(resultId).width();
+                    if (resultWidth != 1)
+                    {
+                        return false;
+                    }
+                    const int64_t operandWidth = graph.getValue(operandId).width();
+                    if (operandWidth <= 0)
+                    {
+                        return false;
+                    }
+                    const BitRange opRange{0, operandWidth - 1};
+                    if (loopSet.find(operandId) != loopSet.end())
+                    {
+                        const auto segIt = segments.find(operandId);
+                        if (segIt == segments.end())
+                        {
+                            return false;
+                        }
+                        if (segIt->second.size() != 1)
+                        {
+                            return false;
+                        }
+                        const auto &seg = segIt->second.front();
+                        if (seg.low != opRange.low || seg.high != opRange.high)
+                        {
+                            return false;
+                        }
+                    }
+                    auto srcFrag = getFragment(operandId, opRange);
+                    if (!srcFrag)
+                    {
+                        return false;
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        if (seg.low != 0 || seg.high != 0)
+                        {
+                            return false;
+                        }
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!dstFrag)
+                        {
+                            return false;
+                        }
+                        if (!definedFragments.insert(*dstFrag).second)
+                        {
+                            return false;
+                        }
+                        segmentOps[opId].push_back(SegmentOp{op.kind(), {*srcFrag}, *dstFrag});
+                    }
+                    break;
+                }
+                case OperationKind::kMux:
+                {
+                    if (operands.size() != 3 || !operands[0].valid() || !operands[1].valid() || !operands[2].valid())
+                    {
+                        return false;
+                    }
+                    const ValueId condId = operands[0];
+                    const ValueId trueId = operands[1];
+                    const ValueId falseId = operands[2];
+                    const int64_t resultWidth = graph.getValue(resultId).width();
+                    if (resultWidth <= 0)
+                    {
+                        return false;
+                    }
+                    if (graph.getValue(condId).width() != 1)
+                    {
+                        return false;
+                    }
+                    if (graph.getValue(trueId).width() != resultWidth ||
+                        graph.getValue(falseId).width() != resultWidth)
+                    {
+                        return false;
+                    }
+                    const BitRange condRange{0, 0};
+                    auto condFrag = getFragment(condId, condRange);
+                    if (!condFrag)
+                    {
+                        return false;
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        auto trueFrag = getFragment(trueId, seg);
+                        auto falseFrag = getFragment(falseId, seg);
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!trueFrag || !falseFrag || !dstFrag)
+                        {
+                            return false;
+                        }
+                        if (!definedFragments.insert(*dstFrag).second)
+                        {
+                            return false;
+                        }
+                        segmentOps[opId].push_back(SegmentOp{op.kind(), {*condFrag, *trueFrag, *falseFrag}, *dstFrag});
+                    }
+                    break;
+                }
                 default:
                     return false;
                 }
