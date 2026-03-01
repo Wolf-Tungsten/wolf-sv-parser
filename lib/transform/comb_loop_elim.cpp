@@ -37,6 +37,7 @@ namespace wolvrix::lib::transform
             std::vector<OperationId> loopOps;
             bool isFalseLoop = false;
             bool wasFalseLoopCandidate = false;
+            bool analysisIncomplete = false;
         };
 
         struct Scc
@@ -745,6 +746,55 @@ namespace wolvrix::lib::transform
             return std::nullopt;
         }
 
+        std::string formatSrcLocShort(const std::optional<SrcLoc> &srcLoc)
+        {
+            if (!srcLoc)
+            {
+                return "none";
+            }
+            if (!srcLoc->file.empty())
+            {
+                std::string out = srcLoc->file;
+                if (srcLoc->line != 0)
+                {
+                    out.push_back(':');
+                    out += std::to_string(srcLoc->line);
+                    if (srcLoc->column != 0)
+                    {
+                        out.push_back(':');
+                        out += std::to_string(srcLoc->column);
+                    }
+                }
+                return out;
+            }
+            std::string out;
+            if (!srcLoc->origin.empty())
+            {
+                out.append(srcLoc->origin);
+            }
+            if (!srcLoc->pass.empty())
+            {
+                if (!out.empty())
+                {
+                    out.push_back(':');
+                }
+                out.append(srcLoc->pass);
+            }
+            if (!srcLoc->note.empty())
+            {
+                if (!out.empty())
+                {
+                    out.push_back(':');
+                }
+                out.append(srcLoc->note);
+            }
+            if (out.empty())
+            {
+                return "unknown";
+            }
+            return out;
+        }
+
         std::string formatValueShort(const Graph &graph, ValueId valueId)
         {
             const Value value = graph.getValue(valueId);
@@ -773,58 +823,65 @@ namespace wolvrix::lib::transform
             return name;
         }
 
-        template <typename T, typename F>
-        std::string joinList(const std::vector<T> &items, std::size_t maxItems, std::string_view sep, F formatter)
+        std::string describeLoop(const LoopInfo &loop,
+                                 const Graph &graph,
+                                 const std::optional<SrcLoc> &srcLoc,
+                                 std::string_view status,
+                                 std::string_view analysisNote)
         {
-            if (items.empty())
-            {
-                return {};
-            }
-            std::string out;
-            const std::size_t count = std::min(items.size(), maxItems);
-            for (std::size_t i = 0; i < count; ++i)
-            {
-                if (i != 0)
-                {
-                    out.append(sep);
-                }
-                out.append(formatter(items[i]));
-            }
-            if (items.size() > maxItems)
-            {
-                out.append(sep);
-                out.append("...");
-            }
-            return out;
-        }
-
-        std::string describeLoop(const LoopInfo &loop, const Graph &graph)
-        {
-            constexpr std::size_t kMaxListItems = 6;
             std::string desc = "comb loop detected (values=";
             desc.append(std::to_string(loop.loopValues.size()));
             desc.append(", ops=");
             desc.append(std::to_string(loop.loopOps.size()));
             desc.append(")");
-
-            const std::string values = joinList<ValueId>(
-                loop.loopValues, kMaxListItems, ", ",
-                [&](ValueId id) { return formatValueShort(graph, id); });
-            if (!values.empty())
+            desc.append(" srcloc=");
+            desc.append(formatSrcLocShort(srcLoc));
+            if (!status.empty())
             {
-                desc.append(" values=[");
-                desc.append(values);
-                desc.append("]");
+                desc.append(" status=");
+                desc.append(status);
+            }
+            if (!analysisNote.empty())
+            {
+                desc.append(" ");
+                desc.append(analysisNote);
             }
 
-            const std::string ops = joinList<OperationId>(
-                loop.loopOps, kMaxListItems, ", ",
-                [&](OperationId id) { return formatOperationShort(graph, id); });
-            if (!ops.empty())
+            desc.append("\n  values:");
+            if (loop.loopValues.empty())
             {
-                desc.append(" ops=[");
-                desc.append(ops);
-                desc.append("]");
+                desc.append("\n    - <none>");
+            }
+            for (ValueId valueId : loop.loopValues)
+            {
+                const Value value = graph.getValue(valueId);
+                desc.append("\n    - ");
+                desc.append(formatValueShort(graph, valueId));
+                desc.append(" id=");
+                desc.append(std::to_string(valueId.index));
+                desc.append(" src=");
+                desc.append(formatSrcLocShort(value.srcLoc()));
+            }
+
+            desc.append("\n  ops:");
+            if (loop.loopOps.empty())
+            {
+                desc.append("\n    - <none>");
+            }
+            for (OperationId opId : loop.loopOps)
+            {
+                if (!opId.valid())
+                {
+                    desc.append("\n    - <invalid>");
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                desc.append("\n    - ");
+                desc.append(formatOperationShort(graph, opId));
+                desc.append(" id=");
+                desc.append(std::to_string(opId.index));
+                desc.append(" src=");
+                desc.append(formatSrcLocShort(op.srcLoc()));
             }
 
             return desc;
@@ -1855,6 +1912,7 @@ namespace wolvrix::lib::transform
                     for (auto &loop : loops)
                     {
                         loop.isFalseLoop = false;
+                        loop.analysisIncomplete = false;
                     }
                     trueLoops = loops.size();
                     return;
@@ -1863,6 +1921,7 @@ namespace wolvrix::lib::transform
                 {
                     bool incomplete = false;
                     loop.isFalseLoop = classifyFalseLoop(loop, graph, incomplete);
+                    loop.analysisIncomplete = incomplete;
                     (void)incomplete;
                     if (loop.isFalseLoop)
                     {
@@ -1907,16 +1966,27 @@ namespace wolvrix::lib::transform
                 report.loopValues = loop.loopValues;
                 report.loopOps = loop.loopOps;
                 report.sourceLocation = findLoopSrcLoc(graph, loop.loopValues, loop.loopOps);
-                report.description = describeLoop(loop, graph);
+                std::string status = "true";
+                if (loop.wasFalseLoopCandidate || loop.isFalseLoop)
+                {
+                    status = options_.fixFalseLoops ? "false-candidate-unresolved"
+                                                    : "false-candidate-fix-disabled";
+                }
+                std::string analysisNote;
+                if (loop.analysisIncomplete)
+                {
+                    analysisNote = "analysis=incomplete";
+                }
+                report.description = describeLoop(loop, graph, report.sourceLocation, status, analysisNote);
                 if (loop.wasFalseLoopCandidate || loop.isFalseLoop)
                 {
                     if (options_.fixFalseLoops)
                     {
-                        report.description.append(" [false loop candidate; unresolved]");
+                        report.description.append("\n  note=false loop candidate; unresolved");
                     }
                     else
                     {
-                        report.description.append(" [false loop candidate; fix disabled]");
+                        report.description.append("\n  note=false loop candidate; fix disabled");
                     }
                 }
                 emitLoopWarning(loop, report.description);
@@ -1938,6 +2008,7 @@ namespace wolvrix::lib::transform
             std::size_t fixIterations = 0;
             std::size_t totalValuesSplit = 0;
             std::size_t totalOpsRewritten = 0;
+            std::size_t totalFalseLoopsFixed = 0;
             bool graphChanged = false;
 
             if (options_.fixFalseLoops)
@@ -1973,11 +2044,25 @@ namespace wolvrix::lib::transform
                         };
                         std::size_t loopValuesSplit = 0;
                         std::size_t loopOpsRewritten = 0;
+                        std::optional<SrcLoc> loopLoc = findLoopSrcLoc(graph, loop.loopValues, loop.loopOps);
                         if (splitFalseLoop(graph, loop, loopValuesSplit, loopOpsRewritten, onError))
                         {
                             changedThisIter = true;
                             totalValuesSplit += loopValuesSplit;
                             totalOpsRewritten += loopOpsRewritten;
+                            ++totalFalseLoopsFixed;
+                            std::string detail = "graph=" + graph.symbol();
+                            detail.append(" ");
+                            detail.append(describeLoop(loop, graph, loopLoc, "false",
+                                                       loop.analysisIncomplete ? "analysis=incomplete" : ""));
+                            detail.append("\n  action=split");
+                            detail.append(" split-values=");
+                            detail.append(std::to_string(loopValuesSplit));
+                            detail.append(" split-ops=");
+                            detail.append(std::to_string(loopOpsRewritten));
+                            detail.append(" iter=");
+                            detail.append(std::to_string(iter));
+                            logInfo(std::move(detail));
                         }
                     }
 
@@ -2036,6 +2121,10 @@ namespace wolvrix::lib::transform
                 stats.append(std::to_string(trueLoops));
                 stats.append(" false=");
                 stats.append(std::to_string(falseLoops));
+                stats.append(" false-unresolved=");
+                stats.append(std::to_string(unresolvedFalseLoops));
+                stats.append(" false-fixed=");
+                stats.append(std::to_string(totalFalseLoopsFixed));
                 stats.append(" split-values=");
                 stats.append(std::to_string(totalValuesSplit));
                 stats.append(" split-ops=");

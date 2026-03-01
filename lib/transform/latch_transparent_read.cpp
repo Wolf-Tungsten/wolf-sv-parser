@@ -185,6 +185,8 @@ namespace wolvrix::lib::transform
                     }
                     const wolvrix::lib::grh::ValueId readResult = results[0];
                     const wolvrix::lib::grh::Value readValue = graph.getValue(readResult);
+                    const std::vector<wolvrix::lib::grh::ValueUser> originalUsers(
+                        readValue.users().begin(), readValue.users().end());
                     
                     // Create the transparent read logic:
                     // When updateCond is 1, return new value (with mask consideration)
@@ -257,11 +259,16 @@ namespace wolvrix::lib::transform
                     wolvrix::lib::grh::ValueId muxResult = graph.createValue(info.width, info.isSigned);
                     graph.addResult(muxOp, muxResult);
                     
-                    // Replace all uses of readResult with mux output, but keep
-                    // the mux's false branch wired to the original readResult
-                    // to avoid creating a combinational self-loop.
-                    graph.replaceAllUses(readResult, muxResult);
-                    graph.replaceOperand(muxOp, 2, readResult);
+                    // Replace only the pre-existing users of readResult so the
+                    // mux false branch and mask logic keep the raw latch value.
+                    for (const auto &user : originalUsers)
+                    {
+                        if (!user.operation.valid())
+                        {
+                            continue;
+                        }
+                        graph.replaceOperand(user.operation, user.operandIndex, muxResult);
+                    }
                     
                     result.changed = true;
                     debug(graph, "Inserted transparent-read mux for latch '" + latchSym + "' read port");
