@@ -1062,7 +1062,15 @@ namespace wolvrix::lib::transform
                 {
                     recordDeclaredAssign(declaredAssigns, op, resultId, operandId);
                 }
-                opsToErase.push_back(opId);
+                const wolvrix::lib::grh::Value updatedResult = ctx.graph.getValue(resultId);
+                if (updatedResult.users().empty())
+                {
+                    opsToErase.push_back(opId);
+                }
+                else
+                {
+                    debug(ctx.graph, "Skipping erase of simplified kSliceStatic (still has users)");
+                }
                 simplifiedSlices = true;
                 ++ctx.simplifiedSlices;
                 break;
@@ -1074,8 +1082,7 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::Operation op = ctx.graph.getOperation(opId);
             if (!ctx.graph.eraseOp(opId))
             {
-                error(ctx.graph, op, "Failed to erase simplified kSliceStatic op");
-                ctx.failed = true;
+                debug(ctx.graph, op, "Failed to erase simplified kSliceStatic op (still used)");
             }
             else
             {

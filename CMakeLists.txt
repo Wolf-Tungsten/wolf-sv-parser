@@ -66,6 +66,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/hier_flatten.cpp
     lib/transform/xmr_resolve.cpp
     lib/transform/latch_transparent_read.cpp
+    lib/transform/slice_index_const.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})

@@ -5,6 +5,7 @@
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
 #include "transform/latch_transparent_read.hpp"
+#include "transform/slice_index_const.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
 #include "transform/simplify.hpp"
@@ -397,6 +398,7 @@ namespace wolvrix::lib::transform
             "blackbox-guard",
             "comb-loop-elim",
             "latch-transparent-read",
+            "slice-index-const",
             "multidriven-guard",
             "hier-flatten",
             "xmr-resolve",
@@ -437,6 +439,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<BlackboxGuardPass>();
+        }
+        if (normalized == "slice-index-const")
+        {
+            if (!args.empty())
+            {
+                error = "slice-index-const does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<SliceIndexConstPass>();
         }
         if (normalized == "hier-flatten")
         {
