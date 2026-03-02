@@ -27,7 +27,7 @@ namespace wolvrix::lib::transform
         std::ostringstream oss;
         oss << "graphs=" << graphCount << ", operations=" << opCount << ", values=" << valueCount;
 
-        info(oss.str());
+        logInfo(oss.str());
 
         PassResult result;
         result.changed = false;

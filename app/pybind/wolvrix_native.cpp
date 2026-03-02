@@ -365,6 +365,24 @@ namespace
         return static_cast<int>(level);
     }
 
+    const char *diagnosticKindName(wolvrix::lib::diag::DiagnosticKind kind)
+    {
+        switch (kind)
+        {
+        case wolvrix::lib::diag::DiagnosticKind::Debug:
+            return "debug";
+        case wolvrix::lib::diag::DiagnosticKind::Info:
+            return "info";
+        case wolvrix::lib::diag::DiagnosticKind::Warning:
+            return "warning";
+        case wolvrix::lib::diag::DiagnosticKind::Todo:
+            return "todo";
+        case wolvrix::lib::diag::DiagnosticKind::Error:
+        default:
+            return "error";
+        }
+    }
+
     wolvrix::lib::LogLevel diagnosticToLogLevel(wolvrix::lib::diag::DiagnosticKind kind)
     {
         switch (kind)
@@ -653,6 +671,86 @@ namespace
         return out;
     }
 
+    PyObject *diagnosticsToPyList(const std::vector<wolvrix::lib::diag::Diagnostic> &messages,
+                                  const slang::SourceManager *sourceManager)
+    {
+        PyObject *list = PyList_New(static_cast<Py_ssize_t>(messages.size()));
+        if (!list)
+        {
+            return nullptr;
+        }
+        for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(messages.size()); ++i)
+        {
+            const auto &message = messages[static_cast<std::size_t>(i)];
+            PyObject *dict = PyDict_New();
+            if (!dict)
+            {
+                Py_DECREF(list);
+                return nullptr;
+            }
+            auto *kind = PyUnicode_FromString(diagnosticKindName(message.kind));
+            auto *pass = PyUnicode_FromString(message.passName.c_str());
+            auto *msg = PyUnicode_FromString(message.message.c_str());
+            auto *ctx = PyUnicode_FromString(message.context.c_str());
+            auto *origin = PyUnicode_FromString(message.originSymbol.c_str());
+            if (!kind || !pass || !msg || !ctx || !origin)
+            {
+                Py_XDECREF(kind);
+                Py_XDECREF(pass);
+                Py_XDECREF(msg);
+                Py_XDECREF(ctx);
+                Py_XDECREF(origin);
+                Py_DECREF(dict);
+                Py_DECREF(list);
+                return nullptr;
+            }
+            PyDict_SetItemString(dict, "kind", kind);
+            PyDict_SetItemString(dict, "pass", pass);
+            PyDict_SetItemString(dict, "message", msg);
+            PyDict_SetItemString(dict, "context", ctx);
+            PyDict_SetItemString(dict, "origin", origin);
+            Py_DECREF(kind);
+            Py_DECREF(pass);
+            Py_DECREF(msg);
+            Py_DECREF(ctx);
+            Py_DECREF(origin);
+
+            if (message.location && sourceManager)
+            {
+                DiagnosticLocationInfo info;
+                if (getDiagnosticLocationInfo(sourceManager, *message.location, info))
+                {
+                    PyObject *file = PyUnicode_FromString(info.filename.c_str());
+                    PyObject *line = PyLong_FromUnsignedLongLong(info.line);
+                    PyObject *column = PyLong_FromUnsignedLongLong(info.column);
+                    if (file && line && column)
+                    {
+                        PyDict_SetItemString(dict, "file", file);
+                        PyDict_SetItemString(dict, "line", line);
+                        PyDict_SetItemString(dict, "column", column);
+                    }
+                    Py_XDECREF(file);
+                    Py_XDECREF(line);
+                    Py_XDECREF(column);
+                }
+            }
+
+            const std::string text = formatDiagnostic(message, sourceManager, false);
+            PyObject *text_obj = PyUnicode_FromString(text.c_str());
+            if (!text_obj)
+            {
+                Py_DECREF(dict);
+                Py_DECREF(list);
+                return nullptr;
+            }
+            PyDict_SetItemString(dict, "text", text_obj);
+            Py_DECREF(text_obj);
+
+            PyList_SET_ITEM(list, i, dict);
+        }
+        return list;
+    }
+
     void emitDiagnostics(const std::vector<wolvrix::lib::diag::Diagnostic> &messages,
                          wolvrix::lib::LogLevel threshold,
                          const slang::SourceManager *sourceManager)
@@ -690,7 +788,7 @@ namespace
     {
         PyObject *path_obj = nullptr;
         PyObject *slang_args_obj = Py_None;
-        const char *log_level_text = "warn";
+        const char *log_level_text = "info";
         const char *diag_text = "warn";
         static const char *kwlist[] = {"path", "slang_args", "log_level", "diagnostics", nullptr};
         if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|Oss",
@@ -760,7 +858,7 @@ namespace
             {
                 return;
             }
-            (void)driver.reportDiagnostics(/* quiet */ false);
+            (void)driver.reportDiagnostics(/* quiet */ true);
         };
 
         if (!driver.parseCommandLine(static_cast<int>(argv.size()), argv.data()))
@@ -801,7 +899,7 @@ namespace
         }
         if (hasSlangIssues)
         {
-            driver.reportCompilation(*compilation, /* quiet */ false);
+            driver.reportCompilation(*compilation, /* quiet */ true);
             reportSlangDiagnostics();
         }
         if (hasSlangErrors)
@@ -823,6 +921,7 @@ namespace
             PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
             return nullptr;
         }
+        (void)diag_level;
 
         wolvrix::lib::ingest::ConvertOptions convertOptions;
         convertOptions.abortOnError = true;
@@ -852,23 +951,57 @@ namespace
         catch (const wolvrix::lib::ingest::ConvertAbort &)
         {
             converter.diagnostics().flushThreadLocal();
-            emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
-            const std::string diagText = formatDiagnostics(converter.diagnostics().messages(),
-                                                           compilation->getSourceManager());
-            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
-            return nullptr;
+            PyObject *diag_list = diagnosticsToPyList(converter.diagnostics().messages(),
+                                                      compilation->getSourceManager());
+            if (!diag_list)
+            {
+                return nullptr;
+            }
+            PyObject *result = PyTuple_New(3);
+            if (!result)
+            {
+                Py_DECREF(diag_list);
+                return nullptr;
+            }
+            Py_INCREF(Py_None);
+            PyTuple_SET_ITEM(result, 0, Py_None);
+            PyTuple_SET_ITEM(result, 1, PyBool_FromLong(0));
+            PyTuple_SET_ITEM(result, 2, diag_list);
+            return result;
         }
-        if (converter.diagnostics().hasError())
+        converter.diagnostics().flushThreadLocal();
+        const bool success = !converter.diagnostics().hasError();
+        PyObject *diag_list = diagnosticsToPyList(converter.diagnostics().messages(),
+                                                  compilation->getSourceManager());
+        if (!diag_list)
         {
-            emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
-            const std::string diagText = formatDiagnostics(converter.diagnostics().messages(),
-                                                           compilation->getSourceManager());
-            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
-        emitDiagnostics(converter.diagnostics().messages(), diag_level, compilation->getSourceManager());
-
-        return makeDesignCapsule(std::move(design), std::move(compilation));
+        PyObject *result = PyTuple_New(3);
+        if (!result)
+        {
+            Py_DECREF(diag_list);
+            return nullptr;
+        }
+        if (success)
+        {
+            PyObject *capsule = makeDesignCapsule(std::move(design), std::move(compilation));
+            if (!capsule)
+            {
+                Py_DECREF(diag_list);
+                Py_DECREF(result);
+                return nullptr;
+            }
+            PyTuple_SET_ITEM(result, 0, capsule);
+        }
+        else
+        {
+            Py_INCREF(Py_None);
+            PyTuple_SET_ITEM(result, 0, Py_None);
+        }
+        PyTuple_SET_ITEM(result, 1, PyBool_FromLong(success ? 1 : 0));
+        PyTuple_SET_ITEM(result, 2, diag_list);
+        return result;
     }
 
     PyObject *py_read_json(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
@@ -1025,9 +1158,10 @@ namespace
         PyObject *pass_args_obj = Py_None;
         int dryrun = 0;
         const char *diag_text = "warn";
-        static const char *kwlist[] = {"design", "name", "args", "dryrun", "diagnostics", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Ops", const_cast<char **>(kwlist),
-                                         &design_obj, &pass_name, &pass_args_obj, &dryrun, &diag_text))
+        const char *log_text = "warn";
+        static const char *kwlist[] = {"design", "name", "args", "dryrun", "diagnostics", "log_level", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Opss", const_cast<char **>(kwlist),
+                                         &design_obj, &pass_name, &pass_args_obj, &dryrun, &diag_text, &log_text))
         {
             return nullptr;
         }
@@ -1035,6 +1169,14 @@ namespace
         if (!parseDiagnosticsLevel(diag_text, diag_level))
         {
             PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
+            return nullptr;
+        }
+        (void)diag_level;
+        bool ok = false;
+        const wolvrix::lib::LogLevel log_level = parseLogLevel(log_text, ok);
+        if (!ok)
+        {
+            PyErr_SetString(PyExc_ValueError, "unknown log_level");
             return nullptr;
         }
         if (!pass_name || pass_name[0] == '\0')
@@ -1071,6 +1213,24 @@ namespace
 
         wolvrix::lib::transform::PassDiagnostics diagnostics;
         wolvrix::lib::transform::PassManager manager;
+        if (log_level != wolvrix::lib::LogLevel::Off)
+        {
+            auto &options = manager.options();
+            options.logLevel = log_level;
+            options.logSink = [](wolvrix::lib::LogLevel level,
+                                 std::string_view tag,
+                                 std::string_view message) {
+                (void)level;
+                std::string out;
+                if (!tag.empty())
+                {
+                    out.append(tag);
+                    out.append(": ");
+                }
+                out.append(message);
+                std::cerr << out << '\n';
+            };
+        }
         manager.addPass(std::move(pass));
 
         wolvrix::lib::transform::PassManagerResult result;
@@ -1084,17 +1244,22 @@ namespace
             result = manager.run(*design, diagnostics);
         }
 
-        if (diagnostics.hasError() || !result.success)
+        const auto *sourceManager = getDesignSourceManager(design_obj);
+        PyObject *diag_list = diagnosticsToPyList(diagnostics.messages(), sourceManager);
+        if (!diag_list)
         {
-            const auto *sourceManager = getDesignSourceManager(design_obj);
-            emitDiagnostics(diagnostics.messages(), diag_level, sourceManager);
-            const std::string diagText = formatDiagnostics(diagnostics.messages(), sourceManager);
-            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
-        emitDiagnostics(diagnostics.messages(), diag_level, getDesignSourceManager(design_obj));
-
-        return PyBool_FromLong(result.changed ? 1 : 0);
+        PyObject *tuple = PyTuple_New(3);
+        if (!tuple)
+        {
+            Py_DECREF(diag_list);
+            return nullptr;
+        }
+        PyTuple_SET_ITEM(tuple, 0, PyBool_FromLong(result.changed ? 1 : 0));
+        PyTuple_SET_ITEM(tuple, 1, PyBool_FromLong(result.success ? 1 : 0));
+        PyTuple_SET_ITEM(tuple, 2, diag_list);
+        return tuple;
     }
 
     PyObject *py_run_pipeline(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
@@ -1103,9 +1268,10 @@ namespace
         PyObject *pipeline_obj = Py_None;
         int dryrun = 0;
         const char *diag_text = "warn";
-        static const char *kwlist[] = {"design", "pipeline", "dryrun", "diagnostics", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|ps", const_cast<char **>(kwlist),
-                                         &design_obj, &pipeline_obj, &dryrun, &diag_text))
+        const char *log_text = "warn";
+        static const char *kwlist[] = {"design", "pipeline", "dryrun", "diagnostics", "log_level", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OO|pss", const_cast<char **>(kwlist),
+                                         &design_obj, &pipeline_obj, &dryrun, &diag_text, &log_text))
         {
             return nullptr;
         }
@@ -1114,6 +1280,14 @@ namespace
         if (!parseDiagnosticsLevel(diag_text, diag_level))
         {
             PyErr_SetString(PyExc_ValueError, "unknown diagnostics level");
+            return nullptr;
+        }
+        (void)diag_level;
+        bool ok = false;
+        const wolvrix::lib::LogLevel log_level = parseLogLevel(log_text, ok);
+        if (!ok)
+        {
+            PyErr_SetString(PyExc_ValueError, "unknown log_level");
             return nullptr;
         }
 
@@ -1133,6 +1307,24 @@ namespace
 
         wolvrix::lib::transform::PassDiagnostics diagnostics;
         wolvrix::lib::transform::PassManager manager;
+        if (log_level != wolvrix::lib::LogLevel::Off)
+        {
+            auto &options = manager.options();
+            options.logLevel = log_level;
+            options.logSink = [](wolvrix::lib::LogLevel level,
+                                 std::string_view tag,
+                                 std::string_view message) {
+                (void)level;
+                std::string out;
+                if (!tag.empty())
+                {
+                    out.append(tag);
+                    out.append(": ");
+                }
+                out.append(message);
+                std::cerr << out << '\n';
+            };
+        }
 
         for (const auto &spec : pipeline)
         {
@@ -1165,17 +1357,22 @@ namespace
             result = manager.run(*design, diagnostics);
         }
 
-        if (diagnostics.hasError() || !result.success)
+        const auto *sourceManager = getDesignSourceManager(design_obj);
+        PyObject *diag_list = diagnosticsToPyList(diagnostics.messages(), sourceManager);
+        if (!diag_list)
         {
-            const auto *sourceManager = getDesignSourceManager(design_obj);
-            emitDiagnostics(diagnostics.messages(), diag_level, sourceManager);
-            const std::string diagText = formatDiagnostics(diagnostics.messages(), sourceManager);
-            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
             return nullptr;
         }
-        emitDiagnostics(diagnostics.messages(), diag_level, getDesignSourceManager(design_obj));
-
-        return PyBool_FromLong(result.changed ? 1 : 0);
+        PyObject *tuple = PyTuple_New(3);
+        if (!tuple)
+        {
+            Py_DECREF(diag_list);
+            return nullptr;
+        }
+        PyTuple_SET_ITEM(tuple, 0, PyBool_FromLong(result.changed ? 1 : 0));
+        PyTuple_SET_ITEM(tuple, 1, PyBool_FromLong(result.success ? 1 : 0));
+        PyTuple_SET_ITEM(tuple, 2, diag_list);
+        return tuple;
     }
 
     PyObject *py_list_passes(PyObject * /*self*/, PyObject * /*args*/)
@@ -1203,7 +1400,7 @@ namespace
 
 static PyMethodDef WolvrixMethods[] = {
     {"read_sv", reinterpret_cast<PyCFunction>(py_read_sv), METH_VARARGS | METH_KEYWORDS,
-     "read_sv(path, slang_args=None, log_level='warn', diagnostics='warn') -> Design capsule"},
+     "read_sv(path, slang_args=None, log_level='info', diagnostics='warn') -> (Design capsule|None, ok, diagnostics)"},
     {"read_json", reinterpret_cast<PyCFunction>(py_read_json), METH_VARARGS | METH_KEYWORDS,
      "read_json(path) -> Design capsule"},
     {"load_json_string", reinterpret_cast<PyCFunction>(py_load_json_string), METH_VARARGS | METH_KEYWORDS,
@@ -1213,9 +1410,9 @@ static PyMethodDef WolvrixMethods[] = {
     {"write_sv", reinterpret_cast<PyCFunction>(py_write_sv), METH_VARARGS | METH_KEYWORDS,
      "write_sv(design, output, top=None)"},
     {"run_pass", reinterpret_cast<PyCFunction>(py_run_pass), METH_VARARGS | METH_KEYWORDS,
-     "run_pass(design, name, args=None, dryrun=False, diagnostics='warn') -> bool"},
+     "run_pass(design, name, args=None, dryrun=False, diagnostics='warn', log_level='warn') -> (changed, ok, diagnostics)"},
     {"run_pipeline", reinterpret_cast<PyCFunction>(py_run_pipeline), METH_VARARGS | METH_KEYWORDS,
-     "run_pipeline(design, pipeline, dryrun=False, diagnostics='warn') -> bool"},
+     "run_pipeline(design, pipeline, dryrun=False, diagnostics='warn', log_level='warn') -> (changed, ok, diagnostics)"},
     {"list_passes", reinterpret_cast<PyCFunction>(py_list_passes), METH_NOARGS,
      "list_passes() -> list[str]"},
     {nullptr, nullptr, 0, nullptr},

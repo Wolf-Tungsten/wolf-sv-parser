@@ -345,20 +345,23 @@ namespace wolvrix::lib::transform
             pass->clearContext();
             result.changed = result.changed || passResult.changed;
 
-            auto durationMs =
-                std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime)
-                    .count();
-            std::string message;
-            message.reserve(pass->id().size() + 32);
-            message.append(pass->id());
-            message.append(passResult.failed ? " failed in " : " done in ");
-            message.append(std::to_string(durationMs));
-            message.append("ms");
-            if (passResult.changed)
+            if (options_.emitTiming)
             {
-                message.append(" (changed)");
+                auto durationMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime)
+                        .count();
+                std::string message;
+                message.reserve(pass->id().size() + 32);
+                message.append(pass->id());
+                message.append(passResult.failed ? " failed in " : " done in ");
+                message.append(std::to_string(durationMs));
+                message.append("ms");
+                if (passResult.changed)
+                {
+                    message.append(" (changed)");
+                }
+                emitLog(LogLevel::Info, "timing", message);
             }
-            emitLog(LogLevel::Info, "timing", message);
 
             if (passResult.failed)
             {

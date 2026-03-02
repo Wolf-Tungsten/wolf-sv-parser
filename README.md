@@ -29,19 +29,42 @@ python3 -m pip install -e wolvrix
 python3 - <<'PY'
 import wolvrix
 
-design = wolvrix.read_sv("path/to/file.sv", slang_args=["--top", "top"], log_level="warn")
+design, _read_diags = wolvrix.read_sv(
+    "path/to/file.sv",
+    slang_args=["--top", "top"],
+    log_level="info",             # dev log output (C++ side, immediate)
+    diagnostics="warn",           # diagnostics collection
+    print_diagnostics_level="info",
+    raise_diagnostics_level="error",
+)
 pipeline = [
     "xmr-resolve",
     "simplify",
     "memory-init-check",
     "stats",
 ]
-wolvrix.run_pipeline(design, pipeline)
+changed, _pass_diags = wolvrix.run_pipeline(
+    design,
+    pipeline,
+    diagnostics="warn",
+    log_level="info",
+    print_diagnostics_level="info",
+    raise_diagnostics_level="error",
+)
 
 design.write_json("out.json")
 design.write_sv("out.sv")
 PY
 ```
+
+### Log vs diagnostics
+
+- **Log**: developer/debug output printed immediately by C++ (not collected). Use `log_level` to control it.
+- **Diagnostics**: user-facing messages collected in C++ and returned to Python. Python controls printing via `print_diagnostics_level` and raising via `raise_diagnostics_level`.
+
+Python helpers accept:
+- `print_diagnostics_level="info|warn|error|none"`
+- `raise_diagnostics_level="error|warn|info|none"` (raise if any diagnostic meets/exceeds this level).
 
 ## Tests
 

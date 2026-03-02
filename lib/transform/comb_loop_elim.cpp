@@ -2389,6 +2389,10 @@ namespace wolvrix::lib::transform
     {
         PassResult result;
         logDebug("begin graphs=" + std::to_string(design().graphs().size()));
+        std::size_t totalLoopsDetected = 0;
+        std::size_t totalTrueLoops = 0;
+        std::size_t totalFalseLoops = 0;
+        std::size_t totalFalseLoopsFixed = 0;
 
         for (const auto &entry : design().graphs())
         {
@@ -2538,8 +2542,26 @@ namespace wolvrix::lib::transform
             std::size_t fixIterations = 0;
             std::size_t totalValuesSplit = 0;
             std::size_t totalOpsRewritten = 0;
-            std::size_t totalFalseLoopsFixed = 0;
+            std::size_t falseLoopsFixed = 0;
+            std::size_t initialLoopsDetected = 0;
+            std::size_t initialTrueLoops = 0;
+            std::size_t initialFalseLoops = 0;
             bool graphChanged = false;
+
+            {
+                const auto valueSpan = graph.values();
+                SuccMap succ = buildSucc(valueSpan.size());
+                std::vector<LoopInfo> initialLoops = collectLoopInfos(graph, valueSpan, succ);
+                if (!initialLoops.empty())
+                {
+                    std::size_t falseLoops = 0;
+                    std::size_t trueLoops = 0;
+                    classifyLoops(initialLoops, falseLoops, trueLoops, true);
+                    initialLoopsDetected = initialLoops.size();
+                    initialTrueLoops = trueLoops;
+                    initialFalseLoops = falseLoops;
+                }
+            }
 
             if (options_.fixFalseLoops)
             {
@@ -2580,7 +2602,7 @@ namespace wolvrix::lib::transform
                             changedThisIter = true;
                             totalValuesSplit += loopValuesSplit;
                             totalOpsRewritten += loopOpsRewritten;
-                            ++totalFalseLoopsFixed;
+                            ++falseLoopsFixed;
                             std::string detail = "graph=" + graph.symbol();
                             detail.append(" ");
                             detail.append(describeLoop(loop, graph, loopLoc, "false",
@@ -2592,7 +2614,7 @@ namespace wolvrix::lib::transform
                             detail.append(std::to_string(loopOpsRewritten));
                             detail.append(" iter=");
                             detail.append(std::to_string(iter));
-                            logInfo(std::move(detail));
+                            logDebug(std::move(detail));
                         }
                     }
 
@@ -2631,7 +2653,7 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            std::size_t loopsDetected = finalLoops.size();
+            std::size_t loopsDetected = initialLoopsDetected;
             for (const auto &loop : finalLoops)
             {
                 recordTrueLoop(loop);
@@ -2648,13 +2670,13 @@ namespace wolvrix::lib::transform
                 stats.append(" loops=");
                 stats.append(std::to_string(loopsDetected));
                 stats.append(" true=");
-                stats.append(std::to_string(trueLoops));
+                stats.append(std::to_string(initialTrueLoops));
                 stats.append(" false=");
-                stats.append(std::to_string(falseLoops));
+                stats.append(std::to_string(initialFalseLoops));
                 stats.append(" false-unresolved=");
                 stats.append(std::to_string(unresolvedFalseLoops));
                 stats.append(" false-fixed=");
-                stats.append(std::to_string(totalFalseLoopsFixed));
+                stats.append(std::to_string(falseLoopsFixed));
                 stats.append(" split-values=");
                 stats.append(std::to_string(totalValuesSplit));
                 stats.append(" split-ops=");
@@ -2663,7 +2685,23 @@ namespace wolvrix::lib::transform
                 stats.append(std::to_string(fixIterations));
                 logInfo(std::move(stats));
             }
+
+            totalLoopsDetected += loopsDetected;
+            totalTrueLoops += initialTrueLoops;
+            totalFalseLoops += initialFalseLoops;
+            totalFalseLoopsFixed += falseLoopsFixed;
         }
+
+        std::string summary = "comb-loop-elim summary";
+        summary.append(" loops=");
+        summary.append(std::to_string(totalLoopsDetected));
+        summary.append(" true=");
+        summary.append(std::to_string(totalTrueLoops));
+        summary.append(" false=");
+        summary.append(std::to_string(totalFalseLoops));
+        summary.append(" false-fixed=");
+        summary.append(std::to_string(totalFalseLoopsFixed));
+        logInfo(std::move(summary));
 
         return result;
     }
