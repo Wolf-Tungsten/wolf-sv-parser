@@ -345,24 +345,23 @@ int main()
         {
             return fail("Stats pass should emit an info diagnostic");
         }
-        if (message.message.find("stats") == std::string::npos ||
-            message.message.find("graphs: 1") == std::string::npos ||
-            message.message.find("operations: 1") == std::string::npos ||
-            message.message.find("values: 2") == std::string::npos ||
-            message.message.find("value-bitwidth-total: 2") == std::string::npos ||
-            message.message.find("value-widths-json:") == std::string::npos ||
+        if (message.message.find("\"graph_count\":1") == std::string::npos ||
+            message.message.find("\"operation_count\":1") == std::string::npos ||
+            message.message.find("\"value_count\":2") == std::string::npos ||
+            message.message.find("\"value_bitwidth_total\":2") == std::string::npos ||
+            message.message.find("\"value_widths\":") == std::string::npos ||
             message.message.find("\"1\":2") == std::string::npos ||
-            message.message.find("op-kinds-json:") == std::string::npos ||
+            message.message.find("\"operation_kinds\":") == std::string::npos ||
             message.message.find("\"kAssign\":1") == std::string::npos ||
-            message.message.find("kRegister-widths-json:") == std::string::npos ||
-            message.message.find("kLatch-widths-json:") == std::string::npos ||
-            message.message.find("kMemory-widths-json:") == std::string::npos ||
-            message.message.find("kMemory-capacity-json:") == std::string::npos ||
-            message.message.find("writeport-cone-depths-json:") == std::string::npos ||
-            message.message.find("writeport-cone-sizes-json:") == std::string::npos ||
-            message.message.find("writeport-cone-fanins-json:") == std::string::npos ||
-            message.message.find("comb-op-fanout-sinks-json:") == std::string::npos ||
-            message.message.find("readport-fanout-sinks-json:") == std::string::npos)
+            message.message.find("\"register_widths\":") == std::string::npos ||
+            message.message.find("\"latch_widths\":") == std::string::npos ||
+            message.message.find("\"memory_widths\":") == std::string::npos ||
+            message.message.find("\"memory_capacity_bits\":") == std::string::npos ||
+            message.message.find("\"writeport_cone_depths\":") == std::string::npos ||
+            message.message.find("\"writeport_cone_sizes\":") == std::string::npos ||
+            message.message.find("\"writeport_cone_fanins\":") == std::string::npos ||
+            message.message.find("\"comb_op_fanout_sinks\":") == std::string::npos ||
+            message.message.find("\"readport_fanout_sinks\":") == std::string::npos)
         {
             return fail("Stats pass diagnostic did not contain expected counts");
         }
