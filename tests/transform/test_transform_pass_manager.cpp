@@ -345,9 +345,24 @@ int main()
         {
             return fail("Stats pass should emit an info diagnostic");
         }
-        if (message.message.find("graphs=1") == std::string::npos ||
-            message.message.find("operations=1") == std::string::npos ||
-            message.message.find("values=2") == std::string::npos)
+        if (message.message.find("stats") == std::string::npos ||
+            message.message.find("graphs: 1") == std::string::npos ||
+            message.message.find("operations: 1") == std::string::npos ||
+            message.message.find("values: 2") == std::string::npos ||
+            message.message.find("value-bitwidth-total: 2") == std::string::npos ||
+            message.message.find("value-widths-json:") == std::string::npos ||
+            message.message.find("\"1\":2") == std::string::npos ||
+            message.message.find("op-kinds-json:") == std::string::npos ||
+            message.message.find("\"kAssign\":1") == std::string::npos ||
+            message.message.find("kRegister-widths-json:") == std::string::npos ||
+            message.message.find("kLatch-widths-json:") == std::string::npos ||
+            message.message.find("kMemory-widths-json:") == std::string::npos ||
+            message.message.find("kMemory-capacity-json:") == std::string::npos ||
+            message.message.find("writeport-cone-depths-json:") == std::string::npos ||
+            message.message.find("writeport-cone-sizes-json:") == std::string::npos ||
+            message.message.find("writeport-cone-fanins-json:") == std::string::npos ||
+            message.message.find("comb-op-fanout-sinks-json:") == std::string::npos ||
+            message.message.find("readport-fanout-sinks-json:") == std::string::npos)
         {
             return fail("Stats pass diagnostic did not contain expected counts");
         }
