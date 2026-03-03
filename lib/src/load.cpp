@@ -3,9 +3,14 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -27,12 +32,66 @@ namespace wolvrix::lib::load
         using wolvrix::lib::grh::Design;
         using wolvrix::lib::grh::OperationId;
         using wolvrix::lib::grh::OperationKind;
+        using wolvrix::lib::grh::Port;
+        using wolvrix::lib::grh::InoutPort;
         using wolvrix::lib::grh::SymbolId;
         using wolvrix::lib::grh::Value;
         using wolvrix::lib::grh::ValueId;
         using wolvrix::lib::grh::attributeValueIsJsonSerializable;
         using wolvrix::lib::grh::parseOperationKind;
         using wolvrix::lib::grh::SrcLoc;
+
+        using TimingClock = std::chrono::steady_clock;
+
+        bool jsonTimingEnabled()
+        {
+            static const bool enabled = []() {
+                const char *env = std::getenv("WOLVRIX_JSON_TIMING");
+                if (!env || *env == '\0')
+                {
+                    return false;
+                }
+                return !(env[0] == '0' && env[1] == '\0');
+            }();
+            return enabled;
+        }
+
+        std::size_t jsonTimingStep()
+        {
+            static const std::size_t step = []() {
+                const char *env = std::getenv("WOLVRIX_JSON_TIMING_STEP");
+                if (!env || *env == '\0')
+                {
+                    return static_cast<std::size_t>(1000000);
+                }
+                char *end = nullptr;
+                const unsigned long long value = std::strtoull(env, &end, 10);
+                if (end == env || *end != '\0')
+                {
+                    return static_cast<std::size_t>(1000000);
+                }
+                return static_cast<std::size_t>(value);
+            }();
+            return step;
+        }
+
+        double toMillis(TimingClock::duration duration)
+        {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        }
+
+        void logJsonTiming(std::string_view label, double ms, std::string_view details = {})
+        {
+            std::ostringstream oss;
+            oss.setf(std::ios::fixed);
+            oss << std::setprecision(3);
+            oss << "[wolvrix-json] " << label << " " << ms << "ms";
+            if (!details.empty())
+            {
+                oss << " " << details;
+            }
+            std::cerr << oss.str() << '\n';
+        }
 
         enum class AttributeKind
         {
@@ -693,7 +752,27 @@ namespace wolvrix::lib::load
 
     wolvrix::lib::grh::Design LoadJson::load(std::string_view json)
     {
+        const bool timingEnabled = jsonTimingEnabled();
+        const std::size_t progressStep = timingEnabled ? jsonTimingStep() : 0;
+        TimingClock::time_point totalStart;
+        if (timingEnabled)
+        {
+            totalStart = TimingClock::now();
+        }
+
+        TimingClock::time_point parseStart;
+        if (timingEnabled)
+        {
+            parseStart = TimingClock::now();
+        }
         JsonValue root = parseJson(json);
+        if (timingEnabled)
+        {
+            const auto parseEnd = TimingClock::now();
+            std::ostringstream details;
+            details << "bytes=" << json.size();
+            logJsonTiming("load_json.parse", toMillis(parseEnd - parseStart), details.str());
+        }
         const auto &rootObj = root.asObject("design");
 
         Design design;
@@ -703,8 +782,29 @@ namespace wolvrix::lib::load
             throw std::runtime_error("Design JSON missing graphs field");
         }
         const auto &graphsArray = graphsIt->second.asArray("graphs");
+        std::size_t totalGraphs = 0;
+        std::size_t totalDeclared = 0;
+        std::size_t totalValues = 0;
+        std::size_t totalOps = 0;
+        std::size_t totalPortsIn = 0;
+        std::size_t totalPortsOut = 0;
+        std::size_t totalPortsInout = 0;
+        TimingClock::time_point graphsStart;
+        if (timingEnabled)
+        {
+            graphsStart = TimingClock::now();
+        }
         for (const auto &graphValue : graphsArray)
         {
+            TimingClock::time_point graphStart;
+            TimingClock::time_point declaredEnd;
+            TimingClock::time_point valuesEnd;
+            TimingClock::time_point portsEnd;
+            TimingClock::time_point opsEnd;
+            if (timingEnabled)
+            {
+                graphStart = TimingClock::now();
+            }
             const auto &graphObj = graphValue.asObject("graph");
             auto symbolIt = graphObj.find("symbol");
             if (symbolIt == graphObj.end())
@@ -717,12 +817,20 @@ namespace wolvrix::lib::load
                 throw std::runtime_error("Graph JSON symbol is empty");
             }
             Graph &graph = design.createGraph(graphSymbol);
+            ++totalGraphs;
+            if (timingEnabled)
+            {
+                std::ostringstream details;
+                details << "symbol=" << graphSymbol;
+                logJsonTiming("load_json.graph.start", 0.0, details.str());
+            }
 
             auto declaredIt = graphObj.find("declaredSymbols");
             if (declaredIt == graphObj.end())
             {
                 throw std::runtime_error("Graph JSON missing declaredSymbols");
             }
+            std::size_t declaredCount = 0;
             for (const auto &entry : declaredIt->second.asArray("graph.declaredSymbols"))
             {
                 const std::string name = entry.asString("graph.declaredSymbols[]");
@@ -740,6 +848,12 @@ namespace wolvrix::lib::load
                     throw std::runtime_error("Declared symbol is already bound to value/operation: " + name);
                 }
                 graph.addDeclaredSymbol(sym);
+                ++declaredCount;
+            }
+            totalDeclared += declaredCount;
+            if (timingEnabled)
+            {
+                declaredEnd = TimingClock::now();
             }
 
             const auto valuesIt = graphObj.find("vals");
@@ -754,6 +868,16 @@ namespace wolvrix::lib::load
             std::unordered_set<uint32_t> declaredInouts;
 
             const auto &valuesArray = valuesIt->second.asArray("graph.vals");
+            std::size_t valuesCount = 0;
+            TimingClock::time_point valuesStart;
+            double valuesSymbolMs = 0.0;
+            double valuesCreateMs = 0.0;
+            double valuesLocMs = 0.0;
+            std::size_t valuesLocCount = 0;
+            if (timingEnabled)
+            {
+                valuesStart = TimingClock::now();
+            }
             for (const auto &valueEntry : valuesArray)
             {
                 const auto &valueObj = valueEntry.asObject("value");
@@ -777,12 +901,32 @@ namespace wolvrix::lib::load
                         throw std::runtime_error("Unknown value type in JSON: " + typeName);
                     }
                 }
+                TimingClock::time_point valueSymbolStart;
+                if (timingEnabled)
+                {
+                    valueSymbolStart = TimingClock::now();
+                }
                 SymbolId valueSym = graph.internSymbol(symbol);
+                if (timingEnabled)
+                {
+                    const auto now = TimingClock::now();
+                    valuesSymbolMs += toMillis(now - valueSymbolStart);
+                }
                 if (!valueSym.valid())
                 {
                     throw std::runtime_error("Value symbol already bound to value/operation: " + symbol);
                 }
+                TimingClock::time_point valueCreateStart;
+                if (timingEnabled)
+                {
+                    valueCreateStart = TimingClock::now();
+                }
                 ValueId valueId = graph.createValue(valueSym, static_cast<int32_t>(width), isSigned, valueType);
+                if (timingEnabled)
+                {
+                    const auto now = TimingClock::now();
+                    valuesCreateMs += toMillis(now - valueCreateStart);
+                }
                 valueBySymbol.emplace(symbol, valueId);
 
                 bool isInput = valueObj.at("in").asBool("value.in");
@@ -812,16 +956,54 @@ namespace wolvrix::lib::load
 
                 if (auto dbgIt = valueObj.find("loc"); dbgIt != valueObj.end())
                 {
+                    TimingClock::time_point valueLocStart;
+                    if (timingEnabled)
+                    {
+                        valueLocStart = TimingClock::now();
+                    }
                     if (auto loc = parseSrcLoc(dbgIt->second, "value.loc"))
                     {
                         graph.setValueSrcLoc(valueId, std::move(*loc));
                     }
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        valuesLocMs += toMillis(now - valueLocStart);
+                        ++valuesLocCount;
+                    }
+                }
+                ++valuesCount;
+                if (progressStep > 0 && (valuesCount % progressStep) == 0)
+                {
+                    const auto now = TimingClock::now();
+                    std::ostringstream details;
+                    details << "symbol=" << graphSymbol
+                            << " count=" << valuesCount
+                            << " elapsed=" << toMillis(now - valuesStart) << "ms";
+                    logJsonTiming("load_json.values.progress", toMillis(now - valuesStart), details.str());
                 }
             }
+            totalValues += valuesCount;
+            if (timingEnabled)
+            {
+                valuesEnd = TimingClock::now();
+            }
 
+            std::size_t portsInCount = 0;
+            std::size_t portsOutCount = 0;
+            std::size_t portsInoutCount = 0;
+            double portsInParseMs = 0.0;
+            double portsOutParseMs = 0.0;
+            double portsInoutParseMs = 0.0;
+            double portsInBindMs = 0.0;
+            double portsOutBindMs = 0.0;
+            double portsInoutBindMs = 0.0;
             if (auto portsIt = graphObj.find("ports"); portsIt != graphObj.end())
             {
                 const auto &portsObj = portsIt->second.asObject("graph.ports");
+                std::vector<Port> inputPorts;
+                std::vector<Port> outputPorts;
+                std::vector<InoutPort> inoutPorts;
                 auto parsePortArray = [&](std::string_view key, bool isInput)
                 {
                     auto arrayIt = portsObj.find(std::string(key));
@@ -830,9 +1012,22 @@ namespace wolvrix::lib::load
                         return;
                     }
                     const auto &portArray = arrayIt->second.asArray(std::string("graph.ports.") + std::string(key));
+                    if (isInput)
+                    {
+                        inputPorts.reserve(inputPorts.size() + portArray.size());
+                    }
+                    else
+                    {
+                        outputPorts.reserve(outputPorts.size() + portArray.size());
+                    }
                     for (const auto &entry : portArray)
                     {
                         const auto &portObj = entry.asObject("graph.port");
+                        TimingClock::time_point portStart;
+                        if (timingEnabled)
+                        {
+                            portStart = TimingClock::now();
+                        }
                         auto nameField = portObj.find("name");
                         auto valField = portObj.find("val");
                         if (nameField == portObj.end() || valField == portObj.end())
@@ -856,11 +1051,24 @@ namespace wolvrix::lib::load
                         }
                         if (isInput)
                         {
-                            graph.bindInputPort(portNameText, valueIt->second);
+                            inputPorts.push_back(Port{portNameText, valueIt->second});
                         }
                         else
                         {
-                            graph.bindOutputPort(portNameText, valueIt->second);
+                            outputPorts.push_back(Port{portNameText, valueIt->second});
+                        }
+                        if (timingEnabled)
+                        {
+                            const auto now = TimingClock::now();
+                            const double delta = toMillis(now - portStart);
+                            if (isInput)
+                            {
+                                portsInParseMs += delta;
+                            }
+                            else
+                            {
+                                portsOutParseMs += delta;
+                            }
                         }
                     }
                 };
@@ -871,9 +1079,15 @@ namespace wolvrix::lib::load
                 if (inoutIt != portsObj.end())
                 {
                     const auto &portArray = inoutIt->second.asArray("graph.ports.inout");
+                    inoutPorts.reserve(inoutPorts.size() + portArray.size());
                     for (const auto &entry : portArray)
                     {
                         const auto &portObj = entry.asObject("graph.inout_port");
+                        TimingClock::time_point portStart;
+                        if (timingEnabled)
+                        {
+                            portStart = TimingClock::now();
+                        }
                         auto nameField = portObj.find("name");
                         auto inField = portObj.find("in");
                         auto outField = portObj.find("out");
@@ -903,7 +1117,59 @@ namespace wolvrix::lib::load
                         {
                             throw std::runtime_error("Inout port references unknown value");
                         }
-                        graph.bindInoutPort(portNameText, inIt->second, outIt->second, oeIt->second);
+                        inoutPorts.push_back(InoutPort{portNameText, inIt->second, outIt->second, oeIt->second});
+                        if (timingEnabled)
+                        {
+                            const auto now = TimingClock::now();
+                            portsInoutParseMs += toMillis(now - portStart);
+                        }
+                    }
+                }
+
+                portsInCount = inputPorts.size();
+                portsOutCount = outputPorts.size();
+                portsInoutCount = inoutPorts.size();
+
+                if (!inputPorts.empty())
+                {
+                    TimingClock::time_point bindStart;
+                    if (timingEnabled)
+                    {
+                        bindStart = TimingClock::now();
+                    }
+                    graph.bindInputPorts(inputPorts);
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        portsInBindMs = toMillis(now - bindStart);
+                    }
+                }
+                if (!outputPorts.empty())
+                {
+                    TimingClock::time_point bindStart;
+                    if (timingEnabled)
+                    {
+                        bindStart = TimingClock::now();
+                    }
+                    graph.bindOutputPorts(outputPorts);
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        portsOutBindMs = toMillis(now - bindStart);
+                    }
+                }
+                if (!inoutPorts.empty())
+                {
+                    TimingClock::time_point bindStart;
+                    if (timingEnabled)
+                    {
+                        bindStart = TimingClock::now();
+                    }
+                    graph.bindInoutPorts(inoutPorts);
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        portsInoutBindMs = toMillis(now - bindStart);
                     }
                 }
             }
@@ -996,7 +1262,29 @@ namespace wolvrix::lib::load
                     throw std::runtime_error("Value marked inout=true but not bound to inout port");
                 }
             }
+            totalPortsIn += portsInCount;
+            totalPortsOut += portsOutCount;
+            totalPortsInout += portsInoutCount;
+            if (timingEnabled)
+            {
+                portsEnd = TimingClock::now();
+            }
 
+            std::size_t opsCount = 0;
+            std::size_t opsInRefs = 0;
+            std::size_t opsOutRefs = 0;
+            std::size_t opsAttrCount = 0;
+            double opsSymbolMs = 0.0;
+            double opsCreateMs = 0.0;
+            double opsInputsMs = 0.0;
+            double opsOutputsMs = 0.0;
+            double opsAttrsMs = 0.0;
+            double opsLocMs = 0.0;
+            TimingClock::time_point opsStart;
+            if (timingEnabled)
+            {
+                opsStart = TimingClock::now();
+            }
             if (auto opsIt = graphObj.find("ops"); opsIt != graphObj.end())
             {
                 for (const auto &opEntry : opsIt->second.asArray("graph.ops"))
@@ -1024,12 +1312,32 @@ namespace wolvrix::lib::load
                     {
                         throw std::runtime_error("Operation symbol is empty");
                     }
+                    TimingClock::time_point opSymbolStart;
+                    if (timingEnabled)
+                    {
+                        opSymbolStart = TimingClock::now();
+                    }
                     SymbolId opSym = graph.internSymbol(opSymbol);
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        opsSymbolMs += toMillis(now - opSymbolStart);
+                    }
                     if (!opSym.valid())
                     {
                         throw std::runtime_error("Operation symbol already bound to value/operation: " + opSymbol);
                     }
+                    TimingClock::time_point opCreateStart;
+                    if (timingEnabled)
+                    {
+                        opCreateStart = TimingClock::now();
+                    }
                     OperationId opId = graph.createOperation(*kind, opSym);
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        opsCreateMs += toMillis(now - opCreateStart);
+                    }
 
                     auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>
                     {
@@ -1044,6 +1352,11 @@ namespace wolvrix::lib::load
                         return entries;
                     };
 
+                    TimingClock::time_point opInputsStart;
+                    if (timingEnabled)
+                    {
+                        opInputsStart = TimingClock::now();
+                    }
                     for (const auto &symbol : parseSymbolList("in", "operation.in"))
                     {
                         auto valueIt = valueBySymbol.find(symbol);
@@ -1052,8 +1365,19 @@ namespace wolvrix::lib::load
                             throw std::runtime_error("Operand references unknown value: " + symbol);
                         }
                         graph.addOperand(opId, valueIt->second);
+                        ++opsInRefs;
+                    }
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        opsInputsMs += toMillis(now - opInputsStart);
                     }
 
+                    TimingClock::time_point opOutputsStart;
+                    if (timingEnabled)
+                    {
+                        opOutputsStart = TimingClock::now();
+                    }
                     for (const auto &symbol : parseSymbolList("out", "operation.out"))
                     {
                         auto valueIt = valueBySymbol.find(symbol);
@@ -1062,32 +1386,125 @@ namespace wolvrix::lib::load
                             throw std::runtime_error("Result references unknown value: " + symbol);
                         }
                         graph.addResult(opId, valueIt->second);
+                        ++opsOutRefs;
+                    }
+                    if (timingEnabled)
+                    {
+                        const auto now = TimingClock::now();
+                        opsOutputsMs += toMillis(now - opOutputsStart);
                     }
 
                     if (auto attrsIt = opObj.find("attrs"); attrsIt != opObj.end())
                     {
+                        TimingClock::time_point opAttrsStart;
+                        if (timingEnabled)
+                        {
+                            opAttrsStart = TimingClock::now();
+                        }
                         for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
                         {
                             graph.setAttr(opId, attrName, parseAttributeValue(attrValue));
+                            ++opsAttrCount;
+                        }
+                        if (timingEnabled)
+                        {
+                            const auto now = TimingClock::now();
+                            opsAttrsMs += toMillis(now - opAttrsStart);
                         }
                     }
 
                     if (auto dbgIt = opObj.find("loc"); dbgIt != opObj.end())
                     {
+                        TimingClock::time_point opLocStart;
+                        if (timingEnabled)
+                        {
+                            opLocStart = TimingClock::now();
+                        }
                         if (auto loc = parseSrcLoc(dbgIt->second, "operation.loc"))
                         {
                             graph.setOpSrcLoc(opId, std::move(*loc));
                         }
+                        if (timingEnabled)
+                        {
+                            const auto now = TimingClock::now();
+                            opsLocMs += toMillis(now - opLocStart);
+                        }
+                    }
+                    ++opsCount;
+                    if (progressStep > 0 && (opsCount % progressStep) == 0)
+                    {
+                        const auto now = TimingClock::now();
+                        std::ostringstream details;
+                        details << "symbol=" << graphSymbol
+                                << " count=" << opsCount
+                                << " elapsed=" << toMillis(now - opsStart) << "ms";
+                        logJsonTiming("load_json.ops.progress", toMillis(now - opsStart), details.str());
                     }
                 }
             }
+            totalOps += opsCount;
+            if (timingEnabled)
+            {
+                opsEnd = TimingClock::now();
+                std::ostringstream details;
+                details << "symbol=" << graphSymbol
+                        << " declared=" << declaredCount
+                        << " values=" << valuesCount
+                        << " ops=" << opsCount
+                        << " ports_in=" << portsInCount
+                        << " ports_out=" << portsOutCount
+                        << " ports_inout=" << portsInoutCount
+                        << " phase_ms=decl:" << toMillis(declaredEnd - graphStart)
+                        << ",vals:" << toMillis(valuesEnd - declaredEnd)
+                        << ",ports:" << toMillis(portsEnd - valuesEnd)
+                        << ",ops:" << toMillis(opsEnd - portsEnd)
+                        << " values_ms=symbol:" << valuesSymbolMs
+                        << ",create:" << valuesCreateMs
+                        << ",loc:" << valuesLocMs
+                        << " values_loc=" << valuesLocCount
+                        << " ports_ms=parse_in:" << portsInParseMs
+                        << ",parse_out:" << portsOutParseMs
+                        << ",parse_inout:" << portsInoutParseMs
+                        << ",bind_in:" << portsInBindMs
+                        << ",bind_out:" << portsOutBindMs
+                        << ",bind_inout:" << portsInoutBindMs
+                        << " ops_ms=sym:" << opsSymbolMs
+                        << ",create:" << opsCreateMs
+                        << ",in:" << opsInputsMs
+                        << ",out:" << opsOutputsMs
+                        << ",attrs:" << opsAttrsMs
+                        << ",loc:" << opsLocMs
+                        << " ops_refs=in:" << opsInRefs
+                        << ",out:" << opsOutRefs
+                        << " ops_attrs=" << opsAttrCount;
+                logJsonTiming("load_json.graph", toMillis(opsEnd - graphStart), details.str());
+            }
+        }
+        if (timingEnabled)
+        {
+            const auto graphsEnd = TimingClock::now();
+            std::ostringstream details;
+            details << "graphs=" << totalGraphs
+                    << " declared=" << totalDeclared
+                    << " values=" << totalValues
+                    << " ops=" << totalOps
+                    << " ports_in=" << totalPortsIn
+                    << " ports_out=" << totalPortsOut
+                    << " ports_inout=" << totalPortsInout;
+            logJsonTiming("load_json.graphs", toMillis(graphsEnd - graphsStart), details.str());
         }
 
+        TimingClock::time_point designStart;
+        if (timingEnabled)
+        {
+            designStart = TimingClock::now();
+        }
         auto declaredIt = rootObj.find("declaredSymbols");
         if (declaredIt == rootObj.end())
         {
             throw std::runtime_error("Design JSON missing declaredSymbols");
         }
+        std::size_t designDeclared = 0;
         for (const auto &entry : declaredIt->second.asArray("design.declaredSymbols"))
         {
             const std::string name = entry.asString("design.declaredSymbols[]");
@@ -1096,8 +1513,10 @@ namespace wolvrix::lib::load
                 throw std::runtime_error("Design declared symbol is empty");
             }
             design.addDeclaredSymbol(design.internSymbol(name));
+            ++designDeclared;
         }
 
+        std::size_t designAliases = 0;
         if (auto aliasesIt = rootObj.find("aliases"); aliasesIt != rootObj.end())
         {
             for (const auto &[alias, value] : aliasesIt->second.asObject("design.aliases"))
@@ -1117,15 +1536,30 @@ namespace wolvrix::lib::load
                     throw std::runtime_error("Design alias target graph not found: " + target);
                 }
                 design.registerGraphAlias(alias, *graph);
+                ++designAliases;
             }
         }
 
+        std::size_t designTops = 0;
         if (auto topIt = rootObj.find("tops"); topIt != rootObj.end())
         {
             for (const auto &entry : topIt->second.asArray("design.tops"))
             {
                 design.markAsTop(entry.asString("design.tops[]"));
+                ++designTops;
             }
+        }
+
+        if (timingEnabled)
+        {
+            const auto designEnd = TimingClock::now();
+            std::ostringstream details;
+            details << "declared=" << designDeclared
+                    << " aliases=" << designAliases
+                    << " tops=" << designTops;
+            logJsonTiming("load_json.design", toMillis(designEnd - designStart), details.str());
+            const auto totalEnd = TimingClock::now();
+            logJsonTiming("load_json.total", toMillis(totalEnd - totalStart));
         }
 
         return design;

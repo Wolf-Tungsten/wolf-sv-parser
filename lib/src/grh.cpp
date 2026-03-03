@@ -2812,8 +2812,8 @@ namespace wolvrix::lib::grh
 
     Value::Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
                  ValueType type, bool isInput, bool isOutput, bool isInout,
-                 OperationId definingOp, std::vector<ValueUser> users,
-                 std::optional<SrcLoc> srcLoc)
+                 OperationId definingOp, std::span<const ValueUser> users,
+                 std::optional<SrcLoc> srcLoc, const Graph *owner, bool usersLoaded)
         : id_(id),
           symbol_(symbol),
           symbolText_(std::move(symbolText)),
@@ -2824,9 +2824,27 @@ namespace wolvrix::lib::grh
           isOutput_(isOutput),
           isInout_(isInout),
           definingOp_(definingOp),
-          users_(std::move(users)),
+          usersLoaded_(usersLoaded),
+          owner_(owner),
           srcLoc_(std::move(srcLoc))
     {
+        if (usersLoaded_)
+        {
+            users_.assign(users);
+        }
+    }
+
+    std::span<const ValueUser> Value::users() const noexcept
+    {
+        if (!usersLoaded_)
+        {
+            if (owner_ != nullptr)
+            {
+                users_.assign(owner_->valueUsersSpan(id_));
+            }
+            usersLoaded_ = true;
+        }
+        return users_.span();
     }
 
     Operation::Operation(OperationId id, OperationKind kind, SymbolId symbol, std::string symbolText,
@@ -3176,6 +3194,50 @@ namespace wolvrix::lib::grh
     OperationId Graph::findOperation(std::string_view symbol) const
     {
         return findOperation(lookupSymbol(symbol));
+    }
+
+    SymbolId Graph::valueSymbol(ValueId id) const noexcept
+    {
+        if (builder_)
+        {
+            if (id.graph != graphId_ || id.index == 0 || id.index > builder_->values_.size())
+            {
+                return SymbolId::invalid();
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            if (!builder_->values_[idx].alive)
+            {
+                return SymbolId::invalid();
+            }
+            return builder_->values_[idx].symbol;
+        }
+        if (view_)
+        {
+            return view_->valueSymbol(id);
+        }
+        return SymbolId::invalid();
+    }
+
+    SymbolId Graph::operationSymbol(OperationId id) const noexcept
+    {
+        if (builder_)
+        {
+            if (id.graph != graphId_ || id.index == 0 || id.index > builder_->operations_.size())
+            {
+                return SymbolId::invalid();
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            if (!builder_->operations_[idx].alive)
+            {
+                return SymbolId::invalid();
+            }
+            return builder_->operations_[idx].symbol;
+        }
+        if (view_)
+        {
+            return view_->opSymbol(id);
+        }
+        return SymbolId::invalid();
     }
 
     Value Graph::getValue(ValueId id) const
@@ -3897,8 +3959,10 @@ namespace wolvrix::lib::grh
                      graphView.valueIsOutput(id),
                      graphView.valueIsInout(id),
                      graphView.valueDef(id),
-                     std::vector<ValueUser>(graphView.valueUsers(id).begin(), graphView.valueUsers(id).end()),
-                     graphView.valueSrcLoc(id));
+                     std::span<const ValueUser>(),
+                     graphView.valueSrcLoc(id),
+                     this,
+                     false);
     }
 
     Value Graph::valueFromBuilder(ValueId id) const
@@ -3919,9 +3983,6 @@ namespace wolvrix::lib::grh
             throw std::runtime_error("ValueId refers to erased value");
         }
 
-        const auto &usersView = builder_->valueUsers_[idx];
-        std::vector<ValueUser> users(usersView.begin(), usersView.end());
-
         std::string symbolText = symbolTextOrEmpty(symbols_, data.symbol);
         return Value(id,
                      data.symbol,
@@ -3933,8 +3994,10 @@ namespace wolvrix::lib::grh
                      data.isOutput,
                      data.isInout,
                      data.definingOp,
-                     std::move(users),
-                     data.srcLoc);
+                     std::span<const ValueUser>(),
+                     data.srcLoc,
+                     this,
+                     false);
     }
 
     Operation Graph::operationFromView(OperationId id) const
@@ -3980,6 +4043,29 @@ namespace wolvrix::lib::grh
                          data.results,
                          data.attrs,
                          data.srcLoc);
+    }
+
+    std::span<const ValueUser> Graph::valueUsersSpan(ValueId id) const noexcept
+    {
+        if (builder_)
+        {
+            if (id.graph != graphId_ || id.index == 0 || id.index > builder_->valueUsers_.size())
+            {
+                return {};
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            if (idx >= builder_->values_.size() || !builder_->values_[idx].alive)
+            {
+                return {};
+            }
+            const auto &users = builder_->valueUsers_[idx];
+            return std::span<const ValueUser>(users.data(), users.size());
+        }
+        if (view_)
+        {
+            return view_->valueUsers(id);
+        }
+        return {};
     }
 
     Graph &Design::addGraphInternal(std::unique_ptr<Graph> graph)

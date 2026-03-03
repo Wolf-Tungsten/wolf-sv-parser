@@ -1,18 +1,19 @@
 #ifndef WOLVRIX_GRH_HPP
 #define WOLVRIX_GRH_HPP
 
-#include <cstdint>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
-#include <span>
 #include <vector>
 
 namespace slang {
@@ -272,6 +273,105 @@ struct AttrKV {
     AttributeValue value;
 };
 
+namespace detail
+{
+    class InlineValueUsers
+    {
+    public:
+        InlineValueUsers() = default;
+
+        InlineValueUsers(const InlineValueUsers &other)
+        {
+            assign(other.span());
+        }
+
+        InlineValueUsers &operator=(const InlineValueUsers &other)
+        {
+            if (this != &other)
+            {
+                assign(other.span());
+            }
+            return *this;
+        }
+
+        InlineValueUsers(InlineValueUsers &&other) noexcept
+        {
+            moveFrom(std::move(other));
+        }
+
+        InlineValueUsers &operator=(InlineValueUsers &&other) noexcept
+        {
+            if (this != &other)
+            {
+                moveFrom(std::move(other));
+            }
+            return *this;
+        }
+
+        void assign(std::span<const ValueUser> users)
+        {
+            if (users.size() <= kInlineCapacity)
+            {
+                usingInline_ = true;
+                inlineSize_ = users.size();
+                for (std::size_t i = 0; i < inlineSize_; ++i)
+                {
+                    inline_[i] = users[i];
+                }
+                heap_.clear();
+                return;
+            }
+            usingInline_ = false;
+            inlineSize_ = 0;
+            heap_.assign(users.begin(), users.end());
+        }
+
+        void clear()
+        {
+            usingInline_ = true;
+            inlineSize_ = 0;
+            heap_.clear();
+        }
+
+        std::span<const ValueUser> span() const noexcept
+        {
+            if (usingInline_)
+            {
+                return std::span<const ValueUser>(inline_.data(), inlineSize_);
+            }
+            return std::span<const ValueUser>(heap_.data(), heap_.size());
+        }
+
+        std::size_t size() const noexcept
+        {
+            return usingInline_ ? inlineSize_ : heap_.size();
+        }
+
+    private:
+        void moveFrom(InlineValueUsers &&other) noexcept
+        {
+            usingInline_ = other.usingInline_;
+            inlineSize_ = other.inlineSize_;
+            if (usingInline_)
+            {
+                inline_ = other.inline_;
+                heap_.clear();
+            }
+            else
+            {
+                heap_ = std::move(other.heap_);
+            }
+            other.clear();
+        }
+
+        static constexpr std::size_t kInlineCapacity = 4;
+        std::array<ValueUser, kInlineCapacity> inline_{};
+        std::vector<ValueUser> heap_{};
+        std::size_t inlineSize_ = 0;
+        bool usingInline_ = true;
+    };
+} // namespace detail
+
 class GraphView {
 public:
     GraphView() = default;
@@ -468,7 +568,7 @@ public:
     bool isOutput() const noexcept { return isOutput_; }
     bool isInout() const noexcept { return isInout_; }
     OperationId definingOp() const noexcept { return definingOp_; }
-    std::span<const ValueUser> users() const noexcept { return std::span<const ValueUser>(users_.data(), users_.size()); }
+    std::span<const ValueUser> users() const noexcept;
     const std::optional<SrcLoc>& srcLoc() const noexcept { return srcLoc_; }
 
 private:
@@ -476,8 +576,8 @@ private:
 
     Value(ValueId id, SymbolId symbol, std::string symbolText, int32_t width, bool isSigned,
           ValueType type, bool isInput, bool isOutput, bool isInout,
-          OperationId definingOp, std::vector<ValueUser> users,
-          std::optional<SrcLoc> srcLoc);
+          OperationId definingOp, std::span<const ValueUser> users,
+          std::optional<SrcLoc> srcLoc, const Graph* owner, bool usersLoaded);
 
     ValueId id_{};
     SymbolId symbol_{};
@@ -489,7 +589,9 @@ private:
     bool isOutput_ = false;
     bool isInout_ = false;
     OperationId definingOp_{};
-    std::vector<ValueUser> users_;
+    mutable detail::InlineValueUsers users_;
+    mutable bool usersLoaded_ = true;
+    const Graph* owner_ = nullptr;
     std::optional<SrcLoc> srcLoc_;
 };
 
@@ -594,6 +696,8 @@ public:
     OperationId findOperation(SymbolId symbol) const noexcept;
     ValueId findValue(std::string_view symbol) const;
     OperationId findOperation(std::string_view symbol) const;
+    SymbolId valueSymbol(ValueId value) const noexcept;
+    SymbolId operationSymbol(OperationId op) const noexcept;
     Value getValue(ValueId id) const;
     Operation getOperation(OperationId id) const;
 
@@ -637,6 +741,7 @@ public:
 
 private:
     friend class Design;
+    friend class Value;
 
     void invalidateCaches() const;
     void invalidateValuesCache() const;
@@ -652,6 +757,7 @@ private:
     Value valueFromBuilder(ValueId id) const;
     Operation operationFromView(OperationId id) const;
     Operation operationFromBuilder(OperationId id) const;
+    std::span<const ValueUser> valueUsersSpan(ValueId id) const noexcept;
 
     Design* owner_;
     std::string symbol_;

@@ -2,9 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <functional>
+#include <iomanip>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <system_error>
@@ -22,6 +26,87 @@ namespace wolvrix::lib::store
 
     namespace
     {
+        using TimingClock = std::chrono::steady_clock;
+
+        bool jsonTimingEnabled()
+        {
+            static const bool enabled = []() {
+                const char *env = std::getenv("WOLVRIX_JSON_TIMING");
+                if (!env || *env == '\0')
+                {
+                    return false;
+                }
+                return !(env[0] == '0' && env[1] == '\0');
+            }();
+            return enabled;
+        }
+
+        double toMillis(TimingClock::duration duration)
+        {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        }
+
+        void logJsonTiming(std::string_view label, double ms, std::string_view details = {})
+        {
+            std::ostringstream oss;
+            oss.setf(std::ios::fixed);
+            oss << std::setprecision(3);
+            oss << "[wolvrix-json] " << label << " " << ms << "ms";
+            if (!details.empty())
+            {
+                oss << " " << details;
+            }
+            std::cerr << oss.str() << '\n';
+        }
+
+        std::size_t jsonTimingStep()
+        {
+            static const std::size_t step = []() {
+                const char *env = std::getenv("WOLVRIX_JSON_TIMING_STEP");
+                if (!env || *env == '\0')
+                {
+                    return static_cast<std::size_t>(1000000);
+                }
+                char *end = nullptr;
+                const unsigned long long value = std::strtoull(env, &end, 10);
+                if (end == env || *end != '\0')
+                {
+                    return static_cast<std::size_t>(1000000);
+                }
+                return static_cast<std::size_t>(value);
+            }();
+            return step;
+        }
+
+        const char *jsonModeName(JsonPrintMode mode)
+        {
+            switch (mode)
+            {
+            case JsonPrintMode::Compact:
+                return "compact";
+            case JsonPrintMode::Pretty:
+                return "pretty";
+            case JsonPrintMode::PrettyCompact:
+            default:
+                return "pretty-compact";
+            }
+        }
+
+        struct GraphWriteStats {
+            double declaredMs = 0.0;
+            double valuesMs = 0.0;
+            double portsInMs = 0.0;
+            double portsOutMs = 0.0;
+            double portsInoutMs = 0.0;
+            double opsMs = 0.0;
+            std::size_t declaredCount = 0;
+            std::size_t valuesCount = 0;
+            std::size_t opsCount = 0;
+            std::size_t portsInCount = 0;
+            std::size_t portsOutCount = 0;
+            std::size_t portsInoutCount = 0;
+        };
+
         template <class... Ts>
         struct Overloaded : Ts...
         {
@@ -587,11 +672,29 @@ namespace wolvrix::lib::store
             writer.setPrettyPrint(pretty);
             writer.startObject();
 
+            const bool timingEnabled = jsonTimingEnabled();
             writer.writeProperty("graphs");
             writer.startArray();
             for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(design))
             {
+                TimingClock::time_point graphStart;
+                if (timingEnabled)
+                {
+                    graphStart = TimingClock::now();
+                }
                 graph->writeJson(writer);
+                if (timingEnabled)
+                {
+                    const auto graphEnd = TimingClock::now();
+                    std::ostringstream details;
+                    details << "symbol=" << graph->symbol()
+                            << " values=" << graph->values().size()
+                            << " ops=" << graph->operations().size()
+                            << " ports_in=" << graph->inputPorts().size()
+                            << " ports_out=" << graph->outputPorts().size()
+                            << " ports_inout=" << graph->inoutPorts().size();
+                    logJsonTiming("store_json.graph", toMillis(graphEnd - graphStart), details.str());
+                }
             }
             writer.endArray();
 
@@ -764,16 +867,6 @@ namespace wolvrix::lib::store
             return oss.str();
         }
 
-        std::string opSymbolRequired(const wolvrix::lib::grh::Operation &op)
-        {
-            std::string sym(op.symbolText());
-            if (!sym.empty())
-            {
-                return sym;
-            }
-            throw std::runtime_error("Operation missing symbol during emit");
-        }
-
         std::string graphSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::SymbolId sym, std::string_view context)
         {
             if (!sym.valid())
@@ -796,6 +889,16 @@ namespace wolvrix::lib::store
                 return sym;
             }
             throw std::runtime_error("Value missing symbol during emit");
+        }
+
+        std::string valueSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId value)
+        {
+            return graphSymbolRequired(graph, graph.valueSymbol(value), "Value");
+        }
+
+        std::string opSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::OperationId op)
+        {
+            return graphSymbolRequired(graph, graph.operationSymbol(op), "Operation");
         }
 
         void validateGraphSymbols(const wolvrix::lib::grh::Graph &graph)
@@ -862,7 +965,7 @@ namespace wolvrix::lib::store
                                                {
                                                    throw std::runtime_error("Value user missing operation during emit");
                                                }
-                                               appendQuotedString(out, opSymbolRequired(graph.getOperation(user.operation)));
+                                               appendQuotedString(out, opSymbolRequired(graph, user.operation));
                                            });
                                       prop("idx", [&]
                                            { out.append(std::to_string(static_cast<int64_t>(user.operandIndex))); });
@@ -1025,7 +1128,7 @@ namespace wolvrix::lib::store
                                   if (value.definingOp())
                                   {
                                       prop("def", [&]
-                                           { appendQuotedString(out, opSymbolRequired(graph.getOperation(value.definingOp()))); });
+                                           { appendQuotedString(out, opSymbolRequired(graph, value.definingOp())); });
                                   }
                                   prop("users", [&]
                                        { writeUsersInline(out, graph, value.users(), mode); });
@@ -1057,7 +1160,7 @@ namespace wolvrix::lib::store
             writeInlineObject(out, mode, [&](auto &&prop)
                               {
                                   prop("sym", [&]
-                                       { appendQuotedString(out, opSymbolRequired(op)); });
+                                       { appendQuotedString(out, opSymbolRequired(graph, op.id())); });
                                   prop("kind", [&]
                                        { appendQuotedString(out, wolvrix::lib::grh::toString(op.kind())); });
                                   prop("in", [&]
@@ -1071,7 +1174,7 @@ namespace wolvrix::lib::store
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, valueSymbolRequired(graph.getValue(operandId)));
+                                               appendQuotedString(out, valueSymbolRequired(graph, operandId));
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -1087,7 +1190,7 @@ namespace wolvrix::lib::store
                                                {
                                                    out.append(comma);
                                                }
-                                               appendQuotedString(out, valueSymbolRequired(graph.getValue(resultId)));
+                                               appendQuotedString(out, valueSymbolRequired(graph, resultId));
                                                first = false;
                                            }
                                            out.push_back(']');
@@ -1146,7 +1249,7 @@ namespace wolvrix::lib::store
                 appendNewlineAndIndent(out, indent);
                 writePortInline(out,
                                 port.name,
-                                valueSymbolRequired(graph.getValue(port.value)),
+                                valueSymbolRequired(graph, port.value),
                                 mode);
                 first = false;
             }
@@ -1184,11 +1287,11 @@ namespace wolvrix::lib::store
                                                appendQuotedString(out, port.name);
                                            });
                                       prop("in", [&]
-                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.in))); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph, port.in)); });
                                       prop("out", [&]
-                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.out))); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph, port.out)); });
                                       prop("oe", [&]
-                                           { appendQuotedString(out, valueSymbolRequired(graph.getValue(port.oe))); });
+                                           { appendQuotedString(out, valueSymbolRequired(graph, port.oe)); });
                                   });
                 first = false;
             }
@@ -1199,10 +1302,26 @@ namespace wolvrix::lib::store
             out.push_back(']');
         }
 
-        void writeGraphPrettyCompact(std::string &out, const wolvrix::lib::grh::Graph &graph, int baseIndent)
+        void writeGraphPrettyCompact(std::string &out,
+                                     const wolvrix::lib::grh::Graph &graph,
+                                     int baseIndent,
+                                     GraphWriteStats *stats,
+                                     bool timingEnabled,
+                                     std::size_t progressStep)
         {
             out.push_back('{');
             int indent = baseIndent + 1;
+            const bool useTiming = timingEnabled && stats;
+
+            if (stats)
+            {
+                stats->declaredCount = graph.declaredSymbols().size();
+                stats->valuesCount = graph.values().size();
+                stats->opsCount = graph.operations().size();
+                stats->portsInCount = graph.inputPorts().size();
+                stats->portsOutCount = graph.outputPorts().size();
+                stats->portsInoutCount = graph.inoutPorts().size();
+            }
 
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "symbol");
@@ -1210,6 +1329,11 @@ namespace wolvrix::lib::store
             appendQuotedString(out, graph.symbol());
             out.push_back(',');
 
+            TimingClock::time_point sectionStart;
+            if (useTiming)
+            {
+                sectionStart = TimingClock::now();
+            }
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "declaredSymbols");
             out.append(": ");
@@ -1223,14 +1347,57 @@ namespace wolvrix::lib::store
                                  }
                                  appendQuotedString(out, text);
                              });
+            if (useTiming)
+            {
+                stats->declaredMs = toMillis(TimingClock::now() - sectionStart);
+                sectionStart = TimingClock::now();
+            }
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "vals");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.values(),
-                             [&](const wolvrix::lib::grh::ValueId valueId)
-                             { writeValueInline(out, graph, graph.getValue(valueId), JsonPrintMode::PrettyCompact); });
+            {
+                const auto values = graph.values();
+                out.push_back('[');
+                bool first = true;
+                std::size_t valueIndex = 0;
+                TimingClock::time_point valuesStart;
+                if (useTiming)
+                {
+                    valuesStart = TimingClock::now();
+                }
+                for (const auto valueId : values)
+                {
+                    if (!first)
+                    {
+                        out.push_back(',');
+                    }
+                    appendNewlineAndIndent(out, indent + 1);
+                    writeValueInline(out, graph, graph.getValue(valueId), JsonPrintMode::PrettyCompact);
+                    first = false;
+                    ++valueIndex;
+                    if (useTiming && progressStep > 0 && (valueIndex % progressStep) == 0)
+                    {
+                        const auto now = TimingClock::now();
+                        std::ostringstream details;
+                        details << "symbol=" << graph.symbol()
+                                << " count=" << valueIndex
+                                << " elapsed=" << toMillis(now - valuesStart) << "ms";
+                        logJsonTiming("store_json.values.progress", toMillis(now - valuesStart), details.str());
+                    }
+                }
+                if (!values.empty())
+                {
+                    appendNewlineAndIndent(out, indent);
+                }
+                out.push_back(']');
+                if (useTiming)
+                {
+                    stats->valuesMs = toMillis(TimingClock::now() - valuesStart);
+                    sectionStart = TimingClock::now();
+                }
+            }
             out.push_back(',');
 
             appendNewlineAndIndent(out, indent);
@@ -1243,18 +1410,33 @@ namespace wolvrix::lib::store
             appendQuotedString(out, "in");
             out.append(": ");
             writePortsPrettyCompact(out, graph, graph.inputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            if (useTiming)
+            {
+                stats->portsInMs = toMillis(TimingClock::now() - sectionStart);
+                sectionStart = TimingClock::now();
+            }
             out.push_back(',');
 
             appendNewlineAndIndent(out, portsIndent);
             appendQuotedString(out, "out");
             out.append(": ");
             writePortsPrettyCompact(out, graph, graph.outputPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            if (useTiming)
+            {
+                stats->portsOutMs = toMillis(TimingClock::now() - sectionStart);
+                sectionStart = TimingClock::now();
+            }
             out.push_back(',');
 
             appendNewlineAndIndent(out, portsIndent);
             appendQuotedString(out, "inout");
             out.append(": ");
             writeInoutPortsPrettyCompact(out, graph, graph.inoutPorts(), JsonPrintMode::PrettyCompact, portsIndent + 1);
+            if (useTiming)
+            {
+                stats->portsInoutMs = toMillis(TimingClock::now() - sectionStart);
+                sectionStart = TimingClock::now();
+            }
 
             appendNewlineAndIndent(out, indent);
             out.push_back('}');
@@ -1263,9 +1445,46 @@ namespace wolvrix::lib::store
             appendNewlineAndIndent(out, indent);
             appendQuotedString(out, "ops");
             out.append(": ");
-            writeInlineArray(out, JsonPrintMode::PrettyCompact, indent + 1, graph.operations(),
-                             [&](const wolvrix::lib::grh::OperationId opId)
-                             { writeOperationInline(out, graph, graph.getOperation(opId), JsonPrintMode::PrettyCompact); });
+            {
+                const auto ops = graph.operations();
+                out.push_back('[');
+                bool first = true;
+                std::size_t opIndex = 0;
+                TimingClock::time_point opsStart;
+                if (useTiming)
+                {
+                    opsStart = TimingClock::now();
+                }
+                for (const auto opId : ops)
+                {
+                    if (!first)
+                    {
+                        out.push_back(',');
+                    }
+                    appendNewlineAndIndent(out, indent + 1);
+                    writeOperationInline(out, graph, graph.getOperation(opId), JsonPrintMode::PrettyCompact);
+                    first = false;
+                    ++opIndex;
+                    if (useTiming && progressStep > 0 && (opIndex % progressStep) == 0)
+                    {
+                        const auto now = TimingClock::now();
+                        std::ostringstream details;
+                        details << "symbol=" << graph.symbol()
+                                << " count=" << opIndex
+                                << " elapsed=" << toMillis(now - opsStart) << "ms";
+                        logJsonTiming("store_json.ops.progress", toMillis(now - opsStart), details.str());
+                    }
+                }
+                if (!ops.empty())
+                {
+                    appendNewlineAndIndent(out, indent);
+                }
+                out.push_back(']');
+                if (useTiming)
+                {
+                    stats->opsMs = toMillis(TimingClock::now() - opsStart);
+                }
+            }
 
             appendNewlineAndIndent(out, baseIndent);
             out.push_back('}');
@@ -1455,17 +1674,44 @@ namespace wolvrix::lib::store
             out.append(": [");
 
             const auto graphs = graphsSortedByName(design);
+            const bool timingEnabled = jsonTimingEnabled();
+            const std::size_t progressStep = timingEnabled ? jsonTimingStep() : 0;
             if (!graphs.empty())
             {
                 bool first = true;
                 for (const wolvrix::lib::grh::Graph *graph : graphs)
                 {
+                    TimingClock::time_point graphStart;
+                    if (timingEnabled)
+                    {
+                        graphStart = TimingClock::now();
+                    }
                     if (!first)
                     {
                         out.push_back(',');
                     }
                     appendNewlineAndIndent(out, indent + 1);
-                    writeGraphPrettyCompact(out, *graph, indent + 1);
+                    GraphWriteStats stats{};
+                    GraphWriteStats *statsPtr = timingEnabled ? &stats : nullptr;
+                    writeGraphPrettyCompact(out, *graph, indent + 1, statsPtr, timingEnabled, progressStep);
+                    if (timingEnabled)
+                    {
+                        const auto graphEnd = TimingClock::now();
+                        std::ostringstream details;
+                        details << "symbol=" << graph->symbol()
+                                << " values=" << stats.valuesCount
+                                << " ops=" << stats.opsCount
+                                << " ports_in=" << stats.portsInCount
+                                << " ports_out=" << stats.portsOutCount
+                                << " ports_inout=" << stats.portsInoutCount
+                                << " sections_ms=decl:" << stats.declaredMs
+                                << ",vals:" << stats.valuesMs
+                                << ",ports_in:" << stats.portsInMs
+                                << ",ports_out:" << stats.portsOutMs
+                                << ",ports_inout:" << stats.portsInoutMs
+                                << ",ops:" << stats.opsMs;
+                        logJsonTiming("store_json.graph", toMillis(graphEnd - graphStart), details.str());
+                    }
                     first = false;
                 }
                 appendNewlineAndIndent(out, indent);
@@ -1733,6 +1979,14 @@ namespace wolvrix::lib::store
         StoreResult result;
 
         std::string jsonText;
+        const bool timingEnabled = jsonTimingEnabled();
+        TimingClock::time_point totalStart;
+        TimingClock::time_point serializeStart;
+        if (timingEnabled)
+        {
+            totalStart = TimingClock::now();
+            serializeStart = totalStart;
+        }
         try
         {
             jsonText = serializeDesignJson(design, topGraphs, options.jsonMode);
@@ -1742,6 +1996,14 @@ namespace wolvrix::lib::store
             reportError("Failed to serialize design to JSON: " + std::string(ex.what()));
             result.success = false;
             return result;
+        }
+        if (timingEnabled)
+        {
+            const auto serializeEnd = TimingClock::now();
+            std::ostringstream details;
+            details << "bytes=" << jsonText.size()
+                    << " mode=" << jsonModeName(options.jsonMode);
+            logJsonTiming("store_json.serialize", toMillis(serializeEnd - serializeStart), details.str());
         }
 
         const std::string filename = options.outputFilename.value_or(std::string("grh.json"));
@@ -1753,7 +2015,22 @@ namespace wolvrix::lib::store
             return result;
         }
 
+        TimingClock::time_point writeStart;
+        if (timingEnabled)
+        {
+            writeStart = TimingClock::now();
+        }
         *stream << jsonText;
+        if (timingEnabled)
+        {
+            const auto writeEnd = TimingClock::now();
+            std::ostringstream details;
+            details << "bytes=" << jsonText.size()
+                    << " path=" << outputPath.string();
+            logJsonTiming("store_json.write_file", toMillis(writeEnd - writeStart), details.str());
+            const auto totalEnd = TimingClock::now();
+            logJsonTiming("store_json.total", toMillis(totalEnd - totalStart));
+        }
         result.artifacts.push_back(outputPath.string());
         return result;
     }
