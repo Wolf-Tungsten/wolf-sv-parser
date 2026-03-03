@@ -67,6 +67,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/xmr_resolve.cpp
     lib/transform/latch_transparent_read.cpp
     lib/transform/slice_index_const.cpp
+    lib/transform/strip_debug.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
@@ -353,6 +354,18 @@ target_link_libraries(transform-latch-transparent-read
 )
 
 register_test_exe(transform-latch-transparent-read)
+
+# transform: strip-debug
+add_executable(transform-strip-debug
+    tests/transform/test_strip_debug_pass.cpp
+)
+
+target_link_libraries(transform-strip-debug
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-strip-debug)
 
 # ingest: symbol collector
 add_executable(ingest-symbol-collector

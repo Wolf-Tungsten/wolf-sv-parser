@@ -10,6 +10,7 @@
 #include "transform/memory_init_check.hpp"
 #include "transform/simplify.hpp"
 #include "transform/xmr_resolve.hpp"
+#include "transform/strip_debug.hpp"
 
 #include <chrono>
 #include <exception>
@@ -408,6 +409,7 @@ namespace wolvrix::lib::transform
             "memory-init-check",
             "simplify",
             "stats",
+            "strip-debug",
         };
     }
 
@@ -760,6 +762,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<LatchTransparentReadPass>();
+        }
+        if (normalized == "strip-debug")
+        {
+            if (!args.empty())
+            {
+                error = "strip-debug does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<StripDebugPass>();
         }
         if (normalized == "stats")
         {

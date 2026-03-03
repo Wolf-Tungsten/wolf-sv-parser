@@ -166,6 +166,7 @@ public:
     DesignSymbolTable();
 
     GraphId allocateGraphId(SymbolId symbol);
+    void releaseGraphId(SymbolId symbol);
     GraphId lookupGraphId(SymbolId symbol) const noexcept;
     SymbolId symbolForGraph(GraphId graph) const noexcept;
 
@@ -371,6 +372,9 @@ public:
     void bindInputPort(std::string_view name, ValueId value);
     void bindOutputPort(std::string_view name, ValueId value);
     void bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe);
+    void bindInputPorts(std::span<const Port> ports);
+    void bindOutputPorts(std::span<const Port> ports);
+    void bindInoutPorts(std::span<const InoutPort> ports);
     bool removeInputPort(std::string_view name);
     bool removeOutputPort(std::string_view name);
     bool removeInoutPort(std::string_view name);
@@ -596,6 +600,9 @@ public:
     void bindInputPort(std::string_view name, ValueId value);
     void bindOutputPort(std::string_view name, ValueId value);
     void bindInoutPort(std::string_view name, ValueId in, ValueId out, ValueId oe);
+    void bindInputPorts(std::span<const Port> ports);
+    void bindOutputPorts(std::span<const Port> ports);
+    void bindInoutPorts(std::span<const InoutPort> ports);
     bool removeInputPort(std::string_view name);
     bool removeOutputPort(std::string_view name);
     bool removeInoutPort(std::string_view name);

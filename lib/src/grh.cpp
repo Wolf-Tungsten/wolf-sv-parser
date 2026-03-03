@@ -329,6 +329,25 @@ namespace wolvrix::lib::grh
         return graphId;
     }
 
+    void DesignSymbolTable::releaseGraphId(SymbolId symbol)
+    {
+        if (!symbol.valid())
+        {
+            return;
+        }
+        auto it = graphIndexBySymbol_.find(symbol.value);
+        if (it == graphIndexBySymbol_.end())
+        {
+            return;
+        }
+        const uint32_t graphIndex = it->second;
+        graphIndexBySymbol_.erase(it);
+        if (graphIndex < symbolByGraph_.size())
+        {
+            symbolByGraph_[graphIndex] = SymbolId::invalid();
+        }
+    }
+
     GraphId DesignSymbolTable::lookupGraphId(SymbolId symbol) const noexcept
     {
         if (!symbol.valid())
@@ -1669,6 +1688,103 @@ namespace wolvrix::lib::grh
         if (!updated)
         {
             ports.push_back(Port{std::string(name), value});
+        }
+        recomputePortFlags();
+    }
+
+    void GraphBuilder::bindInputPorts(std::span<const Port> ports)
+    {
+        for (const auto &port : ports)
+        {
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Input port name is empty");
+            }
+            const std::size_t valIdx = valueIndex(port.value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            bool updated = false;
+            for (auto &entry : inputPorts_)
+            {
+                if (entry.name == port.name)
+                {
+                    entry.value = port.value;
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated)
+            {
+                inputPorts_.push_back(Port{port.name, port.value});
+            }
+        }
+        recomputePortFlags();
+    }
+
+    void GraphBuilder::bindOutputPorts(std::span<const Port> ports)
+    {
+        for (const auto &port : ports)
+        {
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Output port name is empty");
+            }
+            const std::size_t valIdx = valueIndex(port.value);
+            if (!values_[valIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            bool updated = false;
+            for (auto &entry : outputPorts_)
+            {
+                if (entry.name == port.name)
+                {
+                    entry.value = port.value;
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated)
+            {
+                outputPorts_.push_back(Port{port.name, port.value});
+            }
+        }
+        recomputePortFlags();
+    }
+
+    void GraphBuilder::bindInoutPorts(std::span<const InoutPort> ports)
+    {
+        for (const auto &port : ports)
+        {
+            if (port.name.empty())
+            {
+                throw std::runtime_error("Inout port name is empty");
+            }
+            const std::size_t inIdx = valueIndex(port.in);
+            const std::size_t outIdx = valueIndex(port.out);
+            const std::size_t oeIdx = valueIndex(port.oe);
+            if (!values_[inIdx].alive || !values_[outIdx].alive || !values_[oeIdx].alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            bool updated = false;
+            for (auto &entry : inoutPorts_)
+            {
+                if (entry.name == port.name)
+                {
+                    entry.in = port.in;
+                    entry.out = port.out;
+                    entry.oe = port.oe;
+                    updated = true;
+                    break;
+                }
+            }
+            if (!updated)
+            {
+                inoutPorts_.push_back(InoutPort{port.name, port.in, port.out, port.oe});
+            }
         }
         recomputePortFlags();
     }
@@ -3116,6 +3232,39 @@ namespace wolvrix::lib::grh
         }
     }
 
+    void Graph::bindInputPorts(std::span<const Port> ports)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        builder.bindInputPorts(ports);
+        if (!portsCacheDirty_)
+        {
+            inputPortsCache_.clear();
+            inputPortsCache_ = builder.inputPorts_;
+        }
+    }
+
+    void Graph::bindOutputPorts(std::span<const Port> ports)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        builder.bindOutputPorts(ports);
+        if (!portsCacheDirty_)
+        {
+            outputPortsCache_.clear();
+            outputPortsCache_ = builder.outputPorts_;
+        }
+    }
+
+    void Graph::bindInoutPorts(std::span<const InoutPort> ports)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        builder.bindInoutPorts(ports);
+        if (!portsCacheDirty_)
+        {
+            inoutPortsCache_.clear();
+            inoutPortsCache_ = builder.inoutPorts_;
+        }
+    }
+
     bool Graph::removeInputPort(std::string_view name)
     {
         GraphBuilder &builder = ensureBuilder();
@@ -3882,6 +4031,7 @@ namespace wolvrix::lib::grh
         if (declaredSymbol.valid())
         {
             removeDeclaredSymbol(declaredSymbol);
+            designSymbols_.releaseGraphId(declaredSymbol);
         }
 
         graphs_.erase(symbol);
