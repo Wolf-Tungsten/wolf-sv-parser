@@ -552,16 +552,6 @@ namespace wolvrix::lib::emit
             return oss.str();
         }
 
-        std::string opSymbolRequired(const wolvrix::lib::grh::Operation &op)
-        {
-            std::string sym(op.symbolText());
-            if (!sym.empty())
-            {
-                return sym;
-            }
-            throw std::runtime_error("Operation missing symbol during emit");
-        }
-
         std::string graphSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::SymbolId sym, std::string_view context)
         {
             if (!sym.valid())
@@ -586,6 +576,16 @@ namespace wolvrix::lib::emit
             throw std::runtime_error("Value missing symbol during emit");
         }
 
+        std::string valueSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId value)
+        {
+            return graphSymbolRequired(graph, graph.valueSymbol(value), "Value");
+        }
+
+        std::string opSymbolRequired(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::OperationId op)
+        {
+            return graphSymbolRequired(graph, graph.operationSymbol(op), "Operation");
+        }
+
         void validateGraphSymbols(const wolvrix::lib::grh::Graph &graph)
         {
             if (graph.symbol().empty())
@@ -594,16 +594,16 @@ namespace wolvrix::lib::emit
             }
             for (const auto valueId : graph.values())
             {
-                const wolvrix::lib::grh::Value value = graph.getValue(valueId);
-                if (value.symbolText().empty())
+                const wolvrix::lib::grh::SymbolId sym = graph.valueSymbol(valueId);
+                if (!sym.valid() || graph.symbolText(sym).empty())
                 {
                     throw std::runtime_error("Graph value missing symbol during emit");
                 }
             }
             for (const auto opId : graph.operations())
             {
-                const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                if (op.symbolText().empty())
+                const wolvrix::lib::grh::SymbolId sym = graph.operationSymbol(opId);
+                if (!sym.valid() || graph.symbolText(sym).empty())
                 {
                     throw std::runtime_error("Graph operation missing symbol during emit");
                 }
@@ -1260,7 +1260,7 @@ namespace wolvrix::lib::emit
                 const auto &event = key.events[i];
                 out.append(event.edge);
                 out.push_back(' ');
-                out.append(graph.getValue(event.signal).symbolText());
+                out.append(valueSymbolRequired(graph, event.signal));
             }
             out.push_back(')');
             return out;
@@ -1291,10 +1291,9 @@ namespace wolvrix::lib::emit
             const wolvrix::lib::grh::Graph &graph = *graphIt->second;
             for (const auto opId : graph.operations())
             {
-                const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                if (op.kind() == wolvrix::lib::grh::OperationKind::kDpicImport)
+                if (graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kDpicImport)
                 {
-                    dpicImports.emplace(opSymbolRequired(op), DpiImportRef{&graph, opId});
+                    dpicImports.emplace(opSymbolRequired(graph, opId), DpiImportRef{&graph, opId});
                 }
             }
         }
@@ -1372,8 +1371,7 @@ namespace wolvrix::lib::emit
                 std::string &slot = valueNameCache[idx];
                 if (slot.empty())
                 {
-                    wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                    slot = valueSymbolRequired(value);
+                    slot = valueSymbolRequired(*graph, valueId);
                 }
                 return slot;
             };
@@ -1391,27 +1389,25 @@ namespace wolvrix::lib::emit
                 std::string &slot = opNameCache[idx];
                 if (slot.empty())
                 {
-                    wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-                    slot = opSymbolRequired(op);
+                    slot = opSymbolRequired(*graph, opId);
                 }
                 return slot;
             };
             auto isPortValue = [&](wolvrix::lib::grh::ValueId valueId) -> bool
             {
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                return value.isInput() || value.isOutput() || value.isInout();
+                return graph->valueIsInput(valueId) || graph->valueIsOutput(valueId) || graph->valueIsInout(valueId);
             };
             auto valueType = [&](wolvrix::lib::grh::ValueId valueId) -> wolvrix::lib::grh::ValueType
             {
-                return graph->getValue(valueId).type();
+                return graph->valueType(valueId);
             };
             auto valueWidth = [&](wolvrix::lib::grh::ValueId valueId) -> int64_t
             {
-                return graph->getValue(valueId).width();
+                return graph->valueWidth(valueId);
             };
             auto valueSigned = [&](wolvrix::lib::grh::ValueId valueId) -> bool
             {
-                return graph->getValue(valueId).isSigned();
+                return graph->valueSigned(valueId);
             };
             auto formatConstLiteral = [&](wolvrix::lib::grh::ValueId valueId,
                                           std::string_view literal) -> std::string
@@ -1432,17 +1428,16 @@ namespace wolvrix::lib::emit
                 {
                     return std::nullopt;
                 }
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     return std::nullopt;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+                if (graph->opKind(defOpId) != wolvrix::lib::grh::OperationKind::kConstant)
                 {
                     return std::nullopt;
                 }
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                 return getAttribute<std::string>(*graph, defOp, "constValue");
             };
             auto constLiteralFor = [&](wolvrix::lib::grh::ValueId valueId) -> std::optional<std::string>
@@ -1586,9 +1581,12 @@ namespace wolvrix::lib::emit
                     continue;
                 }
                 const std::string &name = port.name;
-                wolvrix::lib::grh::Value value = graph->getValue(port.value);
-                portDecls[name] = PortDecl{PortDir::Input, value.width(), value.isSigned(), false,
-                                           value.type(), value.srcLoc()};
+                portDecls[name] = PortDecl{PortDir::Input,
+                                           graph->valueWidth(port.value),
+                                           graph->valueSigned(port.value),
+                                           false,
+                                           graph->valueType(port.value),
+                                           graph->valueSrcLoc(port.value)};
             }
             for (const auto &port : graph->outputPorts())
             {
@@ -1597,9 +1595,12 @@ namespace wolvrix::lib::emit
                     continue;
                 }
                 const std::string &name = port.name;
-                wolvrix::lib::grh::Value value = graph->getValue(port.value);
-                portDecls[name] = PortDecl{PortDir::Output, value.width(), value.isSigned(), false,
-                                           value.type(), value.srcLoc()};
+                portDecls[name] = PortDecl{PortDir::Output,
+                                           graph->valueWidth(port.value),
+                                           graph->valueSigned(port.value),
+                                           false,
+                                           graph->valueType(port.value),
+                                           graph->valueSrcLoc(port.value)};
             }
             for (const auto &port : graph->inoutPorts())
             {
@@ -1608,9 +1609,12 @@ namespace wolvrix::lib::emit
                     continue;
                 }
                 const std::string &name = port.name;
-                wolvrix::lib::grh::Value value = graph->getValue(port.out);
-                portDecls[name] = PortDecl{PortDir::Inout, value.width(), value.isSigned(), false,
-                                           value.type(), value.srcLoc()};
+                portDecls[name] = PortDecl{PortDir::Inout,
+                                           graph->valueWidth(port.out),
+                                           graph->valueSigned(port.out),
+                                           false,
+                                           graph->valueType(port.out),
+                                           graph->valueSrcLoc(port.out)};
             }
 
             // Book-keeping for declarations.
@@ -1623,13 +1627,18 @@ namespace wolvrix::lib::emit
             std::unordered_set<std::string> storageBackedPorts;
             for (const auto opId : graph->operations())
             {
-                const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-                if (op.kind() != wolvrix::lib::grh::OperationKind::kRegister &&
-                    op.kind() != wolvrix::lib::grh::OperationKind::kLatch)
+                const auto opKind = graph->opKind(opId);
+                if (opKind != wolvrix::lib::grh::OperationKind::kRegister &&
+                    opKind != wolvrix::lib::grh::OperationKind::kLatch)
                 {
                     continue;
                 }
-                const std::string opName = std::string(op.symbolText());
+                const wolvrix::lib::grh::SymbolId opSym = graph->operationSymbol(opId);
+                if (!opSym.valid())
+                {
+                    continue;
+                }
+                const std::string opName = std::string(graph->symbolText(opSym));
                 if (opName.empty())
                 {
                     continue;
@@ -1794,23 +1803,25 @@ namespace wolvrix::lib::emit
 
             auto ensureWireDecl = [&](wolvrix::lib::grh::ValueId valueId)
             {
-                wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const std::string name = std::string(value.symbolText());
-                if (value.type() != wolvrix::lib::grh::ValueType::Logic)
+                const wolvrix::lib::grh::SymbolId sym = graph->valueSymbol(valueId);
+                const std::string name = std::string(graph->symbolText(sym));
+                const auto type = graph->valueType(valueId);
+                const auto debug = graph->valueSrcLoc(valueId);
+                if (type != wolvrix::lib::grh::ValueType::Logic)
                 {
-                    ensureVarDecl(name, value.type(), value.srcLoc());
+                    ensureVarDecl(name, type, debug);
                     return;
                 }
                 if (declaredNames.find(name) != declaredNames.end())
                 {
                     auto it = wireDecls.find(name);
-                    if (it != wireDecls.end() && value.srcLoc() && !it->second.debug)
+                    if (it != wireDecls.end() && debug && !it->second.debug)
                     {
-                        it->second.debug = *value.srcLoc();
+                        it->second.debug = *debug;
                     }
                     return;
                 }
-                wireDecls.emplace(name, NetDecl{value.width(), value.isSigned(), value.srcLoc()});
+                wireDecls.emplace(name, NetDecl{graph->valueWidth(valueId), graph->valueSigned(valueId), debug});
                 declaredNames.insert(name);
             };
 
@@ -1859,7 +1870,7 @@ namespace wolvrix::lib::emit
                     if (valueType(result) == wolvrix::lib::grh::ValueType::String)
                     {
                         ensureVarDecl(valueName(result), valueType(result), 
-                                      graph->getValue(result).srcLoc(), rhs);
+                                      graph->valueSrcLoc(result), rhs);
                     }
                     else
                     {
@@ -1930,8 +1941,7 @@ namespace wolvrix::lib::emit
             valueUseMap.reserve(static_cast<std::size_t>(maxValueIndex) + 8);
             for (const auto opId : graph->operations())
             {
-                const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-                for (const auto operand : op.operands())
+                for (const auto operand : graph->opOperands(opId))
                 {
                     if (!operand.valid() || operand.graph != graph->id())
                     {
@@ -1947,17 +1957,16 @@ namespace wolvrix::lib::emit
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+                if (graph->opKind(defOpId) != wolvrix::lib::grh::OperationKind::kConstant)
                 {
                     return false;
                 }
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                 auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
                 if (!constValue)
                 {
@@ -2363,16 +2372,14 @@ namespace wolvrix::lib::emit
                     return false;
                 }
                 dpiDependsVisiting[idx] = 1;
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     dpiDependsVisiting[idx] = 0;
                     dpiDependsDense[idx] = 0;
                     return false;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                const auto &ops = defOp.operands();
+                const auto ops = graph->opOperands(defOpId);
                 auto dependsForOperands = [&]() -> bool {
                     for (const auto operand : ops)
                     {
@@ -2384,7 +2391,7 @@ namespace wolvrix::lib::emit
                     return false;
                 };
                 bool depends = false;
-                switch (defOp.kind())
+                switch (graph->opKind(defOpId))
                 {
                 case wolvrix::lib::grh::OperationKind::kConstant:
                 case wolvrix::lib::grh::OperationKind::kEq:
@@ -2559,16 +2566,15 @@ namespace wolvrix::lib::emit
                 {
                     return cached->second;
                 }
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (defOpId.valid())
                 {
-                    const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                    if (defOp.kind() == wolvrix::lib::grh::OperationKind::kDpicCall && dpiInlineSink.valid())
+                    if (graph->opKind(defOpId) == wolvrix::lib::grh::OperationKind::kDpicCall && dpiInlineSink.valid())
                     {
                         auto itSink = dpiInlineReturnSink.find(defOpId);
                         if (itSink != dpiInlineReturnSink.end() && itSink->second == dpiInlineSink)
                         {
+                            const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                             if (auto inlineExpr = buildDpiCallExpr(defOp))
                             {
                                 dpiInlineCache.emplace(valueId, *inlineExpr);
@@ -2619,8 +2625,8 @@ namespace wolvrix::lib::emit
                     if (ops.size() >= 2)
                     {
                         int64_t resultWidth =
-                            std::max(graph->getValue(ops[0]).width(),
-                                     graph->getValue(ops[1]).width());
+                            std::max(graph->valueWidth(ops[0]),
+                                     graph->valueWidth(ops[1]));
                         const std::string tok = binOpToken(defOp.kind());
                         const std::string lhs = resultWidth > 0
                                                     ? inlineExpr.extendOperand(ops[0], resultWidth)
@@ -2633,8 +2639,8 @@ namespace wolvrix::lib::emit
                              defOp.kind() == wolvrix::lib::grh::OperationKind::kLe ||
                              defOp.kind() == wolvrix::lib::grh::OperationKind::kGt ||
                              defOp.kind() == wolvrix::lib::grh::OperationKind::kGe) &&
-                            graph->getValue(ops[0]).isSigned() &&
-                            graph->getValue(ops[1]).isSigned();
+                            graph->valueSigned(ops[0]) &&
+                            graph->valueSigned(ops[1]);
                         const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
                         const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
                         expr = lhsExpr + " " + tok + " " + rhsExpr;
@@ -2656,10 +2662,10 @@ namespace wolvrix::lib::emit
                 case wolvrix::lib::grh::OperationKind::kAShr:
                     if (ops.size() >= 2)
                     {
-                        const int64_t resultWidth = graph->getValue(valueId).width();
+                        const int64_t resultWidth = graph->valueWidth(valueId);
                         const bool signExtend =
                             defOp.kind() == wolvrix::lib::grh::OperationKind::kAShr &&
-                            graph->getValue(ops[0]).isSigned();
+                            graph->valueSigned(ops[0]);
                         const std::string tok = binOpToken(defOp.kind());
                         const std::string lhs = resultWidth > 0
                                                     ? inlineExpr.extendShiftOperand(ops[0], resultWidth, signExtend)
@@ -2674,11 +2680,11 @@ namespace wolvrix::lib::emit
                 case wolvrix::lib::grh::OperationKind::kMod:
                     if (ops.size() >= 2)
                     {
-                        int64_t resultWidth = graph->getValue(valueId).width();
+                        int64_t resultWidth = graph->valueWidth(valueId);
                         if (resultWidth <= 0)
                         {
-                            resultWidth = std::max(graph->getValue(ops[0]).width(),
-                                                   graph->getValue(ops[1]).width());
+                            resultWidth = std::max(graph->valueWidth(ops[0]),
+                                                   graph->valueWidth(ops[1]));
                         }
                         const std::string tok = binOpToken(defOp.kind());
                         expr = inlineExpr.extendOperand(ops[0], resultWidth) + " " + tok + " " +
@@ -2716,7 +2722,7 @@ namespace wolvrix::lib::emit
                 case wolvrix::lib::grh::OperationKind::kMux:
                     if (ops.size() >= 3)
                     {
-                        const int64_t resultWidth = graph->getValue(valueId).width();
+                        const int64_t resultWidth = graph->valueWidth(valueId);
                         const std::string lhs = inlineExpr.extendOperand(ops[1], resultWidth);
                         const std::string rhs = inlineExpr.extendOperand(ops[2], resultWidth);
                         expr = inlineExpr.valueExpr(ops[0]) + " ? " + lhs + " : " + rhs;
@@ -2725,7 +2731,7 @@ namespace wolvrix::lib::emit
                 case wolvrix::lib::grh::OperationKind::kAssign:
                     if (!ops.empty())
                     {
-                        int64_t resultWidth = graph->getValue(valueId).width();
+                        int64_t resultWidth = graph->valueWidth(valueId);
                         expr = inlineExpr.extendOperand(ops[0], resultWidth);
                     }
                     break;
@@ -2793,7 +2799,7 @@ namespace wolvrix::lib::emit
                         auto sliceEnd = getAttribute<int64_t>(*graph, defOp, "sliceEnd");
                         if (sliceStart && sliceEnd)
                         {
-                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            const int64_t operandWidth = graph->valueWidth(ops[0]);
                             std::ostringstream exprStream;
                             if (operandWidth == 1)
                             {
@@ -2824,7 +2830,7 @@ namespace wolvrix::lib::emit
                         auto width = getAttribute<int64_t>(*graph, defOp, "sliceWidth");
                         if (width)
                         {
-                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            const int64_t operandWidth = graph->valueWidth(ops[0]);
                             std::ostringstream exprStream;
                             if (operandWidth == 1)
                             {
@@ -2852,7 +2858,7 @@ namespace wolvrix::lib::emit
                         auto width = getAttribute<int64_t>(*graph, defOp, "sliceWidth");
                         if (width)
                         {
-                            const int64_t operandWidth = graph->getValue(ops[0]).width();
+                            const int64_t operandWidth = graph->valueWidth(ops[0]);
                             std::ostringstream exprStream;
                             if (*width == 1 && operandWidth == 1)
                             {
@@ -2908,17 +2914,16 @@ namespace wolvrix::lib::emit
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+                if (graph->opKind(defOpId) != wolvrix::lib::grh::OperationKind::kConstant)
                 {
                     return false;
                 }
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                 auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
                 if (!constValue)
                 {
@@ -2949,17 +2954,16 @@ namespace wolvrix::lib::emit
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     return false;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+                if (graph->opKind(defOpId) != wolvrix::lib::grh::OperationKind::kConstant)
                 {
                     return false;
                 }
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                 auto constValue = getAttribute<std::string>(*graph, defOp, "constValue");
                 if (!constValue)
                 {
@@ -2992,7 +2996,7 @@ namespace wolvrix::lib::emit
                     return false;
                 }
                 const wolvrix::lib::grh::OperationId defOpId =
-                    graph->getValue(maybeNot).definingOp();
+                    graph->valueDef(maybeNot);
                 if (!defOpId.valid())
                 {
                     return false;
@@ -3026,7 +3030,7 @@ namespace wolvrix::lib::emit
                             return;
                         }
                         const wolvrix::lib::grh::OperationId defId =
-                            graph->getValue(id).definingOp();
+                            graph->valueDef(id);
                         if (!defId.valid())
                         {
                             if (leafIndex.find(id) == leafIndex.end())
@@ -3077,7 +3081,7 @@ namespace wolvrix::lib::emit
                         return false;
                     }
                     const wolvrix::lib::grh::OperationId defId =
-                        graph->getValue(id).definingOp();
+                        graph->valueDef(id);
                     if (!defId.valid())
                     {
                         auto it = leafIndex.find(id);
@@ -3147,7 +3151,7 @@ namespace wolvrix::lib::emit
                     return false;
                 }
                 const wolvrix::lib::grh::OperationId defOpId =
-                    graph->getValue(valueId).definingOp();
+                    graph->valueDef(valueId);
                 if (defOpId.valid())
                 {
                     const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
@@ -3172,7 +3176,7 @@ namespace wolvrix::lib::emit
 
             auto markPortAsRegIfNeeded = [&](wolvrix::lib::grh::ValueId valueId)
             {
-                if (graph->getValue(valueId).type() != wolvrix::lib::grh::ValueType::Logic)
+                if (graph->valueType(valueId) != wolvrix::lib::grh::ValueType::Logic)
                 {
                     return;
                 }
@@ -3228,7 +3232,7 @@ namespace wolvrix::lib::emit
             auto registerWidthForSymbol = [&](const std::string &symbol,
                                               wolvrix::lib::grh::ValueId nextValue) -> int64_t
             {
-                int64_t width = graph->getValue(nextValue).width();
+                int64_t width = graph->valueWidth(nextValue);
                 const wolvrix::lib::grh::OperationId regOpId = graph->findOperation(symbol);
                 if (regOpId.valid())
                 {
@@ -3247,7 +3251,7 @@ namespace wolvrix::lib::emit
             auto latchWidthForSymbol = [&](const std::string &symbol,
                                            wolvrix::lib::grh::ValueId nextValue) -> int64_t
             {
-                int64_t width = graph->getValue(nextValue).width();
+                int64_t width = graph->valueWidth(nextValue);
                 const wolvrix::lib::grh::OperationId latchOpId = graph->findOperation(symbol);
                 if (latchOpId.valid())
                 {
@@ -3280,17 +3284,16 @@ namespace wolvrix::lib::emit
             };
             for (const auto valueId : graph->values())
             {
-                const wolvrix::lib::grh::Value value = graph->getValue(valueId);
-                const wolvrix::lib::grh::OperationId defOpId = value.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (!defOpId.valid())
                 {
                     continue;
                 }
-                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                if (defOp.kind() != wolvrix::lib::grh::OperationKind::kConstant)
+                if (graph->opKind(defOpId) != wolvrix::lib::grh::OperationKind::kConstant)
                 {
                     continue;
                 }
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
                 auto literalAttr = getAttribute<std::string>(*graph, defOp, "constValue");
                 if (!literalAttr)
                 {
@@ -3308,8 +3311,8 @@ namespace wolvrix::lib::emit
                     {
                         continue;
                     }
-                    const wolvrix::lib::grh::Operation userOp = graph->getOperation(userOpId);
-                    const auto &ops = userOp.operands();
+                    const auto ops = graph->opOperands(userOpId);
+                    const auto userOpKind = graph->opKind(userOpId);
                     auto usedOnlyAt = [&](std::size_t index) -> bool
                     {
                         bool found = false;
@@ -3327,7 +3330,7 @@ namespace wolvrix::lib::emit
                         }
                         return found;
                     };
-                    switch (userOp.kind())
+                    switch (userOpKind)
                     {
                     case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
                     {
@@ -3336,6 +3339,7 @@ namespace wolvrix::lib::emit
                             allUsesAreFullMask = false;
                             break;
                         }
+                        const wolvrix::lib::grh::Operation userOp = graph->getOperation(userOpId);
                         auto regSymbolAttr = getAttribute<std::string>(*graph, userOp, "regSymbol");
                         if (!regSymbolAttr)
                         {
@@ -3356,6 +3360,7 @@ namespace wolvrix::lib::emit
                             allUsesAreFullMask = false;
                             break;
                         }
+                        const wolvrix::lib::grh::Operation userOp = graph->getOperation(userOpId);
                         auto latchSymbolAttr = getAttribute<std::string>(*graph, userOp, "latchSymbol");
                         if (!latchSymbolAttr)
                         {
@@ -3376,6 +3381,7 @@ namespace wolvrix::lib::emit
                             allUsesAreFullMask = false;
                             break;
                         }
+                        const wolvrix::lib::grh::Operation userOp = graph->getOperation(userOpId);
                         auto memSymbolAttr = resolveMemorySymbol(userOp);
                         if (!memSymbolAttr)
                         {
@@ -3457,7 +3463,7 @@ namespace wolvrix::lib::emit
                                        wolvrix::lib::grh::OperationId sourceOp) {
                 const std::string oeExpr = valueExpr(oeValue);
                 const std::string outExpr = valueExpr(outValue);
-                const int64_t oeWidth = graph->getValue(oeValue).width();
+                const int64_t oeWidth = graph->valueWidth(oeValue);
                 auto oeConstBits = [&]() -> std::optional<std::vector<uint8_t>>
                 {
                     if (auto literal = constLiteralFor(oeValue))
@@ -3560,7 +3566,7 @@ namespace wolvrix::lib::emit
                 }
                 const std::string &portName = port.name;
                 const std::string inName = valueName(port.in);
-                const int64_t width = graph->getValue(port.out).width();
+                const int64_t width = graph->valueWidth(port.out);
                 ensureWireDecl(port.in);
                 ensureWireDecl(port.out);
                 ensureWireDecl(port.oe);
@@ -3720,8 +3726,8 @@ namespace wolvrix::lib::emit
                         break;
                     }
                     int64_t resultWidth =
-                        std::max(graph->getValue(operands[0]).width(),
-                                 graph->getValue(operands[1]).width());
+                        std::max(graph->valueWidth(operands[0]),
+                                 graph->valueWidth(operands[1]));
                     const std::string tok = binOpToken(op.kind());
                     const std::string lhs = resultWidth > 0
                                                 ? baseExpr.extendOperand(operands[0], resultWidth)
@@ -3734,8 +3740,8 @@ namespace wolvrix::lib::emit
                          op.kind() == wolvrix::lib::grh::OperationKind::kLe ||
                          op.kind() == wolvrix::lib::grh::OperationKind::kGt ||
                          op.kind() == wolvrix::lib::grh::OperationKind::kGe) &&
-                        graph->getValue(operands[0]).isSigned() &&
-                        graph->getValue(operands[1]).isSigned();
+                        graph->valueSigned(operands[0]) &&
+                        graph->valueSigned(operands[1]);
                     const std::string lhsExpr = signedCompare ? "$signed(" + lhs + ")" : lhs;
                     const std::string rhsExpr = signedCompare ? "$signed(" + rhs + ")" : rhs;
                     addValueAssign(results[0], lhsExpr + " " + tok + " " + rhsExpr, opId);
@@ -3768,10 +3774,10 @@ namespace wolvrix::lib::emit
                         reportError("Binary operation missing operands or results", opContext);
                         break;
                     }
-                    const int64_t resultWidth = graph->getValue(results[0]).width();
+                    const int64_t resultWidth = graph->valueWidth(results[0]);
                     const bool signExtend =
                         op.kind() == wolvrix::lib::grh::OperationKind::kAShr &&
-                        graph->getValue(operands[0]).isSigned();
+                        graph->valueSigned(operands[0]);
                     const std::string tok = binOpToken(op.kind());
                     const std::string lhs = resultWidth > 0
                                                 ? baseExpr.extendShiftOperand(operands[0], resultWidth, signExtend)
@@ -3793,11 +3799,11 @@ namespace wolvrix::lib::emit
                         reportError("Binary operation missing operands or results", opContext);
                         break;
                     }
-                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    int64_t resultWidth = graph->valueWidth(results[0]);
                     if (resultWidth <= 0)
                     {
-                        resultWidth = std::max(graph->getValue(operands[0]).width(),
-                                               graph->getValue(operands[1]).width());
+                        resultWidth = std::max(graph->valueWidth(operands[0]),
+                                               graph->valueWidth(operands[1]));
                     }
                     const std::string tok = binOpToken(op.kind());
                     addValueAssign(results[0],
@@ -3859,7 +3865,7 @@ namespace wolvrix::lib::emit
                         reportError("kMux missing operands or results", opContext);
                         break;
                     }
-                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    int64_t resultWidth = graph->valueWidth(results[0]);
                     const std::string lhs = baseExpr.extendOperand(operands[1], resultWidth);
                     const std::string rhs = baseExpr.extendOperand(operands[2], resultWidth);
                     addValueAssign(results[0],
@@ -3875,7 +3881,7 @@ namespace wolvrix::lib::emit
                         reportError("kAssign missing operands or results", opContext);
                         break;
                     }
-                    int64_t resultWidth = graph->getValue(results[0]).width();
+                    int64_t resultWidth = graph->valueWidth(results[0]);
                     const std::string rhs = baseExpr.extendOperand(operands[0], resultWidth);
                     addValueAssign(results[0], rhs, opId);
                     ensureWireDecl(results[0]);
@@ -3888,7 +3894,7 @@ namespace wolvrix::lib::emit
                         reportError("kConcat missing operands or results", opContext);
                         break;
                     }
-                    const int64_t resultWidth = graph->getValue(results[0]).width();
+                    const int64_t resultWidth = graph->valueWidth(results[0]);
                     int64_t concatWidth = 0;
                     bool concatWidthKnown = true;
                     for (const auto operand : operands)
@@ -3898,13 +3904,12 @@ namespace wolvrix::lib::emit
                             concatWidthKnown = false;
                             break;
                         }
-                        const wolvrix::lib::grh::Value opVal = graph->getValue(operand);
-                        if (opVal.type() != wolvrix::lib::grh::ValueType::Logic)
+                        if (graph->valueType(operand) != wolvrix::lib::grh::ValueType::Logic)
                         {
                             concatWidthKnown = false;
                             break;
                         }
-                        const int64_t w = opVal.width();
+                        const int64_t w = graph->valueWidth(operand);
                         if (w <= 0)
                         {
                             concatWidthKnown = false;
@@ -3983,11 +3988,10 @@ namespace wolvrix::lib::emit
                     std::ostringstream expr;
                     expr << "{" << *rep << "{" << baseExpr.concatOperandExpr(operands[0]) << "}}";
                     std::string exprText = expr.str();
-                    const int64_t resultWidth = graph->getValue(results[0]).width();
-                    const wolvrix::lib::grh::Value opVal = graph->getValue(operands[0]);
-                    if (resultWidth > 0 && opVal.type() == wolvrix::lib::grh::ValueType::Logic)
+                    const int64_t resultWidth = graph->valueWidth(results[0]);
+                    if (resultWidth > 0 && graph->valueType(operands[0]) == wolvrix::lib::grh::ValueType::Logic)
                     {
-                        const int64_t opWidth = opVal.width();
+                        const int64_t opWidth = graph->valueWidth(operands[0]);
                         if (opWidth > 0)
                         {
                             const int64_t repWidth = opWidth * (*rep);
@@ -4025,7 +4029,7 @@ namespace wolvrix::lib::emit
                         reportError("kSliceStatic missing sliceStart or sliceEnd", opContext);
                         break;
                     }
-                    const int64_t operandWidth = graph->getValue(operands[0]).width();
+                    const int64_t operandWidth = graph->valueWidth(operands[0]);
                     std::ostringstream expr;
                     if (operandWidth == 1)
                     {
@@ -4065,7 +4069,7 @@ namespace wolvrix::lib::emit
                         reportError("kSliceDynamic missing sliceWidth", opContext);
                         break;
                     }
-                    const int64_t operandWidth = graph->getValue(operands[0]).width();
+                    const int64_t operandWidth = graph->valueWidth(operands[0]);
                     auto indexExpr = [&](wolvrix::lib::grh::ValueId indexId) -> std::string
                     {
                         if (auto literal = inlineConstExprFor(indexId))
@@ -4110,7 +4114,7 @@ namespace wolvrix::lib::emit
                         reportError("kSliceArray missing sliceWidth", opContext);
                         break;
                     }
-                    const int64_t operandWidth = graph->getValue(operands[0]).width();
+                    const int64_t operandWidth = graph->valueWidth(operands[0]);
                     auto indexExpr = [&](wolvrix::lib::grh::ValueId indexId) -> std::string
                     {
                         if (auto literal = inlineConstExprFor(indexId))
@@ -4282,7 +4286,7 @@ namespace wolvrix::lib::emit
                         reportError("kRegisterWritePort missing operands", opContext);
                         break;
                     }
-                    if (graph->getValue(updateCond).width() != 1)
+                    if (graph->valueWidth(updateCond) != 1)
                     {
                         reportError("kRegisterWritePort updateCond must be 1 bit", opContext);
                         break;
@@ -4300,7 +4304,7 @@ namespace wolvrix::lib::emit
                         break;
                     }
 
-                    int64_t regWidth = graph->getValue(nextValue).width();
+                    int64_t regWidth = graph->valueWidth(nextValue);
                     const wolvrix::lib::grh::OperationId regOpId = graph->findOperation(*regSymbolAttr);
                     if (regOpId.valid())
                     {
@@ -4372,7 +4376,7 @@ namespace wolvrix::lib::emit
                         }
                         return true;
                     };
-                    const int64_t dataWidth = graph->getValue(nextValue).width();
+                    const int64_t dataWidth = graph->valueWidth(nextValue);
                     const bool maskAllOnes = maskBits ? maskAll(1) : false;
                     if (dataWidth > 0 && regWidth > 0 && dataWidth != regWidth && !maskAllOnes)
                     {
@@ -4461,7 +4465,7 @@ namespace wolvrix::lib::emit
                         reportError("kLatchWritePort missing operands", opContext);
                         break;
                     }
-                    if (graph->getValue(updateCond).width() != 1)
+                    if (graph->valueWidth(updateCond) != 1)
                     {
                         reportError("kLatchWritePort updateCond must be 1 bit", opContext);
                         break;
@@ -4480,7 +4484,7 @@ namespace wolvrix::lib::emit
                         break;
                     }
 
-                    int64_t latchWidth = graph->getValue(nextValue).width();
+                    int64_t latchWidth = graph->valueWidth(nextValue);
                     const wolvrix::lib::grh::OperationId latchOpId = graph->findOperation(*latchSymbolAttr);
                     if (latchOpId.valid())
                     {
@@ -4552,7 +4556,7 @@ namespace wolvrix::lib::emit
                         }
                         return true;
                     };
-                    const int64_t dataWidth = graph->getValue(nextValue).width();
+                    const int64_t dataWidth = graph->valueWidth(nextValue);
                     const bool maskAllOnes = maskBits ? maskAll(1) : false;
                     if (dataWidth > 0 && latchWidth > 0 && dataWidth != latchWidth && !maskAllOnes)
                     {
@@ -4784,7 +4788,7 @@ namespace wolvrix::lib::emit
                         reportError("kMemoryWritePort missing operands", opContext);
                         break;
                     }
-                    if (graph->getValue(updateCond).width() != 1)
+                    if (graph->valueWidth(updateCond) != 1)
                     {
                         reportError("kMemoryWritePort updateCond must be 1 bit", opContext);
                         break;
@@ -4870,7 +4874,7 @@ namespace wolvrix::lib::emit
                         }
                         return true;
                     };
-                    const int64_t dataWidth = graph->getValue(data).width();
+                    const int64_t dataWidth = graph->valueWidth(data);
                     const bool maskAllOnes = maskBits ? maskAll(1) : false;
                     if (dataWidth > 0 && memWidth > 0 && dataWidth != memWidth && !maskAllOnes)
                     {
@@ -5068,8 +5072,8 @@ namespace wolvrix::lib::emit
                                 instanceName.empty()
                                     ? (*inoutNames)[i] + "_inout"
                                     : instanceName + "_" + (*inoutNames)[i] + "_inout";
-                            const int64_t width = graph->getValue(results[outIndex]).width();
-                            const bool isSigned = graph->getValue(results[outIndex]).isSigned();
+                            const int64_t width = graph->valueWidth(results[outIndex]);
+                            const bool isSigned = graph->valueSigned(results[outIndex]);
                             const std::string wireName = ensureNamedWireDecl(wireBase, width, isSigned);
                             connections.emplace_back((*inoutNames)[i], wireName);
                             ensureWireDecl(results[outIndex]);
@@ -5389,10 +5393,13 @@ namespace wolvrix::lib::emit
                     // Declare intermediate regs for outputs and connect them back.
                     for (const auto res : results)
                     {
-                        const wolvrix::lib::grh::Value resValue = graph->getValue(res);
-                        const std::string tempName = std::string(resValue.symbolText()) + "_intm";
-                        ensureRegDecl(tempName, resValue.width(), resValue.isSigned(),
-                                      resValue.type(), op.srcLoc());
+                        const wolvrix::lib::grh::SymbolId sym = graph->valueSymbol(res);
+                        const std::string tempName = std::string(graph->symbolText(sym)) + "_intm";
+                        ensureRegDecl(tempName,
+                                      graph->valueWidth(res),
+                                      graph->valueSigned(res),
+                                      graph->valueType(res),
+                                      op.srcLoc());
                         addValueAssign(res, tempName, opId);
                     }
 
@@ -5509,8 +5516,7 @@ namespace wolvrix::lib::emit
             // Declare remaining wires for non-port values not defined above.
             for (const auto valueId : graph->values())
             {
-                const wolvrix::lib::grh::Value val = graph->getValue(valueId);
-                if (val.isInput() || val.isOutput() || val.isInout())
+                if (graph->valueIsInput(valueId) || graph->valueIsOutput(valueId) || graph->valueIsInout(valueId))
                 {
                     continue;
                 }
@@ -5518,11 +5524,10 @@ namespace wolvrix::lib::emit
                 {
                     continue;
                 }
-                const wolvrix::lib::grh::OperationId defOpId = val.definingOp();
+                const wolvrix::lib::grh::OperationId defOpId = graph->valueDef(valueId);
                 if (defOpId.valid())
                 {
-                    const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
-                    if (defOp.kind() == wolvrix::lib::grh::OperationKind::kConstant)
+                    if (graph->opKind(defOpId) == wolvrix::lib::grh::OperationKind::kConstant)
                     {
                         continue;
                     }
@@ -5553,12 +5558,12 @@ namespace wolvrix::lib::emit
                     {
                         continue;
                     }
-                    const wolvrix::lib::grh::Value val = graph->getValue(valueId);
-                    if (val.isInput() || val.isOutput() || val.isInout())
+                    if (graph->valueIsInput(valueId) || graph->valueIsOutput(valueId) || graph->valueIsInout(valueId))
                     {
                         continue;
                     }
-                    if (val.type() != wolvrix::lib::grh::ValueType::Logic || val.width() <= 0)
+                    if (graph->valueType(valueId) != wolvrix::lib::grh::ValueType::Logic ||
+                        graph->valueWidth(valueId) <= 0)
                     {
                         continue;
                     }
@@ -5569,8 +5574,8 @@ namespace wolvrix::lib::emit
                     }
                     std::string alias = makeUniqueAlias("wd_" + orig);
                     std::string decl = "(* keep *) wire ";
-                    decl.append(signedPrefix(val.isSigned()));
-                    const std::string range = widthRange(val.width());
+                    decl.append(signedPrefix(graph->valueSigned(valueId)));
+                    const std::string range = widthRange(graph->valueWidth(valueId));
                     if (!range.empty())
                     {
                         decl.append(range);

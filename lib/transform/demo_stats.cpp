@@ -24,6 +24,10 @@ namespace wolvrix::lib::transform
         std::size_t opCount = 0;
         std::size_t valueCount = 0;
         uint64_t valueBitwidthTotal = 0;
+        uint64_t registerBitwidthTotal = 0;
+        uint64_t latchBitwidthTotal = 0;
+        uint64_t memoryPortBitwidthTotal = 0;
+        uint64_t memoryCapacityTotal = 0;
         std::map<int32_t, std::size_t> valueWidthCounts;
         std::map<std::string, std::size_t> opKindCounts;
         std::map<int64_t, std::size_t> registerWidthCounts;
@@ -50,15 +54,19 @@ namespace wolvrix::lib::transform
         MaxSymbolEntry maxWriteportConeFanin;
         MaxSymbolEntry maxCombFanout;
         MaxSymbolEntry maxReadportFanout;
-        auto getIntAttr = [](const std::optional<wolvrix::lib::grh::AttributeValue> &attr) -> std::optional<int64_t>
+        auto getIntAttr = [](std::span<const wolvrix::lib::grh::AttrKV> attrs,
+                             std::string_view key) -> std::optional<int64_t>
         {
-            if (!attr)
+            for (const auto &attr : attrs)
             {
-                return std::nullopt;
-            }
-            if (const auto *value = std::get_if<int64_t>(&(*attr)))
-            {
-                return *value;
+                if (attr.key == key)
+                {
+                    if (const auto *value = std::get_if<int64_t>(&attr.value))
+                    {
+                        return *value;
+                    }
+                    return std::nullopt;
+                }
             }
             return std::nullopt;
         };
@@ -115,10 +123,17 @@ namespace wolvrix::lib::transform
             return "graph#" + std::to_string(graph->id().index);
         };
         auto qualifyValueSymbol = [&](const wolvrix::lib::grh::Graph *graph,
-                                      const wolvrix::lib::grh::Value &value,
                                       const wolvrix::lib::grh::ValueId &valueId) -> std::string
         {
-            std::string symbol(value.symbolText());
+            std::string symbol;
+            if (graph && valueId.valid())
+            {
+                const auto sym = graph->valueSymbol(valueId);
+                if (sym.valid())
+                {
+                    symbol = std::string(graph->symbolText(sym));
+                }
+            }
             if (symbol.empty())
             {
                 symbol = "value#" + std::to_string(valueId.index);
@@ -126,10 +141,17 @@ namespace wolvrix::lib::transform
             return qualifyGraphSymbol(graph) + "::" + symbol;
         };
         auto qualifyOpSymbol = [&](const wolvrix::lib::grh::Graph *graph,
-                                   const wolvrix::lib::grh::Operation &op,
                                    const wolvrix::lib::grh::OperationId &opId) -> std::string
         {
-            std::string symbol(op.symbolText());
+            std::string symbol;
+            if (graph && opId.valid())
+            {
+                const auto sym = graph->operationSymbol(opId);
+                if (sym.valid())
+                {
+                    symbol = std::string(graph->symbolText(sym));
+                }
+            }
             if (symbol.empty())
             {
                 symbol = "op#" + std::to_string(opId.index);
@@ -259,21 +281,23 @@ namespace wolvrix::lib::transform
             for (const auto &opId : graph->operations())
             {
                 ++opCount;
-                const auto op = graph->getOperation(opId);
-                const std::string kindText(toString(op.kind()));
+                const auto kind = graph->opKind(opId);
+                const std::string kindText(toString(kind));
                 ++opKindCounts[kindText];
-                const auto width = getIntAttr(op.attr("width"));
-                const auto rows = getIntAttr(op.attr("row"));
-                switch (op.kind())
+                const auto attrs = graph->opAttrs(opId);
+                const auto width = getIntAttr(attrs, "width");
+                const auto rows = getIntAttr(attrs, "row");
+                switch (kind)
                 {
                 case wolvrix::lib::grh::OperationKind::kRegister:
                     if (width && *width > 0)
                     {
                         ++registerWidthCounts[*width];
+                        registerBitwidthTotal += static_cast<uint64_t>(*width);
                         const uint64_t widthValue = static_cast<uint64_t>(*width);
                         if (!maxRegisterWidth.valid || widthValue >= maxRegisterWidth.value)
                         {
-                            updateMax(maxRegisterWidth, widthValue, qualifyOpSymbol(graph, op, opId));
+                            updateMax(maxRegisterWidth, widthValue, qualifyOpSymbol(graph, opId));
                         }
                     }
                     break;
@@ -281,10 +305,11 @@ namespace wolvrix::lib::transform
                     if (width && *width > 0)
                     {
                         ++latchWidthCounts[*width];
+                        latchBitwidthTotal += static_cast<uint64_t>(*width);
                         const uint64_t widthValue = static_cast<uint64_t>(*width);
                         if (!maxLatchWidth.valid || widthValue >= maxLatchWidth.value)
                         {
-                            updateMax(maxLatchWidth, widthValue, qualifyOpSymbol(graph, op, opId));
+                            updateMax(maxLatchWidth, widthValue, qualifyOpSymbol(graph, opId));
                         }
                     }
                     break;
@@ -295,7 +320,7 @@ namespace wolvrix::lib::transform
                         const uint64_t widthValue = static_cast<uint64_t>(*width);
                         if (!maxMemoryWidth.valid || widthValue >= maxMemoryWidth.value)
                         {
-                            updateMax(maxMemoryWidth, widthValue, qualifyOpSymbol(graph, op, opId));
+                            updateMax(maxMemoryWidth, widthValue, qualifyOpSymbol(graph, opId));
                         }
                     }
                     if (width && rows && *width > 0 && *rows > 0)
@@ -305,39 +330,64 @@ namespace wolvrix::lib::transform
                         if (w <= std::numeric_limits<uint64_t>::max() / r)
                         {
                             const uint64_t capacity = w * r;
+                            memoryCapacityTotal += capacity;
                             ++memoryCapacityCounts[capacity];
                             if (!maxMemoryCapacity.valid || capacity >= maxMemoryCapacity.value)
                             {
                                 updateMax(maxMemoryCapacity, capacity,
-                                          qualifyOpSymbol(graph, op, opId));
+                                          qualifyOpSymbol(graph, opId));
+                            }
+                        }
+                    }
+                    break;
+                case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
+                    {
+                        const auto results = graph->opResults(opId);
+                        if (!results.empty())
+                        {
+                            const int32_t dataWidth = graph->valueWidth(results[0]);
+                            if (dataWidth > 0)
+                            {
+                                memoryPortBitwidthTotal += static_cast<uint64_t>(dataWidth);
                             }
                         }
                     }
                     break;
                 case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
                 case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-                    if (op.operands().size() >= 2)
                     {
-                        coneTasks.push_back({graph, op.operands()[0]});
-                        coneTasks.push_back({graph, op.operands()[1]});
+                        const auto operands = graph->opOperands(opId);
+                        if (operands.size() >= 2)
+                        {
+                            coneTasks.push_back({graph, operands[0]});
+                            coneTasks.push_back({graph, operands[1]});
+                        }
                     }
                     break;
                 case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-                    if (op.operands().size() >= 3)
                     {
-                        coneTasks.push_back({graph, op.operands()[0]});
-                        coneTasks.push_back({graph, op.operands()[2]});
+                        const auto operands = graph->opOperands(opId);
+                        if (operands.size() >= 3)
+                        {
+                            const int32_t dataWidth = graph->valueWidth(operands[2]);
+                            if (dataWidth > 0)
+                            {
+                                memoryPortBitwidthTotal += static_cast<uint64_t>(dataWidth);
+                            }
+                            coneTasks.push_back({graph, operands[0]});
+                            coneTasks.push_back({graph, operands[2]});
+                        }
                     }
                     break;
                 default:
                     break;
                 }
 
-                if (isCombinationalOp(op.kind()))
+                if (isCombinationalOp(kind))
                 {
                     combFanoutTasks.push_back({&ctx, opId});
                 }
-                switch (op.kind())
+                switch (kind)
                 {
                 case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
                 case wolvrix::lib::grh::OperationKind::kLatchReadPort:
@@ -351,8 +401,7 @@ namespace wolvrix::lib::transform
             for (const auto &valueId : graph->values())
             {
                 ++valueCount;
-                const auto value = graph->getValue(valueId);
-                const int32_t width = value.width();
+                const int32_t width = graph->valueWidth(valueId);
                 ++valueWidthCounts[width];
                 if (width > 0)
                 {
@@ -361,7 +410,7 @@ namespace wolvrix::lib::transform
                     if (!maxValueWidth.valid || widthValue >= maxValueWidth.value)
                     {
                         updateMax(maxValueWidth, widthValue,
-                                  qualifyValueSymbol(graph, value, valueId));
+                                  qualifyValueSymbol(graph, valueId));
                     }
                 }
             }
@@ -436,15 +485,14 @@ namespace wolvrix::lib::transform
                     }
                     local.depthState[valueId] = 1;
                     uint64_t depth = 0;
-                    const auto value = task.graph->getValue(valueId);
-                    const auto defOpId = value.definingOp();
+                    const auto defOpId = task.graph->valueDef(valueId);
                     if (defOpId.valid())
                     {
-                        const auto defOp = task.graph->getOperation(defOpId);
-                        if (isCombinationalOp(defOp.kind()))
+                        const auto defKind = task.graph->opKind(defOpId);
+                        if (isCombinationalOp(defKind))
                         {
                             uint64_t maxDepth = 0;
-                            for (const auto &operand : defOp.operands())
+                            for (const auto &operand : task.graph->opOperands(defOpId))
                             {
                                 maxDepth = std::max(maxDepth, self(self, operand));
                             }
@@ -479,15 +527,14 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    const auto value = task.graph->getValue(valueId);
-                    const auto defOpId = value.definingOp();
+                    const auto defOpId = task.graph->valueDef(valueId);
                     if (!defOpId.valid())
                     {
                         leafValues.insert(valueId);
                         continue;
                     }
-                    const auto defOp = task.graph->getOperation(defOpId);
-                    if (!isCombinationalOp(defOp.kind()))
+                    const auto defKind = task.graph->opKind(defOpId);
+                    if (!isCombinationalOp(defKind))
                     {
                         leafValues.insert(valueId);
                         continue;
@@ -496,7 +543,7 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    for (const auto &operand : defOp.operands())
+                    for (const auto &operand : task.graph->opOperands(defOpId))
                     {
                         stack.push_back(operand);
                     }
@@ -507,8 +554,7 @@ namespace wolvrix::lib::transform
                 ++local.depthCounts[depth];
                 ++local.sizeCounts[size];
                 ++local.faninCounts[fanin];
-                const auto rootValue = task.graph->getValue(task.root);
-                const auto rootSymbol = qualifyValueSymbol(task.graph, rootValue, task.root);
+                const auto rootSymbol = qualifyValueSymbol(task.graph, task.root);
                 updateMax(local.maxDepth, depth, rootSymbol);
                 updateMax(local.maxSize, size, rootSymbol);
                 updateMax(local.maxFanin, fanin, rootSymbol);
@@ -582,8 +628,8 @@ namespace wolvrix::lib::transform
                 for (const auto &user : value.users())
                 {
                     const auto userOpId = user.operation;
-                    const auto userOp = graph->getOperation(userOpId);
-                    if (!isCombinationalOp(userOp.kind()))
+                    const auto userKind = graph->opKind(userOpId);
+                    if (!isCombinationalOp(userKind))
                     {
                         drivenSinks.insert(userOpId);
                         continue;
@@ -592,7 +638,7 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    for (const auto &res : userOp.results())
+                    for (const auto &res : graph->opResults(userOpId))
                     {
                         if (res.valid())
                         {
@@ -613,11 +659,11 @@ namespace wolvrix::lib::transform
                 {
                     return;
                 }
-                const auto op = task.ctx->graph->getOperation(task.op);
-                const uint64_t fanout = computeSinkFanout(task.ctx, op.results());
+                const auto results = task.ctx->graph->opResults(task.op);
+                const uint64_t fanout = computeSinkFanout(task.ctx, results);
                 ++local.counts[fanout];
                 updateMax(local.maxFanout, fanout,
-                          qualifyOpSymbol(task.ctx->graph, op, task.op));
+                          qualifyOpSymbol(task.ctx->graph, task.op));
             });
         for (const auto &local : combFanoutLocals)
         {
@@ -635,11 +681,11 @@ namespace wolvrix::lib::transform
                 {
                     return;
                 }
-                const auto op = task.ctx->graph->getOperation(task.op);
-                const uint64_t fanout = computeSinkFanout(task.ctx, op.results());
+                const auto results = task.ctx->graph->opResults(task.op);
+                const uint64_t fanout = computeSinkFanout(task.ctx, results);
                 ++local.counts[fanout];
                 updateMax(local.maxFanout, fanout,
-                          qualifyOpSymbol(task.ctx->graph, op, task.op));
+                          qualifyOpSymbol(task.ctx->graph, task.op));
             });
         for (const auto &local : readportFanoutLocals)
         {
@@ -744,6 +790,10 @@ namespace wolvrix::lib::transform
         appendScalar("operation_count", opCount);
         appendScalar("value_count", valueCount);
         appendScalar("value_bitwidth_total", valueBitwidthTotal);
+        appendScalar("register_bitwidth_total", registerBitwidthTotal);
+        appendScalar("latch_bitwidth_total", latchBitwidthTotal);
+        appendScalar("memory_port_bitwidth_total", memoryPortBitwidthTotal);
+        appendScalar("memory_capacity_total", memoryCapacityTotal);
         appendJsonMap("value_widths", valueWidthCounts);
         appendJsonMap("operation_kinds", opKindCounts);
         appendJsonMap("register_widths", registerWidthCounts);

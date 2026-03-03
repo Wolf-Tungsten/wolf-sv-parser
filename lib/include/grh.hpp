@@ -698,6 +698,19 @@ public:
     OperationId findOperation(std::string_view symbol) const;
     SymbolId valueSymbol(ValueId value) const noexcept;
     SymbolId operationSymbol(OperationId op) const noexcept;
+    int32_t valueWidth(ValueId value) const;
+    bool valueSigned(ValueId value) const;
+    ValueType valueType(ValueId value) const;
+    bool valueIsInput(ValueId value) const;
+    bool valueIsOutput(ValueId value) const;
+    bool valueIsInout(ValueId value) const;
+    OperationId valueDef(ValueId value) const;
+    std::optional<SrcLoc> valueSrcLoc(ValueId value) const;
+    OperationKind opKind(OperationId op) const;
+    std::span<const ValueId> opOperands(OperationId op) const;
+    std::span<const ValueId> opResults(OperationId op) const;
+    std::span<const AttrKV> opAttrs(OperationId op) const;
+    std::optional<SrcLoc> opSrcLoc(OperationId op) const;
     Value getValue(ValueId id) const;
     Operation getOperation(OperationId id) const;
 

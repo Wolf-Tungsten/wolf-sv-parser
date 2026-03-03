@@ -3240,6 +3240,318 @@ namespace wolvrix::lib::grh
         return SymbolId::invalid();
     }
 
+    int32_t Graph::valueWidth(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.width;
+        }
+        if (view_)
+        {
+            return view_->valueWidth(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    bool Graph::valueSigned(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.isSigned;
+        }
+        if (view_)
+        {
+            return view_->valueSigned(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    ValueType Graph::valueType(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.type;
+        }
+        if (view_)
+        {
+            return view_->valueType(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    bool Graph::valueIsInput(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.isInput;
+        }
+        if (view_)
+        {
+            return view_->valueIsInput(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    bool Graph::valueIsOutput(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.isOutput;
+        }
+        if (view_)
+        {
+            return view_->valueIsOutput(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    bool Graph::valueIsInout(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.isInout;
+        }
+        if (view_)
+        {
+            return view_->valueIsInout(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    OperationId Graph::valueDef(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.definingOp;
+        }
+        if (view_)
+        {
+            return view_->valueDef(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    std::optional<SrcLoc> Graph::valueSrcLoc(ValueId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->values_.size())
+            {
+                throw std::runtime_error("ValueId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->values_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("ValueId refers to erased value");
+            }
+            return data.srcLoc;
+        }
+        if (view_)
+        {
+            return view_->valueSrcLoc(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    OperationKind Graph::opKind(OperationId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->operations_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            return data.kind;
+        }
+        if (view_)
+        {
+            return view_->opKind(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    std::span<const ValueId> Graph::opOperands(OperationId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->operations_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            return std::span<const ValueId>(data.operands.data(), data.operands.size());
+        }
+        if (view_)
+        {
+            return view_->opOperands(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    std::span<const ValueId> Graph::opResults(OperationId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->operations_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            return std::span<const ValueId>(data.results.data(), data.results.size());
+        }
+        if (view_)
+        {
+            return view_->opResults(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    std::span<const AttrKV> Graph::opAttrs(OperationId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->operations_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            return std::span<const AttrKV>(data.attrs.data(), data.attrs.size());
+        }
+        if (view_)
+        {
+            return view_->opAttrs(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
+    std::optional<SrcLoc> Graph::opSrcLoc(OperationId id) const
+    {
+        if (builder_)
+        {
+            id.assertGraph(graphId_);
+            if (id.index == 0 || id.index > builder_->operations_.size())
+            {
+                throw std::runtime_error("OperationId out of range");
+            }
+            const std::size_t idx = static_cast<std::size_t>(id.index - 1);
+            const auto &data = builder_->operations_[idx];
+            if (!data.alive)
+            {
+                throw std::runtime_error("OperationId refers to erased operation");
+            }
+            return data.srcLoc;
+        }
+        if (view_)
+        {
+            return view_->opSrcLoc(id);
+        }
+        throw std::runtime_error("GraphView is not available; freeze the graph first");
+    }
+
     Value Graph::getValue(ValueId id) const
     {
         if (builder_)
