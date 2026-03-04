@@ -1,6 +1,7 @@
 #include "transform/repcut.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -33,6 +35,8 @@ namespace wolvrix::lib::transform
         using PieceId = uint32_t;
         constexpr NodeId kInvalidNode = std::numeric_limits<NodeId>::max();
         constexpr PieceId kInvalidPiece = std::numeric_limits<PieceId>::max();
+        constexpr std::size_t kMaxConeCollectThreads = 8;
+        constexpr std::size_t kConeCollectChunkSize = 64;
 
         template <typename T>
         std::optional<T> getAttr(const wolvrix::lib::grh::Operation &op, std::string_view key)
@@ -78,6 +82,19 @@ namespace wolvrix::lib::transform
             case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
             case wolvrix::lib::grh::OperationKind::kLatchWritePort:
             case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isSourceOpKind(wolvrix::lib::grh::OperationKind kind)
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kConstant:
+            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
                 return true;
             default:
                 return false;
@@ -161,15 +178,7 @@ namespace wolvrix::lib::transform
             }
 
             const wolvrix::lib::grh::Operation op = graph.getOperation(defOp);
-            switch (op.kind())
-            {
-            case wolvrix::lib::grh::OperationKind::kConstant:
-            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
-            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
-                return true;
-            default:
-                return false;
-            }
+            return isSourceOpKind(op.kind());
         }
 
         struct PhaseAData
@@ -196,8 +205,7 @@ namespace wolvrix::lib::transform
         struct AscInfo
         {
             std::vector<size_t> sinks;
-            std::unordered_set<NodeId> combOps;
-            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> values;
+            std::vector<NodeId> combOps;
         };
 
         struct PhaseBData
@@ -691,18 +699,19 @@ namespace wolvrix::lib::transform
             }
         }
 
-        void collectCone(const wolvrix::lib::grh::Graph &graph,
-                         const PhaseAData &phaseA,
-                         const SinkRef &sink,
-                         const std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> &inoutInputValues,
-                         AscInfo &asc)
+        void collectAscCone(const wolvrix::lib::grh::Graph &graph,
+                            const PhaseAData &phaseA,
+                            const std::vector<SinkRef> &sinks,
+                            const std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> &inoutInputValues,
+                            std::vector<uint32_t> &visitStamp,
+                            const uint32_t visitEpoch,
+                            AscInfo &asc)
         {
-            std::unordered_set<NodeId> visited;
+            asc.combOps.clear();
 
-            std::function<void(wolvrix::lib::grh::ValueId)> traverse = [&](wolvrix::lib::grh::ValueId value) {
+            auto pushFromValue = [&](std::vector<NodeId> &stack, wolvrix::lib::grh::ValueId value) {
                 if (isSourceValue(graph, value, inoutInputValues))
                 {
-                    asc.values.insert(value);
                     return;
                 }
 
@@ -717,36 +726,64 @@ namespace wolvrix::lib::transform
                     return;
                 }
                 const NodeId node = it->second;
-                if (!visited.insert(node).second)
+                if (node >= visitStamp.size() || visitStamp[node] == visitEpoch)
                 {
                     return;
                 }
-
-                const wolvrix::lib::grh::Operation op = graph.getOperation(defOp);
-                if (!isCombOp(op))
-                {
-                    return;
-                }
-
-                asc.combOps.insert(node);
-                asc.values.insert(value);
-                for (const auto operand : op.operands())
-                {
-                    traverse(operand);
-                }
+                visitStamp[node] = visitEpoch;
+                stack.push_back(node);
             };
 
-            if (sink.kind == SinkRef::Kind::Operation)
+            if (asc.sinks.size() >= 32)
             {
-                const wolvrix::lib::grh::Operation op = graph.getOperation(sink.op);
-                for (const auto operand : op.operands())
+                const size_t reserveHint = std::min<size_t>(phaseA.nodeToOp.size(), asc.sinks.size() * 8);
+                asc.combOps.reserve(reserveHint);
+            }
+
+            std::vector<NodeId> stack;
+            stack.reserve(asc.sinks.size() * 2 + 4);
+            for (const size_t sinkIndex : asc.sinks)
+            {
+                const SinkRef &sink = sinks[sinkIndex];
+                if (sink.kind == SinkRef::Kind::Operation)
                 {
-                    traverse(operand);
+                    const wolvrix::lib::grh::Operation op = graph.getOperation(sink.op);
+                    for (const auto operand : op.operands())
+                    {
+                        pushFromValue(stack, operand);
+                    }
+                }
+                else
+                {
+                    pushFromValue(stack, sink.value);
                 }
             }
-            else
+
+            while (!stack.empty())
             {
-                traverse(sink.value);
+                const NodeId node = stack.back();
+                stack.pop_back();
+
+                const wolvrix::lib::grh::Operation op = graph.getOperation(phaseA.nodeToOp[node]);
+                if (isSourceOpKind(op.kind()))
+                {
+                    continue;
+                }
+                if (!isCombOp(op))
+                {
+                    continue;
+                }
+
+                asc.combOps.push_back(node);
+                for (const NodeId pred : phaseA.inNeighbors[node])
+                {
+                    if (pred >= visitStamp.size() || visitStamp[pred] == visitEpoch)
+                    {
+                        continue;
+                    }
+                    visitStamp[pred] = visitEpoch;
+                    stack.push_back(pred);
+                }
             }
         }
 
@@ -959,19 +996,111 @@ namespace wolvrix::lib::transform
 
             const auto collectConeStart = std::chrono::steady_clock::now();
             const size_t ascProgressEvery = data.ascs.size() < 2000 ? 200 : 1000;
-            for (AscId aid = 0; aid < data.ascs.size(); ++aid)
+            const size_t totalAscs = data.ascs.size();
+            const size_t hwThreads =
+                std::max<size_t>(1, static_cast<size_t>(std::thread::hardware_concurrency()));
+            const size_t threadCount = std::min<size_t>(
+                totalAscs,
+                std::min<size_t>(kMaxConeCollectThreads, hwThreads));
+
+            if (threadCount <= 1 || totalAscs < kConeCollectChunkSize * 2)
             {
-                for (const size_t sinkIndex : data.ascs[aid].sinks)
+                std::vector<uint32_t> coneVisitStamp(phaseA.nodeToOp.size(), 0);
+                uint32_t coneVisitEpoch = 1;
+                for (AscId aid = 0; aid < totalAscs; ++aid)
                 {
-                    const SinkRef &sink = data.sinks[sinkIndex];
-                    collectCone(graph, phaseA, sink, inoutInputValues, data.ascs[aid]);
+                    collectAscCone(graph,
+                                   phaseA,
+                                   data.sinks,
+                                   inoutInputValues,
+                                   coneVisitStamp,
+                                   coneVisitEpoch,
+                                   data.ascs[aid]);
+                    ++coneVisitEpoch;
+                    if (coneVisitEpoch == 0)
+                    {
+                        std::fill(coneVisitStamp.begin(), coneVisitStamp.end(), 0);
+                        coneVisitEpoch = 1;
+                    }
+
+                    if (progressLogger && aid > 0 && (aid % ascProgressEvery) == 0)
+                    {
+                        progressLogger("repcut phase-b/ascs: collect_cones_progress=" +
+                                       std::to_string(aid) + "/" + std::to_string(totalAscs) +
+                                       " elapsed_ms=" + std::to_string(msSince(collectConeStart)));
+                    }
+                }
+            }
+            else
+            {
+                if (progressLogger)
+                {
+                    progressLogger("repcut phase-b/ascs: collect_cones_parallel threads=" +
+                                   std::to_string(threadCount) +
+                                   " chunk=" + std::to_string(kConeCollectChunkSize));
                 }
 
-                if (progressLogger && aid > 0 && (aid % ascProgressEvery) == 0)
+                std::atomic<size_t> nextAsc{0};
+                std::atomic<size_t> processedAscs{0};
+                std::vector<std::thread> workers;
+                workers.reserve(threadCount);
+
+                for (size_t t = 0; t < threadCount; ++t)
                 {
-                    progressLogger("repcut phase-b/ascs: collect_cones_progress=" +
-                                   std::to_string(aid) + "/" + std::to_string(data.ascs.size()) +
-                                   " elapsed_ms=" + std::to_string(msSince(collectConeStart)));
+                    workers.emplace_back([&, t]() {
+                        (void)t;
+                        std::vector<uint32_t> visitStamp(phaseA.nodeToOp.size(), 0);
+                        uint32_t visitEpoch = 1;
+                        while (true)
+                        {
+                            const size_t begin = nextAsc.fetch_add(kConeCollectChunkSize, std::memory_order_relaxed);
+                            if (begin >= totalAscs)
+                            {
+                                break;
+                            }
+                            const size_t end = std::min(totalAscs, begin + kConeCollectChunkSize);
+                            for (size_t aid = begin; aid < end; ++aid)
+                            {
+                                collectAscCone(graph,
+                                               phaseA,
+                                               data.sinks,
+                                               inoutInputValues,
+                                               visitStamp,
+                                               visitEpoch,
+                                               data.ascs[aid]);
+                                ++visitEpoch;
+                                if (visitEpoch == 0)
+                                {
+                                    std::fill(visitStamp.begin(), visitStamp.end(), 0);
+                                    visitEpoch = 1;
+                                }
+                            }
+                            processedAscs.fetch_add(end - begin, std::memory_order_relaxed);
+                        }
+                    });
+                }
+
+                if (progressLogger)
+                {
+                    size_t nextProgress = ascProgressEvery;
+                    while (nextProgress < totalAscs)
+                    {
+                        const size_t done = processedAscs.load(std::memory_order_relaxed);
+                        if (done >= nextProgress)
+                        {
+                            progressLogger("repcut phase-b/ascs: collect_cones_progress=" +
+                                           std::to_string(nextProgress) + "/" + std::to_string(totalAscs) +
+                                           " elapsed_ms=" + std::to_string(msSince(collectConeStart)));
+                            nextProgress += ascProgressEvery;
+                            continue;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                }
+
+                for (auto &worker : workers)
+                {
+                    worker.join();
                 }
             }
 
