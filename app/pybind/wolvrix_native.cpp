@@ -88,7 +88,21 @@ namespace
             error = "open failed: " + path;
             return false;
         }
-        out.assign((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        input.seekg(0, std::ios::end);
+        const std::streamoff endPos = input.tellg();
+        if (endPos <= 0)
+        {
+            error = "empty file: " + path;
+            return false;
+        }
+        out.resize(static_cast<std::size_t>(endPos));
+        input.seekg(0, std::ios::beg);
+        input.read(out.data(), static_cast<std::streamsize>(out.size()));
+        if (!input || static_cast<std::size_t>(input.gcount()) != out.size())
+        {
+            error = "read failed: " + path;
+            return false;
+        }
         if (out.empty())
         {
             error = "empty file: " + path;

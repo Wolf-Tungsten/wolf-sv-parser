@@ -140,6 +140,7 @@ public:
     bool contains(std::string_view text) const;
     std::string_view text(SymbolId id) const;
     bool valid(SymbolId id) const noexcept;
+    void reserve(std::size_t count);
 
 private:
     struct StringHash {
@@ -452,6 +453,13 @@ public:
     GraphBuilder(GraphSymbolTable& symbols, GraphId graphId = GraphId{1, 0});
     static GraphBuilder fromView(const GraphView& view, GraphSymbolTable& symbols);
 
+    void reserveValues(std::size_t count);
+    void reserveOperations(std::size_t count);
+    void reserveSymbols(std::size_t count);
+    void reserveOpOperands(OperationId op, std::size_t count);
+    void reserveOpResults(OperationId op, std::size_t count);
+    void reserveOpAttrs(OperationId op, std::size_t count);
+
     ValueId addValue(SymbolId sym, int32_t width, bool isSigned,
                      ValueType type = ValueType::Logic);
     OperationId addOp(OperationKind kind, SymbolId sym);
@@ -640,6 +648,13 @@ public:
 
     GraphSymbolTable& symbols() noexcept { return symbols_; }
     const GraphSymbolTable& symbols() const noexcept { return symbols_; }
+    void reserveSymbolCapacity(std::size_t count);
+    void reserveDeclaredSymbolCapacity(std::size_t count);
+    void reserveValueCapacity(std::size_t count);
+    void reserveOperationCapacity(std::size_t count);
+    void reserveOpOperandCapacity(OperationId op, std::size_t count);
+    void reserveOpResultCapacity(OperationId op, std::size_t count);
+    void reserveOpAttrCapacity(OperationId op, std::size_t count);
     SymbolId internSymbol(std::string_view text);
     SymbolId lookupSymbol(std::string_view text) const;
     std::string_view symbolText(SymbolId id) const;

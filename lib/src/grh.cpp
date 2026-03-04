@@ -422,6 +422,11 @@ namespace wolvrix::lib::grh
         return id.value != 0 && id.value < textById_.size();
     }
 
+    void SymbolTable::reserve(std::size_t count)
+    {
+        symbolsByText_.reserve(count);
+    }
+
     void ValueId::assertGraph(GraphId expected) const
     {
         if (!expected.valid())
@@ -665,6 +670,37 @@ namespace wolvrix::lib::grh
     GraphBuilder::GraphBuilder(GraphSymbolTable &symbols, GraphId graphId) : GraphBuilder(graphId)
     {
         symbols_ = &symbols;
+    }
+
+    void GraphBuilder::reserveValues(std::size_t count)
+    {
+        values_.reserve(count);
+        valueUsers_.reserve(count);
+    }
+
+    void GraphBuilder::reserveOperations(std::size_t count)
+    {
+        operations_.reserve(count);
+    }
+
+    void GraphBuilder::reserveSymbols(std::size_t count)
+    {
+        symbolIndex_.reserve(count);
+    }
+
+    void GraphBuilder::reserveOpOperands(OperationId op, std::size_t count)
+    {
+        operations_[opIndex(op)].operands.reserve(count);
+    }
+
+    void GraphBuilder::reserveOpResults(OperationId op, std::size_t count)
+    {
+        operations_[opIndex(op)].results.reserve(count);
+    }
+
+    void GraphBuilder::reserveOpAttrs(OperationId op, std::size_t count)
+    {
+        operations_[opIndex(op)].attrs.reserve(count);
     }
 
     GraphBuilder GraphBuilder::fromView(const GraphView &view, GraphSymbolTable &symbols)
@@ -2446,14 +2482,6 @@ namespace wolvrix::lib::grh
         {
             throw std::runtime_error(std::string(context) + " symbol is not in the symbol table");
         }
-        if (symbols_)
-        {
-            std::string_view text = symbols_->text(sym);
-            if (text.empty())
-            {
-                throw std::runtime_error(std::string(context) + " symbol is empty");
-            }
-        }
     }
 
     void GraphBuilder::bindSymbol(SymbolId sym, SymbolKind kind, uint32_t index, std::string_view context)
@@ -2895,6 +2923,14 @@ namespace wolvrix::lib::grh
         SymbolId existing = symbols_.lookup(text);
         if (existing.valid())
         {
+            if (builder_)
+            {
+                if (builder_->symbolIndex_.contains(existing.value))
+                {
+                    return SymbolId::invalid();
+                }
+                return existing;
+            }
             if (findValue(existing).valid() || findOperation(existing).valid())
             {
                 return SymbolId::invalid();
@@ -4244,6 +4280,56 @@ namespace wolvrix::lib::grh
         }
         invalidateCaches();
         return *builder_;
+    }
+
+    void Graph::reserveSymbolCapacity(std::size_t count)
+    {
+        symbols_.reserve(count);
+        if (builder_)
+        {
+            builder_->reserveSymbols(count);
+        }
+    }
+
+    void Graph::reserveDeclaredSymbolCapacity(std::size_t count)
+    {
+        declaredSymbols_.reserve(count);
+        declaredSymbolSet_.reserve(count);
+    }
+
+    void Graph::reserveValueCapacity(std::size_t count)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        builder.reserveValues(count);
+        if (!valuesCacheDirty_)
+        {
+            valuesCache_.reserve(count);
+        }
+    }
+
+    void Graph::reserveOperationCapacity(std::size_t count)
+    {
+        GraphBuilder &builder = ensureBuilder();
+        builder.reserveOperations(count);
+        if (!operationsCacheDirty_)
+        {
+            operationsCache_.reserve(count);
+        }
+    }
+
+    void Graph::reserveOpOperandCapacity(OperationId op, std::size_t count)
+    {
+        ensureBuilder().reserveOpOperands(op, count);
+    }
+
+    void Graph::reserveOpResultCapacity(OperationId op, std::size_t count)
+    {
+        ensureBuilder().reserveOpResults(op, count);
+    }
+
+    void Graph::reserveOpAttrCapacity(OperationId op, std::size_t count)
+    {
+        ensureBuilder().reserveOpAttrs(op, count);
     }
 
     const GraphView &Graph::view() const

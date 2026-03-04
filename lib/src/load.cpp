@@ -377,13 +377,36 @@ namespace wolvrix::lib::load
             std::string parseString()
             {
                 expect('"');
+                const char *segmentStart = current_;
+                while (current_ != end_)
+                {
+                    const char ch = *current_;
+                    if (ch == '"')
+                    {
+                        std::string result(segmentStart, static_cast<std::size_t>(current_ - segmentStart));
+                        ++current_;
+                        return result;
+                    }
+                    if (ch == '\\')
+                    {
+                        break;
+                    }
+                    if (static_cast<unsigned char>(ch) < 0x20)
+                    {
+                        throw std::runtime_error("Invalid control character in string");
+                    }
+                    ++current_;
+                }
+
                 std::string result;
+                result.reserve(static_cast<std::size_t>(current_ - segmentStart) + 8);
+                result.append(segmentStart, static_cast<std::size_t>(current_ - segmentStart));
                 while (current_ != end_)
                 {
                     char ch = *current_++;
                     if (ch == '"')
                     {
-                        break;
+                        return result;
                     }
                     if (ch == '\\')
                     {
@@ -466,10 +489,14 @@ namespace wolvrix::lib::load
                     }
                     else
                     {
+                        if (static_cast<unsigned char>(ch) < 0x20)
+                        {
+                            throw std::runtime_error("Invalid control character in string");
+                        }
                         result.push_back(ch);
                     }
                 }
-                return result;
+                throw std::runtime_error("Unterminated JSON string");
             }
 
             JsonValue parseLiteral(std::string_view literal, bool value)
@@ -830,8 +857,31 @@ namespace wolvrix::lib::load
             {
                 throw std::runtime_error("Graph JSON missing declaredSymbols");
             }
+            const auto &declaredArray = declaredIt->second.asArray("graph.declaredSymbols");
+
+            const auto valuesIt = graphObj.find("vals");
+            if (valuesIt == graphObj.end())
+            {
+                throw std::runtime_error("Graph JSON missing vals array");
+            }
+            const auto &valuesArray = valuesIt->second.asArray("graph.vals");
+
+            const auto opsIt = graphObj.find("ops");
+            const JsonValue::Array *opsArray = nullptr;
+            if (opsIt != graphObj.end())
+            {
+                opsArray = &opsIt->second.asArray("graph.ops");
+            }
+            const std::size_t opReserve = opsArray ? opsArray->size() : 0;
+
+            const std::size_t symbolReserve = declaredArray.size() + valuesArray.size() + opReserve + 64;
+            graph.reserveSymbolCapacity(symbolReserve);
+            graph.reserveDeclaredSymbolCapacity(declaredArray.size());
+            graph.reserveValueCapacity(valuesArray.size());
+            graph.reserveOperationCapacity(opReserve);
+
             std::size_t declaredCount = 0;
-            for (const auto &entry : declaredIt->second.asArray("graph.declaredSymbols"))
+            for (const auto &entry : declaredArray)
             {
                 const std::string name = entry.asString("graph.declaredSymbols[]");
                 if (name.empty())
@@ -856,18 +906,17 @@ namespace wolvrix::lib::load
                 declaredEnd = TimingClock::now();
             }
 
-            const auto valuesIt = graphObj.find("vals");
-            if (valuesIt == graphObj.end())
-            {
-                throw std::runtime_error("Graph JSON missing vals array");
-            }
-
             std::unordered_map<std::string, ValueId> valueBySymbol;
             std::unordered_set<uint32_t> declaredInputs;
             std::unordered_set<uint32_t> declaredOutputs;
             std::unordered_set<uint32_t> declaredInouts;
 
-            const auto &valuesArray = valuesIt->second.asArray("graph.vals");
+            valueBySymbol.reserve(valuesArray.size());
+            const std::size_t ioReserve = std::max<std::size_t>(32, valuesArray.size() / 32);
+            declaredInputs.reserve(ioReserve);
+            declaredOutputs.reserve(ioReserve);
+            declaredInouts.reserve(ioReserve);
+
             std::size_t valuesCount = 0;
             TimingClock::time_point valuesStart;
             double valuesSymbolMs = 0.0;
@@ -881,13 +930,24 @@ namespace wolvrix::lib::load
             for (const auto &valueEntry : valuesArray)
             {
                 const auto &valueObj = valueEntry.asObject("value");
-                const auto &symbol = valueObj.at("sym").asString("value.sym");
+                const auto symIt = valueObj.find("sym");
+                const auto widthIt = valueObj.find("w");
+                const auto signIt = valueObj.find("sgn");
+                const auto inIt = valueObj.find("in");
+                const auto outIt = valueObj.find("out");
+                if (symIt == valueObj.end() || widthIt == valueObj.end() ||
+                    signIt == valueObj.end() || inIt == valueObj.end() || outIt == valueObj.end())
+                {
+                    throw std::runtime_error("Value entry missing required fields");
+                }
+
+                const auto &symbol = symIt->second.asString("value.sym");
                 if (symbol.empty())
                 {
                     throw std::runtime_error("Value symbol is empty");
                 }
-                int64_t width = valueObj.at("w").asInt("value.w");
-                bool isSigned = valueObj.at("sgn").asBool("value.sgn");
+                int64_t width = widthIt->second.asInt("value.w");
+                bool isSigned = signIt->second.asBool("value.sgn");
                 wolvrix::lib::grh::ValueType valueType = wolvrix::lib::grh::ValueType::Logic;
                 if (auto typeIt = valueObj.find("type"); typeIt != valueObj.end())
                 {
@@ -929,8 +989,8 @@ namespace wolvrix::lib::load
                 }
                 valueBySymbol.emplace(symbol, valueId);
 
-                bool isInput = valueObj.at("in").asBool("value.in");
-                bool isOutput = valueObj.at("out").asBool("value.out");
+                bool isInput = inIt->second.asBool("value.in");
+                bool isOutput = outIt->second.asBool("value.out");
                 bool isInout = false;
                 if (auto inoutIt = valueObj.find("inout"); inoutIt != valueObj.end())
                 {
@@ -1006,12 +1066,13 @@ namespace wolvrix::lib::load
                 std::vector<InoutPort> inoutPorts;
                 auto parsePortArray = [&](std::string_view key, bool isInput)
                 {
-                    auto arrayIt = portsObj.find(std::string(key));
+                    auto arrayIt = portsObj.find(key);
                     if (arrayIt == portsObj.end())
                     {
                         return;
                     }
-                    const auto &portArray = arrayIt->second.asArray(std::string("graph.ports.") + std::string(key));
+                    const std::string context = std::string("graph.ports.") + std::string(key);
+                    const auto &portArray = arrayIt->second.asArray(context);
                     if (isInput)
                     {
                         inputPorts.reserve(inputPorts.size() + portArray.size());
@@ -1034,12 +1095,12 @@ namespace wolvrix::lib::load
                         {
                             throw std::runtime_error("Port entry missing name or val");
                         }
-                        const std::string portNameText = nameField->second.asString("graph.port.name");
+                        const std::string &portNameText = nameField->second.asString("graph.port.name");
                         if (portNameText.empty())
                         {
                             throw std::runtime_error("Port name is empty");
                         }
-                        const std::string valueName = valField->second.asString("graph.port.val");
+                        const std::string &valueName = valField->second.asString("graph.port.val");
                         if (valueName.empty())
                         {
                             throw std::runtime_error("Port value symbol is empty");
@@ -1097,14 +1158,14 @@ namespace wolvrix::lib::load
                         {
                             throw std::runtime_error("Inout port entry missing name/in/out/oe");
                         }
-                        const std::string portNameText = nameField->second.asString("graph.port.name");
+                        const std::string &portNameText = nameField->second.asString("graph.port.name");
                         if (portNameText.empty())
                         {
                             throw std::runtime_error("Inout port name is empty");
                         }
-                        const std::string inName = inField->second.asString("graph.port.in");
-                        const std::string outName = outField->second.asString("graph.port.out");
-                        const std::string oeName = oeField->second.asString("graph.port.oe");
+                        const std::string &inName = inField->second.asString("graph.port.in");
+                        const std::string &outName = outField->second.asString("graph.port.out");
+                        const std::string &oeName = oeField->second.asString("graph.port.oe");
                         if (inName.empty() || outName.empty() || oeName.empty())
                         {
                             throw std::runtime_error("Inout port value symbol is empty");
@@ -1285,9 +1346,9 @@ namespace wolvrix::lib::load
             {
                 opsStart = TimingClock::now();
             }
-            if (auto opsIt = graphObj.find("ops"); opsIt != graphObj.end())
+            if (opsArray)
             {
-                for (const auto &opEntry : opsIt->second.asArray("graph.ops"))
+                for (const auto &opEntry : *opsArray)
                 {
                     const auto &opObj = opEntry.asObject("operation");
                     auto kindIt = opObj.find("kind");
@@ -1307,7 +1368,7 @@ namespace wolvrix::lib::load
                         throw std::runtime_error("Operation missing symbol");
                     }
 
-                    const std::string opSymbol = symIt->second.asString("operation.sym");
+                    const std::string &opSymbol = symIt->second.asString("operation.sym");
                     if (opSymbol.empty())
                     {
                         throw std::runtime_error("Operation symbol is empty");
@@ -1339,33 +1400,31 @@ namespace wolvrix::lib::load
                         opsCreateMs += toMillis(now - opCreateStart);
                     }
 
-                    auto parseSymbolList = [&](std::string_view key, std::string_view context) -> std::vector<std::string>
+                    const JsonValue::Array *inputsArray = nullptr;
+                    if (auto inIt = opObj.find("in"); inIt != opObj.end())
                     {
-                        std::vector<std::string> entries;
-                        if (auto it = opObj.find(std::string(key)); it != opObj.end())
-                        {
-                            for (const auto &entry : it->second.asArray(std::string(context)))
-                            {
-                                entries.push_back(entry.asString(std::string(context) + "[]"));
-                            }
-                        }
-                        return entries;
-                    };
+                        inputsArray = &inIt->second.asArray("operation.in");
+                        graph.reserveOpOperandCapacity(opId, inputsArray->size());
+                    }
 
                     TimingClock::time_point opInputsStart;
                     if (timingEnabled)
                     {
                         opInputsStart = TimingClock::now();
                     }
-                    for (const auto &symbol : parseSymbolList("in", "operation.in"))
+                    if (inputsArray)
                     {
-                        auto valueIt = valueBySymbol.find(symbol);
-                        if (valueIt == valueBySymbol.end())
+                        for (const auto &entry : *inputsArray)
                         {
-                            throw std::runtime_error("Operand references unknown value: " + symbol);
+                            const std::string &symbol = entry.asString("operation.in[]");
+                            auto valueIt = valueBySymbol.find(symbol);
+                            if (valueIt == valueBySymbol.end())
+                            {
+                                throw std::runtime_error("Operand references unknown value: " + symbol);
+                            }
+                            graph.addOperand(opId, valueIt->second);
+                            ++opsInRefs;
                         }
-                        graph.addOperand(opId, valueIt->second);
-                        ++opsInRefs;
                     }
                     if (timingEnabled)
                     {
@@ -1373,20 +1432,31 @@ namespace wolvrix::lib::load
                         opsInputsMs += toMillis(now - opInputsStart);
                     }
 
+                    const JsonValue::Array *outputsArray = nullptr;
+                    if (auto outIt = opObj.find("out"); outIt != opObj.end())
+                    {
+                        outputsArray = &outIt->second.asArray("operation.out");
+                        graph.reserveOpResultCapacity(opId, outputsArray->size());
+                    }
+
                     TimingClock::time_point opOutputsStart;
                     if (timingEnabled)
                     {
                         opOutputsStart = TimingClock::now();
                     }
-                    for (const auto &symbol : parseSymbolList("out", "operation.out"))
+                    if (outputsArray)
                     {
-                        auto valueIt = valueBySymbol.find(symbol);
-                        if (valueIt == valueBySymbol.end())
+                        for (const auto &entry : *outputsArray)
                         {
-                            throw std::runtime_error("Result references unknown value: " + symbol);
+                            const std::string &symbol = entry.asString("operation.out[]");
+                            auto valueIt = valueBySymbol.find(symbol);
+                            if (valueIt == valueBySymbol.end())
+                            {
+                                throw std::runtime_error("Result references unknown value: " + symbol);
+                            }
+                            graph.addResult(opId, valueIt->second);
+                            ++opsOutRefs;
                         }
-                        graph.addResult(opId, valueIt->second);
-                        ++opsOutRefs;
                     }
                     if (timingEnabled)
                     {
@@ -1401,7 +1471,9 @@ namespace wolvrix::lib::load
                         {
                             opAttrsStart = TimingClock::now();
                         }
-                        for (const auto &[attrName, attrValue] : attrsIt->second.asObject("operation.attrs"))
+                        const auto &attrsObj = attrsIt->second.asObject("operation.attrs");
+                        graph.reserveOpAttrCapacity(opId, attrsObj.size());
+                        for (const auto &[attrName, attrValue] : attrsObj)
                         {
                             graph.setAttr(opId, attrName, parseAttributeValue(attrValue));
                             ++opsAttrCount;
