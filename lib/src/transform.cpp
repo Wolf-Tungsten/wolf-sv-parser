@@ -4,7 +4,9 @@
 #include "transform/comb_loop_elim.hpp"
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
+#include "transform/hrbcut.hpp"
 #include "transform/latch_transparent_read.hpp"
+#include "transform/repcut.hpp"
 #include "transform/slice_index_const.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
@@ -410,6 +412,8 @@ namespace wolvrix::lib::transform
             "simplify",
             "stats",
             "strip-debug",
+            "hrbcut",
+            "repcut",
         };
     }
 
@@ -780,6 +784,332 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<StatsPass>();
+        }
+        if (normalized == "hrbcut")
+        {
+            HrbcutOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    out = std::string(args[++i]);
+                    return true;
+                };
+                auto parseSizeArg = [&](std::string_view name, std::size_t &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    try
+                    {
+                        out = static_cast<std::size_t>(std::stoull(std::string(args[++i])));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = std::string("invalid ") + std::string(name) + " value";
+                        return false;
+                    }
+                    return true;
+                };
+                auto parseDoubleArg = [&](std::string_view name, double &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    try
+                    {
+                        out = std::stod(std::string(args[++i]));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = std::string("invalid ") + std::string(name) + " value";
+                        return false;
+                    }
+                    return true;
+                };
+
+                if (arg == "-target-graph")
+                {
+                    if (!parseStringArg("-target-graph", options.targetGraphSymbol))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-target-graph="))
+                {
+                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-target-graph=").size()));
+                }
+                else if (arg == "-graph")
+                {
+                    if (!parseStringArg("-graph", options.targetGraphSymbol))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-graph="))
+                {
+                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-graph=").size()));
+                }
+                else if (arg == "-partition-count")
+                {
+                    if (!parseSizeArg("-partition-count", options.partitionCount))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-partition-count="))
+                {
+                    try
+                    {
+                        options.partitionCount = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-partition-count=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -partition-count value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-balance-threshold")
+                {
+                    if (!parseDoubleArg("-balance-threshold", options.balanceThreshold))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-balance-threshold="))
+                {
+                    try
+                    {
+                        options.balanceThreshold = std::stod(
+                            std::string(arg.substr(std::string_view("-balance-threshold=").size())));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -balance-threshold value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-target-candidate-count")
+                {
+                    if (!parseSizeArg("-target-candidate-count", options.targetCandidateCount))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-target-candidate-count="))
+                {
+                    try
+                    {
+                        options.targetCandidateCount = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-target-candidate-count=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -target-candidate-count value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-max-trials")
+                {
+                    if (!parseSizeArg("-max-trials", options.maxTrials))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-max-trials="))
+                {
+                    try
+                    {
+                        options.maxTrials = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-max-trials=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-trials value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-split-stop-threshold")
+                {
+                    if (!parseSizeArg("-split-stop-threshold", options.splitStopThreshold))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-split-stop-threshold="))
+                {
+                    try
+                    {
+                        options.splitStopThreshold = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-split-stop-threshold=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -split-stop-threshold value";
+                        return nullptr;
+                    }
+                }
+                else
+                {
+                    error = "unknown hrbcut option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<HrbcutPass>(options);
+        }
+        if (normalized == "repcut")
+        {
+            RepcutOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    out = std::string(args[++i]);
+                    return true;
+                };
+                auto parseSizeArg = [&](std::string_view name, std::size_t &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    try
+                    {
+                        out = static_cast<std::size_t>(std::stoull(std::string(args[++i])));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = std::string("invalid ") + std::string(name) + " value";
+                        return false;
+                    }
+                    return true;
+                };
+                auto parseDoubleArg = [&](std::string_view name, double &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    try
+                    {
+                        out = std::stod(std::string(args[++i]));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = std::string("invalid ") + std::string(name) + " value";
+                        return false;
+                    }
+                    return true;
+                };
+
+                if (arg == "-target-graph")
+                {
+                    if (!parseStringArg("-target-graph", options.targetGraphSymbol))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-target-graph="))
+                {
+                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-target-graph=").size()));
+                }
+                else if (arg == "-graph")
+                {
+                    if (!parseStringArg("-graph", options.targetGraphSymbol))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-graph="))
+                {
+                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-graph=").size()));
+                }
+                else if (arg == "-partition-count")
+                {
+                    if (!parseSizeArg("-partition-count", options.partitionCount))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-partition-count="))
+                {
+                    try
+                    {
+                        options.partitionCount = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-partition-count=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -partition-count value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-imbalance-factor")
+                {
+                    if (!parseDoubleArg("-imbalance-factor", options.imbalanceFactor))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-imbalance-factor="))
+                {
+                    try
+                    {
+                        options.imbalanceFactor = std::stod(
+                            std::string(arg.substr(std::string_view("-imbalance-factor=").size())));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -imbalance-factor value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-work-dir")
+                {
+                    if (!parseStringArg("-work-dir", options.workDir))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-work-dir="))
+                {
+                    options.workDir = std::string(arg.substr(std::string_view("-work-dir=").size()));
+                }
+                else if (arg == "-kahypar-path")
+                {
+                    if (!parseStringArg("-kahypar-path", options.kaHyParPath))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-kahypar-path="))
+                {
+                    options.kaHyParPath = std::string(arg.substr(std::string_view("-kahypar-path=").size()));
+                }
+                else if (arg == "-keep-intermediate-files")
+                {
+                    options.keepIntermediateFiles = true;
+                }
+                else
+                {
+                    error = "unknown repcut option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<RepcutPass>(options);
         }
 
         error = "unknown pass: " + normalized;

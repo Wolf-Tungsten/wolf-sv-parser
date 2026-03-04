@@ -68,6 +68,8 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/latch_transparent_read.cpp
     lib/transform/slice_index_const.cpp
     lib/transform/strip_debug.cpp
+    lib/transform/hrbcut.cpp
+    lib/transform/repcut.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
@@ -366,6 +368,23 @@ target_link_libraries(transform-strip-debug
 )
 
 register_test_exe(transform-strip-debug)
+
+# transform: repcut
+add_executable(transform-repcut
+    tests/transform/test_repcut_pass.cpp
+)
+
+target_link_libraries(transform-repcut
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(transform-repcut
+    PRIVATE
+        WOLF_SV_TEST_ARTIFACT_DIR="${WOLF_SV_TEST_ARTIFACT_DIR}"
+)
+
+register_test_exe(transform-repcut)
 
 # ingest: symbol collector
 add_executable(ingest-symbol-collector
