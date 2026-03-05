@@ -15,7 +15,9 @@ namespace wolvrix::lib::transform
         std::size_t partitionCount = 2;
         double imbalanceFactor = 0.015;
         std::string workDir = ".";
-        std::string kaHyParPath = "KaHyPar";
+        std::string partitioner = "mt-kahypar";
+        std::string mtKaHyParPreset = "quality";
+        std::size_t mtKaHyParThreads = 0;
         bool keepIntermediateFiles = false;
     };
 

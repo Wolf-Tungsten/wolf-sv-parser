@@ -1088,16 +1088,52 @@ namespace wolvrix::lib::transform
                 {
                     options.workDir = std::string(arg.substr(std::string_view("-work-dir=").size()));
                 }
-                else if (arg == "-kahypar-path")
+                else if (arg == "-partitioner")
                 {
-                    if (!parseStringArg("-kahypar-path", options.kaHyParPath))
+                    if (!parseStringArg("-partitioner", options.partitioner))
                     {
                         return nullptr;
                     }
                 }
-                else if (arg.starts_with("-kahypar-path="))
+                else if (arg.starts_with("-partitioner="))
                 {
-                    options.kaHyParPath = std::string(arg.substr(std::string_view("-kahypar-path=").size()));
+                    options.partitioner = std::string(arg.substr(std::string_view("-partitioner=").size()));
+                }
+                else if (arg == "-mtkahypar-preset")
+                {
+                    if (!parseStringArg("-mtkahypar-preset", options.mtKaHyParPreset))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-mtkahypar-preset="))
+                {
+                    options.mtKaHyParPreset = std::string(arg.substr(std::string_view("-mtkahypar-preset=").size()));
+                }
+                else if (arg == "-mtkahypar-threads")
+                {
+                    if (!parseSizeArg("-mtkahypar-threads", options.mtKaHyParThreads))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-mtkahypar-threads="))
+                {
+                    try
+                    {
+                        options.mtKaHyParThreads = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-mtkahypar-threads=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -mtkahypar-threads value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-kahypar-path" || arg.starts_with("-kahypar-path="))
+                {
+                    error = "-kahypar-path has been removed; use -partitioner=mt-kahypar instead";
+                    return nullptr;
                 }
                 else if (arg == "-keep-intermediate-files")
                 {

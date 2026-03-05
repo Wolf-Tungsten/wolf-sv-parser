@@ -45,6 +45,36 @@ file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
 add_subdirectory(external/slang)
 
+option(WOLVRIX_ENABLE_MT_KAHYPAR "Enable mt-kahypar backend for repcut" ON)
+set(WOLVRIX_HAVE_MT_KAHYPAR 0)
+set(WOLVRIX_MTKAHYPAR_ROOT "" CACHE PATH "Root directory of an installed mt-kahypar")
+if (WOLVRIX_ENABLE_MT_KAHYPAR)
+    set(WOLVRIX_MTKAHYPAR_HINT_DIRS)
+    if (WOLVRIX_MTKAHYPAR_ROOT)
+        list(APPEND WOLVRIX_MTKAHYPAR_HINT_DIRS "${WOLVRIX_MTKAHYPAR_ROOT}")
+    endif()
+    if (DEFINED ENV{MTKAHYPAR_ROOT} AND NOT "$ENV{MTKAHYPAR_ROOT}" STREQUAL "")
+        list(APPEND WOLVRIX_MTKAHYPAR_HINT_DIRS "$ENV{MTKAHYPAR_ROOT}")
+    endif()
+
+    find_path(WOLVRIX_MTKAHYPAR_INCLUDE_DIR
+        NAMES mtkahypar.h
+        HINTS ${WOLVRIX_MTKAHYPAR_HINT_DIRS}
+        PATH_SUFFIXES include
+    )
+    find_library(WOLVRIX_MTKAHYPAR_LIBRARY
+        NAMES mtkahypar libmtkahypar
+        HINTS ${WOLVRIX_MTKAHYPAR_HINT_DIRS}
+        PATH_SUFFIXES lib lib64
+    )
+    if (WOLVRIX_MTKAHYPAR_INCLUDE_DIR AND WOLVRIX_MTKAHYPAR_LIBRARY)
+        set(WOLVRIX_HAVE_MT_KAHYPAR 1)
+        message(STATUS "MtKaHyPar enabled: ${WOLVRIX_MTKAHYPAR_LIBRARY}")
+    else()
+        message(WARNING "MtKaHyPar not found; repcut mt-kahypar backend will be unavailable")
+    endif()
+endif()
+
 # Libraries
 set(WOLVRIX_LIB_SOURCES
     lib/src/diagnostics.cpp
@@ -82,6 +112,22 @@ target_include_directories(wolvrix-lib
 target_link_libraries(wolvrix-lib
     PUBLIC
         slang::slang
+)
+
+if (WOLVRIX_HAVE_MT_KAHYPAR)
+    target_include_directories(wolvrix-lib
+        PRIVATE
+            "${WOLVRIX_MTKAHYPAR_INCLUDE_DIR}"
+    )
+    target_link_libraries(wolvrix-lib
+        PRIVATE
+            "${WOLVRIX_MTKAHYPAR_LIBRARY}"
+    )
+endif()
+
+target_compile_definitions(wolvrix-lib
+    PUBLIC
+        WOLVRIX_HAVE_MT_KAHYPAR=${WOLVRIX_HAVE_MT_KAHYPAR}
 )
 
 add_library(wolvrix::lib ALIAS wolvrix-lib)
@@ -517,6 +563,20 @@ target_compile_definitions(ingest-graph-assembly-register-multi
         WOLF_SV_INGEST_GRAPH_ASSEMBLY_REGISTER_MULTI_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_register_multi.sv"
 )
 register_test_exe(ingest-graph-assembly-register-multi)
+
+# ingest: graph assembly register declaration initializer
+add_executable(ingest-graph-assembly-register-init
+    tests/ingest/test_ingest_graph_assembly_register_init.cpp
+)
+target_link_libraries(ingest-graph-assembly-register-init
+    PRIVATE
+        wolvrix-lib
+)
+target_compile_definitions(ingest-graph-assembly-register-init
+    PRIVATE
+        WOLF_SV_INGEST_GRAPH_ASSEMBLY_REGISTER_INIT_DATA_PATH="${WOLF_SV_INGEST_TEST_DATA_DIR}/graph_assembly_register_init.sv"
+)
+register_test_exe(ingest-graph-assembly-register-init)
 
 # ingest: graph assembly memory
 add_executable(ingest-graph-assembly-memory

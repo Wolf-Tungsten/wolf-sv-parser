@@ -18,11 +18,6 @@ namespace
         return 1;
     }
 
-    bool hasKaHyPar()
-    {
-        return std::system("command -v KaHyPar >/dev/null 2>&1") == 0;
-    }
-
     wolvrix::lib::grh::ValueId makeValue(wolvrix::lib::grh::Graph &graph,
                                          const std::string &name,
                                          int32_t width = 8,
@@ -49,12 +44,10 @@ namespace
 
 int main()
 {
-    if (!hasKaHyPar())
-    {
-        std::cout << "[repcut-tests] KaHyPar not found, skip test.\n";
-        return 0;
-    }
-
+#if !WOLVRIX_HAVE_MT_KAHYPAR
+    std::cout << "[repcut-tests] mt-kahypar backend unavailable, skip test.\n";
+    return 0;
+#else
     wolvrix::lib::grh::Design design;
     wolvrix::lib::grh::Graph &graph = design.createGraph("top");
 
@@ -107,7 +100,9 @@ int main()
     options.partitionCount = 2;
     options.imbalanceFactor = 1.0;
     options.workDir = outDir.string();
-    options.kaHyParPath = "KaHyPar";
+    options.partitioner = "mt-kahypar";
+    options.mtKaHyParPreset = "quality";
+    options.mtKaHyParThreads = 0;
     options.keepIntermediateFiles = true;
     manager.addPass(std::make_unique<RepcutPass>(options));
 
@@ -140,7 +135,7 @@ int main()
     }
     if (nativePartFiles.empty())
     {
-        return fail("expected native KaHyPar partition output file");
+        return fail("expected native mt-kahypar partition output file");
     }
 
     if (!result.success || diags.hasError())
@@ -191,5 +186,93 @@ int main()
         return fail("expected partition graph with top_part0 prefix");
     }
 
+    // Regression: read-only register (initValue-only, no write port) must still
+    // get a stable partition owner so reconstructed inputs can be fully mapped.
+    wolvrix::lib::grh::Design readOnlyDesign;
+    wolvrix::lib::grh::Graph &readOnlyGraph = readOnlyDesign.createGraph("top_read_only_reg");
+    readOnlyDesign.markAsTop("top_read_only_reg");
+
+    const auto roIn = makeValue(readOnlyGraph, "in_data", 32, false);
+    const auto roEn = makeValue(readOnlyGraph, "en", 1, false);
+    readOnlyGraph.bindInputPort("in_data", roIn);
+    readOnlyGraph.bindInputPort("en", roEn);
+
+    const auto roRegDecl =
+        readOnlyGraph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                      readOnlyGraph.internSymbol("random_bits"));
+    readOnlyGraph.setAttr(roRegDecl, "width", static_cast<int64_t>(32));
+    readOnlyGraph.setAttr(roRegDecl, "isSigned", false);
+    readOnlyGraph.setAttr(roRegDecl, "initValue", std::string("$random"));
+
+    const auto roRead =
+        readOnlyGraph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                      readOnlyGraph.internSymbol("random_bits_rd"));
+    const auto roReadValue = makeValue(readOnlyGraph, "random_bits_rd_v", 32, false);
+    readOnlyGraph.addResult(roRead, roReadValue);
+    readOnlyGraph.setAttr(roRead, "regSymbol", std::string("random_bits"));
+
+    const auto roData = makeValue(readOnlyGraph, "lat_data", 32, false);
+    makeBinaryOp(readOnlyGraph, wolvrix::lib::grh::OperationKind::kAdd,
+                 "lat_data_add", roReadValue, roIn, roData);
+
+    const auto roLatchDecl =
+        readOnlyGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                      readOnlyGraph.internSymbol("ro_lat"));
+    readOnlyGraph.setAttr(roLatchDecl, "width", static_cast<int64_t>(32));
+    readOnlyGraph.setAttr(roLatchDecl, "isSigned", false);
+
+    const auto roLatchWrite =
+        readOnlyGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                      readOnlyGraph.internSymbol("ro_lat_wr"));
+    readOnlyGraph.addOperand(roLatchWrite, roEn);
+    readOnlyGraph.addOperand(roLatchWrite, roData);
+    readOnlyGraph.setAttr(roLatchWrite, "latchSymbol", std::string("ro_lat"));
+
+    const std::filesystem::path roOutDir =
+        std::filesystem::path(WOLF_SV_TEST_ARTIFACT_DIR) / "repcut_test_read_only_reg";
+    std::filesystem::create_directories(roOutDir, ec);
+    if (ec)
+    {
+        return fail("failed to create output directory: " + roOutDir.string());
+    }
+
+    PassManager roManager;
+    roManager.options().verbosity = PassVerbosity::Info;
+    RepcutOptions roOptions;
+    roOptions.targetGraphSymbol = "top_read_only_reg";
+    roOptions.partitionCount = 2;
+    roOptions.imbalanceFactor = 1.0;
+    roOptions.workDir = roOutDir.string();
+    roOptions.partitioner = "mt-kahypar";
+    roOptions.mtKaHyParPreset = "quality";
+    roOptions.mtKaHyParThreads = 0;
+    roOptions.keepIntermediateFiles = true;
+    roManager.addPass(std::make_unique<RepcutPass>(roOptions));
+
+    PassDiagnostics roDiags;
+    PassManagerResult roResult{};
+    try
+    {
+        roResult = roManager.run(readOnlyDesign, roDiags);
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("read-only register repcut exception: ") + ex.what());
+    }
+
+    if (!roResult.success || roDiags.hasError())
+    {
+        return fail("read-only register repcut failed unexpectedly");
+    }
+    if (!roResult.changed)
+    {
+        return fail("read-only register repcut expected graph changes");
+    }
+    if (readOnlyDesign.findGraph("top_read_only_reg") == nullptr)
+    {
+        return fail("read-only register top graph missing after repcut");
+    }
+
     return 0;
+#endif
 }

@@ -2135,6 +2135,48 @@ struct StmtLowererState {
         domain = saved;
     }
 
+    void handleVariableInitializer(const slang::ast::VariableSymbol& variable)
+    {
+        const slang::ast::Expression* init = variable.getInitializer();
+        if (!init || variable.name.empty())
+        {
+            return;
+        }
+        if (variable.getType().isEvent())
+        {
+            return;
+        }
+
+        PlanSymbolId target = plan.symbolTable.lookup(variable.name);
+        if (!target.valid())
+        {
+            return;
+        }
+        const SignalInfo* signal = findSignalBySymbol(plan, target);
+        if (!signal || signal->memoryRows > 0 || signal->kind == SignalKind::Memory)
+        {
+            return;
+        }
+
+        std::string initValue = tryExtractInitValue(*init);
+        if (initValue.empty())
+        {
+            if (diagnostics)
+            {
+                diagnostics->warn(
+                    init->sourceRange.start(),
+                    "Skipping variable initializer that cannot be represented as initValue");
+            }
+            return;
+        }
+
+        RegisterInit regInit;
+        regInit.reg = target;
+        regInit.initValue = std::move(initValue);
+        regInit.location = init->sourceRange.start();
+        lowering.registerInits.push_back(std::move(regInit));
+    }
+
     void handleAssignment(const slang::ast::AssignmentExpression& expr)
     {
         std::vector<LValueTarget> targets;
@@ -8252,22 +8294,19 @@ private:
         // Case 3: $random or $urandom call
         if (rhs.kind == slang::ast::ExpressionKind::Call) {
             const auto& call = rhs.as<slang::ast::CallExpression>();
-            if (const auto* subroutine = std::get_if<const slang::ast::SubroutineSymbol*>(&call.subroutine)) {
-                std::string name((*subroutine)->name);
-                // Handle $random or $urandom
-                if (name == "$random" || name == "$urandom") {
-                    const auto& args = call.arguments();
-                    if (args.empty()) {
-                        return "$random";
-                    } else if (args.size() == 1) {
-                        // Try to extract seed if it's a constant
-                        if (args[0]->kind == slang::ast::ExpressionKind::IntegerLiteral) {
-                            const auto& seedLit = args[0]->as<slang::ast::IntegerLiteral>();
-                            auto seed = seedLit.getValue();
-                            std::ostringstream oss;
-                            oss << "$random(" << seed.getRawPtr()[0] << ")";
-                            return oss.str();
-                        }
+            const std::string name(call.getSubroutineName());
+            if (name == "$random" || name == "$urandom") {
+                const auto& args = call.arguments();
+                if (args.empty()) {
+                    return "$random";
+                } else if (args.size() == 1) {
+                    // Try to extract seed if it's a constant
+                    if (args[0]->kind == slang::ast::ExpressionKind::IntegerLiteral) {
+                        const auto& seedLit = args[0]->as<slang::ast::IntegerLiteral>();
+                        auto seed = seedLit.getValue();
+                        std::ostringstream oss;
+                        oss << "$random(" << seed.getRawPtr()[0] << ")";
+                        return oss.str();
                     }
                 }
             }
@@ -8724,6 +8763,14 @@ void lowerStmtMemberSymbol(const slang::ast::Symbol& member, StmtLowererState& s
         if (net->getInitializer())
         {
             state.handleNetInitializer(*net);
+            return;
+        }
+    }
+    if (const auto* variable = member.as_if<slang::ast::VariableSymbol>())
+    {
+        if (variable->getInitializer())
+        {
+            state.handleVariableInitializer(*variable);
             return;
         }
     }
@@ -13066,6 +13113,68 @@ private:
                 context_.diagnostics->warn(
                     entry.location,
                     "Storage target written in mixed sequential/latch domains");
+            }
+        }
+
+        for (const auto& init : lowering_.registerInits)
+        {
+            if (!init.reg.valid() || init.reg.index >= storageBySymbol_.size())
+            {
+                continue;
+            }
+
+            StorageKind& current = storageBySymbol_[init.reg.index];
+            if (current == StorageKind::Register)
+            {
+                if (!storageLocation_[init.reg.index].valid() && init.location.valid())
+                {
+                    storageLocation_[init.reg.index] = init.location;
+                }
+                continue;
+            }
+            if (current == StorageKind::Latch)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        init.location,
+                        "Skipping register initializer for latch storage target");
+                }
+                continue;
+            }
+
+            bool hasCombinationalWrite = false;
+            slang::SourceLocation writeLocation{};
+            for (const auto& entry : writeBack_.entries)
+            {
+                if (!entry.target.valid() || entry.target.index != init.reg.index)
+                {
+                    continue;
+                }
+                if (entry.domain == ControlDomain::Sequential ||
+                    entry.domain == ControlDomain::Latch)
+                {
+                    continue;
+                }
+                hasCombinationalWrite = true;
+                writeLocation = entry.location;
+                break;
+            }
+            if (hasCombinationalWrite)
+            {
+                if (context_.diagnostics)
+                {
+                    context_.diagnostics->warn(
+                        writeLocation.valid() ? writeLocation : init.location,
+                        "Skipping register initializer on combinationally-driven target");
+                }
+                continue;
+            }
+
+            current = StorageKind::Register;
+            if (init.location.valid())
+            {
+                storageLocation_[init.reg.index] = init.location;
             }
         }
     }

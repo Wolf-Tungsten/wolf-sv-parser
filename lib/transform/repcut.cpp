@@ -2,13 +2,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <set>
@@ -21,8 +23,8 @@
 #include <utility>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/wait.h>
+#if WOLVRIX_HAVE_MT_KAHYPAR
+#include <mtkahypar.h>
 #endif
 
 namespace wolvrix::lib::transform
@@ -37,6 +39,35 @@ namespace wolvrix::lib::transform
         constexpr PieceId kInvalidPiece = std::numeric_limits<PieceId>::max();
         constexpr std::size_t kMaxConeCollectThreads = 8;
         constexpr std::size_t kConeCollectChunkSize = 64;
+        constexpr std::size_t kForbiddenCrossDiagLimit = 12;
+
+        using PartMask = uint64_t;
+
+        PartMask partMaskBit(uint32_t partId) noexcept
+        {
+            if (partId >= 64)
+            {
+                return 0;
+            }
+            return PartMask{1} << partId;
+        }
+
+        bool partMaskHas(PartMask mask, uint32_t partId) noexcept
+        {
+            const PartMask bit = partMaskBit(partId);
+            return bit != 0 && ((mask & bit) != 0);
+        }
+
+        template <typename Fn>
+        void forEachPartInMask(PartMask mask, Fn &&fn)
+        {
+            while (mask != 0)
+            {
+                const uint32_t partId = static_cast<uint32_t>(std::countr_zero(mask));
+                fn(partId);
+                mask &= (mask - 1);
+            }
+        }
 
         template <typename T>
         std::optional<T> getAttr(const wolvrix::lib::grh::Operation &op, std::string_view key)
@@ -257,6 +288,38 @@ namespace wolvrix::lib::transform
             bool requiresPort = false;
             bool allowed = true;
         };
+
+        struct ForbiddenCrossSample
+        {
+            wolvrix::lib::grh::ValueId value = wolvrix::lib::grh::ValueId::invalid();
+            wolvrix::lib::grh::OperationId defOp = wolvrix::lib::grh::OperationId::invalid();
+            wolvrix::lib::grh::OperationKind defKind = wolvrix::lib::grh::OperationKind::kConstant;
+            bool defKindKnown = false;
+            wolvrix::lib::grh::OperationId useOp = wolvrix::lib::grh::OperationId::invalid();
+            uint32_t srcPart = 0;
+            uint32_t dstPart = 0;
+        };
+
+        std::string formatValueId(wolvrix::lib::grh::ValueId id)
+        {
+            std::ostringstream oss;
+            oss << "v" << id.index << "g" << id.generation;
+            return oss.str();
+        }
+
+        std::string formatOperationRef(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::OperationId opId)
+        {
+            if (!opId.valid())
+            {
+                return "<invalid>";
+            }
+            const auto op = graph.getOperation(opId);
+            std::ostringstream oss;
+            oss << "o" << opId.index << "g" << opId.generation
+                << ":" << wolvrix::lib::grh::toString(op.kind())
+                << ":" << op.symbolText();
+            return oss.str();
+        }
 
         ValueInfo captureValueInfo(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId valueId)
         {
@@ -1372,6 +1435,140 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        bool validateHyperNodeAndHyperSinkTypes(
+            const wolvrix::lib::grh::Graph &graph,
+            const PhaseAData &phaseA,
+            const PhaseBData &phaseB,
+            const std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> &inoutOutputValues,
+            std::string &errorMessage)
+        {
+            constexpr std::size_t kGuardDiagLimit = 24;
+            std::size_t issueCount = 0;
+            std::vector<std::string> samples;
+            samples.reserve(kGuardDiagLimit);
+
+            auto addIssue = [&](std::string msg) {
+                ++issueCount;
+                if (samples.size() < kGuardDiagLimit)
+                {
+                    samples.push_back(std::move(msg));
+                }
+            };
+
+            for (AscId aid = 0; aid < phaseB.ascs.size(); ++aid)
+            {
+                const AscInfo &asc = phaseB.ascs[aid];
+                if (asc.sinks.empty())
+                {
+                    addIssue("hypernode without sinks: asc=" + std::to_string(aid));
+                }
+
+                for (std::size_t sinkPos = 0; sinkPos < asc.sinks.size(); ++sinkPos)
+                {
+                    const std::size_t sinkIndex = asc.sinks[sinkPos];
+                    if (sinkIndex >= phaseB.sinks.size())
+                    {
+                        addIssue("hypersink index out of range: asc=" + std::to_string(aid) +
+                                 " sink_pos=" + std::to_string(sinkPos) +
+                                 " sink_index=" + std::to_string(sinkIndex) +
+                                 " sinks_size=" + std::to_string(phaseB.sinks.size()));
+                        continue;
+                    }
+                    const SinkRef &sink = phaseB.sinks[sinkIndex];
+                    if (sink.kind == SinkRef::Kind::Operation)
+                    {
+                        if (!sink.op.valid())
+                        {
+                            addIssue("hypersink operation id invalid: asc=" + std::to_string(aid) +
+                                     " sink_pos=" + std::to_string(sinkPos) +
+                                     " sink_index=" + std::to_string(sinkIndex));
+                            continue;
+                        }
+                        if (phaseA.opToNode.find(sink.op) == phaseA.opToNode.end())
+                        {
+                            addIssue("hypersink operation missing node index: asc=" + std::to_string(aid) +
+                                     " sink_pos=" + std::to_string(sinkPos) +
+                                     " sink_index=" + std::to_string(sinkIndex) +
+                                     " op=" + formatOperationRef(graph, sink.op));
+                            continue;
+                        }
+                        const wolvrix::lib::grh::Operation op = graph.getOperation(sink.op);
+                        if (!isSinkOpKind(op.kind()))
+                        {
+                            addIssue("hypersink operation kind invalid: asc=" + std::to_string(aid) +
+                                     " sink_pos=" + std::to_string(sinkPos) +
+                                     " sink_index=" + std::to_string(sinkIndex) +
+                                     " op=" + formatOperationRef(graph, sink.op) +
+                                     " expected_sink_kind={kRegisterWritePort|kLatchWritePort|kMemoryWritePort}");
+                        }
+                    }
+                    else
+                    {
+                        if (!sink.value.valid())
+                        {
+                            addIssue("hypersink output value invalid: asc=" + std::to_string(aid) +
+                                     " sink_pos=" + std::to_string(sinkPos) +
+                                     " sink_index=" + std::to_string(sinkIndex));
+                            continue;
+                        }
+                        const bool isOutput = graph.valueIsOutput(sink.value);
+                        const bool isInoutOut = inoutOutputValues.find(sink.value) != inoutOutputValues.end();
+                        if (!isOutput && !isInoutOut)
+                        {
+                            const wolvrix::lib::grh::Value value = graph.getValue(sink.value);
+                            addIssue("hypersink output value kind invalid: asc=" + std::to_string(aid) +
+                                     " sink_pos=" + std::to_string(sinkPos) +
+                                     " sink_index=" + std::to_string(sinkIndex) +
+                                     " value=" + formatValueId(sink.value) +
+                                     " symbol=" + std::string(value.symbolText()) +
+                                     " is_output=" + std::string(isOutput ? "true" : "false") +
+                                     " is_inout_output=" + std::string(isInoutOut ? "true" : "false"));
+                        }
+                    }
+                }
+
+                for (const NodeId node : asc.combOps)
+                {
+                    if (node >= phaseA.nodeToOp.size())
+                    {
+                        addIssue("hypernode comb node out of range: asc=" + std::to_string(aid) +
+                                 " node=" + std::to_string(node) +
+                                 " node_count=" + std::to_string(phaseA.nodeToOp.size()));
+                        continue;
+                    }
+                    const wolvrix::lib::grh::OperationId opId = phaseA.nodeToOp[node];
+                    if (!opId.valid())
+                    {
+                        addIssue("hypernode comb node has invalid op id: asc=" + std::to_string(aid) +
+                                 " node=" + std::to_string(node));
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
+                    if (!isCombOp(op))
+                    {
+                        addIssue("hypernode comb node kind invalid: asc=" + std::to_string(aid) +
+                                 " node=" + std::to_string(node) +
+                                 " op=" + formatOperationRef(graph, opId) +
+                                 " expected=isCombOp(op)==true");
+                    }
+                }
+            }
+            if (issueCount > 0)
+            {
+                std::ostringstream oss;
+                oss << "repcut phase-b guard: invalid hypernode/hypersink node types"
+                    << " total_issues=" << issueCount
+                    << " sample_count=" << samples.size();
+                for (std::size_t i = 0; i < samples.size(); ++i)
+                {
+                    oss << " | sample[" << i << "] " << samples[i];
+                }
+                errorMessage = oss.str();
+                return false;
+            }
+            return true;
+        }
+
         int32_t safeValueWidth(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId value)
         {
             if (!value.valid())
@@ -1739,6 +1936,152 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        bool validateHyperEdgeContentGuard(const PhaseBData &phaseB,
+                                           const HyperGraph &hg,
+                                           const std::vector<uint32_t> &pieceWeights,
+                                           std::string &errorMessage)
+        {
+            constexpr std::size_t kGuardDiagLimit = 24;
+            std::size_t issueCount = 0;
+            std::vector<std::string> samples;
+            samples.reserve(kGuardDiagLimit);
+
+            auto addIssue = [&](std::string msg) {
+                ++issueCount;
+                if (samples.size() < kGuardDiagLimit)
+                {
+                    samples.push_back(std::move(msg));
+                }
+            };
+
+            const std::size_t ascCount = phaseB.ascs.size();
+            std::size_t expectedEdgeCount = 0;
+            for (PieceId pid = static_cast<PieceId>(ascCount); pid < phaseB.pieces.size(); ++pid)
+            {
+                if (!phaseB.pieceToAscs[pid].empty())
+                {
+                    ++expectedEdgeCount;
+                }
+            }
+
+            if (hg.edges.size() != expectedEdgeCount)
+            {
+                addIssue("hyperedge count mismatch: expected=" + std::to_string(expectedEdgeCount) +
+                         " actual=" + std::to_string(hg.edges.size()));
+            }
+
+            std::size_t edgeIndex = 0;
+            for (PieceId pid = static_cast<PieceId>(ascCount); pid < phaseB.pieces.size(); ++pid)
+            {
+                const auto &expectedNodesRaw = phaseB.pieceToAscs[pid];
+                if (expectedNodesRaw.empty())
+                {
+                    continue;
+                }
+
+                if (edgeIndex >= hg.edges.size())
+                {
+                    addIssue("missing hyperedge for non-empty piece: piece=" + std::to_string(pid) +
+                             " expected_nodes=" + std::to_string(expectedNodesRaw.size()));
+                    continue;
+                }
+
+                const HyperGraph::HyperEdge &edge = hg.edges[edgeIndex];
+                if (edge.weight == 0)
+                {
+                    addIssue("hyperedge weight is zero: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid));
+                }
+
+                const uint32_t expectedWeight =
+                    (pid < pieceWeights.size()) ? std::max<uint32_t>(1u, pieceWeights[pid]) : 1u;
+                if (edge.weight != expectedWeight)
+                {
+                    addIssue("hyperedge weight mismatch: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid) +
+                             " expected_weight=" + std::to_string(expectedWeight) +
+                             " actual_weight=" + std::to_string(edge.weight));
+                }
+
+                if (edge.nodes.empty())
+                {
+                    addIssue("hyperedge has empty nodes: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid));
+                }
+
+                std::vector<AscId> actualNodes = edge.nodes;
+                std::sort(actualNodes.begin(), actualNodes.end());
+                const auto actualUniqueEnd = std::unique(actualNodes.begin(), actualNodes.end());
+                const bool hasDuplicateAsc = actualUniqueEnd != actualNodes.end();
+                actualNodes.erase(actualUniqueEnd, actualNodes.end());
+                if (hasDuplicateAsc)
+                {
+                    addIssue("hyperedge contains duplicate asc ids: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid));
+                }
+
+                bool hasOutOfRangeAsc = false;
+                AscId firstOutOfRangeAsc = 0;
+                for (const AscId aid : actualNodes)
+                {
+                    if (aid >= ascCount)
+                    {
+                        hasOutOfRangeAsc = true;
+                        firstOutOfRangeAsc = aid;
+                        break;
+                    }
+                }
+                if (hasOutOfRangeAsc)
+                {
+                    addIssue("hyperedge asc id out of range: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid) +
+                             " asc_id=" + std::to_string(firstOutOfRangeAsc) +
+                             " asc_count=" + std::to_string(ascCount));
+                }
+
+                std::vector<AscId> expectedNodes = expectedNodesRaw;
+                std::sort(expectedNodes.begin(), expectedNodes.end());
+                const auto expectedUniqueEnd = std::unique(expectedNodes.begin(), expectedNodes.end());
+                const bool pieceHasDuplicateAsc = expectedUniqueEnd != expectedNodes.end();
+                expectedNodes.erase(expectedUniqueEnd, expectedNodes.end());
+                if (pieceHasDuplicateAsc)
+                {
+                    addIssue("pieceToAscs contains duplicate asc ids: piece=" + std::to_string(pid));
+                }
+
+                if (actualNodes != expectedNodes)
+                {
+                    addIssue("hyperedge nodes mismatch pieceToAscs: edge_index=" + std::to_string(edgeIndex) +
+                             " piece=" + std::to_string(pid) +
+                             " expected_nodes=" + std::to_string(expectedNodes.size()) +
+                             " actual_nodes=" + std::to_string(actualNodes.size()));
+                }
+
+                ++edgeIndex;
+            }
+
+            if (edgeIndex < hg.edges.size())
+            {
+                addIssue("unexpected extra hyperedges: matched=" + std::to_string(edgeIndex) +
+                         " actual=" + std::to_string(hg.edges.size()));
+            }
+
+            if (issueCount > 0)
+            {
+                std::ostringstream oss;
+                oss << "repcut phase-c guard: invalid hyperedge content"
+                    << " total_issues=" << issueCount
+                    << " sample_count=" << samples.size();
+                for (std::size_t i = 0; i < samples.size(); ++i)
+                {
+                    oss << " | sample[" << i << "] " << samples[i];
+                }
+                errorMessage = oss.str();
+                return false;
+            }
+            return true;
+        }
+
         std::string toFixedString(double value, int precision = 6)
         {
             std::ostringstream oss;
@@ -1833,448 +2176,350 @@ namespace wolvrix::lib::transform
             return out;
         }
 
-        std::string buildKaHyParConfig()
+        std::string normalizeBackendToken(std::string_view value)
         {
-            std::ostringstream cfg;
-            cfg << "# Auto-generated by repcut pass\n";
-            cfg << "# RepCut/Essent-style preset to avoid UNDEFINED defaults\n";
-            cfg << "mode=direct\n";
-            cfg << "objective=km1\n";
-            cfg << "seed=-1\n";
-            cfg << "cmaxnet=1000\n";
-            cfg << "vcycles=0\n";
-            cfg << "write_partition_file=true\n";
-
-            cfg << "p-use-sparsifier=true\n";
-            cfg << "p-sparsifier-min-median-he-size=28\n";
-            cfg << "p-sparsifier-max-hyperedge-size=1200\n";
-            cfg << "p-sparsifier-max-cluster-size=10\n";
-            cfg << "p-sparsifier-min-cluster-size=2\n";
-            cfg << "p-sparsifier-num-hash-func=5\n";
-            cfg << "p-sparsifier-combined-num-hash-func=100\n";
-            cfg << "p-detect-communities=true\n";
-            cfg << "p-detect-communities-in-ip=true\n";
-            cfg << "p-reuse-communities=false\n";
-            cfg << "p-max-louvain-pass-iterations=100\n";
-            cfg << "p-min-eps-improvement=0.0001\n";
-            cfg << "p-louvain-edge-weight=hybrid\n";
-
-            cfg << "c-type=ml_style\n";
-            cfg << "c-s=1\n";
-            cfg << "c-t=160\n";
-            cfg << "c-rating-score=heavy_edge\n";
-            cfg << "c-rating-use-communities=true\n";
-            cfg << "c-rating-heavy_node_penalty=no_penalty\n";
-            cfg << "c-rating-acceptance-criterion=best_prefer_unmatched\n";
-            cfg << "c-fixed-vertex-acceptance-criterion=fixed_vertex_allowed\n";
-
-            cfg << "i-mode=recursive\n";
-            cfg << "i-technique=multi\n";
-            cfg << "i-c-type=ml_style\n";
-            cfg << "i-c-s=1\n";
-            cfg << "i-c-t=150\n";
-            cfg << "i-c-rating-score=heavy_edge\n";
-            cfg << "i-c-rating-use-communities=true\n";
-            cfg << "i-c-rating-heavy_node_penalty=no_penalty\n";
-            cfg << "i-c-rating-acceptance-criterion=best_prefer_unmatched\n";
-            cfg << "i-c-fixed-vertex-acceptance-criterion=fixed_vertex_allowed\n";
-            cfg << "i-algo=pool\n";
-            cfg << "i-runs=20\n";
-            cfg << "i-bp-algorithm=worst_fit\n";
-            cfg << "i-bp-heuristic-prepacking=false\n";
-            cfg << "i-bp-early-restart=true\n";
-            cfg << "i-bp-late-restart=true\n";
-            cfg << "i-r-type=twoway_fm\n";
-            cfg << "i-r-runs=-1\n";
-            cfg << "i-r-fm-stop=simple\n";
-            cfg << "i-r-fm-stop-i=50\n";
-
-            cfg << "r-type=kway_fm_hyperflow_cutter_km1\n";
-            cfg << "r-runs=-1\n";
-            cfg << "r-fm-stop=adaptive_opt\n";
-            cfg << "r-fm-stop-alpha=1\n";
-            cfg << "r-fm-stop-i=350\n";
-            cfg << "r-flow-execution-policy=exponential\n";
-            cfg << "r-hfc-size-constraint=mf-style\n";
-            cfg << "r-hfc-scaling=16\n";
-            cfg << "r-hfc-distance-based-piercing=true\n";
-            cfg << "r-hfc-mbc=true\n";
-            return cfg.str();
-        }
-
-        bool isExecutableAvailable(const std::string &exe)
-        {
-            if (exe.empty())
+            std::string out(value);
+            for (char &ch : out)
             {
-                return false;
-            }
-            if (exe.find('/') != std::string::npos)
-            {
-                std::error_code ec;
-                return std::filesystem::exists(std::filesystem::path(exe), ec);
-            }
-
-            const std::string cmd = "command -v " + exe + " >/dev/null 2>&1";
-            return std::system(cmd.c_str()) == 0;
-        }
-
-        std::string shellQuote(const std::string &value)
-        {
-            std::string out;
-            out.reserve(value.size() + 2);
-            out.push_back('\'');
-            for (const char ch : value)
-            {
-                if (ch == '\'')
+                if (ch >= 'A' && ch <= 'Z')
                 {
-                    out += "'\\''";
+                    ch = static_cast<char>(ch - 'A' + 'a');
                 }
-                else
+                else if (ch == '_')
                 {
-                    out.push_back(ch);
+                    ch = '-';
                 }
             }
-            out.push_back('\'');
             return out;
         }
 
-        int runKaHyParCommand(const std::string &exe,
-                              const std::filesystem::path &hmetisFile,
-                              const std::filesystem::path &configFile,
-                              std::size_t partitionCount,
-                              double imbalanceFactor,
-                              const std::filesystem::path &logFile,
-                              std::string &commandLine)
+#if WOLVRIX_HAVE_MT_KAHYPAR
+        std::optional<mt_kahypar_preset_type_t> parseMtKaHyParPreset(std::string_view presetText)
         {
-            std::ostringstream cmd;
-            cmd << shellQuote(exe)
-                << " -h " << shellQuote(hmetisFile.string())
-                << " -k " << partitionCount
-                << " -e " << toFixedString(imbalanceFactor, 6)
-                << " -p " << shellQuote(configFile.string())
-                << " --seed -1"
-                << " -w true"
-                << " --mode direct"
-                << " --objective km1"
-                << " > " << shellQuote(logFile.string())
-                << " 2>&1";
-            commandLine = cmd.str();
-            return std::system(commandLine.c_str());
+            const std::string normalized = normalizeBackendToken(presetText);
+            if (normalized.empty() || normalized == "quality")
+            {
+                return QUALITY;
+            }
+            if (normalized == "default")
+            {
+                return DEFAULT;
+            }
+            if (normalized == "highest-quality")
+            {
+                return HIGHEST_QUALITY;
+            }
+            if (normalized == "deterministic")
+            {
+                return DETERMINISTIC;
+            }
+            if (normalized == "deterministic-quality")
+            {
+                return DETERMINISTIC_QUALITY;
+            }
+            if (normalized == "large-k")
+            {
+                return LARGE_K;
+            }
+            return std::nullopt;
         }
 
-        std::string decodeSystemStatus(int status)
+        std::string takeMtKaHyParError(mt_kahypar_error_t &error)
         {
-            if (status == -1)
+            std::string message;
+            if (error.msg != nullptr && error.msg_len > 0)
             {
-                return "system() failed to launch process";
+                message.assign(error.msg, error.msg_len);
             }
-#if defined(__unix__) || defined(__APPLE__)
-            if (WIFEXITED(status))
+            if (error.msg != nullptr)
             {
-                return "exit_code=" + std::to_string(WEXITSTATUS(status));
+                mt_kahypar_free_error_content(&error);
             }
-            if (WIFSIGNALED(status))
-            {
-                return "signal=" + std::to_string(WTERMSIG(status));
-            }
+            return message;
+        }
 #endif
-            return "raw_status=" + std::to_string(status);
-        }
 
-        std::string readFileTail(const std::filesystem::path &path, std::size_t maxLines)
+        enum class PartitionBackendErrorKind
         {
-            std::ifstream in(path);
-            if (!in)
-            {
-                return {};
-            }
-            std::vector<std::string> lines;
-            lines.reserve(maxLines + 1);
-            std::string line;
-            while (std::getline(in, line))
-            {
-                lines.push_back(line);
-                if (lines.size() > maxLines)
-                {
-                    lines.erase(lines.begin());
-                }
-            }
-            std::ostringstream out;
-            for (const auto &l : lines)
-            {
-                out << l << "\n";
-            }
-            return out.str();
-        }
+            kNone,
+            kUnavailable,
+            kInvalidConfig,
+            kExecutionFailed,
+        };
 
-        void cleanupStalePartitionOutputs(const std::filesystem::path &hmetisFile)
+        struct PartitionBackendRequest
         {
-            const std::filesystem::path parent = hmetisFile.parent_path();
-            const std::string prefix = hmetisFile.filename().string() + ".part";
-            std::error_code ec;
-            if (!std::filesystem::exists(parent, ec) || ec)
-            {
-                return;
-            }
-            for (const auto &entry : std::filesystem::directory_iterator(parent, ec))
-            {
-                if (ec || !entry.is_regular_file())
-                {
-                    continue;
-                }
-                const std::string name = entry.path().filename().string();
-                if (name.rfind(prefix, 0) == 0)
-                {
-                    std::filesystem::remove(entry.path(), ec);
-                    ec.clear();
-                }
-            }
-        }
+            std::filesystem::path hmetisPath;
+            std::filesystem::path partitionPath;
+            std::size_t partitionCount = 0;
+            double imbalanceFactor = 0.0;
+            std::size_t ascCount = 0;
+            std::string preset;
+            std::size_t threadCount = 0;
+        };
 
-        std::string summarizePartitionCandidates(const std::filesystem::path &hmetisFile)
+        struct PartitionBackendResponse
         {
-            const std::filesystem::path parent = hmetisFile.parent_path();
-            const std::string prefix = hmetisFile.filename().string() + ".part";
-            std::error_code ec;
-            if (!std::filesystem::exists(parent, ec) || ec)
-            {
-                return "<none>";
-            }
-            std::vector<std::string> names;
-            for (const auto &entry : std::filesystem::directory_iterator(parent, ec))
-            {
-                if (ec || !entry.is_regular_file())
-                {
-                    continue;
-                }
-                const std::string name = entry.path().filename().string();
-                if (name.rfind(prefix, 0) == 0)
-                {
-                    names.push_back(name);
-                }
-            }
-            if (names.empty())
-            {
-                return "<none>";
-            }
-            std::sort(names.begin(), names.end());
-            std::ostringstream out;
-            for (std::size_t i = 0; i < names.size(); ++i)
-            {
-                if (i)
-                {
-                    out << ", ";
-                }
-                out << names[i];
-            }
-            return out.str();
-        }
+            PartitionBackendErrorKind errorKind = PartitionBackendErrorKind::kNone;
+            std::string errorMessage;
+            std::vector<std::string> backendLogs;
+            uint64_t solverRunMs = 0;
+            uint64_t parsePartitionMs = 0;
+            std::filesystem::path partitionPath;
+            bool partitionComplete = true;
+            std::string partitionWarning;
+            std::vector<uint32_t> partition;
+        };
 
-        std::filesystem::path findPartitionResultPath(const std::filesystem::path &hmetisFile,
-                                                      std::size_t partitionCount,
-                                                      double imbalanceFactor,
-                                                      int seed)
+        class PartitionBackend
         {
-            const std::filesystem::path byK =
-                std::filesystem::path(hmetisFile.string() + ".part" + std::to_string(partitionCount));
-            std::error_code ec;
-            if (std::filesystem::exists(byK, ec))
-            {
-                return byK;
-            }
+        public:
+            virtual ~PartitionBackend() = default;
+            virtual std::string_view name() const = 0;
+            virtual bool run(const PartitionBackendRequest &request,
+                             PartitionBackendResponse &response) const = 0;
+        };
 
-            const std::filesystem::path generic = std::filesystem::path(hmetisFile.string() + ".part");
-            if (std::filesystem::exists(generic, ec))
-            {
-                return generic;
-            }
-
-            std::ostringstream exactSuffix;
-            exactSuffix << ".part" << partitionCount
-                        << ".epsilon" << toFixedString(imbalanceFactor, 6)
-                        << ".seed" << seed
-                        << ".KaHyPar";
-            const std::filesystem::path exact = std::filesystem::path(hmetisFile.string() + exactSuffix.str());
-            if (std::filesystem::exists(exact, ec))
-            {
-                return exact;
-            }
-
-            const std::filesystem::path parent = hmetisFile.parent_path();
-            const std::string prefix = hmetisFile.filename().string() + ".part";
-            std::vector<std::filesystem::path> candidates;
-            if (std::filesystem::exists(parent, ec) && !ec)
-            {
-                for (const auto &entry : std::filesystem::directory_iterator(parent, ec))
-                {
-                    if (ec || !entry.is_regular_file())
-                    {
-                        continue;
-                    }
-                    const std::string name = entry.path().filename().string();
-                    if (name.rfind(prefix, 0) == 0)
-                    {
-                        candidates.push_back(entry.path());
-                    }
-                }
-            }
-
-            if (!candidates.empty())
-            {
-                std::stable_sort(candidates.begin(), candidates.end(),
-                                 [&](const auto &lhs, const auto &rhs) {
-                                     const std::string l = lhs.filename().string();
-                                     const std::string r = rhs.filename().string();
-                                     const bool lByK = l == byK.filename().string();
-                                     const bool rByK = r == byK.filename().string();
-                                     if (lByK != rByK)
-                                     {
-                                         return lByK;
-                                     }
-                                     const bool lKahypar = l.find(".KaHyPar") != std::string::npos;
-                                     const bool rKahypar = r.find(".KaHyPar") != std::string::npos;
-                                     if (lKahypar != rKahypar)
-                                     {
-                                         return lKahypar;
-                                     }
-                                     return l.size() > r.size();
-                                 });
-                return candidates.front();
-            }
-
-            return byK;
-        }
-
-        std::vector<uint32_t> parsePartitionResult(const std::filesystem::path &resultFile,
-                                                   std::size_t ascCount,
-                                                   std::size_t maxPartCount,
-                                                   bool &complete,
-                                                   std::string &warningMessage)
+        class MtKaHyParBackend final : public PartitionBackend
         {
-            std::vector<uint32_t> partition(ascCount, 0);
-            complete = true;
-            warningMessage.clear();
-
-            std::ifstream in(resultFile);
-            if (!in)
+        public:
+            std::string_view name() const override
             {
-                complete = false;
-                warningMessage = "cannot open partition result: " + resultFile.string();
-                return partition;
+                return "mt-kahypar";
             }
 
-            std::size_t index = 0;
-            std::size_t invalidTokenCount = 0;
-            std::size_t negativeCount = 0;
-            std::size_t clampedToMaxCount = 0;
-            std::string line;
-            while (std::getline(in, line))
+            bool run(const PartitionBackendRequest &request,
+                     PartitionBackendResponse &response) const override
             {
-                if (line.empty())
+                response = {};
+                auto addBackendLog = [&](std::string message) {
+                    response.backendLogs.push_back(std::move(message));
+                };
+#if !WOLVRIX_HAVE_MT_KAHYPAR
+                (void)request;
+                response.errorKind = PartitionBackendErrorKind::kUnavailable;
+                response.errorMessage = "repcut was built without mt-kahypar support";
+                return false;
+#else
                 {
-                    continue;
+                    std::ostringstream oss;
+                    oss << "invoke hgr_path=" << request.hmetisPath.string()
+                        << " partition_path=" << request.partitionPath.string()
+                        << " k=" << request.partitionCount
+                        << " imbalance_factor=" << toFixedString(request.imbalanceFactor, 6)
+                        << " asc_count=" << request.ascCount
+                        << " preset_token=" << request.preset
+                        << " requested_threads=" << request.threadCount;
+                    addBackendLog(oss.str());
+                }
+                const std::optional<mt_kahypar_preset_type_t> preset = parseMtKaHyParPreset(request.preset);
+                if (!preset)
+                {
+                    response.errorKind = PartitionBackendErrorKind::kInvalidConfig;
+                    response.errorMessage = "unsupported mt-kahypar preset: " + std::string(request.preset);
+                    return false;
+                }
+                addBackendLog("context_from_preset preset_enum=" + std::to_string(static_cast<int>(*preset)));
+
+                static std::once_flag initOnce;
+                std::size_t threadCount = request.threadCount;
+                if (threadCount == 0)
+                {
+                    threadCount = std::thread::hardware_concurrency();
+                    if (threadCount == 0)
+                    {
+                        threadCount = 1;
+                    }
+                }
+                bool initializedThisRun = false;
+                std::call_once(initOnce, [&]() {
+                    mt_kahypar_initialize(threadCount, false);
+                    initializedThisRun = true;
+                });
+                {
+                    std::ostringstream oss;
+                    oss << "initialize threads=" << threadCount
+                        << " interleaved_numa=false"
+                        << " initialized_this_run=" << (initializedThisRun ? "true" : "false");
+                    addBackendLog(oss.str());
                 }
 
-                std::istringstream ls(line);
-                std::string token;
-                while (ls >> token)
+                mt_kahypar_context_t *context = nullptr;
+                mt_kahypar_hypergraph_t hypergraph{nullptr, NULLPTR_HYPERGRAPH};
+                mt_kahypar_partitioned_hypergraph_t partitionedHg{nullptr, NULLPTR_PARTITION};
+                auto cleanup = [&]() {
+                    if (partitionedHg.partitioned_hg != nullptr)
+                    {
+                        mt_kahypar_free_partitioned_hypergraph(partitionedHg);
+                        partitionedHg = {nullptr, NULLPTR_PARTITION};
+                    }
+                    if (hypergraph.hypergraph != nullptr)
+                    {
+                        mt_kahypar_free_hypergraph(hypergraph);
+                        hypergraph = {nullptr, NULLPTR_HYPERGRAPH};
+                    }
+                    if (context != nullptr)
+                    {
+                        mt_kahypar_free_context(context);
+                        context = nullptr;
+                    }
+                };
+
+                mt_kahypar_error_t mtError{};
+                context = mt_kahypar_context_from_preset(*preset);
+                if (context == nullptr)
                 {
-                    if (!token.empty() && token[0] == '#')
-                    {
-                        break;
-                    }
+                    response.errorKind = PartitionBackendErrorKind::kExecutionFailed;
+                    response.errorMessage = "mt-kahypar failed to create partition context";
+                    cleanup();
+                    return false;
+                }
 
-                    std::size_t parsedChars = 0;
-                    int64_t parsed = 0;
-                    try
-                    {
-                        parsed = std::stoll(token, &parsedChars);
-                    }
-                    catch (const std::exception &)
-                    {
-                        complete = false;
-                        ++invalidTokenCount;
-                        continue;
-                    }
-                    if (parsedChars != token.size())
-                    {
-                        complete = false;
-                        ++invalidTokenCount;
-                        continue;
-                    }
+                constexpr int kMtKaHyParSeed = 0;
+                mt_kahypar_set_seed(kMtKaHyParSeed);
+                addBackendLog("set_seed seed=" + std::to_string(kMtKaHyParSeed));
+                mt_kahypar_set_partitioning_parameters(
+                    context,
+                    static_cast<mt_kahypar_partition_id_t>(request.partitionCount),
+                    request.imbalanceFactor,
+                    KM1);
+                {
+                    std::ostringstream oss;
+                    oss << "set_partitioning_parameters k=" << request.partitionCount
+                        << " imbalance_factor=" << toFixedString(request.imbalanceFactor, 6)
+                        << " objective=KM1";
+                    addBackendLog(oss.str());
+                }
 
-                    if (parsed < 0)
+                const std::string hgrPath = request.hmetisPath.string();
+                addBackendLog("read_hypergraph_from_file path=" + hgrPath + " format=HMETIS");
+                hypergraph = mt_kahypar_read_hypergraph_from_file(
+                    hgrPath.c_str(), context, HMETIS, &mtError);
+                if (hypergraph.hypergraph == nullptr)
+                {
+                    response.errorKind = PartitionBackendErrorKind::kExecutionFailed;
+                    response.errorMessage = "mt-kahypar failed to load hMETIS file: " + takeMtKaHyParError(mtError);
+                    cleanup();
+                    return false;
+                }
+                addBackendLog("read_hypergraph_done node_count=" +
+                              std::to_string(static_cast<std::size_t>(mt_kahypar_num_hypernodes(hypergraph))));
+
+                addBackendLog("partition begin");
+                const auto solverStart = std::chrono::steady_clock::now();
+                partitionedHg = mt_kahypar_partition(hypergraph, context, &mtError);
+                response.solverRunMs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - solverStart)
+                        .count());
+                if (partitionedHg.partitioned_hg == nullptr)
+                {
+                    response.errorKind = PartitionBackendErrorKind::kExecutionFailed;
+                    response.errorMessage = "mt-kahypar partition failed: " + takeMtKaHyParError(mtError);
+                    cleanup();
+                    return false;
+                }
+                addBackendLog("partition done run_ms=" + std::to_string(response.solverRunMs));
+
+                response.partitionPath = request.partitionPath;
+                if (!request.partitionPath.empty())
+                {
+                    const std::string partPath = request.partitionPath.string();
+                    addBackendLog("write_partition_to_file path=" + partPath);
+                    const mt_kahypar_status_t writeStatus =
+                        mt_kahypar_write_partition_to_file(partitionedHg, partPath.c_str(), &mtError);
+                    if (writeStatus != SUCCESS)
                     {
-                        complete = false;
+                        response.errorKind = PartitionBackendErrorKind::kExecutionFailed;
+                        response.errorMessage = "mt-kahypar failed to write partition file: " +
+                                                takeMtKaHyParError(mtError);
+                        cleanup();
+                        return false;
+                    }
+                }
+
+                const auto parseStart = std::chrono::steady_clock::now();
+                const std::size_t nodeCount = static_cast<std::size_t>(mt_kahypar_num_hypernodes(hypergraph));
+                std::vector<mt_kahypar_partition_id_t> rawPartition(nodeCount, 0);
+                if (!rawPartition.empty())
+                {
+                    mt_kahypar_get_partition(partitionedHg, rawPartition.data());
+                }
+                addBackendLog("get_partition entries=" + std::to_string(rawPartition.size()));
+
+                response.partition.assign(request.ascCount, 0);
+                std::size_t negativeCount = 0;
+                std::size_t outOfRangeCount = 0;
+                const std::size_t limit = std::min(request.ascCount, rawPartition.size());
+                for (std::size_t i = 0; i < limit; ++i)
+                {
+                    int64_t part = static_cast<int64_t>(rawPartition[i]);
+                    if (part < 0)
+                    {
                         ++negativeCount;
-                        parsed = 0;
+                        part = 0;
                     }
-
-                    if (maxPartCount > 0 && parsed >= static_cast<int64_t>(maxPartCount))
+                    if (part >= static_cast<int64_t>(request.partitionCount))
                     {
-                        complete = false;
-                        ++clampedToMaxCount;
-                        parsed = static_cast<int64_t>(maxPartCount - 1);
+                        ++outOfRangeCount;
+                        part = static_cast<int64_t>(request.partitionCount - 1);
                     }
+                    response.partition[i] = static_cast<uint32_t>(part);
+                }
 
-                    if (index < ascCount)
+                std::ostringstream warning;
+                if (rawPartition.size() < request.ascCount)
+                {
+                    response.partitionComplete = false;
+                    warning << "fewer entries than ASC count (" << rawPartition.size()
+                            << " < " << request.ascCount
+                            << "), missing entries default to 0";
+                }
+                else if (rawPartition.size() > request.ascCount)
+                {
+                    response.partitionComplete = false;
+                    warning << "extra entries in partition result (" << rawPartition.size()
+                            << " > " << request.ascCount
+                            << "), extras ignored";
+                }
+                if (negativeCount > 0)
+                {
+                    if (warning.tellp() > 0)
                     {
-                        partition[index] = static_cast<uint32_t>(parsed);
+                        warning << "; ";
                     }
-                    ++index;
+                    response.partitionComplete = false;
+                    warning << "negative ids clamped=" << negativeCount;
                 }
-            }
+                if (outOfRangeCount > 0)
+                {
+                    if (warning.tellp() > 0)
+                    {
+                        warning << "; ";
+                    }
+                    response.partitionComplete = false;
+                    warning << "ids >= max-part-count clamped=" << outOfRangeCount;
+                }
+                response.partitionWarning = warning.str();
+                response.parsePartitionMs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - parseStart)
+                        .count());
 
-            if (index < ascCount)
-            {
-                complete = false;
+                cleanup();
+                return true;
+#endif
             }
+        };
 
-            std::ostringstream warn;
-            if (index < ascCount)
+        std::unique_ptr<PartitionBackend> createPartitionBackend(const RepcutOptions &options)
+        {
+            const std::string normalized = normalizeBackendToken(options.partitioner);
+            if (normalized == "mt-kahypar" || normalized == "mtkahypar")
             {
-                warn << "fewer entries than ASC count (" << index << " < " << ascCount
-                     << "), missing entries default to 0";
+                return std::make_unique<MtKaHyParBackend>();
             }
-            else if (index > ascCount)
-            {
-                if (warn.tellp() > 0)
-                {
-                    warn << "; ";
-                }
-                warn << "extra entries in partition file (" << index << " > " << ascCount
-                     << "), extras ignored";
-            }
-            if (invalidTokenCount > 0)
-            {
-                if (warn.tellp() > 0)
-                {
-                    warn << "; ";
-                }
-                warn << "invalid tokens=" << invalidTokenCount;
-            }
-            if (negativeCount > 0)
-            {
-                if (warn.tellp() > 0)
-                {
-                    warn << "; ";
-                }
-                warn << "negative ids clamped=" << negativeCount;
-            }
-            if (clampedToMaxCount > 0)
-            {
-                if (warn.tellp() > 0)
-                {
-                    warn << "; ";
-                }
-                warn << "ids >= max-part-count clamped=" << clampedToMaxCount;
-            }
-            warningMessage = warn.str();
-            if (warningMessage.empty())
-            {
-                warningMessage.clear();
-            }
-            return partition;
+            return nullptr;
         }
 
         void collectStorageInfos(const wolvrix::lib::grh::Graph &graph,
@@ -2359,7 +2604,8 @@ namespace wolvrix::lib::transform
         void assignStorageOpsToPartition(
             const std::unordered_map<std::string, StorageInfo> &infos,
             const std::unordered_map<std::string, uint32_t> &partitionBySymbol,
-            std::unordered_map<wolvrix::lib::grh::OperationId, uint32_t, wolvrix::lib::grh::OperationIdHash> &opPartition)
+            std::unordered_map<wolvrix::lib::grh::OperationId, uint32_t, wolvrix::lib::grh::OperationIdHash> &opPartition,
+            std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
         {
             for (const auto &[symbol, partId] : partitionBySymbol)
             {
@@ -2371,17 +2617,95 @@ namespace wolvrix::lib::transform
                 const StorageInfo &info = it->second;
                 if (info.declOp.valid())
                 {
-                    opPartition[info.declOp] = partId;
+                    opPartition.emplace(info.declOp, partId);
+                    opPartitionMask[info.declOp] |= partMaskBit(partId);
                 }
                 for (const auto opId : info.readPorts)
                 {
-                    opPartition[opId] = partId;
+                    opPartition.emplace(opId, partId);
+                    opPartitionMask[opId] |= partMaskBit(partId);
                 }
                 for (const auto opId : info.writePorts)
                 {
-                    opPartition[opId] = partId;
+                    opPartition.emplace(opId, partId);
+                    opPartitionMask[opId] |= partMaskBit(partId);
                 }
             }
+        }
+
+        std::optional<uint32_t> inferStoragePartitionFromReadUsers(
+            const wolvrix::lib::grh::Graph &graph,
+            const StorageInfo &info,
+            const std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
+        {
+            std::unordered_map<uint32_t, std::size_t> scoreByPart;
+            for (const auto readOpId : info.readPorts)
+            {
+                if (!readOpId.valid())
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::Operation readOp = graph.getOperation(readOpId);
+                for (const auto resultValue : readOp.results())
+                {
+                    if (!resultValue.valid())
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::Value value = graph.getValue(resultValue);
+                    for (const auto &user : value.users())
+                    {
+                        auto it = opPartitionMask.find(user.operation);
+                        if (it == opPartitionMask.end() || it->second == 0)
+                        {
+                            continue;
+                        }
+                        forEachPartInMask(it->second, [&](uint32_t partId) {
+                            scoreByPart[partId] += 1;
+                        });
+                    }
+                }
+            }
+            if (scoreByPart.empty())
+            {
+                return std::nullopt;
+            }
+
+            std::optional<uint32_t> bestPart;
+            std::size_t bestScore = 0;
+            for (const auto &[partId, score] : scoreByPart)
+            {
+                if (!bestPart || score > bestScore || (score == bestScore && partId < *bestPart))
+                {
+                    bestPart = partId;
+                    bestScore = score;
+                }
+            }
+            return bestPart;
+        }
+
+        std::size_t inferMissingStoragePartitions(
+            const wolvrix::lib::grh::Graph &graph,
+            const std::unordered_map<std::string, StorageInfo> &infos,
+            std::unordered_map<std::string, uint32_t> &partitionBySymbol,
+            const std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
+        {
+            std::size_t assignedCount = 0;
+            for (const auto &[symbol, info] : infos)
+            {
+                if (partitionBySymbol.find(symbol) != partitionBySymbol.end() || info.readPorts.empty())
+                {
+                    continue;
+                }
+                std::optional<uint32_t> owner = inferStoragePartitionFromReadUsers(graph, info, opPartitionMask);
+                if (!owner)
+                {
+                    continue;
+                }
+                partitionBySymbol.emplace(symbol, *owner);
+                assignedCount += 1;
+            }
+            return assignedCount;
         }
 
     } // namespace
@@ -2420,6 +2744,12 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
+        if (options_.partitionCount > 63)
+        {
+            error("repcut partition_count must be <= 63");
+            result.failed = true;
+            return result;
+        }
         if (options_.imbalanceFactor < 0.0)
         {
             error("repcut imbalance_factor must be >= 0");
@@ -2441,7 +2771,9 @@ namespace wolvrix::lib::transform
                  << " partition_count=" << options_.partitionCount
                  << " imbalance_factor=" << toFixedString(options_.imbalanceFactor, 6)
                  << " work_dir=" << (options_.workDir.empty() ? std::string(".") : options_.workDir)
-                 << " kahypar_path=" << options_.kaHyParPath
+                 << " partitioner=" << options_.partitioner
+                 << " mtkahypar_preset=" << options_.mtKaHyParPreset
+                 << " mtkahypar_threads=" << options_.mtKaHyParThreads
                  << " keep_intermediate=" << (options_.keepIntermediateFiles ? "true" : "false");
             logInfo(boot.str());
         }
@@ -2558,6 +2890,17 @@ namespace wolvrix::lib::transform
             return result;
         }
 
+        const auto phaseBGuardStart = std::chrono::steady_clock::now();
+        std::string phaseBGuardError;
+        if (!validateHyperNodeAndHyperSinkTypes(*graph, data, phaseB, inoutOutputValues, phaseBGuardError))
+        {
+            error(phaseBGuardError);
+            result.failed = true;
+            return result;
+        }
+        logInfo("repcut phase-b guard: hypernode/hypersink node types validated elapsed_ms=" +
+                std::to_string(msSince(phaseBGuardStart)));
+
         std::size_t opSinkCountInAsc = 0;
         std::size_t valueSinkCountInAsc = 0;
         std::size_t totalCombOpsInAsc = 0;
@@ -2623,6 +2966,17 @@ namespace wolvrix::lib::transform
                 const auto hyperBuildStart = std::chrono::steady_clock::now();
         const HyperGraph hg = buildHyperGraph(*graph, data, phaseB, nodeWeights, pieceWeights);
                 const uint64_t hyperBuildMs = msSince(hyperBuildStart);
+
+        const auto phaseCGuardStart = std::chrono::steady_clock::now();
+        std::string phaseCGuardError;
+        if (!validateHyperEdgeContentGuard(phaseB, hg, pieceWeights, phaseCGuardError))
+        {
+            error(phaseCGuardError);
+            result.failed = true;
+            return result;
+        }
+        logInfo("repcut phase-c guard: hyperedge content validated elapsed_ms=" +
+                std::to_string(msSince(phaseCGuardStart)));
 
         std::string phaseCError;
         if (!validateHyperGraph(phaseB, hg, phaseCError))
@@ -2702,8 +3056,8 @@ namespace wolvrix::lib::transform
         const std::string graphBase = wolvrix::lib::grh::Graph::normalizeComponent(graph->symbol());
         const std::string stem = graphBase + "_repcut_k" + std::to_string(options_.partitionCount);
         const std::filesystem::path hmetisPath = outputDir / (stem + ".hgr");
-        const std::filesystem::path configPath = outputDir / (stem + ".kahypar.cfg");
-        const std::filesystem::path kaHyParLogPath = outputDir / (stem + ".kahypar.log");
+        const std::filesystem::path partitionPath = std::filesystem::path(hmetisPath.string() + ".part" +
+                                                                           std::to_string(options_.partitionCount));
 
         std::string ioError;
         const auto writeHgrStart = std::chrono::steady_clock::now();
@@ -2714,118 +3068,86 @@ namespace wolvrix::lib::transform
             return result;
         }
         const uint64_t writeHgrMs = msSince(writeHgrStart);
-        const auto writeCfgStart = std::chrono::steady_clock::now();
-        const std::string configText = buildKaHyParConfig();
-        if (!writeTextFile(configPath, configText, ioError))
-        {
-            error("repcut phase-d: " + ioError);
-            result.failed = true;
-            return result;
-        }
-        const uint64_t writeCfgMs = msSince(writeCfgStart);
         result.artifacts.push_back(hmetisPath.string());
-        result.artifacts.push_back(configPath.string());
-        result.artifacts.push_back(kaHyParLogPath.string());
 
         std::error_code sizeEc;
         const uintmax_t hgrBytes = std::filesystem::file_size(hmetisPath, sizeEc);
-        sizeEc.clear();
-        const uintmax_t cfgBytes = std::filesystem::file_size(configPath, sizeEc);
 
         {
             std::ostringstream dprep;
             dprep << "repcut phase-d prep: hgr_path=" << hmetisPath.string()
                   << " hgr_bytes=" << hgrBytes
-                  << " cfg_path=" << configPath.string()
-                  << " cfg_bytes=" << cfgBytes
-                  << " write_hgr_ms=" << writeHgrMs
-                  << " write_cfg_ms=" << writeCfgMs;
+                  << " write_hgr_ms=" << writeHgrMs;
             logInfo(dprep.str());
         }
 
-        cleanupStalePartitionOutputs(hmetisPath);
-
-        if (!isExecutableAvailable(options_.kaHyParPath))
+        const std::unique_ptr<PartitionBackend> partitionBackend = createPartitionBackend(options_);
+        if (!partitionBackend)
         {
-            error("repcut phase-d: KaHyPar executable not found: " + options_.kaHyParPath);
+            error("repcut phase-d: unsupported partitioner: " + options_.partitioner);
             result.failed = true;
             return result;
         }
 
-        std::string kaHyParCommand;
-        const auto kaHyParRunStart = std::chrono::steady_clock::now();
-        const int kaHyParResult = runKaHyParCommand(options_.kaHyParPath,
-                                                    hmetisPath,
-                                                    configPath,
-                                                    options_.partitionCount,
-                                                    options_.imbalanceFactor,
-                                                    kaHyParLogPath,
-                                                    kaHyParCommand);
-        const uint64_t kaHyParRunMs = msSince(kaHyParRunStart);
-        debug("repcut phase-d command: " + kaHyParCommand);
-        if (kaHyParResult != 0)
+        PartitionBackendRequest backendRequest;
+        backendRequest.hmetisPath = hmetisPath;
+        backendRequest.partitionPath = partitionPath;
+        backendRequest.partitionCount = options_.partitionCount;
+        backendRequest.imbalanceFactor = options_.imbalanceFactor;
+        backendRequest.ascCount = phaseB.ascs.size();
+        backendRequest.preset = options_.mtKaHyParPreset;
+        backendRequest.threadCount = options_.mtKaHyParThreads;
+
+        PartitionBackendResponse backendResponse;
+        const bool backendOk = partitionBackend->run(backendRequest, backendResponse);
+        for (const auto &backendLog : backendResponse.backendLogs)
         {
-            const std::string logTail = readFileTail(kaHyParLogPath, 40);
+            logInfo("repcut phase-d " + std::string(partitionBackend->name()) + " call: " + backendLog);
+        }
+        if (!backendOk)
+        {
             std::ostringstream diag;
-            diag << "repcut phase-d: KaHyPar failed (" << decodeSystemStatus(kaHyParResult) << ")"
-                 << "; graph=" << graph->symbol()
+            diag << "repcut phase-d: " << partitionBackend->name() << " backend failed";
+            if (!backendResponse.errorMessage.empty())
+            {
+                diag << ": " << backendResponse.errorMessage;
+            }
+            diag << "; graph=" << graph->symbol()
                  << "; hyper_nodes=" << hg.nodeWeights.size()
                  << "; hyper_edges=" << hg.edges.size()
-                 << "; kahypar_run_ms=" << kaHyParRunMs
-                 << "; hmetis=" << hmetisPath.string()
-                 << "; config=" << configPath.string()
-                 << "; log=" << kaHyParLogPath.string();
+                 << "; hmetis=" << hmetisPath.string();
+            if (!backendResponse.partitionPath.empty())
+            {
+                diag << "; partition_file=" << backendResponse.partitionPath.string();
+            }
             if (hg.edges.empty())
             {
                 diag << "; hint=hypergraph has zero hyper-edges (degenerate partitioning input)";
-            }
-            if (!logTail.empty())
-            {
-                diag << "\nKaHyPar log tail:\n" << logTail;
             }
             error(diag.str());
             result.failed = true;
             return result;
         }
 
-            logInfo("repcut phase-d kahypar: run_ms=" + std::to_string(kaHyParRunMs) +
-                " log=" + kaHyParLogPath.string());
+        const uint64_t partitionRunMs = backendResponse.solverRunMs;
+        const uint64_t parsePartMs = backendResponse.parsePartitionMs;
+        const std::filesystem::path &partitionOutPath = backendResponse.partitionPath;
+        const std::vector<uint32_t> &ascPartition = backendResponse.partition;
+        const bool partitionComplete = backendResponse.partitionComplete;
+        const std::string &partitionWarning = backendResponse.partitionWarning;
 
-            const auto parsePartStart = std::chrono::steady_clock::now();
-        const std::filesystem::path partitionPath = findPartitionResultPath(hmetisPath,
-                                            options_.partitionCount,
-                                            options_.imbalanceFactor,
-                                            -1);
-        if (!std::filesystem::exists(partitionPath, fsError))
+        logInfo("repcut phase-d " + std::string(partitionBackend->name()) + ": run_ms=" +
+                std::to_string(partitionRunMs));
+
+        if (!partitionOutPath.empty())
         {
-            std::ostringstream msg;
-            msg << "repcut phase-d: partition result file not found: " << partitionPath.string()
-                << "; candidates=" << summarizePartitionCandidates(hmetisPath)
-                << "; log=" << kaHyParLogPath.string();
-            const std::string logTail = readFileTail(kaHyParLogPath, 20);
-            if (!logTail.empty())
-            {
-                msg << "\nKaHyPar log tail:\n" << logTail;
-            }
-            error(msg.str());
-            result.failed = true;
-            return result;
+            result.artifacts.push_back(partitionOutPath.string());
         }
-        result.artifacts.push_back(partitionPath.string());
 
-        bool partitionComplete = true;
-        std::string partitionWarning;
-        const std::vector<uint32_t> ascPartition =
-            parsePartitionResult(partitionPath,
-                                 phaseB.ascs.size(),
-                                 options_.partitionCount,
-                                 partitionComplete,
-                                 partitionWarning);
         if (!partitionComplete && !partitionWarning.empty())
         {
             warning("repcut phase-d: " + partitionWarning);
         }
-        const uint64_t parsePartMs = msSince(parsePartStart);
 
         uint32_t maxPartId = 0;
         std::unordered_map<uint32_t, size_t> partSizes;
@@ -2837,21 +3159,34 @@ namespace wolvrix::lib::transform
 
         std::ostringstream phaseDSummary;
         phaseDSummary << "repcut phase-d: graph=" << graph->symbol()
+                      << " backend=" << partitionBackend->name()
                       << " hmetis=" << hmetisPath.string()
-                      << " partition_file=" << partitionPath.string()
+                      << " partition_file=" << (partitionOutPath.empty() ? "<none>" : partitionOutPath.string())
                       << " asc_count=" << ascPartition.size()
                       << " part_count_observed=" << (partSizes.empty() ? 0 : (maxPartId + 1))
                       << " partition_complete=" << (partitionComplete ? "true" : "false");
         const uint64_t phaseDMs = msSince(phaseDStart);
         phaseDSummary << " parse_partition_ms=" << parsePartMs
-                      << " kahypar_run_ms=" << kaHyParRunMs
+                      << " partition_run_ms=" << partitionRunMs
                       << " elapsed_ms=" << phaseDMs;
         logInfo(phaseDSummary.str());
 
         const auto phaseEStart = std::chrono::steady_clock::now();
         const auto phaseEMapStart = std::chrono::steady_clock::now();
         std::unordered_map<wolvrix::lib::grh::OperationId, uint32_t, wolvrix::lib::grh::OperationIdHash> opPartition;
+        std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash>
+            opPartitionMask;
         opPartition.reserve(data.nodeToOp.size());
+        opPartitionMask.reserve(data.nodeToOp.size());
+
+        auto assignOpPartition = [&](wolvrix::lib::grh::OperationId opId, uint32_t partId) {
+            if (!opId.valid())
+            {
+                return;
+            }
+            opPartition.emplace(opId, partId);
+            opPartitionMask[opId] |= partMaskBit(partId);
+        };
 
         for (AscId aid = 0; aid < phaseB.ascs.size(); ++aid)
         {
@@ -2866,14 +3201,14 @@ namespace wolvrix::lib::transform
                 const SinkRef &sink = phaseB.sinks[sinkIndex];
                 if (sink.kind == SinkRef::Kind::Operation && sink.op.valid())
                 {
-                    opPartition[sink.op] = partId;
+                    assignOpPartition(sink.op, partId);
                 }
             }
             for (const NodeId node : phaseB.ascs[aid].combOps)
             {
                 if (node < data.nodeToOp.size())
                 {
-                    opPartition[data.nodeToOp[node]] = partId;
+                    assignOpPartition(data.nodeToOp[node], partId);
                 }
             }
         }
@@ -2912,29 +3247,83 @@ namespace wolvrix::lib::transform
         std::unordered_map<std::string, StorageInfo> memInfos;
         collectStorageInfos(*graph, regInfos, latchInfos, memInfos);
 
-        assignStorageOpsToPartition(regInfos, regPartition, opPartition);
-        assignStorageOpsToPartition(latchInfos, latchPartition, opPartition);
-        assignStorageOpsToPartition(memInfos, memPartition, opPartition);
+        const std::size_t inferredRegPartitionCount =
+            inferMissingStoragePartitions(*graph, regInfos, regPartition, opPartitionMask);
+        const std::size_t inferredLatchPartitionCount =
+            inferMissingStoragePartitions(*graph, latchInfos, latchPartition, opPartitionMask);
+        if (inferredRegPartitionCount > 0 || inferredLatchPartitionCount > 0)
+        {
+            logInfo("repcut phase-e: inferred storage partitions from read users regs=" +
+                    std::to_string(inferredRegPartitionCount) +
+                    " latches=" + std::to_string(inferredLatchPartitionCount));
+        }
+
+        assignStorageOpsToPartition(regInfos, regPartition, opPartition, opPartitionMask);
+        assignStorageOpsToPartition(latchInfos, latchPartition, opPartition, opPartitionMask);
+        assignStorageOpsToPartition(memInfos, memPartition, opPartition, opPartitionMask);
         const uint64_t phaseEMapMs = msSince(phaseEMapStart);
 
         std::unordered_map<wolvrix::lib::grh::ValueId, uint32_t, wolvrix::lib::grh::ValueIdHash> valueDefPartition;
+        std::unordered_map<wolvrix::lib::grh::ValueId, PartMask, wolvrix::lib::grh::ValueIdHash> valueDefPartMask;
         valueDefPartition.reserve(graph->values().size());
+        valueDefPartMask.reserve(graph->values().size());
         for (const auto &[opId, pid] : opPartition)
         {
             const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
             for (const auto resultValue : op.results())
             {
-                valueDefPartition[resultValue] = pid;
+                valueDefPartition.emplace(resultValue, pid);
+            }
+        }
+        for (const auto &[opId, partMask] : opPartitionMask)
+        {
+            const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
+            for (const auto resultValue : op.results())
+            {
+                valueDefPartMask[resultValue] |= partMask;
+                if (valueDefPartition.find(resultValue) == valueDefPartition.end() && partMask != 0)
+                {
+                    uint32_t firstPart = 0;
+                    bool firstSet = false;
+                    forEachPartInMask(partMask, [&](uint32_t partId) {
+                        if (!firstSet)
+                        {
+                            firstPart = partId;
+                            firstSet = true;
+                        }
+                    });
+                    if (firstSet)
+                    {
+                        valueDefPartition.emplace(resultValue, firstPart);
+                    }
+                }
             }
         }
 
         std::vector<CrossPartitionValue> crossValues;
         bool hasForbiddenCross = false;
         std::size_t forbiddenMemoryReadCrossCount = 0;
+        std::size_t forbiddenCrossCount = 0;
+        std::unordered_map<wolvrix::lib::grh::OperationKind, std::size_t> forbiddenCrossByDefKind;
+        std::vector<ForbiddenCrossSample> forbiddenCrossSamples;
+        forbiddenCrossSamples.reserve(kForbiddenCrossDiagLimit);
         const auto phaseECrossStart = std::chrono::steady_clock::now();
 
-        for (const auto &[value, defPart] : valueDefPartition)
+        for (const auto &[value, defMask] : valueDefPartMask)
         {
+            uint32_t defPart = 0;
+            auto itDefPart = valueDefPartition.find(value);
+            if (itDefPart != valueDefPartition.end())
+            {
+                defPart = itDefPart->second;
+            }
+            else if (defMask != 0)
+            {
+                forEachPartInMask(defMask, [&](uint32_t partId) {
+                    defPart = partId;
+                });
+            }
+
             const wolvrix::lib::grh::Value val = graph->getValue(value);
             const wolvrix::lib::grh::OperationId defOpId = val.definingOp();
             wolvrix::lib::grh::OperationKind defKind = wolvrix::lib::grh::OperationKind::kConstant;
@@ -2947,66 +3336,82 @@ namespace wolvrix::lib::transform
 
             for (const auto &user : val.users())
             {
-                auto itPart = opPartition.find(user.operation);
-                if (itPart == opPartition.end())
+                auto itUserMask = opPartitionMask.find(user.operation);
+                if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
                 {
                     continue;
                 }
-                const uint32_t usePart = itPart->second;
-                if (usePart == defPart)
-                {
-                    continue;
-                }
+                const PartMask useMask = itUserMask->second;
+                forEachPartInMask(useMask, [&](uint32_t usePart) {
+                    if (partMaskHas(defMask, usePart))
+                    {
+                        return;
+                    }
 
-                bool allowCross = false;
-                bool requiresPort = false;
-                if (defKindKnown)
-                {
-                    if (defKind == wolvrix::lib::grh::OperationKind::kRegisterReadPort ||
-                        defKind == wolvrix::lib::grh::OperationKind::kLatchReadPort)
+                    bool allowCross = false;
+                    bool requiresPort = false;
+                    if (defKindKnown)
+                    {
+                        if (defKind == wolvrix::lib::grh::OperationKind::kRegisterReadPort ||
+                            defKind == wolvrix::lib::grh::OperationKind::kLatchReadPort)
+                        {
+                            allowCross = true;
+                            requiresPort = true;
+                        }
+                        else if (defKind == wolvrix::lib::grh::OperationKind::kMemoryReadPort)
+                        {
+                            allowCross = false;
+                        }
+                        else if (defKind == wolvrix::lib::grh::OperationKind::kConstant)
+                        {
+                            allowCross = true;
+                            requiresPort = false;
+                        }
+                        else
+                        {
+                            allowCross = false;
+                        }
+                    }
+                    else if (val.isInput() || inoutInputValues.find(value) != inoutInputValues.end())
                     {
                         allowCross = true;
                         requiresPort = true;
                     }
-                    else if (defKind == wolvrix::lib::grh::OperationKind::kMemoryReadPort)
-                    {
-                        allowCross = false;
-                    }
-                    else if (defKind == wolvrix::lib::grh::OperationKind::kConstant)
-                    {
-                        allowCross = true;
-                        requiresPort = false;
-                    }
-                    else
-                    {
-                        allowCross = false;
-                    }
-                }
-                else
-                {
-                    if (val.isInput() || inoutInputValues.find(value) != inoutInputValues.end())
-                    {
-                        allowCross = true;
-                        requiresPort = true;
-                    }
-                }
 
-                if (!allowCross)
-                {
-                    hasForbiddenCross = true;
-                    if (defKindKnown && defKind == wolvrix::lib::grh::OperationKind::kMemoryReadPort)
+                    if (!allowCross)
                     {
-                        ++forbiddenMemoryReadCrossCount;
+                        hasForbiddenCross = true;
+                        ++forbiddenCrossCount;
+                        if (defKindKnown)
+                        {
+                            forbiddenCrossByDefKind[defKind] += 1;
+                        }
+                        if (defKindKnown && defKind == wolvrix::lib::grh::OperationKind::kMemoryReadPort)
+                        {
+                            ++forbiddenMemoryReadCrossCount;
+                        }
+                        if (forbiddenCrossSamples.size() < kForbiddenCrossDiagLimit)
+                        {
+                            ForbiddenCrossSample sample;
+                            sample.value = value;
+                            sample.defOp = defOpId;
+                            sample.defKind = defKind;
+                            sample.defKindKnown = defKindKnown;
+                            sample.useOp = user.operation;
+                            sample.srcPart = defPart;
+                            sample.dstPart = usePart;
+                            forbiddenCrossSamples.push_back(sample);
+                        }
                     }
-                }
 
-                CrossPartitionValue cv;
-                cv.value = value;
-                cv.srcPart = defPart;
-                cv.dstPart = usePart;
-                cv.allowed = allowCross;
-                cv.requiresPort = requiresPort;
-                crossValues.push_back(cv);
+                    CrossPartitionValue cv;
+                    cv.value = value;
+                    cv.srcPart = defPart;
+                    cv.dstPart = usePart;
+                    cv.allowed = allowCross;
+                    cv.requiresPort = requiresPort;
+                    crossValues.push_back(cv);
+                });
             }
         }
         const uint64_t phaseECrossMs = msSince(phaseECrossStart);
@@ -3023,30 +3428,107 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::Value val = graph->getValue(valueId);
             for (const auto &user : val.users())
             {
-                auto itPart = opPartition.find(user.operation);
-                if (itPart == opPartition.end())
+                auto itUserMask = opPartitionMask.find(user.operation);
+                if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
                 {
                     continue;
                 }
-                const uint32_t usePart = itPart->second;
-                auto [it, inserted] = firstInputOwner.emplace(valueId, usePart);
-                if (inserted || it->second == usePart)
-                {
-                    continue;
-                }
+                forEachPartInMask(itUserMask->second, [&](uint32_t usePart) {
+                    auto [it, inserted] = firstInputOwner.emplace(valueId, usePart);
+                    if (inserted || it->second == usePart)
+                    {
+                        return;
+                    }
 
-                CrossPartitionValue cv;
-                cv.value = valueId;
-                cv.srcPart = it->second;
-                cv.dstPart = usePart;
-                cv.allowed = true;
-                cv.requiresPort = true;
-                crossValues.push_back(cv);
+                    CrossPartitionValue cv;
+                    cv.value = valueId;
+                    cv.srcPart = it->second;
+                    cv.dstPart = usePart;
+                    cv.allowed = true;
+                    cv.requiresPort = true;
+                    crossValues.push_back(cv);
+                });
             }
+        }
+
+        std::size_t partitionCount = options_.partitionCount;
+        for (const auto &[opId, partMask] : opPartitionMask)
+        {
+            (void)opId;
+            forEachPartInMask(partMask, [&](uint32_t partId) {
+                partitionCount = std::max(partitionCount, static_cast<std::size_t>(partId) + 1);
+            });
+        }
+
+        std::vector<std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>>
+            partitionOps(partitionCount);
+        for (const auto &[opId, partMask] : opPartitionMask)
+        {
+            forEachPartInMask(partMask, [&](uint32_t partId) {
+                if (partId < partitionOps.size())
+                {
+                    partitionOps[partId].insert(opId);
+                }
+            });
         }
 
         if (hasForbiddenCross)
         {
+            {
+                std::ostringstream details;
+                details << "repcut phase-e: forbidden_cross_total=" << forbiddenCrossCount
+                        << " memory_read_forbidden=" << forbiddenMemoryReadCrossCount
+                        << " sample_count=" << forbiddenCrossSamples.size();
+                logInfo(details.str());
+            }
+
+            if (!forbiddenCrossByDefKind.empty())
+            {
+                std::vector<std::pair<wolvrix::lib::grh::OperationKind, std::size_t>> kindCounts;
+                kindCounts.reserve(forbiddenCrossByDefKind.size());
+                for (const auto &[kind, count] : forbiddenCrossByDefKind)
+                {
+                    kindCounts.emplace_back(kind, count);
+                }
+                std::sort(kindCounts.begin(),
+                          kindCounts.end(),
+                          [](const auto &lhs, const auto &rhs) {
+                              if (lhs.second != rhs.second)
+                              {
+                                  return lhs.second > rhs.second;
+                              }
+                              return static_cast<int>(lhs.first) < static_cast<int>(rhs.first);
+                          });
+                std::ostringstream kinds;
+                kinds << "repcut phase-e: forbidden_cross_def_kinds";
+                const std::size_t limit = std::min<std::size_t>(5, kindCounts.size());
+                for (std::size_t i = 0; i < limit; ++i)
+                {
+                    kinds << (i == 0 ? " " : ", ")
+                          << wolvrix::lib::grh::toString(kindCounts[i].first)
+                          << "=" << kindCounts[i].second;
+                }
+                logInfo(kinds.str());
+            }
+
+            for (std::size_t i = 0; i < forbiddenCrossSamples.size(); ++i)
+            {
+                const ForbiddenCrossSample &sample = forbiddenCrossSamples[i];
+                const auto value = graph->getValue(sample.value);
+                std::ostringstream detail;
+                detail << "repcut phase-e forbidden[" << i << "]"
+                       << " value=" << formatValueId(sample.value)
+                       << " value_symbol=" << value.symbolText()
+                       << " def_kind="
+                       << (sample.defKindKnown ? std::string(wolvrix::lib::grh::toString(sample.defKind))
+                                               : std::string("<unknown>"))
+                       << " src_part=" << sample.srcPart
+                       << " dst_part=" << sample.dstPart
+                       << " def_op=" << formatOperationRef(*graph, sample.defOp)
+                       << " use_op=" << formatOperationRef(*graph, sample.useOp);
+                logInfo(detail.str());
+            }
+
             if (forbiddenMemoryReadCrossCount > 0)
             {
                 error("repcut phase-e: detected memory-read cross-partition usage (" +
@@ -3088,6 +3570,10 @@ namespace wolvrix::lib::transform
         logInfo(phaseESummary.str());
 
         const auto phaseERebuildStart = std::chrono::steady_clock::now();
+        logInfo("repcut phase-e rebuild: begin graph=" + graph->symbol() +
+                " partition_count=" + std::to_string(partitionOps.size()) +
+                " op_partitioned=" + std::to_string(opPartition.size()) +
+                " cross_values_need_ports=" + std::to_string(crossNeedsPortCount));
         struct DefInfo
         {
             uint32_t owner = std::numeric_limits<uint32_t>::max();
@@ -3101,69 +3587,9 @@ namespace wolvrix::lib::transform
         {
             valueInfos.emplace(valueId, captureValueInfo(*graph, valueId));
         }
-
-        for (const auto opId : graph->operations())
-        {
-            if (opPartition.find(opId) != opPartition.end())
-            {
-                continue;
-            }
-            const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-            if (op.kind() != wolvrix::lib::grh::OperationKind::kConstant)
-            {
-                continue;
-            }
-
-            std::optional<uint32_t> owner;
-            bool multiOwner = false;
-            for (const auto resultValue : op.results())
-            {
-                const wolvrix::lib::grh::Value value = graph->getValue(resultValue);
-                for (const auto &user : value.users())
-                {
-                    auto it = opPartition.find(user.operation);
-                    if (it == opPartition.end())
-                    {
-                        continue;
-                    }
-                    if (!owner)
-                    {
-                        owner = it->second;
-                    }
-                    else if (*owner != it->second)
-                    {
-                        multiOwner = true;
-                        break;
-                    }
-                }
-                if (multiOwner)
-                {
-                    break;
-                }
-            }
-            if (owner && !multiOwner)
-            {
-                opPartition.emplace(opId, *owner);
-            }
-        }
-
-        std::size_t partitionCount = options_.partitionCount;
-        for (const auto &[opId, pid] : opPartition)
-        {
-            (void)opId;
-            partitionCount = std::max(partitionCount, static_cast<std::size_t>(pid) + 1);
-        }
-
-        std::vector<std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>>
-            partitionOps(partitionCount);
-        for (const auto &[opId, pid] : opPartition)
-        {
-            if (pid >= partitionOps.size())
-            {
-                continue;
-            }
-            partitionOps[pid].insert(opId);
-        }
+        logInfo("repcut phase-e rebuild: captured value metadata values=" +
+                std::to_string(valueInfos.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         for (const auto opId : graph->operations())
         {
@@ -3177,18 +3603,24 @@ namespace wolvrix::lib::transform
                 const wolvrix::lib::grh::Value value = graph->getValue(resultValue);
                 for (const auto &user : value.users())
                 {
-                    auto it = opPartition.find(user.operation);
-                    if (it == opPartition.end())
+                    auto itUserMask = opPartitionMask.find(user.operation);
+                    if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
                     {
                         continue;
                     }
-                    if (it->second < partitionOps.size())
-                    {
-                        partitionOps[it->second].insert(opId);
-                    }
+                    forEachPartInMask(itUserMask->second, [&](uint32_t partId) {
+                        if (partId >= partitionOps.size())
+                        {
+                            return;
+                        }
+                        partitionOps[partId].insert(opId);
+                        assignOpPartition(opId, partId);
+                    });
                 }
             }
         }
+        logInfo("repcut phase-e rebuild: constant partition propagation done elapsed_ms=" +
+                std::to_string(msSince(phaseERebuildStart)));
 
         std::unordered_map<wolvrix::lib::grh::ValueId, DefInfo, wolvrix::lib::grh::ValueIdHash> defInfo;
         defInfo.reserve(values.size());
@@ -3217,6 +3649,9 @@ namespace wolvrix::lib::transform
                 }
             }
         }
+        logInfo("repcut phase-e rebuild: def ownership table ready defs=" +
+                std::to_string(defInfo.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> origInputs;
         std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> origOutputs;
@@ -3235,27 +3670,103 @@ namespace wolvrix::lib::transform
             origOutputs.insert(port.oe);
         }
 
-        std::unordered_map<wolvrix::lib::grh::ValueId, bool, wolvrix::lib::grh::ValueIdHash> usedByOther;
+        auto isValueDefinedInPartition =
+            [&](wolvrix::lib::grh::ValueId valueId, std::size_t partId) -> bool {
+            if (!valueId.valid() || partId >= partitionOps.size())
+            {
+                return false;
+            }
+            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
+            if (!defOp.valid())
+            {
+                return false;
+            }
+            return partitionOps[partId].find(defOp) != partitionOps[partId].end();
+        };
+
+        auto primaryOwnerOfValue =
+            [&](wolvrix::lib::grh::ValueId valueId) -> std::optional<uint32_t> {
+            auto it = defInfo.find(valueId);
+            if (it != defInfo.end() &&
+                it->second.owner != std::numeric_limits<uint32_t>::max())
+            {
+                return it->second.owner;
+            }
+
+            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
+            if (!defOp.valid())
+            {
+                return std::nullopt;
+            }
+            auto itMask = opPartitionMask.find(defOp);
+            if (itMask == opPartitionMask.end() || itMask->second == 0)
+            {
+                return std::nullopt;
+            }
+            uint32_t owner = 0;
+            bool ownerSet = false;
+            forEachPartInMask(itMask->second, [&](uint32_t partId) {
+                if (!ownerSet)
+                {
+                    owner = partId;
+                    ownerSet = true;
+                }
+            });
+            if (!ownerSet)
+            {
+                return std::nullopt;
+            }
+            return owner;
+        };
+
+        std::size_t partitionOpMemberships = 0;
+        for (const auto &opsInPart : partitionOps)
+        {
+            partitionOpMemberships += opsInPart.size();
+        }
+
+        std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> usedByOther;
+        const std::size_t usedScanProgressEvery = 250000;
+        std::size_t usedScanVisited = 0;
+        const auto usedByOtherStart = std::chrono::steady_clock::now();
         for (std::size_t p = 0; p < partitionOps.size(); ++p)
         {
             for (const auto opId : partitionOps[p])
             {
+                ++usedScanVisited;
+                if (usedScanVisited > 0 && (usedScanVisited % usedScanProgressEvery) == 0)
+                {
+                    logInfo("repcut phase-e rebuild: used_by_other_scan_progress visited_ops=" +
+                            std::to_string(usedScanVisited) + "/" + std::to_string(partitionOpMemberships) +
+                            " current_part=" + std::to_string(p) +
+                            " elapsed_ms=" + std::to_string(msSince(usedByOtherStart)));
+                }
                 const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
                 for (const auto operand : op.operands())
                 {
-                    auto it = defInfo.find(operand);
-                    if (it == defInfo.end())
+                    if (!operand.valid())
                     {
                         continue;
                     }
-                    if (it->second.owner != std::numeric_limits<uint32_t>::max() &&
-                        it->second.owner != p)
+                    if (origInputs.find(operand) != origInputs.end())
                     {
-                        usedByOther[operand] = true;
+                        continue;
+                    }
+                    if (!isValueDefinedInPartition(operand, p))
+                    {
+                        const wolvrix::lib::grh::OperationId operandDef = graph->valueDef(operand);
+                        if (operandDef.valid())
+                        {
+                            usedByOther.insert(operand);
+                        }
                     }
                 }
             }
         }
+        logInfo("repcut phase-e rebuild: used_by_other_scan_done used_by_other_values=" +
+                std::to_string(usedByOther.size()) +
+                " elapsed_ms=" + std::to_string(msSince(usedByOtherStart)) +
+                " total_elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         struct PartitionGraphInfo
         {
@@ -3267,48 +3778,41 @@ namespace wolvrix::lib::transform
 
         std::vector<PartitionGraphInfo> partInfos;
         partInfos.reserve(partitionOps.size());
+        logInfo("repcut phase-e rebuild: begin partition graph cloning partition_count=" +
+                std::to_string(partitionOps.size()));
+        std::unordered_set<uint32_t> sourceDeclaredSymbols;
+        sourceDeclaredSymbols.reserve(graph->declaredSymbols().size());
+        for (const auto sym : graph->declaredSymbols())
+        {
+            sourceDeclaredSymbols.insert(sym.value);
+        }
 
         for (std::size_t p = 0; p < partitionOps.size(); ++p)
         {
-            const std::string partName = uniqueGraphName(design(), graph->symbol() + "_part" + std::to_string(p));
-            wolvrix::lib::grh::Graph &partGraph = design().cloneGraph(graph->symbol(), partName);
+            const auto partBuildStart = std::chrono::steady_clock::now();
+            logInfo("repcut phase-e rebuild: partition_clone_begin index=" +
+                    std::to_string(p + 1) + "/" + std::to_string(partitionOps.size()) +
+                    " source_ops=" + std::to_string(partitionOps[p].size()));
+            const auto &sourceOpsInPart = partitionOps[p];
+            std::vector<wolvrix::lib::grh::OperationId> sourceOps;
+            sourceOps.reserve(sourceOpsInPart.size());
+            for (const auto opId : sourceOpsInPart)
+            {
+                sourceOps.push_back(opId);
+            }
+            std::sort(sourceOps.begin(), sourceOps.end(),
+                      [](wolvrix::lib::grh::OperationId lhs, wolvrix::lib::grh::OperationId rhs) {
+                          return lhs.index < rhs.index;
+                      });
 
-            std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
-                valueMap;
-            std::unordered_map<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>
-                opMap;
-
-            const auto srcValues = graph->values();
-            const auto dstValues = partGraph.values();
-            for (std::size_t i = 0; i < srcValues.size() && i < dstValues.size(); ++i)
-            {
-                valueMap.emplace(srcValues[i], dstValues[i]);
-            }
-            const auto srcOps = graph->operations();
-            const auto dstOps = partGraph.operations();
-            for (std::size_t i = 0; i < srcOps.size() && i < dstOps.size(); ++i)
-            {
-                opMap.emplace(srcOps[i], dstOps[i]);
-            }
-
-            for (const auto &port : partGraph.inputPorts())
-            {
-                partGraph.removeInputPort(port.name);
-            }
-            for (const auto &port : partGraph.outputPorts())
-            {
-                partGraph.removeOutputPort(port.name);
-            }
-            for (const auto &port : partGraph.inoutPorts())
-            {
-                partGraph.removeInoutPort(port.name);
-            }
-
-            std::unordered_set<std::string> usedPortNames;
             std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> inputValues;
             std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> outputValues;
+            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> requiredValues;
+            inputValues.reserve(sourceOps.size() / 2 + 64);
+            outputValues.reserve(sourceOps.size() / 2 + 64);
+            requiredValues.reserve(sourceOps.size() * 2 + 128);
 
-            for (const auto opId : partitionOps[p])
+            for (const auto opId : sourceOps)
             {
                 const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
                 for (const auto operand : op.operands())
@@ -3317,25 +3821,13 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
+                    requiredValues.insert(operand);
                     if (origInputs.find(operand) != origInputs.end())
                     {
                         inputValues.insert(operand);
                         continue;
                     }
-
-                    auto it = defInfo.find(operand);
-                    if (it == defInfo.end())
-                    {
-                        const wolvrix::lib::grh::OperationId operandDef = graph->valueDef(operand);
-                        if (operandDef.valid() &&
-                            graph->getOperation(operandDef).kind() == wolvrix::lib::grh::OperationKind::kConstant)
-                        {
-                            continue;
-                        }
-                        inputValues.insert(operand);
-                        continue;
-                    }
-                    if (it->second.owner != std::numeric_limits<uint32_t>::max() && it->second.owner != p)
+                    if (!isValueDefinedInPartition(operand, p))
                     {
                         inputValues.insert(operand);
                     }
@@ -3347,12 +3839,14 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
+                    requiredValues.insert(resultValue);
                     auto it = defInfo.find(resultValue);
                     if (it == defInfo.end())
                     {
                         continue;
                     }
-                    if (it->second.owner == p &&
+                    const std::optional<uint32_t> owner = primaryOwnerOfValue(resultValue);
+                    if (owner && *owner == p &&
                         (origOutputs.find(resultValue) != origOutputs.end() ||
                          usedByOther.find(resultValue) != usedByOther.end()))
                     {
@@ -3361,16 +3855,163 @@ namespace wolvrix::lib::transform
                 }
             }
 
+            for (const auto valueId : inputValues)
+            {
+                requiredValues.insert(valueId);
+            }
+            for (const auto valueId : outputValues)
+            {
+                requiredValues.insert(valueId);
+            }
+
+            std::vector<wolvrix::lib::grh::ValueId> sourceValues;
+            sourceValues.reserve(requiredValues.size());
+            for (const auto valueId : requiredValues)
+            {
+                sourceValues.push_back(valueId);
+            }
+            std::sort(sourceValues.begin(), sourceValues.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+
+            const std::string partName = uniqueGraphName(design(), graph->symbol() + "_part" + std::to_string(p));
+            wolvrix::lib::grh::Graph &partGraph = design().createGraph(partName);
+            const std::size_t symbolReserveCount = sourceValues.size() + sourceOps.size() + 32;
+            partGraph.reserveSymbolCapacity(symbolReserveCount);
+            partGraph.reserveDeclaredSymbolCapacity(symbolReserveCount);
+            partGraph.reserveValueCapacity(sourceValues.size());
+            partGraph.reserveOperationCapacity(sourceOps.size());
+
+            std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
+                valueMap;
+            valueMap.reserve(sourceValues.size());
+            std::unordered_map<uint32_t, wolvrix::lib::grh::SymbolId> symbolMap;
+            symbolMap.reserve(symbolReserveCount);
+
+            auto mapSymbol = [&](wolvrix::lib::grh::SymbolId srcSym) -> wolvrix::lib::grh::SymbolId {
+                if (!srcSym.valid())
+                {
+                    return wolvrix::lib::grh::SymbolId::invalid();
+                }
+                auto it = symbolMap.find(srcSym.value);
+                if (it != symbolMap.end())
+                {
+                    return it->second;
+                }
+                const std::string_view text = graph->symbolText(srcSym);
+                if (text.empty())
+                {
+                    throw std::runtime_error("repcut phase-e rebuild: source symbol text is empty");
+                }
+                wolvrix::lib::grh::SymbolId dstSym = partGraph.lookupSymbol(text);
+                if (!dstSym.valid())
+                {
+                    dstSym = partGraph.internSymbol(text);
+                }
+                if (!dstSym.valid())
+                {
+                    throw std::runtime_error("repcut phase-e rebuild: failed to intern symbol " + std::string(text));
+                }
+                if (sourceDeclaredSymbols.find(srcSym.value) != sourceDeclaredSymbols.end())
+                {
+                    partGraph.addDeclaredSymbol(dstSym);
+                }
+                symbolMap.emplace(srcSym.value, dstSym);
+                return dstSym;
+            };
+
+            for (const auto sourceValueId : sourceValues)
+            {
+                const wolvrix::lib::grh::Value srcValue = graph->getValue(sourceValueId);
+                const wolvrix::lib::grh::SymbolId dstSym = mapSymbol(srcValue.symbol());
+                const wolvrix::lib::grh::ValueId dstValue =
+                    partGraph.createValue(dstSym, srcValue.width(), srcValue.isSigned(), srcValue.type());
+                if (srcValue.srcLoc())
+                {
+                    partGraph.setValueSrcLoc(dstValue, *srcValue.srcLoc());
+                }
+                valueMap.emplace(sourceValueId, dstValue);
+            }
+
+            for (const auto sourceOpId : sourceOps)
+            {
+                const wolvrix::lib::grh::Operation srcOp = graph->getOperation(sourceOpId);
+                const wolvrix::lib::grh::SymbolId dstSym = mapSymbol(srcOp.symbol());
+                const wolvrix::lib::grh::OperationId dstOp = partGraph.createOperation(srcOp.kind(), dstSym);
+                partGraph.reserveOpOperandCapacity(dstOp, srcOp.operands().size());
+                partGraph.reserveOpResultCapacity(dstOp, srcOp.results().size());
+                partGraph.reserveOpAttrCapacity(dstOp, srcOp.attrs().size());
+                for (const auto &attr : srcOp.attrs())
+                {
+                    partGraph.setAttr(dstOp, attr.key, attr.value);
+                }
+                for (const auto operand : srcOp.operands())
+                {
+                    auto it = valueMap.find(operand);
+                    if (it == valueMap.end())
+                    {
+                        error("repcut phase-e rebuild: missing operand clone for op " +
+                              formatOperationRef(*graph, sourceOpId) +
+                              " operand_value=" + std::to_string(operand.index));
+                        result.failed = true;
+                        return result;
+                    }
+                    partGraph.addOperand(dstOp, it->second);
+                }
+                for (const auto resultValue : srcOp.results())
+                {
+                    auto it = valueMap.find(resultValue);
+                    if (it == valueMap.end())
+                    {
+                        error("repcut phase-e rebuild: missing result clone for op " +
+                              formatOperationRef(*graph, sourceOpId) +
+                              " result_value=" + std::to_string(resultValue.index));
+                        result.failed = true;
+                        return result;
+                    }
+                    partGraph.addResult(dstOp, it->second);
+                }
+                if (srcOp.srcLoc())
+                {
+                    partGraph.setOpSrcLoc(dstOp, *srcOp.srcLoc());
+                }
+            }
+
             PartitionGraphInfo info;
             info.graph = &partGraph;
             info.name = partName;
 
+            std::unordered_set<std::string> usedPortNames;
+            std::vector<wolvrix::lib::grh::ValueId> inputList;
+            inputList.reserve(inputValues.size());
             for (const auto valueId : inputValues)
+            {
+                inputList.push_back(valueId);
+            }
+            std::vector<wolvrix::lib::grh::ValueId> outputList;
+            outputList.reserve(outputValues.size());
+            for (const auto valueId : outputValues)
+            {
+                outputList.push_back(valueId);
+            }
+            std::sort(inputList.begin(), inputList.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+            std::sort(outputList.begin(), outputList.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+
+            for (const auto valueId : inputList)
             {
                 auto it = valueMap.find(valueId);
                 if (it == valueMap.end())
                 {
-                    continue;
+                    error("repcut phase-e rebuild: missing input-port clone value=" + std::to_string(valueId.index));
+                    result.failed = true;
+                    return result;
                 }
                 const auto vinfoIt = valueInfos.find(valueId);
                 if (vinfoIt == valueInfos.end())
@@ -3385,12 +4026,14 @@ namespace wolvrix::lib::transform
                 info.inputPortByValue.emplace(valueId, portName);
             }
 
-            for (const auto valueId : outputValues)
+            for (const auto valueId : outputList)
             {
                 auto it = valueMap.find(valueId);
                 if (it == valueMap.end())
                 {
-                    continue;
+                    error("repcut phase-e rebuild: missing output-port clone value=" + std::to_string(valueId.index));
+                    result.failed = true;
+                    return result;
                 }
                 const auto vinfoIt = valueInfos.find(valueId);
                 if (vinfoIt == valueInfos.end())
@@ -3405,26 +4048,68 @@ namespace wolvrix::lib::transform
                 info.outputPortByValue.emplace(valueId, portName);
             }
 
-            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> keepCloneOps;
-            keepCloneOps.reserve(partitionOps[p].size());
-            for (const auto opId : partitionOps[p])
+            partInfos.push_back(std::move(info));
+            logInfo("repcut phase-e rebuild: partition_clone_done index=" +
+                    std::to_string(p + 1) + "/" + std::to_string(partitionOps.size()) +
+                    " graph=" + partName +
+                    " source_values=" + std::to_string(sourceValues.size()) +
+                    " source_ops=" + std::to_string(sourceOps.size()) +
+                    " input_ports=" + std::to_string(partInfos.back().inputPortByValue.size()) +
+                    " output_ports=" + std::to_string(partInfos.back().outputPortByValue.size()) +
+                    " elapsed_ms=" + std::to_string(msSince(partBuildStart)) +
+                    " total_elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+        }
+        logInfo("repcut phase-e rebuild: partition graph cloning done part_graphs=" +
+                std::to_string(partInfos.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+
+        std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> boundaryValues;
+        boundaryValues.reserve(usedByOther.size() + 1024);
+        for (const auto valueId : usedByOther)
+        {
+            boundaryValues.insert(valueId);
+        }
+        for (const auto &part : partInfos)
+        {
+            for (const auto &[valueId, portName] : part.inputPortByValue)
             {
-                auto it = opMap.find(opId);
-                if (it != opMap.end())
-                {
-                    keepCloneOps.insert(it->second);
-                }
+                (void)portName;
+                boundaryValues.insert(valueId);
             }
-            for (const auto opId : partGraph.operations())
+            for (const auto &[valueId, portName] : part.outputPortByValue)
             {
-                if (keepCloneOps.find(opId) == keepCloneOps.end())
-                {
-                    partGraph.eraseOpUnchecked(opId);
-                }
+                (void)portName;
+                boundaryValues.insert(valueId);
+            }
+        }
+
+        std::unordered_map<wolvrix::lib::grh::ValueId, uint32_t, wolvrix::lib::grh::ValueIdHash> ownerByValue;
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationId, wolvrix::lib::grh::ValueIdHash>
+            defOpByValue;
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationKind, wolvrix::lib::grh::ValueIdHash>
+            defKindByValue;
+        ownerByValue.reserve(boundaryValues.size());
+        defOpByValue.reserve(boundaryValues.size());
+        defKindByValue.reserve(boundaryValues.size());
+        for (const auto valueId : boundaryValues)
+        {
+            if (const std::optional<uint32_t> owner = primaryOwnerOfValue(valueId))
+            {
+                ownerByValue.emplace(valueId, *owner);
             }
 
-            partInfos.push_back(std::move(info));
+            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
+            if (!defOp.valid())
+            {
+                continue;
+            }
+            defOpByValue.emplace(valueId, defOp);
+            defKindByValue.emplace(valueId, graph->getOperation(defOp).kind());
         }
+        logInfo("repcut phase-e rebuild: boundary metadata captured values=" +
+                std::to_string(boundaryValues.size()) +
+                " owner_values=" + std::to_string(ownerByValue.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         struct PortSnapshot
         {
@@ -3470,6 +4155,16 @@ namespace wolvrix::lib::transform
             snap.infoOe = captureValueInfo(*graph, port.oe);
             inoutSnapshot.push_back(std::move(snap));
         }
+        logInfo("repcut phase-e rebuild: top port snapshot captured inputs=" +
+                std::to_string(inputSnapshot.size()) +
+                " outputs=" + std::to_string(outputSnapshot.size()) +
+                " inouts=" + std::to_string(inoutSnapshot.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+        const std::size_t origTopOpsCount = graph->operations().size();
+        const std::size_t origTopValuesCount = graph->values().size();
+        const std::size_t origTopInputsCount = inputSnapshot.size();
+        const std::size_t origTopOutputsCount = outputSnapshot.size();
+        const std::size_t origTopInoutsCount = inoutSnapshot.size();
 
         std::vector<std::string> topAliases = design().aliasesForGraph(graph->symbol());
         bool wasTop = false;
@@ -3483,6 +4178,9 @@ namespace wolvrix::lib::transform
         }
 
         const std::string topName = graph->symbol();
+        logInfo("repcut phase-e rebuild: rebuilding top graph graph=" + topName +
+                " aliases=" + std::to_string(topAliases.size()) +
+                " was_top=" + std::string(wasTop ? "true" : "false"));
         design().deleteGraph(topName);
         wolvrix::lib::grh::Graph &newTop = design().createGraph(topName);
 
@@ -3505,13 +4203,9 @@ namespace wolvrix::lib::transform
 
         std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
             linkValues;
-        for (const auto &[valueId, info] : defInfo)
+        for (const auto valueId : usedByOther)
         {
-            if (info.owner == std::numeric_limits<uint32_t>::max())
-            {
-                continue;
-            }
-            if (usedByOther.find(valueId) == usedByOther.end())
+            if (ownerByValue.find(valueId) == ownerByValue.end())
             {
                 continue;
             }
@@ -3531,6 +4225,9 @@ namespace wolvrix::lib::transform
             }
             linkValues.emplace(valueId, linkVal);
         }
+        logInfo("repcut phase-e rebuild: top link values created cross_links=" +
+                std::to_string(linkValues.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         for (const auto &port : outputSnapshot)
         {
@@ -3608,6 +4305,37 @@ namespace wolvrix::lib::transform
             topValueBySource.emplace(port.oe, oeVal);
         }
 
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
+            undrivenTopValues;
+        auto mapUndrivenInputToTop =
+            [&](wolvrix::lib::grh::ValueId sourceValue) -> std::optional<wolvrix::lib::grh::ValueId> {
+            if (auto it = undrivenTopValues.find(sourceValue); it != undrivenTopValues.end())
+            {
+                return it->second;
+            }
+            if (defOpByValue.find(sourceValue) != defOpByValue.end())
+            {
+                return std::nullopt;
+            }
+            auto infoIt = valueInfos.find(sourceValue);
+            if (infoIt == valueInfos.end())
+            {
+                return std::nullopt;
+            }
+
+            const ValueInfo &vinfo = infoIt->second;
+            const std::string base = normalizePortBase(vinfo.symbol, "undriven");
+            const wolvrix::lib::grh::SymbolId sym = internUniqueSymbol(newTop, "repcut_undriven_" + base);
+            const wolvrix::lib::grh::ValueId value = newTop.createValue(sym, vinfo.width, vinfo.isSigned, vinfo.type);
+            if (vinfo.srcLoc)
+            {
+                newTop.setValueSrcLoc(value, *vinfo.srcLoc);
+            }
+            undrivenTopValues.emplace(sourceValue, value);
+            topValueBySource.emplace(sourceValue, value);
+            return value;
+        };
+
         for (std::size_t p = 0; p < partInfos.size(); ++p)
         {
             PartitionGraphInfo &part = partInfos[p];
@@ -3631,6 +4359,11 @@ namespace wolvrix::lib::transform
                 if (itLink != linkValues.end())
                 {
                     inputMapping.emplace(portName, itLink->second);
+                    continue;
+                }
+                if (auto undrivenTop = mapUndrivenInputToTop(sourceValue))
+                {
+                    inputMapping.emplace(portName, *undrivenTop);
                 }
             }
 
@@ -3651,15 +4384,147 @@ namespace wolvrix::lib::transform
 
             if (inputMapping.size() != part.graph->inputPorts().size())
             {
-                warning("repcut phase-e: incomplete instance input mapping for " + part.graph->symbol());
+                constexpr std::size_t kMissingPortDiagLimit = 8;
+                std::size_t missingInputCount = 0;
+                for (const auto &[sourceValue, portName] : part.inputPortByValue)
+                {
+                    if (inputMapping.find(portName) != inputMapping.end())
+                    {
+                        continue;
+                    }
+                    ++missingInputCount;
+                    if (missingInputCount > kMissingPortDiagLimit)
+                    {
+                        continue;
+                    }
+
+                    const bool hasTopValue = topValueBySource.find(sourceValue) != topValueBySource.end();
+                    const bool hasLinkValue = linkValues.find(sourceValue) != linkValues.end();
+                    const bool inUsedByOther = usedByOther.find(sourceValue) != usedByOther.end();
+                    const bool isOrigInput = origInputs.find(sourceValue) != origInputs.end();
+                    const bool isOrigOutput = origOutputs.find(sourceValue) != origOutputs.end();
+                    auto ownerIt = ownerByValue.find(sourceValue);
+                    const std::optional<uint32_t> owner =
+                        (ownerIt == ownerByValue.end()) ? std::nullopt : std::optional<uint32_t>(ownerIt->second);
+                    wolvrix::lib::grh::OperationId defOp = wolvrix::lib::grh::OperationId::invalid();
+                    if (auto defOpIt = defOpByValue.find(sourceValue); defOpIt != defOpByValue.end())
+                    {
+                        defOp = defOpIt->second;
+                    }
+                    std::string defKindText = "<none>";
+                    if (auto defKindIt = defKindByValue.find(sourceValue); defKindIt != defKindByValue.end())
+                    {
+                        defKindText = std::string(wolvrix::lib::grh::toString(defKindIt->second));
+                    }
+                    const ValueInfo &vinfo = valueInfos.at(sourceValue);
+
+                    std::ostringstream detail;
+                    detail << "repcut phase-e rebuild: missing input port mapping"
+                           << " part=" << part.graph->symbol()
+                           << " port=" << portName
+                           << " source_value=" << formatValueId(sourceValue)
+                           << " source_symbol=" << vinfo.symbol
+                           << " def_op_id=" << (defOp.valid() ? std::to_string(defOp.index) : std::string("<none>"))
+                           << " def_kind=" << defKindText
+                           << " owner=" << (owner ? std::to_string(*owner) : std::string("<none>"))
+                           << " has_top_value=" << (hasTopValue ? "true" : "false")
+                           << " has_link_value=" << (hasLinkValue ? "true" : "false")
+                           << " used_by_other=" << (inUsedByOther ? "true" : "false")
+                           << " orig_input=" << (isOrigInput ? "true" : "false")
+                           << " orig_output=" << (isOrigOutput ? "true" : "false");
+                    error(detail.str());
+                }
+                if (missingInputCount > kMissingPortDiagLimit)
+                {
+                    warning("repcut phase-e rebuild: additional missing input-port mappings omitted count=" +
+                            std::to_string(missingInputCount - kMissingPortDiagLimit));
+                }
+                error("repcut phase-e: incomplete instance input mapping for " + part.graph->symbol() +
+                      " mapped=" + std::to_string(inputMapping.size()) +
+                      " expected=" + std::to_string(part.graph->inputPorts().size()));
+                result.failed = true;
+                return result;
             }
             if (outputMapping.size() != part.graph->outputPorts().size())
             {
-                warning("repcut phase-e: incomplete instance output mapping for " + part.graph->symbol());
+                constexpr std::size_t kMissingPortDiagLimit = 8;
+                std::size_t missingOutputCount = 0;
+                for (const auto &[sourceValue, portName] : part.outputPortByValue)
+                {
+                    if (outputMapping.find(portName) != outputMapping.end())
+                    {
+                        continue;
+                    }
+                    ++missingOutputCount;
+                    if (missingOutputCount > kMissingPortDiagLimit)
+                    {
+                        continue;
+                    }
+
+                    const bool hasTopValue = topValueBySource.find(sourceValue) != topValueBySource.end();
+                    const bool hasLinkValue = linkValues.find(sourceValue) != linkValues.end();
+                    const bool inUsedByOther = usedByOther.find(sourceValue) != usedByOther.end();
+                    const bool isOrigInput = origInputs.find(sourceValue) != origInputs.end();
+                    const bool isOrigOutput = origOutputs.find(sourceValue) != origOutputs.end();
+                    auto ownerIt = ownerByValue.find(sourceValue);
+                    const std::optional<uint32_t> owner =
+                        (ownerIt == ownerByValue.end()) ? std::nullopt : std::optional<uint32_t>(ownerIt->second);
+                    wolvrix::lib::grh::OperationId defOp = wolvrix::lib::grh::OperationId::invalid();
+                    if (auto defOpIt = defOpByValue.find(sourceValue); defOpIt != defOpByValue.end())
+                    {
+                        defOp = defOpIt->second;
+                    }
+                    std::string defKindText = "<none>";
+                    if (auto defKindIt = defKindByValue.find(sourceValue); defKindIt != defKindByValue.end())
+                    {
+                        defKindText = std::string(wolvrix::lib::grh::toString(defKindIt->second));
+                    }
+                    const ValueInfo &vinfo = valueInfos.at(sourceValue);
+
+                    std::ostringstream detail;
+                    detail << "repcut phase-e rebuild: missing output port mapping"
+                           << " part=" << part.graph->symbol()
+                           << " port=" << portName
+                           << " source_value=" << formatValueId(sourceValue)
+                           << " source_symbol=" << vinfo.symbol
+                           << " def_op_id=" << (defOp.valid() ? std::to_string(defOp.index) : std::string("<none>"))
+                           << " def_kind=" << defKindText
+                           << " owner=" << (owner ? std::to_string(*owner) : std::string("<none>"))
+                           << " has_top_value=" << (hasTopValue ? "true" : "false")
+                           << " has_link_value=" << (hasLinkValue ? "true" : "false")
+                           << " used_by_other=" << (inUsedByOther ? "true" : "false")
+                           << " orig_input=" << (isOrigInput ? "true" : "false")
+                           << " orig_output=" << (isOrigOutput ? "true" : "false");
+                    error(detail.str());
+                }
+                if (missingOutputCount > kMissingPortDiagLimit)
+                {
+                    warning("repcut phase-e rebuild: additional missing output-port mappings omitted count=" +
+                            std::to_string(missingOutputCount - kMissingPortDiagLimit));
+                }
+                error("repcut phase-e: incomplete instance output mapping for " + part.graph->symbol() +
+                      " mapped=" + std::to_string(outputMapping.size()) +
+                      " expected=" + std::to_string(part.graph->outputPorts().size()));
+                result.failed = true;
+                return result;
             }
 
             buildInstance(newTop, part.graph->symbol(), "part_" + std::to_string(p), *part.graph, inputMapping, outputMapping);
+            if (((p + 1) % 8) == 0 || (p + 1) == partInfos.size())
+            {
+                logInfo("repcut phase-e rebuild: instance_wiring_progress done=" +
+                        std::to_string(p + 1) + "/" + std::to_string(partInfos.size()) +
+                        " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+            }
         }
+        if (!undrivenTopValues.empty())
+        {
+            logInfo("repcut phase-e rebuild: synthesized undriven top values count=" +
+                    std::to_string(undrivenTopValues.size()));
+        }
+        logInfo("repcut phase-e rebuild: instance wiring done instances=" +
+                std::to_string(partInfos.size()) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
         for (const auto &alias : topAliases)
         {
@@ -3685,12 +4550,48 @@ namespace wolvrix::lib::transform
             std::error_code cleanupError;
             std::filesystem::remove(hmetisPath, cleanupError);
             cleanupError.clear();
-            std::filesystem::remove(configPath, cleanupError);
-            cleanupError.clear();
             std::filesystem::remove(partitionPath, cleanupError);
         }
 
         std::ostringstream stats;
+        std::size_t partitionOpsSum = 0;
+        std::size_t partitionOpsMax = 0;
+        std::size_t partitionGraphCount = 0;
+        for (const auto &part : partInfos)
+        {
+            if (part.graph == nullptr)
+            {
+                continue;
+            }
+            const std::size_t partOps = part.graph->operations().size();
+            partitionOpsSum += partOps;
+            partitionOpsMax = std::max(partitionOpsMax, partOps);
+            partitionGraphCount += 1;
+        }
+        const double partitionOpsAvg =
+            (partitionGraphCount == 0) ? 0.0 : static_cast<double>(partitionOpsSum) / static_cast<double>(partitionGraphCount);
+        const int64_t partitionOpsDelta =
+            static_cast<int64_t>(partitionOpsSum) - static_cast<int64_t>(origTopOpsCount);
+        const double origOverMaxOpsRatio =
+            (partitionOpsMax == 0) ? 0.0 : static_cast<double>(origTopOpsCount) / static_cast<double>(partitionOpsMax);
+        const double origOverAvgOpsRatio =
+            (partitionOpsAvg <= 0.0) ? 0.0 : static_cast<double>(origTopOpsCount) / partitionOpsAvg;
+
+        const auto appendGraphStatsJson = [&](std::ostringstream &oss,
+                                              std::string_view key,
+                                              std::size_t ops,
+                                              std::size_t values,
+                                              std::size_t inputs,
+                                              std::size_t outputs,
+                                              std::size_t inouts) {
+            oss << ",\"" << key << "\":{"
+                << "\"ops\":" << ops
+                << ",\"values\":" << values
+                << ",\"inputs\":" << inputs
+                << ",\"outputs\":" << outputs
+                << ",\"inouts\":" << inouts
+                << "}";
+        };
         stats << "{"
               << "\"pass\":\"repcut\""
               << ",\"graph\":\"" << escapeJson(topName) << "\""
@@ -3708,7 +4609,49 @@ namespace wolvrix::lib::transform
               << ",\"time_ms_phase_c\":" << phaseCMs
               << ",\"time_ms_phase_d\":" << phaseDMs
               << ",\"time_ms_phase_e\":" << phaseEMs
+              << ",\"op_partition_stats\":{"
+              << "\"original_ops\":" << origTopOpsCount
+              << ",\"partition_count\":" << partitionGraphCount
+              << ",\"max_partition_ops\":" << partitionOpsMax
+              << ",\"avg_partition_ops\":" << toFixedString(partitionOpsAvg, 6)
+              << ",\"partition_ops_sum\":" << partitionOpsSum
+              << ",\"partition_ops_delta\":" << partitionOpsDelta
+              << ",\"original_over_max_ops_ratio\":" << toFixedString(origOverMaxOpsRatio, 6)
+              << ",\"original_over_avg_ops_ratio\":" << toFixedString(origOverAvgOpsRatio, 6)
               << "}";
+        appendGraphStatsJson(
+            stats,
+            "original_top_graph_stats",
+            origTopOpsCount,
+            origTopValuesCount,
+            origTopInputsCount,
+            origTopOutputsCount,
+            origTopInoutsCount);
+        stats << ",\"partition_graph_stats\":[";
+        bool firstPartitionStats = true;
+        for (std::size_t i = 0; i < partInfos.size(); ++i)
+        {
+            const PartitionGraphInfo &part = partInfos[i];
+            if (part.graph == nullptr)
+            {
+                continue;
+            }
+            if (!firstPartitionStats)
+            {
+                stats << ",";
+            }
+            stats << "{"
+                  << "\"index\":" << i
+                  << ",\"graph\":\"" << escapeJson(part.graph->symbol()) << "\""
+                  << ",\"ops\":" << part.graph->operations().size()
+                  << ",\"values\":" << part.graph->values().size()
+                  << ",\"inputs\":" << part.graph->inputPorts().size()
+                  << ",\"outputs\":" << part.graph->outputPorts().size()
+                  << ",\"inouts\":" << part.graph->inoutPorts().size()
+                  << "}";
+            firstPartitionStats = false;
+        }
+        stats << "]}";
         const std::string statsMessage = stats.str();
         info(statsMessage);
         result.artifacts.push_back(statsMessage);
@@ -3725,7 +4668,7 @@ namespace wolvrix::lib::transform
             debug("repcut phase-a: M1 sink/source/comb classification ready");
             debug("repcut phase-b: ASC and piece initialization ready");
             debug("repcut phase-c: node/piece weights and hypergraph ready");
-            debug("repcut phase-d: hmetis/config generation and KaHyPar invocation ready");
+            debug("repcut phase-d: hmetis generation and mt-kahypar partitioning ready");
             debug("repcut phase-e: op partition mapping and cross-partition checks ready");
         }
 
