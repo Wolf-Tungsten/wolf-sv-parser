@@ -1,8 +1,8 @@
 #include "transform/repcut.hpp"
+#include "transform/repcut_partition_set.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -40,34 +40,9 @@ namespace wolvrix::lib::transform
         constexpr std::size_t kMaxConeCollectThreads = 8;
         constexpr std::size_t kConeCollectChunkSize = 64;
         constexpr std::size_t kForbiddenCrossDiagLimit = 12;
+        constexpr std::size_t kMaxPartitionCount = 4096;
 
-        using PartMask = uint64_t;
-
-        PartMask partMaskBit(uint32_t partId) noexcept
-        {
-            if (partId >= 64)
-            {
-                return 0;
-            }
-            return PartMask{1} << partId;
-        }
-
-        bool partMaskHas(PartMask mask, uint32_t partId) noexcept
-        {
-            const PartMask bit = partMaskBit(partId);
-            return bit != 0 && ((mask & bit) != 0);
-        }
-
-        template <typename Fn>
-        void forEachPartInMask(PartMask mask, Fn &&fn)
-        {
-            while (mask != 0)
-            {
-                const uint32_t partId = static_cast<uint32_t>(std::countr_zero(mask));
-                fn(partId);
-                mask &= (mask - 1);
-            }
-        }
+        using PartitionSet = wolvrix::lib::transform::detail::PartitionSet;
 
         template <typename T>
         std::optional<T> getAttr(const wolvrix::lib::grh::Operation &op, std::string_view key)
@@ -960,6 +935,10 @@ namespace wolvrix::lib::transform
             MemSymbolMemo memMemo;
             memMemo.nodeToMemSymbolIds.resize(phaseA.nodeToOp.size());
             memMemo.nodeState.resize(phaseA.nodeToOp.size(), 0);
+            if (progressLogger)
+            {
+                progressLogger("repcut phase-b/ascs: collect_mem_symbols_begin mem_cone_union=enabled");
+            }
             size_t batchStartIndex = 0;
             auto batchStart = memConeStart;
             uint64_t batchVisitedNodes = 0;
@@ -1172,6 +1151,200 @@ namespace wolvrix::lib::transform
                 progressLogger("repcut phase-b/ascs: collect_cones_done elapsed_ms=" +
                                std::to_string(msSince(collectConeStart)) +
                                " total_elapsed_ms=" + std::to_string(msSince(phaseStart)));
+            }
+
+            if (progressLogger && !data.ascs.empty())
+            {
+                AscId maxAscByCombOps = 0;
+                for (AscId aid = 1; aid < data.ascs.size(); ++aid)
+                {
+                    if (data.ascs[aid].combOps.size() > data.ascs[maxAscByCombOps].combOps.size())
+                    {
+                        maxAscByCombOps = aid;
+                    }
+                }
+
+                const AscInfo &targetAsc = data.ascs[maxAscByCombOps];
+                std::unordered_map<std::string, std::size_t> directWriteMemSymbolCounts;
+                std::unordered_map<std::string, std::size_t> coneMemSymbolSinkCounts;
+                directWriteMemSymbolCounts.reserve(256);
+                coneMemSymbolSinkCounts.reserve(256);
+                constexpr std::size_t kSinkDetailLimit = 64;
+                constexpr std::size_t kPerSinkMemSymbolLimit = 12;
+                std::vector<std::string> sinkDetails;
+                sinkDetails.reserve(std::min(kSinkDetailLimit, targetAsc.sinks.size()));
+                bool sinkDetailsTruncated = false;
+
+                MemSymbolCollectStats debugStats;
+                std::unordered_set<uint32_t> sinkMemSymbolIds;
+                sinkMemSymbolIds.reserve(32);
+                for (const size_t sinkIndex : targetAsc.sinks)
+                {
+                    if (sinkIndex >= data.sinks.size())
+                    {
+                        continue;
+                    }
+                    const SinkRef &sink = data.sinks[sinkIndex];
+                    if (sink.kind == SinkRef::Kind::Operation)
+                    {
+                        const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
+                        if (sinkOp.kind() == wolvrix::lib::grh::OperationKind::kMemoryWritePort)
+                        {
+                            if (auto sym = getAttrString(sinkOp, "memSymbol"))
+                            {
+                                directWriteMemSymbolCounts[*sym] += 1;
+                            }
+                        }
+                    }
+
+                    sinkMemSymbolIds.clear();
+                    collectConeMemSymbolIds(graph,
+                                            phaseA,
+                                            sink,
+                                            inoutInputValues,
+                                            memSymbolIntern,
+                                            memMemo,
+                                            sinkMemSymbolIds,
+                                            debugStats);
+                    for (const uint32_t symId : sinkMemSymbolIds)
+                    {
+                        if (symId < memSymbolIntern.idToSymbol.size())
+                        {
+                            coneMemSymbolSinkCounts[memSymbolIntern.idToSymbol[symId]] += 1;
+                        }
+                    }
+
+                    if (sinkDetails.size() < kSinkDetailLimit)
+                    {
+                        std::vector<std::string> coneMemSymbols;
+                        coneMemSymbols.reserve(sinkMemSymbolIds.size());
+                        for (const uint32_t symId : sinkMemSymbolIds)
+                        {
+                            if (symId < memSymbolIntern.idToSymbol.size())
+                            {
+                                coneMemSymbols.push_back(memSymbolIntern.idToSymbol[symId]);
+                            }
+                        }
+                        std::sort(coneMemSymbols.begin(), coneMemSymbols.end());
+                        coneMemSymbols.erase(std::unique(coneMemSymbols.begin(), coneMemSymbols.end()),
+                                             coneMemSymbols.end());
+
+                        std::string directMemSymbol = "-";
+                        std::string sinkRef;
+                        if (sink.kind == SinkRef::Kind::Operation)
+                        {
+                            sinkRef = formatOperationRef(graph, sink.op);
+                            const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
+                            if (auto sym = getAttrString(sinkOp, "memSymbol"))
+                            {
+                                directMemSymbol = *sym;
+                            }
+                        }
+                        else
+                        {
+                            const auto value = graph.getValue(sink.value);
+                            sinkRef = formatValueId(sink.value) + ":" + std::string(value.symbolText());
+                        }
+
+                        std::ostringstream sinkDetail;
+                        sinkDetail << "sink#" << sinkIndex
+                                   << " kind=" << (sink.kind == SinkRef::Kind::Operation ? "op" : "value")
+                                   << " ref=" << sinkRef
+                                   << " mem_symbol=" << directMemSymbol
+                                   << " cone_mem_symbols=";
+                        if (coneMemSymbols.empty())
+                        {
+                            sinkDetail << "-";
+                        }
+                        else
+                        {
+                            const std::size_t showCount = std::min(kPerSinkMemSymbolLimit, coneMemSymbols.size());
+                            for (std::size_t i = 0; i < showCount; ++i)
+                            {
+                                if (i > 0)
+                                {
+                                    sinkDetail << ",";
+                                }
+                                sinkDetail << coneMemSymbols[i];
+                            }
+                            if (coneMemSymbols.size() > showCount)
+                            {
+                                sinkDetail << ",...+" << (coneMemSymbols.size() - showCount);
+                            }
+                        }
+                        sinkDetails.push_back(sinkDetail.str());
+                    }
+                    else
+                    {
+                        sinkDetailsTruncated = true;
+                    }
+                }
+
+                auto formatTopSymbolCounts = [](const std::unordered_map<std::string, std::size_t> &counts,
+                                                std::size_t limit) -> std::string {
+                    if (counts.empty())
+                    {
+                        return "-";
+                    }
+                    std::vector<std::pair<std::string, std::size_t>> ordered;
+                    ordered.reserve(counts.size());
+                    for (const auto &entry : counts)
+                    {
+                        ordered.push_back(entry);
+                    }
+                    std::sort(ordered.begin(),
+                              ordered.end(),
+                              [](const auto &lhs, const auto &rhs) {
+                                  if (lhs.second != rhs.second)
+                                  {
+                                      return lhs.second > rhs.second;
+                                  }
+                                  return lhs.first < rhs.first;
+                              });
+
+                    std::ostringstream oss;
+                    const std::size_t n = std::min(limit, ordered.size());
+                    for (std::size_t i = 0; i < n; ++i)
+                    {
+                        if (i > 0)
+                        {
+                            oss << "; ";
+                        }
+                        oss << ordered[i].first << ":" << ordered[i].second;
+                    }
+                    return oss.str();
+                };
+
+                std::ostringstream ascDetail;
+                ascDetail << "repcut phase-b/ascs: max_asc_detail aid=" << maxAscByCombOps
+                          << " sinks=" << targetAsc.sinks.size()
+                          << " comb_ops=" << targetAsc.combOps.size()
+                          << " unique_direct_write_mem_symbols=" << directWriteMemSymbolCounts.size()
+                          << " unique_cone_mem_symbols=" << coneMemSymbolSinkCounts.size()
+                          << " top_direct_write_mem_symbols=" << formatTopSymbolCounts(directWriteMemSymbolCounts, 10)
+                          << " top_cone_mem_symbols=" << formatTopSymbolCounts(coneMemSymbolSinkCounts, 10);
+                progressLogger(ascDetail.str());
+
+                std::ostringstream sinkLog;
+                sinkLog << "repcut phase-b/ascs: max_asc_sinks aid=" << maxAscByCombOps
+                        << " asc_sink_count=" << targetAsc.sinks.size()
+                        << " asc_comb_ops=" << targetAsc.combOps.size()
+                        << " shown=" << sinkDetails.size();
+                if (sinkDetailsTruncated)
+                {
+                    sinkLog << " truncated=true";
+                }
+                sinkLog << " sinks=[";
+                for (std::size_t i = 0; i < sinkDetails.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        sinkLog << " | ";
+                    }
+                    sinkLog << sinkDetails[i];
+                }
+                sinkLog << "]";
+                progressLogger(sinkLog.str());
             }
 
             return data;
@@ -2605,7 +2778,7 @@ namespace wolvrix::lib::transform
             const std::unordered_map<std::string, StorageInfo> &infos,
             const std::unordered_map<std::string, uint32_t> &partitionBySymbol,
             std::unordered_map<wolvrix::lib::grh::OperationId, uint32_t, wolvrix::lib::grh::OperationIdHash> &opPartition,
-            std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
+            std::unordered_map<wolvrix::lib::grh::OperationId, PartitionSet, wolvrix::lib::grh::OperationIdHash> &opPartitionSet)
         {
             for (const auto &[symbol, partId] : partitionBySymbol)
             {
@@ -2618,17 +2791,17 @@ namespace wolvrix::lib::transform
                 if (info.declOp.valid())
                 {
                     opPartition.emplace(info.declOp, partId);
-                    opPartitionMask[info.declOp] |= partMaskBit(partId);
+                    opPartitionSet[info.declOp].add(partId);
                 }
                 for (const auto opId : info.readPorts)
                 {
                     opPartition.emplace(opId, partId);
-                    opPartitionMask[opId] |= partMaskBit(partId);
+                    opPartitionSet[opId].add(partId);
                 }
                 for (const auto opId : info.writePorts)
                 {
                     opPartition.emplace(opId, partId);
-                    opPartitionMask[opId] |= partMaskBit(partId);
+                    opPartitionSet[opId].add(partId);
                 }
             }
         }
@@ -2636,7 +2809,8 @@ namespace wolvrix::lib::transform
         std::optional<uint32_t> inferStoragePartitionFromReadUsers(
             const wolvrix::lib::grh::Graph &graph,
             const StorageInfo &info,
-            const std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
+            const std::unordered_map<wolvrix::lib::grh::OperationId, PartitionSet, wolvrix::lib::grh::OperationIdHash>
+                &opPartitionSet)
         {
             std::unordered_map<uint32_t, std::size_t> scoreByPart;
             for (const auto readOpId : info.readPorts)
@@ -2655,12 +2829,12 @@ namespace wolvrix::lib::transform
                     const wolvrix::lib::grh::Value value = graph.getValue(resultValue);
                     for (const auto &user : value.users())
                     {
-                        auto it = opPartitionMask.find(user.operation);
-                        if (it == opPartitionMask.end() || it->second == 0)
+                        auto it = opPartitionSet.find(user.operation);
+                        if (it == opPartitionSet.end() || it->second.empty())
                         {
                             continue;
                         }
-                        forEachPartInMask(it->second, [&](uint32_t partId) {
+                        it->second.forEach([&](uint32_t partId) {
                             scoreByPart[partId] += 1;
                         });
                     }
@@ -2688,7 +2862,8 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::Graph &graph,
             const std::unordered_map<std::string, StorageInfo> &infos,
             std::unordered_map<std::string, uint32_t> &partitionBySymbol,
-            const std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash> &opPartitionMask)
+            const std::unordered_map<wolvrix::lib::grh::OperationId, PartitionSet, wolvrix::lib::grh::OperationIdHash>
+                &opPartitionSet)
         {
             std::size_t assignedCount = 0;
             for (const auto &[symbol, info] : infos)
@@ -2697,7 +2872,7 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
-                std::optional<uint32_t> owner = inferStoragePartitionFromReadUsers(graph, info, opPartitionMask);
+                std::optional<uint32_t> owner = inferStoragePartitionFromReadUsers(graph, info, opPartitionSet);
                 if (!owner)
                 {
                     continue;
@@ -2744,9 +2919,9 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
-        if (options_.partitionCount > 63)
+        if (options_.partitionCount > kMaxPartitionCount)
         {
-            error("repcut partition_count must be <= 63");
+            error("repcut partition_count must be <= " + std::to_string(kMaxPartitionCount));
             result.failed = true;
             return result;
         }
@@ -2774,6 +2949,7 @@ namespace wolvrix::lib::transform
                  << " partitioner=" << options_.partitioner
                  << " mtkahypar_preset=" << options_.mtKaHyParPreset
                  << " mtkahypar_threads=" << options_.mtKaHyParThreads
+                 << " mem_cone_union=true"
                  << " keep_intermediate=" << (options_.keepIntermediateFiles ? "true" : "false");
             logInfo(boot.str());
         }
@@ -3174,10 +3350,10 @@ namespace wolvrix::lib::transform
         const auto phaseEStart = std::chrono::steady_clock::now();
         const auto phaseEMapStart = std::chrono::steady_clock::now();
         std::unordered_map<wolvrix::lib::grh::OperationId, uint32_t, wolvrix::lib::grh::OperationIdHash> opPartition;
-        std::unordered_map<wolvrix::lib::grh::OperationId, PartMask, wolvrix::lib::grh::OperationIdHash>
-            opPartitionMask;
+        std::unordered_map<wolvrix::lib::grh::OperationId, PartitionSet, wolvrix::lib::grh::OperationIdHash>
+            opPartitionSet;
         opPartition.reserve(data.nodeToOp.size());
-        opPartitionMask.reserve(data.nodeToOp.size());
+        opPartitionSet.reserve(data.nodeToOp.size());
 
         auto assignOpPartition = [&](wolvrix::lib::grh::OperationId opId, uint32_t partId) {
             if (!opId.valid())
@@ -3185,7 +3361,7 @@ namespace wolvrix::lib::transform
                 return;
             }
             opPartition.emplace(opId, partId);
-            opPartitionMask[opId] |= partMaskBit(partId);
+            opPartitionSet[opId].add(partId);
         };
 
         for (AscId aid = 0; aid < phaseB.ascs.size(); ++aid)
@@ -3248,9 +3424,9 @@ namespace wolvrix::lib::transform
         collectStorageInfos(*graph, regInfos, latchInfos, memInfos);
 
         const std::size_t inferredRegPartitionCount =
-            inferMissingStoragePartitions(*graph, regInfos, regPartition, opPartitionMask);
+            inferMissingStoragePartitions(*graph, regInfos, regPartition, opPartitionSet);
         const std::size_t inferredLatchPartitionCount =
-            inferMissingStoragePartitions(*graph, latchInfos, latchPartition, opPartitionMask);
+            inferMissingStoragePartitions(*graph, latchInfos, latchPartition, opPartitionSet);
         if (inferredRegPartitionCount > 0 || inferredLatchPartitionCount > 0)
         {
             logInfo("repcut phase-e: inferred storage partitions from read users regs=" +
@@ -3258,15 +3434,15 @@ namespace wolvrix::lib::transform
                     " latches=" + std::to_string(inferredLatchPartitionCount));
         }
 
-        assignStorageOpsToPartition(regInfos, regPartition, opPartition, opPartitionMask);
-        assignStorageOpsToPartition(latchInfos, latchPartition, opPartition, opPartitionMask);
-        assignStorageOpsToPartition(memInfos, memPartition, opPartition, opPartitionMask);
+        assignStorageOpsToPartition(regInfos, regPartition, opPartition, opPartitionSet);
+        assignStorageOpsToPartition(latchInfos, latchPartition, opPartition, opPartitionSet);
+        assignStorageOpsToPartition(memInfos, memPartition, opPartition, opPartitionSet);
         const uint64_t phaseEMapMs = msSince(phaseEMapStart);
 
         std::unordered_map<wolvrix::lib::grh::ValueId, uint32_t, wolvrix::lib::grh::ValueIdHash> valueDefPartition;
-        std::unordered_map<wolvrix::lib::grh::ValueId, PartMask, wolvrix::lib::grh::ValueIdHash> valueDefPartMask;
+        std::unordered_map<wolvrix::lib::grh::ValueId, PartitionSet, wolvrix::lib::grh::ValueIdHash> valueDefPartSet;
         valueDefPartition.reserve(graph->values().size());
-        valueDefPartMask.reserve(graph->values().size());
+        valueDefPartSet.reserve(graph->values().size());
         for (const auto &[opId, pid] : opPartition)
         {
             const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
@@ -3275,26 +3451,18 @@ namespace wolvrix::lib::transform
                 valueDefPartition.emplace(resultValue, pid);
             }
         }
-        for (const auto &[opId, partMask] : opPartitionMask)
+        for (const auto &[opId, partSet] : opPartitionSet)
         {
             const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
             for (const auto resultValue : op.results())
             {
-                valueDefPartMask[resultValue] |= partMask;
-                if (valueDefPartition.find(resultValue) == valueDefPartition.end() && partMask != 0)
+                valueDefPartSet[resultValue].merge(partSet);
+                if (valueDefPartition.find(resultValue) == valueDefPartition.end() && !partSet.empty())
                 {
-                    uint32_t firstPart = 0;
-                    bool firstSet = false;
-                    forEachPartInMask(partMask, [&](uint32_t partId) {
-                        if (!firstSet)
-                        {
-                            firstPart = partId;
-                            firstSet = true;
-                        }
-                    });
-                    if (firstSet)
+                    const std::optional<uint32_t> firstPart = partSet.first();
+                    if (firstPart)
                     {
-                        valueDefPartition.emplace(resultValue, firstPart);
+                        valueDefPartition.emplace(resultValue, *firstPart);
                     }
                 }
             }
@@ -3309,7 +3477,7 @@ namespace wolvrix::lib::transform
         forbiddenCrossSamples.reserve(kForbiddenCrossDiagLimit);
         const auto phaseECrossStart = std::chrono::steady_clock::now();
 
-        for (const auto &[value, defMask] : valueDefPartMask)
+        for (const auto &[value, defPartSet] : valueDefPartSet)
         {
             uint32_t defPart = 0;
             auto itDefPart = valueDefPartition.find(value);
@@ -3317,11 +3485,9 @@ namespace wolvrix::lib::transform
             {
                 defPart = itDefPart->second;
             }
-            else if (defMask != 0)
+            else if (const std::optional<uint32_t> firstPart = defPartSet.first(); firstPart)
             {
-                forEachPartInMask(defMask, [&](uint32_t partId) {
-                    defPart = partId;
-                });
+                defPart = *firstPart;
             }
 
             const wolvrix::lib::grh::Value val = graph->getValue(value);
@@ -3336,14 +3502,14 @@ namespace wolvrix::lib::transform
 
             for (const auto &user : val.users())
             {
-                auto itUserMask = opPartitionMask.find(user.operation);
-                if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
+                auto itUserSet = opPartitionSet.find(user.operation);
+                if (itUserSet == opPartitionSet.end() || itUserSet->second.empty())
                 {
                     continue;
                 }
-                const PartMask useMask = itUserMask->second;
-                forEachPartInMask(useMask, [&](uint32_t usePart) {
-                    if (partMaskHas(defMask, usePart))
+                const PartitionSet &useSet = itUserSet->second;
+                useSet.forEach([&](uint32_t usePart) {
+                    if (defPartSet.contains(usePart))
                     {
                         return;
                     }
@@ -3428,12 +3594,12 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::Value val = graph->getValue(valueId);
             for (const auto &user : val.users())
             {
-                auto itUserMask = opPartitionMask.find(user.operation);
-                if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
+                auto itUserSet = opPartitionSet.find(user.operation);
+                if (itUserSet == opPartitionSet.end() || itUserSet->second.empty())
                 {
                     continue;
                 }
-                forEachPartInMask(itUserMask->second, [&](uint32_t usePart) {
+                itUserSet->second.forEach([&](uint32_t usePart) {
                     auto [it, inserted] = firstInputOwner.emplace(valueId, usePart);
                     if (inserted || it->second == usePart)
                     {
@@ -3452,19 +3618,19 @@ namespace wolvrix::lib::transform
         }
 
         std::size_t partitionCount = options_.partitionCount;
-        for (const auto &[opId, partMask] : opPartitionMask)
+        for (const auto &[opId, partSet] : opPartitionSet)
         {
             (void)opId;
-            forEachPartInMask(partMask, [&](uint32_t partId) {
+            partSet.forEach([&](uint32_t partId) {
                 partitionCount = std::max(partitionCount, static_cast<std::size_t>(partId) + 1);
             });
         }
 
         std::vector<std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>>
             partitionOps(partitionCount);
-        for (const auto &[opId, partMask] : opPartitionMask)
+        for (const auto &[opId, partSet] : opPartitionSet)
         {
-            forEachPartInMask(partMask, [&](uint32_t partId) {
+            partSet.forEach([&](uint32_t partId) {
                 if (partId < partitionOps.size())
                 {
                     partitionOps[partId].insert(opId);
@@ -3603,12 +3769,12 @@ namespace wolvrix::lib::transform
                 const wolvrix::lib::grh::Value value = graph->getValue(resultValue);
                 for (const auto &user : value.users())
                 {
-                    auto itUserMask = opPartitionMask.find(user.operation);
-                    if (itUserMask == opPartitionMask.end() || itUserMask->second == 0)
+                    auto itUserSet = opPartitionSet.find(user.operation);
+                    if (itUserSet == opPartitionSet.end() || itUserSet->second.empty())
                     {
                         continue;
                     }
-                    forEachPartInMask(itUserMask->second, [&](uint32_t partId) {
+                    itUserSet->second.forEach([&](uint32_t partId) {
                         if (partId >= partitionOps.size())
                         {
                             return;
@@ -3698,25 +3864,12 @@ namespace wolvrix::lib::transform
             {
                 return std::nullopt;
             }
-            auto itMask = opPartitionMask.find(defOp);
-            if (itMask == opPartitionMask.end() || itMask->second == 0)
+            auto itSet = opPartitionSet.find(defOp);
+            if (itSet == opPartitionSet.end() || itSet->second.empty())
             {
                 return std::nullopt;
             }
-            uint32_t owner = 0;
-            bool ownerSet = false;
-            forEachPartInMask(itMask->second, [&](uint32_t partId) {
-                if (!ownerSet)
-                {
-                    owner = partId;
-                    ownerSet = true;
-                }
-            });
-            if (!ownerSet)
-            {
-                return std::nullopt;
-            }
-            return owner;
+            return itSet->second.first();
         };
 
         std::size_t partitionOpMemberships = 0;

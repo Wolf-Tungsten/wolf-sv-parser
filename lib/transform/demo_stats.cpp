@@ -33,6 +33,7 @@ namespace wolvrix::lib::transform
         std::map<int64_t, std::size_t> registerWidthCounts;
         std::map<int64_t, std::size_t> latchWidthCounts;
         std::map<int64_t, std::size_t> memoryWidthCounts;
+        std::map<int64_t, std::size_t> memoryRowCounts;
         std::map<uint64_t, std::size_t> memoryCapacityCounts;
         std::map<uint64_t, std::size_t> coneDepthCounts;
         std::map<uint64_t, std::size_t> coneSizeCounts;
@@ -322,6 +323,10 @@ namespace wolvrix::lib::transform
                         {
                             updateMax(maxMemoryWidth, widthValue, qualifyOpSymbol(graph, opId));
                         }
+                    }
+                    if (rows && *rows > 0)
+                    {
+                        ++memoryRowCounts[*rows];
                     }
                     if (width && rows && *width > 0 && *rows > 0)
                     {
@@ -799,6 +804,7 @@ namespace wolvrix::lib::transform
         appendJsonMap("register_widths", registerWidthCounts);
         appendJsonMap("latch_widths", latchWidthCounts);
         appendJsonMap("memory_widths", memoryWidthCounts);
+        appendJsonMap("memory_rows", memoryRowCounts);
         appendJsonMap("memory_capacity_bits", memoryCapacityCounts);
         appendJsonMap("writeport_cone_depths", coneDepthCounts);
         appendJsonMap("writeport_cone_sizes", coneSizeCounts);

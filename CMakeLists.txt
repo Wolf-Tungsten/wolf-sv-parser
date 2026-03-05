@@ -432,6 +432,33 @@ target_compile_definitions(transform-repcut
 
 register_test_exe(transform-repcut)
 
+add_executable(transform-repcut-partition-set
+    tests/transform/test_repcut_partition_set.cpp
+)
+
+target_link_libraries(transform-repcut-partition-set
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-repcut-partition-set)
+
+add_executable(transform-repcut-partition-count
+    tests/transform/test_repcut_partition_count.cpp
+)
+
+target_link_libraries(transform-repcut-partition-count
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(transform-repcut-partition-count
+    PRIVATE
+        WOLF_SV_TEST_ARTIFACT_DIR="${WOLF_SV_TEST_ARTIFACT_DIR}"
+)
+
+register_test_exe(transform-repcut-partition-count)
+
 # ingest: symbol collector
 add_executable(ingest-symbol-collector
     tests/ingest/test_ingest_symbol_collector.cpp
