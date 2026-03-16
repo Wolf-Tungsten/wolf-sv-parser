@@ -1155,290 +1155,69 @@ namespace wolvrix::lib::transform
 
             if (progressLogger && !data.ascs.empty())
             {
-                AscId maxAscByCombOps = 0;
-                for (AscId aid = 1; aid < data.ascs.size(); ++aid)
+                std::vector<AscId> orderedAscs;
+                orderedAscs.reserve(data.ascs.size());
+                for (AscId aid = 0; aid < data.ascs.size(); ++aid)
                 {
-                    if (data.ascs[aid].combOps.size() > data.ascs[maxAscByCombOps].combOps.size())
-                    {
-                        maxAscByCombOps = aid;
-                    }
+                    orderedAscs.push_back(aid);
                 }
+                std::sort(orderedAscs.begin(),
+                          orderedAscs.end(),
+                          [&](AscId lhs, AscId rhs) {
+                              const std::size_t lhsSize = data.ascs[lhs].combOps.size();
+                              const std::size_t rhsSize = data.ascs[rhs].combOps.size();
+                              if (lhsSize != rhsSize)
+                              {
+                                  return lhsSize > rhsSize;
+                              }
+                              return lhs < rhs;
+                          });
 
-                const AscInfo &targetAsc = data.ascs[maxAscByCombOps];
-                std::unordered_map<std::string, std::size_t> directWriteMemSymbolCounts;
-                std::unordered_map<std::string, std::size_t> coneMemSymbolSinkCounts;
-                std::unordered_map<uint32_t, std::vector<size_t>> coneMemSymbolToSinkIndices;
-                directWriteMemSymbolCounts.reserve(256);
-                coneMemSymbolSinkCounts.reserve(256);
-                coneMemSymbolToSinkIndices.reserve(256);
-                constexpr std::size_t kSinkDetailLimit = 64;
-                constexpr std::size_t kPerSinkMemSymbolLimit = 12;
-                std::vector<std::string> sinkDetails;
-                sinkDetails.reserve(std::min(kSinkDetailLimit, targetAsc.sinks.size()));
-                bool sinkDetailsTruncated = false;
-
-                MemSymbolCollectStats debugStats;
-                std::unordered_set<uint32_t> sinkMemSymbolIds;
-                sinkMemSymbolIds.reserve(32);
-                for (const size_t sinkIndex : targetAsc.sinks)
+                const std::size_t limit = std::min<std::size_t>(5, orderedAscs.size());
+                for (std::size_t rank = 0; rank < limit; ++rank)
                 {
-                    if (sinkIndex >= data.sinks.size())
+                    const AscId aid = orderedAscs[rank];
+                    const AscInfo &asc = data.ascs[aid];
+                    std::vector<std::string> opSymbols;
+                    opSymbols.reserve(asc.combOps.size());
+                    for (const NodeId node : asc.combOps)
                     {
-                        continue;
-                    }
-                    const SinkRef &sink = data.sinks[sinkIndex];
-                    if (sink.kind == SinkRef::Kind::Operation)
-                    {
-                        const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
-                        if (sinkOp.kind() == wolvrix::lib::grh::OperationKind::kMemoryWritePort)
-                        {
-                            if (auto sym = getAttrString(sinkOp, "memSymbol"))
-                            {
-                                directWriteMemSymbolCounts[*sym] += 1;
-                            }
-                        }
-                    }
-
-                    sinkMemSymbolIds.clear();
-                    collectConeMemSymbolIds(graph,
-                                            phaseA,
-                                            sink,
-                                            inoutInputValues,
-                                            memSymbolIntern,
-                                            memMemo,
-                                            sinkMemSymbolIds,
-                                            debugStats);
-                    for (const uint32_t symId : sinkMemSymbolIds)
-                    {
-                        if (symId < memSymbolIntern.idToSymbol.size())
-                        {
-                            coneMemSymbolSinkCounts[memSymbolIntern.idToSymbol[symId]] += 1;
-                            coneMemSymbolToSinkIndices[symId].push_back(sinkIndex);
-                        }
-                    }
-
-                    if (sinkDetails.size() < kSinkDetailLimit)
-                    {
-                        std::vector<std::string> coneMemSymbols;
-                        coneMemSymbols.reserve(sinkMemSymbolIds.size());
-                        for (const uint32_t symId : sinkMemSymbolIds)
-                        {
-                            if (symId < memSymbolIntern.idToSymbol.size())
-                            {
-                                coneMemSymbols.push_back(memSymbolIntern.idToSymbol[symId]);
-                            }
-                        }
-                        std::sort(coneMemSymbols.begin(), coneMemSymbols.end());
-                        coneMemSymbols.erase(std::unique(coneMemSymbols.begin(), coneMemSymbols.end()),
-                                             coneMemSymbols.end());
-
-                        std::string directMemSymbol = "-";
-                        std::string sinkRef;
-                        if (sink.kind == SinkRef::Kind::Operation)
-                        {
-                            sinkRef = formatOperationRef(graph, sink.op);
-                            const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
-                            if (auto sym = getAttrString(sinkOp, "memSymbol"))
-                            {
-                                directMemSymbol = *sym;
-                            }
-                        }
-                        else
-                        {
-                            const auto value = graph.getValue(sink.value);
-                            sinkRef = formatValueId(sink.value) + ":" + std::string(value.symbolText());
-                        }
-
-                        std::ostringstream sinkDetail;
-                        sinkDetail << "sink#" << sinkIndex
-                                   << " kind=" << (sink.kind == SinkRef::Kind::Operation ? "op" : "value")
-                                   << " ref=" << sinkRef
-                                   << " mem_symbol=" << directMemSymbol
-                                   << " cone_mem_symbols=";
-                        if (coneMemSymbols.empty())
-                        {
-                            sinkDetail << "-";
-                        }
-                        else
-                        {
-                            const std::size_t showCount = std::min(kPerSinkMemSymbolLimit, coneMemSymbols.size());
-                            for (std::size_t i = 0; i < showCount; ++i)
-                            {
-                                if (i > 0)
-                                {
-                                    sinkDetail << ",";
-                                }
-                                sinkDetail << coneMemSymbols[i];
-                            }
-                            if (coneMemSymbols.size() > showCount)
-                            {
-                                sinkDetail << ",...+" << (coneMemSymbols.size() - showCount);
-                            }
-                        }
-                        sinkDetails.push_back(sinkDetail.str());
-                    }
-                    else
-                    {
-                        sinkDetailsTruncated = true;
-                    }
-                }
-
-                auto formatTopSymbolCounts = [](const std::unordered_map<std::string, std::size_t> &counts,
-                                                std::size_t limit) -> std::string {
-                    if (counts.empty())
-                    {
-                        return "-";
-                    }
-                    std::vector<std::pair<std::string, std::size_t>> ordered;
-                    ordered.reserve(counts.size());
-                    for (const auto &entry : counts)
-                    {
-                        ordered.push_back(entry);
-                    }
-                    std::sort(ordered.begin(),
-                              ordered.end(),
-                              [](const auto &lhs, const auto &rhs) {
-                                  if (lhs.second != rhs.second)
-                                  {
-                                      return lhs.second > rhs.second;
-                                  }
-                                  return lhs.first < rhs.first;
-                              });
-
-                    std::ostringstream oss;
-                    const std::size_t n = std::min(limit, ordered.size());
-                    for (std::size_t i = 0; i < n; ++i)
-                    {
-                        if (i > 0)
-                        {
-                            oss << "; ";
-                        }
-                        oss << ordered[i].first << ":" << ordered[i].second;
-                    }
-                    return oss.str();
-                };
-
-                std::ostringstream ascDetail;
-                ascDetail << "repcut phase-b/ascs: max_asc_detail aid=" << maxAscByCombOps
-                          << " sinks=" << targetAsc.sinks.size()
-                          << " comb_ops=" << targetAsc.combOps.size()
-                          << " unique_direct_write_mem_symbols=" << directWriteMemSymbolCounts.size()
-                          << " unique_cone_mem_symbols=" << coneMemSymbolSinkCounts.size()
-                          << " top_direct_write_mem_symbols=" << formatTopSymbolCounts(directWriteMemSymbolCounts, 10)
-                          << " top_cone_mem_symbols=" << formatTopSymbolCounts(coneMemSymbolSinkCounts, 10);
-                progressLogger(ascDetail.str());
-
-                if (!coneMemSymbolToSinkIndices.empty())
-                {
-                    uint32_t topMemSymbolId = 0;
-                    std::size_t topMemSymbolHitCount = 0;
-                    std::string topMemSymbol;
-                    for (const auto &[symId, sinkIndices] : coneMemSymbolToSinkIndices)
-                    {
-                        if (symId >= memSymbolIntern.idToSymbol.size())
+                        if (node >= phaseA.nodeToOp.size())
                         {
                             continue;
                         }
-                        const std::string &symbol = memSymbolIntern.idToSymbol[symId];
-                        const std::size_t hitCount = sinkIndices.size();
-                        if (hitCount > topMemSymbolHitCount ||
-                            (hitCount == topMemSymbolHitCount && !symbol.empty() &&
-                             (topMemSymbol.empty() || symbol < topMemSymbol)))
+                        const auto opId = phaseA.nodeToOp[node];
+                        if (!opId.valid())
                         {
-                            topMemSymbolId = symId;
-                            topMemSymbolHitCount = hitCount;
-                            topMemSymbol = symbol;
+                            continue;
                         }
-                    }
-
-                    if (!topMemSymbol.empty())
-                    {
-                        std::ostringstream topMemSymbolLog;
-                        topMemSymbolLog << "repcut phase-b/ascs: max_asc_top_cone_mem_symbol aid=" << maxAscByCombOps
-                                        << " symbol=" << topMemSymbol
-                                        << " hit_sinks=" << topMemSymbolHitCount;
-                        progressLogger(topMemSymbolLog.str());
-
-                        auto formatSinkSymbol = [&](const SinkRef &sink) -> std::string {
-                            if (sink.kind == SinkRef::Kind::Operation)
-                            {
-                                const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
-                                if (auto sym = getAttrString(sinkOp, "regSymbol"))
-                                {
-                                    return *sym;
-                                }
-                                if (auto sym = getAttrString(sinkOp, "latchSymbol"))
-                                {
-                                    return *sym;
-                                }
-                                if (auto sym = getAttrString(sinkOp, "memSymbol"))
-                                {
-                                    return *sym;
-                                }
-                                return std::string(sinkOp.symbolText());
-                            }
-
-                            const auto value = graph.getValue(sink.value);
-                            return std::string(value.symbolText());
-                        };
-
-                        auto formatSinkRefText = [&](const SinkRef &sink) -> std::string {
-                            if (sink.kind == SinkRef::Kind::Operation)
-                            {
-                                return formatOperationRef(graph, sink.op);
-                            }
-                            const auto value = graph.getValue(sink.value);
-                            return formatValueId(sink.value) + ":" + std::string(value.symbolText());
-                        };
-
-                        auto topSymbolIt = coneMemSymbolToSinkIndices.find(topMemSymbolId);
-                        if (topSymbolIt != coneMemSymbolToSinkIndices.end())
+                        const auto op = graph.getOperation(opId);
+                        std::string symbol(op.symbolText());
+                        if (symbol.empty())
                         {
-                            const std::vector<size_t> &sinkIndices = topSymbolIt->second;
-                            for (std::size_t i = 0; i < sinkIndices.size(); ++i)
-                            {
-                                const size_t sinkIndex = sinkIndices[i];
-                                if (sinkIndex >= data.sinks.size())
-                                {
-                                    continue;
-                                }
-                                const SinkRef &sink = data.sinks[sinkIndex];
-                                std::ostringstream sinkBySymbolLog;
-                                sinkBySymbolLog << "repcut phase-b/ascs: max_asc_top_cone_mem_symbol_sink aid="
-                                                << maxAscByCombOps
-                                                << " symbol=" << topMemSymbol
-                                                << " hit_rank=" << (i + 1) << "/" << sinkIndices.size()
-                                                << " sink_index=" << sinkIndex
-                                                << " sink_kind="
-                                                << (sink.kind == SinkRef::Kind::Operation ? "op" : "value")
-                                                << " sink_symbol=" << formatSinkSymbol(sink)
-                                                << " sink_ref=" << formatSinkRefText(sink);
-                                progressLogger(sinkBySymbolLog.str());
-                            }
+                            symbol = formatOperationRef(graph, opId);
                         }
+                        opSymbols.push_back(std::move(symbol));
                     }
-                }
+                    std::sort(opSymbols.begin(), opSymbols.end());
 
-                std::ostringstream sinkLog;
-                sinkLog << "repcut phase-b/ascs: max_asc_sinks aid=" << maxAscByCombOps
-                        << " asc_sink_count=" << targetAsc.sinks.size()
-                        << " asc_comb_ops=" << targetAsc.combOps.size()
-                        << " shown=" << sinkDetails.size();
-                if (sinkDetailsTruncated)
-                {
-                    sinkLog << " truncated=true";
-                }
-                sinkLog << " sinks=[";
-                for (std::size_t i = 0; i < sinkDetails.size(); ++i)
-                {
-                    if (i > 0)
+                    std::ostringstream ascLog;
+                    ascLog << "repcut phase-b/ascs: top_asc rank=" << (rank + 1)
+                           << " aid=" << aid
+                           << " comb_ops=" << asc.combOps.size()
+                           << " sinks=" << asc.sinks.size()
+                           << " op_symbols=[";
+                    for (std::size_t i = 0; i < opSymbols.size(); ++i)
                     {
-                        sinkLog << " | ";
+                        if (i > 0)
+                        {
+                            ascLog << ", ";
+                        }
+                        ascLog << opSymbols[i];
                     }
-                    sinkLog << sinkDetails[i];
+                    ascLog << "]";
+                    progressLogger(ascLog.str());
                 }
-                sinkLog << "]";
-                progressLogger(sinkLog.str());
             }
 
             return data;

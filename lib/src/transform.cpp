@@ -6,6 +6,7 @@
 #include "transform/hier_flatten.hpp"
 #include "transform/hrbcut.hpp"
 #include "transform/latch_transparent_read.hpp"
+#include "transform/memory_read_retime.hpp"
 #include "transform/repcut.hpp"
 #include "transform/slice_index_const.hpp"
 #include "transform/multidriven_guard.hpp"
@@ -405,6 +406,7 @@ namespace wolvrix::lib::transform
             "blackbox-guard",
             "comb-loop-elim",
             "latch-transparent-read",
+            "memory-read-retime",
             "slice-index-const",
             "multidriven-guard",
             "hier-flatten",
@@ -815,6 +817,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<MemToRegPass>(options);
+        }
+        if (normalized == "memory-read-retime")
+        {
+            if (!args.empty())
+            {
+                error = "memory-read-retime does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<MemoryReadRetimePass>();
         }
         if (normalized == "latch-transparent-read")
         {

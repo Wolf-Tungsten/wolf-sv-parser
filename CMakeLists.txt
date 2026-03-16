@@ -90,6 +90,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/dead_code_elim.cpp
     lib/transform/simplify.cpp
     lib/transform/memory_init_check.cpp
+    lib/transform/memory_read_retime.cpp
     lib/transform/mem_to_reg.cpp
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
@@ -403,6 +404,18 @@ target_link_libraries(transform-latch-transparent-read
 )
 
 register_test_exe(transform-latch-transparent-read)
+
+# transform: memory-read-retime
+add_executable(transform-memory-read-retime
+    tests/transform/test_memory_read_retime.cpp
+)
+
+target_link_libraries(transform-memory-read-retime
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-memory-read-retime)
 
 # transform: strip-debug
 add_executable(transform-strip-debug
