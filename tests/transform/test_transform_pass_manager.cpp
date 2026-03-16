@@ -360,10 +360,73 @@ int main()
             message.message.find("\"writeport_cone_depths\":") == std::string::npos ||
             message.message.find("\"writeport_cone_sizes\":") == std::string::npos ||
             message.message.find("\"writeport_cone_fanins\":") == std::string::npos ||
+            message.message.find("\"comb_result_user_counts\":") == std::string::npos ||
             message.message.find("\"comb_op_fanout_sinks\":") == std::string::npos ||
             message.message.find("\"readport_fanout_sinks\":") == std::string::npos)
         {
             return fail("Stats pass diagnostic did not contain expected counts");
+        }
+    }
+
+    // Case 7: stats pass reports direct user distribution for combinational results
+    {
+        wolvrix::lib::grh::Design designStats;
+        wolvrix::lib::grh::Graph &graph = designStats.createGraph("g");
+
+        const auto inA = graph.createValue(graph.internSymbol("a"), 1, false);
+        const auto inB = graph.createValue(graph.internSymbol("b"), 1, false);
+        graph.bindInputPort("a", inA);
+        graph.bindInputPort("b", inB);
+
+        const auto sum = graph.createValue(graph.internSymbol("sum"), 1, false);
+        const auto add = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                               graph.internSymbol("add0"));
+        graph.addOperand(add, inA);
+        graph.addOperand(add, inB);
+        graph.addResult(add, sum);
+
+        const auto neg = graph.createValue(graph.internSymbol("neg"), 1, false);
+        const auto notOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot,
+                                                 graph.internSymbol("not0"));
+        graph.addOperand(notOp, sum);
+        graph.addResult(notOp, neg);
+        graph.bindOutputPort("y", neg);
+
+        const auto sysTask =
+            graph.createOperation(wolvrix::lib::grh::OperationKind::kSystemTask,
+                                  graph.internSymbol("display0"));
+        graph.addOperand(sysTask, sum);
+        graph.setAttr(sysTask, "name", std::string("$display"));
+
+        PassManager manager;
+        manager.options().verbosity = PassVerbosity::Info;
+        manager.addPass(std::make_unique<StatsPass>());
+
+        PassDiagnostics diags;
+        PassManagerResult result = manager.run(designStats, diags);
+        if (!result.success || diags.hasError())
+        {
+            return fail("Expected stats pass direct-user case to succeed");
+        }
+        if (diags.messages().empty())
+        {
+            return fail("Stats pass should emit a diagnostic for direct-user case");
+        }
+
+        const auto &message = diags.messages().front().message;
+        if (message.find("\"comb_result_user_counts\":{\"0\":1,\"2\":1}") ==
+                std::string::npos &&
+            message.find("\"comb_result_user_counts\":{\"2\":1,\"0\":1}") ==
+                std::string::npos)
+        {
+            return fail("Stats pass did not report expected combinational result user distribution");
+        }
+        if (message.find("\"comb_result_user_counts\":{\"max\":2,\"symbols\":[\"g::sum\"]}") ==
+                std::string::npos &&
+            message.find("\"comb_result_user_counts\":{\"max\":2,\"symbols\":[\"g::sum\",\"g::neg\"]}") ==
+                std::string::npos)
+        {
+            return fail("Stats pass did not report expected max symbol for combinational result users");
         }
     }
 

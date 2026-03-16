@@ -1167,8 +1167,10 @@ namespace wolvrix::lib::transform
                 const AscInfo &targetAsc = data.ascs[maxAscByCombOps];
                 std::unordered_map<std::string, std::size_t> directWriteMemSymbolCounts;
                 std::unordered_map<std::string, std::size_t> coneMemSymbolSinkCounts;
+                std::unordered_map<uint32_t, std::vector<size_t>> coneMemSymbolToSinkIndices;
                 directWriteMemSymbolCounts.reserve(256);
                 coneMemSymbolSinkCounts.reserve(256);
+                coneMemSymbolToSinkIndices.reserve(256);
                 constexpr std::size_t kSinkDetailLimit = 64;
                 constexpr std::size_t kPerSinkMemSymbolLimit = 12;
                 std::vector<std::string> sinkDetails;
@@ -1211,6 +1213,7 @@ namespace wolvrix::lib::transform
                         if (symId < memSymbolIntern.idToSymbol.size())
                         {
                             coneMemSymbolSinkCounts[memSymbolIntern.idToSymbol[symId]] += 1;
+                            coneMemSymbolToSinkIndices[symId].push_back(sinkIndex);
                         }
                     }
 
@@ -1324,6 +1327,97 @@ namespace wolvrix::lib::transform
                           << " top_direct_write_mem_symbols=" << formatTopSymbolCounts(directWriteMemSymbolCounts, 10)
                           << " top_cone_mem_symbols=" << formatTopSymbolCounts(coneMemSymbolSinkCounts, 10);
                 progressLogger(ascDetail.str());
+
+                if (!coneMemSymbolToSinkIndices.empty())
+                {
+                    uint32_t topMemSymbolId = 0;
+                    std::size_t topMemSymbolHitCount = 0;
+                    std::string topMemSymbol;
+                    for (const auto &[symId, sinkIndices] : coneMemSymbolToSinkIndices)
+                    {
+                        if (symId >= memSymbolIntern.idToSymbol.size())
+                        {
+                            continue;
+                        }
+                        const std::string &symbol = memSymbolIntern.idToSymbol[symId];
+                        const std::size_t hitCount = sinkIndices.size();
+                        if (hitCount > topMemSymbolHitCount ||
+                            (hitCount == topMemSymbolHitCount && !symbol.empty() &&
+                             (topMemSymbol.empty() || symbol < topMemSymbol)))
+                        {
+                            topMemSymbolId = symId;
+                            topMemSymbolHitCount = hitCount;
+                            topMemSymbol = symbol;
+                        }
+                    }
+
+                    if (!topMemSymbol.empty())
+                    {
+                        std::ostringstream topMemSymbolLog;
+                        topMemSymbolLog << "repcut phase-b/ascs: max_asc_top_cone_mem_symbol aid=" << maxAscByCombOps
+                                        << " symbol=" << topMemSymbol
+                                        << " hit_sinks=" << topMemSymbolHitCount;
+                        progressLogger(topMemSymbolLog.str());
+
+                        auto formatSinkSymbol = [&](const SinkRef &sink) -> std::string {
+                            if (sink.kind == SinkRef::Kind::Operation)
+                            {
+                                const wolvrix::lib::grh::Operation sinkOp = graph.getOperation(sink.op);
+                                if (auto sym = getAttrString(sinkOp, "regSymbol"))
+                                {
+                                    return *sym;
+                                }
+                                if (auto sym = getAttrString(sinkOp, "latchSymbol"))
+                                {
+                                    return *sym;
+                                }
+                                if (auto sym = getAttrString(sinkOp, "memSymbol"))
+                                {
+                                    return *sym;
+                                }
+                                return std::string(sinkOp.symbolText());
+                            }
+
+                            const auto value = graph.getValue(sink.value);
+                            return std::string(value.symbolText());
+                        };
+
+                        auto formatSinkRefText = [&](const SinkRef &sink) -> std::string {
+                            if (sink.kind == SinkRef::Kind::Operation)
+                            {
+                                return formatOperationRef(graph, sink.op);
+                            }
+                            const auto value = graph.getValue(sink.value);
+                            return formatValueId(sink.value) + ":" + std::string(value.symbolText());
+                        };
+
+                        auto topSymbolIt = coneMemSymbolToSinkIndices.find(topMemSymbolId);
+                        if (topSymbolIt != coneMemSymbolToSinkIndices.end())
+                        {
+                            const std::vector<size_t> &sinkIndices = topSymbolIt->second;
+                            for (std::size_t i = 0; i < sinkIndices.size(); ++i)
+                            {
+                                const size_t sinkIndex = sinkIndices[i];
+                                if (sinkIndex >= data.sinks.size())
+                                {
+                                    continue;
+                                }
+                                const SinkRef &sink = data.sinks[sinkIndex];
+                                std::ostringstream sinkBySymbolLog;
+                                sinkBySymbolLog << "repcut phase-b/ascs: max_asc_top_cone_mem_symbol_sink aid="
+                                                << maxAscByCombOps
+                                                << " symbol=" << topMemSymbol
+                                                << " hit_rank=" << (i + 1) << "/" << sinkIndices.size()
+                                                << " sink_index=" << sinkIndex
+                                                << " sink_kind="
+                                                << (sink.kind == SinkRef::Kind::Operation ? "op" : "value")
+                                                << " sink_symbol=" << formatSinkSymbol(sink)
+                                                << " sink_ref=" << formatSinkRefText(sink);
+                                progressLogger(sinkBySymbolLog.str());
+                            }
+                        }
+                    }
+                }
 
                 std::ostringstream sinkLog;
                 sinkLog << "repcut phase-b/ascs: max_asc_sinks aid=" << maxAscByCombOps

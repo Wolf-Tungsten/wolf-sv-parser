@@ -10,6 +10,7 @@
 #include "transform/slice_index_const.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/memory_init_check.hpp"
+#include "transform/mem_to_reg.hpp"
 #include "transform/simplify.hpp"
 #include "transform/xmr_resolve.hpp"
 #include "transform/strip_debug.hpp"
@@ -409,6 +410,7 @@ namespace wolvrix::lib::transform
             "hier-flatten",
             "xmr-resolve",
             "memory-init-check",
+            "mem-to-reg",
             "simplify",
             "stats",
             "strip-debug",
@@ -757,6 +759,62 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<MemoryInitCheckPass>();
+        }
+        if (normalized == "mem-to-reg")
+        {
+            MemToRegOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-row-limit")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-row-limit expects a value";
+                        return nullptr;
+                    }
+                    try
+                    {
+                        options.rowLimit = std::stoll(std::string(args[++i]));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -row-limit value";
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-row-limit="))
+                {
+                    try
+                    {
+                        options.rowLimit = std::stoll(std::string(arg.substr(std::string_view("-row-limit=").size())));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -row-limit value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-strict-init")
+                {
+                    options.strictInit = true;
+                }
+                else if (arg == "-no-strict-init")
+                {
+                    options.strictInit = false;
+                }
+                else
+                {
+                    error = "unknown mem-to-reg option";
+                    return nullptr;
+                }
+            }
+            if (options.rowLimit <= 0)
+            {
+                error = "-row-limit must be > 0";
+                return nullptr;
+            }
+            return std::make_unique<MemToRegPass>(options);
         }
         if (normalized == "latch-transparent-read")
         {

@@ -38,6 +38,7 @@ namespace wolvrix::lib::transform
         std::map<uint64_t, std::size_t> coneDepthCounts;
         std::map<uint64_t, std::size_t> coneSizeCounts;
         std::map<uint64_t, std::size_t> coneFaninCounts;
+        std::map<uint64_t, std::size_t> combResultUserCounts;
         std::map<uint64_t, std::size_t> combFanoutStatefulCounts;
         struct MaxSymbolEntry
         {
@@ -53,6 +54,7 @@ namespace wolvrix::lib::transform
         MaxSymbolEntry maxWriteportConeDepth;
         MaxSymbolEntry maxWriteportConeSize;
         MaxSymbolEntry maxWriteportConeFanin;
+        MaxSymbolEntry maxCombResultUsers;
         MaxSymbolEntry maxCombFanout;
         MaxSymbolEntry maxReadportFanout;
         auto getIntAttr = [](std::span<const wolvrix::lib::grh::AttrKV> attrs,
@@ -391,6 +393,18 @@ namespace wolvrix::lib::transform
                 if (isCombinationalOp(kind))
                 {
                     combFanoutTasks.push_back({&ctx, opId});
+                    for (const auto resultId : graph->opResults(opId))
+                    {
+                        if (!resultId.valid())
+                        {
+                            continue;
+                        }
+                        const uint64_t userCount =
+                            static_cast<uint64_t>(graph->getValue(resultId).users().size());
+                        ++combResultUserCounts[userCount];
+                        updateMax(maxCombResultUsers, userCount,
+                                  qualifyValueSymbol(graph, resultId));
+                    }
                 }
                 switch (kind)
                 {
@@ -809,6 +823,7 @@ namespace wolvrix::lib::transform
         appendJsonMap("writeport_cone_depths", coneDepthCounts);
         appendJsonMap("writeport_cone_sizes", coneSizeCounts);
         appendJsonMap("writeport_cone_fanins", coneFaninCounts);
+        appendJsonMap("comb_result_user_counts", combResultUserCounts);
         appendJsonMap("comb_op_fanout_sinks", combFanoutStatefulCounts);
         appendJsonMap("readport_fanout_sinks", readportFanoutCounts);
         if (!firstField)
@@ -825,6 +840,7 @@ namespace wolvrix::lib::transform
         appendMaxSymbolEntry("writeport_cone_depths", maxWriteportConeDepth, firstMax);
         appendMaxSymbolEntry("writeport_cone_sizes", maxWriteportConeSize, firstMax);
         appendMaxSymbolEntry("writeport_cone_fanins", maxWriteportConeFanin, firstMax);
+        appendMaxSymbolEntry("comb_result_user_counts", maxCombResultUsers, firstMax);
         appendMaxSymbolEntry("comb_op_fanout_sinks", maxCombFanout, firstMax);
         appendMaxSymbolEntry("readport_fanout_sinks", maxReadportFanout, firstMax);
         oss << "}";

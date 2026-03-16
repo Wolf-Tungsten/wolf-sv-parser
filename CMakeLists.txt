@@ -90,6 +90,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/dead_code_elim.cpp
     lib/transform/simplify.cpp
     lib/transform/memory_init_check.cpp
+    lib/transform/mem_to_reg.cpp
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
     lib/transform/comb_loop_elim.cpp
