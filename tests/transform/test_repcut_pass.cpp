@@ -40,6 +40,20 @@ namespace
         return op;
     }
 
+    const std::string *findRepcutStatsDiagnostic(const PassDiagnostics &diags)
+    {
+        for (const auto &diag : diags.messages())
+        {
+            if (diag.passName == "repcut" &&
+                diag.kind == PassDiagnosticKind::Info &&
+                diag.message.find("\"pass\":\"repcut\"") != std::string::npos)
+            {
+                return &diag.message;
+            }
+        }
+        return nullptr;
+    }
+
 } // namespace
 
 int main()
@@ -271,6 +285,48 @@ int main()
     if (readOnlyDesign.findGraph("top_read_only_reg") == nullptr)
     {
         return fail("read-only register top graph missing after repcut");
+    }
+
+    const std::string *roStats = findRepcutStatsDiagnostic(roDiags);
+    if (roStats == nullptr)
+    {
+        return fail("read-only register repcut missing stats artifact");
+    }
+    if (roStats->find("\"weight_partition_stats\":{") == std::string::npos)
+    {
+        return fail("read-only register repcut missing weight_partition_stats");
+    }
+    if (roStats->find("\"original_total_weight\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing original_total_weight");
+    }
+    if (roStats->find("\"max_partition_weight\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing max_partition_weight");
+    }
+    if (roStats->find("\"avg_partition_weight\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing avg_partition_weight");
+    }
+    if (roStats->find("\"original_over_max_weight_ratio\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing original_over_max_weight_ratio");
+    }
+    if (roStats->find("\"original_over_avg_weight_ratio\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing original_over_avg_weight_ratio");
+    }
+    if (roStats->find("\"max_partition_weight_fraction_of_original\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing max_partition_weight_fraction_of_original");
+    }
+    if (roStats->find("\"avg_partition_weight_fraction_of_original\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing avg_partition_weight_fraction_of_original");
+    }
+    if (roStats->find("\"weight\":") == std::string::npos)
+    {
+        return fail("read-only register repcut missing per-partition weight entries");
     }
 
     return 0;

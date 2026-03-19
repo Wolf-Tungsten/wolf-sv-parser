@@ -4579,6 +4579,39 @@ namespace wolvrix::lib::transform
             std::filesystem::remove(partitionPath, cleanupError);
         }
 
+        std::vector<std::size_t> partitionWeights(partInfos.size(), 0);
+        for (AscId aid = 0; aid < hg.nodeWeights.size(); ++aid)
+        {
+            const uint32_t partId = (aid < ascPartition.size()) ? ascPartition[aid] : 0u;
+            if (partId >= partitionWeights.size())
+            {
+                partitionWeights.resize(static_cast<std::size_t>(partId) + 1u, 0);
+            }
+            partitionWeights[partId] += static_cast<std::size_t>(hg.nodeWeights[aid]);
+        }
+
+        std::size_t partitionWeightSum = 0;
+        std::size_t partitionWeightMax = 0;
+        std::size_t weightedPartitionCount = 0;
+        for (const std::size_t partWeight : partitionWeights)
+        {
+            partitionWeightSum += partWeight;
+            partitionWeightMax = std::max(partitionWeightMax, partWeight);
+            weightedPartitionCount += 1;
+        }
+        const double partitionWeightAvg =
+            (weightedPartitionCount == 0)
+                ? 0.0
+                : static_cast<double>(partitionWeightSum) / static_cast<double>(weightedPartitionCount);
+        const double originalOverMaxWeightRatio =
+            (partitionWeightMax == 0) ? 0.0 : static_cast<double>(partitionWeightSum) / static_cast<double>(partitionWeightMax);
+        const double originalOverAvgWeightRatio =
+            (partitionWeightAvg <= 0.0) ? 0.0 : static_cast<double>(partitionWeightSum) / partitionWeightAvg;
+        const double maxWeightFractionOfOriginal =
+            (partitionWeightSum == 0) ? 0.0 : static_cast<double>(partitionWeightMax) / static_cast<double>(partitionWeightSum);
+        const double avgWeightFractionOfOriginal =
+            (partitionWeightSum == 0) ? 0.0 : partitionWeightAvg / static_cast<double>(partitionWeightSum);
+
         std::ostringstream stats;
         std::size_t partitionOpsSum = 0;
         std::size_t partitionOpsMax = 0;
@@ -4644,6 +4677,17 @@ namespace wolvrix::lib::transform
               << ",\"partition_ops_delta\":" << partitionOpsDelta
               << ",\"original_over_max_ops_ratio\":" << toFixedString(origOverMaxOpsRatio, 6)
               << ",\"original_over_avg_ops_ratio\":" << toFixedString(origOverAvgOpsRatio, 6)
+              << "}"
+              << ",\"weight_partition_stats\":{"
+              << "\"original_total_weight\":" << partitionWeightSum
+              << ",\"partition_count\":" << weightedPartitionCount
+              << ",\"max_partition_weight\":" << partitionWeightMax
+              << ",\"avg_partition_weight\":" << toFixedString(partitionWeightAvg, 6)
+              << ",\"partition_weight_sum\":" << partitionWeightSum
+              << ",\"original_over_max_weight_ratio\":" << toFixedString(originalOverMaxWeightRatio, 6)
+              << ",\"original_over_avg_weight_ratio\":" << toFixedString(originalOverAvgWeightRatio, 6)
+              << ",\"max_partition_weight_fraction_of_original\":" << toFixedString(maxWeightFractionOfOriginal, 6)
+              << ",\"avg_partition_weight_fraction_of_original\":" << toFixedString(avgWeightFractionOfOriginal, 6)
               << "}";
         appendGraphStatsJson(
             stats,
@@ -4669,6 +4713,7 @@ namespace wolvrix::lib::transform
             stats << "{"
                   << "\"index\":" << i
                   << ",\"graph\":\"" << escapeJson(part.graph->symbol()) << "\""
+                  << ",\"weight\":" << (i < partitionWeights.size() ? partitionWeights[i] : 0u)
                   << ",\"ops\":" << part.graph->operations().size()
                   << ",\"values\":" << part.graph->values().size()
                   << ",\"inputs\":" << part.graph->inputPorts().size()
