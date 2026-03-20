@@ -3427,6 +3427,7 @@ namespace wolvrix::lib::emit
 
             auto bindOutputPort = [&](const std::string &portName, wolvrix::lib::grh::ValueId valueId)
             {
+                const std::string valueSymbol = valueName(valueId);
                 const std::string rhsExpr = valueExpr(valueId);
                 if (storageBackedPorts.find(portName) != storageBackedPorts.end())
                 {
@@ -3435,6 +3436,12 @@ namespace wolvrix::lib::emit
                 if (rhsExpr.empty() || portName == rhsExpr)
                 {
                     return;
+                }
+                // If output RHS is the direct value symbol, ensure it is declared even
+                // when that value is also tagged as a port value in GRH.
+                if (!valueSymbol.empty() && rhsExpr == valueSymbol)
+                {
+                    ensureWireDecl(valueId);
                 }
                 portBindingStmts.emplace_back(
                     "assign " + portName + " = " + rhsExpr + ";", wolvrix::lib::grh::OperationId::invalid());
