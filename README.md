@@ -54,8 +54,11 @@ changed, _pass_diags = wolvrix.run_pipeline(
 
 design.write_json("out.json")
 design.write_sv("out.sv")
+design.write_sv("out/top_a", top=["top_a"], split_modules=True)
 PY
 ```
+
+`write_sv` now emits only the modules reachable from the selected tops. If `top` is omitted it starts from `design.topGraphs()`. With `split_modules=False` the `output` argument is a single `.sv` file path; with `split_modules=True` it is an output directory and each reachable module is written to `<module_name>.sv`.
 
 ### Log vs diagnostics
 

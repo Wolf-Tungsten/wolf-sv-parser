@@ -481,18 +481,88 @@ namespace wolvrix::lib::emit
             return bits;
         }
 
-        std::vector<const wolvrix::lib::grh::Graph *> graphsSortedByName(const wolvrix::lib::grh::Design &design)
+        std::vector<const wolvrix::lib::grh::Graph *> graphsInDesignOrder(
+            const wolvrix::lib::grh::Design &design,
+            const std::unordered_set<std::string> &graphSymbols)
         {
             std::vector<const wolvrix::lib::grh::Graph *> graphs;
-            graphs.reserve(design.graphs().size());
+            graphs.reserve(graphSymbols.size());
             for (const auto &symbol : design.graphOrder())
             {
+                if (!graphSymbols.contains(symbol))
+                {
+                    continue;
+                }
                 if (auto it = design.graphs().find(symbol); it != design.graphs().end())
                 {
                     graphs.push_back(it->second.get());
                 }
             }
             return graphs;
+        }
+
+        std::vector<const wolvrix::lib::grh::Graph *> reachableGraphsFromTops(
+            const wolvrix::lib::grh::Design &design,
+            std::span<const wolvrix::lib::grh::Graph *const> topGraphs)
+        {
+            std::unordered_set<std::string> reachableSymbols;
+            std::vector<const wolvrix::lib::grh::Graph *> worklist;
+            worklist.reserve(topGraphs.size());
+
+            for (const wolvrix::lib::grh::Graph *graph : topGraphs)
+            {
+                if (graph == nullptr)
+                {
+                    continue;
+                }
+                if (reachableSymbols.insert(graph->symbol()).second)
+                {
+                    worklist.push_back(graph);
+                }
+            }
+
+            for (std::size_t index = 0; index < worklist.size(); ++index)
+            {
+                const wolvrix::lib::grh::Graph *graph = worklist[index];
+                if (graph == nullptr)
+                {
+                    continue;
+                }
+
+                for (const auto opId : graph->operations())
+                {
+                    if (graph->opKind(opId) != wolvrix::lib::grh::OperationKind::kInstance)
+                    {
+                        continue;
+                    }
+
+                    const auto op = graph->getOperation(opId);
+                    const auto moduleAttr = op.attr("moduleName");
+                    if (!moduleAttr)
+                    {
+                        continue;
+                    }
+
+                    const auto *moduleName = std::get_if<std::string>(&*moduleAttr);
+                    if (moduleName == nullptr || moduleName->empty())
+                    {
+                        continue;
+                    }
+
+                    const wolvrix::lib::grh::Graph *targetGraph = design.findGraph(*moduleName);
+                    if (targetGraph == nullptr)
+                    {
+                        continue;
+                    }
+
+                    if (reachableSymbols.insert(targetGraph->symbol()).second)
+                    {
+                        worklist.push_back(targetGraph);
+                    }
+                }
+            }
+
+            return graphsInDesignOrder(design, reachableSymbols);
         }
 
         std::string formatSrcAttribute(const std::optional<wolvrix::lib::grh::SrcLoc> &srcLoc)
@@ -1272,7 +1342,6 @@ namespace wolvrix::lib::emit
                                            const EmitOptions &options)
     {
         EmitResult result;
-        (void)topGraphs;
 
         // Index DPI imports across the design for later resolution.
         struct DpiImportRef
@@ -1298,15 +1367,18 @@ namespace wolvrix::lib::emit
             }
         }
 
+        const std::vector<const wolvrix::lib::grh::Graph *> emittedGraphs =
+            reachableGraphsFromTops(design, topGraphs);
+
         std::unordered_map<std::string, std::string> emittedModuleNames;
         std::unordered_set<std::string> usedModuleNames;
-        for (const auto &graphSymbol : design.graphOrder())
+        for (const wolvrix::lib::grh::Graph *graph : emittedGraphs)
         {
-            const wolvrix::lib::grh::Graph *graph = design.findGraph(graphSymbol);
             if (!graph)
             {
                 continue;
             }
+            const std::string &graphSymbol = graph->symbol();
             std::string emittedName = graphSymbol;
             auto aliases = design.aliasesForGraph(graphSymbol);
             for (const auto &alias : aliases)
@@ -1321,24 +1393,8 @@ namespace wolvrix::lib::emit
             emittedModuleNames.emplace(graphSymbol, std::move(emittedName));
         }
 
-        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
-        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
-        auto stream = openOutputFile(outputPath);
-        if (!stream)
+        auto emitGraph = [&](const wolvrix::lib::grh::Graph *graph, std::ostream &out)
         {
-            result.success = false;
-            return result;
-        }
-        std::ostream &out = *stream;
-        bool firstModule = true;
-        for (const wolvrix::lib::grh::Graph *graph : graphsSortedByName(design))
-        {
-            if (!firstModule)
-            {
-                out << '\n';
-            }
-            firstModule = false;
-
             validateGraphSymbols(*graph);
 
             const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
@@ -5878,7 +5934,60 @@ namespace wolvrix::lib::emit
             }
 
             out << "endmodule\n";
+        };
+
+        if (options.splitModules)
+        {
+            const std::filesystem::path outputDir = resolveOutputDir(options);
+            for (const wolvrix::lib::grh::Graph *graph : emittedGraphs)
+            {
+                if (!graph)
+                {
+                    continue;
+                }
+
+                const auto moduleNameIt = emittedModuleNames.find(graph->symbol());
+                const std::string &moduleName =
+                    moduleNameIt != emittedModuleNames.end() ? moduleNameIt->second : graph->symbol();
+                const std::filesystem::path outputPath = outputDir / (moduleName + ".sv");
+                auto stream = openOutputFile(outputPath);
+                if (!stream)
+                {
+                    result.success = false;
+                    return result;
+                }
+
+                emitGraph(graph, *stream);
+                result.artifacts.push_back(outputPath.string());
+            }
+            return result;
         }
+
+        const std::string filename = options.outputFilename.value_or(std::string("grh.sv"));
+        const std::filesystem::path outputPath = resolveOutputDir(options) / filename;
+        auto stream = openOutputFile(outputPath);
+        if (!stream)
+        {
+            result.success = false;
+            return result;
+        }
+
+        std::ostream &out = *stream;
+        bool firstModule = true;
+        for (const wolvrix::lib::grh::Graph *graph : emittedGraphs)
+        {
+            if (!graph)
+            {
+                continue;
+            }
+            if (!firstModule)
+            {
+                out << '\n';
+            }
+            firstModule = false;
+            emitGraph(graph, out);
+        }
+
         result.artifacts.push_back(outputPath.string());
         return result;
     }

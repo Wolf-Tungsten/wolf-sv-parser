@@ -1122,9 +1122,10 @@ namespace
         PyObject *design_obj = nullptr;
         const char *output = nullptr;
         PyObject *top_list_obj = Py_None;
-        static const char *kwlist[] = {"design", "output", "top", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|O", const_cast<char **>(kwlist),
-                                         &design_obj, &output, &top_list_obj))
+        int split_modules = 0;
+        static const char *kwlist[] = {"design", "output", "top", "split_modules", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|Op", const_cast<char **>(kwlist),
+                                         &design_obj, &output, &top_list_obj, &split_modules))
         {
             return nullptr;
         }
@@ -1145,11 +1146,32 @@ namespace
         wolvrix::lib::emit::EmitDiagnostics diagnostics;
         wolvrix::lib::emit::EmitSystemVerilog emitter(&diagnostics);
         wolvrix::lib::emit::EmitOptions options;
+        options.splitModules = split_modules != 0;
         std::filesystem::path out_path(output);
-        options.outputFilename = out_path.filename().string();
-        if (!out_path.parent_path().empty())
+        if (options.splitModules)
         {
-            options.outputDir = out_path.parent_path().string();
+            if (out_path.has_extension() && out_path.extension() == ".sv")
+            {
+                PyErr_SetString(PyExc_ValueError,
+                                "write_sv(..., split_modules=True) expects an output directory, not a .sv file path");
+                return nullptr;
+            }
+            options.outputDir = out_path.string();
+        }
+        else
+        {
+            const auto filename = out_path.filename().string();
+            if (filename.empty())
+            {
+                PyErr_SetString(PyExc_ValueError,
+                                "write_sv(..., split_modules=False) expects an output file path");
+                return nullptr;
+            }
+            options.outputFilename = filename;
+            if (!out_path.parent_path().empty())
+            {
+                options.outputDir = out_path.parent_path().string();
+            }
         }
         options.topOverrides = std::move(top_names);
 
@@ -1422,7 +1444,7 @@ static PyMethodDef WolvrixMethods[] = {
     {"store_json_string", reinterpret_cast<PyCFunction>(py_store_json_string), METH_VARARGS | METH_KEYWORDS,
      "store_json_string(design, mode='pretty-compact', top=None) -> str"},
     {"write_sv", reinterpret_cast<PyCFunction>(py_write_sv), METH_VARARGS | METH_KEYWORDS,
-     "write_sv(design, output, top=None)"},
+     "write_sv(design, output, top=None, split_modules=False)"},
     {"run_pass", reinterpret_cast<PyCFunction>(py_run_pass), METH_VARARGS | METH_KEYWORDS,
      "run_pass(design, name, args=None, dryrun=False, diagnostics='warn', log_level='warn') -> (changed, ok, diagnostics)"},
     {"run_pipeline", reinterpret_cast<PyCFunction>(py_run_pipeline), METH_VARARGS | METH_KEYWORDS,

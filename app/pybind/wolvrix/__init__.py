@@ -64,8 +64,13 @@ class Design:
             _raise_with_diagnostics(diag)
         return bool(changed), list(diag)
 
-    def write_sv(self, output: str, top: list[str] | None = None) -> None:
-        _native.write_sv(self._capsule, output, top or [])
+    def write_sv(
+        self,
+        output: str,
+        top: list[str] | None = None,
+        split_modules: bool = False,
+    ) -> None:
+        _native.write_sv(self._capsule, output, top or [], split_modules)
 
     def to_json(self, mode: str = "pretty-compact", top: list[str] | None = None) -> str:
         return _native.store_json_string(self._capsule, mode, top or [])

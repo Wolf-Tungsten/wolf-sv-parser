@@ -327,6 +327,22 @@ target_compile_definitions(emit-sv-storage-ports
 
 register_test_exe(emit-sv-storage-ports)
 
+add_executable(emit-sv-top-reachable
+    tests/emit/test_emit_sv_top_reachable.cpp
+)
+
+target_link_libraries(emit-sv-top-reachable
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(emit-sv-top-reachable
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-sv-top-reachable)
+
 # transform tests
 add_executable(transform-pass-manager
     tests/transform/test_transform_pass_manager.cpp

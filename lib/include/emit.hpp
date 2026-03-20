@@ -38,6 +38,7 @@ namespace wolvrix::lib::emit
         std::vector<std::string> topOverrides;
         std::map<std::string, std::string, std::less<>> attributes;
         bool traceUnderscoreValues = false;
+        bool splitModules = false;
     };
 
     struct EmitResult
