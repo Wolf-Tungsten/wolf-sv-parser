@@ -1,6 +1,6 @@
 #include "transform/memory_read_retime.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include "slang/numeric/SVInt.h"
 

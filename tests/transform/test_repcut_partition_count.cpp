@@ -1,5 +1,5 @@
-#include "grh.hpp"
-#include "transform.hpp"
+#include "core/grh.hpp"
+#include "core/transform.hpp"
 #include "transform/repcut.hpp"
 
 #include <cstdint>

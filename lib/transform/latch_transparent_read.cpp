@@ -1,6 +1,6 @@
 #include "transform/latch_transparent_read.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <optional>
 #include <string>

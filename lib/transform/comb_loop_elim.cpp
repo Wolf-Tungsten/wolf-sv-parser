@@ -1,6 +1,6 @@
 #include "transform/comb_loop_elim.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <algorithm>
 #include <cctype>

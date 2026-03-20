@@ -1,6 +1,6 @@
-#include "grh.hpp"
+#include "core/grh.hpp"
 #include "transform/simplify.hpp"
-#include "transform.hpp"
+#include "core/transform.hpp"
 
 #include "slang/numeric/SVInt.h"
 

@@ -1,6 +1,6 @@
-#include "grh.hpp"
+#include "core/grh.hpp"
 #include "transform/strip_debug.hpp"
-#include "transform.hpp"
+#include "core/transform.hpp"
 
 #include <iostream>
 #include <optional>

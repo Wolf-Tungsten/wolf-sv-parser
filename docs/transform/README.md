@@ -61,7 +61,7 @@ wolvrix \
 ### C++ API 使用
 
 ```cpp
-#include "transform.hpp"
+#include "core/transform.hpp"
 #include "transform/simplify.hpp"
 
 using namespace wolvrix::lib::transform;

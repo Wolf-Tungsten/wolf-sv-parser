@@ -77,13 +77,14 @@ endif()
 
 # Libraries
 set(WOLVRIX_LIB_SOURCES
-    lib/src/diagnostics.cpp
-    lib/src/grh.cpp
-    lib/src/load.cpp
-    lib/src/emit.cpp
-    lib/src/store.cpp
-    lib/src/ingest.cpp
-    lib/src/transform.cpp
+    lib/core/diagnostics.cpp
+    lib/core/grh.cpp
+    lib/core/load.cpp
+    lib/core/emit.cpp
+    lib/emit/system_verilog.cpp
+    lib/core/store.cpp
+    lib/core/ingest.cpp
+    lib/core/transform.cpp
     lib/transform/demo_stats.cpp
     lib/transform/const_fold.cpp
     lib/transform/redundant_elim.cpp
@@ -109,7 +110,7 @@ add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
 
 target_include_directories(wolvrix-lib
     PUBLIC
-        lib/include
+        include
 )
 
 target_link_libraries(wolvrix-lib

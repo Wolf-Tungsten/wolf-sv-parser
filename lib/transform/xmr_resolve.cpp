@@ -1,6 +1,6 @@
 #include "transform/xmr_resolve.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <algorithm>
 #include <cctype>

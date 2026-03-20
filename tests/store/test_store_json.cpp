@@ -1,5 +1,5 @@
-#include "store.hpp"
-#include "grh.hpp"
+#include "core/store.hpp"
+#include "core/grh.hpp"
 
 #include <filesystem>
 #include <fstream>

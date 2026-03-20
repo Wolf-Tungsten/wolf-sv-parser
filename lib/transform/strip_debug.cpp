@@ -1,6 +1,6 @@
 #include "transform/strip_debug.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <algorithm>
 #include <cstdint>

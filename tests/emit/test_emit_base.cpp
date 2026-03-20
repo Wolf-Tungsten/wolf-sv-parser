@@ -1,5 +1,5 @@
-#include "emit.hpp"
-#include "grh.hpp"
+#include "core/emit.hpp"
+#include "core/grh.hpp"
 
 #include <filesystem>
 #include <fstream>

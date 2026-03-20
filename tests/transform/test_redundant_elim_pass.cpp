@@ -1,6 +1,6 @@
-#include "grh.hpp"
+#include "core/grh.hpp"
 #include "transform/redundant_elim.hpp"
-#include "transform.hpp"
+#include "core/transform.hpp"
 
 #include <iostream>
 #include <string>

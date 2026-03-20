@@ -1,6 +1,6 @@
 #include "transform/demo_stats.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <algorithm>
 #include <atomic>

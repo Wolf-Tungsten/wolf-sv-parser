@@ -1,5 +1,5 @@
-#include "grh.hpp"
-#include "transform.hpp"
+#include "core/grh.hpp"
+#include "core/transform.hpp"
 #include "transform/xmr_resolve.hpp"
 
 #include <iostream>

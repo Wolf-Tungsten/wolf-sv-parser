@@ -1,11 +1,11 @@
 #include <Python.h>
 
-#include "emit.hpp"
-#include "grh.hpp"
-#include "ingest.hpp"
-#include "logging.hpp"
-#include "store.hpp"
-#include "transform.hpp"
+#include "emit/system_verilog.hpp"
+#include "core/grh.hpp"
+#include "core/ingest.hpp"
+#include "core/logging.hpp"
+#include "core/store.hpp"
+#include "core/transform.hpp"
 
 #include "slang/analysis/AnalysisManager.h"
 #include "slang/ast/Compilation.h"

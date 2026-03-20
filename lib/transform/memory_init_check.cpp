@@ -1,6 +1,6 @@
 #include "transform/memory_init_check.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <optional>
 #include <string>

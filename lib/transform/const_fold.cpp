@@ -1,6 +1,6 @@
 #include "transform/const_fold.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include "slang/numeric/SVInt.h"
 

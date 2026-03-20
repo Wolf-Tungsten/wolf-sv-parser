@@ -1,6 +1,6 @@
 #include "transform/hier_flatten.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <functional>
 #include <optional>

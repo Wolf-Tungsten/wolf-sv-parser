@@ -1,6 +1,6 @@
 #include "transform/dead_code_elim.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <algorithm>
 #include <deque>

@@ -1,6 +1,6 @@
 #include "transform/slice_index_const.hpp"
 
-#include "grh.hpp"
+#include "core/grh.hpp"
 
 #include <cctype>
 #include <limits>
