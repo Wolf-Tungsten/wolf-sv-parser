@@ -353,6 +353,110 @@ namespace wolvrix::lib::transform
             return candidate;
         }
 
+        std::vector<std::string> splitPath(std::string_view path)
+        {
+            std::vector<std::string> out;
+            std::string current;
+            for (const char ch : path)
+            {
+                if (ch == '.')
+                {
+                    if (!current.empty())
+                    {
+                        out.push_back(current);
+                        current.clear();
+                    }
+                    continue;
+                }
+                current.push_back(ch);
+            }
+            if (!current.empty())
+            {
+                out.push_back(current);
+            }
+            return out;
+        }
+
+        wolvrix::lib::grh::OperationId findUniqueInstance(const wolvrix::lib::grh::Graph &graph,
+                                                          std::string_view instanceName)
+        {
+            wolvrix::lib::grh::OperationId found = wolvrix::lib::grh::OperationId::invalid();
+            for (const auto opId : graph.operations())
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const auto op = graph.getOperation(opId);
+                if (op.kind() != wolvrix::lib::grh::OperationKind::kInstance)
+                {
+                    continue;
+                }
+                const auto name = getAttrString(op, "instanceName");
+                if (!name || *name != instanceName)
+                {
+                    continue;
+                }
+                if (found.valid())
+                {
+                    return wolvrix::lib::grh::OperationId::invalid();
+                }
+                found = opId;
+            }
+            return found;
+        }
+
+        std::optional<std::string> resolveTargetGraphName(wolvrix::lib::grh::Design &design,
+                                                          std::string_view path,
+                                                          std::string &error)
+        {
+            const std::vector<std::string> segments = splitPath(path);
+            if (segments.empty())
+            {
+                error = "repcut path must not be empty";
+                return std::nullopt;
+            }
+            if (segments.size() == 1)
+            {
+                if (design.findGraph(segments.front()) == nullptr)
+                {
+                    error = "repcut graph not found: " + segments.front();
+                    return std::nullopt;
+                }
+                return segments.front();
+            }
+
+            auto *current = design.findGraph(segments.front());
+            if (current == nullptr)
+            {
+                error = "repcut root graph not found: " + segments.front();
+                return std::nullopt;
+            }
+            for (std::size_t i = 1; i < segments.size(); ++i)
+            {
+                const auto instOp = findUniqueInstance(*current, segments[i]);
+                if (!instOp.valid())
+                {
+                    error = "repcut instance not found or not unique: " + segments[i];
+                    return std::nullopt;
+                }
+                const auto op = current->getOperation(instOp);
+                const auto moduleName = getAttrString(op, "moduleName");
+                if (!moduleName || moduleName->empty())
+                {
+                    error = "repcut instance missing moduleName: " + segments[i];
+                    return std::nullopt;
+                }
+                current = design.findGraph(*moduleName);
+                if (current == nullptr)
+                {
+                    error = "repcut target module graph not found: " + *moduleName;
+                    return std::nullopt;
+                }
+            }
+            return current->symbol();
+        }
+
         wolvrix::lib::grh::SymbolId internUniqueSymbol(wolvrix::lib::grh::Graph &graph, std::string base)
         {
             if (base.empty())
@@ -2780,9 +2884,9 @@ namespace wolvrix::lib::transform
                     .count());
         };
 
-        if (options_.targetGraphSymbol.empty())
+        if (options_.path.empty())
         {
-            error("repcut requires -target-graph to select a graph symbol");
+            error("repcut requires -path");
             result.failed = true;
             return result;
         }
@@ -2805,17 +2909,27 @@ namespace wolvrix::lib::transform
             return result;
         }
 
-        wolvrix::lib::grh::Graph *graph = design().findGraph(options_.targetGraphSymbol);
+        std::string resolveError;
+        const std::optional<std::string> targetGraphName = resolveTargetGraphName(design(), options_.path, resolveError);
+        if (!targetGraphName)
+        {
+            error(resolveError);
+            result.failed = true;
+            return result;
+        }
+
+        wolvrix::lib::grh::Graph *graph = design().findGraph(*targetGraphName);
         if (!graph)
         {
-            error("repcut target graph not found: " + options_.targetGraphSymbol);
+            error("repcut target graph not found: " + *targetGraphName);
             result.failed = true;
             return result;
         }
 
         {
             std::ostringstream boot;
-            boot << "repcut start: graph=" << graph->symbol()
+            boot << "repcut start: path=" << options_.path
+                 << " graph=" << graph->symbol()
                  << " partition_count=" << options_.partitionCount
                  << " imbalance_factor=" << toFixedString(options_.imbalanceFactor, 6)
                  << " work_dir=" << (options_.workDir.empty() ? std::string(".") : options_.workDir)
@@ -3901,7 +4015,8 @@ namespace wolvrix::lib::transform
                           return lhs.index < rhs.index;
                       });
 
-            const std::string partName = uniqueGraphName(design(), graph->symbol() + "_part" + std::to_string(p));
+            const std::string partName =
+                uniqueGraphName(design(), graph->symbol() + "_repcut_part" + std::to_string(p));
             wolvrix::lib::grh::Graph &partGraph = design().createGraph(partName);
             const std::size_t symbolReserveCount = sourceValues.size() + sourceOps.size() + 32;
             partGraph.reserveSymbolCapacity(symbolReserveCount);

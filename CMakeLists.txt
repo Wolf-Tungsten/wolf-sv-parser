@@ -96,6 +96,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/blackbox_guard.cpp
     lib/transform/comb_loop_elim.cpp
     lib/transform/hier_flatten.cpp
+    lib/transform/instance_inline.cpp
     lib/transform/xmr_resolve.cpp
     lib/transform/latch_transparent_read.cpp
     lib/transform/slice_index_const.cpp
@@ -359,6 +360,17 @@ target_link_libraries(transform-hier-flatten
 )
 
 register_test_exe(transform-hier-flatten)
+
+add_executable(transform-instance-inline
+    tests/transform/test_instance_inline_pass.cpp
+)
+
+target_link_libraries(transform-instance-inline
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-instance-inline)
 
 add_executable(transform-comb-loop-elim
     tests/transform/test_comb_loop_elim_pass.cpp

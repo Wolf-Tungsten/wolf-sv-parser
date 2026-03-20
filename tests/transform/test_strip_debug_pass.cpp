@@ -110,7 +110,7 @@ int runBasicTest()
     design.markAsTop("top");
 
     PassManager manager;
-    manager.addPass(std::make_unique<StripDebugPass>());
+    manager.addPass(std::make_unique<StripDebugPass>(StripDebugOptions{.path = "top"}));
 
     PassDiagnostics diags;
     PassManagerResult res{};
@@ -136,11 +136,11 @@ int runBasicTest()
     {
         return fail("Expected new top graph to exist");
     }
-    auto *topInt = design.findGraph("top_int");
-    auto *topExt = design.findGraph("top_ext");
+    auto *topInt = design.findGraph("top_logic_part");
+    auto *topExt = design.findGraph("top_debug_part");
     if (!topInt || !topExt)
     {
-        return fail("Expected top_int and top_ext graphs");
+        return fail("Expected top_logic_part and top_debug_part graphs");
     }
 
     if (topInt->findOperation("dpi_call").valid() ||
@@ -257,7 +257,7 @@ int runImportRenameTest()
     design.markAsTop("top");
 
     PassManager manager;
-    manager.addPass(std::make_unique<StripDebugPass>());
+    manager.addPass(std::make_unique<StripDebugPass>(StripDebugOptions{.path = "top"}));
 
     PassDiagnostics diags;
     PassManagerResult res{};
@@ -278,10 +278,10 @@ int runImportRenameTest()
         return fail("Expected strip-debug to report changes (rename test)");
     }
 
-    auto *topExt = design.findGraph("top_ext");
+    auto *topExt = design.findGraph("top_debug_part");
     if (!topExt)
     {
-        return fail("Expected top_ext graph to exist (rename test)");
+        return fail("Expected top_debug_part graph to exist (rename test)");
     }
 
     std::optional<std::string> importSym;
@@ -301,11 +301,94 @@ int runImportRenameTest()
 
     if (!importSym || !callTarget)
     {
-        return fail("Expected DPI import and call in top_ext (rename test)");
+        return fail("Expected DPI import and call in top_debug_part (rename test)");
     }
     if (*importSym != *callTarget)
     {
         return fail("Expected DPI call targetImportSymbol to match imported symbol (rename test)");
+    }
+
+    return 0;
+}
+
+int runInstancePathTest()
+{
+    wolvrix::lib::grh::Design design;
+    wolvrix::lib::grh::Graph &child = design.createGraph("child");
+    wolvrix::lib::grh::Graph &top = design.createGraph("top");
+
+    auto makeChildValue = [&](const std::string &name) {
+        wolvrix::lib::grh::SymbolId sym = child.internSymbol(name);
+        return child.createValue(sym, 1, false);
+    };
+    auto makeTopValue = [&](const std::string &name) {
+        wolvrix::lib::grh::SymbolId sym = top.internSymbol(name);
+        return top.createValue(sym, 1, false);
+    };
+
+    wolvrix::lib::grh::ValueId childIn = makeChildValue("a");
+    wolvrix::lib::grh::ValueId childOut = makeChildValue("y");
+    child.bindInputPort("a", childIn);
+    child.bindOutputPort("y", childOut);
+
+    wolvrix::lib::grh::OperationId sysTask =
+        child.createOperation(wolvrix::lib::grh::OperationKind::kSystemTask, child.internSymbol("child_debug_task"));
+    child.addOperand(sysTask, childIn);
+    child.setAttr(sysTask, "name", std::string("$display"));
+
+    wolvrix::lib::grh::OperationId assign =
+        child.createOperation(wolvrix::lib::grh::OperationKind::kAssign, child.internSymbol("assign_y"));
+    child.addOperand(assign, childIn);
+    child.addResult(assign, childOut);
+
+    wolvrix::lib::grh::ValueId topIn = makeTopValue("a");
+    wolvrix::lib::grh::ValueId topOut = makeTopValue("y");
+    top.bindInputPort("a", topIn);
+    top.bindOutputPort("y", topOut);
+    wolvrix::lib::grh::OperationId inst =
+        top.createOperation(wolvrix::lib::grh::OperationKind::kInstance, top.internSymbol("u_child"));
+    top.addOperand(inst, topIn);
+    top.addResult(inst, topOut);
+    top.setAttr(inst, "moduleName", std::string("child"));
+    top.setAttr(inst, "instanceName", std::string("u_child"));
+    top.setAttr(inst, "inputPortName", std::vector<std::string>{"a"});
+    top.setAttr(inst, "outputPortName", std::vector<std::string>{"y"});
+
+    design.markAsTop("top");
+
+    PassManager manager;
+    manager.addPass(std::make_unique<StripDebugPass>(StripDebugOptions{.path = "top.u_child"}));
+
+    PassDiagnostics diags;
+    PassManagerResult res{};
+    try
+    {
+        res = manager.run(design, diags);
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("Exception during run (instance path test): ") + ex.what());
+    }
+    if (!res.success || diags.hasError())
+    {
+        return fail("Expected strip-debug to succeed (instance path test)");
+    }
+
+    auto *childWrapper = design.findGraph("child");
+    auto *childLogic = design.findGraph("child_logic_part");
+    auto *childDebug = design.findGraph("child_debug_part");
+    if (!childWrapper || !childLogic || !childDebug)
+    {
+        return fail("Expected child wrapper and split parts to exist");
+    }
+
+    if (childLogic->findOperation("child_debug_task").valid())
+    {
+        return fail("Expected debug ops to be removed from child_logic_part");
+    }
+    if (!childDebug->findOperation("child_debug_task").valid())
+    {
+        return fail("Expected debug ops to move into child_debug_part");
     }
 
     return 0;
@@ -318,6 +401,10 @@ int main()
         return rc;
     }
     if (int rc = runImportRenameTest())
+    {
+        return rc;
+    }
+    if (int rc = runInstancePathTest())
     {
         return rc;
     }

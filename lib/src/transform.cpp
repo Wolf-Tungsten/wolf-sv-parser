@@ -5,6 +5,7 @@
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
 #include "transform/hrbcut.hpp"
+#include "transform/instance_inline.hpp"
 #include "transform/latch_transparent_read.hpp"
 #include "transform/memory_read_retime.hpp"
 #include "transform/repcut.hpp"
@@ -410,6 +411,7 @@ namespace wolvrix::lib::transform
             "slice-index-const",
             "multidriven-guard",
             "hier-flatten",
+            "instance-inline",
             "xmr-resolve",
             "memory-init-check",
             "mem-to-reg",
@@ -517,6 +519,38 @@ namespace wolvrix::lib::transform
                 }
             }
             return std::make_unique<HierFlattenPass>(options);
+        }
+        if (normalized == "instance-inline")
+        {
+            InstanceInlineOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-path")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-path expects a value";
+                        return nullptr;
+                    }
+                    options.path = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-path="))
+                {
+                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
+                }
+                else
+                {
+                    error = "unknown instance-inline option";
+                    return nullptr;
+                }
+            }
+            if (options.path.empty())
+            {
+                error = "instance-inline requires -path";
+                return nullptr;
+            }
+            return std::make_unique<InstanceInlinePass>(options);
         }
         if (normalized == "simplify")
         {
@@ -838,12 +872,30 @@ namespace wolvrix::lib::transform
         }
         if (normalized == "strip-debug")
         {
-            if (!args.empty())
+            StripDebugOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
             {
-                error = "strip-debug does not accept arguments";
-                return nullptr;
+                const std::string_view arg = args[i];
+                if (arg == "-path")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-path expects a value";
+                        return nullptr;
+                    }
+                    options.path = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-path="))
+                {
+                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
+                }
+                else
+                {
+                    error = "unknown strip-debug option";
+                    return nullptr;
+                }
             }
-            return std::make_unique<StripDebugPass>();
+            return std::make_unique<StripDebugPass>(options);
         }
         if (normalized == "stats")
         {
@@ -1084,27 +1136,16 @@ namespace wolvrix::lib::transform
                     return true;
                 };
 
-                if (arg == "-target-graph")
+                if (arg == "-path")
                 {
-                    if (!parseStringArg("-target-graph", options.targetGraphSymbol))
+                    if (!parseStringArg("-path", options.path))
                     {
                         return nullptr;
                     }
                 }
-                else if (arg.starts_with("-target-graph="))
+                else if (arg.starts_with("-path="))
                 {
-                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-target-graph=").size()));
-                }
-                else if (arg == "-graph")
-                {
-                    if (!parseStringArg("-graph", options.targetGraphSymbol))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-graph="))
-                {
-                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-graph=").size()));
+                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
                 }
                 else if (arg == "-partition-count")
                 {

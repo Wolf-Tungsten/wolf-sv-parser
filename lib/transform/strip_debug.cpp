@@ -325,24 +325,151 @@ namespace wolvrix::lib::transform
             return names;
         }
 
+        std::vector<std::string> splitPath(std::string_view path)
+        {
+            std::vector<std::string> out;
+            std::string current;
+            for (char ch : path)
+            {
+                if (ch == '.')
+                {
+                    if (!current.empty())
+                    {
+                        out.push_back(current);
+                        current.clear();
+                    }
+                    continue;
+                }
+                current.push_back(ch);
+            }
+            if (!current.empty())
+            {
+                out.push_back(current);
+            }
+            return out;
+        }
+
+        OperationId findUniqueInstance(const Graph &graph, std::string_view instanceName)
+        {
+            OperationId found = OperationId::invalid();
+            for (const auto opId : graph.operations())
+            {
+                if (!opId.valid())
+                {
+                    continue;
+                }
+                const Operation op = graph.getOperation(opId);
+                if (op.kind() != OperationKind::kInstance)
+                {
+                    continue;
+                }
+                auto name = getAttrString(op, "instanceName");
+                if (!name || *name != instanceName)
+                {
+                    continue;
+                }
+                if (found.valid())
+                {
+                    return OperationId::invalid();
+                }
+                found = opId;
+            }
+            return found;
+        }
+
+        std::optional<std::string> resolveTargetGraphName(wolvrix::lib::grh::Design &design,
+                                                          std::string_view path,
+                                                          std::string &error)
+        {
+            const std::vector<std::string> segments = splitPath(path);
+            if (segments.empty())
+            {
+                error = "strip-debug path must not be empty";
+                return std::nullopt;
+            }
+            if (segments.size() == 1)
+            {
+                if (design.findGraph(segments.front()) == nullptr)
+                {
+                    error = "strip-debug graph not found: " + segments.front();
+                    return std::nullopt;
+                }
+                return segments.front();
+            }
+
+            Graph *current = design.findGraph(segments.front());
+            if (current == nullptr)
+            {
+                error = "strip-debug root graph not found: " + segments.front();
+                return std::nullopt;
+            }
+            for (std::size_t i = 1; i < segments.size(); ++i)
+            {
+                const OperationId instOp = findUniqueInstance(*current, segments[i]);
+                if (!instOp.valid())
+                {
+                    error = "strip-debug instance not found or not unique: " + segments[i];
+                    return std::nullopt;
+                }
+                const Operation op = current->getOperation(instOp);
+                auto moduleName = getAttrString(op, "moduleName");
+                if (!moduleName || moduleName->empty())
+                {
+                    error = "strip-debug instance missing moduleName: " + segments[i];
+                    return std::nullopt;
+                }
+                Graph *child = design.findGraph(*moduleName);
+                if (child == nullptr)
+                {
+                    error = "strip-debug child graph not found: " + *moduleName;
+                    return std::nullopt;
+                }
+                current = child;
+            }
+            return current->symbol();
+        }
+
     } // namespace
 
     StripDebugPass::StripDebugPass()
-        : Pass("strip-debug", "strip-debug", "Split top modules into *_ext and *_int with debug operations stripped")
+        : StripDebugPass(StripDebugOptions{})
+    {
+    }
+
+    StripDebugPass::StripDebugPass(StripDebugOptions options)
+        : Pass("strip-debug", "strip-debug", "Split selected modules into *_debug_part and *_logic_part"),
+          options_(std::move(options))
     {
     }
 
     PassResult StripDebugPass::run()
     {
         PassResult result;
-        std::vector<std::string> topNames = design().topGraphs();
-        if (topNames.empty())
+        std::vector<std::string> targetNames;
+        if (options_.path.empty())
         {
-            info("strip-debug: no top graphs to process");
+            targetNames = design().topGraphs();
+        }
+        else
+        {
+            std::string resolveError;
+            auto targetName = resolveTargetGraphName(design(), options_.path, resolveError);
+            if (!targetName)
+            {
+                error(std::move(resolveError));
+                result.failed = true;
+                return result;
+            }
+            targetNames.push_back(*targetName);
+        }
+
+        if (targetNames.empty())
+        {
+            info("strip-debug: no target graphs to process");
             return result;
         }
 
-        for (const auto &topName : topNames)
+        for (const auto &topName : targetNames)
         {
             Graph *top = design().findGraph(topName);
             if (!top)
@@ -469,8 +596,11 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            std::string topIntName = uniqueGraphName(design(), topName + "_int");
-            std::string topExtName = uniqueGraphName(design(), topName + "_ext");
+            const bool wasTop =
+                std::find(design().topGraphs().begin(), design().topGraphs().end(), topName) !=
+                design().topGraphs().end();
+            std::string topIntName = uniqueGraphName(design(), topName + "_logic_part");
+            std::string topExtName = uniqueGraphName(design(), topName + "_debug_part");
 
             Graph &topInt = design().cloneGraph(topName, topIntName);
             Graph &topExt = design().createGraph(topExtName);
@@ -1018,18 +1148,21 @@ namespace wolvrix::lib::transform
                 extOutputMapping.emplace(entry.extPort, linkIt->second);
             }
 
-            buildInstance(newTop, topInt.symbol(), "top_int", topInt, intInputMapping, intOutputMapping, intInoutMapping);
-            buildInstance(newTop, topExt.symbol(), "top_ext", topExt, extInputMapping, extOutputMapping, extInoutMapping);
+            buildInstance(newTop, topInt.symbol(), "logic_part", topInt, intInputMapping, intOutputMapping, intInoutMapping);
+            buildInstance(newTop, topExt.symbol(), "debug_part", topExt, extInputMapping, extOutputMapping, extInoutMapping);
 
             for (const auto &alias : topAliases)
             {
                 design().registerGraphAlias(alias, newTop);
             }
 
-            design().markAsTop(topName);
+            if (wasTop)
+            {
+                design().markAsTop(topName);
+            }
             result.changed = true;
 
-            std::string summary = "strip-debug: top=" + topName +
+            std::string summary = "strip-debug: graph=" + topName +
                                   " strip_ops=" + std::to_string(plan.stripOps.size()) +
                                   " consts=" + std::to_string(plan.constOps.size()) +
                                   " boundary_in=" + std::to_string(plan.boundaryInputs.size()) +

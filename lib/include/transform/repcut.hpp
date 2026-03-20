@@ -11,7 +11,7 @@ namespace wolvrix::lib::transform
 
     struct RepcutOptions
     {
-        std::string targetGraphSymbol;
+        std::string path;
         std::size_t partitionCount = 2;
         double imbalanceFactor = 0.015;
         std::string workDir = ".";

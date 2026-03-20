@@ -4,7 +4,9 @@
 
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace wolvrix::lib::transform;
@@ -52,6 +54,60 @@ namespace
             }
         }
         return nullptr;
+    }
+
+    std::optional<std::string> getAttrString(const wolvrix::lib::grh::Operation &op,
+                                             std::string_view key)
+    {
+        auto attr = op.attr(key);
+        if (!attr)
+        {
+            return std::nullopt;
+        }
+        if (const auto *value = std::get_if<std::string>(&*attr))
+        {
+            return *value;
+        }
+        return std::nullopt;
+    }
+
+    wolvrix::lib::grh::OperationId findInstanceByName(const wolvrix::lib::grh::Graph &graph,
+                                                      std::string_view instanceName)
+    {
+        for (const auto opId : graph.operations())
+        {
+            if (!opId.valid())
+            {
+                continue;
+            }
+            const auto op = graph.getOperation(opId);
+            if (op.kind() != wolvrix::lib::grh::OperationKind::kInstance)
+            {
+                continue;
+            }
+            const auto name = getAttrString(op, "instanceName");
+            if (name && *name == instanceName)
+            {
+                return opId;
+            }
+        }
+        return wolvrix::lib::grh::OperationId::invalid();
+    }
+
+    bool hasGraphWithPrefix(wolvrix::lib::grh::Design &design, std::string_view prefix)
+    {
+        if (design.findGraph(std::string(prefix)) != nullptr)
+        {
+            return true;
+        }
+        for (int suffix = 1; suffix <= 8; ++suffix)
+        {
+            if (design.findGraph(std::string(prefix) + "_" + std::to_string(suffix)) != nullptr)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
 } // namespace
@@ -110,7 +166,7 @@ int main()
     PassManager manager;
     manager.options().verbosity = PassVerbosity::Info;
     RepcutOptions options;
-    options.targetGraphSymbol = "top";
+    options.path = "top";
     options.partitionCount = 2;
     options.imbalanceFactor = 1.0;
     options.workDir = outDir.string();
@@ -195,9 +251,9 @@ int main()
         return fail("expected at least one partition instance in reconstructed top");
     }
 
-    if (design.findGraph("top_part0") == nullptr && design.findGraph("top_part0_1") == nullptr)
+    if (!hasGraphWithPrefix(design, "top_repcut_part0"))
     {
-        return fail("expected partition graph with top_part0 prefix");
+        return fail("expected partition graph with top_repcut_part0 prefix");
     }
 
     // Regression: read-only register (initValue-only, no write port) must still
@@ -253,7 +309,7 @@ int main()
     PassManager roManager;
     roManager.options().verbosity = PassVerbosity::Info;
     RepcutOptions roOptions;
-    roOptions.targetGraphSymbol = "top_read_only_reg";
+    roOptions.path = "top_read_only_reg";
     roOptions.partitionCount = 2;
     roOptions.imbalanceFactor = 1.0;
     roOptions.workDir = roOutDir.string();
@@ -327,6 +383,133 @@ int main()
     if (roStats->find("\"weight\":") == std::string::npos)
     {
         return fail("read-only register repcut missing per-partition weight entries");
+    }
+
+    // Path-mode regression: resolving "top.u_child" should partition the child module graph
+    // rather than the top wrapper graph.
+    wolvrix::lib::grh::Design pathDesign;
+    wolvrix::lib::grh::Graph &pathChild = pathDesign.createGraph("child");
+    wolvrix::lib::grh::Graph &pathTop = pathDesign.createGraph("top");
+    pathDesign.markAsTop("top");
+
+    const auto childIn = makeValue(pathChild, "in_data", 32, false);
+    const auto childEn = makeValue(pathChild, "en", 1, false);
+    pathChild.bindInputPort("in_data", childIn);
+    pathChild.bindInputPort("en", childEn);
+
+    const auto childRegDecl =
+        pathChild.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                  pathChild.internSymbol("random_bits"));
+    pathChild.setAttr(childRegDecl, "width", static_cast<int64_t>(32));
+    pathChild.setAttr(childRegDecl, "isSigned", false);
+    pathChild.setAttr(childRegDecl, "initValue", std::string("$random"));
+
+    const auto childRead =
+        pathChild.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                  pathChild.internSymbol("random_bits_rd"));
+    const auto childReadValue = makeValue(pathChild, "random_bits_rd_v", 32, false);
+    pathChild.addResult(childRead, childReadValue);
+    pathChild.setAttr(childRead, "regSymbol", std::string("random_bits"));
+
+    const auto childData = makeValue(pathChild, "lat_data", 32, false);
+    makeBinaryOp(pathChild, wolvrix::lib::grh::OperationKind::kAdd,
+                 "lat_data_add", childReadValue, childIn, childData);
+
+    const auto childLatchDecl =
+        pathChild.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                  pathChild.internSymbol("ro_lat"));
+    pathChild.setAttr(childLatchDecl, "width", static_cast<int64_t>(32));
+    pathChild.setAttr(childLatchDecl, "isSigned", false);
+
+    const auto childLatchWrite =
+        pathChild.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                  pathChild.internSymbol("ro_lat_wr"));
+    pathChild.addOperand(childLatchWrite, childEn);
+    pathChild.addOperand(childLatchWrite, childData);
+    pathChild.setAttr(childLatchWrite, "latchSymbol", std::string("ro_lat"));
+
+    const auto topIn = makeValue(pathTop, "in_data", 32, false);
+    const auto topEn = makeValue(pathTop, "en", 1, false);
+    pathTop.bindInputPort("in_data", topIn);
+    pathTop.bindInputPort("en", topEn);
+
+    const auto childInst =
+        pathTop.createOperation(wolvrix::lib::grh::OperationKind::kInstance, pathTop.makeInternalOpSym());
+    pathTop.addOperand(childInst, topIn);
+    pathTop.addOperand(childInst, topEn);
+    pathTop.setAttr(childInst, "moduleName", std::string("child"));
+    pathTop.setAttr(childInst, "instanceName", std::string("u_child"));
+    pathTop.setAttr(childInst, "inputPortName", std::vector<std::string>{"in_data", "en"});
+    pathTop.setAttr(childInst, "outputPortName", std::vector<std::string>{});
+
+    const std::filesystem::path pathOutDir =
+        std::filesystem::path(WOLF_SV_TEST_ARTIFACT_DIR) / "repcut_test_path_mode";
+    std::filesystem::create_directories(pathOutDir, ec);
+    if (ec)
+    {
+        return fail("failed to create output directory: " + pathOutDir.string());
+    }
+
+    PassManager pathManager;
+    pathManager.options().verbosity = PassVerbosity::Info;
+    RepcutOptions pathOptions;
+    pathOptions.path = "top.u_child";
+    pathOptions.partitionCount = 2;
+    pathOptions.imbalanceFactor = 1.0;
+    pathOptions.workDir = pathOutDir.string();
+    pathOptions.partitioner = "mt-kahypar";
+    pathOptions.mtKaHyParPreset = "quality";
+    pathOptions.mtKaHyParThreads = 0;
+    pathOptions.keepIntermediateFiles = true;
+    pathManager.addPass(std::make_unique<RepcutPass>(pathOptions));
+
+    PassDiagnostics pathDiags;
+    PassManagerResult pathResult{};
+    try
+    {
+        pathResult = pathManager.run(pathDesign, pathDiags);
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("path-mode repcut exception: ") + ex.what());
+    }
+
+    if (!pathResult.success || pathDiags.hasError())
+    {
+        return fail("path-mode repcut failed unexpectedly");
+    }
+    if (!pathResult.changed)
+    {
+        return fail("path-mode repcut expected graph changes");
+    }
+    if (pathDesign.findGraph("top") == nullptr)
+    {
+        return fail("path-mode top graph missing after repcut");
+    }
+    wolvrix::lib::grh::Graph *rebuiltChild = pathDesign.findGraph("child");
+    if (rebuiltChild == nullptr)
+    {
+        return fail("path-mode child graph missing after repcut");
+    }
+    if (!findInstanceByName(pathTop, "u_child").valid())
+    {
+        return fail("path-mode top instance should remain after child repcut");
+    }
+    std::size_t childInstanceCount = 0;
+    for (const auto opId : rebuiltChild->operations())
+    {
+        if (rebuiltChild->getOperation(opId).kind() == wolvrix::lib::grh::OperationKind::kInstance)
+        {
+            ++childInstanceCount;
+        }
+    }
+    if (childInstanceCount < 1)
+    {
+        return fail("path-mode rebuilt child should contain partition instances");
+    }
+    if (!hasGraphWithPrefix(pathDesign, "child_repcut_part0"))
+    {
+        return fail("expected child_repcut_part0 graph after path-mode repcut");
     }
 
     return 0;

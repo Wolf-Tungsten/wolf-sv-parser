@@ -85,7 +85,7 @@ int main()
         PassManager manager;
         manager.options().verbosity = PassVerbosity::Info;
         RepcutOptions options;
-        options.targetGraphSymbol = graphName;
+        options.path = graphName;
         options.partitionCount = partitionCount;
         options.imbalanceFactor = 1.0;
         options.workDir = outDir.string();

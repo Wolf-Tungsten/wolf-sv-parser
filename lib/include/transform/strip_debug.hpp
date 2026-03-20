@@ -6,12 +6,21 @@
 namespace wolvrix::lib::transform
 {
 
+    struct StripDebugOptions
+    {
+        std::string path;
+    };
+
     class StripDebugPass : public Pass
     {
     public:
         StripDebugPass();
+        explicit StripDebugPass(StripDebugOptions options);
 
         PassResult run() override;
+
+    private:
+        StripDebugOptions options_;
     };
 
 } // namespace wolvrix::lib::transform
