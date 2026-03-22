@@ -1,6 +1,7 @@
 #include <Python.h>
 
 #include "emit/system_verilog.hpp"
+#include "emit/verilator_repcut_package.hpp"
 #include "core/grh.hpp"
 #include "core/ingest.hpp"
 #include "core/logging.hpp"
@@ -1187,6 +1188,56 @@ namespace
         Py_RETURN_NONE;
     }
 
+    PyObject *py_write_verilator_repcut_package(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
+    {
+        PyObject *design_obj = nullptr;
+        const char *output = nullptr;
+        PyObject *top_list_obj = Py_None;
+        static const char *kwlist[] = {"design", "output", "top", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|O", const_cast<char **>(kwlist),
+                                         &design_obj, &output, &top_list_obj))
+        {
+            return nullptr;
+        }
+        auto *design = getDesign(design_obj);
+        if (!design)
+        {
+            return nullptr;
+        }
+
+        std::vector<std::string> top_names;
+        std::string error;
+        if (!parseStringList(top_list_obj, top_names, error))
+        {
+            PyErr_SetString(PyExc_ValueError, error.c_str());
+            return nullptr;
+        }
+
+        wolvrix::lib::emit::EmitDiagnostics diagnostics;
+        wolvrix::lib::emit::EmitVerilatorRepCutPackage emitter(&diagnostics);
+        wolvrix::lib::emit::EmitOptions options;
+        const std::filesystem::path out_path(output);
+        if (out_path.empty())
+        {
+            PyErr_SetString(PyExc_ValueError,
+                            "write_verilator_repcut_package(...) expects an output directory");
+            return nullptr;
+        }
+        options.outputDir = out_path.string();
+        options.topOverrides = std::move(top_names);
+
+        const auto result = emitter.emit(*design, options);
+        if (diagnostics.hasError() || !result.success)
+        {
+            const std::string diagText =
+                formatDiagnostics(diagnostics.messages(), getDesignSourceManager(design_obj));
+            PyErr_SetString(PyExc_RuntimeError, diagText.c_str());
+            return nullptr;
+        }
+
+        Py_RETURN_NONE;
+    }
+
     PyObject *py_run_pass(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
     {
         PyObject *design_obj = nullptr;
@@ -1445,6 +1496,10 @@ static PyMethodDef WolvrixMethods[] = {
      "store_json_string(design, mode='pretty-compact', top=None) -> str"},
     {"write_sv", reinterpret_cast<PyCFunction>(py_write_sv), METH_VARARGS | METH_KEYWORDS,
      "write_sv(design, output, top=None, split_modules=False)"},
+    {"write_verilator_repcut_package",
+     reinterpret_cast<PyCFunction>(py_write_verilator_repcut_package),
+     METH_VARARGS | METH_KEYWORDS,
+     "write_verilator_repcut_package(design, output, top=None)"},
     {"run_pass", reinterpret_cast<PyCFunction>(py_run_pass), METH_VARARGS | METH_KEYWORDS,
      "run_pass(design, name, args=None, dryrun=False, diagnostics='warn', log_level='warn') -> (changed, ok, diagnostics)"},
     {"run_pipeline", reinterpret_cast<PyCFunction>(py_run_pipeline), METH_VARARGS | METH_KEYWORDS,

@@ -72,6 +72,13 @@ class Design:
     ) -> None:
         _native.write_sv(self._capsule, output, top or [], split_modules)
 
+    def write_verilator_repcut_package(
+        self,
+        output: str,
+        top: list[str] | None = None,
+    ) -> None:
+        _native.write_verilator_repcut_package(self._capsule, output, top or [])
+
     def to_json(self, mode: str = "pretty-compact", top: list[str] | None = None) -> str:
         return _native.store_json_string(self._capsule, mode, top or [])
 

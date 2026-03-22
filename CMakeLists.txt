@@ -82,6 +82,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/core/load.cpp
     lib/core/emit.cpp
     lib/emit/system_verilog.cpp
+    lib/emit/verilator_repcut_package.cpp
     lib/core/store.cpp
     lib/core/ingest.cpp
     lib/core/transform.cpp
@@ -343,6 +344,31 @@ target_compile_definitions(emit-sv-top-reachable
 )
 
 register_test_exe(emit-sv-top-reachable)
+
+add_executable(emit-verilator-repcut-package
+    tests/emit/test_emit_verilator_repcut_package.cpp
+)
+
+target_link_libraries(emit-verilator-repcut-package
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(emit-verilator-repcut-package
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-verilator-repcut-package)
+
+add_executable(json-emit-verilator-repcut-package
+    app/json_emit_verilator_repcut_package.cpp
+)
+
+target_link_libraries(json-emit-verilator-repcut-package
+    PRIVATE
+        wolvrix-lib
+)
 
 # transform tests
 add_executable(transform-pass-manager
