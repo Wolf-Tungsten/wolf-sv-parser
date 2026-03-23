@@ -296,10 +296,16 @@ int main()
     {
         return fail("wrapper header missing expected unit members");
     }
-    if (!contains(wrapperHeader, "std::vector<std::function<void()>> logic_eval_fns_;") ||
-        !contains(wrapperHeader, "void run_part_eval_workers_();"))
+    if (!contains(wrapperHeader, "std::vector<std::function<void()>> non_debug_step_fns_;") ||
+        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns);") ||
+        !contains(wrapperHeader, "void run_non_debug_step_workers_();"))
     {
         return fail("wrapper header missing expected parallel eval declarations");
+    }
+    if (!contains(wrapperHeader, "CData signal_mid_snapshot_{};") ||
+        !contains(wrapperHeader, "CData signal_mid_writeback_{};"))
+    {
+        return fail("wrapper header missing expected snapshot/writeback cache members");
     }
     if (!contains(wrapperHeader, "void set_clock(CData value) { top_in_clock_ = value; }") ||
         !contains(wrapperHeader, "void set_in_data(CData value) { top_in_in_data_ = value; }") ||
@@ -309,46 +315,66 @@ int main()
     }
     if (!contains(wrapperSource, "unit_debug_part_->in_2 = top_in_in_data_;") ||
         !contains(wrapperSource, "unit_part_0_->in_2 = top_in_in_data_;") ||
-        !contains(wrapperSource, "unit_part_1_->in_2 = signal_mid_;") ||
+        !contains(wrapperSource, "unit_part_1_->in_2 = signal_mid_snapshot_;") ||
         !contains(wrapperSource, "unit_part_1_->in_3 = const_sel_const_;"))
     {
         return fail("wrapper source missing expected scatter code");
     }
+    if (!contains(wrapperSource, "non_debug_step_fns_.emplace_back([this]() {"))
+    {
+        return fail("wrapper source missing expected static task generation");
+    }
     if (!contains(wrapperSource, "unit_debug_part_->eval();") ||
-        !contains(wrapperSource, "logic_eval_fns_.emplace_back([this]() { unit_part_0_->eval(); });") ||
-        !contains(wrapperSource, "logic_eval_fns_.emplace_back([this]() { unit_part_1_->eval(); });") ||
-        !contains(wrapperSource, "run_part_eval_workers_();"))
+        !contains(wrapperSource, "// eval part_0") ||
+        !contains(wrapperSource, "// eval part_1") ||
+        !contains(wrapperSource, "run_non_debug_step_workers_();"))
     {
         return fail("wrapper source missing expected eval calls");
     }
+    if (!contains(wrapperSource, "Publish debug_part outputs into both snapshot and writeback before worker launch.") ||
+        !contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
+        !contains(wrapperSource, "signal_mid_snapshot_ = signal_mid_writeback_;"))
+    {
+        return fail("wrapper source missing expected snapshot/writeback publish and commit code");
+    }
     if (!contains(wrapperSource, "std::getenv(\"XS_EMU_THREADS\")") ||
-        !contains(wrapperSource, "assert(requestedWorkers <= logic_eval_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
+        !contains(wrapperSource, "assert(requestedWorkers <= non_debug_step_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
         !contains(wrapperSource, "#if defined(__linux__)"))
     {
         return fail("wrapper source missing expected runtime thread-pool guards");
     }
+    if (!contains(wrapperSource, "step_timing_enabled_ = wolvi_env_flag_enabled(\"XS_REPCUT_STEP_TIMING\");") ||
+        !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_step_timing_() const {") ||
+        !contains(wrapperSource, "step_timing_.part_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);"))
+    {
+        return fail("wrapper source missing expected step timing instrumentation");
+    }
     if (!contains(wrapperSource, "Evaluate debug_part first so DPI/device responses are available before logic eval.") ||
-        !contains(wrapperSource, "Evaluate all non-debug units after every cross-partition input has been loaded."))
+        !contains(wrapperSource, "Evaluate all non-debug units with fused local scatter/eval/gather."))
     {
         return fail("wrapper source missing expected debug_part scheduling comments");
     }
-    if (!contains(wrapperSource, "signal_mid_ = unit_part_0_->out_0;") ||
+    if (!contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
         !contains(wrapperSource, "top_out_out_ = unit_part_1_->out_0;"))
     {
         return fail("wrapper source missing expected gather code");
     }
-    const std::size_t part1InputPos = wrapperSource.find("unit_part_1_->in_2 = signal_mid_;");
+    const std::size_t debugInputPos = wrapperSource.find("unit_debug_part_->in_2 = top_in_in_data_;");
     const std::size_t debugEvalPos = wrapperSource.find("unit_debug_part_->eval();");
-    const std::size_t partEvalPos = wrapperSource.find("run_part_eval_workers_();");
-    const std::size_t gatherPos = wrapperSource.find("signal_mid_ = unit_part_0_->out_0;");
-    if (part1InputPos == std::string::npos || debugEvalPos == std::string::npos ||
-        partEvalPos == std::string::npos || gatherPos == std::string::npos)
+    const std::size_t debugPublishPos =
+        wrapperSource.find("Publish debug_part outputs into both snapshot and writeback before worker launch.");
+    const std::size_t partEvalPos = wrapperSource.find("run_non_debug_step_workers_();");
+    const std::size_t gatherPhasePos = wrapperSource.find("signal_mid_snapshot_ = signal_mid_writeback_;");
+    if (debugInputPos == std::string::npos || debugEvalPos == std::string::npos ||
+        debugPublishPos == std::string::npos || partEvalPos == std::string::npos ||
+        gatherPhasePos == std::string::npos)
     {
         return fail("wrapper source missing phase-order markers");
     }
-    if (!(part1InputPos < debugEvalPos && debugEvalPos < partEvalPos && partEvalPos < gatherPos))
+    if (!(debugInputPos < debugEvalPos && debugEvalPos < debugPublishPos && debugPublishPos < partEvalPos &&
+          partEvalPos < gatherPhasePos))
     {
-        return fail("wrapper source should scatter all inputs, eval debug_part first, then run parallel part eval, then gather outputs");
+        return fail("wrapper source should load debug inputs, eval debug_part, publish debug outputs, run fused non-debug worker phase, then commit writeback");
     }
     if (!contains(wrapperSource, "const CData WolviRepCutVerilatorSim::const_sel_const_ = static_cast<CData>(0x1ULL);"))
     {

@@ -884,6 +884,13 @@ namespace wolvrix::lib::emit
                 std::string memberName;
                 CppSignalDesc desc;
             };
+            struct CacheSignal
+            {
+                std::string originalName;
+                std::string snapshotMemberName;
+                std::string writebackMemberName;
+                CppSignalDesc desc;
+            };
 
             std::unordered_set<std::string> usedUnitIdentifiers;
             std::unordered_map<std::string, UnitInfo> unitInfoByInstance;
@@ -906,8 +913,8 @@ namespace wolvrix::lib::emit
                 }
             }
 
-            std::vector<std::string> logicEvalOrder;
-            logicEvalOrder.reserve(manifest.serialEvalOrder.size());
+            std::vector<std::string> nonDebugEvalOrder;
+            nonDebugEvalOrder.reserve(manifest.serialEvalOrder.size());
             for (const auto &instanceName : manifest.serialEvalOrder)
             {
                 if (instanceName == "debug_part")
@@ -918,7 +925,7 @@ namespace wolvrix::lib::emit
                 {
                     continue;
                 }
-                logicEvalOrder.push_back(instanceName);
+                nonDebugEvalOrder.push_back(instanceName);
             }
             const bool hasDebugPart =
                 unitInfoByInstance.find("debug_part") != unitInfoByInstance.end() &&
@@ -954,8 +961,8 @@ namespace wolvrix::lib::emit
             }
 
             std::unordered_set<std::string> usedCacheIdentifiers;
-            std::vector<NamedSignal> signalCaches;
-            std::unordered_map<std::string, NamedSignal> signalCacheByName;
+            std::vector<CacheSignal> signalCaches;
+            std::unordered_map<std::string, CacheSignal> signalCacheByName;
             std::vector<NamedSignal> constSignals;
             std::unordered_map<std::string, NamedSignal> constSignalByName;
             std::unordered_map<std::string, std::string> constLiteralBySignal;
@@ -964,9 +971,11 @@ namespace wolvrix::lib::emit
                 if (edge.kind == "unit_to_unit" &&
                     signalCacheByName.find(edge.signal) == signalCacheByName.end())
                 {
-                    NamedSignal signal{
+                    const std::string ident = makeUniqueIdentifier(edge.signal, usedCacheIdentifiers);
+                    CacheSignal signal{
                         edge.signal,
-                        "signal_" + makeUniqueIdentifier(edge.signal, usedCacheIdentifiers) + "_",
+                        "signal_" + ident + "_snapshot_",
+                        "signal_" + ident + "_writeback_",
                         cppSignalDesc(edge.width),
                     };
                     signalCacheByName.emplace(edge.signal, signal);
@@ -1022,6 +1031,7 @@ namespace wolvrix::lib::emit
             header << "#include <array>\n";
             header << "#include <condition_variable>\n";
             header << "#include <cstddef>\n";
+            header << "#include <cstdint>\n";
             header << "#include <functional>\n";
             header << "#include <memory>\n";
             header << "#include <mutex>\n";
@@ -1085,11 +1095,25 @@ namespace wolvrix::lib::emit
             header << "    bool completed{false};\n";
             header << "    bool stop{false};\n";
             header << "  };\n\n";
+            header << "  struct StepTimingStats {\n";
+            header << "    std::uint64_t steps{};\n";
+            header << "    std::uint64_t scatter_ns{};\n";
+            header << "    std::uint64_t debug_eval_ns{};\n";
+            header << "    std::uint64_t debug_gather_ns{};\n";
+            header << "    std::uint64_t debug_refresh_ns{};\n";
+            header << "    std::uint64_t part_eval_ns{};\n";
+            header << "    std::uint64_t gather_ns{};\n";
+            header << "    std::uint64_t total_ns{};\n";
+            header << "  };\n\n";
             header << "  void initialize_part_eval_workers_();\n";
             header << "  void shutdown_part_eval_workers_();\n";
             header << "  void part_eval_worker_loop_(std::size_t workerIndex);\n";
-            header << "  void run_part_eval_workers_();\n";
-            header << "  void eval_part_batch_(std::size_t workerIndex, std::size_t workerCount);\n\n";
+            header << "  void run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns);\n";
+            header << "  void run_non_debug_step_workers_();\n";
+            header << "  void eval_part_batch_(const std::vector<std::function<void()>>& phaseFns,\n";
+            header << "                        std::size_t workerIndex,\n";
+            header << "                        std::size_t workerCount);\n";
+            header << "  void report_step_timing_() const;\n\n";
             for (const auto &signal : constSignals)
             {
                 header << "  static const " << signal.desc.typeName << " " << signal.memberName << ";\n";
@@ -1107,11 +1131,14 @@ namespace wolvrix::lib::emit
             {
                 header << "\n";
             }
-            header << "  std::vector<std::function<void()>> logic_eval_fns_;\n";
+            header << "  std::vector<std::function<void()>> non_debug_step_fns_;\n";
+            header << "  const std::vector<std::function<void()>>* active_part_eval_fns_{};\n";
             header << "  std::unique_ptr<PartEvalWorker[]> part_eval_workers_;\n";
             header << "  std::vector<int> part_eval_cpu_ids_;\n";
             header << "  std::size_t part_eval_worker_count_{};\n";
             header << "  bool part_eval_parallel_{};\n\n";
+            header << "  StepTimingStats step_timing_{};\n";
+            header << "  bool step_timing_enabled_{};\n\n";
             for (const auto &signal : topInputs)
             {
                 header << "  " << signal.desc.typeName << " " << signal.memberName << "{};\n";
@@ -1122,7 +1149,8 @@ namespace wolvrix::lib::emit
             }
             for (const auto &signal : signalCaches)
             {
-                header << "  " << signal.desc.typeName << " " << signal.memberName << "{};\n";
+                header << "  " << signal.desc.typeName << " " << signal.snapshotMemberName << "{};\n";
+                header << "  " << signal.desc.typeName << " " << signal.writebackMemberName << "{};\n";
             }
             header << "};\n\n";
             header << "#endif // WOLVI_REPCUT_VERILATOR_SIM_H\n";
@@ -1131,6 +1159,9 @@ namespace wolvrix::lib::emit
             source << "#include \"wolvi_repcut_verilator_sim.h\"\n\n";
             source << "#include <algorithm>\n";
             source << "#include <cassert>\n";
+            source << "#include <chrono>\n";
+            source << "#include <cstdio>\n";
+            source << "#include <cstring>\n";
             source << "#include <cstdlib>\n";
             source << "#include <cstddef>\n";
             source << "#include <utility>\n";
@@ -1157,6 +1188,12 @@ namespace wolvrix::lib::emit
             source << "  for (std::size_t i = 0; i < N; ++i) {\n";
             source << "    dst[i] = src[i];\n";
             source << "  }\n";
+            source << "}\n";
+            source << "\n";
+            source << "using WolviClock = std::chrono::steady_clock;\n";
+            source << "\n";
+            source << "inline std::uint64_t wolvi_elapsed_ns(WolviClock::time_point begin, WolviClock::time_point end) {\n";
+            source << "  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());\n";
             source << "}\n";
             source << "\n";
             source << "inline std::vector<int> wolvi_part_eval_available_cpus() {\n";
@@ -1206,6 +1243,15 @@ namespace wolvrix::lib::emit
             source << "  }\n";
             source << "  return static_cast<std::size_t>(value);\n";
             source << "}\n";
+            source << "\n";
+            source << "inline bool wolvi_env_flag_enabled(const char* name) {\n";
+            source << "  const char* env = std::getenv(name);\n";
+            source << "  if (env == nullptr || *env == '\\0') {\n";
+            source << "    return false;\n";
+            source << "  }\n";
+            source << "  return std::strcmp(env, \"0\") != 0 && std::strcmp(env, \"false\") != 0 &&\n";
+            source << "         std::strcmp(env, \"False\") != 0 && std::strcmp(env, \"FALSE\") != 0;\n";
+            source << "}\n";
             source << "} // namespace\n\n";
 
             for (const auto &signal : constSignals)
@@ -1220,6 +1266,201 @@ namespace wolvrix::lib::emit
             {
                 source << "\n";
             }
+
+            auto emitScatterInputsForUnit = [&](std::ostream &out, const std::string &instanceName, int indentLevel)
+            {
+                const auto unitIt = unitInfoByInstance.find(instanceName);
+                if (unitIt == unitInfoByInstance.end())
+                {
+                    return false;
+                }
+                const auto &unitInfo = unitIt->second;
+                const std::string indent(static_cast<std::size_t>(indentLevel * 2), ' ');
+                bool wroteAny = false;
+                for (const auto &edge : manifest.connections)
+                {
+                    for (const auto &sink : edge.sinks)
+                    {
+                        if (sink.kind != SinkDesc::Kind::Unit || sink.instanceName != instanceName)
+                        {
+                            continue;
+                        }
+
+                        std::string srcExpr;
+                        bool srcIsWide = false;
+                        std::size_t srcWordCount = 0;
+                        if (edge.driver.kind == DriverDesc::Kind::Top)
+                        {
+                            const auto topInputIt = topInputByPort.find(edge.driver.portName);
+                            if (topInputIt == topInputByPort.end())
+                            {
+                                continue;
+                            }
+                            srcExpr = topInputIt->second.memberName;
+                            srcIsWide = topInputIt->second.desc.isWide;
+                            srcWordCount = topInputIt->second.desc.wordCount;
+                        }
+                        else if (edge.driver.kind == DriverDesc::Kind::Unit)
+                        {
+                            const auto cacheIt = signalCacheByName.find(edge.signal);
+                            if (cacheIt == signalCacheByName.end())
+                            {
+                                continue;
+                            }
+                            srcExpr = cacheIt->second.snapshotMemberName;
+                            srcIsWide = cacheIt->second.desc.isWide;
+                            srcWordCount = cacheIt->second.desc.wordCount;
+                        }
+                        else
+                        {
+                            const auto constIt = constSignalByName.find(edge.signal);
+                            if (constIt == constSignalByName.end())
+                            {
+                                continue;
+                            }
+                            srcExpr = constIt->second.memberName;
+                            srcIsWide = constIt->second.desc.isWide;
+                            srcWordCount = constIt->second.desc.wordCount;
+                        }
+                        if (!wroteAny)
+                        {
+                            out << indent << "// inputs for " << instanceName << "\n";
+                            wroteAny = true;
+                        }
+                        emitAssign(out,
+                                   unitInfo.memberName + "->" + unitInfo.portCppMemberByName.at(sink.portName),
+                                   unitInfo.portDescByName.at(sink.portName).isWide,
+                                   unitInfo.portDescByName.at(sink.portName).wordCount,
+                                   srcExpr,
+                                   srcIsWide,
+                                   srcWordCount,
+                                   indentLevel);
+                    }
+                }
+                return wroteAny;
+            };
+            auto emitPublishOutputsForUnit = [&](std::ostream &out,
+                                                 const std::string &instanceName,
+                                                 int indentLevel,
+                                                 bool publishToSnapshot,
+                                                 bool publishToWriteback)
+            {
+                const auto unitIt = unitInfoByInstance.find(instanceName);
+                if (unitIt == unitInfoByInstance.end())
+                {
+                    return false;
+                }
+                const auto &unitInfo = unitIt->second;
+                const std::string indent(static_cast<std::size_t>(indentLevel * 2), ' ');
+                bool wroteAny = false;
+                for (const auto &edge : manifest.connections)
+                {
+                    if (edge.driver.kind != DriverDesc::Kind::Unit || edge.driver.instanceName != instanceName)
+                    {
+                        continue;
+                    }
+                    if (!wroteAny)
+                    {
+                        out << indent << "// outputs for " << instanceName << "\n";
+                        wroteAny = true;
+                    }
+
+                    const std::string srcExpr =
+                        unitInfo.memberName + "->" + unitInfo.portCppMemberByName.at(edge.driver.portName);
+                    if (edge.kind == "unit_to_unit")
+                    {
+                        const auto cacheIt = signalCacheByName.find(edge.signal);
+                        if (cacheIt == signalCacheByName.end())
+                        {
+                            continue;
+                        }
+                        if (publishToSnapshot)
+                        {
+                            emitAssign(out,
+                                       cacheIt->second.snapshotMemberName,
+                                       cacheIt->second.desc.isWide,
+                                       cacheIt->second.desc.wordCount,
+                                       srcExpr,
+                                       unitInfo.portDescByName.at(edge.driver.portName).isWide,
+                                       unitInfo.portDescByName.at(edge.driver.portName).wordCount,
+                                       indentLevel);
+                        }
+                        if (publishToWriteback)
+                        {
+                            emitAssign(out,
+                                       cacheIt->second.writebackMemberName,
+                                       cacheIt->second.desc.isWide,
+                                       cacheIt->second.desc.wordCount,
+                                       srcExpr,
+                                       unitInfo.portDescByName.at(edge.driver.portName).isWide,
+                                       unitInfo.portDescByName.at(edge.driver.portName).wordCount,
+                                       indentLevel);
+                        }
+                    }
+                    else if (edge.kind == "unit_to_top")
+                    {
+                        for (const auto &sink : edge.sinks)
+                        {
+                            if (sink.kind != SinkDesc::Kind::Top)
+                            {
+                                continue;
+                            }
+                            const auto topOutputIt = topOutputByPort.find(sink.portName);
+                            if (topOutputIt == topOutputByPort.end())
+                            {
+                                continue;
+                            }
+                            emitAssign(out,
+                                       topOutputIt->second.memberName,
+                                       topOutputIt->second.desc.isWide,
+                                       topOutputIt->second.desc.wordCount,
+                                       srcExpr,
+                                       unitInfo.portDescByName.at(edge.driver.portName).isWide,
+                                       unitInfo.portDescByName.at(edge.driver.portName).wordCount,
+                                       indentLevel);
+                        }
+                    }
+                }
+                return wroteAny;
+            };
+            auto emitCommitWritebackToSnapshot = [&](std::ostream &out, int indentLevel)
+            {
+                const std::string indent(static_cast<std::size_t>(indentLevel * 2), ' ');
+                bool wroteAny = false;
+                for (const auto &signal : signalCaches)
+                {
+                    if (!wroteAny)
+                    {
+                        out << indent << "// Commit non-debug writeback into the next cross-partition snapshot\n";
+                        wroteAny = true;
+                    }
+                    emitAssign(out,
+                               signal.snapshotMemberName,
+                               signal.desc.isWide,
+                               signal.desc.wordCount,
+                               signal.writebackMemberName,
+                               signal.desc.isWide,
+                               signal.desc.wordCount,
+                               indentLevel);
+                }
+                return wroteAny;
+            };
+            auto emitNonDebugStepForUnit = [&](std::ostream &out, const std::string &instanceName, int indentLevel)
+            {
+                const auto unitIt = unitInfoByInstance.find(instanceName);
+                if (unitIt == unitInfoByInstance.end())
+                {
+                    return false;
+                }
+                const auto &unitInfo = unitIt->second;
+                emitScatterInputsForUnit(out, instanceName, indentLevel);
+                out << std::string(static_cast<std::size_t>(indentLevel * 2), ' ') << "// eval " << instanceName
+                    << "\n";
+                out << std::string(static_cast<std::size_t>(indentLevel * 2), ' ') << unitInfo.memberName
+                    << "->eval();\n";
+                emitPublishOutputsForUnit(out, instanceName, indentLevel, false, true);
+                return true;
+            };
 
             source << "WolviRepCutVerilatorSim::WolviRepCutVerilatorSim()\n";
             if (!manifest.units.empty())
@@ -1237,20 +1478,25 @@ namespace wolvrix::lib::emit
                 }
             }
             source << " {\n";
-            for (const auto &instanceName : logicEvalOrder)
+            for (const auto &instanceName : nonDebugEvalOrder)
             {
-                const auto &unitInfo = unitInfoByInstance.at(instanceName);
-                source << "  logic_eval_fns_.emplace_back([this]() { " << unitInfo.memberName << "->eval(); });\n";
+                std::ostringstream body;
+                emitNonDebugStepForUnit(body, instanceName, 2);
+                source << "  non_debug_step_fns_.emplace_back([this]() {\n";
+                source << body.str();
+                source << "  });\n";
             }
+            source << "  step_timing_enabled_ = wolvi_env_flag_enabled(\"XS_REPCUT_STEP_TIMING\");\n";
             source << "  initialize_part_eval_workers_();\n";
             source << "}\n\n";
             source << "WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim() {\n";
+            source << "  report_step_timing_();\n";
             source << "  shutdown_part_eval_workers_();\n";
             source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::initialize_part_eval_workers_() {\n";
             source << "  const std::size_t requestedWorkers = wolvi_part_eval_requested_workers();\n";
-            source << "  assert(requestedWorkers <= logic_eval_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\");\n";
-            source << "  if (logic_eval_fns_.size() < 2 || requestedWorkers < 2) {\n";
+            source << "  assert(requestedWorkers <= non_debug_step_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\");\n";
+            source << "  if (non_debug_step_fns_.size() < 2 || requestedWorkers < 2) {\n";
             source << "    return;\n";
             source << "  }\n";
             source << "  part_eval_cpu_ids_ = wolvi_part_eval_available_cpus();\n";
@@ -1258,7 +1504,7 @@ namespace wolvrix::lib::emit
             source << "    part_eval_cpu_ids_.clear();\n";
             source << "    return;\n";
             source << "  }\n";
-            source << "  part_eval_worker_count_ = std::min(logic_eval_fns_.size(), requestedWorkers);\n";
+            source << "  part_eval_worker_count_ = std::min(non_debug_step_fns_.size(), requestedWorkers);\n";
             source << "  part_eval_worker_count_ = std::min(part_eval_worker_count_, part_eval_cpu_ids_.size());\n";
             source << "  if (part_eval_worker_count_ < 2) {\n";
             source << "    part_eval_worker_count_ = 0;\n";
@@ -1312,29 +1558,38 @@ namespace wolvrix::lib::emit
             source << "      return;\n";
             source << "    }\n";
             source << "    worker.hasWork = false;\n";
+            source << "    const auto* phaseFns = active_part_eval_fns_;\n";
             source << "    lock.unlock();\n";
-            source << "    eval_part_batch_(workerIndex, part_eval_worker_count_);\n";
+            source << "    if (phaseFns != nullptr) {\n";
+            source << "      eval_part_batch_(*phaseFns, workerIndex, part_eval_worker_count_);\n";
+            source << "    }\n";
             source << "    lock.lock();\n";
             source << "    worker.completed = true;\n";
             source << "    lock.unlock();\n";
             source << "    worker.cv.notify_one();\n";
             source << "  }\n";
             source << "}\n\n";
-            source << "void WolviRepCutVerilatorSim::eval_part_batch_(std::size_t workerIndex, std::size_t workerCount) {\n";
-            source << "  if (workerCount == 0 || logic_eval_fns_.empty()) {\n";
+            source << "void WolviRepCutVerilatorSim::eval_part_batch_(const std::vector<std::function<void()>>& phaseFns,\n";
+            source << "                                             std::size_t workerIndex,\n";
+            source << "                                             std::size_t workerCount) {\n";
+            source << "  if (workerCount == 0 || phaseFns.empty()) {\n";
             source << "    return;\n";
             source << "  }\n";
-            source << "  const std::size_t begin = logic_eval_fns_.size() * workerIndex / workerCount;\n";
-            source << "  const std::size_t end = logic_eval_fns_.size() * (workerIndex + 1) / workerCount;\n";
+            source << "  const std::size_t begin = phaseFns.size() * workerIndex / workerCount;\n";
+            source << "  const std::size_t end = phaseFns.size() * (workerIndex + 1) / workerCount;\n";
             source << "  for (std::size_t index = begin; index < end; ++index) {\n";
-            source << "    logic_eval_fns_[index]();\n";
+            source << "    phaseFns[index]();\n";
             source << "  }\n";
             source << "}\n\n";
-            source << "void WolviRepCutVerilatorSim::run_part_eval_workers_() {\n";
-            source << "  if (!part_eval_parallel_) {\n";
-            source << "    eval_part_batch_(0, 1);\n";
+            source << "void WolviRepCutVerilatorSim::run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns) {\n";
+            source << "  if (phaseFns.empty()) {\n";
             source << "    return;\n";
             source << "  }\n";
+            source << "  if (!part_eval_parallel_) {\n";
+            source << "    eval_part_batch_(phaseFns, 0, 1);\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  active_part_eval_fns_ = &phaseFns;\n";
             source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
             source << "    auto &worker = part_eval_workers_[workerIndex];\n";
             source << "    {\n";
@@ -1349,222 +1604,91 @@ namespace wolvrix::lib::emit
             source << "    std::unique_lock<std::mutex> lock(worker.mutex);\n";
             source << "    worker.cv.wait(lock, [&worker]() { return worker.completed; });\n";
             source << "  }\n";
+            source << "  active_part_eval_fns_ = nullptr;\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::run_non_debug_step_workers_() {\n";
+            source << "  run_part_eval_phase_(non_debug_step_fns_);\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::report_step_timing_() const {\n";
+            source << "  if (!step_timing_enabled_ || step_timing_.steps == 0) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  const double steps = static_cast<double>(step_timing_.steps);\n";
+            source << "  const double totalMs = static_cast<double>(step_timing_.total_ns) / 1.0e6;\n";
+            source << "  const auto printPhase = [&](const char* name, std::uint64_t ns) {\n";
+            source << "    const double totalPhaseMs = static_cast<double>(ns) / 1.0e6;\n";
+            source << "    const double avgPhaseUs = static_cast<double>(ns) / steps / 1.0e3;\n";
+            source << "    const double pct = step_timing_.total_ns == 0 ? 0.0 :\n";
+            source << "                       (100.0 * static_cast<double>(ns) / static_cast<double>(step_timing_.total_ns));\n";
+            source << "    std::fprintf(stderr, \"[WOLVI][step-timing] %s total=%.3f ms avg=%.3f us pct=%.2f%%\\n\",\n";
+            source << "                 name, totalPhaseMs, avgPhaseUs, pct);\n";
+            source << "  };\n";
+            source << "  std::fprintf(stderr, \"[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n\",\n";
+            source << "               static_cast<unsigned long long>(step_timing_.steps), totalMs,\n";
+            source << "               totalMs * 1000.0 / steps);\n";
+            source << "  printPhase(\"scatter\", step_timing_.scatter_ns);\n";
+            source << "  printPhase(\"debug_eval\", step_timing_.debug_eval_ns);\n";
+            source << "  printPhase(\"debug_gather\", step_timing_.debug_gather_ns);\n";
+            source << "  printPhase(\"debug_refresh\", step_timing_.debug_refresh_ns);\n";
+            source << "  printPhase(\"part_eval\", step_timing_.part_eval_ns);\n";
+            source << "  printPhase(\"gather\", step_timing_.gather_ns);\n";
             source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::step() {\n";
-            auto emitScatterInputsForUnit = [&](const std::string &instanceName)
-            {
-                const auto unitIt = unitInfoByInstance.find(instanceName);
-                if (unitIt == unitInfoByInstance.end())
-                {
-                    return;
-                }
-                const auto &unitInfo = unitIt->second;
-                source << "  // inputs for " << instanceName << "\n";
-                for (const auto &edge : manifest.connections)
-                {
-                    for (const auto &sink : edge.sinks)
-                    {
-                        if (sink.kind != SinkDesc::Kind::Unit || sink.instanceName != instanceName)
-                        {
-                            continue;
-                        }
-
-                        std::string srcExpr;
-                        bool srcIsWide = false;
-                        std::size_t srcWordCount = 0;
-                        if (edge.driver.kind == DriverDesc::Kind::Top)
-                        {
-                            const auto topInputIt = topInputByPort.find(edge.driver.portName);
-                            if (topInputIt == topInputByPort.end())
-                            {
-                                continue;
-                            }
-                            srcExpr = topInputIt->second.memberName;
-                            srcIsWide = topInputIt->second.desc.isWide;
-                            srcWordCount = topInputIt->second.desc.wordCount;
-                        }
-                        else if (edge.driver.kind == DriverDesc::Kind::Unit)
-                        {
-                            const auto cacheIt = signalCacheByName.find(edge.signal);
-                            if (cacheIt == signalCacheByName.end())
-                            {
-                                continue;
-                            }
-                            srcExpr = cacheIt->second.memberName;
-                            srcIsWide = cacheIt->second.desc.isWide;
-                            srcWordCount = cacheIt->second.desc.wordCount;
-                        }
-                        else
-                        {
-                            const auto constIt = constSignalByName.find(edge.signal);
-                            if (constIt == constSignalByName.end())
-                            {
-                                continue;
-                            }
-                            srcExpr = constIt->second.memberName;
-                            srcIsWide = constIt->second.desc.isWide;
-                            srcWordCount = constIt->second.desc.wordCount;
-                        }
-                        emitAssign(source,
-                                   unitInfo.memberName + "->" + unitInfo.portCppMemberByName.at(sink.portName),
-                                   unitInfo.portDescByName.at(sink.portName).isWide,
-                                   unitInfo.portDescByName.at(sink.portName).wordCount,
-                                   srcExpr,
-                                   srcIsWide,
-                                   srcWordCount,
-                                   1);
-                    }
-                }
-            };
-            auto emitGatherOutputsForUnit = [&](const std::string &instanceName)
-            {
-                const auto unitIt = unitInfoByInstance.find(instanceName);
-                if (unitIt == unitInfoByInstance.end())
-                {
-                    return;
-                }
-                const auto &unitInfo = unitIt->second;
-                source << "  // outputs for " << instanceName << "\n";
-                for (const auto &edge : manifest.connections)
-                {
-                    if (edge.driver.kind != DriverDesc::Kind::Unit || edge.driver.instanceName != instanceName)
-                    {
-                        continue;
-                    }
-
-                    const std::string srcExpr =
-                        unitInfo.memberName + "->" + unitInfo.portCppMemberByName.at(edge.driver.portName);
-                    if (edge.kind == "unit_to_unit")
-                    {
-                        const auto cacheIt = signalCacheByName.find(edge.signal);
-                        if (cacheIt == signalCacheByName.end())
-                        {
-                            continue;
-                        }
-                        emitAssign(source,
-                                   cacheIt->second.memberName,
-                                   cacheIt->second.desc.isWide,
-                                   cacheIt->second.desc.wordCount,
-                                   srcExpr,
-                                   unitInfo.portDescByName.at(edge.driver.portName).isWide,
-                                   unitInfo.portDescByName.at(edge.driver.portName).wordCount,
-                                   1);
-                    }
-                    else if (edge.kind == "unit_to_top")
-                    {
-                        for (const auto &sink : edge.sinks)
-                        {
-                            if (sink.kind != SinkDesc::Kind::Top)
-                            {
-                                continue;
-                            }
-                            const auto topOutputIt = topOutputByPort.find(sink.portName);
-                            if (topOutputIt == topOutputByPort.end())
-                            {
-                                continue;
-                            }
-                            emitAssign(source,
-                                       topOutputIt->second.memberName,
-                                       topOutputIt->second.desc.isWide,
-                                       topOutputIt->second.desc.wordCount,
-                                       srcExpr,
-                                       unitInfo.portDescByName.at(edge.driver.portName).isWide,
-                                       unitInfo.portDescByName.at(edge.driver.portName).wordCount,
-                                       1);
-                        }
-                    }
-                }
-            };
-            source << "  // Scatter a single cross-partition snapshot into every unit input first.\n";
-            for (const auto &instanceName : manifest.serialEvalOrder)
-            {
-                emitScatterInputsForUnit(instanceName);
-            }
-            source << "\n";
+            source << "  const bool stepTimingEnabled = step_timing_enabled_;\n";
+            source << "  const auto stepBegin = stepTimingEnabled ? WolviClock::now() : WolviClock::time_point{};\n";
+            source << "  auto phaseBegin = stepBegin;\n";
+            source << "  if (stepTimingEnabled) {\n";
+            source << "    ++step_timing_.steps;\n";
+            source << "  }\n";
             if (hasDebugPart)
             {
                 const auto &debugInfo = unitInfoByInstance.at("debug_part");
+                source << "  // Load debug_part inputs from the current cross-partition snapshot.\n";
+                emitScatterInputsForUnit(source, "debug_part", 1);
+                source << "\n";
+                source << "  if (stepTimingEnabled) {\n";
+                source << "    const auto phaseEnd = WolviClock::now();\n";
+                source << "    step_timing_.scatter_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
+                source << "    phaseBegin = phaseEnd;\n";
+                source << "  }\n";
                 source << "  // Evaluate debug_part first so DPI/device responses are available before logic eval.\n";
                 source << "  // eval debug_part\n";
                 source << "  " << debugInfo.memberName << "->eval();\n\n";
-                source << "  // Gather debug_part outputs immediately so sink units see current DPI/device data.\n";
-                emitGatherOutputsForUnit("debug_part");
+                source << "  if (stepTimingEnabled) {\n";
+                source << "    const auto phaseEnd = WolviClock::now();\n";
+                source << "    step_timing_.debug_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
+                source << "    phaseBegin = phaseEnd;\n";
+                source << "  }\n";
+                source << "  // Publish debug_part outputs into both snapshot and writeback before worker launch.\n";
+                emitPublishOutputsForUnit(source, "debug_part", 1, true, true);
                 source << "\n";
-                source << "  // Refresh non-debug unit inputs that depend on debug_part outputs.\n";
-                for (const auto &instanceName : manifest.serialEvalOrder)
-                {
-                    if (instanceName == "debug_part")
-                    {
-                        continue;
-                    }
-                    const auto unitIt = unitInfoByInstance.find(instanceName);
-                    if (unitIt == unitInfoByInstance.end())
-                    {
-                        continue;
-                    }
-                    const auto &unitInfo = unitIt->second;
-                    bool wroteAny = false;
-                    for (const auto &edge : manifest.connections)
-                    {
-                        if (edge.driver.kind != DriverDesc::Kind::Unit ||
-                            edge.driver.instanceName != "debug_part")
-                        {
-                            continue;
-                        }
-                        const auto cacheIt = signalCacheByName.find(edge.signal);
-                        if (cacheIt == signalCacheByName.end())
-                        {
-                            continue;
-                        }
-                        for (const auto &sink : edge.sinks)
-                        {
-                            if (sink.kind != SinkDesc::Kind::Unit || sink.instanceName != instanceName)
-                            {
-                                continue;
-                            }
-                            if (!wroteAny)
-                            {
-                                source << "  // debug-fed inputs for " << instanceName << "\n";
-                                wroteAny = true;
-                            }
-                            emitAssign(source,
-                                       unitInfo.memberName + "->" + unitInfo.portCppMemberByName.at(sink.portName),
-                                       unitInfo.portDescByName.at(sink.portName).isWide,
-                                       unitInfo.portDescByName.at(sink.portName).wordCount,
-                                       cacheIt->second.memberName,
-                                       cacheIt->second.desc.isWide,
-                                       cacheIt->second.desc.wordCount,
-                                       1);
-                        }
-                    }
-                }
-                source << "\n";
-                source << "  // Evaluate all non-debug units after every cross-partition input has been loaded.\n";
+                source << "  if (stepTimingEnabled) {\n";
+                source << "    const auto phaseEnd = WolviClock::now();\n";
+                source << "    step_timing_.debug_gather_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
+                source << "    phaseBegin = phaseEnd;\n";
+                source << "  }\n";
+                source << "  // Evaluate all non-debug units with fused local scatter/eval/gather.\n";
             }
             else
             {
-                source << "  // Evaluate all units after every cross-partition input has been loaded.\n";
+                source << "  // Evaluate all units with fused local scatter/eval/gather.\n";
             }
-            source << "  // eval part_* on fixed worker threads\n";
-            source << "  run_part_eval_workers_();\n";
+            source << "  // Run fused non-debug step tasks on fixed worker threads.\n";
+            source << "  run_non_debug_step_workers_();\n";
             source << "\n";
-            if (hasDebugPart)
-            {
-                source << "  // Gather non-debug outputs after every logic unit has completed eval().\n";
-            }
-            else
-            {
-                source << "  // Gather outputs only after every unit has completed eval().\n";
-            }
-            for (const auto &instanceName : manifest.serialEvalOrder)
-            {
-                if (hasDebugPart && instanceName == "debug_part")
-                {
-                    continue;
-                }
-                emitGatherOutputsForUnit(instanceName);
-                source << "\n";
-            }
+            source << "  if (stepTimingEnabled) {\n";
+            source << "    const auto phaseEnd = WolviClock::now();\n";
+            source << "    step_timing_.part_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
+            source << "    phaseBegin = phaseEnd;\n";
+            source << "  }\n";
+            source << "  // Commit cross-partition writeback after every non-debug task has completed.\n";
+            emitCommitWritebackToSnapshot(source, 1);
+            source << "\n";
+            source << "  if (stepTimingEnabled) {\n";
+            source << "    const auto stepEnd = WolviClock::now();\n";
+            source << "    step_timing_.gather_ns += wolvi_elapsed_ns(phaseBegin, stepEnd);\n";
+            source << "    step_timing_.total_ns += wolvi_elapsed_ns(stepBegin, stepEnd);\n";
+            source << "  }\n";
             source << "}\n";
 
             return WrapperCode{header.str(), source.str()};
