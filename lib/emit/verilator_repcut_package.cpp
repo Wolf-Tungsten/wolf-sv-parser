@@ -906,6 +906,25 @@ namespace wolvrix::lib::emit
                 }
             }
 
+            std::vector<std::string> logicEvalOrder;
+            logicEvalOrder.reserve(manifest.serialEvalOrder.size());
+            for (const auto &instanceName : manifest.serialEvalOrder)
+            {
+                if (instanceName == "debug_part")
+                {
+                    continue;
+                }
+                if (unitInfoByInstance.find(instanceName) == unitInfoByInstance.end())
+                {
+                    continue;
+                }
+                logicEvalOrder.push_back(instanceName);
+            }
+            const bool hasDebugPart =
+                unitInfoByInstance.find("debug_part") != unitInfoByInstance.end() &&
+                std::find(manifest.serialEvalOrder.begin(), manifest.serialEvalOrder.end(), "debug_part") !=
+                    manifest.serialEvalOrder.end();
+
             std::unordered_set<std::string> usedTopInputIdentifiers;
             std::vector<NamedSignal> topInputs;
             std::unordered_map<std::string, NamedSignal> topInputByPort;
@@ -1001,7 +1020,13 @@ namespace wolvrix::lib::emit
             header << "#ifndef WOLVI_REPCUT_VERILATOR_SIM_H\n";
             header << "#define WOLVI_REPCUT_VERILATOR_SIM_H\n\n";
             header << "#include <array>\n";
+            header << "#include <condition_variable>\n";
+            header << "#include <cstddef>\n";
+            header << "#include <functional>\n";
             header << "#include <memory>\n";
+            header << "#include <mutex>\n";
+            header << "#include <thread>\n";
+            header << "#include <vector>\n";
             header << "#include <verilated.h>\n\n";
             for (const auto &unit : manifest.units)
             {
@@ -1052,6 +1077,19 @@ namespace wolvrix::lib::emit
                 }
             }
             header << "\nprivate:\n";
+            header << "  struct PartEvalWorker {\n";
+            header << "    std::thread thread;\n";
+            header << "    std::mutex mutex;\n";
+            header << "    std::condition_variable cv;\n";
+            header << "    bool hasWork{false};\n";
+            header << "    bool completed{false};\n";
+            header << "    bool stop{false};\n";
+            header << "  };\n\n";
+            header << "  void initialize_part_eval_workers_();\n";
+            header << "  void shutdown_part_eval_workers_();\n";
+            header << "  void part_eval_worker_loop_(std::size_t workerIndex);\n";
+            header << "  void run_part_eval_workers_();\n";
+            header << "  void eval_part_batch_(std::size_t workerIndex, std::size_t workerCount);\n\n";
             for (const auto &signal : constSignals)
             {
                 header << "  static const " << signal.desc.typeName << " " << signal.memberName << ";\n";
@@ -1069,6 +1107,11 @@ namespace wolvrix::lib::emit
             {
                 header << "\n";
             }
+            header << "  std::vector<std::function<void()>> logic_eval_fns_;\n";
+            header << "  std::unique_ptr<PartEvalWorker[]> part_eval_workers_;\n";
+            header << "  std::vector<int> part_eval_cpu_ids_;\n";
+            header << "  std::size_t part_eval_worker_count_{};\n";
+            header << "  bool part_eval_parallel_{};\n\n";
             for (const auto &signal : topInputs)
             {
                 header << "  " << signal.desc.typeName << " " << signal.memberName << "{};\n";
@@ -1086,8 +1129,16 @@ namespace wolvrix::lib::emit
 
             std::ostringstream source;
             source << "#include \"wolvi_repcut_verilator_sim.h\"\n\n";
+            source << "#include <algorithm>\n";
+            source << "#include <cassert>\n";
+            source << "#include <cstdlib>\n";
             source << "#include <cstddef>\n";
-            source << "#include <utility>\n\n";
+            source << "#include <utility>\n";
+            source << "#if defined(__linux__)\n";
+            source << "#include <pthread.h>\n";
+            source << "#include <sched.h>\n";
+            source << "#endif\n";
+            source << "\n";
             source << "namespace {\n";
             source << "template <typename WideDst, typename WideSrc>\n";
             source << "inline void copy_wide_words(WideDst& dst, const WideSrc& src, std::size_t words) {\n";
@@ -1106,6 +1157,54 @@ namespace wolvrix::lib::emit
             source << "  for (std::size_t i = 0; i < N; ++i) {\n";
             source << "    dst[i] = src[i];\n";
             source << "  }\n";
+            source << "}\n";
+            source << "\n";
+            source << "inline std::vector<int> wolvi_part_eval_available_cpus() {\n";
+            source << "#if defined(__linux__)\n";
+            source << "  cpu_set_t mask;\n";
+            source << "  CPU_ZERO(&mask);\n";
+            source << "  if (sched_getaffinity(0, sizeof(mask), &mask) != 0) {\n";
+            source << "    return {};\n";
+            source << "  }\n";
+            source << "  std::vector<int> cpus;\n";
+            source << "  for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {\n";
+            source << "    if (CPU_ISSET(cpu, &mask)) {\n";
+            source << "      cpus.push_back(cpu);\n";
+            source << "    }\n";
+            source << "  }\n";
+            source << "  return cpus;\n";
+            source << "#else\n";
+            source << "  return {};\n";
+            source << "#endif\n";
+            source << "}\n";
+            source << "\n";
+            source << "inline bool wolvi_part_eval_pin_current_thread(int cpuId) {\n";
+            source << "#if defined(__linux__)\n";
+            source << "  if (cpuId < 0) {\n";
+            source << "    return false;\n";
+            source << "  }\n";
+            source << "  cpu_set_t mask;\n";
+            source << "  CPU_ZERO(&mask);\n";
+            source << "  CPU_SET(cpuId, &mask);\n";
+            source << "  return pthread_setaffinity_np(pthread_self(), sizeof(mask), &mask) == 0;\n";
+            source << "#else\n";
+            source << "  (void)cpuId;\n";
+            source << "  return false;\n";
+            source << "#endif\n";
+            source << "}\n";
+            source << "\n";
+            source << "inline std::size_t wolvi_part_eval_requested_workers() {\n";
+            source << "  const char* env = std::getenv(\"XS_EMU_THREADS\");\n";
+            source << "  if (env == nullptr || *env == '\\0') {\n";
+            source << "    return 0;\n";
+            source << "  }\n";
+            source << "  char* end = nullptr;\n";
+            source << "  const unsigned long long value = std::strtoull(env, &end, 10);\n";
+            source << "  if (end == env || (end != nullptr && *end != '\\0')) {\n";
+            source << "    assert(false && \"XS_EMU_THREADS must be an unsigned integer\");\n";
+            source << "    return 0;\n";
+            source << "  }\n";
+            source << "  return static_cast<std::size_t>(value);\n";
             source << "}\n";
             source << "} // namespace\n\n";
 
@@ -1137,13 +1236,121 @@ namespace wolvrix::lib::emit
                     source << unitInfo.memberName << "(std::make_unique<" << unitInfo.modelType << ">())";
                 }
             }
-            source << " {}\n\n";
-            source << "WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim() = default;\n\n";
+            source << " {\n";
+            for (const auto &instanceName : logicEvalOrder)
+            {
+                const auto &unitInfo = unitInfoByInstance.at(instanceName);
+                source << "  logic_eval_fns_.emplace_back([this]() { " << unitInfo.memberName << "->eval(); });\n";
+            }
+            source << "  initialize_part_eval_workers_();\n";
+            source << "}\n\n";
+            source << "WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim() {\n";
+            source << "  shutdown_part_eval_workers_();\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::initialize_part_eval_workers_() {\n";
+            source << "  const std::size_t requestedWorkers = wolvi_part_eval_requested_workers();\n";
+            source << "  assert(requestedWorkers <= logic_eval_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\");\n";
+            source << "  if (logic_eval_fns_.size() < 2 || requestedWorkers < 2) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  part_eval_cpu_ids_ = wolvi_part_eval_available_cpus();\n";
+            source << "  if (part_eval_cpu_ids_.size() < 2) {\n";
+            source << "    part_eval_cpu_ids_.clear();\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  part_eval_worker_count_ = std::min(logic_eval_fns_.size(), requestedWorkers);\n";
+            source << "  part_eval_worker_count_ = std::min(part_eval_worker_count_, part_eval_cpu_ids_.size());\n";
+            source << "  if (part_eval_worker_count_ < 2) {\n";
+            source << "    part_eval_worker_count_ = 0;\n";
+            source << "    part_eval_cpu_ids_.clear();\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  if (!part_eval_cpu_ids_.empty()) {\n";
+            source << "    part_eval_cpu_ids_.resize(part_eval_worker_count_);\n";
+            source << "  }\n";
+            source << "  part_eval_workers_ = std::make_unique<PartEvalWorker[]>(part_eval_worker_count_);\n";
+            source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
+            source << "    part_eval_workers_[workerIndex].thread = std::thread([this, workerIndex]() {\n";
+            source << "      if (workerIndex < part_eval_cpu_ids_.size()) {\n";
+            source << "        wolvi_part_eval_pin_current_thread(part_eval_cpu_ids_[workerIndex]);\n";
+            source << "      }\n";
+            source << "      part_eval_worker_loop_(workerIndex);\n";
+            source << "    });\n";
+            source << "  }\n";
+            source << "  part_eval_parallel_ = true;\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::shutdown_part_eval_workers_() {\n";
+            source << "  if (!part_eval_workers_) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
+            source << "    auto &worker = part_eval_workers_[workerIndex];\n";
+            source << "    {\n";
+            source << "      std::lock_guard<std::mutex> lock(worker.mutex);\n";
+            source << "      worker.stop = true;\n";
+            source << "      worker.hasWork = true;\n";
+            source << "    }\n";
+            source << "    worker.cv.notify_one();\n";
+            source << "  }\n";
+            source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
+            source << "    auto &worker = part_eval_workers_[workerIndex];\n";
+            source << "    if (worker.thread.joinable()) {\n";
+            source << "      worker.thread.join();\n";
+            source << "    }\n";
+            source << "  }\n";
+            source << "  part_eval_workers_.reset();\n";
+            source << "  part_eval_cpu_ids_.clear();\n";
+            source << "  part_eval_worker_count_ = 0;\n";
+            source << "  part_eval_parallel_ = false;\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::part_eval_worker_loop_(std::size_t workerIndex) {\n";
+            source << "  auto &worker = part_eval_workers_[workerIndex];\n";
+            source << "  while (true) {\n";
+            source << "    std::unique_lock<std::mutex> lock(worker.mutex);\n";
+            source << "    worker.cv.wait(lock, [&worker]() { return worker.hasWork; });\n";
+            source << "    if (worker.stop) {\n";
+            source << "      return;\n";
+            source << "    }\n";
+            source << "    worker.hasWork = false;\n";
+            source << "    lock.unlock();\n";
+            source << "    eval_part_batch_(workerIndex, part_eval_worker_count_);\n";
+            source << "    lock.lock();\n";
+            source << "    worker.completed = true;\n";
+            source << "    lock.unlock();\n";
+            source << "    worker.cv.notify_one();\n";
+            source << "  }\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::eval_part_batch_(std::size_t workerIndex, std::size_t workerCount) {\n";
+            source << "  if (workerCount == 0 || logic_eval_fns_.empty()) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  const std::size_t begin = logic_eval_fns_.size() * workerIndex / workerCount;\n";
+            source << "  const std::size_t end = logic_eval_fns_.size() * (workerIndex + 1) / workerCount;\n";
+            source << "  for (std::size_t index = begin; index < end; ++index) {\n";
+            source << "    logic_eval_fns_[index]();\n";
+            source << "  }\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::run_part_eval_workers_() {\n";
+            source << "  if (!part_eval_parallel_) {\n";
+            source << "    eval_part_batch_(0, 1);\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
+            source << "    auto &worker = part_eval_workers_[workerIndex];\n";
+            source << "    {\n";
+            source << "      std::lock_guard<std::mutex> lock(worker.mutex);\n";
+            source << "      worker.completed = false;\n";
+            source << "      worker.hasWork = true;\n";
+            source << "    }\n";
+            source << "    worker.cv.notify_one();\n";
+            source << "  }\n";
+            source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
+            source << "    auto &worker = part_eval_workers_[workerIndex];\n";
+            source << "    std::unique_lock<std::mutex> lock(worker.mutex);\n";
+            source << "    worker.cv.wait(lock, [&worker]() { return worker.completed; });\n";
+            source << "  }\n";
+            source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::step() {\n";
-            const bool hasDebugPart =
-                unitInfoByInstance.find("debug_part") != unitInfoByInstance.end() &&
-                std::find(manifest.serialEvalOrder.begin(), manifest.serialEvalOrder.end(), "debug_part") !=
-                    manifest.serialEvalOrder.end();
             auto emitScatterInputsForUnit = [&](const std::string &instanceName)
             {
                 const auto unitIt = unitInfoByInstance.find(instanceName);
@@ -1338,21 +1545,8 @@ namespace wolvrix::lib::emit
             {
                 source << "  // Evaluate all units after every cross-partition input has been loaded.\n";
             }
-            for (const auto &instanceName : manifest.serialEvalOrder)
-            {
-                if (hasDebugPart && instanceName == "debug_part")
-                {
-                    continue;
-                }
-                const auto unitIt = unitInfoByInstance.find(instanceName);
-                if (unitIt == unitInfoByInstance.end())
-                {
-                    continue;
-                }
-                const auto &unitInfo = unitIt->second;
-                source << "  // eval " << instanceName << "\n";
-                source << "  " << unitInfo.memberName << "->eval();\n";
-            }
+            source << "  // eval part_* on fixed worker threads\n";
+            source << "  run_part_eval_workers_();\n";
             source << "\n";
             if (hasDebugPart)
             {

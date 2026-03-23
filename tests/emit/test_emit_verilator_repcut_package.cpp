@@ -296,6 +296,11 @@ int main()
     {
         return fail("wrapper header missing expected unit members");
     }
+    if (!contains(wrapperHeader, "std::vector<std::function<void()>> logic_eval_fns_;") ||
+        !contains(wrapperHeader, "void run_part_eval_workers_();"))
+    {
+        return fail("wrapper header missing expected parallel eval declarations");
+    }
     if (!contains(wrapperHeader, "void set_clock(CData value) { top_in_clock_ = value; }") ||
         !contains(wrapperHeader, "void set_in_data(CData value) { top_in_in_data_ = value; }") ||
         !contains(wrapperHeader, "CData get_out() const { return top_out_out_; }"))
@@ -310,10 +315,17 @@ int main()
         return fail("wrapper source missing expected scatter code");
     }
     if (!contains(wrapperSource, "unit_debug_part_->eval();") ||
-        !contains(wrapperSource, "unit_part_0_->eval();") ||
-        !contains(wrapperSource, "unit_part_1_->eval();"))
+        !contains(wrapperSource, "logic_eval_fns_.emplace_back([this]() { unit_part_0_->eval(); });") ||
+        !contains(wrapperSource, "logic_eval_fns_.emplace_back([this]() { unit_part_1_->eval(); });") ||
+        !contains(wrapperSource, "run_part_eval_workers_();"))
     {
         return fail("wrapper source missing expected eval calls");
+    }
+    if (!contains(wrapperSource, "std::getenv(\"XS_EMU_THREADS\")") ||
+        !contains(wrapperSource, "assert(requestedWorkers <= logic_eval_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
+        !contains(wrapperSource, "#if defined(__linux__)"))
+    {
+        return fail("wrapper source missing expected runtime thread-pool guards");
     }
     if (!contains(wrapperSource, "Evaluate debug_part first so DPI/device responses are available before logic eval.") ||
         !contains(wrapperSource, "Evaluate all non-debug units after every cross-partition input has been loaded."))
@@ -327,19 +339,16 @@ int main()
     }
     const std::size_t part1InputPos = wrapperSource.find("unit_part_1_->in_2 = signal_mid_;");
     const std::size_t debugEvalPos = wrapperSource.find("unit_debug_part_->eval();");
-    const std::size_t part0EvalPos = wrapperSource.find("unit_part_0_->eval();");
-    const std::size_t part1EvalPos = wrapperSource.find("unit_part_1_->eval();");
+    const std::size_t partEvalPos = wrapperSource.find("run_part_eval_workers_();");
     const std::size_t gatherPos = wrapperSource.find("signal_mid_ = unit_part_0_->out_0;");
     if (part1InputPos == std::string::npos || debugEvalPos == std::string::npos ||
-        part0EvalPos == std::string::npos ||
-        part1EvalPos == std::string::npos || gatherPos == std::string::npos)
+        partEvalPos == std::string::npos || gatherPos == std::string::npos)
     {
         return fail("wrapper source missing phase-order markers");
     }
-    if (!(part1InputPos < debugEvalPos && debugEvalPos < part0EvalPos && part0EvalPos < part1EvalPos &&
-          part1EvalPos < gatherPos))
+    if (!(part1InputPos < debugEvalPos && debugEvalPos < partEvalPos && partEvalPos < gatherPos))
     {
-        return fail("wrapper source should scatter all inputs, eval debug_part first, then eval logic units, then gather outputs");
+        return fail("wrapper source should scatter all inputs, eval debug_part first, then run parallel part eval, then gather outputs");
     }
     if (!contains(wrapperSource, "const CData WolviRepCutVerilatorSim::const_sel_const_ = static_cast<CData>(0x1ULL);"))
     {
