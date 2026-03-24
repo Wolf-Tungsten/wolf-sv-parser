@@ -2,8 +2,10 @@
 #include "transform/repcut_partition_set.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -274,6 +276,37 @@ namespace wolvrix::lib::transform
             uint32_t srcPart = 0;
             uint32_t dstPart = 0;
         };
+
+        std::string jsonEscape(std::string_view text)
+        {
+            std::string out;
+            out.reserve(text.size() + 8);
+            for (const char ch : text)
+            {
+                switch (ch)
+                {
+                case '\\':
+                    out += "\\\\";
+                    break;
+                case '"':
+                    out += "\\\"";
+                    break;
+                case '\n':
+                    out += "\\n";
+                    break;
+                case '\r':
+                    out += "\\r";
+                    break;
+                case '\t':
+                    out += "\\t";
+                    break;
+                default:
+                    out.push_back(ch);
+                    break;
+                }
+            }
+            return out;
+        }
 
         std::string formatValueId(wolvrix::lib::grh::ValueId id)
         {
@@ -1959,11 +1992,396 @@ namespace wolvrix::lib::transform
             return pieceWeights[pid];
         }
 
+        uint32_t clampToUint32(std::size_t value)
+        {
+            return value > static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())
+                       ? std::numeric_limits<uint32_t>::max()
+                       : static_cast<uint32_t>(value);
+        }
+
+        uint32_t calculatePieceCommWords(const wolvrix::lib::grh::Graph &graph,
+                                         const PhaseAData &phaseA,
+                                         const PhaseBData &phaseB,
+                                         PieceId pid)
+        {
+            if (pid >= phaseB.pieces.size())
+            {
+                return 0;
+            }
+
+            const auto &piece = phaseB.pieces[pid];
+            if (piece.empty())
+            {
+                return 0;
+            }
+
+            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> pieceResults;
+            for (const NodeId node : piece)
+            {
+                if (node >= phaseA.nodeToOp.size())
+                {
+                    continue;
+                }
+                const auto op = graph.getOperation(phaseA.nodeToOp[node]);
+                for (const auto resultValue : op.results())
+                {
+                    if (resultValue.valid())
+                    {
+                        pieceResults.insert(resultValue);
+                    }
+                }
+            }
+
+            std::size_t totalCommWords = 0;
+            for (const auto valueId : pieceResults)
+            {
+                const auto value = graph.getValue(valueId);
+                std::unordered_set<AscId> userAscs;
+                for (const auto &user : value.users())
+                {
+                    if (!user.operation.valid())
+                    {
+                        continue;
+                    }
+                    auto itNode = phaseA.opToNode.find(user.operation);
+                    if (itNode == phaseA.opToNode.end())
+                    {
+                        continue;
+                    }
+                    const NodeId userNode = itNode->second;
+                    if (userNode >= phaseB.nodeToPiece.size())
+                    {
+                        continue;
+                    }
+                    const PieceId userPid = phaseB.nodeToPiece[userNode];
+                    if (userPid == kInvalidPiece || userPid >= phaseB.pieceToAscs.size())
+                    {
+                        continue;
+                    }
+                    for (const AscId aid : phaseB.pieceToAscs[userPid])
+                    {
+                        userAscs.insert(aid);
+                    }
+                }
+
+                if (userAscs.size() < 2)
+                {
+                    continue;
+                }
+
+                const int32_t width = std::max(1, safeValueWidth(graph, valueId));
+                const std::size_t words = static_cast<std::size_t>((width + 63) / 64);
+                const std::size_t fanoutFactor = std::max<std::size_t>(1, userAscs.size() - 1);
+                totalCommWords += words * fanoutFactor;
+            }
+
+            return clampToUint32(totalCommWords);
+        }
+
+        std::size_t widthToWordCount(int32_t width)
+        {
+            const int32_t clampedWidth = std::max(1, width);
+            return static_cast<std::size_t>((clampedWidth + 63) / 64);
+        }
+
+        std::size_t widthBucketIndex(int32_t width)
+        {
+            if (width <= 1)
+            {
+                return 0;
+            }
+            if (width <= 8)
+            {
+                return 1;
+            }
+            if (width <= 16)
+            {
+                return 2;
+            }
+            if (width <= 32)
+            {
+                return 3;
+            }
+            if (width <= 64)
+            {
+                return 4;
+            }
+            if (width <= 128)
+            {
+                return 5;
+            }
+            if (width <= 256)
+            {
+                return 6;
+            }
+            return 7;
+        }
+
+        const char *widthBucketName(std::size_t index)
+        {
+            static constexpr std::array<const char *, 8> kNames = {
+                "w1",
+                "w2_8",
+                "w9_16",
+                "w17_32",
+                "w33_64",
+                "w65_128",
+                "w129_256",
+                "w257_plus",
+            };
+            return index < kNames.size() ? kNames[index] : "unknown";
+        }
+
+        struct PartitionStaticFeatureRecord
+        {
+            std::size_t opCount = 0;
+            std::size_t combOpCount = 0;
+            std::size_t sinkOpCount = 0;
+            std::size_t sourceOpCount = 0;
+            std::size_t phaseANodeCount = 0;
+            std::size_t nonPhaseAOpCount = 0;
+            std::size_t operandCount = 0;
+            std::size_t resultCount = 0;
+            std::size_t operandWordCount = 0;
+            std::size_t resultWordCount = 0;
+            std::size_t fanoutCount = 0;
+            std::size_t estimatedNodeWeightSum = 0;
+            std::size_t hyperNodeWeight = 0;
+            std::size_t crossInValueCount = 0;
+            std::size_t crossOutValueCount = 0;
+            std::size_t crossInWordCount = 0;
+            std::size_t crossOutWordCount = 0;
+            int32_t maxOpWidth = 1;
+            std::unordered_map<std::string, std::size_t> opKindCounts;
+            std::array<std::size_t, 8> widthBucketCounts{};
+        };
+
+        bool belongsToGraph(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::OperationId opId) noexcept
+        {
+            return opId.valid() && opId.graph == graph.id();
+        }
+
+        bool belongsToGraph(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId valueId) noexcept
+        {
+            return valueId.valid() && valueId.graph == graph.id();
+        }
+
+        std::vector<PartitionStaticFeatureRecord> buildPartitionStaticFeatureRecords(
+            const wolvrix::lib::grh::Graph &graph,
+            const PhaseAData &phaseA,
+            const std::vector<std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>> &partitionOps,
+            const std::vector<CrossPartitionValue> &crossValues,
+            const std::vector<std::size_t> &partitionWeights)
+        {
+            std::vector<PartitionStaticFeatureRecord> records(partitionOps.size());
+            std::vector<uint32_t> nodeWeights(phaseA.nodeToOp.size(), std::numeric_limits<uint32_t>::max());
+
+            for (std::size_t partId = 0; partId < partitionOps.size(); ++partId)
+            {
+                auto &record = records[partId];
+                if (partId < partitionWeights.size())
+                {
+                    record.hyperNodeWeight = partitionWeights[partId];
+                }
+                for (const auto opId : partitionOps[partId])
+                {
+                    if (!belongsToGraph(graph, opId))
+                    {
+                        continue;
+                    }
+                    const auto op = graph.getOperation(opId);
+                    ++record.opCount;
+                    record.operandCount += op.operands().size();
+                    record.resultCount += op.results().size();
+                    record.opKindCounts[std::string(wolvrix::lib::grh::toString(op.kind()))] += 1;
+                    if (isCombOp(op))
+                    {
+                        ++record.combOpCount;
+                    }
+                    if (isSinkOpKind(op.kind()))
+                    {
+                        ++record.sinkOpCount;
+                    }
+                    if (isSourceOpKind(op.kind()))
+                    {
+                        ++record.sourceOpCount;
+                    }
+
+                    int32_t opWidth = 1;
+                    opWidth = std::max(opWidth, getResultWidth(graph, op));
+                    opWidth = std::max(opWidth, getMaxOperandWidth(graph, op));
+                    record.maxOpWidth = std::max(record.maxOpWidth, opWidth);
+                    record.widthBucketCounts[widthBucketIndex(opWidth)] += 1;
+
+                    for (const auto operand : op.operands())
+                    {
+                        if (!belongsToGraph(graph, operand))
+                        {
+                            continue;
+                        }
+                        record.operandWordCount += widthToWordCount(safeValueWidth(graph, operand));
+                    }
+                    for (const auto resultValue : op.results())
+                    {
+                        if (!belongsToGraph(graph, resultValue))
+                        {
+                            continue;
+                        }
+                        record.resultWordCount += widthToWordCount(safeValueWidth(graph, resultValue));
+                        record.fanoutCount += graph.getValue(resultValue).users().size();
+                    }
+
+                    const auto nodeIt = phaseA.opToNode.find(opId);
+                    if (nodeIt != phaseA.opToNode.end())
+                    {
+                        ++record.phaseANodeCount;
+                        record.estimatedNodeWeightSum +=
+                            calculateNodeWeight(graph, phaseA, nodeIt->second, nodeWeights);
+                    }
+                    else
+                    {
+                        ++record.nonPhaseAOpCount;
+                    }
+                }
+            }
+
+            for (const auto &cv : crossValues)
+            {
+                if (!cv.allowed || !cv.requiresPort)
+                {
+                    continue;
+                }
+                if (!belongsToGraph(graph, cv.value))
+                {
+                    continue;
+                }
+                const std::size_t wordCount = widthToWordCount(safeValueWidth(graph, cv.value));
+                if (cv.srcPart < records.size())
+                {
+                    records[cv.srcPart].crossOutValueCount += 1;
+                    records[cv.srcPart].crossOutWordCount += wordCount;
+                }
+                if (cv.dstPart < records.size())
+                {
+                    records[cv.dstPart].crossInValueCount += 1;
+                    records[cv.dstPart].crossInWordCount += wordCount;
+                }
+            }
+
+            return records;
+        }
+
+        bool writePartitionStaticFeatureJsonl(
+            const std::string &graphName,
+            const std::string &stem,
+            const std::vector<PartitionStaticFeatureRecord> &records,
+            std::size_t crossValueCount,
+            const std::vector<std::string> &partitionGraphNames,
+            const std::filesystem::path &outputPath,
+            std::string &errorMessage)
+        {
+            std::ofstream out(outputPath);
+            if (!out)
+            {
+                errorMessage = "failed to open partition static feature output: " + outputPath.string();
+                return false;
+            }
+
+            out << "{\"record_type\":\"partition_static_feature_summary\""
+                << ",\"schema_version\":1"
+                << ",\"graph\":\"" << jsonEscape(graphName) << "\""
+                << ",\"stem\":\"" << jsonEscape(stem) << "\""
+                << ",\"partition_count\":" << records.size()
+                << ",\"cross_value_count\":" << crossValueCount
+                << "}\n";
+
+            for (std::size_t partId = 0; partId < records.size(); ++partId)
+            {
+                const auto &record = records[partId];
+                std::vector<std::pair<std::string, std::size_t>> kindCounts(
+                    record.opKindCounts.begin(), record.opKindCounts.end());
+                std::sort(kindCounts.begin(), kindCounts.end(),
+                          [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+
+                const std::string graphPartName =
+                    partId < partitionGraphNames.size() ? partitionGraphNames[partId] : std::string();
+
+                out << "{\"record_type\":\"partition_static_features\""
+                    << ",\"schema_version\":1"
+                    << ",\"graph\":\"" << jsonEscape(graphName) << "\""
+                    << ",\"stem\":\"" << jsonEscape(stem) << "\""
+                    << ",\"part_id\":" << partId
+                    << ",\"part_name\":\"part_" << partId << "\""
+                    << ",\"partition_graph_name\":\"" << jsonEscape(graphPartName) << "\""
+                    << ",\"op_count\":" << record.opCount
+                    << ",\"comb_op_count\":" << record.combOpCount
+                    << ",\"sink_op_count\":" << record.sinkOpCount
+                    << ",\"source_op_count\":" << record.sourceOpCount
+                    << ",\"phase_a_node_count\":" << record.phaseANodeCount
+                    << ",\"non_phase_a_op_count\":" << record.nonPhaseAOpCount
+                    << ",\"operand_count\":" << record.operandCount
+                    << ",\"result_count\":" << record.resultCount
+                    << ",\"operand_word_count\":" << record.operandWordCount
+                    << ",\"result_word_count\":" << record.resultWordCount
+                    << ",\"fanout_count\":" << record.fanoutCount
+                    << ",\"estimated_node_weight_sum\":" << record.estimatedNodeWeightSum
+                    << ",\"hyper_partition_weight\":" << record.hyperNodeWeight
+                    << ",\"cross_in_value_count\":" << record.crossInValueCount
+                    << ",\"cross_out_value_count\":" << record.crossOutValueCount
+                    << ",\"cross_in_word_count\":" << record.crossInWordCount
+                    << ",\"cross_out_word_count\":" << record.crossOutWordCount
+                    << ",\"max_op_width\":" << record.maxOpWidth
+                    << ",\"width_bucket_counts\":{";
+                for (std::size_t i = 0; i < record.widthBucketCounts.size(); ++i)
+                {
+                    if (i != 0)
+                    {
+                        out << ",";
+                    }
+                    out << "\"" << widthBucketName(i) << "\":" << record.widthBucketCounts[i];
+                }
+                out << "},\"op_kind_counts\":{";
+                for (std::size_t i = 0; i < kindCounts.size(); ++i)
+                {
+                    if (i != 0)
+                    {
+                        out << ",";
+                    }
+                    out << "\"" << jsonEscape(kindCounts[i].first) << "\":" << kindCounts[i].second;
+                }
+                out << "}}\n";
+            }
+
+            out.flush();
+            if (!out)
+            {
+                errorMessage = "failed while writing partition static feature output: " + outputPath.string();
+                return false;
+            }
+            out.close();
+            if (!out)
+            {
+                errorMessage = "failed while closing partition static feature output: " + outputPath.string();
+                return false;
+            }
+            std::error_code existsEc;
+            if (!std::filesystem::exists(outputPath, existsEc))
+            {
+                errorMessage = existsEc
+                                   ? ("partition static feature output missing after close: " + outputPath.string() +
+                                      " (" + existsEc.message() + ")")
+                                   : ("partition static feature output missing after close: " + outputPath.string());
+                return false;
+            }
+            return true;
+        }
+
         HyperGraph buildHyperGraph(const wolvrix::lib::grh::Graph &graph,
                                    const PhaseAData &phaseA,
                                    const PhaseBData &phaseB,
                                    std::vector<uint32_t> &nodeWeights,
-                                   std::vector<uint32_t> &pieceWeights)
+                                   std::vector<uint32_t> &pieceWeights,
+                                   std::vector<uint32_t> &edgeProxyWeights)
         {
             HyperGraph hg;
 
@@ -1973,6 +2391,17 @@ namespace wolvrix::lib::transform
             for (PieceId pid = 0; pid < phaseB.pieces.size(); ++pid)
             {
                 (void)calculatePieceWeight(graph, phaseA, phaseB, pid, nodeWeights, pieceWeights);
+            }
+
+            edgeProxyWeights.assign(phaseB.pieces.size(), 1u);
+            for (PieceId pid = 0; pid < phaseB.pieces.size(); ++pid)
+            {
+                const double computeWeight = static_cast<double>((pid < pieceWeights.size()) ? pieceWeights[pid] : 1u);
+                const double commWords = static_cast<double>(calculatePieceCommWords(graph, phaseA, phaseB, pid));
+                const double combined = computeWeight + commWords;
+                const std::size_t roundedCombined =
+                    (combined <= 0.0) ? 1u : static_cast<std::size_t>(std::llround(combined));
+                edgeProxyWeights[pid] = std::max<uint32_t>(1u, clampToUint32(roundedCombined));
             }
 
             std::vector<uint32_t> piecePinCount(phaseB.pieces.size(), 0);
@@ -2022,7 +2451,8 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    sharedWeight += pieceWeights[pid] / pinCount;
+                    const uint32_t proxyWeight = (pid < edgeProxyWeights.size()) ? edgeProxyWeights[pid] : 1u;
+                    sharedWeight += std::max(1u, proxyWeight) / pinCount;
                 }
 
                 hg.nodeWeights.push_back(std::max(1u, weight + sharedWeight));
@@ -2031,7 +2461,7 @@ namespace wolvrix::lib::transform
             for (PieceId pid = static_cast<PieceId>(phaseB.ascs.size()); pid < phaseB.pieces.size(); ++pid)
             {
                 HyperGraph::HyperEdge edge;
-                edge.weight = std::max(1u, pieceWeights[pid]);
+                edge.weight = (pid < edgeProxyWeights.size()) ? std::max(1u, edgeProxyWeights[pid]) : 1u;
                 edge.nodes = phaseB.pieceToAscs[pid];
                 if (!edge.nodes.empty())
                 {
@@ -2088,7 +2518,7 @@ namespace wolvrix::lib::transform
 
         bool validateHyperEdgeContentGuard(const PhaseBData &phaseB,
                                            const HyperGraph &hg,
-                                           const std::vector<uint32_t> &pieceWeights,
+                                           const std::vector<uint32_t> &edgeProxyWeights,
                                            std::string &errorMessage)
         {
             constexpr std::size_t kGuardDiagLimit = 24;
@@ -2144,7 +2574,7 @@ namespace wolvrix::lib::transform
                 }
 
                 const uint32_t expectedWeight =
-                    (pid < pieceWeights.size()) ? std::max<uint32_t>(1u, pieceWeights[pid]) : 1u;
+                    (pid < edgeProxyWeights.size()) ? std::max<uint32_t>(1u, edgeProxyWeights[pid]) : 1u;
                 if (edge.weight != expectedWeight)
                 {
                     addIssue("hyperedge weight mismatch: edge_index=" + std::to_string(edgeIndex) +
@@ -2908,7 +3338,6 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
-
         std::string resolveError;
         const std::optional<std::string> targetGraphName = resolveTargetGraphName(design(), options_.path, resolveError);
         if (!targetGraphName)
@@ -3126,13 +3555,14 @@ namespace wolvrix::lib::transform
                 const auto phaseCStart = std::chrono::steady_clock::now();
         std::vector<uint32_t> nodeWeights;
         std::vector<uint32_t> pieceWeights;
+        std::vector<uint32_t> edgeProxyWeights;
                 const auto hyperBuildStart = std::chrono::steady_clock::now();
-        const HyperGraph hg = buildHyperGraph(*graph, data, phaseB, nodeWeights, pieceWeights);
+        const HyperGraph hg = buildHyperGraph(*graph, data, phaseB, nodeWeights, pieceWeights, edgeProxyWeights);
                 const uint64_t hyperBuildMs = msSince(hyperBuildStart);
 
         const auto phaseCGuardStart = std::chrono::steady_clock::now();
         std::string phaseCGuardError;
-        if (!validateHyperEdgeContentGuard(phaseB, hg, pieceWeights, phaseCGuardError))
+        if (!validateHyperEdgeContentGuard(phaseB, hg, edgeProxyWeights, phaseCGuardError))
         {
             error(phaseCGuardError);
             result.failed = true;
@@ -3721,6 +4151,19 @@ namespace wolvrix::lib::transform
                       << " map_storage_ms=" << phaseEMapMs
                       << " cross_scan_ms=" << phaseECrossMs;
         logInfo(phaseESummary.str());
+
+        std::vector<std::size_t> partitionWeights(options_.partitionCount, 0);
+        for (AscId aid = 0; aid < hg.nodeWeights.size(); ++aid)
+        {
+            const uint32_t partId = (aid < ascPartition.size()) ? ascPartition[aid] : 0u;
+            if (partId >= partitionWeights.size())
+            {
+                partitionWeights.resize(static_cast<std::size_t>(partId) + 1u, 0);
+            }
+            partitionWeights[partId] += static_cast<std::size_t>(hg.nodeWeights[aid]);
+        }
+        const std::vector<PartitionStaticFeatureRecord> partitionFeatureRecords =
+            buildPartitionStaticFeatureRecords(*graph, data, partitionOps, crossValues, partitionWeights);
 
         const auto phaseERebuildStart = std::chrono::steady_clock::now();
         logInfo("repcut phase-e rebuild: begin graph=" + graph->symbol() +
@@ -4694,16 +5137,29 @@ namespace wolvrix::lib::transform
             std::filesystem::remove(partitionPath, cleanupError);
         }
 
-        std::vector<std::size_t> partitionWeights(partInfos.size(), 0);
-        for (AscId aid = 0; aid < hg.nodeWeights.size(); ++aid)
+        std::vector<std::string> partitionGraphNames;
+        partitionGraphNames.reserve(partInfos.size());
+        for (const auto &part : partInfos)
         {
-            const uint32_t partId = (aid < ascPartition.size()) ? ascPartition[aid] : 0u;
-            if (partId >= partitionWeights.size())
-            {
-                partitionWeights.resize(static_cast<std::size_t>(partId) + 1u, 0);
-            }
-            partitionWeights[partId] += static_cast<std::size_t>(hg.nodeWeights[aid]);
+            partitionGraphNames.push_back(part.name);
         }
+
+        const std::filesystem::path partitionFeaturePath = outputDir / (stem + ".partition_features.jsonl");
+        std::string partitionFeatureError;
+        if (!writePartitionStaticFeatureJsonl(graph->symbol(),
+                                             stem,
+                                             partitionFeatureRecords,
+                                             crossValues.size(),
+                                             partitionGraphNames,
+                                             partitionFeaturePath,
+                                             partitionFeatureError))
+        {
+            error("repcut feature export: " + partitionFeatureError);
+            result.failed = true;
+            return result;
+        }
+        result.artifacts.push_back(partitionFeaturePath.string());
+        logInfo("repcut feature export: partition_features=" + partitionFeaturePath.string());
 
         std::size_t partitionWeightSum = 0;
         std::size_t partitionWeightMax = 0;
@@ -4726,7 +5182,6 @@ namespace wolvrix::lib::transform
             (partitionWeightSum == 0) ? 0.0 : static_cast<double>(partitionWeightMax) / static_cast<double>(partitionWeightSum);
         const double avgWeightFractionOfOriginal =
             (partitionWeightSum == 0) ? 0.0 : partitionWeightAvg / static_cast<double>(partitionWeightSum);
-
         std::ostringstream stats;
         std::size_t partitionOpsSum = 0;
         std::size_t partitionOpsMax = 0;
@@ -4836,6 +5291,67 @@ namespace wolvrix::lib::transform
                   << ",\"inouts\":" << part.graph->inoutPorts().size()
                   << "}";
             firstPartitionStats = false;
+        }
+        stats << "]";
+        stats << ",\"partition_static_features\":[";
+        bool firstPartitionFeature = true;
+        for (std::size_t i = 0; i < partitionFeatureRecords.size(); ++i)
+        {
+            if (i >= partInfos.size() || partInfos[i].graph == nullptr)
+            {
+                continue;
+            }
+            const auto &record = partitionFeatureRecords[i];
+            if (!firstPartitionFeature)
+            {
+                stats << ",";
+            }
+            stats << "{"
+                  << "\"part_id\":" << i
+                  << ",\"part_name\":\"part_" << i << "\""
+                  << ",\"partition_graph_name\":\"" << escapeJson(partInfos[i].graph->symbol()) << "\""
+                  << ",\"op_count\":" << record.opCount
+                  << ",\"comb_op_count\":" << record.combOpCount
+                  << ",\"sink_op_count\":" << record.sinkOpCount
+                  << ",\"source_op_count\":" << record.sourceOpCount
+                  << ",\"phase_a_node_count\":" << record.phaseANodeCount
+                  << ",\"non_phase_a_op_count\":" << record.nonPhaseAOpCount
+                  << ",\"operand_count\":" << record.operandCount
+                  << ",\"result_count\":" << record.resultCount
+                  << ",\"operand_word_count\":" << record.operandWordCount
+                  << ",\"result_word_count\":" << record.resultWordCount
+                  << ",\"fanout_count\":" << record.fanoutCount
+                  << ",\"estimated_node_weight_sum\":" << record.estimatedNodeWeightSum
+                  << ",\"hyper_partition_weight\":" << record.hyperNodeWeight
+                  << ",\"cross_in_value_count\":" << record.crossInValueCount
+                  << ",\"cross_out_value_count\":" << record.crossOutValueCount
+                  << ",\"cross_in_word_count\":" << record.crossInWordCount
+                  << ",\"cross_out_word_count\":" << record.crossOutWordCount
+                  << ",\"max_op_width\":" << record.maxOpWidth
+                  << ",\"width_bucket_counts\":{";
+            for (std::size_t bucket = 0; bucket < record.widthBucketCounts.size(); ++bucket)
+            {
+                if (bucket != 0)
+                {
+                    stats << ",";
+                }
+                stats << "\"" << widthBucketName(bucket) << "\":" << record.widthBucketCounts[bucket];
+            }
+            stats << "},\"op_kind_counts\":{";
+            std::vector<std::pair<std::string, std::size_t>> kindCounts(
+                record.opKindCounts.begin(), record.opKindCounts.end());
+            std::sort(kindCounts.begin(), kindCounts.end(),
+                      [](const auto &lhs, const auto &rhs) { return lhs.first < rhs.first; });
+            for (std::size_t k = 0; k < kindCounts.size(); ++k)
+            {
+                if (k != 0)
+                {
+                    stats << ",";
+                }
+                stats << "\"" << escapeJson(kindCounts[k].first) << "\":" << kindCounts[k].second;
+            }
+            stats << "}}";
+            firstPartitionFeature = false;
         }
         stats << "]}";
         const std::string statsMessage = stats.str();

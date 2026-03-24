@@ -703,11 +703,16 @@ namespace
                 Py_DECREF(list);
                 return nullptr;
             }
-            auto *kind = PyUnicode_FromString(diagnosticKindName(message.kind));
-            auto *pass = PyUnicode_FromString(message.passName.c_str());
-            auto *msg = PyUnicode_FromString(message.message.c_str());
-            auto *ctx = PyUnicode_FromString(message.context.c_str());
-            auto *origin = PyUnicode_FromString(message.originSymbol.c_str());
+            const char *kindText = diagnosticKindName(message.kind);
+            auto *kind = PyUnicode_FromStringAndSize(kindText, static_cast<Py_ssize_t>(std::strlen(kindText)));
+            auto *pass = PyUnicode_FromStringAndSize(message.passName.data(),
+                                                     static_cast<Py_ssize_t>(message.passName.size()));
+            auto *msg = PyUnicode_FromStringAndSize(message.message.data(),
+                                                    static_cast<Py_ssize_t>(message.message.size()));
+            auto *ctx = PyUnicode_FromStringAndSize(message.context.data(),
+                                                    static_cast<Py_ssize_t>(message.context.size()));
+            auto *origin = PyUnicode_FromStringAndSize(message.originSymbol.data(),
+                                                       static_cast<Py_ssize_t>(message.originSymbol.size()));
             if (!kind || !pass || !msg || !ctx || !origin)
             {
                 Py_XDECREF(kind);
@@ -751,7 +756,7 @@ namespace
             }
 
             const std::string text = formatDiagnostic(message, sourceManager, false);
-            PyObject *text_obj = PyUnicode_FromString(text.c_str());
+            PyObject *text_obj = PyUnicode_FromStringAndSize(text.data(), static_cast<Py_ssize_t>(text.size()));
             if (!text_obj)
             {
                 Py_DECREF(dict);

@@ -179,7 +179,6 @@ int main()
         return fail("package emit reported diagnostics errors");
     }
 
-    const std::filesystem::path manifestPath = artifactRoot / "manifest.json";
     const std::filesystem::path debugSvPath = artifactRoot / "sv" / "SimTop_debug_part.sv";
     const std::filesystem::path part0SvPath = artifactRoot / "sv" / "SimTop_logic_part_repcut_part0.sv";
     const std::filesystem::path part1SvPath = artifactRoot / "sv" / "SimTop_logic_part_repcut_part1.sv";
@@ -193,7 +192,7 @@ int main()
     const std::filesystem::path unitsMkPath = artifactRoot / "units.mk";
     const std::filesystem::path makefilePath = artifactRoot / "Makefile";
 
-    for (const auto &path : {manifestPath, debugSvPath, part0SvPath, part1SvPath, topSvPath,
+    for (const auto &path : {debugSvPath, part0SvPath, part1SvPath, topSvPath,
                              debugFileList, part0FileList, part1FileList, wrapperHeaderPath, wrapperSourcePath,
                              smokeMainPath, unitsMkPath, makefilePath})
     {
@@ -201,59 +200,6 @@ int main()
         {
             return fail("expected package artifact is missing: " + path.string());
         }
-    }
-
-    const std::string manifest = readFile(manifestPath);
-    if (manifest.empty())
-    {
-        return fail("failed to read manifest.json");
-    }
-    if (!contains(manifest, "\"top_module\":\"SimTop\""))
-    {
-        return fail("manifest missing top_module");
-    }
-    if (!contains(manifest, "\"top_inputs\":[{\"name\":\"clock\",\"width\":1,\"signed\":false},{\"name\":\"reset\",\"width\":1,\"signed\":false},{\"name\":\"in_data\",\"width\":8,\"signed\":false}]"))
-    {
-        return fail("manifest missing top_inputs");
-    }
-    if (contains(manifest, "\"clock_port\"") || contains(manifest, "\"reset_port\""))
-    {
-        return fail("manifest should not special-case clock/reset ports");
-    }
-    if (!contains(manifest, "\"serial_eval_order\":[\"debug_part\",\"part_0\",\"part_1\"]"))
-    {
-        return fail("manifest missing serial_eval_order");
-    }
-    if (!contains(manifest, "\"instance_name\":\"part_0\"") ||
-        !contains(manifest, "\"instance_name\":\"part_1\"") ||
-        !contains(manifest, "\"instance_name\":\"debug_part\""))
-    {
-        return fail("manifest missing unit list entries");
-    }
-    if (!contains(manifest, "\"kind\":\"top_to_unit\"") ||
-        !contains(manifest, "\"kind\":\"unit_to_unit\"") ||
-        !contains(manifest, "\"kind\":\"unit_to_top\"") ||
-        !contains(manifest, "\"kind\":\"const_to_unit\""))
-    {
-        return fail("manifest missing expected connection kinds");
-    }
-    if (!contains(manifest, "\"signal\":\"mid\"") ||
-        !contains(manifest, "\"driver\":{\"type\":\"unit\",\"instance\":\"part_0\",\"port\":\"out_0\"}") ||
-        !contains(manifest, "\"sinks\":[{\"type\":\"unit\",\"instance\":\"part_1\",\"port\":\"in_2\"}]"))
-    {
-        return fail("manifest missing expected unit_to_unit connection details");
-    }
-    if (!contains(manifest, "\"signal\":\"out_alias\"") ||
-        !contains(manifest, "\"driver\":{\"type\":\"unit\",\"instance\":\"part_1\",\"port\":\"out_0\"}") ||
-        !contains(manifest, "\"sinks\":[{\"type\":\"top\",\"port\":\"out\"}]"))
-    {
-        return fail("manifest missing expected unit_to_top connection details");
-    }
-    if (!contains(manifest, "\"signal\":\"sel_const\"") ||
-        !contains(manifest, "\"driver\":{\"type\":\"const\",\"value\":\"1'b1\"}") ||
-        !contains(manifest, "\"port\":\"in_3\""))
-    {
-        return fail("manifest missing expected const_to_unit connection details");
     }
 
     if (readFile(debugFileList) !=
@@ -296,11 +242,27 @@ int main()
     {
         return fail("wrapper header missing expected unit members");
     }
-    if (!contains(wrapperHeader, "std::vector<std::function<void()>> non_debug_step_fns_;") ||
-        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns);") ||
+    if (!contains(wrapperHeader, "std::vector<std::function<void(std::size_t)>> non_debug_step_fns_;") ||
+        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<std::function<void(std::size_t)>>& phaseFns);") ||
         !contains(wrapperHeader, "void run_non_debug_step_workers_();"))
     {
         return fail("wrapper header missing expected parallel eval declarations");
+    }
+    if (!contains(wrapperHeader, "struct alignas(64) PartTimingStats {") ||
+        !contains(wrapperHeader, "std::uint64_t scatter_ns{};") ||
+        !contains(wrapperHeader, "std::uint64_t eval_ns{};") ||
+        !contains(wrapperHeader, "std::uint64_t gather_ns{};") ||
+        !contains(wrapperHeader, "struct StepTimingStats {") ||
+        !contains(wrapperHeader, "PartTimingStats collect_part_timing_stats_(std::size_t partIndex) const;") ||
+        !contains(wrapperHeader, "void report_step_timing_() const;") ||
+        !contains(wrapperHeader, "void report_part_timing_() const;") ||
+        !contains(wrapperHeader, "void dump_timing_jsonl_() const;") ||
+        !contains(wrapperHeader, "std::uint64_t step_count_{};") ||
+        !contains(wrapperHeader, "StepTimingStats step_timing_{};") ||
+        !contains(wrapperHeader, "part_timing_stats_{};") ||
+        !contains(wrapperHeader, "part_timing_worker_stats_{};"))
+    {
+        return fail("wrapper header missing expected timing declarations");
     }
     if (!contains(wrapperHeader, "CData signal_mid_snapshot_{};") ||
         !contains(wrapperHeader, "CData signal_mid_writeback_{};"))
@@ -320,7 +282,7 @@ int main()
     {
         return fail("wrapper source missing expected scatter code");
     }
-    if (!contains(wrapperSource, "non_debug_step_fns_.emplace_back([this]() {"))
+    if (!contains(wrapperSource, "non_debug_step_fns_.emplace_back([this](std::size_t workerIndex) {"))
     {
         return fail("wrapper source missing expected static task generation");
     }
@@ -343,16 +305,65 @@ int main()
     {
         return fail("wrapper source missing expected runtime thread-pool guards");
     }
-    if (!contains(wrapperSource, "step_timing_enabled_ = wolvi_env_flag_enabled(\"XS_REPCUT_STEP_TIMING\");") ||
+    if (!contains(wrapperSource, "using WolviClock = std::chrono::steady_clock;") ||
         !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_step_timing_() const {") ||
-        !contains(wrapperSource, "step_timing_.part_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);"))
+        !contains(wrapperSource, "[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n") ||
+        !contains(wrapperSource, "printPhase(\"debug_scatter\", step_timing_.debug_scatter_ns);") ||
+        !contains(wrapperSource, "printPhase(\"debug_eval\", step_timing_.debug_eval_ns);") ||
+        !contains(wrapperSource, "printPhase(\"debug_publish\", step_timing_.debug_publish_ns);") ||
+        !contains(wrapperSource, "printPhase(\"part_eval\", step_timing_.part_eval_ns);") ||
+        !contains(wrapperSource, "printPhase(\"writeback\", step_timing_.writeback_ns);") ||
+        !contains(wrapperSource, "WolviRepCutVerilatorSim::PartTimingStats WolviRepCutVerilatorSim::collect_part_timing_stats_(std::size_t partIndex) const {") ||
+        !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_part_timing_() const {") ||
+        !contains(wrapperSource, "void WolviRepCutVerilatorSim::dump_timing_jsonl_() const {") ||
+        !contains(wrapperSource, "std::getenv(\"WOLVI_REPCUT_TIMING_JSONL\")") ||
+        !contains(wrapperSource, "\"{\\\"record_type\\\":\\\"part_timing\\\"") ||
+        !contains(wrapperSource, "\\\"scatter_total_ms\\\":%.3f") ||
+        !contains(wrapperSource, "\\\"eval_total_ms\\\":%.3f") ||
+        !contains(wrapperSource, "\\\"gather_total_ms\\\":%.3f") ||
+        !contains(wrapperSource, "[WOLVI][part-timing] part=%s steps=%llu total=%.3f ms avg=%.3f us scatter=%.3f us eval=%.3f us gather=%.3f us\\n") ||
+        !contains(wrapperSource, "++step_timing_.steps;") ||
+        !contains(wrapperSource, "step_timing_.debug_scatter_ns +=") ||
+        !contains(wrapperSource, "step_timing_.debug_eval_ns +=") ||
+        !contains(wrapperSource, "step_timing_.debug_publish_ns +=") ||
+        !contains(wrapperSource, "step_timing_.part_eval_ns +=") ||
+        !contains(wrapperSource, "step_timing_.writeback_ns +=") ||
+        !contains(wrapperSource, "step_timing_.total_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->scatter_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->eval_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->gather_ns +=") ||
+        !contains(wrapperSource, "partTimingStats = &part_timing_worker_stats_[workerIndex][") ||
+        !contains(wrapperSource, "part_timing_stats_[0].total_ns +=") ||
+        !contains(wrapperSource, "part_timing_stats_[0].scatter_ns +=") ||
+        !contains(wrapperSource, "part_timing_stats_[0].eval_ns +=") ||
+        !contains(wrapperSource, "part_timing_stats_[0].gather_ns +="))
     {
-        return fail("wrapper source missing expected step timing instrumentation");
+        return fail("wrapper source missing expected timing instrumentation");
+    }
+    if (contains(wrapperSource, "XS_REPCUT_STEP_TIMING") ||
+        contains(wrapperSource, "step_timing_enabled_") ||
+        contains(wrapperSource, "wolvi_env_flag_enabled("))
+    {
+        return fail("wrapper source should not contain legacy step timing instrumentation");
     }
     if (!contains(wrapperSource, "Evaluate debug_part first so DPI/device responses are available before logic eval.") ||
         !contains(wrapperSource, "Evaluate all non-debug units with fused local scatter/eval/gather."))
     {
         return fail("wrapper source missing expected debug_part scheduling comments");
+    }
+    const std::size_t dtorPos = wrapperSource.find("WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim()");
+    const std::size_t reportStepPos = wrapperSource.find("report_step_timing_();", dtorPos);
+    const std::size_t reportPartPos = wrapperSource.find("report_part_timing_();", dtorPos);
+    const std::size_t dumpJsonPos = wrapperSource.find("dump_timing_jsonl_();", dtorPos);
+    const std::size_t shutdownPos = wrapperSource.find("shutdown_part_eval_workers_();", dtorPos);
+    if (dtorPos == std::string::npos || reportStepPos == std::string::npos || reportPartPos == std::string::npos ||
+        dumpJsonPos == std::string::npos || shutdownPos == std::string::npos)
+    {
+        return fail("wrapper source missing destructor timing/shutdown sequence");
+    }
+    if (!(reportStepPos < shutdownPos && reportPartPos < shutdownPos && dumpJsonPos < shutdownPos))
+    {
+        return fail("wrapper destructor should report and dump timing before clearing worker timing state");
     }
     if (!contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
         !contains(wrapperSource, "top_out_out_ = unit_part_1_->out_0;"))

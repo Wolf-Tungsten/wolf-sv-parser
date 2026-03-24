@@ -19,8 +19,6 @@
 
 #include "emit/system_verilog.hpp"
 #include "slang/numeric/SVInt.h"
-#include "slang/text/Json.h"
-
 namespace wolvrix::lib::emit
 {
 
@@ -688,162 +686,6 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
-        void writePort(slang::JsonWriter &writer, const ManifestPort &port, bool includeDirection)
-        {
-            writer.startObject();
-            writer.writeProperty("name");
-            writer.writeValue(port.name);
-            if (includeDirection)
-            {
-                writer.writeProperty("direction");
-                writer.writeValue(port.direction);
-            }
-            writer.writeProperty("width");
-            writer.writeValue(port.width);
-            writer.writeProperty("signed");
-            writer.writeValue(port.isSigned);
-            writer.endObject();
-        }
-
-        void writeDriver(slang::JsonWriter &writer, const DriverDesc &driver)
-        {
-            writer.startObject();
-            switch (driver.kind)
-            {
-            case DriverDesc::Kind::Top:
-                writer.writeProperty("type");
-                writer.writeValue(std::string_view("top"));
-                writer.writeProperty("port");
-                writer.writeValue(driver.portName);
-                break;
-            case DriverDesc::Kind::Unit:
-                writer.writeProperty("type");
-                writer.writeValue(std::string_view("unit"));
-                writer.writeProperty("instance");
-                writer.writeValue(driver.instanceName);
-                writer.writeProperty("port");
-                writer.writeValue(driver.portName);
-                break;
-            case DriverDesc::Kind::Const:
-                writer.writeProperty("type");
-                writer.writeValue(std::string_view("const"));
-                writer.writeProperty("value");
-                writer.writeValue(driver.constValue);
-                break;
-            }
-            writer.endObject();
-        }
-
-        void writeSink(slang::JsonWriter &writer, const SinkDesc &sink)
-        {
-            writer.startObject();
-            switch (sink.kind)
-            {
-            case SinkDesc::Kind::Unit:
-                writer.writeProperty("type");
-                writer.writeValue(std::string_view("unit"));
-                writer.writeProperty("instance");
-                writer.writeValue(sink.instanceName);
-                writer.writeProperty("port");
-                writer.writeValue(sink.portName);
-                break;
-            case SinkDesc::Kind::Top:
-                writer.writeProperty("type");
-                writer.writeValue(std::string_view("top"));
-                writer.writeProperty("port");
-                writer.writeValue(sink.portName);
-                break;
-            }
-            writer.endObject();
-        }
-
-        std::string serializeManifest(const PackageManifest &manifest)
-        {
-            slang::JsonWriter writer;
-            writer.setPrettyPrint(false);
-            writer.startObject();
-
-            writer.writeProperty("top_module");
-            writer.writeValue(manifest.topModule);
-
-            writer.writeProperty("top_inputs");
-            writer.startArray();
-            for (const auto &port : manifest.topInputs)
-            {
-                writePort(writer, port, false);
-            }
-            writer.endArray();
-
-            writer.writeProperty("top_outputs");
-            writer.startArray();
-            for (const auto &port : manifest.topOutputs)
-            {
-                writePort(writer, port, false);
-            }
-            writer.endArray();
-
-            writer.writeProperty("units");
-            writer.startArray();
-            for (const auto &unit : manifest.units)
-            {
-                writer.startObject();
-                writer.writeProperty("instance_name");
-                writer.writeValue(unit.instanceName);
-                writer.writeProperty("module_graph");
-                writer.writeValue(unit.moduleGraphName);
-                writer.writeProperty("module_name");
-                writer.writeValue(unit.moduleName);
-                writer.writeProperty("source_sv");
-                writer.writeValue(unit.sourceSv);
-                writer.writeProperty("ports");
-                writer.startArray();
-                for (const auto &port : unit.ports)
-                {
-                    writePort(writer, port, true);
-                }
-                writer.endArray();
-                writer.endObject();
-            }
-            writer.endArray();
-
-            writer.writeProperty("connections");
-            writer.startArray();
-            for (const auto &edge : manifest.connections)
-            {
-                writer.startObject();
-                writer.writeProperty("signal");
-                writer.writeValue(edge.signal);
-                writer.writeProperty("width");
-                writer.writeValue(edge.width);
-                writer.writeProperty("signed");
-                writer.writeValue(edge.isSigned);
-                writer.writeProperty("kind");
-                writer.writeValue(edge.kind);
-                writer.writeProperty("driver");
-                writeDriver(writer, edge.driver);
-                writer.writeProperty("sinks");
-                writer.startArray();
-                for (const auto &sink : edge.sinks)
-                {
-                    writeSink(writer, sink);
-                }
-                writer.endArray();
-                writer.endObject();
-            }
-            writer.endArray();
-
-            writer.writeProperty("serial_eval_order");
-            writer.startArray();
-            for (const auto &instanceName : manifest.serialEvalOrder)
-            {
-                writer.writeValue(instanceName);
-            }
-            writer.endArray();
-
-            writer.endObject();
-            return std::string(writer.view());
-        }
-
         std::optional<std::string> findConstValue(const wolvrix::lib::grh::Graph &graph,
                                                   wolvrix::lib::grh::ValueId valueId)
         {
@@ -1095,25 +937,34 @@ namespace wolvrix::lib::emit
             header << "    bool completed{false};\n";
             header << "    bool stop{false};\n";
             header << "  };\n\n";
+            header << "  struct alignas(64) PartTimingStats {\n";
+            header << "    std::uint64_t scatter_ns{};\n";
+            header << "    std::uint64_t eval_ns{};\n";
+            header << "    std::uint64_t gather_ns{};\n";
+            header << "    std::uint64_t total_ns{};\n";
+            header << "  };\n\n";
             header << "  struct StepTimingStats {\n";
             header << "    std::uint64_t steps{};\n";
-            header << "    std::uint64_t scatter_ns{};\n";
+            header << "    std::uint64_t debug_scatter_ns{};\n";
             header << "    std::uint64_t debug_eval_ns{};\n";
-            header << "    std::uint64_t debug_gather_ns{};\n";
-            header << "    std::uint64_t debug_refresh_ns{};\n";
+            header << "    std::uint64_t debug_publish_ns{};\n";
             header << "    std::uint64_t part_eval_ns{};\n";
-            header << "    std::uint64_t gather_ns{};\n";
+            header << "    std::uint64_t writeback_ns{};\n";
             header << "    std::uint64_t total_ns{};\n";
             header << "  };\n\n";
             header << "  void initialize_part_eval_workers_();\n";
             header << "  void shutdown_part_eval_workers_();\n";
             header << "  void part_eval_worker_loop_(std::size_t workerIndex);\n";
-            header << "  void run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns);\n";
+            header << "  void run_part_eval_phase_(const std::vector<std::function<void(std::size_t)>>& phaseFns);\n";
             header << "  void run_non_debug_step_workers_();\n";
-            header << "  void eval_part_batch_(const std::vector<std::function<void()>>& phaseFns,\n";
+            header << "  void eval_part_batch_(const std::vector<std::function<void(std::size_t)>>& phaseFns,\n";
             header << "                        std::size_t workerIndex,\n";
             header << "                        std::size_t workerCount);\n";
-            header << "  void report_step_timing_() const;\n\n";
+            header << "  PartTimingStats collect_part_timing_stats_(std::size_t partIndex) const;\n";
+            header << "  void report_step_timing_() const;\n";
+            header << "  void report_part_timing_() const;\n";
+            header << "  void dump_timing_jsonl_() const;\n";
+            header << "\n";
             for (const auto &signal : constSignals)
             {
                 header << "  static const " << signal.desc.typeName << " " << signal.memberName << ";\n";
@@ -1131,14 +982,17 @@ namespace wolvrix::lib::emit
             {
                 header << "\n";
             }
-            header << "  std::vector<std::function<void()>> non_debug_step_fns_;\n";
-            header << "  const std::vector<std::function<void()>>* active_part_eval_fns_{};\n";
+            header << "  std::vector<std::function<void(std::size_t)>> non_debug_step_fns_;\n";
+            header << "  const std::vector<std::function<void(std::size_t)>>* active_part_eval_fns_{};\n";
             header << "  std::unique_ptr<PartEvalWorker[]> part_eval_workers_;\n";
             header << "  std::vector<int> part_eval_cpu_ids_;\n";
             header << "  std::size_t part_eval_worker_count_{};\n";
-            header << "  bool part_eval_parallel_{};\n\n";
+            header << "  bool part_eval_parallel_{};\n";
+            header << "  std::uint64_t step_count_{};\n";
             header << "  StepTimingStats step_timing_{};\n";
-            header << "  bool step_timing_enabled_{};\n\n";
+            header << "  std::array<PartTimingStats, " << manifest.units.size() << "> part_timing_stats_{};\n\n";
+            header << "  std::vector<std::array<PartTimingStats, " << manifest.units.size()
+                   << ">> part_timing_worker_stats_{};\n\n";
             for (const auto &signal : topInputs)
             {
                 header << "  " << signal.desc.typeName << " " << signal.memberName << "{};\n";
@@ -1161,7 +1015,6 @@ namespace wolvrix::lib::emit
             source << "#include <cassert>\n";
             source << "#include <chrono>\n";
             source << "#include <cstdio>\n";
-            source << "#include <cstring>\n";
             source << "#include <cstdlib>\n";
             source << "#include <cstddef>\n";
             source << "#include <utility>\n";
@@ -1242,15 +1095,6 @@ namespace wolvrix::lib::emit
             source << "    return 0;\n";
             source << "  }\n";
             source << "  return static_cast<std::size_t>(value);\n";
-            source << "}\n";
-            source << "\n";
-            source << "inline bool wolvi_env_flag_enabled(const char* name) {\n";
-            source << "  const char* env = std::getenv(name);\n";
-            source << "  if (env == nullptr || *env == '\\0') {\n";
-            source << "    return false;\n";
-            source << "  }\n";
-            source << "  return std::strcmp(env, \"0\") != 0 && std::strcmp(env, \"false\") != 0 &&\n";
-            source << "         std::strcmp(env, \"False\") != 0 && std::strcmp(env, \"FALSE\") != 0;\n";
             source << "}\n";
             source << "} // namespace\n\n";
 
@@ -1481,16 +1325,46 @@ namespace wolvrix::lib::emit
             for (const auto &instanceName : nonDebugEvalOrder)
             {
                 std::ostringstream body;
-                emitNonDebugStepForUnit(body, instanceName, 2);
-                source << "  non_debug_step_fns_.emplace_back([this]() {\n";
+                const auto timingIndexIt = std::find_if(
+                    manifest.units.begin(),
+                    manifest.units.end(),
+                    [&](const ManifestUnit &unit) { return unit.instanceName == instanceName; });
+                if (timingIndexIt == manifest.units.end())
+                {
+                    throw std::runtime_error("Missing timing index for unit " + instanceName);
+                }
+                const std::size_t timingIndex =
+                    static_cast<std::size_t>(std::distance(manifest.units.begin(), timingIndexIt));
+                body << "    PartTimingStats* partTimingStats = &part_timing_stats_[" << timingIndex << "];\n";
+                body << "    if (part_eval_parallel_) {\n";
+                body << "      assert(workerIndex < part_timing_worker_stats_.size());\n";
+                body << "      partTimingStats = &part_timing_worker_stats_[workerIndex][" << timingIndex << "];\n";
+                body << "    }\n";
+                body << "    const auto partBegin = WolviClock::now();\n";
+                body << "    const auto scatterBegin = partBegin;\n";
+                emitScatterInputsForUnit(body, instanceName, 2);
+                body << "    const auto scatterEnd = WolviClock::now();\n";
+                body << "    partTimingStats->scatter_ns += wolvi_elapsed_ns(scatterBegin, scatterEnd);\n";
+                body << "    // eval " << instanceName << "\n";
+                body << "    const auto evalBegin = scatterEnd;\n";
+                body << "    " << unitInfoByInstance.at(instanceName).memberName << "->eval();\n";
+                body << "    const auto evalEnd = WolviClock::now();\n";
+                body << "    partTimingStats->eval_ns += wolvi_elapsed_ns(evalBegin, evalEnd);\n";
+                body << "    const auto gatherBegin = evalEnd;\n";
+                emitPublishOutputsForUnit(body, instanceName, 2, false, true);
+                body << "    const auto gatherEnd = WolviClock::now();\n";
+                body << "    partTimingStats->gather_ns += wolvi_elapsed_ns(gatherBegin, gatherEnd);\n";
+                body << "    partTimingStats->total_ns += wolvi_elapsed_ns(partBegin, gatherEnd);\n";
+                source << "  non_debug_step_fns_.emplace_back([this](std::size_t workerIndex) {\n";
                 source << body.str();
                 source << "  });\n";
             }
-            source << "  step_timing_enabled_ = wolvi_env_flag_enabled(\"XS_REPCUT_STEP_TIMING\");\n";
             source << "  initialize_part_eval_workers_();\n";
             source << "}\n\n";
             source << "WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim() {\n";
             source << "  report_step_timing_();\n";
+            source << "  report_part_timing_();\n";
+            source << "  dump_timing_jsonl_();\n";
             source << "  shutdown_part_eval_workers_();\n";
             source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::initialize_part_eval_workers_() {\n";
@@ -1514,6 +1388,7 @@ namespace wolvrix::lib::emit
             source << "  if (!part_eval_cpu_ids_.empty()) {\n";
             source << "    part_eval_cpu_ids_.resize(part_eval_worker_count_);\n";
             source << "  }\n";
+            source << "  part_timing_worker_stats_.assign(part_eval_worker_count_, {});\n";
             source << "  part_eval_workers_ = std::make_unique<PartEvalWorker[]>(part_eval_worker_count_);\n";
             source << "  for (std::size_t workerIndex = 0; workerIndex < part_eval_worker_count_; ++workerIndex) {\n";
             source << "    part_eval_workers_[workerIndex].thread = std::thread([this, workerIndex]() {\n";
@@ -1545,6 +1420,7 @@ namespace wolvrix::lib::emit
             source << "    }\n";
             source << "  }\n";
             source << "  part_eval_workers_.reset();\n";
+            source << "  part_timing_worker_stats_.clear();\n";
             source << "  part_eval_cpu_ids_.clear();\n";
             source << "  part_eval_worker_count_ = 0;\n";
             source << "  part_eval_parallel_ = false;\n";
@@ -1569,7 +1445,7 @@ namespace wolvrix::lib::emit
             source << "    worker.cv.notify_one();\n";
             source << "  }\n";
             source << "}\n\n";
-            source << "void WolviRepCutVerilatorSim::eval_part_batch_(const std::vector<std::function<void()>>& phaseFns,\n";
+            source << "void WolviRepCutVerilatorSim::eval_part_batch_(const std::vector<std::function<void(std::size_t)>>& phaseFns,\n";
             source << "                                             std::size_t workerIndex,\n";
             source << "                                             std::size_t workerCount) {\n";
             source << "  if (workerCount == 0 || phaseFns.empty()) {\n";
@@ -1578,10 +1454,10 @@ namespace wolvrix::lib::emit
             source << "  const std::size_t begin = phaseFns.size() * workerIndex / workerCount;\n";
             source << "  const std::size_t end = phaseFns.size() * (workerIndex + 1) / workerCount;\n";
             source << "  for (std::size_t index = begin; index < end; ++index) {\n";
-            source << "    phaseFns[index]();\n";
+            source << "    phaseFns[index](workerIndex);\n";
             source << "  }\n";
             source << "}\n\n";
-            source << "void WolviRepCutVerilatorSim::run_part_eval_phase_(const std::vector<std::function<void()>>& phaseFns) {\n";
+            source << "void WolviRepCutVerilatorSim::run_part_eval_phase_(const std::vector<std::function<void(std::size_t)>>& phaseFns) {\n";
             source << "  if (phaseFns.empty()) {\n";
             source << "    return;\n";
             source << "  }\n";
@@ -1609,8 +1485,18 @@ namespace wolvrix::lib::emit
             source << "void WolviRepCutVerilatorSim::run_non_debug_step_workers_() {\n";
             source << "  run_part_eval_phase_(non_debug_step_fns_);\n";
             source << "}\n\n";
+            source << "WolviRepCutVerilatorSim::PartTimingStats WolviRepCutVerilatorSim::collect_part_timing_stats_(std::size_t partIndex) const {\n";
+            source << "  PartTimingStats total = part_timing_stats_[partIndex];\n";
+            source << "  for (const auto& workerStats : part_timing_worker_stats_) {\n";
+            source << "    total.scatter_ns += workerStats[partIndex].scatter_ns;\n";
+            source << "    total.eval_ns += workerStats[partIndex].eval_ns;\n";
+            source << "    total.gather_ns += workerStats[partIndex].gather_ns;\n";
+            source << "    total.total_ns += workerStats[partIndex].total_ns;\n";
+            source << "  }\n";
+            source << "  return total;\n";
+            source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::report_step_timing_() const {\n";
-            source << "  if (!step_timing_enabled_ || step_timing_.steps == 0) {\n";
+            source << "  if (step_timing_.steps == 0) {\n";
             source << "    return;\n";
             source << "  }\n";
             source << "  const double steps = static_cast<double>(step_timing_.steps);\n";
@@ -1620,53 +1506,182 @@ namespace wolvrix::lib::emit
             source << "    const double avgPhaseUs = static_cast<double>(ns) / steps / 1.0e3;\n";
             source << "    const double pct = step_timing_.total_ns == 0 ? 0.0 :\n";
             source << "                       (100.0 * static_cast<double>(ns) / static_cast<double>(step_timing_.total_ns));\n";
-            source << "    std::fprintf(stderr, \"[WOLVI][step-timing] %s total=%.3f ms avg=%.3f us pct=%.2f%%\\n\",\n";
-            source << "                 name, totalPhaseMs, avgPhaseUs, pct);\n";
+            source << "    std::fprintf(stderr,\n";
+            source << "                 \"[WOLVI][step-timing] %s total=%.3f ms avg=%.3f us pct=%.2f%%\\n\",\n";
+            source << "                 name,\n";
+            source << "                 totalPhaseMs,\n";
+            source << "                 avgPhaseUs,\n";
+            source << "                 pct);\n";
             source << "  };\n";
-            source << "  std::fprintf(stderr, \"[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n\",\n";
-            source << "               static_cast<unsigned long long>(step_timing_.steps), totalMs,\n";
+            source << "  std::fprintf(stderr,\n";
+            source << "               \"[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n\",\n";
+            source << "               static_cast<unsigned long long>(step_timing_.steps),\n";
+            source << "               totalMs,\n";
             source << "               totalMs * 1000.0 / steps);\n";
-            source << "  printPhase(\"scatter\", step_timing_.scatter_ns);\n";
+            source << "  printPhase(\"debug_scatter\", step_timing_.debug_scatter_ns);\n";
             source << "  printPhase(\"debug_eval\", step_timing_.debug_eval_ns);\n";
-            source << "  printPhase(\"debug_gather\", step_timing_.debug_gather_ns);\n";
-            source << "  printPhase(\"debug_refresh\", step_timing_.debug_refresh_ns);\n";
+            source << "  printPhase(\"debug_publish\", step_timing_.debug_publish_ns);\n";
             source << "  printPhase(\"part_eval\", step_timing_.part_eval_ns);\n";
-            source << "  printPhase(\"gather\", step_timing_.gather_ns);\n";
+            source << "  printPhase(\"writeback\", step_timing_.writeback_ns);\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::report_part_timing_() const {\n";
+            source << "  if (step_count_ == 0) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  static constexpr std::array<const char*, " << manifest.units.size() << "> kPartNames = {";
+            for (std::size_t i = 0; i < manifest.units.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    source << ", ";
+                }
+                source << "\"" << manifest.units[i].instanceName << "\"";
+            }
+            source << "};\n";
+            source << "  for (std::size_t partIndex = 0; partIndex < kPartNames.size(); ++partIndex) {\n";
+            source << "    const PartTimingStats partStats = collect_part_timing_stats_(partIndex);\n";
+            source << "    const double totalMs = static_cast<double>(partStats.total_ns) / 1.0e6;\n";
+            source << "    const double avgUs = static_cast<double>(partStats.total_ns) /\n";
+            source << "                         static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "    const double scatterAvgUs = static_cast<double>(partStats.scatter_ns) /\n";
+            source << "                                static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "    const double evalAvgUs = static_cast<double>(partStats.eval_ns) /\n";
+            source << "                             static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "    const double gatherAvgUs = static_cast<double>(partStats.gather_ns) /\n";
+            source << "                               static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "    std::fprintf(stderr,\n";
+            source << "                 \"[WOLVI][part-timing] part=%s steps=%llu total=%.3f ms avg=%.3f us scatter=%.3f us eval=%.3f us gather=%.3f us\\n\",\n";
+            source << "                 kPartNames[partIndex],\n";
+            source << "                 static_cast<unsigned long long>(step_count_),\n";
+            source << "                 totalMs,\n";
+            source << "                 avgUs,\n";
+            source << "                 scatterAvgUs,\n";
+            source << "                 evalAvgUs,\n";
+            source << "                 gatherAvgUs);\n";
+            source << "  }\n";
+            source << "}\n\n";
+            source << "void WolviRepCutVerilatorSim::dump_timing_jsonl_() const {\n";
+            source << "  const char* path = std::getenv(\"WOLVI_REPCUT_TIMING_JSONL\");\n";
+            source << "  if (path == nullptr || *path == '\\0') {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  FILE* file = std::fopen(path, \"w\");\n";
+            source << "  if (file == nullptr) {\n";
+            source << "    return;\n";
+            source << "  }\n";
+            source << "  if (step_timing_.steps != 0) {\n";
+            source << "    const double steps = static_cast<double>(step_timing_.steps);\n";
+            source << "    const double totalMs = static_cast<double>(step_timing_.total_ns) / 1.0e6;\n";
+            source << "    const double avgUs = static_cast<double>(step_timing_.total_ns) / steps / 1.0e3;\n";
+            source << "    std::fprintf(file,\n";
+            source << "                 \"{\\\"record_type\\\":\\\"step_timing_summary\\\",\\\"schema_version\\\":1,\\\"steps\\\":%llu,\\\"total_ms\\\":%.3f,\\\"avg_us\\\":%.3f}\\n\",\n";
+            source << "                 static_cast<unsigned long long>(step_timing_.steps),\n";
+            source << "                 totalMs,\n";
+            source << "                 avgUs);\n";
+            source << "    const auto dumpPhase = [&](const char* name, std::uint64_t ns) {\n";
+            source << "      const double phaseTotalMs = static_cast<double>(ns) / 1.0e6;\n";
+            source << "      const double phaseAvgUs = static_cast<double>(ns) / steps / 1.0e3;\n";
+            source << "      const double pct = step_timing_.total_ns == 0 ? 0.0 :\n";
+            source << "                         (100.0 * static_cast<double>(ns) / static_cast<double>(step_timing_.total_ns));\n";
+            source << "      std::fprintf(file,\n";
+            source << "                   \"{\\\"record_type\\\":\\\"step_timing_phase\\\",\\\"schema_version\\\":1,\\\"phase\\\":\\\"%s\\\",\\\"steps\\\":%llu,\\\"total_ms\\\":%.3f,\\\"avg_us\\\":%.3f,\\\"pct\\\":%.2f}\\n\",\n";
+            source << "                   name,\n";
+            source << "                   static_cast<unsigned long long>(step_timing_.steps),\n";
+            source << "                   phaseTotalMs,\n";
+            source << "                   phaseAvgUs,\n";
+            source << "                   pct);\n";
+            source << "    };\n";
+            source << "    dumpPhase(\"debug_scatter\", step_timing_.debug_scatter_ns);\n";
+            source << "    dumpPhase(\"debug_eval\", step_timing_.debug_eval_ns);\n";
+            source << "    dumpPhase(\"debug_publish\", step_timing_.debug_publish_ns);\n";
+            source << "    dumpPhase(\"part_eval\", step_timing_.part_eval_ns);\n";
+            source << "    dumpPhase(\"writeback\", step_timing_.writeback_ns);\n";
+            source << "  }\n";
+            source << "  if (step_count_ != 0) {\n";
+            source << "    static constexpr std::array<const char*, " << manifest.units.size() << "> kPartNames = {";
+            for (std::size_t i = 0; i < manifest.units.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    source << ", ";
+                }
+                source << "\"" << manifest.units[i].instanceName << "\"";
+            }
+            source << "};\n";
+            source << "    for (std::size_t partIndex = 0; partIndex < kPartNames.size(); ++partIndex) {\n";
+            source << "      const PartTimingStats partStats = collect_part_timing_stats_(partIndex);\n";
+            source << "      const double totalMs = static_cast<double>(partStats.total_ns) / 1.0e6;\n";
+            source << "      const double avgUs = static_cast<double>(partStats.total_ns) /\n";
+            source << "                           static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "      const double scatterTotalMs = static_cast<double>(partStats.scatter_ns) / 1.0e6;\n";
+            source << "      const double scatterAvgUs = static_cast<double>(partStats.scatter_ns) /\n";
+            source << "                                  static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "      const double evalTotalMs = static_cast<double>(partStats.eval_ns) / 1.0e6;\n";
+            source << "      const double evalAvgUs = static_cast<double>(partStats.eval_ns) /\n";
+            source << "                               static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "      const double gatherTotalMs = static_cast<double>(partStats.gather_ns) / 1.0e6;\n";
+            source << "      const double gatherAvgUs = static_cast<double>(partStats.gather_ns) /\n";
+            source << "                                 static_cast<double>(step_count_) / 1.0e3;\n";
+            source << "      std::fprintf(file,\n";
+            source << "                   \"{\\\"record_type\\\":\\\"part_timing\\\",\\\"schema_version\\\":1,\\\"part_name\\\":\\\"%s\\\",\\\"steps\\\":%llu,\\\"total_ms\\\":%.3f,\\\"avg_us\\\":%.3f,\\\"scatter_total_ms\\\":%.3f,\\\"scatter_avg_us\\\":%.3f,\\\"eval_total_ms\\\":%.3f,\\\"eval_avg_us\\\":%.3f,\\\"gather_total_ms\\\":%.3f,\\\"gather_avg_us\\\":%.3f}\\n\",\n";
+            source << "                   kPartNames[partIndex],\n";
+            source << "                   static_cast<unsigned long long>(step_count_),\n";
+            source << "                   totalMs,\n";
+            source << "                   avgUs,\n";
+            source << "                   scatterTotalMs,\n";
+            source << "                   scatterAvgUs,\n";
+            source << "                   evalTotalMs,\n";
+            source << "                   evalAvgUs,\n";
+            source << "                   gatherTotalMs,\n";
+            source << "                   gatherAvgUs);\n";
+            source << "    }\n";
+            source << "  }\n";
+            source << "  std::fclose(file);\n";
             source << "}\n\n";
             source << "void WolviRepCutVerilatorSim::step() {\n";
-            source << "  const bool stepTimingEnabled = step_timing_enabled_;\n";
-            source << "  const auto stepBegin = stepTimingEnabled ? WolviClock::now() : WolviClock::time_point{};\n";
-            source << "  auto phaseBegin = stepBegin;\n";
-            source << "  if (stepTimingEnabled) {\n";
-            source << "    ++step_timing_.steps;\n";
-            source << "  }\n";
+            source << "  ++step_count_;\n";
+            source << "  ++step_timing_.steps;\n";
+            source << "  const auto stepBegin = WolviClock::now();\n";
             if (hasDebugPart)
             {
                 const auto &debugInfo = unitInfoByInstance.at("debug_part");
+                const auto debugTimingIndexIt = std::find_if(
+                    manifest.units.begin(),
+                    manifest.units.end(),
+                    [](const ManifestUnit &unit) { return unit.instanceName == "debug_part"; });
+                if (debugTimingIndexIt == manifest.units.end())
+                {
+                    throw std::runtime_error("Missing timing index for unit debug_part");
+                }
+                const std::size_t debugTimingIndex =
+                    static_cast<std::size_t>(std::distance(manifest.units.begin(), debugTimingIndexIt));
+                source << "  const auto debugPartBegin = WolviClock::now();\n";
                 source << "  // Load debug_part inputs from the current cross-partition snapshot.\n";
                 emitScatterInputsForUnit(source, "debug_part", 1);
                 source << "\n";
-                source << "  if (stepTimingEnabled) {\n";
-                source << "    const auto phaseEnd = WolviClock::now();\n";
-                source << "    step_timing_.scatter_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
-                source << "    phaseBegin = phaseEnd;\n";
-                source << "  }\n";
+                source << "  const auto debugScatterEnd = WolviClock::now();\n";
+                source << "  step_timing_.debug_scatter_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugPartBegin, debugScatterEnd);\n";
                 source << "  // Evaluate debug_part first so DPI/device responses are available before logic eval.\n";
                 source << "  // eval debug_part\n";
                 source << "  " << debugInfo.memberName << "->eval();\n\n";
-                source << "  if (stepTimingEnabled) {\n";
-                source << "    const auto phaseEnd = WolviClock::now();\n";
-                source << "    step_timing_.debug_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
-                source << "    phaseBegin = phaseEnd;\n";
-                source << "  }\n";
+                source << "  const auto debugEvalEnd = WolviClock::now();\n";
+                source << "  step_timing_.debug_eval_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugScatterEnd, debugEvalEnd);\n";
                 source << "  // Publish debug_part outputs into both snapshot and writeback before worker launch.\n";
                 emitPublishOutputsForUnit(source, "debug_part", 1, true, true);
                 source << "\n";
-                source << "  if (stepTimingEnabled) {\n";
-                source << "    const auto phaseEnd = WolviClock::now();\n";
-                source << "    step_timing_.debug_gather_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
-                source << "    phaseBegin = phaseEnd;\n";
-                source << "  }\n";
+                source << "  const auto debugPublishEnd = WolviClock::now();\n";
+                source << "  step_timing_.debug_publish_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugEvalEnd, debugPublishEnd);\n";
+                source << "  part_timing_stats_[" << debugTimingIndex << "].scatter_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugPartBegin, debugScatterEnd);\n";
+                source << "  part_timing_stats_[" << debugTimingIndex << "].eval_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugScatterEnd, debugEvalEnd);\n";
+                source << "  part_timing_stats_[" << debugTimingIndex << "].gather_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugEvalEnd, debugPublishEnd);\n";
+                source << "  part_timing_stats_[" << debugTimingIndex << "].total_ns +=\n";
+                source << "      wolvi_elapsed_ns(debugPartBegin, debugPublishEnd);\n";
                 source << "  // Evaluate all non-debug units with fused local scatter/eval/gather.\n";
             }
             else
@@ -1674,21 +1689,18 @@ namespace wolvrix::lib::emit
                 source << "  // Evaluate all units with fused local scatter/eval/gather.\n";
             }
             source << "  // Run fused non-debug step tasks on fixed worker threads.\n";
+            source << "  const auto partEvalBegin = WolviClock::now();\n";
             source << "  run_non_debug_step_workers_();\n";
             source << "\n";
-            source << "  if (stepTimingEnabled) {\n";
-            source << "    const auto phaseEnd = WolviClock::now();\n";
-            source << "    step_timing_.part_eval_ns += wolvi_elapsed_ns(phaseBegin, phaseEnd);\n";
-            source << "    phaseBegin = phaseEnd;\n";
-            source << "  }\n";
+            source << "  const auto partEvalEnd = WolviClock::now();\n";
+            source << "  step_timing_.part_eval_ns += wolvi_elapsed_ns(partEvalBegin, partEvalEnd);\n";
             source << "  // Commit cross-partition writeback after every non-debug task has completed.\n";
+            source << "  const auto writebackBegin = WolviClock::now();\n";
             emitCommitWritebackToSnapshot(source, 1);
             source << "\n";
-            source << "  if (stepTimingEnabled) {\n";
-            source << "    const auto stepEnd = WolviClock::now();\n";
-            source << "    step_timing_.gather_ns += wolvi_elapsed_ns(phaseBegin, stepEnd);\n";
-            source << "    step_timing_.total_ns += wolvi_elapsed_ns(stepBegin, stepEnd);\n";
-            source << "  }\n";
+            source << "  const auto writebackEnd = WolviClock::now();\n";
+            source << "  step_timing_.writeback_ns += wolvi_elapsed_ns(writebackBegin, writebackEnd);\n";
+            source << "  step_timing_.total_ns += wolvi_elapsed_ns(stepBegin, writebackEnd);\n";
             source << "}\n";
 
             return WrapperCode{header.str(), source.str()};
@@ -2199,16 +2211,6 @@ namespace wolvrix::lib::emit
             }
             appendSink("unit_to_top", port.value, driver, SinkDesc{SinkDesc::Kind::Top, {}, port.name});
         }
-
-        const std::filesystem::path manifestPath = packageDir / "manifest.json";
-        auto manifestStream = openOutputFile(manifestPath);
-        if (!manifestStream)
-        {
-            result.success = false;
-            return result;
-        }
-        *manifestStream << serializeManifest(manifest);
-        result.artifacts.push_back(manifestPath.string());
 
         for (const auto &unit : manifest.units)
         {

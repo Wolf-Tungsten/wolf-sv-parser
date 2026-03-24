@@ -3,6 +3,7 @@
 #include "transform/repcut.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -18,6 +19,16 @@ namespace
     {
         std::cerr << "[repcut-tests] " << message << '\n';
         return 1;
+    }
+
+    std::string readFile(const std::filesystem::path &path)
+    {
+        std::ifstream stream(path);
+        if (!stream.is_open())
+        {
+            return {};
+        }
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
 
     wolvrix::lib::grh::ValueId makeValue(wolvrix::lib::grh::Graph &graph,
@@ -207,6 +218,20 @@ int main()
     {
         return fail("expected native mt-kahypar partition output file");
     }
+    const std::filesystem::path featurePath = outDir / "top_repcut_k2.partition_features.jsonl";
+    if (!std::filesystem::exists(featurePath))
+    {
+        return fail("expected repcut partition static feature export");
+    }
+    const std::string featureText = readFile(featurePath);
+    if (featureText.find("\"record_type\":\"partition_static_feature_summary\"") == std::string::npos ||
+        featureText.find("\"record_type\":\"partition_static_features\"") == std::string::npos ||
+        featureText.find("\"part_name\":\"part_0\"") == std::string::npos ||
+        featureText.find("\"op_kind_counts\":{") == std::string::npos ||
+        featureText.find("\"width_bucket_counts\":{") == std::string::npos)
+    {
+        return fail("unexpected repcut partition static feature export content");
+    }
 
     if (!result.success || diags.hasError())
     {
@@ -379,6 +404,10 @@ int main()
     if (roStats->find("\"avg_partition_weight_fraction_of_original\":") == std::string::npos)
     {
         return fail("read-only register repcut missing avg_partition_weight_fraction_of_original");
+    }
+    if (roStats->find("\"partition_static_features\":[") == std::string::npos)
+    {
+        return fail("read-only register repcut missing partition_static_features");
     }
     if (roStats->find("\"weight\":") == std::string::npos)
     {
