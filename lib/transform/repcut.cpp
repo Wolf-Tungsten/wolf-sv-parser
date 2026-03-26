@@ -1,4 +1,5 @@
 #include "transform/repcut.hpp"
+#include "transform/repcut_boundary_bundle.hpp"
 #include "transform/repcut_partition_set.hpp"
 
 #include <algorithm>
@@ -31,6 +32,147 @@
 
 namespace wolvrix::lib::transform
 {
+
+    namespace detail
+    {
+
+        RepcutBoundaryBundleResult buildRepcutBoundaryBundles(std::span<const RepcutBoundaryValueDesc> values)
+        {
+            struct GroupKey
+            {
+                uint32_t ownerPart = 0;
+                std::string dstSignature;
+
+                bool operator==(const GroupKey &other) const
+                {
+                    return ownerPart == other.ownerPart && dstSignature == other.dstSignature;
+                }
+            };
+
+            struct GroupKeyHash
+            {
+                std::size_t operator()(const GroupKey &key) const
+                {
+                    std::size_t seed = std::hash<uint32_t>{}(key.ownerPart);
+                    seed ^= std::hash<std::string>{}(key.dstSignature) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+                    return seed;
+                }
+            };
+
+            auto formatSignature = [](const std::vector<uint32_t> &parts) {
+                std::ostringstream oss;
+                for (std::size_t i = 0; i < parts.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        oss << "_";
+                    }
+                    oss << "p" << parts[i];
+                }
+                return oss.str();
+            };
+
+            std::unordered_map<GroupKey, std::vector<uint64_t>, GroupKeyHash> membersByKey;
+            std::unordered_map<GroupKey, std::vector<uint32_t>, GroupKeyHash> dstPartsByKey;
+            std::unordered_map<uint64_t, int64_t> widthByValue;
+            membersByKey.reserve(values.size());
+            dstPartsByKey.reserve(values.size());
+            widthByValue.reserve(values.size());
+
+            for (const auto &value : values)
+            {
+                if (value.width <= 0 || value.dstParts.empty())
+                {
+                    continue;
+                }
+                std::vector<uint32_t> dstParts = value.dstParts;
+                std::sort(dstParts.begin(), dstParts.end());
+                dstParts.erase(std::unique(dstParts.begin(), dstParts.end()), dstParts.end());
+                if (dstParts.empty())
+                {
+                    continue;
+                }
+
+                GroupKey key;
+                key.ownerPart = value.ownerPart;
+                key.dstSignature = formatSignature(dstParts);
+                membersByKey[key].push_back(value.valueKey);
+                dstPartsByKey.emplace(key, dstParts);
+                widthByValue.emplace(value.valueKey, value.width);
+            }
+
+            RepcutBoundaryBundleResult result;
+            result.groups.reserve(membersByKey.size());
+            for (auto &[key, members] : membersByKey)
+            {
+                if (members.size() < 2)
+                {
+                    continue;
+                }
+                std::sort(members.begin(), members.end());
+                RepcutBoundaryBundle bundle;
+                bundle.ownerPart = key.ownerPart;
+                bundle.dstSignature = key.dstSignature;
+                auto dstIt = dstPartsByKey.find(key);
+                if (dstIt != dstPartsByKey.end())
+                {
+                    bundle.dstParts = dstIt->second;
+                }
+                bundle.members = std::move(members);
+                for (const uint64_t member : bundle.members)
+                {
+                    auto widthIt = widthByValue.find(member);
+                    if (widthIt != widthByValue.end())
+                    {
+                        bundle.totalWidth += widthIt->second;
+                    }
+                }
+                result.groups.push_back(std::move(bundle));
+            }
+
+            std::sort(result.groups.begin(),
+                      result.groups.end(),
+                      [](const RepcutBoundaryBundle &lhs, const RepcutBoundaryBundle &rhs) {
+                          if (lhs.ownerPart != rhs.ownerPart)
+                          {
+                              return lhs.ownerPart < rhs.ownerPart;
+                          }
+                          if (lhs.dstSignature != rhs.dstSignature)
+                          {
+                              return lhs.dstSignature < rhs.dstSignature;
+                          }
+                          const uint64_t lhsFirst =
+                              lhs.members.empty() ? std::numeric_limits<uint64_t>::max() : lhs.members.front();
+                          const uint64_t rhsFirst =
+                              rhs.members.empty() ? std::numeric_limits<uint64_t>::max() : rhs.members.front();
+                          return lhsFirst < rhsFirst;
+                      });
+
+            result.members.reserve(values.size());
+            for (std::size_t groupIndex = 0; groupIndex < result.groups.size(); ++groupIndex)
+            {
+                const RepcutBoundaryBundle &bundle = result.groups[groupIndex];
+                int64_t bitCursor = bundle.totalWidth;
+                for (const uint64_t member : bundle.members)
+                {
+                    auto widthIt = widthByValue.find(member);
+                    if (widthIt == widthByValue.end() || widthIt->second <= 0 || bitCursor < widthIt->second)
+                    {
+                        continue;
+                    }
+                    RepcutBoundaryBundleMember layout;
+                    layout.groupIndex = groupIndex;
+                    layout.sliceStart = bitCursor - widthIt->second;
+                    layout.sliceEnd = bitCursor - 1;
+                    result.members.emplace(member, layout);
+                    bitCursor -= widthIt->second;
+                }
+            }
+
+            return result;
+        }
+
+    } // namespace detail
 
     namespace
     {
@@ -339,6 +481,43 @@ namespace wolvrix::lib::transform
             std::optional<wolvrix::lib::grh::SrcLoc> srcLoc;
         };
 
+        struct BoundaryPortGroupKey
+        {
+            uint32_t ownerPart = 0;
+            std::string dstSignature;
+
+            bool operator==(const BoundaryPortGroupKey &other) const
+            {
+                return ownerPart == other.ownerPart && dstSignature == other.dstSignature;
+            }
+        };
+
+        struct BoundaryPortGroupKeyHash
+        {
+            std::size_t operator()(const BoundaryPortGroupKey &key) const
+            {
+                std::size_t seed = std::hash<uint32_t>{}(key.ownerPart);
+                seed ^= std::hash<std::string>{}(key.dstSignature) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+                return seed;
+            }
+        };
+
+        struct BoundaryPortGroup
+        {
+            uint32_t ownerPart = 0;
+            std::vector<uint32_t> dstParts;
+            std::string dstSignature;
+            std::vector<wolvrix::lib::grh::ValueId> members;
+            int64_t totalWidth = 0;
+        };
+
+        struct BoundaryPortGroupMemberInfo
+        {
+            std::size_t groupIndex = 0;
+            int64_t sliceStart = 0;
+            int64_t sliceEnd = 0;
+        };
+
         struct CrossPartitionValue
         {
             wolvrix::lib::grh::ValueId value = wolvrix::lib::grh::ValueId::invalid();
@@ -435,6 +614,27 @@ namespace wolvrix::lib::transform
                 normalized.insert(normalized.begin(), '_');
             }
             return normalized;
+        }
+
+        std::vector<uint32_t> collectPartitionSetParts(const PartitionSet &set)
+        {
+            std::vector<uint32_t> parts;
+            set.forEach([&](uint32_t partId) { parts.push_back(partId); });
+            return parts;
+        }
+
+        std::string formatPartitionSignature(const std::vector<uint32_t> &parts)
+        {
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < parts.size(); ++i)
+            {
+                if (i > 0)
+                {
+                    oss << "_";
+                }
+                oss << "p" << parts[i];
+            }
+            return oss.str();
         }
 
         std::string uniquePortName(std::unordered_set<std::string> &used, std::string base)
@@ -4810,12 +5010,205 @@ namespace wolvrix::lib::transform
                 " elapsed_ms=" + std::to_string(msSince(usedByOtherStart)) +
                 " total_elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
 
+        std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> boundaryValues;
+        boundaryValues.reserve(usedByOther.size() + origOutputs.size() + 1024);
+        for (const auto valueId : usedByOther)
+        {
+            boundaryValues.insert(valueId);
+        }
+        for (const auto &valuesInPart : partInputValueCandidates)
+        {
+            for (const auto valueId : valuesInPart)
+            {
+                boundaryValues.insert(valueId);
+            }
+        }
+        for (const auto &valuesInPart : partOutputValueCandidates)
+        {
+            for (const auto valueId : valuesInPart)
+            {
+                boundaryValues.insert(valueId);
+            }
+        }
+
+        std::unordered_map<wolvrix::lib::grh::ValueId, uint32_t, wolvrix::lib::grh::ValueIdHash> ownerByValue;
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationId, wolvrix::lib::grh::ValueIdHash>
+            defOpByValue;
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationKind, wolvrix::lib::grh::ValueIdHash>
+            defKindByValue;
+        ownerByValue.reserve(boundaryValues.size());
+        defOpByValue.reserve(boundaryValues.size());
+        defKindByValue.reserve(boundaryValues.size());
+        for (const auto valueId : boundaryValues)
+        {
+            if (const std::optional<uint32_t> owner = primaryOwnerOfValue(valueId))
+            {
+                ownerByValue.emplace(valueId, *owner);
+            }
+
+            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
+            if (!defOp.valid())
+            {
+                continue;
+            }
+            defOpByValue.emplace(valueId, defOp);
+            defKindByValue.emplace(valueId, graph->getOperation(defOp).kind());
+        }
+
+        std::unordered_map<wolvrix::lib::grh::ValueId, PartitionSet, wolvrix::lib::grh::ValueIdHash> consumerPartsByValue;
+        consumerPartsByValue.reserve(usedByOther.size() + 1024);
+        for (std::size_t p = 0; p < partInputValueCandidates.size(); ++p)
+        {
+            for (const auto valueId : partInputValueCandidates[p])
+            {
+                if (origInputs.find(valueId) != origInputs.end())
+                {
+                    continue;
+                }
+                auto ownerIt = ownerByValue.find(valueId);
+                if (ownerIt == ownerByValue.end() || ownerIt->second == p)
+                {
+                    continue;
+                }
+                consumerPartsByValue[valueId].add(static_cast<uint32_t>(p));
+            }
+        }
+
+        std::unordered_map<BoundaryPortGroupKey,
+                           std::vector<wolvrix::lib::grh::ValueId>,
+                           BoundaryPortGroupKeyHash>
+            boundaryGroupMembersByKey;
+        std::unordered_map<BoundaryPortGroupKey,
+                           std::vector<uint32_t>,
+                           BoundaryPortGroupKeyHash>
+            boundaryGroupDstPartsByKey;
+        boundaryGroupMembersByKey.reserve(consumerPartsByValue.size());
+        boundaryGroupDstPartsByKey.reserve(consumerPartsByValue.size());
+        for (const auto &[valueId, dstSet] : consumerPartsByValue)
+        {
+            const std::vector<uint32_t> dstParts = collectPartitionSetParts(dstSet);
+            if (dstParts.empty())
+            {
+                continue;
+            }
+            auto ownerIt = ownerByValue.find(valueId);
+            if (ownerIt == ownerByValue.end())
+            {
+                continue;
+            }
+            BoundaryPortGroupKey key;
+            key.ownerPart = ownerIt->second;
+            key.dstSignature = formatPartitionSignature(dstParts);
+            boundaryGroupMembersByKey[key].push_back(valueId);
+            boundaryGroupDstPartsByKey.emplace(key, dstParts);
+        }
+
+        std::vector<BoundaryPortGroup> boundaryGroups;
+        boundaryGroups.reserve(boundaryGroupMembersByKey.size());
+        for (auto &[key, members] : boundaryGroupMembersByKey)
+        {
+            if (members.size() < 2)
+            {
+                continue;
+            }
+            std::sort(members.begin(), members.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+            BoundaryPortGroup group;
+            group.ownerPart = key.ownerPart;
+            group.dstSignature = key.dstSignature;
+            auto dstIt = boundaryGroupDstPartsByKey.find(key);
+            if (dstIt != boundaryGroupDstPartsByKey.end())
+            {
+                group.dstParts = dstIt->second;
+            }
+            group.members = std::move(members);
+            for (const auto valueId : group.members)
+            {
+                auto vinfoIt = valueInfos.find(valueId);
+                if (vinfoIt == valueInfos.end())
+                {
+                    continue;
+                }
+                group.totalWidth += static_cast<int64_t>(vinfoIt->second.width);
+            }
+            boundaryGroups.push_back(std::move(group));
+        }
+        std::sort(boundaryGroups.begin(),
+                  boundaryGroups.end(),
+                  [](const BoundaryPortGroup &lhs, const BoundaryPortGroup &rhs) {
+                      if (lhs.ownerPart != rhs.ownerPart)
+                      {
+                          return lhs.ownerPart < rhs.ownerPart;
+                      }
+                      if (lhs.dstSignature != rhs.dstSignature)
+                      {
+                          return lhs.dstSignature < rhs.dstSignature;
+                      }
+                      const uint32_t lhsFirst =
+                          lhs.members.empty() ? std::numeric_limits<uint32_t>::max() : lhs.members.front().index;
+                      const uint32_t rhsFirst =
+                          rhs.members.empty() ? std::numeric_limits<uint32_t>::max() : rhs.members.front().index;
+                      return lhsFirst < rhsFirst;
+                  });
+
+        std::unordered_map<wolvrix::lib::grh::ValueId, BoundaryPortGroupMemberInfo, wolvrix::lib::grh::ValueIdHash>
+            groupedValueMembers;
+        groupedValueMembers.reserve(boundaryValues.size());
+        std::vector<std::vector<std::size_t>> partInputGroups(partitionOps.size());
+        std::vector<std::vector<std::size_t>> partOutputGroups(partitionOps.size());
+        std::size_t groupedValueCount = 0;
+        for (std::size_t groupIndex = 0; groupIndex < boundaryGroups.size(); ++groupIndex)
+        {
+            const BoundaryPortGroup &group = boundaryGroups[groupIndex];
+            if (group.ownerPart < partOutputGroups.size())
+            {
+                partOutputGroups[group.ownerPart].push_back(groupIndex);
+            }
+            for (const uint32_t dstPart : group.dstParts)
+            {
+                if (dstPart < partInputGroups.size())
+                {
+                    partInputGroups[dstPart].push_back(groupIndex);
+                }
+            }
+
+            int64_t bitCursor = group.totalWidth;
+            for (const auto valueId : group.members)
+            {
+                auto vinfoIt = valueInfos.find(valueId);
+                if (vinfoIt == valueInfos.end())
+                {
+                    continue;
+                }
+                const int64_t width = static_cast<int64_t>(vinfoIt->second.width);
+                if (width <= 0 || bitCursor < width)
+                {
+                    continue;
+                }
+                BoundaryPortGroupMemberInfo info;
+                info.groupIndex = groupIndex;
+                info.sliceStart = bitCursor - width;
+                info.sliceEnd = bitCursor - 1;
+                groupedValueMembers.emplace(valueId, info);
+                bitCursor -= width;
+                ++groupedValueCount;
+            }
+        }
+        logInfo("repcut phase-e rebuild: grouped boundary bundles groups=" +
+                std::to_string(boundaryGroups.size()) +
+                " values=" + std::to_string(groupedValueCount) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+
         struct PartitionGraphInfo
         {
             wolvrix::lib::grh::Graph *graph = nullptr;
             std::string name;
             std::unordered_map<wolvrix::lib::grh::ValueId, std::string, wolvrix::lib::grh::ValueIdHash> inputPortByValue;
             std::unordered_map<wolvrix::lib::grh::ValueId, std::string, wolvrix::lib::grh::ValueIdHash> outputPortByValue;
+            std::unordered_map<std::size_t, std::string> inputPortByGroup;
+            std::unordered_map<std::size_t, std::string> outputPortByGroup;
         };
 
         std::vector<PartitionGraphInfo> partInfos;
@@ -4865,19 +5258,55 @@ namespace wolvrix::lib::transform
             inputList.reserve(partInputValueCandidates[p].size());
             std::vector<wolvrix::lib::grh::ValueId> outputList;
             outputList.reserve(partOutputValueCandidates[p].size());
+            std::vector<std::size_t> inputGroupIds = partInputGroups[p];
+            std::vector<std::size_t> outputGroupIds = partOutputGroups[p];
+            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> groupedInputValues;
+            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> groupedOutputValues;
+            for (const std::size_t groupId : inputGroupIds)
+            {
+                if (groupId >= boundaryGroups.size())
+                {
+                    continue;
+                }
+                for (const auto valueId : boundaryGroups[groupId].members)
+                {
+                    groupedInputValues.insert(valueId);
+                }
+            }
+            for (const std::size_t groupId : outputGroupIds)
+            {
+                if (groupId >= boundaryGroups.size())
+                {
+                    continue;
+                }
+                for (const auto valueId : boundaryGroups[groupId].members)
+                {
+                    groupedOutputValues.insert(valueId);
+                }
+            }
 
             for (const auto valueId : partRequiredValueCandidates[p])
             {
+                if (groupedInputValues.find(valueId) != groupedInputValues.end())
+                {
+                    continue;
+                }
                 appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
             }
             for (const auto valueId : partInputValueCandidates[p])
             {
-                appendUniqueValue(inputList, inputValueMarks, inputValueStamp, valueId);
-                appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
+                if (groupedInputValues.find(valueId) == groupedInputValues.end())
+                {
+                    appendUniqueValue(inputList, inputValueMarks, inputValueStamp, valueId);
+                    appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
+                }
             }
             for (const auto valueId : partOutputValueCandidates[p])
             {
-                appendUniqueValue(outputList, outputValueMarks, outputValueStamp, valueId);
+                if (groupedOutputValues.find(valueId) == groupedOutputValues.end())
+                {
+                    appendUniqueValue(outputList, outputValueMarks, outputValueStamp, valueId);
+                }
                 appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
             }
 
@@ -4954,6 +5383,94 @@ namespace wolvrix::lib::transform
                 valueMap.emplace(sourceValueId, dstValue);
             }
 
+            PartitionGraphInfo info;
+            info.graph = &partGraph;
+            info.name = partName;
+
+            std::unordered_set<std::string> usedPortNames;
+
+            for (const std::size_t groupId : inputGroupIds)
+            {
+                if (groupId >= boundaryGroups.size())
+                {
+                    continue;
+                }
+                const BoundaryPortGroup &group = boundaryGroups[groupId];
+                if (group.totalWidth <= 0 || group.totalWidth > std::numeric_limits<int32_t>::max())
+                {
+                    error("repcut phase-e rebuild: invalid grouped input width group=" + std::to_string(groupId) +
+                          " width=" + std::to_string(group.totalWidth));
+                    result.failed = true;
+                    return result;
+                }
+
+                wolvrix::lib::grh::ValueId bundleValue = wolvrix::lib::grh::ValueId::invalid();
+                if (group.members.size() == 1)
+                {
+                    const auto valueId = group.members.front();
+                    const auto vinfoIt = valueInfos.find(valueId);
+                    if (vinfoIt == valueInfos.end())
+                    {
+                        continue;
+                    }
+                    const ValueInfo &vinfo = vinfoIt->second;
+                    const std::string bundleBase = "repcut_in_bundle_" + std::to_string(group.ownerPart) +
+                                                   "_to_" + group.dstSignature;
+                    const auto sym = internUniqueSymbol(partGraph, bundleBase);
+                    bundleValue = partGraph.createValue(sym, vinfo.width, vinfo.isSigned, vinfo.type);
+                    if (vinfo.srcLoc)
+                    {
+                        partGraph.setValueSrcLoc(bundleValue, *vinfo.srcLoc);
+                    }
+                    valueMap[valueId] = bundleValue;
+                }
+                else
+                {
+                    const std::string bundleBase = "repcut_in_bundle_" + std::to_string(group.ownerPart) +
+                                                   "_to_" + group.dstSignature;
+                    const auto sym = internUniqueSymbol(partGraph, bundleBase);
+                    bundleValue = partGraph.createValue(sym,
+                                                        static_cast<int32_t>(group.totalWidth),
+                                                        false,
+                                                        wolvrix::lib::grh::ValueType::Logic);
+                    for (const auto valueId : group.members)
+                    {
+                        auto memberIt = groupedValueMembers.find(valueId);
+                        auto vinfoIt = valueInfos.find(valueId);
+                        if (memberIt == groupedValueMembers.end() || vinfoIt == valueInfos.end())
+                        {
+                            continue;
+                        }
+                        const BoundaryPortGroupMemberInfo &memberInfo = memberIt->second;
+                        const ValueInfo &vinfo = vinfoIt->second;
+                        const auto sliceSym = internUniqueSymbol(
+                            partGraph,
+                            "repcut_in_slice_" + normalizePortBase(vinfo.symbol,
+                                                                   std::string("value") + std::to_string(valueId.index)));
+                        const auto sliceOp =
+                            partGraph.createOperation(wolvrix::lib::grh::OperationKind::kSliceStatic, sliceSym);
+                        partGraph.addOperand(sliceOp, bundleValue);
+                        partGraph.setAttr(sliceOp, "sliceStart", memberInfo.sliceStart);
+                        partGraph.setAttr(sliceOp, "sliceEnd", memberInfo.sliceEnd);
+                        const auto memberSym = mapSymbol(graph->getValue(valueId).symbol());
+                        const auto memberValue =
+                            partGraph.createValue(memberSym, vinfo.width, vinfo.isSigned, vinfo.type);
+                        if (vinfo.srcLoc)
+                        {
+                            partGraph.setValueSrcLoc(memberValue, *vinfo.srcLoc);
+                        }
+                        partGraph.addResult(sliceOp, memberValue);
+                        valueMap[valueId] = memberValue;
+                    }
+                }
+
+                const std::string portName =
+                    uniquePortName(usedPortNames,
+                                   "in_bundle_from_p" + std::to_string(group.ownerPart) + "_to_" + group.dstSignature);
+                partGraph.bindInputPort(portName, bundleValue);
+                info.inputPortByGroup.emplace(groupId, portName);
+            }
+
             for (const auto sourceOpId : sourceOps)
             {
                 const wolvrix::lib::grh::Operation srcOp = graph->getOperation(sourceOpId);
@@ -4997,12 +5514,6 @@ namespace wolvrix::lib::transform
                     partGraph.setOpSrcLoc(dstOp, *srcOp.srcLoc());
                 }
             }
-
-            PartitionGraphInfo info;
-            info.graph = &partGraph;
-            info.name = partName;
-
-            std::unordered_set<std::string> usedPortNames;
 
             for (const auto valueId : inputList)
             {
@@ -5048,64 +5559,86 @@ namespace wolvrix::lib::transform
                 info.outputPortByValue.emplace(valueId, portName);
             }
 
+            for (const std::size_t groupId : outputGroupIds)
+            {
+                if (groupId >= boundaryGroups.size())
+                {
+                    continue;
+                }
+                const BoundaryPortGroup &group = boundaryGroups[groupId];
+                if (group.totalWidth <= 0 || group.totalWidth > std::numeric_limits<int32_t>::max())
+                {
+                    error("repcut phase-e rebuild: invalid grouped output width group=" + std::to_string(groupId) +
+                          " width=" + std::to_string(group.totalWidth));
+                    result.failed = true;
+                    return result;
+                }
+
+                wolvrix::lib::grh::ValueId bundleValue = wolvrix::lib::grh::ValueId::invalid();
+                if (group.members.size() == 1)
+                {
+                    auto it = valueMap.find(group.members.front());
+                    if (it == valueMap.end())
+                    {
+                        error("repcut phase-e rebuild: missing grouped output member clone value=" +
+                              std::to_string(group.members.front().index));
+                        result.failed = true;
+                        return result;
+                    }
+                    bundleValue = it->second;
+                }
+                else
+                {
+                    const auto concatSym =
+                        internUniqueSymbol(partGraph,
+                                           "repcut_out_bundle_" + std::to_string(group.ownerPart) +
+                                               "_to_" + group.dstSignature);
+                    const auto concatOp =
+                        partGraph.createOperation(wolvrix::lib::grh::OperationKind::kConcat, concatSym);
+                    for (const auto valueId : group.members)
+                    {
+                        auto it = valueMap.find(valueId);
+                        if (it == valueMap.end())
+                        {
+                            error("repcut phase-e rebuild: missing grouped output member clone value=" +
+                                  std::to_string(valueId.index));
+                            result.failed = true;
+                            return result;
+                        }
+                        partGraph.addOperand(concatOp, it->second);
+                    }
+                    const auto bundleSym = internUniqueSymbol(partGraph,
+                                                              "repcut_out_bundle_val_" + std::to_string(group.ownerPart) +
+                                                                  "_to_" + group.dstSignature);
+                    bundleValue = partGraph.createValue(bundleSym,
+                                                        static_cast<int32_t>(group.totalWidth),
+                                                        false,
+                                                        wolvrix::lib::grh::ValueType::Logic);
+                    partGraph.addResult(concatOp, bundleValue);
+                }
+
+                const std::string portName =
+                    uniquePortName(usedPortNames, "out_bundle_to_" + group.dstSignature);
+                partGraph.bindOutputPort(portName, bundleValue);
+                info.outputPortByGroup.emplace(groupId, portName);
+            }
+
             partInfos.push_back(std::move(info));
             logInfo("repcut phase-e rebuild: partition_clone_done index=" +
                     std::to_string(p + 1) + "/" + std::to_string(partitionOps.size()) +
                     " graph=" + partName +
                     " source_values=" + std::to_string(sourceValues.size()) +
                     " source_ops=" + std::to_string(sourceOps.size()) +
-                    " input_ports=" + std::to_string(partInfos.back().inputPortByValue.size()) +
-                    " output_ports=" + std::to_string(partInfos.back().outputPortByValue.size()) +
+                    " input_ports=" +
+                    std::to_string(partInfos.back().inputPortByValue.size() + partInfos.back().inputPortByGroup.size()) +
+                    " output_ports=" +
+                    std::to_string(partInfos.back().outputPortByValue.size() + partInfos.back().outputPortByGroup.size()) +
                     " elapsed_ms=" + std::to_string(msSince(partBuildStart)) +
                     " total_elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
         }
         logInfo("repcut phase-e rebuild: partition graph cloning done part_graphs=" +
                 std::to_string(partInfos.size()) +
                 " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
-
-        std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> boundaryValues;
-        boundaryValues.reserve(usedByOther.size() + 1024);
-        for (const auto valueId : usedByOther)
-        {
-            boundaryValues.insert(valueId);
-        }
-        for (const auto &part : partInfos)
-        {
-            for (const auto &[valueId, portName] : part.inputPortByValue)
-            {
-                (void)portName;
-                boundaryValues.insert(valueId);
-            }
-            for (const auto &[valueId, portName] : part.outputPortByValue)
-            {
-                (void)portName;
-                boundaryValues.insert(valueId);
-            }
-        }
-
-        std::unordered_map<wolvrix::lib::grh::ValueId, uint32_t, wolvrix::lib::grh::ValueIdHash> ownerByValue;
-        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationId, wolvrix::lib::grh::ValueIdHash>
-            defOpByValue;
-        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::OperationKind, wolvrix::lib::grh::ValueIdHash>
-            defKindByValue;
-        ownerByValue.reserve(boundaryValues.size());
-        defOpByValue.reserve(boundaryValues.size());
-        defKindByValue.reserve(boundaryValues.size());
-        for (const auto valueId : boundaryValues)
-        {
-            if (const std::optional<uint32_t> owner = primaryOwnerOfValue(valueId))
-            {
-                ownerByValue.emplace(valueId, *owner);
-            }
-
-            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
-            if (!defOp.valid())
-            {
-                continue;
-            }
-            defOpByValue.emplace(valueId, defOp);
-            defKindByValue.emplace(valueId, graph->getOperation(defOp).kind());
-        }
         logInfo("repcut phase-e rebuild: boundary metadata captured values=" +
                 std::to_string(boundaryValues.size()) +
                 " owner_values=" + std::to_string(ownerByValue.size()) +
@@ -5203,8 +5736,58 @@ namespace wolvrix::lib::transform
 
         std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
             linkValues;
+        std::unordered_map<std::size_t, wolvrix::lib::grh::ValueId> groupLinkValues;
+        groupLinkValues.reserve(boundaryGroups.size());
+        for (std::size_t groupId = 0; groupId < boundaryGroups.size(); ++groupId)
+        {
+            const BoundaryPortGroup &group = boundaryGroups[groupId];
+            if (group.members.empty() || group.totalWidth <= 0 || group.totalWidth > std::numeric_limits<int32_t>::max())
+            {
+                error("repcut phase-e rebuild: invalid grouped top link width group=" + std::to_string(groupId) +
+                      " width=" + std::to_string(group.totalWidth));
+                result.failed = true;
+                return result;
+            }
+
+            wolvrix::lib::grh::ValueId linkVal = wolvrix::lib::grh::ValueId::invalid();
+            if (group.members.size() == 1)
+            {
+                const auto valueId = group.members.front();
+                auto vinfoIt = valueInfos.find(valueId);
+                if (vinfoIt == valueInfos.end())
+                {
+                    continue;
+                }
+                const ValueInfo &vinfo = vinfoIt->second;
+                const auto sym =
+                    internUniqueSymbol(newTop,
+                                       "repcut_link_bundle_p" + std::to_string(group.ownerPart) +
+                                           "_to_" + group.dstSignature);
+                linkVal = newTop.createValue(sym, vinfo.width, vinfo.isSigned, vinfo.type);
+                if (vinfo.srcLoc)
+                {
+                    newTop.setValueSrcLoc(linkVal, *vinfo.srcLoc);
+                }
+            }
+            else
+            {
+                const auto sym =
+                    internUniqueSymbol(newTop,
+                                       "repcut_link_bundle_p" + std::to_string(group.ownerPart) +
+                                           "_to_" + group.dstSignature);
+                linkVal = newTop.createValue(sym,
+                                             static_cast<int32_t>(group.totalWidth),
+                                             false,
+                                             wolvrix::lib::grh::ValueType::Logic);
+            }
+            groupLinkValues.emplace(groupId, linkVal);
+        }
         for (const auto valueId : usedByOther)
         {
+            if (groupedValueMembers.find(valueId) != groupedValueMembers.end())
+            {
+                continue;
+            }
             if (ownerByValue.find(valueId) == ownerByValue.end())
             {
                 continue;
@@ -5227,15 +5810,84 @@ namespace wolvrix::lib::transform
         }
         logInfo("repcut phase-e rebuild: top link values created cross_links=" +
                 std::to_string(linkValues.size()) +
+                " grouped_links=" + std::to_string(groupLinkValues.size()) +
                 " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+
+        std::unordered_map<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
+            groupedTopSlices;
+        auto getTopValueForSource =
+            [&](wolvrix::lib::grh::ValueId sourceValue) -> std::optional<wolvrix::lib::grh::ValueId> {
+            if (auto it = topValueBySource.find(sourceValue); it != topValueBySource.end())
+            {
+                return it->second;
+            }
+            if (auto it = groupedTopSlices.find(sourceValue); it != groupedTopSlices.end())
+            {
+                return it->second;
+            }
+            if (auto memberIt = groupedValueMembers.find(sourceValue); memberIt != groupedValueMembers.end())
+            {
+                const BoundaryPortGroupMemberInfo &memberInfo = memberIt->second;
+                if (memberInfo.groupIndex >= boundaryGroups.size())
+                {
+                    return std::nullopt;
+                }
+                auto linkIt = groupLinkValues.find(memberInfo.groupIndex);
+                if (linkIt == groupLinkValues.end())
+                {
+                    return std::nullopt;
+                }
+                const BoundaryPortGroup &group = boundaryGroups[memberInfo.groupIndex];
+                wolvrix::lib::grh::ValueId value = wolvrix::lib::grh::ValueId::invalid();
+                if (group.members.size() == 1)
+                {
+                    value = linkIt->second;
+                }
+                else
+                {
+                    auto vinfoIt = valueInfos.find(sourceValue);
+                    if (vinfoIt == valueInfos.end())
+                    {
+                        return std::nullopt;
+                    }
+                    const ValueInfo &vinfo = vinfoIt->second;
+                    const auto sliceSym = internUniqueSymbol(
+                        newTop,
+                        "repcut_link_slice_" +
+                            normalizePortBase(vinfo.symbol, std::string("value") + std::to_string(sourceValue.index)));
+                    const auto sliceOp =
+                        newTop.createOperation(wolvrix::lib::grh::OperationKind::kSliceStatic, sliceSym);
+                    newTop.addOperand(sliceOp, linkIt->second);
+                    newTop.setAttr(sliceOp, "sliceStart", memberInfo.sliceStart);
+                    newTop.setAttr(sliceOp, "sliceEnd", memberInfo.sliceEnd);
+                    const auto resultSym = internUniqueSymbol(
+                        newTop,
+                        "repcut_link_value_" +
+                            normalizePortBase(vinfo.symbol, std::string("value") + std::to_string(sourceValue.index)));
+                    value = newTop.createValue(resultSym, vinfo.width, vinfo.isSigned, vinfo.type);
+                    if (vinfo.srcLoc)
+                    {
+                        newTop.setValueSrcLoc(value, *vinfo.srcLoc);
+                    }
+                    newTop.addResult(sliceOp, value);
+                }
+                groupedTopSlices.emplace(sourceValue, value);
+                topValueBySource.emplace(sourceValue, value);
+                return value;
+            }
+            if (auto it = linkValues.find(sourceValue); it != linkValues.end())
+            {
+                return it->second;
+            }
+            return std::nullopt;
+        };
 
         for (const auto &port : outputSnapshot)
         {
-            auto itLink = linkValues.find(port.value);
-            if (itLink != linkValues.end())
+            if (auto mapped = getTopValueForSource(port.value))
             {
-                newTop.bindOutputPort(port.name, itLink->second);
-                topValueBySource.emplace(port.value, itLink->second);
+                newTop.bindOutputPort(port.name, *mapped);
+                topValueBySource.emplace(port.value, *mapped);
                 continue;
             }
             auto itTop = topValueBySource.find(port.value);
@@ -5268,10 +5920,9 @@ namespace wolvrix::lib::transform
             }
 
             wolvrix::lib::grh::ValueId outVal;
-            auto outLink = linkValues.find(port.out);
-            if (outLink != linkValues.end())
+            if (auto mapped = getTopValueForSource(port.out))
             {
-                outVal = outLink->second;
+                outVal = *mapped;
             }
             else
             {
@@ -5284,10 +5935,9 @@ namespace wolvrix::lib::transform
             }
 
             wolvrix::lib::grh::ValueId oeVal;
-            auto oeLink = linkValues.find(port.oe);
-            if (oeLink != linkValues.end())
+            if (auto mapped = getTopValueForSource(port.oe))
             {
-                oeVal = oeLink->second;
+                oeVal = *mapped;
             }
             else
             {
@@ -5349,16 +5999,9 @@ namespace wolvrix::lib::transform
 
             for (const auto &[sourceValue, portName] : part.inputPortByValue)
             {
-                auto itTop = topValueBySource.find(sourceValue);
-                if (itTop != topValueBySource.end())
+                if (auto mapped = getTopValueForSource(sourceValue))
                 {
-                    inputMapping.emplace(portName, itTop->second);
-                    continue;
-                }
-                auto itLink = linkValues.find(sourceValue);
-                if (itLink != linkValues.end())
-                {
-                    inputMapping.emplace(portName, itLink->second);
+                    inputMapping.emplace(portName, *mapped);
                     continue;
                 }
                 if (auto undrivenTop = mapUndrivenInputToTop(sourceValue))
@@ -5366,19 +6009,28 @@ namespace wolvrix::lib::transform
                     inputMapping.emplace(portName, *undrivenTop);
                 }
             }
+            for (const auto &[groupId, portName] : part.inputPortByGroup)
+            {
+                auto it = groupLinkValues.find(groupId);
+                if (it != groupLinkValues.end())
+                {
+                    inputMapping.emplace(portName, it->second);
+                }
+            }
 
             for (const auto &[sourceValue, portName] : part.outputPortByValue)
             {
-                auto itTop = topValueBySource.find(sourceValue);
-                if (itTop != topValueBySource.end())
+                if (auto mapped = getTopValueForSource(sourceValue))
                 {
-                    outputMapping.emplace(portName, itTop->second);
-                    continue;
+                    outputMapping.emplace(portName, *mapped);
                 }
-                auto itLink = linkValues.find(sourceValue);
-                if (itLink != linkValues.end())
+            }
+            for (const auto &[groupId, portName] : part.outputPortByGroup)
+            {
+                auto it = groupLinkValues.find(groupId);
+                if (it != groupLinkValues.end())
                 {
-                    outputMapping.emplace(portName, itLink->second);
+                    outputMapping.emplace(portName, it->second);
                 }
             }
 
@@ -5386,6 +6038,26 @@ namespace wolvrix::lib::transform
             {
                 constexpr std::size_t kMissingPortDiagLimit = 8;
                 std::size_t missingInputCount = 0;
+                for (const auto &[groupId, portName] : part.inputPortByGroup)
+                {
+                    if (inputMapping.find(portName) != inputMapping.end())
+                    {
+                        continue;
+                    }
+                    ++missingInputCount;
+                    if (missingInputCount > kMissingPortDiagLimit)
+                    {
+                        continue;
+                    }
+                    if (groupId < boundaryGroups.size())
+                    {
+                        const BoundaryPortGroup &group = boundaryGroups[groupId];
+                        error("repcut phase-e rebuild: missing grouped input port mapping part=" + part.graph->symbol() +
+                              " port=" + portName +
+                              " owner_part=" + std::to_string(group.ownerPart) +
+                              " dsts=" + group.dstSignature);
+                    }
+                }
                 for (const auto &[sourceValue, portName] : part.inputPortByValue)
                 {
                     if (inputMapping.find(portName) != inputMapping.end())
@@ -5449,6 +6121,26 @@ namespace wolvrix::lib::transform
             {
                 constexpr std::size_t kMissingPortDiagLimit = 8;
                 std::size_t missingOutputCount = 0;
+                for (const auto &[groupId, portName] : part.outputPortByGroup)
+                {
+                    if (outputMapping.find(portName) != outputMapping.end())
+                    {
+                        continue;
+                    }
+                    ++missingOutputCount;
+                    if (missingOutputCount > kMissingPortDiagLimit)
+                    {
+                        continue;
+                    }
+                    if (groupId < boundaryGroups.size())
+                    {
+                        const BoundaryPortGroup &group = boundaryGroups[groupId];
+                        error("repcut phase-e rebuild: missing grouped output port mapping part=" + part.graph->symbol() +
+                              " port=" + portName +
+                              " owner_part=" + std::to_string(group.ownerPart) +
+                              " dsts=" + group.dstSignature);
+                    }
+                }
                 for (const auto &[sourceValue, portName] : part.outputPortByValue)
                 {
                     if (outputMapping.find(portName) != outputMapping.end())
@@ -5541,6 +6233,8 @@ namespace wolvrix::lib::transform
         phaseEReconstructSummary << "repcut phase-e reconstruct: graph=" << topName
                                  << " partition_graphs=" << partInfos.size()
                                  << " cross_links=" << linkValues.size()
+                                 << " grouped_links=" << groupLinkValues.size()
+                                 << " grouped_values=" << groupedValueCount
                                  << " rebuild_ms=" << msSince(phaseERebuildStart);
         logInfo(phaseEReconstructSummary.str());
         const uint64_t phaseEMs = msSince(phaseEStart);

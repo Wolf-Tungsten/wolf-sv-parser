@@ -503,6 +503,17 @@ target_link_libraries(transform-repcut-partition-set
 
 register_test_exe(transform-repcut-partition-set)
 
+add_executable(transform-repcut-boundary-bundle
+    tests/transform/test_repcut_boundary_bundle.cpp
+)
+
+target_link_libraries(transform-repcut-boundary-bundle
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-repcut-boundary-bundle)
+
 add_executable(transform-repcut-partition-count
     tests/transform/test_repcut_partition_count.cpp
 )
