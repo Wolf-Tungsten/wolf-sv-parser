@@ -361,15 +361,6 @@ target_compile_definitions(emit-verilator-repcut-package
 
 register_test_exe(emit-verilator-repcut-package)
 
-add_executable(json-emit-verilator-repcut-package
-    app/json_emit_verilator_repcut_package.cpp
-)
-
-target_link_libraries(json-emit-verilator-repcut-package
-    PRIVATE
-        wolvrix-lib
-)
-
 # transform tests
 add_executable(transform-pass-manager
     tests/transform/test_transform_pass_manager.cpp

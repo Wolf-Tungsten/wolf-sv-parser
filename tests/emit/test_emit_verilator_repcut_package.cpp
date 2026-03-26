@@ -1,12 +1,14 @@
 #include "emit/verilator_repcut_package.hpp"
 #include "core/grh.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 using namespace wolvrix::lib::emit;
@@ -34,6 +36,26 @@ namespace
     bool contains(std::string_view text, std::string_view needle)
     {
         return text.find(needle) != std::string_view::npos;
+    }
+
+    std::string diagnosticsSummary(const EmitDiagnostics &diagnostics)
+    {
+        std::string summary;
+        for (const auto &diag : diagnostics.messages())
+        {
+            if (!summary.empty())
+            {
+                summary += " | ";
+            }
+            summary += diag.message;
+            if (!diag.context.empty())
+            {
+                summary += " [";
+                summary += diag.context;
+                summary += "]";
+            }
+        }
+        return summary;
     }
 
     Graph &buildUnitGraph(Design &design,
@@ -82,13 +104,65 @@ namespace
     Design buildDesign()
     {
         Design design;
-        buildUnitGraph(design,
-                       "SimTop_debug_part",
-                       {{"clock", 1}, {"reset", 1}, {"in__data", 8}},
-                       {{"dbg__out", 8}});
+        Graph &effect = design.createGraph("SimTop_effect_part");
+        const auto effectClock = effect.createValue(effect.internSymbol("clock"), 1, false);
+        const auto effectReset = effect.createValue(effect.internSymbol("reset"), 1, false);
+        const auto effectInput = effect.createValue(effect.internSymbol("in__data"), 8, false);
+        const auto effectOutput = effect.createValue(effect.internSymbol("effect__out"), 8, false);
+        const auto effectCond = effect.createValue(effect.internSymbol("effect_cond"), 1, false);
+        effect.bindInputPort("clock", effectClock);
+        effect.bindInputPort("reset", effectReset);
+        effect.bindInputPort("in__data", effectInput);
+        effect.bindOutputPort("effect__out", effectOutput);
+        const auto condConst =
+            effect.createOperation(OperationKind::kConstant, effect.internSymbol("const_true"));
+        effect.setAttr(condConst, "constValue", std::string("1'b1"));
+        effect.addResult(condConst, effectCond);
+        const auto dpiImport =
+            effect.createOperation(OperationKind::kDpicImport, effect.internSymbol("dpi_func"));
+        effect.setAttr(dpiImport, "argsDirection", std::vector<std::string>{"input"});
+        effect.setAttr(dpiImport, "argsWidth", std::vector<int64_t>{8});
+        effect.setAttr(dpiImport, "argsName", std::vector<std::string>{"in_val"});
+        effect.setAttr(dpiImport, "argsSigned", std::vector<bool>{false});
+        effect.setAttr(dpiImport, "argsType", std::vector<std::string>{"logic"});
+        effect.setAttr(dpiImport, "hasReturn", true);
+        effect.setAttr(dpiImport, "returnWidth", static_cast<int64_t>(8));
+        effect.setAttr(dpiImport, "returnSigned", false);
+        effect.setAttr(dpiImport, "returnType", std::string("logic"));
+        (void)dpiImport;
+        const auto dpiCall =
+            effect.createOperation(OperationKind::kDpicCall, effect.internSymbol("dpi_call"));
+        effect.addOperand(dpiCall, effectCond);
+        effect.addOperand(dpiCall, effectInput);
+        effect.addOperand(dpiCall, effectClock);
+        effect.addResult(dpiCall, effectOutput);
+        effect.setAttr(dpiCall, "targetImportSymbol", std::string("dpi_func"));
+        effect.setAttr(dpiCall, "eventEdge", std::vector<std::string>{"posedge"});
+        effect.setAttr(dpiCall, "inArgName", std::vector<std::string>{"in_val"});
+        effect.setAttr(dpiCall, "outArgName", std::vector<std::string>{});
+        effect.setAttr(dpiCall, "hasReturn", true);
+
+        const auto dpiImportVoid =
+            effect.createOperation(OperationKind::kDpicImport, effect.internSymbol("dpi_void_func"));
+        effect.setAttr(dpiImportVoid, "argsDirection", std::vector<std::string>{"input"});
+        effect.setAttr(dpiImportVoid, "argsWidth", std::vector<int64_t>{8});
+        effect.setAttr(dpiImportVoid, "argsName", std::vector<std::string>{"in_val"});
+        effect.setAttr(dpiImportVoid, "argsSigned", std::vector<bool>{false});
+        effect.setAttr(dpiImportVoid, "argsType", std::vector<std::string>{"logic"});
+        effect.setAttr(dpiImportVoid, "hasReturn", false);
+        const auto dpiCallVoid =
+            effect.createOperation(OperationKind::kDpicCall, effect.internSymbol("dpi_call_void"));
+        effect.addOperand(dpiCallVoid, effectCond);
+        effect.addOperand(dpiCallVoid, effectInput);
+        effect.addOperand(dpiCallVoid, effectClock);
+        effect.setAttr(dpiCallVoid, "targetImportSymbol", std::string("dpi_void_func"));
+        effect.setAttr(dpiCallVoid, "eventEdge", std::vector<std::string>{"posedge"});
+        effect.setAttr(dpiCallVoid, "inArgName", std::vector<std::string>{"in_val"});
+        effect.setAttr(dpiCallVoid, "outArgName", std::vector<std::string>{});
+        effect.setAttr(dpiCallVoid, "hasReturn", false);
         buildUnitGraph(design,
                        "SimTop_logic_part_repcut_part0",
-                       {{"clock", 1}, {"reset", 1}, {"in_data", 8}},
+                       {{"clock", 1}, {"reset", 1}, {"effect__out", 8}},
                        {{"mid__val", 8}});
         buildUnitGraph(design,
                        "SimTop_logic_part_repcut_part1",
@@ -100,7 +174,7 @@ namespace
         const auto linkClock = top.createValue(top.internSymbol("link_clock"), 1, false);
         const auto reset = top.createValue(top.internSymbol("reset"), 1, false);
         const auto inData = top.createValue(top.internSymbol("in_data"), 8, false);
-        const auto dbgOut = top.createValue(top.internSymbol("dbg__out"), 8, false);
+        const auto effectOut = top.createValue(top.internSymbol("effect__out"), 8, false);
         const auto mid = top.createValue(top.internSymbol("mid"), 8, false);
         const auto outData = top.createValue(top.internSymbol("out_data"), 8, false);
         const auto outAlias = top.createValue(top.internSymbol("out_alias"), 8, false);
@@ -124,18 +198,18 @@ namespace
         top.addResult(outAssign, outAlias);
 
         addInstance(top,
-                    "debug_part",
-                    "SimTop_debug_part",
+                    "effect_part",
+                    "SimTop_effect_part",
                     {linkClock, reset, inData},
-                    {dbgOut},
+                    {effectOut},
                     {"clock", "reset", "in__data"},
-                    {"dbg__out"});
+                    {"effect__out"});
         addInstance(top,
                     "part_0",
                     "SimTop_logic_part_repcut_part0",
-                    {linkClock, reset, inData},
+                    {linkClock, reset, effectOut},
                     {mid},
-                    {"clock", "reset", "in_data"},
+                    {"clock", "reset", "effect__out"},
                     {"mid__val"});
         addInstance(top,
                     "part_1",
@@ -172,28 +246,42 @@ int main()
     const EmitResult result = emitter.emit(design, options);
     if (!result.success)
     {
-        return fail("package emit reported failure");
+        return fail("package emit reported failure: " + diagnosticsSummary(diagnostics));
     }
     if (diagnostics.hasError())
     {
-        return fail("package emit reported diagnostics errors");
+        return fail("package emit reported diagnostics errors: " + diagnosticsSummary(diagnostics));
     }
 
-    const std::filesystem::path debugSvPath = artifactRoot / "sv" / "SimTop_debug_part.sv";
+    const std::filesystem::path effectSvPath = artifactRoot / "sv" / "SimTop_effect_part.sv";
     const std::filesystem::path part0SvPath = artifactRoot / "sv" / "SimTop_logic_part_repcut_part0.sv";
     const std::filesystem::path part1SvPath = artifactRoot / "sv" / "SimTop_logic_part_repcut_part1.sv";
     const std::filesystem::path topSvPath = artifactRoot / "sv" / "SimTop.sv";
-    const std::filesystem::path debugFileList = artifactRoot / "verilate" / "debug_part.f";
+    const std::filesystem::path effectFileList = artifactRoot / "verilate" / "effect_part.f";
     const std::filesystem::path part0FileList = artifactRoot / "verilate" / "part_0.f";
     const std::filesystem::path part1FileList = artifactRoot / "verilate" / "part_1.f";
     const std::filesystem::path wrapperHeaderPath = artifactRoot / "wolvi_repcut_verilator_sim.h";
-    const std::filesystem::path wrapperSourcePath = artifactRoot / "wolvi_repcut_verilator_sim.cpp";
     const std::filesystem::path smokeMainPath = artifactRoot / "partitioned_smoke_main.cpp";
     const std::filesystem::path unitsMkPath = artifactRoot / "units.mk";
     const std::filesystem::path makefilePath = artifactRoot / "Makefile";
+    std::vector<std::filesystem::path> wrapperSourcePaths;
+    for (const auto &entry : std::filesystem::directory_iterator(artifactRoot))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+        const auto filename = entry.path().filename().string();
+        if (entry.path().extension() == ".cpp" && filename.rfind("wolvi_repcut_verilator_sim", 0) == 0)
+        {
+            wrapperSourcePaths.push_back(entry.path());
+        }
+    }
+    std::sort(wrapperSourcePaths.begin(), wrapperSourcePaths.end());
+    std::unordered_map<std::string, std::string> wrapperSourceByName;
 
-    for (const auto &path : {debugSvPath, part0SvPath, part1SvPath, topSvPath,
-                             debugFileList, part0FileList, part1FileList, wrapperHeaderPath, wrapperSourcePath,
+    for (const auto &path : {effectSvPath, part0SvPath, part1SvPath, topSvPath,
+                             effectFileList, part0FileList, part1FileList, wrapperHeaderPath,
                              smokeMainPath, unitsMkPath, makefilePath})
     {
         if (!std::filesystem::exists(path))
@@ -201,12 +289,16 @@ int main()
             return fail("expected package artifact is missing: " + path.string());
         }
     }
-
-    if (readFile(debugFileList) !=
-        (artifactRoot / "sv" / "WolviRepCutUnit_debug_part.sv").generic_string() + "\n" +
-            (artifactRoot / "sv" / "SimTop_debug_part.sv").generic_string() + "\n")
+    if (wrapperSourcePaths.empty())
     {
-        return fail("unexpected debug_part file list content");
+        return fail("expected split wrapper sources are missing");
+    }
+
+    if (readFile(effectFileList) !=
+        (artifactRoot / "sv" / "WolviRepCutUnit_effect_part.sv").generic_string() + "\n" +
+            (artifactRoot / "sv" / "SimTop_effect_part.sv").generic_string() + "\n")
+    {
+        return fail("unexpected effect_part file list content");
     }
     if (readFile(part0FileList) !=
         (artifactRoot / "sv" / "WolviRepCutUnit_part_0.sv").generic_string() + "\n" +
@@ -222,29 +314,37 @@ int main()
     }
 
     const std::string wrapperHeader = readFile(wrapperHeaderPath);
-    const std::string wrapperSource = readFile(wrapperSourcePath);
     const std::string smokeMain = readFile(smokeMainPath);
     const std::string unitsMk = readFile(unitsMkPath);
     const std::string makefile = readFile(makefilePath);
+    std::string wrapperSource;
+    for (const auto &path : wrapperSourcePaths)
+    {
+        const std::string text = readFile(path);
+        wrapperSourceByName.emplace(path.filename().string(), text);
+        wrapperSource += text;
+        wrapperSource += "\n";
+    }
     if (wrapperHeader.empty() || wrapperSource.empty() || smokeMain.empty() || unitsMk.empty() || makefile.empty())
     {
         return fail("failed to read generated package build files");
     }
-    if (!contains(wrapperHeader, "#include \"VWolviRepCutUnit_debug_part.h\"") ||
-        !contains(wrapperHeader, "#include \"VWolviRepCutUnit_part_0.h\"") ||
-        !contains(wrapperHeader, "#include \"VWolviRepCutUnit_part_1.h\""))
+    if (!contains(wrapperHeader, "class VWolviRepCutUnit_effect_part;") ||
+        !contains(wrapperHeader, "class VWolviRepCutUnit_part_0;") ||
+        !contains(wrapperHeader, "class VWolviRepCutUnit_part_1;"))
     {
-        return fail("wrapper header missing expected model includes");
+        return fail("wrapper header missing expected model forward declarations");
     }
-    if (!contains(wrapperHeader, "std::unique_ptr<VWolviRepCutUnit_debug_part> unit_debug_part_;") ||
+    if (!contains(wrapperHeader, "std::unique_ptr<VWolviRepCutUnit_effect_part> unit_effect_part_;") ||
         !contains(wrapperHeader, "std::unique_ptr<VWolviRepCutUnit_part_0> unit_part_0_;") ||
         !contains(wrapperHeader, "std::unique_ptr<VWolviRepCutUnit_part_1> unit_part_1_;"))
     {
         return fail("wrapper header missing expected unit members");
     }
-    if (!contains(wrapperHeader, "std::vector<std::function<void(std::size_t)>> non_debug_step_fns_;") ||
-        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<std::function<void(std::size_t)>>& phaseFns);") ||
-        !contains(wrapperHeader, "void run_non_debug_step_workers_();"))
+    if (!contains(wrapperHeader, "using StepFn = void (WolviRepCutVerilatorSim::*)(std::size_t);") ||
+        !contains(wrapperHeader, "std::vector<StepFn> normal_step_fns_;") ||
+        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<StepFn>& phaseFns);") ||
+        !contains(wrapperHeader, "void run_normal_step_workers_();"))
     {
         return fail("wrapper header missing expected parallel eval declarations");
     }
@@ -264,7 +364,9 @@ int main()
     {
         return fail("wrapper header missing expected timing declarations");
     }
-    if (!contains(wrapperHeader, "CData signal_mid_snapshot_{};") ||
+    if (!contains(wrapperHeader, "CData signal_effect__out_snapshot_{};") ||
+        !contains(wrapperHeader, "CData signal_effect__out_writeback_{};") ||
+        !contains(wrapperHeader, "CData signal_mid_snapshot_{};") ||
         !contains(wrapperHeader, "CData signal_mid_writeback_{};"))
     {
         return fail("wrapper header missing expected snapshot/writeback cache members");
@@ -275,42 +377,52 @@ int main()
     {
         return fail("wrapper header missing expected top port accessors");
     }
-    if (!contains(wrapperSource, "unit_debug_part_->in_2 = top_in_in_data_;") ||
-        !contains(wrapperSource, "unit_part_0_->in_2 = top_in_in_data_;") ||
+    if (!contains(wrapperSource, "#include \"VWolviRepCutUnit_effect_part.h\"") ||
+        !contains(wrapperSource, "#include \"VWolviRepCutUnit_part_0.h\"") ||
+        !contains(wrapperSource, "#include \"VWolviRepCutUnit_part_1.h\""))
+    {
+        return fail("wrapper sources missing expected model includes");
+    }
+    if (!contains(wrapperSource, "unit_effect_part_->in_2 = top_in_in_data_;") ||
+        !contains(wrapperSource, "unit_part_0_->in_2 = signal_effect__out_snapshot_;") ||
         !contains(wrapperSource, "unit_part_1_->in_2 = signal_mid_snapshot_;") ||
         !contains(wrapperSource, "unit_part_1_->in_3 = const_sel_const_;"))
     {
         return fail("wrapper source missing expected scatter code");
     }
-    if (!contains(wrapperSource, "non_debug_step_fns_.emplace_back([this](std::size_t workerIndex) {"))
+    if (!contains(wrapperSource, "normal_step_fns_.push_back(&WolviRepCutVerilatorSim::"))
     {
         return fail("wrapper source missing expected static task generation");
     }
-    if (!contains(wrapperSource, "unit_debug_part_->eval();") ||
+    if (!contains(wrapperSource, "unit_effect_part_->eval();") ||
         !contains(wrapperSource, "// eval part_0") ||
         !contains(wrapperSource, "// eval part_1") ||
-        !contains(wrapperSource, "run_non_debug_step_workers_();"))
+        !contains(wrapperSource, "run_normal_step_workers_();"))
     {
         return fail("wrapper source missing expected eval calls");
     }
-    if (!contains(wrapperSource, "Publish debug_part outputs into both snapshot and writeback before worker launch.") ||
+    if (!contains(wrapperSource, "signal_effect__out_writeback_ = unit_effect_part_->out_0;") ||
         !contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
+        !contains(wrapperSource, "signal_effect__out_snapshot_ = signal_effect__out_writeback_;") ||
         !contains(wrapperSource, "signal_mid_snapshot_ = signal_mid_writeback_;"))
     {
         return fail("wrapper source missing expected snapshot/writeback publish and commit code");
     }
     if (!contains(wrapperSource, "std::getenv(\"XS_EMU_THREADS\")") ||
-        !contains(wrapperSource, "assert(requestedWorkers <= non_debug_step_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
+        !contains(wrapperSource, "assert(requestedWorkers <= normal_step_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
         !contains(wrapperSource, "#if defined(__linux__)"))
     {
         return fail("wrapper source missing expected runtime thread-pool guards");
     }
-    if (!contains(wrapperSource, "using WolviClock = std::chrono::steady_clock;") ||
+    const auto commonSourceIt = wrapperSourceByName.find("wolvi_repcut_verilator_sim_common.cpp");
+    if (commonSourceIt == wrapperSourceByName.end())
+    {
+        return fail("missing common wrapper source");
+    }
+    const std::string &commonSource = commonSourceIt->second;
+    if (!contains(wrapperHeader, "using WolviClock = std::chrono::steady_clock;") ||
         !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_step_timing_() const {") ||
         !contains(wrapperSource, "[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n") ||
-        !contains(wrapperSource, "printPhase(\"debug_scatter\", step_timing_.debug_scatter_ns);") ||
-        !contains(wrapperSource, "printPhase(\"debug_eval\", step_timing_.debug_eval_ns);") ||
-        !contains(wrapperSource, "printPhase(\"debug_publish\", step_timing_.debug_publish_ns);") ||
         !contains(wrapperSource, "printPhase(\"part_eval\", step_timing_.part_eval_ns);") ||
         !contains(wrapperSource, "printPhase(\"writeback\", step_timing_.writeback_ns);") ||
         !contains(wrapperSource, "WolviRepCutVerilatorSim::PartTimingStats WolviRepCutVerilatorSim::collect_part_timing_stats_(std::size_t partIndex) const {") ||
@@ -323,22 +435,33 @@ int main()
         !contains(wrapperSource, "\\\"gather_total_ms\\\":%.3f") ||
         !contains(wrapperSource, "[WOLVI][part-timing] part=%s steps=%llu total=%.3f ms avg=%.3f us scatter=%.3f us eval=%.3f us gather=%.3f us\\n") ||
         !contains(wrapperSource, "++step_timing_.steps;") ||
-        !contains(wrapperSource, "step_timing_.debug_scatter_ns +=") ||
-        !contains(wrapperSource, "step_timing_.debug_eval_ns +=") ||
-        !contains(wrapperSource, "step_timing_.debug_publish_ns +=") ||
         !contains(wrapperSource, "step_timing_.part_eval_ns +=") ||
         !contains(wrapperSource, "step_timing_.writeback_ns +=") ||
         !contains(wrapperSource, "step_timing_.total_ns +=") ||
         !contains(wrapperSource, "partTimingStats->scatter_ns +=") ||
         !contains(wrapperSource, "partTimingStats->eval_ns +=") ||
         !contains(wrapperSource, "partTimingStats->gather_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->total_ns +=") ||
         !contains(wrapperSource, "partTimingStats = &part_timing_worker_stats_[workerIndex][") ||
-        !contains(wrapperSource, "part_timing_stats_[0].total_ns +=") ||
-        !contains(wrapperSource, "part_timing_stats_[0].scatter_ns +=") ||
-        !contains(wrapperSource, "part_timing_stats_[0].eval_ns +=") ||
-        !contains(wrapperSource, "part_timing_stats_[0].gather_ns +="))
+        !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[0];") ||
+        !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[1];") ||
+        !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[2];"))
     {
         return fail("wrapper source missing expected timing instrumentation");
+    }
+    if (contains(wrapperHeader, "void run_early_phase_();") ||
+        contains(wrapperHeader, "early_scatter_ns") ||
+        contains(wrapperHeader, "early_eval_ns") ||
+        contains(wrapperHeader, "early_publish_ns") ||
+        contains(wrapperSource, "run_early_phase_();") ||
+        contains(wrapperSource, "printPhase(\"early_scatter\"") ||
+        contains(wrapperSource, "printPhase(\"early_eval\"") ||
+        contains(wrapperSource, "printPhase(\"early_publish\"") ||
+        contains(wrapperSource, "dumpPhase(\"early_scatter\"") ||
+        contains(wrapperSource, "dumpPhase(\"early_eval\"") ||
+        contains(wrapperSource, "dumpPhase(\"early_publish\""))
+    {
+        return fail("wrapper source should not contain early-phase scheduling artifacts");
     }
     if (contains(wrapperSource, "XS_REPCUT_STEP_TIMING") ||
         contains(wrapperSource, "step_timing_enabled_") ||
@@ -346,16 +469,15 @@ int main()
     {
         return fail("wrapper source should not contain legacy step timing instrumentation");
     }
-    if (!contains(wrapperSource, "Evaluate debug_part first so DPI/device responses are available before logic eval.") ||
-        !contains(wrapperSource, "Evaluate all non-debug units with fused local scatter/eval/gather."))
+    if (!contains(commonSource, "Evaluate all units with fused local scatter/eval/gather."))
     {
-        return fail("wrapper source missing expected debug_part scheduling comments");
+        return fail("wrapper source missing expected normal scheduling comment");
     }
-    const std::size_t dtorPos = wrapperSource.find("WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim()");
-    const std::size_t reportStepPos = wrapperSource.find("report_step_timing_();", dtorPos);
-    const std::size_t reportPartPos = wrapperSource.find("report_part_timing_();", dtorPos);
-    const std::size_t dumpJsonPos = wrapperSource.find("dump_timing_jsonl_();", dtorPos);
-    const std::size_t shutdownPos = wrapperSource.find("shutdown_part_eval_workers_();", dtorPos);
+    const std::size_t dtorPos = commonSource.find("WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim()");
+    const std::size_t reportStepPos = commonSource.find("report_step_timing_();", dtorPos);
+    const std::size_t reportPartPos = commonSource.find("report_part_timing_();", dtorPos);
+    const std::size_t dumpJsonPos = commonSource.find("dump_timing_jsonl_();", dtorPos);
+    const std::size_t shutdownPos = commonSource.find("shutdown_part_eval_workers_();", dtorPos);
     if (dtorPos == std::string::npos || reportStepPos == std::string::npos || reportPartPos == std::string::npos ||
         dumpJsonPos == std::string::npos || shutdownPos == std::string::npos)
     {
@@ -370,22 +492,36 @@ int main()
     {
         return fail("wrapper source missing expected gather code");
     }
-    const std::size_t debugInputPos = wrapperSource.find("unit_debug_part_->in_2 = top_in_in_data_;");
-    const std::size_t debugEvalPos = wrapperSource.find("unit_debug_part_->eval();");
-    const std::size_t debugPublishPos =
-        wrapperSource.find("Publish debug_part outputs into both snapshot and writeback before worker launch.");
-    const std::size_t partEvalPos = wrapperSource.find("run_non_debug_step_workers_();");
-    const std::size_t gatherPhasePos = wrapperSource.find("signal_mid_snapshot_ = signal_mid_writeback_;");
-    if (debugInputPos == std::string::npos || debugEvalPos == std::string::npos ||
-        debugPublishPos == std::string::npos || partEvalPos == std::string::npos ||
-        gatherPhasePos == std::string::npos)
+    std::string normalChunkSource;
+    for (const auto &[name, text] : wrapperSourceByName)
+    {
+        if (name.rfind("wolvi_repcut_verilator_sim_normal_", 0) == 0 &&
+            text.find("unit_effect_part_->in_2 = top_in_in_data_;") != std::string::npos)
+        {
+            normalChunkSource = text;
+            break;
+        }
+    }
+    if (normalChunkSource.empty())
+    {
+        return fail("wrapper source missing normal chunk for effect_part");
+    }
+    const std::size_t commonPartEvalPos = commonSource.find("run_normal_step_workers_();");
+    const std::size_t commonWritebackPos = commonSource.find("commit_writeback_();");
+    const std::size_t normalInputPos = normalChunkSource.find("unit_effect_part_->in_2 = top_in_in_data_;");
+    const std::size_t normalEvalPos = normalChunkSource.find("unit_effect_part_->eval();");
+    const std::size_t normalPublishPos =
+        normalChunkSource.find("signal_effect__out_writeback_ = unit_effect_part_->out_0;");
+    if (commonPartEvalPos == std::string::npos || commonWritebackPos == std::string::npos ||
+        normalInputPos == std::string::npos || normalEvalPos == std::string::npos ||
+        normalPublishPos == std::string::npos)
     {
         return fail("wrapper source missing phase-order markers");
     }
-    if (!(debugInputPos < debugEvalPos && debugEvalPos < debugPublishPos && debugPublishPos < partEvalPos &&
-          partEvalPos < gatherPhasePos))
+    if (!(commonPartEvalPos < commonWritebackPos &&
+          normalInputPos < normalEvalPos && normalEvalPos < normalPublishPos))
     {
-        return fail("wrapper source should load debug inputs, eval debug_part, publish debug outputs, run fused non-debug worker phase, then commit writeback");
+        return fail("wrapper source should run normal workers before writeback and keep per-unit local ordering");
     }
     if (!contains(wrapperSource, "const CData WolviRepCutVerilatorSim::const_sel_const_ = static_cast<CData>(0x1ULL);"))
     {
@@ -396,13 +532,13 @@ int main()
     {
         return fail("smoke main missing expected simulation bootstrap");
     }
-    if (!contains(unitsMk, "PARTITIONED_UNITS := debug_part part_0 part_1") ||
+    if (!contains(unitsMk, "PARTITIONED_UNITS := effect_part part_0 part_1") ||
         !contains(unitsMk, "PARTITIONED_UNIT_MAKE_J ?= $(if $(strip $(VM_BUILD_JOBS)),-j $(VM_BUILD_JOBS),)") ||
         !contains(unitsMk, "PARTITIONED_VM_PARALLEL_BUILDS ?= $(VM_PARALLEL_BUILDS)") ||
-        !contains(unitsMk, "UNIT_debug_part_MODULE := WolviRepCutUnit_debug_part") ||
+        !contains(unitsMk, "UNIT_effect_part_MODULE := WolviRepCutUnit_effect_part") ||
         !contains(unitsMk, "UNIT_part_0_MODULE := WolviRepCutUnit_part_0") ||
         !contains(unitsMk, "UNIT_part_1_MODULE := WolviRepCutUnit_part_1") ||
-        !contains(unitsMk, "$(VERILATOR) --cc -f $(UNIT_debug_part_FILELIST)") ||
+        !contains(unitsMk, "$(VERILATOR) --cc -f $(UNIT_effect_part_FILELIST)") ||
         !contains(unitsMk, "$(MAKE) $(PARTITIONED_UNIT_MAKE_J) -C $(UNIT_part_1_MDIR) VM_PARALLEL_BUILDS=$(PARTITIONED_VM_PARALLEL_BUILDS) OBJCACHE= -f VWolviRepCutUnit_part_1.mk VWolviRepCutUnit_part_1__ALL.a"))
     {
         return fail("units.mk missing expected unit build rules");
@@ -413,10 +549,14 @@ int main()
         !contains(makefile, "VM_BUILD_JOBS ?=") ||
         !contains(makefile, "VM_PARALLEL_BUILDS ?= 1") ||
         !contains(makefile, "verilate-units: $(UNIT_ARCHIVES)") ||
+        !contains(makefile, "WRAPPER_SRC_NAMES :=") ||
+        !contains(makefile, "WRAPPER_SRCS := $(addprefix $(PACKAGE_ROOT)/,$(WRAPPER_SRC_NAMES))") ||
+        !contains(makefile, "WRAPPER_OBJS := $(addprefix $(BUILD_DIR)/,$(WRAPPER_SRC_NAMES:.cpp=.o))") ||
         !contains(makefile, "VERILATED_DPI_OBJ := $(BUILD_DIR)/verilated_dpi.o") ||
         !contains(makefile, "VERILATED_THREADS_OBJ := $(BUILD_DIR)/verilated_threads.o") ||
-        !contains(makefile, "$(TARGET): $(VERILATED_OBJ) $(VERILATED_DPI_OBJ) $(VERILATED_THREADS_OBJ) $(WRAPPER_OBJ) $(SMOKE_MAIN_OBJ) $(UNIT_ARCHIVES)") ||
-        !contains(makefile, "$(CXX) $(LDFLAGS) -o $@ $(VERILATED_OBJ) $(VERILATED_DPI_OBJ) $(VERILATED_THREADS_OBJ) $(WRAPPER_OBJ) $(SMOKE_MAIN_OBJ) $(UNIT_ARCHIVES) $(LDLIBS) -ldl -pthread") ||
+        !contains(makefile, "$(BUILD_DIR)/%.o: $(PACKAGE_ROOT)/%.cpp $(PACKAGE_ROOT)/wolvi_repcut_verilator_sim.h $(UNIT_ARCHIVES) | $(BUILD_DIR)") ||
+        !contains(makefile, "$(TARGET): $(VERILATED_OBJ) $(VERILATED_DPI_OBJ) $(VERILATED_THREADS_OBJ) $(WRAPPER_OBJS) $(SMOKE_MAIN_OBJ) $(UNIT_ARCHIVES)") ||
+        !contains(makefile, "$(CXX) $(LDFLAGS) -o $@ $(VERILATED_OBJ) $(VERILATED_DPI_OBJ) $(VERILATED_THREADS_OBJ) $(WRAPPER_OBJS) $(SMOKE_MAIN_OBJ) $(UNIT_ARCHIVES) $(LDLIBS) -ldl -pthread") ||
         !contains(makefile, "run: $(TARGET)"))
     {
         return fail("Makefile missing expected top-level build rules");

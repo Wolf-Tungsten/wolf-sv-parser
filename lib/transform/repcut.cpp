@@ -72,6 +72,30 @@ namespace wolvrix::lib::transform
             return getAttr<std::string>(op, key);
         }
 
+        wolvrix::lib::grh::OperationId findMatchingDpicImport(const wolvrix::lib::grh::Graph &graph,
+                                                              const wolvrix::lib::grh::Operation &dpiCall)
+        {
+            if (dpiCall.kind() != wolvrix::lib::grh::OperationKind::kDpicCall)
+            {
+                return wolvrix::lib::grh::OperationId::invalid();
+            }
+            const auto importSym = getAttrString(dpiCall, "targetImportSymbol");
+            if (!importSym || importSym->empty())
+            {
+                return wolvrix::lib::grh::OperationId::invalid();
+            }
+            const wolvrix::lib::grh::OperationId importOpId = graph.findOperation(*importSym);
+            if (!importOpId.valid())
+            {
+                return wolvrix::lib::grh::OperationId::invalid();
+            }
+            if (graph.opKind(importOpId) != wolvrix::lib::grh::OperationKind::kDpicImport)
+            {
+                return wolvrix::lib::grh::OperationId::invalid();
+            }
+            return importOpId;
+        }
+
         std::optional<bool> getAttrBool(const wolvrix::lib::grh::Operation &op, std::string_view key)
         {
             return getAttr<bool>(op, key);
@@ -83,6 +107,37 @@ namespace wolvrix::lib::transform
             return edges && !edges->empty();
         }
 
+        bool opHasReturnedEffectValue(const wolvrix::lib::grh::Operation &op)
+        {
+            if (!getAttrBool(op, "hasReturn").value_or(false))
+            {
+                return false;
+            }
+            return op.kind() == wolvrix::lib::grh::OperationKind::kDpicCall ||
+                   op.kind() == wolvrix::lib::grh::OperationKind::kSystemTask;
+        }
+
+        bool isEffectSinkOpKind(wolvrix::lib::grh::OperationKind kind)
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kSystemTask:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isEffectSinkOp(const wolvrix::lib::grh::Operation &op)
+        {
+            if (isEffectSinkOpKind(op.kind()))
+            {
+                return !opHasReturnedEffectValue(op);
+            }
+            return op.kind() == wolvrix::lib::grh::OperationKind::kDpicCall &&
+                   !opHasReturnedEffectValue(op);
+        }
+
         bool isSinkOpKind(wolvrix::lib::grh::OperationKind kind)
         {
             switch (kind)
@@ -90,6 +145,28 @@ namespace wolvrix::lib::transform
             case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
             case wolvrix::lib::grh::OperationKind::kLatchWritePort:
             case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                return true;
+            default:
+                return isEffectSinkOpKind(kind);
+            }
+        }
+
+        bool isSinkOp(const wolvrix::lib::grh::Operation &op)
+        {
+            if (op.kind() == wolvrix::lib::grh::OperationKind::kDpicCall ||
+                op.kind() == wolvrix::lib::grh::OperationKind::kSystemTask)
+            {
+                return !opHasReturnedEffectValue(op);
+            }
+            return isSinkOpKind(op.kind()) || isEffectSinkOp(op);
+        }
+
+        bool isHierOpKind(wolvrix::lib::grh::OperationKind kind)
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kInstance:
+            case wolvrix::lib::grh::OperationKind::kBlackbox:
                 return true;
             default:
                 return false;
@@ -168,6 +245,11 @@ namespace wolvrix::lib::transform
             default:
                 return false;
             }
+        }
+
+        bool isAscConeTraversalOp(const wolvrix::lib::grh::Operation &op)
+        {
+            return isCombOp(op) || opHasReturnedEffectValue(op);
         }
 
         bool isSourceValue(const wolvrix::lib::grh::Graph &graph,
@@ -682,7 +764,7 @@ namespace wolvrix::lib::transform
             for (const auto opId : graph.operations())
             {
                 const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                if (!isSinkOpKind(op.kind()))
+                if (!isSinkOp(op))
                 {
                     continue;
                 }
@@ -785,7 +867,7 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            if (isCombOp(op))
+            if (isAscConeTraversalOp(op))
             {
                 for (const auto operand : op.operands())
                 {
@@ -874,6 +956,143 @@ namespace wolvrix::lib::transform
             }
         }
 
+        struct ReturnedEffectCollectStats
+        {
+            uint64_t visitedNodes = 0;
+            uint64_t returnedEffectHits = 0;
+        };
+
+        struct ReturnedEffectMemo
+        {
+            std::vector<std::vector<wolvrix::lib::grh::OperationId>> nodeToReturnedEffectOps;
+            std::vector<uint8_t> nodeState;
+        };
+
+        const std::vector<wolvrix::lib::grh::OperationId> &
+        collectNodeReturnedEffectOps(
+            const wolvrix::lib::grh::Graph &graph,
+            const PhaseAData &phaseA,
+            NodeId node,
+            const std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> &inoutInputValues,
+            ReturnedEffectMemo &memo,
+            ReturnedEffectCollectStats &stats)
+        {
+            static const std::vector<wolvrix::lib::grh::OperationId> kEmpty;
+            if (node >= memo.nodeToReturnedEffectOps.size() || node >= memo.nodeState.size())
+            {
+                return kEmpty;
+            }
+
+            uint8_t &state = memo.nodeState[node];
+            if (state == 2)
+            {
+                return memo.nodeToReturnedEffectOps[node];
+            }
+            if (state == 1)
+            {
+                return kEmpty;
+            }
+
+            state = 1;
+            ++stats.visitedNodes;
+            std::vector<wolvrix::lib::grh::OperationId> &result = memo.nodeToReturnedEffectOps[node];
+            result.clear();
+
+            const wolvrix::lib::grh::OperationId opId = phaseA.nodeToOp[node];
+            const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
+            if (opHasReturnedEffectValue(op))
+            {
+                ++stats.returnedEffectHits;
+                result.push_back(opId);
+            }
+
+            if (isAscConeTraversalOp(op))
+            {
+                for (const auto operand : op.operands())
+                {
+                    if (isSourceValue(graph, operand, inoutInputValues))
+                    {
+                        continue;
+                    }
+                    const wolvrix::lib::grh::OperationId predOp = graph.valueDef(operand);
+                    if (!predOp.valid())
+                    {
+                        continue;
+                    }
+                    auto it = phaseA.opToNode.find(predOp);
+                    if (it == phaseA.opToNode.end())
+                    {
+                        continue;
+                    }
+                    const auto &childOps =
+                        collectNodeReturnedEffectOps(graph, phaseA, it->second, inoutInputValues, memo, stats);
+                    result.insert(result.end(), childOps.begin(), childOps.end());
+                }
+            }
+
+            if (result.size() > 1)
+            {
+                std::sort(result.begin(),
+                          result.end(),
+                          [](wolvrix::lib::grh::OperationId lhs, wolvrix::lib::grh::OperationId rhs) {
+                              if (lhs.index != rhs.index)
+                              {
+                                  return lhs.index < rhs.index;
+                              }
+                              return lhs.generation < rhs.generation;
+                          });
+                result.erase(std::unique(result.begin(), result.end()), result.end());
+            }
+
+            state = 2;
+            return result;
+        }
+
+        void collectConeReturnedEffectOps(
+            const wolvrix::lib::grh::Graph &graph,
+            const PhaseAData &phaseA,
+            const SinkRef &sink,
+            const std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> &inoutInputValues,
+            ReturnedEffectMemo &memo,
+            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> &returnedEffectOps,
+            ReturnedEffectCollectStats &stats)
+        {
+            auto collectFromValue = [&](wolvrix::lib::grh::ValueId value) {
+                if (isSourceValue(graph, value, inoutInputValues))
+                {
+                    return;
+                }
+
+                const wolvrix::lib::grh::OperationId defOp = graph.valueDef(value);
+                if (!defOp.valid())
+                {
+                    return;
+                }
+                auto it = phaseA.opToNode.find(defOp);
+                if (it == phaseA.opToNode.end())
+                {
+                    return;
+                }
+
+                const auto &ops =
+                    collectNodeReturnedEffectOps(graph, phaseA, it->second, inoutInputValues, memo, stats);
+                returnedEffectOps.insert(ops.begin(), ops.end());
+            };
+
+            if (sink.kind == SinkRef::Kind::Operation)
+            {
+                const wolvrix::lib::grh::Operation op = graph.getOperation(sink.op);
+                for (const auto operand : op.operands())
+                {
+                    collectFromValue(operand);
+                }
+            }
+            else
+            {
+                collectFromValue(sink.value);
+            }
+        }
+
         void collectAscCone(const wolvrix::lib::grh::Graph &graph,
                             const PhaseAData &phaseA,
                             const std::vector<SinkRef> &sinks,
@@ -944,7 +1163,7 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
-                if (!isCombOp(op))
+                if (!isAscConeTraversalOp(op))
                 {
                     continue;
                 }
@@ -1150,6 +1369,91 @@ namespace wolvrix::lib::transform
             {
                 progressLogger("repcut phase-b/ascs: collect_mem_symbols_done elapsed_ms=" +
                                std::to_string(msSince(memConeStart)));
+            }
+
+            const auto effectConeStart = std::chrono::steady_clock::now();
+            const size_t effectProgressEvery = sinkCount < 20000 ? 5000 : 20000;
+            ReturnedEffectMemo effectMemo;
+            effectMemo.nodeToReturnedEffectOps.resize(phaseA.nodeToOp.size());
+            effectMemo.nodeState.resize(phaseA.nodeToOp.size(), 0);
+            std::unordered_map<wolvrix::lib::grh::OperationId, size_t, wolvrix::lib::grh::OperationIdHash>
+                firstSinkByReturnedEffect;
+            if (progressLogger)
+            {
+                progressLogger("repcut phase-b/ascs: collect_returned_effect_begin");
+            }
+            batchStartIndex = 0;
+            batchStart = effectConeStart;
+            uint64_t batchReturnedVisitedNodes = 0;
+            uint64_t batchReturnedEffectHits = 0;
+            uint64_t batchReturnedDsuUnions = 0;
+            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>
+                batchUniqueReturnedEffects;
+            for (size_t i = 0; i < data.sinks.size(); ++i)
+            {
+                ReturnedEffectCollectStats sinkStats;
+                std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash>
+                    sinkReturnedEffects;
+                collectConeReturnedEffectOps(graph,
+                                             phaseA,
+                                             data.sinks[i],
+                                             inoutInputValues,
+                                             effectMemo,
+                                             sinkReturnedEffects,
+                                             sinkStats);
+                batchReturnedVisitedNodes += sinkStats.visitedNodes;
+                batchReturnedEffectHits += sinkStats.returnedEffectHits;
+                for (const auto returnedEffectOp : sinkReturnedEffects)
+                {
+                    batchUniqueReturnedEffects.insert(returnedEffectOp);
+                    const auto [it, inserted] = firstSinkByReturnedEffect.emplace(returnedEffectOp, i);
+                    if (inserted)
+                    {
+                        continue;
+                    }
+                    const size_t sinkRoot = dsu.find(i);
+                    const size_t firstRoot = dsu.find(it->second);
+                    if (sinkRoot != firstRoot)
+                    {
+                        ++batchReturnedDsuUnions;
+                        dsu.unite(sinkRoot, firstRoot);
+                    }
+                }
+
+                if (progressLogger && ((i + 1) % effectProgressEvery) == 0)
+                {
+                    const size_t processed = i + 1;
+                    progressLogger("repcut phase-b/ascs: collect_returned_effect_progress=" +
+                                   std::to_string(processed) + "/" + std::to_string(sinkCount) +
+                                   " elapsed_ms=" + std::to_string(msSince(effectConeStart)) +
+                                   " batch_elapsed_ms=" + std::to_string(msSince(batchStart)) +
+                                   " visited_nodes=" + std::to_string(batchReturnedVisitedNodes) +
+                                   " returned_effect_hits=" + std::to_string(batchReturnedEffectHits) +
+                                   " unique_returned_effects=" + std::to_string(batchUniqueReturnedEffects.size()) +
+                                   " dsu_unions=" + std::to_string(batchReturnedDsuUnions));
+                    batchStartIndex = processed;
+                    batchStart = std::chrono::steady_clock::now();
+                    batchReturnedVisitedNodes = 0;
+                    batchReturnedEffectHits = 0;
+                    batchReturnedDsuUnions = 0;
+                    batchUniqueReturnedEffects.clear();
+                }
+            }
+            if (progressLogger && batchStartIndex < sinkCount)
+            {
+                progressLogger("repcut phase-b/ascs: collect_returned_effect_progress=" +
+                               std::to_string(sinkCount) + "/" + std::to_string(sinkCount) +
+                               " elapsed_ms=" + std::to_string(msSince(effectConeStart)) +
+                               " batch_elapsed_ms=" + std::to_string(msSince(batchStart)) +
+                               " visited_nodes=" + std::to_string(batchReturnedVisitedNodes) +
+                               " returned_effect_hits=" + std::to_string(batchReturnedEffectHits) +
+                               " unique_returned_effects=" + std::to_string(batchUniqueReturnedEffects.size()) +
+                               " dsu_unions=" + std::to_string(batchReturnedDsuUnions));
+            }
+            if (progressLogger)
+            {
+                progressLogger("repcut phase-b/ascs: collect_returned_effect_done elapsed_ms=" +
+                               std::to_string(msSince(effectConeStart)));
             }
 
             std::unordered_map<size_t, AscId> ascByRoot;
@@ -1676,13 +1980,13 @@ namespace wolvrix::lib::transform
                             continue;
                         }
                         const wolvrix::lib::grh::Operation op = graph.getOperation(sink.op);
-                        if (!isSinkOpKind(op.kind()))
+                        if (!isSinkOp(op))
                         {
                             addIssue("hypersink operation kind invalid: asc=" + std::to_string(aid) +
                                      " sink_pos=" + std::to_string(sinkPos) +
                                      " sink_index=" + std::to_string(sinkIndex) +
                                      " op=" + formatOperationRef(graph, sink.op) +
-                                     " expected_sink_kind={kRegisterWritePort|kLatchWritePort|kMemoryWritePort}");
+                                     " expected_sink_kind={kRegisterWritePort|kLatchWritePort|kMemoryWritePort|kDpicCall(no-return)|kSystemTask(no-return)}");
                         }
                     }
                     else
@@ -1727,12 +2031,12 @@ namespace wolvrix::lib::transform
                         continue;
                     }
                     const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
-                    if (!isCombOp(op))
+                    if (!isAscConeTraversalOp(op))
                     {
                         addIssue("hypernode comb node kind invalid: asc=" + std::to_string(aid) +
                                  " node=" + std::to_string(node) +
                                  " op=" + formatOperationRef(graph, opId) +
-                                 " expected=isCombOp(op)==true");
+                                 " expected=isAscConeTraversalOp(op)==true");
                     }
                 }
             }
@@ -2198,7 +2502,7 @@ namespace wolvrix::lib::transform
                     {
                         ++record.combOpCount;
                     }
-                    if (isSinkOpKind(op.kind()))
+                    if (isSinkOp(op))
                     {
                         ++record.sinkOpCount;
                     }
@@ -3373,10 +3677,12 @@ namespace wolvrix::lib::transform
         for (const auto opId : graph->operations())
         {
             const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-            if (op.kind() == wolvrix::lib::grh::OperationKind::kSystemTask ||
-                op.kind() == wolvrix::lib::grh::OperationKind::kDpicCall)
+            if (isHierOpKind(op.kind()))
             {
-                error(*graph, op, "strip-debug should remove system tasks/dpi calls before repcut");
+                error(*graph,
+                      op,
+                      "repcut guard: target graph must not contain hierarchical ops before partition kind=" +
+                          std::string(wolvrix::lib::grh::toString(op.kind())));
                 result.failed = true;
             }
         }
@@ -3405,7 +3711,7 @@ namespace wolvrix::lib::transform
         for (const auto opId : graph->operations())
         {
             const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-            if (isSinkOpKind(op.kind()))
+            if (isSinkOp(op))
             {
                 ++sinkOpCount;
             }
@@ -3911,9 +4217,12 @@ namespace wolvrix::lib::transform
             const wolvrix::lib::grh::OperationId defOpId = val.definingOp();
             wolvrix::lib::grh::OperationKind defKind = wolvrix::lib::grh::OperationKind::kConstant;
             bool defKindKnown = false;
+            bool defIsAllowedEffectSink = false;
             if (defOpId.valid())
             {
-                defKind = graph->getOperation(defOpId).kind();
+                const wolvrix::lib::grh::Operation defOp = graph->getOperation(defOpId);
+                defKind = defOp.kind();
+                defIsAllowedEffectSink = isEffectSinkOp(defOp);
                 defKindKnown = true;
             }
 
@@ -3949,6 +4258,11 @@ namespace wolvrix::lib::transform
                         {
                             allowCross = true;
                             requiresPort = false;
+                        }
+                        else if (defIsAllowedEffectSink)
+                        {
+                            allowCross = true;
+                            requiresPort = true;
                         }
                         else
                         {
@@ -4218,6 +4532,46 @@ namespace wolvrix::lib::transform
         logInfo("repcut phase-e rebuild: constant partition propagation done elapsed_ms=" +
                 std::to_string(msSince(phaseERebuildStart)));
 
+        std::size_t dpicImportAssignments = 0;
+        std::size_t dpicImportMisses = 0;
+        for (const auto opId : graph->operations())
+        {
+            const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
+            if (op.kind() != wolvrix::lib::grh::OperationKind::kDpicCall)
+            {
+                continue;
+            }
+            auto itSet = opPartitionSet.find(opId);
+            if (itSet == opPartitionSet.end() || itSet->second.empty())
+            {
+                continue;
+            }
+
+            const wolvrix::lib::grh::OperationId importOpId = findMatchingDpicImport(*graph, op);
+            if (!importOpId.valid())
+            {
+                ++dpicImportMisses;
+                continue;
+            }
+
+            itSet->second.forEach([&](uint32_t partId) {
+                if (partId >= partitionOps.size())
+                {
+                    return;
+                }
+                const auto [_, inserted] = partitionOps[partId].insert(importOpId);
+                assignOpPartition(importOpId, partId);
+                if (inserted)
+                {
+                    ++dpicImportAssignments;
+                }
+            });
+        }
+        logInfo("repcut phase-e rebuild: dpi import propagation done assigned=" +
+                std::to_string(dpicImportAssignments) +
+                " missing=" + std::to_string(dpicImportMisses) +
+                " elapsed_ms=" + std::to_string(msSince(phaseERebuildStart)));
+
         std::unordered_map<wolvrix::lib::grh::ValueId, DefInfo, wolvrix::lib::grh::ValueIdHash> defInfo;
         defInfo.reserve(values.size());
         for (std::size_t p = 0; p < partitionOps.size(); ++p)
@@ -4266,19 +4620,38 @@ namespace wolvrix::lib::transform
             origOutputs.insert(port.oe);
         }
 
+        uint32_t maxValueIndex = 0;
+        for (const auto valueId : values)
+        {
+            maxValueIndex = std::max(maxValueIndex, valueId.index);
+        }
+        std::vector<uint8_t> origInputFlags(static_cast<std::size_t>(maxValueIndex) + 1u, 0);
+        for (const auto valueId : origInputs)
+        {
+            if (valueId.valid())
+            {
+                origInputFlags[static_cast<std::size_t>(valueId.index)] = 1u;
+            }
+        }
+
         auto isValueDefinedInPartition =
             [&](wolvrix::lib::grh::ValueId valueId, std::size_t partId) -> bool {
-            if (!valueId.valid() || partId >= partitionOps.size())
-            {
-                return false;
-            }
-            const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
-            if (!defOp.valid())
-            {
-                return false;
-            }
-            return partitionOps[partId].find(defOp) != partitionOps[partId].end();
-        };
+                if (!valueId.valid() || partId >= partitionOps.size())
+                {
+                    return false;
+                }
+                const wolvrix::lib::grh::OperationId defOp = graph->valueDef(valueId);
+                if (!defOp.valid())
+                {
+                    return false;
+                }
+                auto itSet = opPartitionSet.find(defOp);
+                if (itSet == opPartitionSet.end())
+                {
+                    return false;
+                }
+                return itSet->second.contains(static_cast<uint32_t>(partId));
+            };
 
         auto primaryOwnerOfValue =
             [&](wolvrix::lib::grh::ValueId valueId) -> std::optional<uint32_t> {
@@ -4308,12 +4681,54 @@ namespace wolvrix::lib::transform
             partitionOpMemberships += opsInPart.size();
         }
 
+        std::vector<std::vector<wolvrix::lib::grh::ValueId>> partRequiredValueCandidates(partitionOps.size());
+        std::vector<std::vector<wolvrix::lib::grh::ValueId>> partInputValueCandidates(partitionOps.size());
+        std::vector<std::vector<wolvrix::lib::grh::ValueId>> partOutputValueCandidates(partitionOps.size());
+        for (std::size_t p = 0; p < partitionOps.size(); ++p)
+        {
+            const std::size_t sourceOpCount = partitionOps[p].size();
+            partRequiredValueCandidates[p].reserve(sourceOpCount * 2);
+            partInputValueCandidates[p].reserve(sourceOpCount / 2 + 64);
+            partOutputValueCandidates[p].reserve(sourceOpCount / 4 + 32);
+        }
+        auto resetStampVector = [](std::vector<uint32_t> &marks, uint32_t &stamp) {
+            if (stamp == std::numeric_limits<uint32_t>::max())
+            {
+                std::fill(marks.begin(), marks.end(), 0u);
+                stamp = 1u;
+                return;
+            }
+            ++stamp;
+        };
+        auto appendUniqueValue = [](std::vector<wolvrix::lib::grh::ValueId> &list,
+                                    std::vector<uint32_t> &marks,
+                                    uint32_t stamp,
+                                    wolvrix::lib::grh::ValueId valueId) {
+            if (!valueId.valid())
+            {
+                return;
+            }
+            const std::size_t idx = static_cast<std::size_t>(valueId.index);
+            if (idx >= marks.size() || marks[idx] == stamp)
+            {
+                return;
+            }
+            marks[idx] = stamp;
+            list.push_back(valueId);
+        };
+        std::vector<uint32_t> scanRequiredValueMarks(static_cast<std::size_t>(maxValueIndex) + 1u, 0u);
+        std::vector<uint32_t> scanInputValueMarks(static_cast<std::size_t>(maxValueIndex) + 1u, 0u);
+        uint32_t scanRequiredValueStamp = 0;
+        uint32_t scanInputValueStamp = 0;
+
         std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> usedByOther;
         const std::size_t usedScanProgressEvery = 250000;
         std::size_t usedScanVisited = 0;
         const auto usedByOtherStart = std::chrono::steady_clock::now();
         for (std::size_t p = 0; p < partitionOps.size(); ++p)
         {
+            resetStampVector(scanRequiredValueMarks, scanRequiredValueStamp);
+            resetStampVector(scanInputValueMarks, scanInputValueStamp);
             for (const auto opId : partitionOps[p])
             {
                 ++usedScanVisited;
@@ -4331,12 +4746,27 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    if (origInputs.find(operand) != origInputs.end())
+                    appendUniqueValue(partRequiredValueCandidates[p],
+                                      scanRequiredValueMarks,
+                                      scanRequiredValueStamp,
+                                      operand);
+                    const bool isOrigInput =
+                        operand.index < origInputFlags.size() &&
+                        origInputFlags[static_cast<std::size_t>(operand.index)] != 0u;
+                    if (isOrigInput)
                     {
+                        appendUniqueValue(partInputValueCandidates[p],
+                                          scanInputValueMarks,
+                                          scanInputValueStamp,
+                                          operand);
                         continue;
                     }
                     if (!isValueDefinedInPartition(operand, p))
                     {
+                        appendUniqueValue(partInputValueCandidates[p],
+                                          scanInputValueMarks,
+                                          scanInputValueStamp,
+                                          operand);
                         const wolvrix::lib::grh::OperationId operandDef = graph->valueDef(operand);
                         if (operandDef.valid())
                         {
@@ -4344,7 +4774,36 @@ namespace wolvrix::lib::transform
                         }
                     }
                 }
+                for (const auto resultValue : op.results())
+                {
+                    if (!resultValue.valid())
+                    {
+                        continue;
+                    }
+                    appendUniqueValue(partRequiredValueCandidates[p],
+                                      scanRequiredValueMarks,
+                                      scanRequiredValueStamp,
+                                      resultValue);
+                }
             }
+        }
+        for (const auto valueId : usedByOther)
+        {
+            const std::optional<uint32_t> owner = primaryOwnerOfValue(valueId);
+            if (!owner || *owner >= partOutputValueCandidates.size())
+            {
+                continue;
+            }
+            partOutputValueCandidates[*owner].push_back(valueId);
+        }
+        for (const auto valueId : origOutputs)
+        {
+            const std::optional<uint32_t> owner = primaryOwnerOfValue(valueId);
+            if (!owner || *owner >= partOutputValueCandidates.size())
+            {
+                continue;
+            }
+            partOutputValueCandidates[*owner].push_back(valueId);
         }
         logInfo("repcut phase-e rebuild: used_by_other_scan_done used_by_other_values=" +
                 std::to_string(usedByOther.size()) +
@@ -4369,6 +4828,12 @@ namespace wolvrix::lib::transform
         {
             sourceDeclaredSymbols.insert(sym.value);
         }
+        std::vector<uint32_t> requiredValueMarks(static_cast<std::size_t>(maxValueIndex) + 1u, 0u);
+        std::vector<uint32_t> inputValueMarks(static_cast<std::size_t>(maxValueIndex) + 1u, 0u);
+        std::vector<uint32_t> outputValueMarks(static_cast<std::size_t>(maxValueIndex) + 1u, 0u);
+        uint32_t requiredValueStamp = 0;
+        uint32_t inputValueStamp = 0;
+        uint32_t outputValueStamp = 0;
 
         for (std::size_t p = 0; p < partitionOps.size(); ++p)
         {
@@ -4388,72 +4853,43 @@ namespace wolvrix::lib::transform
                           return lhs.index < rhs.index;
                       });
 
-            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> inputValues;
-            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> outputValues;
-            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> requiredValues;
-            inputValues.reserve(sourceOps.size() / 2 + 64);
-            outputValues.reserve(sourceOps.size() / 2 + 64);
-            requiredValues.reserve(sourceOps.size() * 2 + 128);
-
-            for (const auto opId : sourceOps)
-            {
-                const wolvrix::lib::grh::Operation op = graph->getOperation(opId);
-                for (const auto operand : op.operands())
-                {
-                    if (!operand.valid())
-                    {
-                        continue;
-                    }
-                    requiredValues.insert(operand);
-                    if (origInputs.find(operand) != origInputs.end())
-                    {
-                        inputValues.insert(operand);
-                        continue;
-                    }
-                    if (!isValueDefinedInPartition(operand, p))
-                    {
-                        inputValues.insert(operand);
-                    }
-                }
-
-                for (const auto resultValue : op.results())
-                {
-                    if (!resultValue.valid())
-                    {
-                        continue;
-                    }
-                    requiredValues.insert(resultValue);
-                    auto it = defInfo.find(resultValue);
-                    if (it == defInfo.end())
-                    {
-                        continue;
-                    }
-                    const std::optional<uint32_t> owner = primaryOwnerOfValue(resultValue);
-                    if (owner && *owner == p &&
-                        (origOutputs.find(resultValue) != origOutputs.end() ||
-                         usedByOther.find(resultValue) != usedByOther.end()))
-                    {
-                        outputValues.insert(resultValue);
-                    }
-                }
-            }
-
-            for (const auto valueId : inputValues)
-            {
-                requiredValues.insert(valueId);
-            }
-            for (const auto valueId : outputValues)
-            {
-                requiredValues.insert(valueId);
-            }
+            resetStampVector(requiredValueMarks, requiredValueStamp);
+            resetStampVector(inputValueMarks, inputValueStamp);
+            resetStampVector(outputValueMarks, outputValueStamp);
 
             std::vector<wolvrix::lib::grh::ValueId> sourceValues;
-            sourceValues.reserve(requiredValues.size());
-            for (const auto valueId : requiredValues)
+            sourceValues.reserve(partRequiredValueCandidates[p].size() +
+                                 partInputValueCandidates[p].size() +
+                                 partOutputValueCandidates[p].size());
+            std::vector<wolvrix::lib::grh::ValueId> inputList;
+            inputList.reserve(partInputValueCandidates[p].size());
+            std::vector<wolvrix::lib::grh::ValueId> outputList;
+            outputList.reserve(partOutputValueCandidates[p].size());
+
+            for (const auto valueId : partRequiredValueCandidates[p])
             {
-                sourceValues.push_back(valueId);
+                appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
             }
+            for (const auto valueId : partInputValueCandidates[p])
+            {
+                appendUniqueValue(inputList, inputValueMarks, inputValueStamp, valueId);
+                appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
+            }
+            for (const auto valueId : partOutputValueCandidates[p])
+            {
+                appendUniqueValue(outputList, outputValueMarks, outputValueStamp, valueId);
+                appendUniqueValue(sourceValues, requiredValueMarks, requiredValueStamp, valueId);
+            }
+
             std::sort(sourceValues.begin(), sourceValues.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+            std::sort(inputList.begin(), inputList.end(),
+                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
+                          return lhs.index < rhs.index;
+                      });
+            std::sort(outputList.begin(), outputList.end(),
                       [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
                           return lhs.index < rhs.index;
                       });
@@ -4567,26 +5003,6 @@ namespace wolvrix::lib::transform
             info.name = partName;
 
             std::unordered_set<std::string> usedPortNames;
-            std::vector<wolvrix::lib::grh::ValueId> inputList;
-            inputList.reserve(inputValues.size());
-            for (const auto valueId : inputValues)
-            {
-                inputList.push_back(valueId);
-            }
-            std::vector<wolvrix::lib::grh::ValueId> outputList;
-            outputList.reserve(outputValues.size());
-            for (const auto valueId : outputValues)
-            {
-                outputList.push_back(valueId);
-            }
-            std::sort(inputList.begin(), inputList.end(),
-                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
-                          return lhs.index < rhs.index;
-                      });
-            std::sort(outputList.begin(), outputList.end(),
-                      [](wolvrix::lib::grh::ValueId lhs, wolvrix::lib::grh::ValueId rhs) {
-                          return lhs.index < rhs.index;
-                      });
 
             for (const auto valueId : inputList)
             {

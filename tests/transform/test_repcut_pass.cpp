@@ -67,6 +67,18 @@ namespace
         return nullptr;
     }
 
+    bool diagnosticsContain(const PassDiagnostics &diags, std::string_view pattern)
+    {
+        for (const auto &diag : diags.messages())
+        {
+            if (diag.message.find(pattern) != std::string::npos)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::optional<std::string> getAttrString(const wolvrix::lib::grh::Operation &op,
                                              std::string_view key)
     {
@@ -119,6 +131,73 @@ namespace
             }
         }
         return false;
+    }
+
+    bool graphHasOpKind(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::OperationKind kind)
+    {
+        for (const auto opId : graph.operations())
+        {
+            if (graph.opKind(opId) == kind)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool graphHasOpSymbol(const wolvrix::lib::grh::Graph &graph, std::string_view symbol)
+    {
+        for (const auto opId : graph.operations())
+        {
+            if (!opId.valid())
+            {
+                continue;
+            }
+            const auto op = graph.getOperation(opId);
+            if (op.symbolText() == symbol)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    wolvrix::lib::grh::Graph *findGraphWithPrefixAndOpKind(wolvrix::lib::grh::Design &design,
+                                                           std::string_view prefix,
+                                                           wolvrix::lib::grh::OperationKind kind)
+    {
+        for (const auto &graphName : design.graphOrder())
+        {
+            if (graphName.rfind(prefix, 0) != 0)
+            {
+                continue;
+            }
+            auto *graph = design.findGraph(graphName);
+            if (graph != nullptr && graphHasOpKind(*graph, kind))
+            {
+                return graph;
+            }
+        }
+        return nullptr;
+    }
+
+    wolvrix::lib::grh::Graph *findGraphWithPrefixAndOpSymbol(wolvrix::lib::grh::Design &design,
+                                                             std::string_view prefix,
+                                                             std::string_view symbol)
+    {
+        for (const auto &graphName : design.graphOrder())
+        {
+            if (graphName.rfind(prefix, 0) != 0)
+            {
+                continue;
+            }
+            auto *graph = design.findGraph(graphName);
+            if (graph != nullptr && graphHasOpSymbol(*graph, symbol))
+            {
+                return graph;
+            }
+        }
+        return nullptr;
     }
 
 } // namespace
@@ -412,6 +491,323 @@ int main()
     if (roStats->find("\"weight\":") == std::string::npos)
     {
         return fail("read-only register repcut missing per-partition weight entries");
+    }
+
+    // Regression: effect sinks should be handled directly by repcut without
+    // strip-debug pre-processing, and hierarchical ops should still be
+    // rejected by repcut guard.
+    wolvrix::lib::grh::Design effectDesign;
+    wolvrix::lib::grh::Graph &effectGraph = effectDesign.createGraph("top_effect_sink");
+    effectDesign.markAsTop("top_effect_sink");
+
+    const auto effA = makeValue(effectGraph, "a", 32, false);
+    const auto effB = makeValue(effectGraph, "b", 32, false);
+    const auto effEn = makeValue(effectGraph, "en", 1, false);
+    effectGraph.bindInputPort("a", effA);
+    effectGraph.bindInputPort("b", effB);
+    effectGraph.bindInputPort("en", effEn);
+
+    const auto dpiImport =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kDpicImport,
+                                    effectGraph.internSymbol("dpi_func"));
+    effectGraph.setAttr(dpiImport, "argsDirection", std::vector<std::string>{"input"});
+    effectGraph.setAttr(dpiImport, "argsWidth", std::vector<int64_t>{32});
+    effectGraph.setAttr(dpiImport, "argsName", std::vector<std::string>{"lhs"});
+    effectGraph.setAttr(dpiImport, "argsSigned", std::vector<bool>{false});
+    effectGraph.setAttr(dpiImport, "argsType", std::vector<std::string>{"logic"});
+    effectGraph.setAttr(dpiImport, "hasReturn", true);
+    effectGraph.setAttr(dpiImport, "returnWidth", static_cast<int64_t>(32));
+    effectGraph.setAttr(dpiImport, "returnSigned", false);
+    effectGraph.setAttr(dpiImport, "returnType", std::string("logic"));
+
+    const auto dpiImportVoid =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kDpicImport,
+                                    effectGraph.internSymbol("dpi_func_void"));
+    effectGraph.setAttr(dpiImportVoid, "argsDirection", std::vector<std::string>{"input"});
+    effectGraph.setAttr(dpiImportVoid, "argsWidth", std::vector<int64_t>{32});
+    effectGraph.setAttr(dpiImportVoid, "argsName", std::vector<std::string>{"rhs"});
+    effectGraph.setAttr(dpiImportVoid, "argsSigned", std::vector<bool>{false});
+    effectGraph.setAttr(dpiImportVoid, "argsType", std::vector<std::string>{"logic"});
+    effectGraph.setAttr(dpiImportVoid, "hasReturn", false);
+
+    const auto dpiCall =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kDpicCall,
+                                    effectGraph.internSymbol("dpi_call"));
+    effectGraph.addOperand(dpiCall, effEn);
+    effectGraph.addOperand(dpiCall, effA);
+    effectGraph.addOperand(dpiCall, effEn);
+    effectGraph.setAttr(dpiCall, "targetImportSymbol", std::string("dpi_func"));
+    effectGraph.setAttr(dpiCall, "eventEdge", std::vector<std::string>{"posedge"});
+    effectGraph.setAttr(dpiCall, "inArgName", std::vector<std::string>{"lhs"});
+    effectGraph.setAttr(dpiCall, "outArgName", std::vector<std::string>{});
+    effectGraph.setAttr(dpiCall, "hasReturn", true);
+    const auto dpiRes = makeValue(effectGraph, "dpi_res", 32, false);
+    effectGraph.addResult(dpiCall, dpiRes);
+
+    const auto dpiCallVoid =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kDpicCall,
+                                    effectGraph.internSymbol("dpi_call_void"));
+    effectGraph.addOperand(dpiCallVoid, effEn);
+    effectGraph.addOperand(dpiCallVoid, effB);
+    effectGraph.addOperand(dpiCallVoid, effEn);
+    effectGraph.setAttr(dpiCallVoid, "targetImportSymbol", std::string("dpi_func_void"));
+    effectGraph.setAttr(dpiCallVoid, "eventEdge", std::vector<std::string>{"posedge"});
+    effectGraph.setAttr(dpiCallVoid, "inArgName", std::vector<std::string>{"rhs"});
+    effectGraph.setAttr(dpiCallVoid, "outArgName", std::vector<std::string>{});
+    effectGraph.setAttr(dpiCallVoid, "hasReturn", false);
+
+    const auto sysTask =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kSystemTask,
+                                    effectGraph.internSymbol("sys_task"));
+    effectGraph.addOperand(sysTask, dpiRes);
+    effectGraph.setAttr(sysTask, "name", std::string("$display"));
+    effectGraph.setAttr(sysTask, "hasReturn", false);
+
+    const auto sysTaskRet =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kSystemTask,
+                                    effectGraph.internSymbol("sys_task_ret"));
+    effectGraph.addOperand(sysTaskRet, effEn);
+    effectGraph.addOperand(sysTaskRet, effB);
+    effectGraph.setAttr(sysTaskRet, "name", std::string("$ret_task"));
+    effectGraph.setAttr(sysTaskRet, "hasReturn", true);
+    const auto sysTaskRetRes = makeValue(effectGraph, "sys_task_ret_res", 32, false);
+    effectGraph.addResult(sysTaskRet, sysTaskRetRes);
+
+    const auto effData0 = makeValue(effectGraph, "lat_data0", 32, false);
+    makeBinaryOp(effectGraph, wolvrix::lib::grh::OperationKind::kAdd,
+                 "lat_add0", dpiRes, effA, effData0);
+
+    const auto effLatch0 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                    effectGraph.internSymbol("lat0"));
+    effectGraph.setAttr(effLatch0, "width", static_cast<int64_t>(32));
+    effectGraph.setAttr(effLatch0, "isSigned", false);
+
+    const auto effLatchWr0 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                    effectGraph.internSymbol("lat0_wr"));
+    effectGraph.addOperand(effLatchWr0, effEn);
+    effectGraph.addOperand(effLatchWr0, effData0);
+    effectGraph.setAttr(effLatchWr0, "latchSymbol", std::string("lat0"));
+
+    const auto effData1 = makeValue(effectGraph, "lat_data1", 32, false);
+    makeBinaryOp(effectGraph, wolvrix::lib::grh::OperationKind::kSub,
+                 "lat_sub1", effB, effA, effData1);
+
+    const auto effLatch1 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                    effectGraph.internSymbol("lat1"));
+    effectGraph.setAttr(effLatch1, "width", static_cast<int64_t>(32));
+    effectGraph.setAttr(effLatch1, "isSigned", false);
+
+    const auto effLatchWr1 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                    effectGraph.internSymbol("lat1_wr"));
+    effectGraph.addOperand(effLatchWr1, effEn);
+    effectGraph.addOperand(effLatchWr1, effData1);
+    effectGraph.setAttr(effLatchWr1, "latchSymbol", std::string("lat1"));
+
+    const auto effData2 = makeValue(effectGraph, "lat_data2", 32, false);
+    makeBinaryOp(effectGraph, wolvrix::lib::grh::OperationKind::kAdd,
+                 "lat_add2", sysTaskRetRes, effA, effData2);
+
+    const auto effLatch2 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                    effectGraph.internSymbol("lat2"));
+    effectGraph.setAttr(effLatch2, "width", static_cast<int64_t>(32));
+    effectGraph.setAttr(effLatch2, "isSigned", false);
+
+    const auto effLatchWr2 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                    effectGraph.internSymbol("lat2_wr"));
+    effectGraph.addOperand(effLatchWr2, effEn);
+    effectGraph.addOperand(effLatchWr2, effData2);
+    effectGraph.setAttr(effLatchWr2, "latchSymbol", std::string("lat2"));
+
+    const auto effData3 = makeValue(effectGraph, "lat_data3", 32, false);
+    makeBinaryOp(effectGraph, wolvrix::lib::grh::OperationKind::kSub,
+                 "lat_sub3", sysTaskRetRes, effB, effData3);
+
+    const auto effLatch3 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                    effectGraph.internSymbol("lat3"));
+    effectGraph.setAttr(effLatch3, "width", static_cast<int64_t>(32));
+    effectGraph.setAttr(effLatch3, "isSigned", false);
+
+    const auto effLatchWr3 =
+        effectGraph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                    effectGraph.internSymbol("lat3_wr"));
+    effectGraph.addOperand(effLatchWr3, effEn);
+    effectGraph.addOperand(effLatchWr3, effData3);
+    effectGraph.setAttr(effLatchWr3, "latchSymbol", std::string("lat3"));
+
+    const std::filesystem::path effectOutDir =
+        std::filesystem::path(WOLF_SV_TEST_ARTIFACT_DIR) / "repcut_test_effect_sink";
+    std::filesystem::create_directories(effectOutDir, ec);
+    if (ec)
+    {
+        return fail("failed to create output directory: " + effectOutDir.string());
+    }
+
+    PassManager effectManager;
+    effectManager.options().verbosity = PassVerbosity::Info;
+    RepcutOptions effectOptions;
+    effectOptions.path = "top_effect_sink";
+    effectOptions.partitionCount = 2;
+    effectOptions.imbalanceFactor = 1.0;
+    effectOptions.workDir = effectOutDir.string();
+    effectOptions.partitioner = "mt-kahypar";
+    effectOptions.mtKaHyParPreset = "quality";
+    effectOptions.mtKaHyParThreads = 0;
+    effectOptions.keepIntermediateFiles = true;
+    effectManager.addPass(std::make_unique<RepcutPass>(effectOptions));
+
+    PassDiagnostics effectDiags;
+    PassManagerResult effectResult{};
+    try
+    {
+        effectResult = effectManager.run(effectDesign, effectDiags);
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("effect-sink repcut exception: ") + ex.what());
+    }
+
+    if (!effectResult.success || effectDiags.hasError())
+    {
+        return fail("effect-sink repcut failed unexpectedly");
+    }
+    if (!effectResult.changed)
+    {
+        return fail("effect-sink repcut expected graph changes");
+    }
+    if (effectDesign.findGraph("top_effect_sink") == nullptr)
+    {
+        return fail("effect-sink top graph missing after repcut");
+    }
+    if (!hasGraphWithPrefix(effectDesign, "top_effect_sink_repcut_part0"))
+    {
+        return fail("expected partition graph for effect-sink repcut");
+    }
+
+    auto *returnedCallPart = findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "dpi_call");
+    if (returnedCallPart == nullptr)
+    {
+        return fail("expected partition graph containing returned kDpicCall after effect-sink repcut");
+    }
+    auto *sysTaskPart = findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "sys_task");
+    if (sysTaskPart == nullptr)
+    {
+        return fail("expected partition graph containing dependent system task after effect-sink repcut");
+    }
+    auto *lat0Part = findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "lat0_wr");
+    if (lat0Part == nullptr)
+    {
+        return fail("expected partition graph containing dependent latch sink after effect-sink repcut");
+    }
+    if (returnedCallPart != sysTaskPart || returnedCallPart != lat0Part)
+    {
+        return fail("returned kDpicCall and its dependent sinks should be merged into one ASC/partition");
+    }
+    if (!graphHasOpSymbol(*returnedCallPart, "dpi_func"))
+    {
+        return fail("returned kDpicCall partition missing matching kDpicImport after repcut");
+    }
+    auto *voidCallPart =
+        findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "dpi_call_void");
+    if (voidCallPart == nullptr)
+    {
+        return fail("expected partition graph containing no-return kDpicCall sink after effect-sink repcut");
+    }
+    if (!graphHasOpSymbol(*voidCallPart, "dpi_func_void"))
+    {
+        return fail("no-return kDpicCall partition missing matching kDpicImport after repcut");
+    }
+    auto *returnedSysTaskPart =
+        findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "sys_task_ret");
+    if (returnedSysTaskPart == nullptr)
+    {
+        return fail("expected partition graph containing returned kSystemTask after effect-sink repcut");
+    }
+    auto *lat2Part = findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "lat2_wr");
+    if (lat2Part == nullptr)
+    {
+        return fail("expected partition graph containing first sink depending on returned kSystemTask");
+    }
+    auto *lat3Part = findGraphWithPrefixAndOpSymbol(effectDesign, "top_effect_sink_repcut_part", "lat3_wr");
+    if (lat3Part == nullptr)
+    {
+        return fail("expected partition graph containing second sink depending on returned kSystemTask");
+    }
+    if (returnedSysTaskPart != lat2Part || returnedSysTaskPart != lat3Part)
+    {
+        return fail("returned kSystemTask and its dependent sinks should be merged into one ASC/partition");
+    }
+
+    wolvrix::lib::grh::Design hierGuardDesign;
+    wolvrix::lib::grh::Graph &hierGraph = hierGuardDesign.createGraph("top_hier_guard");
+    hierGuardDesign.markAsTop("top_hier_guard");
+
+    const auto hierIn = makeValue(hierGraph, "a", 8, false);
+    hierGraph.bindInputPort("a", hierIn);
+
+    const auto badInst =
+        hierGraph.createOperation(wolvrix::lib::grh::OperationKind::kInstance,
+                                  hierGraph.internSymbol("u_child"));
+    hierGraph.addOperand(badInst, hierIn);
+    hierGraph.setAttr(badInst, "moduleName", std::string("child"));
+    hierGraph.setAttr(badInst, "instanceName", std::string("u_child"));
+    hierGraph.setAttr(badInst, "inputPortName", std::vector<std::string>{"a"});
+    hierGraph.setAttr(badInst, "outputPortName", std::vector<std::string>{});
+
+    const auto badBlackbox =
+        hierGraph.createOperation(wolvrix::lib::grh::OperationKind::kBlackbox,
+                                  hierGraph.internSymbol("u_bb"));
+    hierGraph.addOperand(badBlackbox, hierIn);
+
+    const std::filesystem::path hierGuardOutDir =
+        std::filesystem::path(WOLF_SV_TEST_ARTIFACT_DIR) / "repcut_test_hier_guard";
+    std::filesystem::create_directories(hierGuardOutDir, ec);
+    if (ec)
+    {
+        return fail("failed to create output directory: " + hierGuardOutDir.string());
+    }
+
+    PassManager hierGuardManager;
+    hierGuardManager.options().verbosity = PassVerbosity::Info;
+    RepcutOptions hierGuardOptions;
+    hierGuardOptions.path = "top_hier_guard";
+    hierGuardOptions.partitionCount = 2;
+    hierGuardOptions.imbalanceFactor = 1.0;
+    hierGuardOptions.workDir = hierGuardOutDir.string();
+    hierGuardOptions.partitioner = "mt-kahypar";
+    hierGuardOptions.mtKaHyParPreset = "quality";
+    hierGuardOptions.mtKaHyParThreads = 0;
+    hierGuardOptions.keepIntermediateFiles = true;
+    hierGuardManager.addPass(std::make_unique<RepcutPass>(hierGuardOptions));
+
+    PassDiagnostics hierGuardDiags;
+    PassManagerResult hierGuardResult{};
+    try
+    {
+        hierGuardResult = hierGuardManager.run(hierGuardDesign, hierGuardDiags);
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("hier-guard repcut exception: ") + ex.what());
+    }
+
+    if (hierGuardResult.success || !hierGuardDiags.hasError())
+    {
+        return fail("hier-guard repcut should fail on kInstance/kBlackbox");
+    }
+    if (!diagnosticsContain(hierGuardDiags, "kind=kInstance"))
+    {
+        return fail("hier-guard repcut missing kInstance diagnostic");
+    }
+    if (!diagnosticsContain(hierGuardDiags, "kind=kBlackbox"))
+    {
+        return fail("hier-guard repcut missing kBlackbox diagnostic");
     }
 
     // Path-mode regression: resolving "top.u_child" should partition the child module graph
