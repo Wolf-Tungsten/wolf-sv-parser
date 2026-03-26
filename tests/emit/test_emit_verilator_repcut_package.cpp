@@ -342,17 +342,21 @@ int main()
         return fail("wrapper header missing expected unit members");
     }
     if (!contains(wrapperHeader, "using StepFn = void (WolviRepCutVerilatorSim::*)(std::size_t);") ||
-        !contains(wrapperHeader, "std::vector<StepFn> normal_step_fns_;") ||
-        !contains(wrapperHeader, "void run_part_eval_phase_(const std::vector<StepFn>& phaseFns);") ||
-        !contains(wrapperHeader, "void run_normal_step_workers_();"))
+        !contains(wrapperHeader, "std::vector<StepFn> load_step_fns_;") ||
+        !contains(wrapperHeader, "std::vector<StepFn> eval_step_fns_;") ||
+        !contains(wrapperHeader, "std::vector<StepFn> update_step_fns_;") ||
+        !contains(wrapperHeader, "void run_host_phase_(const std::vector<StepFn>& phaseFns);") ||
+        !contains(wrapperHeader, "void run_phase_workers_(const std::vector<StepFn>& phaseFns);"))
     {
-        return fail("wrapper header missing expected parallel eval declarations");
+        return fail("wrapper header missing expected phase scheduling declarations");
     }
     if (!contains(wrapperHeader, "struct alignas(64) PartTimingStats {") ||
-        !contains(wrapperHeader, "std::uint64_t scatter_ns{};") ||
+        !contains(wrapperHeader, "std::uint64_t input_apply_ns{};") ||
         !contains(wrapperHeader, "std::uint64_t eval_ns{};") ||
-        !contains(wrapperHeader, "std::uint64_t gather_ns{};") ||
+        !contains(wrapperHeader, "std::uint64_t update_push_ns{};") ||
         !contains(wrapperHeader, "struct StepTimingStats {") ||
+        !contains(wrapperHeader, "std::uint64_t input_load_ns{};") ||
+        !contains(wrapperHeader, "std::uint64_t global_update_ns{};") ||
         !contains(wrapperHeader, "PartTimingStats collect_part_timing_stats_(std::size_t partIndex) const;") ||
         !contains(wrapperHeader, "void report_step_timing_() const;") ||
         !contains(wrapperHeader, "void report_part_timing_() const;") ||
@@ -364,12 +368,10 @@ int main()
     {
         return fail("wrapper header missing expected timing declarations");
     }
-    if (!contains(wrapperHeader, "CData signal_effect__out_snapshot_{};") ||
-        !contains(wrapperHeader, "CData signal_effect__out_writeback_{};") ||
-        !contains(wrapperHeader, "CData signal_mid_snapshot_{};") ||
-        !contains(wrapperHeader, "CData signal_mid_writeback_{};"))
+    if (contains(wrapperHeader, "snapshot_") ||
+        contains(wrapperHeader, "writeback_"))
     {
-        return fail("wrapper header missing expected snapshot/writeback cache members");
+        return fail("wrapper header should not contain snapshot/writeback cache members");
     }
     if (!contains(wrapperHeader, "void set_clock(CData value) { top_in_clock_ = value; }") ||
         !contains(wrapperHeader, "void set_in_data(CData value) { top_in_in_data_ = value; }") ||
@@ -384,32 +386,34 @@ int main()
         return fail("wrapper sources missing expected model includes");
     }
     if (!contains(wrapperSource, "unit_effect_part_->in_2 = top_in_in_data_;") ||
-        !contains(wrapperSource, "unit_part_0_->in_2 = signal_effect__out_snapshot_;") ||
-        !contains(wrapperSource, "unit_part_1_->in_2 = signal_mid_snapshot_;") ||
-        !contains(wrapperSource, "unit_part_1_->in_3 = const_sel_const_;"))
+        !contains(wrapperSource, "unit_part_0_->in_2 = unit_effect_part_->out_0;") ||
+        !contains(wrapperSource, "unit_part_1_->in_2 = unit_part_0_->out_0;") ||
+        !contains(wrapperSource, "unit_part_1_->in_3 = const_sel_const_;") ||
+        !contains(wrapperSource, "top_out_out_ = unit_part_1_->out_0;"))
     {
-        return fail("wrapper source missing expected scatter code");
+        return fail("wrapper source missing expected load/update wiring");
     }
-    if (!contains(wrapperSource, "normal_step_fns_.push_back(&WolviRepCutVerilatorSim::"))
+    if (!contains(wrapperSource, "load_step_fns_.push_back(&WolviRepCutVerilatorSim::") ||
+        !contains(wrapperSource, "eval_step_fns_.push_back(&WolviRepCutVerilatorSim::") ||
+        !contains(wrapperSource, "update_step_fns_.push_back(&WolviRepCutVerilatorSim::"))
     {
-        return fail("wrapper source missing expected static task generation");
+        return fail("wrapper source missing expected phase task registration");
     }
     if (!contains(wrapperSource, "unit_effect_part_->eval();") ||
         !contains(wrapperSource, "// eval part_0") ||
         !contains(wrapperSource, "// eval part_1") ||
-        !contains(wrapperSource, "run_normal_step_workers_();"))
+        !contains(wrapperSource, "run_phase_workers_(eval_step_fns_);"))
     {
         return fail("wrapper source missing expected eval calls");
     }
-    if (!contains(wrapperSource, "signal_effect__out_writeback_ = unit_effect_part_->out_0;") ||
-        !contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
-        !contains(wrapperSource, "signal_effect__out_snapshot_ = signal_effect__out_writeback_;") ||
-        !contains(wrapperSource, "signal_mid_snapshot_ = signal_mid_writeback_;"))
+    if (contains(wrapperSource, "snapshot_") ||
+        contains(wrapperSource, "commit_writeback_()"))
     {
-        return fail("wrapper source missing expected snapshot/writeback publish and commit code");
+        return fail("wrapper source should not contain snapshot/writeback publish paths");
     }
     if (!contains(wrapperSource, "std::getenv(\"XS_EMU_THREADS\")") ||
-        !contains(wrapperSource, "assert(requestedWorkers <= normal_step_fns_.size() && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
+        !contains(wrapperSource, "const std::size_t maxParallelFns = std::max(eval_step_fns_.size(), update_step_fns_.size());") ||
+        !contains(wrapperSource, "assert(requestedWorkers <= maxParallelFns && \"XS_EMU_THREADS must not exceed repcut partition count\")") ||
         !contains(wrapperSource, "#if defined(__linux__)"))
     {
         return fail("wrapper source missing expected runtime thread-pool guards");
@@ -423,29 +427,33 @@ int main()
     if (!contains(wrapperHeader, "using WolviClock = std::chrono::steady_clock;") ||
         !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_step_timing_() const {") ||
         !contains(wrapperSource, "[WOLVI][step-timing] steps=%llu total=%.3f ms avg=%.3f us\\n") ||
+        !contains(wrapperSource, "printPhase(\"input_load\", step_timing_.input_load_ns);") ||
         !contains(wrapperSource, "printPhase(\"part_eval\", step_timing_.part_eval_ns);") ||
-        !contains(wrapperSource, "printPhase(\"writeback\", step_timing_.writeback_ns);") ||
+        !contains(wrapperSource, "printPhase(\"global_update\", step_timing_.global_update_ns);") ||
         !contains(wrapperSource, "WolviRepCutVerilatorSim::PartTimingStats WolviRepCutVerilatorSim::collect_part_timing_stats_(std::size_t partIndex) const {") ||
         !contains(wrapperSource, "void WolviRepCutVerilatorSim::report_part_timing_() const {") ||
         !contains(wrapperSource, "void WolviRepCutVerilatorSim::dump_timing_jsonl_() const {") ||
         !contains(wrapperSource, "std::getenv(\"WOLVI_REPCUT_TIMING_JSONL\")") ||
         !contains(wrapperSource, "\"{\\\"record_type\\\":\\\"part_timing\\\"") ||
-        !contains(wrapperSource, "\\\"scatter_total_ms\\\":%.3f") ||
+        !contains(wrapperSource, "\\\"input_apply_total_ms\\\":%.3f") ||
         !contains(wrapperSource, "\\\"eval_total_ms\\\":%.3f") ||
-        !contains(wrapperSource, "\\\"gather_total_ms\\\":%.3f") ||
-        !contains(wrapperSource, "[WOLVI][part-timing] part=%s steps=%llu total=%.3f ms avg=%.3f us scatter=%.3f us eval=%.3f us gather=%.3f us\\n") ||
+        !contains(wrapperSource, "\\\"update_push_total_ms\\\":%.3f") ||
+        !contains(wrapperSource, "[WOLVI][part-timing] part=%s steps=%llu total=%.3f ms avg=%.3f us input_apply=%.3f us eval=%.3f us update_push=%.3f us\\n") ||
         !contains(wrapperSource, "++step_timing_.steps;") ||
+        !contains(wrapperSource, "step_timing_.input_load_ns +=") ||
         !contains(wrapperSource, "step_timing_.part_eval_ns +=") ||
-        !contains(wrapperSource, "step_timing_.writeback_ns +=") ||
+        !contains(wrapperSource, "step_timing_.global_update_ns +=") ||
         !contains(wrapperSource, "step_timing_.total_ns +=") ||
-        !contains(wrapperSource, "partTimingStats->scatter_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->input_apply_ns +=") ||
         !contains(wrapperSource, "partTimingStats->eval_ns +=") ||
-        !contains(wrapperSource, "partTimingStats->gather_ns +=") ||
+        !contains(wrapperSource, "partTimingStats->update_push_ns +=") ||
         !contains(wrapperSource, "partTimingStats->total_ns +=") ||
         !contains(wrapperSource, "partTimingStats = &part_timing_worker_stats_[workerIndex][") ||
         !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[0];") ||
         !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[1];") ||
-        !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[2];"))
+        !contains(wrapperSource, "PartTimingStats* partTimingStats = &part_timing_stats_[2];") ||
+        contains(wrapperSource, "\\\"scatter_total_ms\\\":%.3f") ||
+        contains(wrapperSource, "\\\"gather_total_ms\\\":%.3f"))
     {
         return fail("wrapper source missing expected timing instrumentation");
     }
@@ -469,15 +477,11 @@ int main()
     {
         return fail("wrapper source should not contain legacy step timing instrumentation");
     }
-    if (!contains(commonSource, "Evaluate all units with fused local scatter/eval/gather."))
-    {
-        return fail("wrapper source missing expected normal scheduling comment");
-    }
     const std::size_t dtorPos = commonSource.find("WolviRepCutVerilatorSim::~WolviRepCutVerilatorSim()");
     const std::size_t reportStepPos = commonSource.find("report_step_timing_();", dtorPos);
     const std::size_t reportPartPos = commonSource.find("report_part_timing_();", dtorPos);
     const std::size_t dumpJsonPos = commonSource.find("dump_timing_jsonl_();", dtorPos);
-    const std::size_t shutdownPos = commonSource.find("shutdown_part_eval_workers_();", dtorPos);
+    const std::size_t shutdownPos = commonSource.find("shutdown_phase_workers_();", dtorPos);
     if (dtorPos == std::string::npos || reportStepPos == std::string::npos || reportPartPos == std::string::npos ||
         dumpJsonPos == std::string::npos || shutdownPos == std::string::npos)
     {
@@ -487,41 +491,46 @@ int main()
     {
         return fail("wrapper destructor should report and dump timing before clearing worker timing state");
     }
-    if (!contains(wrapperSource, "signal_mid_writeback_ = unit_part_0_->out_0;") ||
-        !contains(wrapperSource, "top_out_out_ = unit_part_1_->out_0;"))
-    {
-        return fail("wrapper source missing expected gather code");
-    }
-    std::string normalChunkSource;
+    std::string loadChunkSource;
+    std::string evalChunkSource;
+    std::string updateChunkSource;
     for (const auto &[name, text] : wrapperSourceByName)
     {
-        if (name.rfind("wolvi_repcut_verilator_sim_normal_", 0) == 0 &&
+        if (name.rfind("wolvi_repcut_verilator_sim_load_", 0) == 0 &&
             text.find("unit_effect_part_->in_2 = top_in_in_data_;") != std::string::npos)
         {
-            normalChunkSource = text;
-            break;
+            loadChunkSource = text;
+        }
+        if (name.rfind("wolvi_repcut_verilator_sim_eval_", 0) == 0 &&
+            text.find("unit_effect_part_->eval();") != std::string::npos)
+        {
+            evalChunkSource = text;
+        }
+        if (name.rfind("wolvi_repcut_verilator_sim_update_", 0) == 0 &&
+            text.find("unit_part_0_->in_2 = unit_effect_part_->out_0;") != std::string::npos)
+        {
+            updateChunkSource = text;
         }
     }
-    if (normalChunkSource.empty())
+    if (loadChunkSource.empty() || evalChunkSource.empty() || updateChunkSource.empty())
     {
-        return fail("wrapper source missing normal chunk for effect_part");
+        return fail("wrapper source missing expected load/eval/update chunks");
     }
-    const std::size_t commonPartEvalPos = commonSource.find("run_normal_step_workers_();");
-    const std::size_t commonWritebackPos = commonSource.find("commit_writeback_();");
-    const std::size_t normalInputPos = normalChunkSource.find("unit_effect_part_->in_2 = top_in_in_data_;");
-    const std::size_t normalEvalPos = normalChunkSource.find("unit_effect_part_->eval();");
-    const std::size_t normalPublishPos =
-        normalChunkSource.find("signal_effect__out_writeback_ = unit_effect_part_->out_0;");
-    if (commonPartEvalPos == std::string::npos || commonWritebackPos == std::string::npos ||
-        normalInputPos == std::string::npos || normalEvalPos == std::string::npos ||
-        normalPublishPos == std::string::npos)
+    const std::size_t commonLoadPos = commonSource.find("run_host_phase_(load_step_fns_);");
+    const std::size_t commonPartEvalPos = commonSource.find("run_phase_workers_(eval_step_fns_);");
+    const std::size_t commonUpdatePos = commonSource.find("run_phase_workers_(update_step_fns_);");
+    const std::size_t loadInputPos = loadChunkSource.find("unit_effect_part_->in_2 = top_in_in_data_;");
+    const std::size_t evalEvalPos = evalChunkSource.find("unit_effect_part_->eval();");
+    const std::size_t updatePushPos = updateChunkSource.find("unit_part_0_->in_2 = unit_effect_part_->out_0;");
+    if (commonLoadPos == std::string::npos || commonPartEvalPos == std::string::npos ||
+        commonUpdatePos == std::string::npos || loadInputPos == std::string::npos ||
+        evalEvalPos == std::string::npos || updatePushPos == std::string::npos)
     {
         return fail("wrapper source missing phase-order markers");
     }
-    if (!(commonPartEvalPos < commonWritebackPos &&
-          normalInputPos < normalEvalPos && normalEvalPos < normalPublishPos))
+    if (!(commonLoadPos < commonPartEvalPos && commonPartEvalPos < commonUpdatePos))
     {
-        return fail("wrapper source should run normal workers before writeback and keep per-unit local ordering");
+        return fail("wrapper source should run load before eval and eval before update");
     }
     if (!contains(wrapperSource, "const CData WolviRepCutVerilatorSim::const_sel_const_ = static_cast<CData>(0x1ULL);"))
     {
