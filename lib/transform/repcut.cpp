@@ -1815,6 +1815,7 @@ namespace wolvrix::lib::transform
                           });
 
                 const std::size_t limit = std::min<std::size_t>(5, orderedAscs.size());
+                constexpr std::size_t kTopAscSymbolLogLimit = 64;
                 for (std::size_t rank = 0; rank < limit; ++rank)
                 {
                     const AscId aid = orderedAscs[rank];
@@ -1848,13 +1849,22 @@ namespace wolvrix::lib::transform
                            << " comb_ops=" << asc.combOps.size()
                            << " sinks=" << asc.sinks.size()
                            << " op_symbols=[";
-                    for (std::size_t i = 0; i < opSymbols.size(); ++i)
+                    const std::size_t emittedCount = std::min<std::size_t>(kTopAscSymbolLogLimit, opSymbols.size());
+                    for (std::size_t i = 0; i < emittedCount; ++i)
                     {
                         if (i > 0)
                         {
                             ascLog << ", ";
                         }
                         ascLog << opSymbols[i];
+                    }
+                    if (opSymbols.size() > emittedCount)
+                    {
+                        if (emittedCount > 0)
+                        {
+                            ascLog << ", ";
+                        }
+                        ascLog << "... +" << (opSymbols.size() - emittedCount) << " more";
                     }
                     ascLog << "]";
                     progressLogger(ascLog.str());
@@ -2416,7 +2426,78 @@ namespace wolvrix::lib::transform
             }
             }
 
-            nodeWeights[node] = std::max(1u, weight);
+            auto getResultFanout = [&](const wolvrix::lib::grh::Operation &curOp) -> std::size_t {
+                std::size_t totalFanout = 0;
+                for (const auto resultValue : curOp.results())
+                {
+                    if (!resultValue.valid())
+                    {
+                        continue;
+                    }
+                    totalFanout += graph.getValue(resultValue).users().size();
+                }
+                return totalFanout;
+            };
+
+            auto isWideLogicSensitiveKind = [](wolvrix::lib::grh::OperationKind kind) noexcept {
+                switch (kind)
+                {
+                case wolvrix::lib::grh::OperationKind::kEq:
+                case wolvrix::lib::grh::OperationKind::kNe:
+                case wolvrix::lib::grh::OperationKind::kCaseEq:
+                case wolvrix::lib::grh::OperationKind::kCaseNe:
+                case wolvrix::lib::grh::OperationKind::kWildcardEq:
+                case wolvrix::lib::grh::OperationKind::kWildcardNe:
+                case wolvrix::lib::grh::OperationKind::kLt:
+                case wolvrix::lib::grh::OperationKind::kLe:
+                case wolvrix::lib::grh::OperationKind::kGt:
+                case wolvrix::lib::grh::OperationKind::kGe:
+                case wolvrix::lib::grh::OperationKind::kAnd:
+                case wolvrix::lib::grh::OperationKind::kOr:
+                case wolvrix::lib::grh::OperationKind::kXor:
+                case wolvrix::lib::grh::OperationKind::kXnor:
+                case wolvrix::lib::grh::OperationKind::kNot:
+                case wolvrix::lib::grh::OperationKind::kLogicAnd:
+                case wolvrix::lib::grh::OperationKind::kLogicOr:
+                case wolvrix::lib::grh::OperationKind::kLogicNot:
+                case wolvrix::lib::grh::OperationKind::kReduceAnd:
+                case wolvrix::lib::grh::OperationKind::kReduceOr:
+                case wolvrix::lib::grh::OperationKind::kReduceXor:
+                case wolvrix::lib::grh::OperationKind::kReduceNor:
+                case wolvrix::lib::grh::OperationKind::kReduceNand:
+                case wolvrix::lib::grh::OperationKind::kReduceXnor:
+                case wolvrix::lib::grh::OperationKind::kMux:
+                    return true;
+                default:
+                    return false;
+                }
+            };
+
+            const int32_t clampedResultWidth = std::max(1, getResultWidth(graph, op));
+            const std::size_t resultWords = static_cast<std::size_t>((clampedResultWidth + 63) / 64);
+            double fanoutScale = 1.0 + 0.12 * std::log2(1.0 + static_cast<double>(getResultFanout(op)));
+            double widthScale = 1.0;
+            if (resultWords == 2)
+            {
+                widthScale = 1.15;
+            }
+            else if (resultWords >= 3 && resultWords <= 4)
+            {
+                widthScale = 1.30;
+            }
+            else if (resultWords > 4)
+            {
+                widthScale = 1.50;
+            }
+            const double specialScale = isWideLogicSensitiveKind(op.kind()) ? widthScale : 1.0;
+            const double scaledWeight =
+                static_cast<double>(std::max(1u, weight)) * std::max(1.0, fanoutScale) * std::max(1.0, specialScale);
+
+            const std::size_t roundedWeight =
+                (scaledWeight <= 1.0) ? 1u : static_cast<std::size_t>(std::llround(scaledWeight));
+            nodeWeights[node] = roundedWeight > static_cast<std::size_t>(std::numeric_limits<uint32_t>::max())
+                                    ? std::numeric_limits<uint32_t>::max()
+                                    : static_cast<uint32_t>(roundedWeight);
             return nodeWeights[node];
         }
 
@@ -2503,20 +2584,93 @@ namespace wolvrix::lib::transform
                        : static_cast<uint32_t>(value);
         }
 
-        uint32_t calculatePieceCommWords(const wolvrix::lib::grh::Graph &graph,
-                                         const PhaseAData &phaseA,
-                                         const PhaseBData &phaseB,
-                                         PieceId pid)
+        std::size_t compressWeightMetric(std::size_t value,
+                                         std::size_t linearLimit,
+                                         double tailDivisor,
+                                         double tailScale)
         {
-            if (pid >= phaseB.pieces.size())
+            if (value <= linearLimit)
+            {
+                return value;
+            }
+            const double safeTailDivisor = std::max(1.0, tailDivisor);
+            const double tail = static_cast<double>(value - linearLimit) / safeTailDivisor;
+            const double compressed =
+                static_cast<double>(linearLimit) + std::max(0.0, tailScale) * std::log2(1.0 + tail);
+            return std::max<std::size_t>(
+                linearLimit,
+                static_cast<std::size_t>(std::llround(std::max<double>(static_cast<double>(linearLimit), compressed))));
+        }
+
+        struct PieceCommStats
+        {
+            std::size_t outSignalCount = 0;
+            std::size_t outWords = 0;
+            std::size_t wide64Words = 0;
+            std::size_t wide256Words = 0;
+            std::size_t fanoutExcess = 0;
+            std::size_t stateBoundaryWords = 0;
+        };
+
+        bool isStateBoundaryDefKind(wolvrix::lib::grh::OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
+            case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isStateBoundaryUserKind(wolvrix::lib::grh::OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
+            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        std::size_t percentileThreshold(std::vector<std::size_t> values, double quantile)
+        {
+            if (values.empty())
             {
                 return 0;
+            }
+            std::sort(values.begin(), values.end());
+            const double clampedQuantile = std::clamp(quantile, 0.0, 1.0);
+            if (clampedQuantile <= 0.0)
+            {
+                return values.front();
+            }
+            const std::size_t index = std::min<std::size_t>(
+                values.size() - 1,
+                static_cast<std::size_t>(std::ceil(clampedQuantile * static_cast<double>(values.size()))) - 1u);
+            return values[index];
+        }
+
+        PieceCommStats calculatePieceCommStats(const wolvrix::lib::grh::Graph &graph,
+                                               const PhaseAData &phaseA,
+                                               const PhaseBData &phaseB,
+                                               PieceId pid)
+        {
+            PieceCommStats stats;
+            if (pid >= phaseB.pieces.size())
+            {
+                return stats;
             }
 
             const auto &piece = phaseB.pieces[pid];
             if (piece.empty())
             {
-                return 0;
+                return stats;
             }
 
             std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> pieceResults;
@@ -2536,17 +2690,25 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            std::size_t totalCommWords = 0;
             for (const auto valueId : pieceResults)
             {
                 const auto value = graph.getValue(valueId);
                 std::unordered_set<AscId> userAscs;
+                bool touchesStateBoundary = false;
+                const auto defOpId = graph.valueDef(valueId);
+                if (defOpId.valid())
+                {
+                    const auto defOp = graph.getOperation(defOpId);
+                    touchesStateBoundary = isStateBoundaryDefKind(defOp.kind());
+                }
                 for (const auto &user : value.users())
                 {
                     if (!user.operation.valid())
                     {
                         continue;
                     }
+                    const auto userOp = graph.getOperation(user.operation);
+                    touchesStateBoundary = touchesStateBoundary || isStateBoundaryUserKind(userOp.kind());
                     auto itNode = phaseA.opToNode.find(user.operation);
                     if (itNode == phaseA.opToNode.end())
                     {
@@ -2576,10 +2738,24 @@ namespace wolvrix::lib::transform
                 const int32_t width = std::max(1, safeValueWidth(graph, valueId));
                 const std::size_t words = static_cast<std::size_t>((width + 63) / 64);
                 const std::size_t fanoutFactor = std::max<std::size_t>(1, userAscs.size() - 1);
-                totalCommWords += words * fanoutFactor;
+                stats.outSignalCount += 1;
+                stats.outWords += words;
+                stats.fanoutExcess += fanoutFactor;
+                if (width > 64)
+                {
+                    stats.wide64Words += words;
+                }
+                if (width > 256)
+                {
+                    stats.wide256Words += words;
+                }
+                if (touchesStateBoundary)
+                {
+                    stats.stateBoundaryWords += words;
+                }
             }
 
-            return clampToUint32(totalCommWords);
+            return stats;
         }
 
         std::size_t widthToWordCount(int32_t width)
@@ -2885,7 +3061,7 @@ namespace wolvrix::lib::transform
                                    const PhaseBData &phaseB,
                                    std::vector<uint32_t> &nodeWeights,
                                    std::vector<uint32_t> &pieceWeights,
-                                   std::vector<uint32_t> &edgeProxyWeights)
+                                   std::vector<uint32_t> &edgeCutWeights)
         {
             HyperGraph hg;
 
@@ -2897,75 +3073,73 @@ namespace wolvrix::lib::transform
                 (void)calculatePieceWeight(graph, phaseA, phaseB, pid, nodeWeights, pieceWeights);
             }
 
-            edgeProxyWeights.assign(phaseB.pieces.size(), 1u);
+            std::vector<PieceCommStats> pieceCommStats(phaseB.pieces.size());
             for (PieceId pid = 0; pid < phaseB.pieces.size(); ++pid)
             {
-                const double computeWeight = static_cast<double>((pid < pieceWeights.size()) ? pieceWeights[pid] : 1u);
-                const double commWords = static_cast<double>(calculatePieceCommWords(graph, phaseA, phaseB, pid));
-                const double combined = computeWeight + commWords;
-                const std::size_t roundedCombined =
-                    (combined <= 0.0) ? 1u : static_cast<std::size_t>(std::llround(combined));
-                edgeProxyWeights[pid] = std::max<uint32_t>(1u, clampToUint32(roundedCombined));
+                pieceCommStats[pid] = calculatePieceCommStats(graph, phaseA, phaseB, pid);
             }
 
-            std::vector<uint32_t> piecePinCount(phaseB.pieces.size(), 0);
+            std::vector<std::size_t> edgeSignalCounts;
+            std::vector<std::size_t> edgeFanoutExcesses;
+            std::vector<std::size_t> edgeWide64Words;
+            for (PieceId pid = static_cast<PieceId>(phaseB.ascs.size()); pid < phaseB.pieces.size(); ++pid)
+            {
+                if (phaseB.pieceToAscs[pid].empty())
+                {
+                    continue;
+                }
+                edgeSignalCounts.push_back(pieceCommStats[pid].outSignalCount);
+                edgeFanoutExcesses.push_back(pieceCommStats[pid].fanoutExcess);
+                edgeWide64Words.push_back(pieceCommStats[pid].wide64Words);
+            }
+
+            const std::size_t p90SignalCount = percentileThreshold(std::move(edgeSignalCounts), 0.90);
+            const std::size_t p90FanoutExcess = percentileThreshold(std::move(edgeFanoutExcesses), 0.90);
+            const std::size_t p90Wide64Words = percentileThreshold(std::move(edgeWide64Words), 0.90);
+            constexpr std::size_t kMaxCutEdgeWeight = 65535;
+
+            std::vector<uint32_t> balanceWeights(phaseB.pieces.size(), 1u);
+            edgeCutWeights.assign(phaseB.pieces.size(), 1u);
             for (PieceId pid = 0; pid < phaseB.pieces.size(); ++pid)
             {
-                piecePinCount[pid] = static_cast<uint32_t>(phaseB.pieceToAscs[pid].size());
+                const PieceCommStats &stats = pieceCommStats[pid];
+                const double sourceUpdateWeight =
+                    static_cast<double>(stats.outWords) + 0.5 * static_cast<double>(stats.fanoutExcess) +
+                    2.0 * static_cast<double>(stats.stateBoundaryWords);
+                const double balanced =
+                    static_cast<double>((pid < pieceWeights.size()) ? pieceWeights[pid] : 1u) + 0.35 * sourceUpdateWeight;
+                balanceWeights[pid] =
+                    std::max<uint32_t>(1u, clampToUint32(static_cast<std::size_t>(std::llround(std::max(1.0, balanced)))));
+
+                const bool hubBonus =
+                    (p90SignalCount > 0 && stats.outSignalCount >= p90SignalCount) ||
+                    (p90FanoutExcess > 0 && stats.fanoutExcess >= p90FanoutExcess) ||
+                    (p90Wide64Words > 0 && stats.wide64Words >= p90Wide64Words);
+                const std::size_t outWordScore = compressWeightMetric(stats.outWords, 128, 128.0, 32.0);
+                const std::size_t wide64Score = compressWeightMetric(stats.wide64Words, 64, 64.0, 24.0);
+                const std::size_t wide256Score = compressWeightMetric(stats.wide256Words, 32, 32.0, 24.0);
+                const std::size_t fanoutScore = compressWeightMetric(stats.fanoutExcess, 64, 64.0, 24.0);
+                const std::size_t stateBoundaryScore =
+                    compressWeightMetric(stats.stateBoundaryWords, 64, 64.0, 24.0);
+                const std::size_t edgeWeight =
+                    1u + outWordScore + 2u * wide64Score + 4u * wide256Score + 2u * fanoutScore +
+                    3u * stateBoundaryScore + (hubBonus ? 32u : 0u);
+                edgeCutWeights[pid] = std::max<uint32_t>(
+                    1u,
+                    clampToUint32(std::min<std::size_t>(kMaxCutEdgeWeight, edgeWeight)));
             }
 
             hg.nodeWeights.reserve(phaseB.ascs.size());
             for (AscId aid = 0; aid < phaseB.ascs.size(); ++aid)
             {
-                uint32_t weight = (aid < pieceWeights.size()) ? pieceWeights[aid] : 1u;
-
-                std::unordered_set<PieceId> connectPieces;
-                for (const size_t sinkIndex : phaseB.ascs[aid].sinks)
-                {
-                    const SinkRef &sink = phaseB.sinks[sinkIndex];
-                    if (sink.kind != SinkRef::Kind::Operation)
-                    {
-                        continue;
-                    }
-                    auto it = phaseA.opToNode.find(sink.op);
-                    if (it != phaseA.opToNode.end())
-                    {
-                        const PieceId pid = phaseB.nodeToPiece[it->second];
-                        if (pid != kInvalidPiece)
-                        {
-                            connectPieces.insert(pid);
-                        }
-                    }
-                }
-                for (const NodeId node : phaseB.ascs[aid].combOps)
-                {
-                    const PieceId pid = phaseB.nodeToPiece[node];
-                    if (pid != kInvalidPiece)
-                    {
-                        connectPieces.insert(pid);
-                    }
-                }
-                connectPieces.erase(aid);
-
-                uint32_t sharedWeight = 0;
-                for (const PieceId pid : connectPieces)
-                {
-                    const uint32_t pinCount = piecePinCount[pid];
-                    if (pinCount == 0)
-                    {
-                        continue;
-                    }
-                    const uint32_t proxyWeight = (pid < edgeProxyWeights.size()) ? edgeProxyWeights[pid] : 1u;
-                    sharedWeight += std::max(1u, proxyWeight) / pinCount;
-                }
-
-                hg.nodeWeights.push_back(std::max(1u, weight + sharedWeight));
+                const uint32_t weight = (aid < balanceWeights.size()) ? balanceWeights[aid] : 1u;
+                hg.nodeWeights.push_back(std::max(1u, weight));
             }
 
             for (PieceId pid = static_cast<PieceId>(phaseB.ascs.size()); pid < phaseB.pieces.size(); ++pid)
             {
                 HyperGraph::HyperEdge edge;
-                edge.weight = (pid < edgeProxyWeights.size()) ? std::max(1u, edgeProxyWeights[pid]) : 1u;
+                edge.weight = (pid < edgeCutWeights.size()) ? std::max(1u, edgeCutWeights[pid]) : 1u;
                 edge.nodes = phaseB.pieceToAscs[pid];
                 if (!edge.nodes.empty())
                 {
