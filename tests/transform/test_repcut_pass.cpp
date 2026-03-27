@@ -53,6 +53,64 @@ namespace
         return op;
     }
 
+    void populateBasicRepcutDesign(wolvrix::lib::grh::Design &design, const std::string &topName)
+    {
+        wolvrix::lib::grh::Graph &graph = design.createGraph(topName);
+
+        const auto inA = makeValue(graph, "a");
+        const auto inB = makeValue(graph, "b");
+        const auto en = makeValue(graph, "en", 1, false);
+        graph.bindInputPort("a", inA);
+        graph.bindInputPort("b", inB);
+        graph.bindInputPort("en", en);
+
+        const auto shared = makeValue(graph, "shared");
+        makeBinaryOp(graph, wolvrix::lib::grh::OperationKind::kAdd, "shared_add", inA, inB, shared);
+
+        constexpr int kSinkCount = 6;
+        for (int i = 0; i < kSinkCount; ++i)
+        {
+            const std::string suffix = std::to_string(i);
+            const auto datav = makeValue(graph, "wr_data_" + suffix);
+            const auto kind = (i % 2 == 0) ? wolvrix::lib::grh::OperationKind::kAdd
+                                           : wolvrix::lib::grh::OperationKind::kSub;
+            const std::string dataOpName = (i % 2 == 0 ? "sink_add_" : "sink_sub_") + suffix;
+            makeBinaryOp(graph, kind, dataOpName, shared, (i % 2 == 0) ? inA : inB, datav);
+
+            const std::string latchName = "lat_" + suffix;
+            const auto latchDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                                         graph.internSymbol(latchName));
+            graph.setAttr(latchDecl, "width", static_cast<int64_t>(8));
+            graph.setAttr(latchDecl, "isSigned", false);
+
+            const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
+                                                       graph.internSymbol(latchName + "_wr"));
+            graph.addOperand(writeOp, en);
+            graph.addOperand(writeOp, datav);
+            graph.setAttr(writeOp, "latchSymbol", latchName);
+        }
+
+        design.markAsTop(topName);
+    }
+
+    std::filesystem::path findNativePartitionFile(const std::filesystem::path &outDir, std::string_view prefix)
+    {
+        std::error_code ec;
+        for (const auto &entry : std::filesystem::directory_iterator(outDir, ec))
+        {
+            if (ec || !entry.is_regular_file())
+            {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(prefix, 0) == 0)
+            {
+                return entry.path();
+            }
+        }
+        return {};
+    }
+
     const std::string *findRepcutStatsDiagnostic(const PassDiagnostics &diags)
     {
         for (const auto &diag : diags.messages())
@@ -209,41 +267,7 @@ int main()
     return 0;
 #else
     wolvrix::lib::grh::Design design;
-    wolvrix::lib::grh::Graph &graph = design.createGraph("top");
-
-    const auto inA = makeValue(graph, "a");
-    const auto inB = makeValue(graph, "b");
-    const auto en = makeValue(graph, "en", 1, false);
-    graph.bindInputPort("a", inA);
-    graph.bindInputPort("b", inB);
-    graph.bindInputPort("en", en);
-
-    const auto shared = makeValue(graph, "shared");
-    makeBinaryOp(graph, wolvrix::lib::grh::OperationKind::kAdd, "shared_add", inA, inB, shared);
-
-    constexpr int kSinkCount = 6;
-    for (int i = 0; i < kSinkCount; ++i)
-    {
-        const std::string suffix = std::to_string(i);
-        const auto datav = makeValue(graph, "wr_data_" + suffix);
-        const auto kind = (i % 2 == 0) ? wolvrix::lib::grh::OperationKind::kAdd
-                                       : wolvrix::lib::grh::OperationKind::kSub;
-        const std::string dataOpName = (i % 2 == 0 ? "sink_add_" : "sink_sub_") + suffix;
-        makeBinaryOp(graph, kind, dataOpName, shared, (i % 2 == 0) ? inA : inB, datav);
-
-        const std::string latchName = "lat_" + suffix;
-        const auto latchDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
-                                                     graph.internSymbol(latchName));
-        graph.setAttr(latchDecl, "width", static_cast<int64_t>(8));
-        graph.setAttr(latchDecl, "isSigned", false);
-
-        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatchWritePort,
-                                                   graph.internSymbol(latchName + "_wr"));
-        graph.addOperand(writeOp, en);
-        graph.addOperand(writeOp, datav);
-        graph.setAttr(writeOp, "latchSymbol", latchName);
-    }
-    design.markAsTop("top");
+    populateBasicRepcutDesign(design, "top");
 
     const std::filesystem::path outDir = std::filesystem::path(WOLF_SV_TEST_ARTIFACT_DIR) / "repcut_test";
     std::error_code ec;
@@ -266,6 +290,99 @@ int main()
     options.keepIntermediateFiles = true;
     manager.addPass(std::make_unique<RepcutPass>(options));
 
+    wolvrix::lib::grh::Design deterministicDesign1;
+    wolvrix::lib::grh::Design deterministicDesign2;
+    populateBasicRepcutDesign(deterministicDesign1, "top_repeat");
+    populateBasicRepcutDesign(deterministicDesign2, "top_repeat");
+
+    const std::filesystem::path deterministicOutDir1 = outDir / "deterministic_run1";
+    const std::filesystem::path deterministicOutDir2 = outDir / "deterministic_run2";
+    std::filesystem::create_directories(deterministicOutDir1, ec);
+    std::filesystem::create_directories(deterministicOutDir2, ec);
+    if (ec)
+    {
+        return fail("failed to create deterministic output directories under: " + outDir.string());
+    }
+
+    RepcutOptions deterministicOptions;
+    deterministicOptions.path = "top_repeat";
+    deterministicOptions.partitionCount = 2;
+    deterministicOptions.imbalanceFactor = 1.0;
+    deterministicOptions.partitioner = "mt-kahypar";
+    deterministicOptions.mtKaHyParPreset = "quality";
+    deterministicOptions.mtKaHyParThreads = 0;
+    deterministicOptions.keepIntermediateFiles = true;
+
+    auto runDeterministicCapture = [&](wolvrix::lib::grh::Design &currentDesign,
+                                       const std::filesystem::path &currentOutDir,
+                                       std::vector<std::string> &logs) -> int {
+        PassManager currentManager;
+        currentManager.options().verbosity = PassVerbosity::Info;
+        currentManager.options().logLevel = wolvrix::lib::LogLevel::Info;
+        currentManager.options().logSink = [&](wolvrix::lib::LogLevel, std::string_view, std::string_view message) {
+            logs.emplace_back(message);
+        };
+
+        RepcutOptions currentOptions = deterministicOptions;
+        currentOptions.workDir = currentOutDir.string();
+        currentManager.addPass(std::make_unique<RepcutPass>(currentOptions));
+
+        PassDiagnostics currentDiags;
+        PassManagerResult currentResult{};
+        try
+        {
+            currentResult = currentManager.run(currentDesign, currentDiags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("deterministic repcut exception: ") + ex.what());
+        }
+        if (!currentResult.success && !currentDiags.hasError())
+        {
+            return fail("deterministic repcut reported failure without diagnostics");
+        }
+        return 0;
+    };
+
+    std::vector<std::string> deterministicLogs1;
+    std::vector<std::string> deterministicLogs2;
+    if (const int rc = runDeterministicCapture(deterministicDesign1, deterministicOutDir1, deterministicLogs1); rc != 0)
+    {
+        return rc;
+    }
+    if (const int rc = runDeterministicCapture(deterministicDesign2, deterministicOutDir2, deterministicLogs2); rc != 0)
+    {
+        return rc;
+    }
+
+    bool sawDeterministicOverride = false;
+    for (const auto &message : deterministicLogs1)
+    {
+        if (message.find("effective_preset_token=deterministic-quality") != std::string::npos &&
+            message.find("overridden=true") != std::string::npos)
+        {
+            sawDeterministicOverride = true;
+            break;
+        }
+    }
+    if (!sawDeterministicOverride)
+    {
+        return fail("expected quality preset to be resolved to deterministic-quality");
+    }
+
+    const std::filesystem::path deterministicPart1 =
+        findNativePartitionFile(deterministicOutDir1, "top_repeat_repcut_k2.hgr.part");
+    const std::filesystem::path deterministicPart2 =
+        findNativePartitionFile(deterministicOutDir2, "top_repeat_repcut_k2.hgr.part");
+    if (deterministicPart1.empty() || deterministicPart2.empty())
+    {
+        return fail("expected deterministic repcut runs to emit native partition files");
+    }
+    if (readFile(deterministicPart1) != readFile(deterministicPart2))
+    {
+        return fail("expected repeated repcut runs to emit identical mt-kahypar partition files");
+    }
+
     PassDiagnostics diags;
     PassManagerResult result{};
     try
@@ -277,23 +394,8 @@ int main()
         return fail(std::string("exception during repcut run: ") + ex.what());
     }
 
-    std::vector<std::filesystem::path> nativePartFiles;
-    {
-        std::error_code ec2;
-        for (const auto &entry : std::filesystem::directory_iterator(outDir, ec2))
-        {
-            if (ec2 || !entry.is_regular_file())
-            {
-                continue;
-            }
-            const std::string name = entry.path().filename().string();
-            if (name.rfind("top_repcut_k2.hgr.part", 0) == 0)
-            {
-                nativePartFiles.push_back(entry.path());
-            }
-        }
-    }
-    if (nativePartFiles.empty())
+    const std::filesystem::path nativePartFile = findNativePartitionFile(outDir, "top_repcut_k2.hgr.part");
+    if (nativePartFile.empty())
     {
         return fail("expected native mt-kahypar partition output file");
     }

@@ -16,7 +16,7 @@ namespace wolvrix::lib::transform
         double imbalanceFactor = 0.015;
         std::string workDir = ".";
         std::string partitioner = "mt-kahypar";
-        std::string mtKaHyParPreset = "quality";
+        std::string mtKaHyParPreset = "deterministic-quality";
         std::size_t mtKaHyParThreads = 0;
         bool keepIntermediateFiles = false;
     };

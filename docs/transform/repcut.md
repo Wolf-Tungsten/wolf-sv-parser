@@ -66,7 +66,7 @@
 | `-imbalance-factor` | `0.015` | 分区不平衡因子 |
 | `-work-dir` | `.` | 中间文件输出目录 |
 | `-partitioner` | `mt-kahypar` | 分区后端 |
-| `-mtkahypar-preset` | `quality` | mt-kahypar 预设 |
+| `-mtkahypar-preset` | `deterministic-quality` | mt-kahypar 预设；`repcut` 会强制使用确定性 preset |
 | `-mtkahypar-threads` | `0` | 线程数，`0` 表示后端默认 |
 | `-keep-intermediate-files` | false | 是否保留中间文件 |
 
@@ -96,6 +96,7 @@ wolvrix --pass=repcut:-path=SimTop.logic_part:-partition-count=32 input.json
 ## 注意事项
 
 - 多段路径按实例名解析，不按模块名解析
+- `-mtkahypar-preset=quality` / `highest-quality` 会映射到 `deterministic-quality`，`default` 会映射到 `deterministic`；`large-k` 不再适用于 `repcut`
 - 该 pass 只分区目标 graph 一层，不会继续递归分区其内部实例
 - 若目标 graph 原来是 top graph，重建后会重新标记为 top；否则不会改变 top 集合
 - 分区数上限当前为 `4096`

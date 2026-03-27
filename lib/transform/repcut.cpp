@@ -3452,33 +3452,43 @@ namespace wolvrix::lib::transform
         }
 
 #if WOLVRIX_HAVE_MT_KAHYPAR
-        std::optional<mt_kahypar_preset_type_t> parseMtKaHyParPreset(std::string_view presetText)
+        struct ResolvedMtKaHyParPreset
+        {
+            mt_kahypar_preset_type_t preset = DETERMINISTIC_QUALITY;
+            std::string requestedToken;
+            std::string effectiveToken;
+            bool overridden = false;
+        };
+
+        std::optional<ResolvedMtKaHyParPreset> resolveMtKaHyParPreset(std::string_view presetText)
         {
             const std::string normalized = normalizeBackendToken(presetText);
-            if (normalized.empty() || normalized == "quality")
+
+            if (normalized.empty() || normalized == "quality" || normalized == "highest-quality")
             {
-                return QUALITY;
+                return ResolvedMtKaHyParPreset{
+                    DETERMINISTIC_QUALITY,
+                    normalized,
+                    "deterministic-quality",
+                    normalized != "deterministic-quality"};
             }
-            if (normalized == "default")
+            if (normalized == "default" || normalized == "deterministic")
             {
-                return DEFAULT;
-            }
-            if (normalized == "highest-quality")
-            {
-                return HIGHEST_QUALITY;
-            }
-            if (normalized == "deterministic")
-            {
-                return DETERMINISTIC;
+                return ResolvedMtKaHyParPreset{
+                    DETERMINISTIC,
+                    normalized,
+                    "deterministic",
+                    normalized != "deterministic"};
             }
             if (normalized == "deterministic-quality")
             {
-                return DETERMINISTIC_QUALITY;
+                return ResolvedMtKaHyParPreset{
+                    DETERMINISTIC_QUALITY,
+                    normalized,
+                    "deterministic-quality",
+                    false};
             }
-            if (normalized == "large-k")
-            {
-                return LARGE_K;
-            }
+
             return std::nullopt;
         }
 
@@ -3566,20 +3576,31 @@ namespace wolvrix::lib::transform
                         << " k=" << request.partitionCount
                         << " imbalance_factor=" << toFixedString(request.imbalanceFactor, 6)
                         << " asc_count=" << request.ascCount
-                        << " preset_token=" << request.preset
+                        << " requested_preset_token=" << request.preset
                         << " requested_threads=" << request.threadCount;
                     addBackendLog(oss.str());
                 }
-                const std::optional<mt_kahypar_preset_type_t> preset = parseMtKaHyParPreset(request.preset);
-                if (!preset)
+                const std::optional<ResolvedMtKaHyParPreset> resolvedPreset = resolveMtKaHyParPreset(request.preset);
+                if (!resolvedPreset)
                 {
                     response.errorKind = PartitionBackendErrorKind::kInvalidConfig;
-                    response.errorMessage = "unsupported mt-kahypar preset: " + std::string(request.preset);
+                    response.errorMessage =
+                        "unsupported mt-kahypar preset for deterministic repcut: " + std::string(request.preset);
                     return false;
                 }
-                addBackendLog("context_from_preset preset_enum=" + std::to_string(static_cast<int>(*preset)));
+                {
+                    std::ostringstream oss;
+                    oss << "resolved_preset requested_token="
+                        << (resolvedPreset->requestedToken.empty() ? std::string("<empty>") : resolvedPreset->requestedToken)
+                        << " effective_preset_token=" << resolvedPreset->effectiveToken
+                        << " overridden=" << (resolvedPreset->overridden ? "true" : "false");
+                    addBackendLog(oss.str());
+                }
+                addBackendLog("context_from_preset preset_enum=" +
+                              std::to_string(static_cast<int>(resolvedPreset->preset)));
 
                 static std::once_flag initOnce;
+                static std::size_t initializedThreadCount = 0;
                 std::size_t threadCount = request.threadCount;
                 if (threadCount == 0)
                 {
@@ -3592,14 +3613,22 @@ namespace wolvrix::lib::transform
                 bool initializedThisRun = false;
                 std::call_once(initOnce, [&]() {
                     mt_kahypar_initialize(threadCount, false);
+                    initializedThreadCount = threadCount;
                     initializedThisRun = true;
                 });
+                const std::size_t activeThreadCount = initializedThreadCount == 0 ? threadCount : initializedThreadCount;
                 {
                     std::ostringstream oss;
-                    oss << "initialize threads=" << threadCount
+                    oss << "initialize requested_threads=" << threadCount
+                        << " active_threads=" << activeThreadCount
                         << " interleaved_numa=false"
                         << " initialized_this_run=" << (initializedThisRun ? "true" : "false");
                     addBackendLog(oss.str());
+                }
+                if (!initializedThisRun && threadCount != activeThreadCount)
+                {
+                    addBackendLog("thread_pool_reuse requested_threads=" + std::to_string(threadCount) +
+                                  " active_threads=" + std::to_string(activeThreadCount));
                 }
 
                 mt_kahypar_context_t *context = nullptr;
@@ -3624,7 +3653,7 @@ namespace wolvrix::lib::transform
                 };
 
                 mt_kahypar_error_t mtError{};
-                context = mt_kahypar_context_from_preset(*preset);
+                context = mt_kahypar_context_from_preset(resolvedPreset->preset);
                 if (context == nullptr)
                 {
                     response.errorKind = PartitionBackendErrorKind::kExecutionFailed;
