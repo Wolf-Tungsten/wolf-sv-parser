@@ -2577,8 +2577,20 @@ namespace wolvrix::lib::emit
                 case wolvrix::lib::grh::OperationKind::kXnor:
                     if (ops.size() >= 2)
                     {
+                        int64_t resultWidth = graph->valueWidth(valueId);
+                        if (resultWidth <= 0)
+                        {
+                            resultWidth = std::max(graph->valueWidth(ops[0]),
+                                                   graph->valueWidth(ops[1]));
+                        }
                         const std::string tok = binOpToken(defOp.kind());
-                        expr = inlineExpr.valueExpr(ops[0]) + " " + tok + " " + inlineExpr.valueExpr(ops[1]);
+                        const std::string lhs = resultWidth > 0
+                                                    ? inlineExpr.extendOperand(ops[0], resultWidth)
+                                                    : inlineExpr.valueExpr(ops[0]);
+                        const std::string rhs = resultWidth > 0
+                                                    ? inlineExpr.extendOperand(ops[1], resultWidth)
+                                                    : inlineExpr.valueExpr(ops[1]);
+                        expr = lhs + " " + tok + " " + rhs;
                     }
                     break;
                 case wolvrix::lib::grh::OperationKind::kShl:
@@ -3689,10 +3701,20 @@ namespace wolvrix::lib::emit
                         reportError("Binary operation missing operands or results", opContext);
                         break;
                     }
+                    int64_t resultWidth = graph->valueWidth(results[0]);
+                    if (resultWidth <= 0)
+                    {
+                        resultWidth = std::max(graph->valueWidth(operands[0]),
+                                               graph->valueWidth(operands[1]));
+                    }
                     const std::string tok = binOpToken(op.kind());
-                    addValueAssign(results[0],
-                                   valueExpr(operands[0]) + " " + tok + " " + valueExpr(operands[1]),
-                                   opId);
+                    const std::string lhs = resultWidth > 0
+                                                ? baseExpr.extendOperand(operands[0], resultWidth)
+                                                : valueExpr(operands[0]);
+                    const std::string rhs = resultWidth > 0
+                                                ? baseExpr.extendOperand(operands[1], resultWidth)
+                                                : valueExpr(operands[1]);
+                    addValueAssign(results[0], lhs + " " + tok + " " + rhs, opId);
                     ensureWireDecl(results[0]);
                     break;
                 }

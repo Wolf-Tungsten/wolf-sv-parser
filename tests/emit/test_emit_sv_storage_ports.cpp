@@ -53,6 +53,8 @@ Design buildDesign()
     const auto dataMask = graph.createValue(graph.internSymbol("data_mask"), 8, false);
     const auto latchEn = graph.createValue(graph.internSymbol("latch_en"), 1, false);
     const auto latchData = graph.createValue(graph.internSymbol("latch_data"), 4, false);
+    const auto wideData = graph.createValue(graph.internSymbol("wide_data"), 32, false);
+    const auto narrowMask = graph.createValue(graph.internSymbol("narrow_mask"), 3, false);
 
     graph.bindInputPort("clk", clk);
     graph.bindInputPort("en", en);
@@ -60,6 +62,8 @@ Design buildDesign()
     graph.bindInputPort("data_mask", dataMask);
     graph.bindInputPort("latch_en", latchEn);
     graph.bindInputPort("latch_data", latchData);
+    graph.bindInputPort("wide_data", wideData);
+    graph.bindInputPort("narrow_mask", narrowMask);
 
     const auto fullMask = addConstant(graph, "mask_full", 8, "8'hFF");
     const auto halfMask = addConstant(graph, "mask_half", 8, "8'h0F");
@@ -94,6 +98,15 @@ Design buildDesign()
         graph.createValue(graph.internSymbol("lat_q"), 4, false);
     graph.addResult(latchRead, latchReadValue);
     graph.setAttr(latchRead, "latchSymbol", std::string("lat_a"));
+
+    const auto maskedNarrowOp = graph.createOperation(OperationKind::kAnd,
+                                                      graph.internSymbol("_op_emit_masked_narrow"));
+    const auto maskedNarrow =
+        graph.createValue(graph.internSymbol("masked_narrow"), 3, false);
+    graph.addOperand(maskedNarrowOp, wideData);
+    graph.addOperand(maskedNarrowOp, narrowMask);
+    graph.addResult(maskedNarrowOp, maskedNarrow);
+    graph.bindOutputPort("masked_narrow", maskedNarrow);
 
     const auto regWrite = graph.createOperation(OperationKind::kRegisterWritePort,
                                                 graph.internSymbol("_op_emit_reg_write"));
@@ -200,6 +213,10 @@ int main()
     if (output.find("lat_a = latch_data;") == std::string::npos)
     {
         return fail("Missing latch write");
+    }
+    if (output.find("assign masked_narrow = wide_data[2:0] & narrow_mask;") == std::string::npos)
+    {
+        return fail("Missing width-trimmed bitwise and emit");
     }
 
     return 0;

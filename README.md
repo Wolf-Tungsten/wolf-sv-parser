@@ -17,13 +17,13 @@ cmake -S wolvrix -B wolvrix/build
 cmake --build wolvrix/build -j$(nproc)
 ```
 
-The resulting binary will be available at `wolvrix/build/bin/wolvrix`.
+The resulting binary will be available at `wolvrix/build/bin/wolvrix`. This CMake flow builds the native library, CLI, and tests. Python installation is handled separately through `pip` + `scikit-build-core`.
 
 ## Python Bindings (primary usage)
 
 ```bash
-# Install editable package (from repo root)
-python3 -m pip install -e wolvrix
+# Install editable package (from repo root) via scikit-build-core
+python3 -m pip install --no-build-isolation -e wolvrix
 
 # Basic template (bindings + run_pipeline)
 python3 - <<'PY'

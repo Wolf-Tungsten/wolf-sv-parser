@@ -137,8 +137,20 @@ target_compile_definitions(wolvrix-lib
 
 add_library(wolvrix::lib ALIAS wolvrix-lib)
 
-option(WOLVRIX_BUILD_PYTHON "Build Python bindings" OFF)
-if (WOLVRIX_BUILD_PYTHON)
+if (DEFINED WOLVRIX_BUILD_PYTHON AND WOLVRIX_BUILD_PYTHON)
+    message(WARNING
+        "WOLVRIX_BUILD_PYTHON is ignored. "
+        "Install wolvrix into Python with `python -m pip install -e wolvrix --no-build-isolation`, "
+        "which builds the bindings via scikit-build-core."
+    )
+endif()
+
+set(WOLVRIX_BUILD_PYTHON_PACKAGE OFF)
+if (DEFINED SKBUILD_PLATLIB_DIR OR DEFINED SKBUILD_PURELIB_DIR)
+    set(WOLVRIX_BUILD_PYTHON_PACKAGE ON)
+endif()
+
+if (WOLVRIX_BUILD_PYTHON_PACKAGE)
     find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
     set(WOLVRIX_PYTHON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/app/pybind")
