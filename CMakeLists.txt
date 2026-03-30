@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.26)
 project(wolvrix VERSION 0.1.0 LANGUAGES CXX)
 
 find_package(Git QUIET)
@@ -45,34 +45,30 @@ file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 
 add_subdirectory(external/slang)
 
-option(WOLVRIX_ENABLE_MT_KAHYPAR "Enable mt-kahypar backend for repcut" ON)
+option(WOLVRIX_MTKAHYPAR_BUILD_SHARED "Build vendored mt-kahypar as a shared library" OFF)
 set(WOLVRIX_HAVE_MT_KAHYPAR 0)
-set(WOLVRIX_MTKAHYPAR_ROOT "" CACHE PATH "Root directory of an installed mt-kahypar")
-if (WOLVRIX_ENABLE_MT_KAHYPAR)
-    set(WOLVRIX_MTKAHYPAR_HINT_DIRS)
-    if (WOLVRIX_MTKAHYPAR_ROOT)
-        list(APPEND WOLVRIX_MTKAHYPAR_HINT_DIRS "${WOLVRIX_MTKAHYPAR_ROOT}")
-    endif()
-    if (DEFINED ENV{MTKAHYPAR_ROOT} AND NOT "$ENV{MTKAHYPAR_ROOT}" STREQUAL "")
-        list(APPEND WOLVRIX_MTKAHYPAR_HINT_DIRS "$ENV{MTKAHYPAR_ROOT}")
-    endif()
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/mt-kahypar/CMakeLists.txt")
+    block(SCOPE_FOR VARIABLES)
+        set(BUILD_SHARED_LIBS ${WOLVRIX_MTKAHYPAR_BUILD_SHARED})
+        set(KAHYPAR_PYTHON OFF)
+        set(KAHYPAR_ENABLE_TESTING OFF)
+        set(KAHYPAR_INSTALL_CLI OFF)
+        set(KAHYPAR_BUILD_DEBIAN_PACKAGE OFF)
+        if (NOT DEFINED KAHYPAR_DOWNLOAD_TBB)
+            set(KAHYPAR_DOWNLOAD_TBB ON)
+        endif()
+        if (NOT DEFINED KAHYPAR_DISABLE_HWLOC)
+            set(KAHYPAR_DISABLE_HWLOC ON)
+        endif()
+        add_subdirectory(external/mt-kahypar EXCLUDE_FROM_ALL)
+    endblock()
+endif()
 
-    find_path(WOLVRIX_MTKAHYPAR_INCLUDE_DIR
-        NAMES mtkahypar.h
-        HINTS ${WOLVRIX_MTKAHYPAR_HINT_DIRS}
-        PATH_SUFFIXES include
-    )
-    find_library(WOLVRIX_MTKAHYPAR_LIBRARY
-        NAMES mtkahypar libmtkahypar
-        HINTS ${WOLVRIX_MTKAHYPAR_HINT_DIRS}
-        PATH_SUFFIXES lib lib64
-    )
-    if (WOLVRIX_MTKAHYPAR_INCLUDE_DIR AND WOLVRIX_MTKAHYPAR_LIBRARY)
-        set(WOLVRIX_HAVE_MT_KAHYPAR 1)
-        message(STATUS "MtKaHyPar enabled: ${WOLVRIX_MTKAHYPAR_LIBRARY}")
-    else()
-        message(WARNING "MtKaHyPar not found; repcut mt-kahypar backend will be unavailable")
-    endif()
+if (TARGET MtKaHyPar::mtkahypar)
+    set(WOLVRIX_HAVE_MT_KAHYPAR 1)
+    message(STATUS "MtKaHyPar enabled from vendored source")
+else()
+    message(WARNING "Vendored MtKaHyPar not available; repcut mt-kahypar backend will be unavailable")
 endif()
 
 # Libraries
@@ -120,19 +116,19 @@ target_link_libraries(wolvrix-lib
 )
 
 if (WOLVRIX_HAVE_MT_KAHYPAR)
-    target_include_directories(wolvrix-lib
-        PRIVATE
-            "${WOLVRIX_MTKAHYPAR_INCLUDE_DIR}"
-    )
     target_link_libraries(wolvrix-lib
         PRIVATE
-            "${WOLVRIX_MTKAHYPAR_LIBRARY}"
+            MtKaHyPar::mtkahypar
     )
 endif()
 
 target_compile_definitions(wolvrix-lib
     PUBLIC
         WOLVRIX_HAVE_MT_KAHYPAR=${WOLVRIX_HAVE_MT_KAHYPAR}
+)
+set_target_properties(wolvrix-lib PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN"
 )
 
 add_library(wolvrix::lib ALIAS wolvrix-lib)
@@ -196,6 +192,18 @@ if (WOLVRIX_BUILD_PYTHON_PACKAGE)
         LIBRARY DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
         RUNTIME DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
     )
+    if (WOLVRIX_HAVE_MT_KAHYPAR AND WOLVRIX_MTKAHYPAR_BUILD_SHARED)
+        install(TARGETS mtkahypar
+            LIBRARY DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+            RUNTIME DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+        )
+    endif()
+    if (WOLVRIX_HAVE_MT_KAHYPAR AND TARGET tbb AND TARGET tbbmalloc)
+        install(TARGETS tbb tbbmalloc
+            LIBRARY DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+            RUNTIME DESTINATION "${WOLVRIX_PYTHON_PLATLIB_DIR}/wolvrix"
+        )
+    endif()
 endif()
 
 enable_testing()

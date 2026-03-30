@@ -17,7 +17,7 @@ cmake -S wolvrix -B wolvrix/build
 cmake --build wolvrix/build -j$(nproc)
 ```
 
-The resulting binary will be available at `wolvrix/build/bin/wolvrix`. This CMake flow builds the native library, CLI, and tests. Python installation is handled separately through `pip` + `scikit-build-core`.
+This flow requires CMake 3.26+ because the vendored `external/mt-kahypar` build is wired directly into the top-level project. The resulting binary will be available at `wolvrix/build/bin/wolvrix`. This CMake flow builds the native library, CLI, tests, and the vendored `mt-kahypar` backend used by `repcut`. By default, the vendored `mt-kahypar` build downloads its TBB dependency during configure and disables `hwloc` integration unless you override the upstream `KAHYPAR_*` options. Python installation is handled separately through `pip` + `scikit-build-core`.
 
 ## Python Bindings (primary usage)
 
