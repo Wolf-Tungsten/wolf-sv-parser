@@ -2,6 +2,9 @@
 requires = ["scikit-build-core>=0.7"]
 build-backend = "scikit_build_core.build"
 
+[tool.scikit-build]
+build-dir = "build/skbuild"
+
 [project]
 name = "wolvrix"
 version = "0.1.0"
