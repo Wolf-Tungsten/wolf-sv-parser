@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <set>
 #include <span>
@@ -371,8 +372,12 @@ namespace wolvrix::lib::transform
             }
         }
 
-        std::optional<int64_t> getConstIntValue(const Graph &graph, ValueId valueId)
+        std::optional<uint64_t> getConstUintValue(const Graph &graph, ValueId valueId, int depth)
         {
+            if (depth <= 0)
+            {
+                return std::nullopt;
+            }
             if (!valueId.valid())
             {
                 return std::nullopt;
@@ -384,20 +389,112 @@ namespace wolvrix::lib::transform
                 return std::nullopt;
             }
             const Operation defOp = graph.getOperation(defId);
-            if (defOp.kind() != OperationKind::kConstant)
+            switch (defOp.kind())
+            {
+            case OperationKind::kConstant:
+            {
+                auto attr = defOp.attr("constValue");
+                if (!attr)
+                {
+                    return std::nullopt;
+                }
+                if (const auto *literal = std::get_if<std::string>(&*attr))
+                {
+                    auto parsed = parseConstIntLiteral(*literal);
+                    if (!parsed || *parsed < 0)
+                    {
+                        return std::nullopt;
+                    }
+                    return static_cast<uint64_t>(*parsed);
+                }
+                return std::nullopt;
+            }
+            case OperationKind::kAssign:
+            {
+                const auto &operands = defOp.operands();
+                if (operands.size() != 1 || !operands[0].valid())
+                {
+                    return std::nullopt;
+                }
+                return getConstUintValue(graph, operands[0], depth - 1);
+            }
+            case OperationKind::kSliceStatic:
+            {
+                const auto &operands = defOp.operands();
+                if (operands.size() != 1 || !operands[0].valid())
+                {
+                    return std::nullopt;
+                }
+                auto startOpt = getIntAttr(defOp, "sliceStart");
+                auto endOpt = getIntAttr(defOp, "sliceEnd");
+                if (!startOpt || !endOpt)
+                {
+                    return std::nullopt;
+                }
+                const int64_t low = std::min(*startOpt, *endOpt);
+                const int64_t high = std::max(*startOpt, *endOpt);
+                const int64_t width = high - low + 1;
+                if (low < 0 || width <= 0 || width > 63)
+                {
+                    return std::nullopt;
+                }
+                auto baseValue = getConstUintValue(graph, operands[0], depth - 1);
+                if (!baseValue)
+                {
+                    return std::nullopt;
+                }
+                const uint64_t shifted = (*baseValue >> static_cast<uint64_t>(low));
+                const uint64_t mask = (uint64_t(1) << static_cast<uint64_t>(width)) - 1u;
+                return shifted & mask;
+            }
+            case OperationKind::kConcat:
+            {
+                const auto &operands = defOp.operands();
+                if (operands.empty())
+                {
+                    return std::nullopt;
+                }
+                uint64_t acc = 0;
+                int totalWidth = 0;
+                for (ValueId operand : operands)
+                {
+                    if (!operand.valid())
+                    {
+                        return std::nullopt;
+                    }
+                    const int64_t width = graph.getValue(operand).width();
+                    if (width <= 0 || width > 63 || totalWidth + static_cast<int>(width) > 63)
+                    {
+                        return std::nullopt;
+                    }
+                    auto part = getConstUintValue(graph, operand, depth - 1);
+                    if (!part)
+                    {
+                        return std::nullopt;
+                    }
+                    const uint64_t mask = (uint64_t(1) << static_cast<uint64_t>(width)) - 1u;
+                    acc = (acc << static_cast<uint64_t>(width)) | (*part & mask);
+                    totalWidth += static_cast<int>(width);
+                }
+                return acc;
+            }
+            default:
+                return std::nullopt;
+            }
+        }
+
+        std::optional<int64_t> getConstIntValue(const Graph &graph, ValueId valueId)
+        {
+            auto value = getConstUintValue(graph, valueId, 32);
+            if (!value)
             {
                 return std::nullopt;
             }
-            auto attr = defOp.attr("constValue");
-            if (!attr)
+            if (*value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
             {
                 return std::nullopt;
             }
-            if (const auto *literal = std::get_if<std::string>(&*attr))
-            {
-                return parseConstIntLiteral(*literal);
-            }
-            return std::nullopt;
+            return static_cast<int64_t>(*value);
         }
 
         bool rangeWithin(const BitRange &inner, const BitRange &outer)
@@ -654,8 +751,8 @@ namespace wolvrix::lib::transform
                         uncertain = true;
                         return false;
                     }
-                    BitRange sliceRange{*startOpt, *endOpt};
-                    if (sliceRange.low < 0 || sliceRange.high < sliceRange.low ||
+                    BitRange sliceRange{std::min(*startOpt, *endOpt), std::max(*startOpt, *endOpt)};
+                    if (sliceRange.low < 0 ||
                         !rangeWithin(sliceRange, baseRange))
                     {
                         uncertain = true;
@@ -1436,6 +1533,37 @@ namespace wolvrix::lib::transform
                     edges.push_back(MappingEdge{operands[0], resultId, sliceLow, 0, sliceWidth});
                     break;
                 }
+                case OperationKind::kSliceDynamic:
+                {
+                    if (operands.size() < 2 || !operands[0].valid() || !operands[1].valid())
+                    {
+                        return false;
+                    }
+                    auto widthOpt = getIntAttr(op, "sliceWidth");
+                    auto indexOpt = getConstIntValue(graph, operands[1]);
+                    if (!widthOpt || !indexOpt)
+                    {
+                        return false;
+                    }
+                    const int64_t sliceWidth = *widthOpt;
+                    const int64_t sliceLow = *indexOpt;
+                    const int64_t sliceHigh = sliceLow + sliceWidth - 1;
+                    if (sliceWidth <= 0 || sliceLow < 0 || sliceHigh < sliceLow)
+                    {
+                        return false;
+                    }
+                    const int64_t operandWidth = graph.getValue(operands[0]).width();
+                    if (sliceHigh >= operandWidth)
+                    {
+                        return false;
+                    }
+                    if (sliceWidth != resultWidth)
+                    {
+                        return false;
+                    }
+                    edges.push_back(MappingEdge{operands[0], resultId, sliceLow, 0, sliceWidth});
+                    break;
+                }
                 case OperationKind::kConcat:
                 {
                     if (operands.empty())
@@ -1651,11 +1779,23 @@ namespace wolvrix::lib::transform
                 ValueId result;
             };
 
+            struct CustomRewrite
+            {
+                OperationKind kind;
+                std::vector<ValueId> operands;
+                ValueId result;
+                std::vector<BitRange> resultSegments;
+                std::optional<SrcLoc> srcLoc;
+            };
+
             std::unordered_map<OperationId, std::vector<std::pair<ValueId, ValueId>>, OperationIdHash> opPairs;
             std::unordered_map<OperationId, std::vector<SegmentOp>, OperationIdHash> segmentOps;
+            std::unordered_map<OperationId, CustomRewrite, OperationIdHash> customOps;
             opPairs.reserve(loop.loopOps.size());
             segmentOps.reserve(loop.loopOps.size());
+            customOps.reserve(loop.loopOps.size());
             std::unordered_set<ValueId, ValueIdHash> definedFragments;
+            opsRewritten = 0;
 
             auto getFragment = [&](ValueId valueId, const BitRange &range) -> std::optional<ValueId>
             {
@@ -1665,6 +1805,44 @@ namespace wolvrix::lib::transform
                     auto it = fragmentMap.find(RangeNode{valueId, range});
                     if (it == fragmentMap.end())
                     {
+                        const auto segIt = segments.find(valueId);
+                        if (segIt == segments.end())
+                        {
+                            return std::nullopt;
+                        }
+                        for (const auto &seg : segIt->second)
+                        {
+                            if (!rangeWithin(range, seg))
+                            {
+                                continue;
+                            }
+                            auto segFragIt = fragmentMap.find(RangeNode{valueId, seg});
+                            if (segFragIt == fragmentMap.end())
+                            {
+                                return std::nullopt;
+                            }
+                            if (range.low == seg.low && range.high == seg.high)
+                            {
+                                return segFragIt->second;
+                            }
+                            const int64_t width = range.high - range.low + 1;
+                            if (width <= 0)
+                            {
+                                return std::nullopt;
+                            }
+                            const int64_t localLow = range.low - seg.low;
+                            const int64_t localHigh = range.high - seg.low;
+                            OperationId sliceOp = graph.createOperation(OperationKind::kSliceStatic);
+                            graph.addOperand(sliceOp, segFragIt->second);
+                            graph.setAttr(sliceOp, "sliceStart", localLow);
+                            graph.setAttr(sliceOp, "sliceEnd", localHigh);
+                            ValueId frag = graph.createValue(static_cast<int32_t>(width),
+                                                             graph.getValue(valueId).isSigned(),
+                                                             graph.getValue(valueId).type());
+                            graph.addResult(sliceOp, frag);
+                            fragmentMap.emplace(RangeNode{valueId, range}, frag);
+                            return frag;
+                        }
                         return std::nullopt;
                     }
                     return it->second;
@@ -1699,6 +1877,59 @@ namespace wolvrix::lib::transform
                 return frag;
             };
 
+            std::unordered_map<ValueId, ValueId, ValueIdHash> fullViewCache;
+            auto getFullView = [&](ValueId valueId) -> std::optional<ValueId>
+            {
+                if (loopSet.find(valueId) == loopSet.end())
+                {
+                    return valueId;
+                }
+                auto cached = fullViewCache.find(valueId);
+                if (cached != fullViewCache.end())
+                {
+                    return cached->second;
+                }
+                const auto segIt = segments.find(valueId);
+                if (segIt == segments.end())
+                {
+                    return std::nullopt;
+                }
+                std::vector<std::pair<BitRange, ValueId>> ordered;
+                ordered.reserve(segIt->second.size());
+                for (const auto &seg : segIt->second)
+                {
+                    auto frag = getFragment(valueId, seg);
+                    if (!frag)
+                    {
+                        return std::nullopt;
+                    }
+                    ordered.push_back(std::make_pair(seg, *frag));
+                }
+                std::sort(ordered.begin(), ordered.end(),
+                          [](const auto &lhs, const auto &rhs) {
+                              if (lhs.first.high != rhs.first.high)
+                              {
+                                  return lhs.first.high > rhs.first.high;
+                              }
+                              return lhs.first.low > rhs.first.low;
+                          });
+                if (ordered.size() == 1)
+                {
+                    fullViewCache.emplace(valueId, ordered.front().second);
+                    return ordered.front().second;
+                }
+                OperationId concatOp = graph.createOperation(OperationKind::kConcat);
+                for (const auto &entry : ordered)
+                {
+                    graph.addOperand(concatOp, entry.second);
+                }
+                const Value value = graph.getValue(valueId);
+                ValueId fullView = graph.createValue(value.width(), value.isSigned(), value.type());
+                graph.addResult(concatOp, fullView);
+                fullViewCache.emplace(valueId, fullView);
+                return fullView;
+            };
+
             auto addPair = [&](OperationId opId, ValueId srcFrag, ValueId dstFrag) -> bool
             {
                 if (!srcFrag.valid() || !dstFrag.valid())
@@ -1710,6 +1941,87 @@ namespace wolvrix::lib::transform
                     return false;
                 }
                 opPairs[opId].push_back(std::make_pair(srcFrag, dstFrag));
+                return true;
+            };
+
+            auto rewriteOp = [&](OperationId opId,
+                                 OperationKind kind,
+                                 const std::vector<ValueId> &operands,
+                                 ValueId result) -> bool
+            {
+                const Operation op = graph.getOperation(opId);
+                try
+                {
+                    graph.setOpKind(opId, kind);
+                    for (std::size_t i = 0; i < operands.size(); ++i)
+                    {
+                        if (graph.getOperation(opId).operands().size() > i)
+                        {
+                            graph.replaceOperand(opId, i, operands[i]);
+                        }
+                        else
+                        {
+                            graph.addOperand(opId, operands[i]);
+                        }
+                    }
+                    while (graph.getOperation(opId).operands().size() > operands.size())
+                    {
+                        graph.eraseOperand(opId, graph.getOperation(opId).operands().size() - 1);
+                    }
+                    if (graph.getOperation(opId).results().empty())
+                    {
+                        graph.addResult(opId, result);
+                    }
+                    else
+                    {
+                        graph.replaceResult(opId, 0, result);
+                    }
+                    while (graph.getOperation(opId).results().size() > 1)
+                    {
+                        graph.eraseResult(opId, graph.getOperation(opId).results().size() - 1);
+                    }
+                    graph.eraseAttr(opId, "sliceStart");
+                    graph.eraseAttr(opId, "sliceEnd");
+                    graph.eraseAttr(opId, "sliceWidth");
+                    graph.eraseAttr(opId, "rep");
+                }
+                catch (const std::exception &ex)
+                {
+                    onError(op, std::string("Failed to rewrite loop op: ") + ex.what());
+                    return false;
+                }
+                ++opsRewritten;
+                return true;
+            };
+
+            auto createOp = [&](OperationKind kind,
+                                const std::vector<ValueId> &operands,
+                                ValueId result,
+                                const std::optional<SrcLoc> &srcLoc) -> bool
+            {
+                try
+                {
+                    OperationId opId = graph.createOperation(kind);
+                    for (ValueId operand : operands)
+                    {
+                        graph.addOperand(opId, operand);
+                    }
+                    graph.addResult(opId, result);
+                    if (srcLoc)
+                    {
+                        graph.setOpSrcLoc(opId, *srcLoc);
+                    }
+                }
+                catch (const std::exception &ex)
+                {
+                    if (!loop.loopOps.empty())
+                    {
+                        onError(graph.getOperation(loop.loopOps.front()),
+                                std::string("Failed to create loop op: ") + ex.what());
+                    }
+                    return false;
+                }
+                ++opsRewritten;
                 return true;
             };
 
@@ -1772,6 +2084,46 @@ namespace wolvrix::lib::transform
                     const int64_t sliceHigh = *endOpt;
                     for (const auto &seg : resultSegments)
                     {
+                        BitRange baseRange{sliceLow + seg.low, sliceLow + seg.high};
+                        auto srcFrag = getFragment(operands[0], baseRange);
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!srcFrag || !dstFrag || !addPair(opId, *srcFrag, *dstFrag))
+                        {
+                            return false;
+                        }
+                    }
+                    break;
+                }
+                case OperationKind::kSliceDynamic:
+                {
+                    if (operands.size() < 2 || !operands[0].valid() || !operands[1].valid())
+                    {
+                        return false;
+                    }
+                    auto widthOpt = getIntAttr(op, "sliceWidth");
+                    auto indexOpt = getConstIntValue(graph, operands[1]);
+                    if (!widthOpt || !indexOpt)
+                    {
+                        return false;
+                    }
+                    const int64_t sliceWidth = *widthOpt;
+                    const int64_t sliceLow = *indexOpt;
+                    const int64_t sliceHigh = sliceLow + sliceWidth - 1;
+                    if (sliceWidth <= 0 || sliceLow < 0 || sliceHigh < sliceLow)
+                    {
+                        return false;
+                    }
+                    const int64_t operandWidth = graph.getValue(operands[0]).width();
+                    if (sliceHigh >= operandWidth)
+                    {
+                        return false;
+                    }
+                    for (const auto &seg : resultSegments)
+                    {
+                        if (seg.low < 0 || seg.high < seg.low || seg.high >= sliceWidth)
+                        {
+                            return false;
+                        }
                         BitRange baseRange{sliceLow + seg.low, sliceLow + seg.high};
                         auto srcFrag = getFragment(operands[0], baseRange);
                         auto dstFrag = getFragment(resultId, seg);
@@ -2105,6 +2457,72 @@ namespace wolvrix::lib::transform
                     }
                     break;
                 }
+                case OperationKind::kAdd:
+                {
+                    if (operands.size() != 2 || !operands[0].valid() || !operands[1].valid())
+                    {
+                        return false;
+                    }
+                    customOps.emplace(opId, CustomRewrite{op.kind(),
+                                                          std::vector<ValueId>{operands[0], operands[1]},
+                                                          resultId,
+                                                          resultSegments,
+                                                          op.srcLoc()});
+                    for (const auto &seg : resultSegments)
+                    {
+                        auto dstFrag = getFragment(resultId, seg);
+                        if (!dstFrag)
+                        {
+                            return false;
+                        }
+                        definedFragments.insert(*dstFrag);
+                    }
+                    break;
+                }
+                case OperationKind::kGt:
+                {
+                    if (operands.size() != 2 || !operands[0].valid() || !operands[1].valid())
+                    {
+                        return false;
+                    }
+                    const int64_t resultWidth = graph.getValue(resultId).width();
+                    if (resultWidth != 1)
+                    {
+                        return false;
+                    }
+                    const int64_t lhsWidth = graph.getValue(operands[0]).width();
+                    const int64_t rhsWidth = graph.getValue(operands[1]).width();
+                    if (lhsWidth <= 0 || rhsWidth <= 0 || lhsWidth != rhsWidth)
+                    {
+                        return false;
+                    }
+                    if (resultSegments.size() != 1)
+                    {
+                        return false;
+                    }
+                    const auto &seg = resultSegments.front();
+                    if (seg.low != 0 || seg.high != 0)
+                    {
+                        return false;
+                    }
+                    auto dstFrag = getFragment(resultId, seg);
+                    auto lhsView = getFullView(operands[0]);
+                    auto rhsView = getFullView(operands[1]);
+                    if (!dstFrag || !lhsView || !rhsView)
+                    {
+                        return false;
+                    }
+                    if (!definedFragments.insert(*dstFrag).second)
+                    {
+                        return false;
+                    }
+                    customOps.emplace(opId, CustomRewrite{op.kind(),
+                                                          std::vector<ValueId>{*lhsView, *rhsView},
+                                                          resultId,
+                                                          resultSegments,
+                                                          op.srcLoc()});
+                    break;
+                }
                 default:
                     return false;
                 }
@@ -2237,6 +2655,139 @@ namespace wolvrix::lib::transform
                         graph.setOpSrcLoc(newOp, *op.srcLoc());
                     }
                     ++opsRewritten;
+                }
+            }
+
+            for (const auto &entry : customOps)
+            {
+                const OperationId opId = entry.first;
+                const auto &custom = entry.second;
+                if (custom.kind == OperationKind::kGt)
+                {
+                    auto dstFrag = getFragment(custom.result, custom.resultSegments.front());
+                    if (!dstFrag)
+                    {
+                        return false;
+                    }
+                    if (!rewriteOp(opId, OperationKind::kGt, custom.operands, *dstFrag))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (custom.kind != OperationKind::kAdd)
+                {
+                    return false;
+                }
+
+                const int64_t resultWidth = graph.getValue(custom.result).width();
+                if (resultWidth <= 0)
+                {
+                    return false;
+                }
+
+                const Value resultValue = graph.getValue(custom.result);
+                std::vector<ValueId> bitResults(static_cast<std::size_t>(resultWidth));
+                std::optional<ValueId> carryBit;
+
+                auto emitNewBinary = [&](OperationKind kind, ValueId lhs, ValueId rhs) -> std::optional<ValueId>
+                {
+                    ValueId out = graph.createValue(1, false, resultValue.type());
+                    if (!createOp(kind, std::vector<ValueId>{lhs, rhs}, out, custom.srcLoc))
+                    {
+                        return std::nullopt;
+                    }
+                    return out;
+                };
+
+                for (int64_t bit = 0; bit < resultWidth; ++bit)
+                {
+                    BitRange bitRange{bit, bit};
+                    auto lhsBit = getFragment(custom.operands[0], bitRange);
+                    auto rhsBit = getFragment(custom.operands[1], bitRange);
+                    if (!lhsBit || !rhsBit)
+                    {
+                        return false;
+                    }
+                    auto xor1 = emitNewBinary(OperationKind::kXor, *lhsBit, *rhsBit);
+                    auto and1 = emitNewBinary(OperationKind::kAnd, *lhsBit, *rhsBit);
+                    if (!xor1 || !and1)
+                    {
+                        return false;
+                    }
+                    ValueId sumBit = *xor1;
+                    if (carryBit)
+                    {
+                        auto xor2 = emitNewBinary(OperationKind::kXor, *xor1, *carryBit);
+                        auto and2 = emitNewBinary(OperationKind::kAnd, *xor1, *carryBit);
+                        if (!xor2 || !and2)
+                        {
+                            return false;
+                        }
+                        auto carryNext = emitNewBinary(OperationKind::kOr, *and1, *and2);
+                        if (!carryNext)
+                        {
+                            return false;
+                        }
+                        sumBit = *xor2;
+                        carryBit = *carryNext;
+                    }
+                    else
+                    {
+                        carryBit = *and1;
+                    }
+                    bitResults[static_cast<std::size_t>(bit)] = sumBit;
+                }
+
+                bool reused = false;
+                auto orderedSegments = custom.resultSegments;
+                std::sort(orderedSegments.begin(), orderedSegments.end(),
+                          [](const BitRange &lhs, const BitRange &rhs) {
+                              if (lhs.low != rhs.low)
+                              {
+                                  return lhs.low < rhs.low;
+                              }
+                              return lhs.high < rhs.high;
+                          });
+                for (const auto &seg : orderedSegments)
+                {
+                    auto dstFrag = getFragment(custom.result, seg);
+                    if (!dstFrag)
+                    {
+                        return false;
+                    }
+                    std::vector<ValueId> segBits;
+                    segBits.reserve(static_cast<std::size_t>(seg.high - seg.low + 1));
+                    for (int64_t bit = seg.high; bit >= seg.low; --bit)
+                    {
+                        segBits.push_back(bitResults[static_cast<std::size_t>(bit)]);
+                    }
+                    if (!reused)
+                    {
+                        if (segBits.size() == 1)
+                        {
+                            if (!rewriteOp(opId, OperationKind::kAssign, std::vector<ValueId>{segBits.front()}, *dstFrag))
+                            {
+                                return false;
+                            }
+                        }
+                        else if (!rewriteOp(opId, OperationKind::kConcat, segBits, *dstFrag))
+                        {
+                            return false;
+                        }
+                        reused = true;
+                    }
+                    else if (segBits.size() == 1)
+                    {
+                        if (!createOp(OperationKind::kAssign, std::vector<ValueId>{segBits.front()}, *dstFrag, custom.srcLoc))
+                        {
+                            return false;
+                        }
+                    }
+                    else if (!createOp(OperationKind::kConcat, segBits, *dstFrag, custom.srcLoc))
+                    {
+                        return false;
+                    }
                 }
             }
 
