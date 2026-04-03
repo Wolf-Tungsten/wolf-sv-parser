@@ -77,6 +77,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/core/grh.cpp
     lib/core/load.cpp
     lib/core/emit.cpp
+    lib/core/toposort.cpp
     lib/emit/system_verilog.cpp
     lib/emit/verilator_repcut_package.cpp
     lib/core/store.cpp
@@ -267,6 +268,18 @@ target_link_libraries(grh-clone-tests
 )
 
 register_test_exe(grh-clone-tests)
+
+# core: toposort
+add_executable(core-toposort
+    tests/core/test_toposort.cpp
+)
+
+target_link_libraries(core-toposort
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(core-toposort)
 
 # emit base
 add_executable(emit-base
