@@ -14,6 +14,7 @@
 #include "transform/memory_init_check.hpp"
 #include "transform/mem_to_reg.hpp"
 #include "transform/simplify.hpp"
+#include "transform/trigger_key_driven_schedule.hpp"
 #include "transform/xmr_resolve.hpp"
 #include "transform/strip_debug.hpp"
 
@@ -418,6 +419,7 @@ namespace wolvrix::lib::transform
             "simplify",
             "stats",
             "strip-debug",
+            "trigger-key-driven-schedule",
             "hrbcut",
             "repcut",
         };
@@ -1256,6 +1258,33 @@ namespace wolvrix::lib::transform
                 }
             }
             return std::make_unique<RepcutPass>(options);
+        }
+        if (normalized == "trigger-key-driven-schedule")
+        {
+            TriggerKeyDrivenScheduleOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-path")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-path expects a value";
+                        return nullptr;
+                    }
+                    options.path = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-path="))
+                {
+                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
+                }
+                else
+                {
+                    error = "unknown trigger-key-driven-schedule option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<TriggerKeyDrivenSchedulePass>(options);
         }
 
         error = "unknown pass: " + normalized;

@@ -46,8 +46,9 @@ file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 add_subdirectory(external/slang)
 
 option(WOLVRIX_MTKAHYPAR_BUILD_SHARED "Build vendored mt-kahypar as a shared library" OFF)
+option(WOLVRIX_ENABLE_MT_KAHYPAR "Enable vendored mt-kahypar integration" ON)
 set(WOLVRIX_HAVE_MT_KAHYPAR 0)
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/mt-kahypar/CMakeLists.txt")
+if (WOLVRIX_ENABLE_MT_KAHYPAR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/mt-kahypar/CMakeLists.txt")
     block(SCOPE_FOR VARIABLES)
         set(BUILD_SHARED_LIBS ${WOLVRIX_MTKAHYPAR_BUILD_SHARED})
         set(KAHYPAR_PYTHON OFF)
@@ -67,6 +68,8 @@ endif()
 if (TARGET MtKaHyPar::mtkahypar)
     set(WOLVRIX_HAVE_MT_KAHYPAR 1)
     message(STATUS "MtKaHyPar enabled from vendored source")
+elseif (NOT WOLVRIX_ENABLE_MT_KAHYPAR)
+    message(STATUS "MtKaHyPar disabled by WOLVRIX_ENABLE_MT_KAHYPAR=OFF")
 else()
     message(WARNING "Vendored MtKaHyPar not available; repcut mt-kahypar backend will be unavailable")
 endif()
@@ -102,6 +105,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/strip_debug.cpp
     lib/transform/hrbcut.cpp
     lib/transform/repcut.cpp
+    lib/transform/trigger_key_driven_schedule.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
@@ -562,6 +566,17 @@ target_compile_definitions(transform-repcut-partition-count
 )
 
 register_test_exe(transform-repcut-partition-count)
+
+add_executable(transform-trigger-key-driven-schedule
+    tests/transform/test_trigger_key_driven_schedule.cpp
+)
+
+target_link_libraries(transform-trigger-key-driven-schedule
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-trigger-key-driven-schedule)
 
 # ingest: symbol collector
 add_executable(ingest-symbol-collector
