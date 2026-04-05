@@ -1028,16 +1028,44 @@ namespace wolvrix::lib::transform
         meta.tkdGroupCount = tkdGroupCount;
         meta.edgeCount = edges.size();
 
-        setScratchpad(scratchpadKey(modulePath, "meta"), meta);
-        setScratchpad(scratchpadKey(modulePath, "pools/triggerKeys"), triggerKeyPool);
-        setScratchpad(scratchpadKey(modulePath, "pools/affectedSinkSets"), affectedSinkSetPool);
-        setScratchpad(scratchpadKey(modulePath, "groups/sink"), sinkGroups);
-        setScratchpad(scratchpadKey(modulePath, "groups/trigger"), std::vector<TkdTriggerGroupRecord>{triggerGroup});
-        setScratchpad(scratchpadKey(modulePath, "groups/simple"), simpleGroups);
-        setScratchpad(scratchpadKey(modulePath, "index/opToTkdGroup"),
-                      TkdOpToGroupIndex{kInvalidTkdGroupId, groupIdByOpIndex});
-        setScratchpad(scratchpadKey(modulePath, "plan/edges"), edges);
-        setScratchpad(scratchpadKey(modulePath, "plan/topoOrder"), topoOrder);
+        const std::vector<TkdTriggerGroupRecord> triggerGroups{triggerGroup};
+        const TkdOpToGroupIndex opToGroupIndex{kInvalidTkdGroupId, groupIdByOpIndex};
+        if (!options_.metaKey.empty())
+        {
+            setScratchpad(options_.metaKey, meta, "tkd.meta");
+        }
+        if (!options_.groupsKey.empty())
+        {
+            setScratchpad(options_.groupsKey,
+                          TkdGroupBundle{sinkGroups, triggerGroups, simpleGroups},
+                          "tkd.groups");
+        }
+        if (!options_.resultKey.empty())
+        {
+            setScratchpad(options_.resultKey,
+                          TkdScheduleResult{
+                              meta,
+                              triggerKeyPool,
+                              affectedSinkSetPool,
+                              TkdGroupBundle{sinkGroups, triggerGroups, simpleGroups},
+                              opToGroupIndex,
+                              edges,
+                              topoOrder,
+                          },
+                          "tkd.result");
+        }
+        if (options_.resultKey.empty() && options_.groupsKey.empty() && options_.metaKey.empty())
+        {
+            setScratchpad(scratchpadKey(modulePath, "meta"), meta, "tkd.meta");
+            setScratchpad(scratchpadKey(modulePath, "pools/triggerKeys"), triggerKeyPool, "tkd.trigger_keys");
+            setScratchpad(scratchpadKey(modulePath, "pools/affectedSinkSets"), affectedSinkSetPool, "tkd.affected_sink_sets");
+            setScratchpad(scratchpadKey(modulePath, "groups/sink"), sinkGroups, "tkd.sink_groups");
+            setScratchpad(scratchpadKey(modulePath, "groups/trigger"), triggerGroups, "tkd.trigger_groups");
+            setScratchpad(scratchpadKey(modulePath, "groups/simple"), simpleGroups, "tkd.simple_groups");
+            setScratchpad(scratchpadKey(modulePath, "index/opToTkdGroup"), opToGroupIndex, "tkd.op_group_index");
+            setScratchpad(scratchpadKey(modulePath, "plan/edges"), edges, "tkd.plan_edges");
+            setScratchpad(scratchpadKey(modulePath, "plan/topoOrder"), topoOrder, "tkd.topo_order");
+        }
 
         return result;
     }

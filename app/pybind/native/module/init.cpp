@@ -1,0 +1,62 @@
+#include <Python.h>
+
+#include "native/module/methods.hpp"
+
+static PyMethodDef WolvrixMethods[] = {
+    {"create_session", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_create_session), METH_NOARGS,
+     "create_session() -> Session capsule"},
+    {"session_close", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_close), METH_VARARGS,
+     "session_close(session)"},
+    {"session_contains", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_contains), METH_VARARGS,
+     "session_contains(session, key) -> bool"},
+    {"session_keys", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_keys), METH_VARARGS | METH_KEYWORDS,
+     "session_keys(session, prefix=None, kind=None) -> list[str]"},
+    {"session_kind", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_kind), METH_VARARGS,
+     "session_kind(session, key) -> str"},
+    {"session_get_value", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_get_value), METH_VARARGS,
+     "session_get_value(session, key) -> (storage, kind, payload)"},
+    {"session_export", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_export), METH_VARARGS | METH_KEYWORDS,
+     "session_export(session, key, view='text') -> object"},
+    {"session_put_python", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_put_python), METH_VARARGS | METH_KEYWORDS,
+     "session_put_python(session, key, value, kind, replace=False)"},
+    {"session_delete", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_delete), METH_VARARGS,
+     "session_delete(session, key)"},
+    {"session_copy", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_copy), METH_VARARGS | METH_KEYWORDS,
+     "session_copy(session, src, dst, replace=False)"},
+    {"session_rename", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_rename), METH_VARARGS | METH_KEYWORDS,
+     "session_rename(session, src, dst, replace=False)"},
+    {"session_read_sv", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_read_sv), METH_VARARGS | METH_KEYWORDS,
+     "session_read_sv(session, path, target_design_key, slang_args=None, replace=False, log_level='info') -> (success, diagnostics)"},
+    {"session_read_json_file", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_read_json_file), METH_VARARGS | METH_KEYWORDS,
+     "session_read_json_file(session, path, target_design_key, replace=False) -> (success, diagnostics)"},
+    {"session_load_json_text", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_load_json_text), METH_VARARGS | METH_KEYWORDS,
+     "session_load_json_text(session, text, target_design_key, replace=False) -> (success, diagnostics)"},
+    {"session_clone_design", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_clone_design), METH_VARARGS | METH_KEYWORDS,
+     "session_clone_design(session, src, dst, replace=False) -> (success, diagnostics)"},
+    {"session_run_pass", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_run_pass), METH_VARARGS | METH_KEYWORDS,
+     "session_run_pass(session, name, design, args=None, dryrun=False, log_level='warn') -> (success, changed, diagnostics)"},
+    {"session_store_json", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_store_json), METH_VARARGS | METH_KEYWORDS,
+     "session_store_json(session, design, output, mode='pretty-compact', top=None) -> (success, diagnostics)"},
+    {"session_emit_sv", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_emit_sv), METH_VARARGS | METH_KEYWORDS,
+     "session_emit_sv(session, design, output, top=None, split_modules=False) -> (success, diagnostics)"},
+    {"session_emit_verilator_repcut_package",
+     reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_session_emit_verilator_repcut_package),
+     METH_VARARGS | METH_KEYWORDS,
+     "session_emit_verilator_repcut_package(session, design, output, top=None) -> (success, diagnostics)"},
+    {"list_passes", reinterpret_cast<PyCFunction>(wolvrix::app::pybind::py_list_passes), METH_NOARGS,
+     "list_passes() -> list[str]"},
+    {nullptr, nullptr, 0, nullptr},
+};
+
+static PyModuleDef WolvrixModule = {
+    PyModuleDef_HEAD_INIT,
+    "_wolvrix",
+    "Wolvrix native bindings",
+    -1,
+    WolvrixMethods,
+};
+
+PyMODINIT_FUNC PyInit__wolvrix(void)
+{
+    return PyModule_Create(&WolvrixModule);
+}

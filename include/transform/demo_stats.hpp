@@ -6,12 +6,21 @@
 namespace wolvrix::lib::transform
 {
 
+    struct StatsOptions
+    {
+        std::string outputKey;
+    };
+
     class StatsPass : public Pass
     {
     public:
         StatsPass();
+        explicit StatsPass(StatsOptions options);
 
         PassResult run() override;
+
+    private:
+        StatsOptions options_;
     };
 
 } // namespace wolvrix::lib::transform

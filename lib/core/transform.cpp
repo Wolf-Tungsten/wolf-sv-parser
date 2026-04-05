@@ -310,7 +310,10 @@ namespace wolvrix::lib::transform
     PassManagerResult PassManager::run(wolvrix::lib::grh::Design &design, PassDiagnostics &diags)
     {
         PassManagerResult result;
-        PassContext context{design, diags, options_.verbosity, options_.logLevel, options_.logSink, options_.keepDeclaredSymbols};
+        ScratchpadStore localScratchpad;
+        ScratchpadStore *scratchpad = options_.scratchpad ? options_.scratchpad : &localScratchpad;
+        PassContext context{design, diags, options_.verbosity, options_.logLevel, options_.logSink,
+                            options_.keepDeclaredSymbols, scratchpad};
         bool encounteredFailure = false;
         auto emitLog = [&](LogLevel level, std::string_view tag, std::string_view message) {
             if (!options_.logSink)
@@ -901,12 +904,30 @@ namespace wolvrix::lib::transform
         }
         if (normalized == "stats")
         {
-            if (!args.empty())
+            StatsOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
             {
-                error = "stats does not accept arguments";
-                return nullptr;
+                const std::string_view arg = args[i];
+                if (arg == "-output-key")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-output-key expects a value";
+                        return nullptr;
+                    }
+                    options.outputKey = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-output-key="))
+                {
+                    options.outputKey = std::string(arg.substr(std::string_view("-output-key=").size()));
+                }
+                else
+                {
+                    error = "unknown stats option";
+                    return nullptr;
+                }
             }
-            return std::make_unique<StatsPass>();
+            return std::make_unique<StatsPass>(options);
         }
         if (normalized == "hrbcut")
         {
@@ -1265,18 +1286,59 @@ namespace wolvrix::lib::transform
             for (std::size_t i = 0; i < args.size(); ++i)
             {
                 const std::string_view arg = args[i];
-                if (arg == "-path")
-                {
+                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
                     if (i + 1 >= args.size())
                     {
-                        error = "-path expects a value";
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    out = std::string(args[++i]);
+                    return true;
+                };
+
+                if (arg == "-path")
+                {
+                    if (!parseStringArg("-path", options.path))
+                    {
                         return nullptr;
                     }
-                    options.path = std::string(args[++i]);
                 }
                 else if (arg.starts_with("-path="))
                 {
                     options.path = std::string(arg.substr(std::string_view("-path=").size()));
+                }
+                else if (arg == "-result-key")
+                {
+                    if (!parseStringArg("-result-key", options.resultKey))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-result-key="))
+                {
+                    options.resultKey = std::string(arg.substr(std::string_view("-result-key=").size()));
+                }
+                else if (arg == "-groups-key")
+                {
+                    if (!parseStringArg("-groups-key", options.groupsKey))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-groups-key="))
+                {
+                    options.groupsKey = std::string(arg.substr(std::string_view("-groups-key=").size()));
+                }
+                else if (arg == "-meta-key")
+                {
+                    if (!parseStringArg("-meta-key", options.metaKey))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-meta-key="))
+                {
+                    options.metaKey = std::string(arg.substr(std::string_view("-meta-key=").size()));
                 }
                 else
                 {

@@ -3082,7 +3082,7 @@ namespace wolvrix::lib::transform
                 }
                 else
                 {
-                    setScratchpad("comb_loops", std::vector<CombLoopReport>{report});
+                    setScratchpad("comb_loops", std::vector<CombLoopReport>{report}, "comb_loops");
                 }
                 if (options_.failOnTrueLoop)
                 {

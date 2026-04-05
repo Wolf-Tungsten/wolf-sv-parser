@@ -42,6 +42,9 @@ namespace wolvrix::lib::transform
     struct TriggerKeyDrivenScheduleOptions
     {
         std::string path;
+        std::string resultKey;
+        std::string groupsKey;
+        std::string metaKey;
     };
 
     struct TkdTriggerEventItem
@@ -118,6 +121,24 @@ namespace wolvrix::lib::transform
         std::size_t simpleGroupCount = 0;
         std::size_t tkdGroupCount = 0;
         std::size_t edgeCount = 0;
+    };
+
+    struct TkdGroupBundle
+    {
+        std::vector<TkdSinkGroupRecord> sinkGroups;
+        std::vector<TkdTriggerGroupRecord> triggerGroups;
+        std::vector<TkdSimpleGroupRecord> simpleGroups;
+    };
+
+    struct TkdScheduleResult
+    {
+        TkdScheduleMeta meta;
+        std::vector<TkdTriggerKeyRecord> triggerKeys;
+        std::vector<TkdAffectedSinkSetRecord> affectedSinkSets;
+        TkdGroupBundle groups;
+        TkdOpToGroupIndex opToGroupIndex;
+        std::vector<TkdGroupEdge> planEdges;
+        std::vector<TkdGroupId> topoOrder;
     };
 
     class TriggerKeyDrivenSchedulePass : public Pass

@@ -171,7 +171,15 @@ if (WOLVRIX_BUILD_PYTHON_PACKAGE)
             "${WOLVRIX_PYTHON_BUILD_DIR}"
     )
 
-    Python_add_library(wolvrix_python MODULE app/pybind/wolvrix_native.cpp)
+    file(GLOB_RECURSE WOLVRIX_PYBIND_SOURCES CONFIGURE_DEPENDS
+        app/pybind/*.cpp
+    )
+
+    Python_add_library(wolvrix_python MODULE ${WOLVRIX_PYBIND_SOURCES})
+    target_include_directories(wolvrix_python
+        PRIVATE
+            "${CMAKE_SOURCE_DIR}/app/pybind"
+    )
     target_link_libraries(wolvrix_python
         PRIVATE
             wolvrix-lib

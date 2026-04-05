@@ -16,7 +16,17 @@
 namespace wolvrix::lib::transform
 {
 
-    StatsPass::StatsPass() : Pass("stats", "operation-value-stats", "Count graphs, operations, and values for diagnostics") {}
+    StatsPass::StatsPass()
+        : Pass("stats", "operation-value-stats", "Count graphs, operations, and values for diagnostics"),
+          options_({})
+    {
+    }
+
+    StatsPass::StatsPass(StatsOptions options)
+        : Pass("stats", "operation-value-stats", "Count graphs, operations, and values for diagnostics"),
+          options_(std::move(options))
+    {
+    }
 
     PassResult StatsPass::run()
     {
@@ -848,6 +858,11 @@ namespace wolvrix::lib::transform
         oss << "}";
 
         std::string message = oss.str();
+
+        if (!options_.outputKey.empty())
+        {
+            setScratchpad(options_.outputKey, message, "stats");
+        }
 
         info(message);
 
