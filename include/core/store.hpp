@@ -30,7 +30,6 @@ namespace wolvrix::lib::store
     {
     public:
         using wolvrix::lib::diag::Diagnostics::Diagnostics;
-        using wolvrix::lib::diag::Diagnostics::todo;
         using wolvrix::lib::diag::Diagnostics::error;
         using wolvrix::lib::diag::Diagnostics::warning;
         using wolvrix::lib::diag::Diagnostics::info;

@@ -131,8 +131,9 @@ Example:
 import wolvrix
 
 with wolvrix.Session() as sess:
-    sess.set_log_level("info")
-    sess.set_diagnostics_policy("error")
+    sess.log_level = "info"
+    sess.diagnostics_print_min_level = "warning"
+    sess.diagnostics_raise_min_level = "error"
 
     sess.read_sv(
         "path/to/top.sv",
@@ -200,11 +201,20 @@ class Session:
     def rename(self, src: str, dst: str, *, replace: bool = False) -> None: ...
     def copy(self, src: str, dst: str, *, replace: bool = False) -> None: ...
 
-    def set_diagnostics_policy(self, level: str) -> None: ...
-    def diagnostics_policy(self) -> str: ...
+    @property
+    def diagnostics_print_min_level(self) -> str: ...
+    @diagnostics_print_min_level.setter
+    def diagnostics_print_min_level(self, level: str) -> None: ...
 
-    def set_log_level(self, level: str) -> None: ...
+    @property
+    def diagnostics_raise_min_level(self) -> str: ...
+    @diagnostics_raise_min_level.setter
+    def diagnostics_raise_min_level(self, level: str) -> None: ...
+
+    @property
     def log_level(self) -> str: ...
+    @log_level.setter
+    def log_level(self, level: str) -> None: ...
 
     def history(self) -> list[dict]: ...
 ```
@@ -272,7 +282,7 @@ Each diagnostic record currently has this shape:
 
 ```python
 {
-    "kind": str,      # "debug" | "info" | "warning" | "todo" | "error"
+    "kind": str,      # "debug" | "info" | "warning" | "error"
     "pass": str,      # pass name, or "" when not applicable
     "message": str,   # core message text
     "context": str,   # optional extra context, often ""
@@ -322,7 +332,7 @@ counts = Counter(d["kind"] for d in diags)
 Check whether anything severe happened:
 
 ```python
-has_blocking = any(d["kind"] in {"warning", "todo", "error"} for d in diags)
+has_blocking = any(d["kind"] in {"warning", "error"} for d in diags)
 ```
 
 Filter diagnostics from one pass:
@@ -383,20 +393,34 @@ Display levels:
 - `error`
 - `none`
 
-### Diagnostics And Session Policy
+### Diagnostics Print And Raise Levels
 
-The session controls how diagnostics affect control flow:
+The session controls both diagnostic display and control flow.
+
+`diagnostics_print_min_level`:
+
+- `none`: do not print diagnostics automatically
+- `warning`: print warning and error diagnostics automatically
+- `error`: print only error diagnostics automatically
+
+`diagnostics_raise_min_level`:
 
 - `none`: never raise because of diagnostics
-- `warning`: raise on warning, error, or todo
-- `error`: raise on error or todo
+- `warning`: raise on warning or error
+- `error`: raise on error
+
+Defaults:
+
+- `sess.diagnostics_print_min_level = "warning"`
+- `sess.diagnostics_raise_min_level = "error"`
 
 Suggested action flow:
 
 1. run the action
 2. collect diagnostics
-3. return diagnostics
-4. apply the session policy
+3. auto-print diagnostics according to `diagnostics_print_min_level`
+4. apply the session raise threshold
+5. return diagnostics when no exception is raised
 
 If an exception is raised by policy, the exception still carries the diagnostics:
 
@@ -407,12 +431,15 @@ except RuntimeError as ex:
     diags = ex.diagnostics
 ```
 
+This means most scripts can simply call actions directly without wrapping each call in an explicit
+`print_diagnostics(...)` helper, while still keeping the structured return value available.
+
 ## Logging
 
 Logging is configured at the session level:
 
 ```python
-sess.set_log_level("warn")
+sess.log_level = "warn"
 ```
 
 For now, logging stays in C++:

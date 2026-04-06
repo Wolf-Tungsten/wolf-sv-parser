@@ -15,7 +15,6 @@ namespace wolvrix::lib::diag
 
     enum class DiagnosticKind
     {
-        Todo,
         Error,
         Warning,
         Info,
@@ -35,7 +34,6 @@ namespace wolvrix::lib::diag
     class Diagnostics
     {
     public:
-        void todo(std::string message, std::string context = {});
         void error(std::string message, std::string context = {});
         void warning(std::string message, std::string context = {});
         void info(std::string message, std::string context = {});

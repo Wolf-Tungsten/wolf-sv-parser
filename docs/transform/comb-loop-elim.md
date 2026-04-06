@@ -57,19 +57,19 @@ This is mainly for later inspection or debugging. The primary output of the pass
 | `-fail-on-true-loop` | false | treat true loops as pass failure |
 | `-output-key` | empty | session key for an explicit loop report |
 
-## Diagnostic Policy Interaction
+## Diagnostic Raise-Level Interaction
 
-This pass works especially well with session-level diagnostic policies.
+This pass works especially well with the session-level diagnostic raise threshold.
 
 For example:
 
-- with `sess.set_diagnostics_policy("warning")`, any unresolved loop warning becomes an exception
-- with `sess.set_diagnostics_policy("error")`, warnings are returned but do not automatically raise
+- with `sess.diagnostics_raise_min_level = "warning"`, any unresolved loop warning becomes an exception
+- with `sess.diagnostics_raise_min_level = "error"`, warnings are returned but do not automatically raise
 
 That keeps the pass behavior easy to reason about:
 
 - diagnostics describe what happened
-- session policy decides whether that should stop execution
+- session raise level decides whether that should stop execution
 
 ## Notes
 

@@ -34,7 +34,6 @@ namespace wolvrix::lib::transform
     {
     public:
         using wolvrix::lib::diag::Diagnostics::Diagnostics;
-        using wolvrix::lib::diag::Diagnostics::todo;
 
         void error(std::string passName, std::string message, std::string context = {});
         void warning(std::string passName, std::string message, std::string context = {});

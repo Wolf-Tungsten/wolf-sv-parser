@@ -9352,17 +9352,6 @@ std::string_view PlanSymbolTable::text(PlanSymbolId id) const
     return storage_[id.index];
 }
 
-void ConvertDiagnostics::todo(std::string message, std::string context)
-{
-    error(std::move(message), std::move(context));
-}
-
-void ConvertDiagnostics::todo(const slang::ast::Symbol& symbol, std::string message)
-{
-    add(ConvertDiagnosticKind::Error, std::move(message), {}, {}, std::string(symbol.name),
-        symbol.location.valid() ? std::optional(symbol.location) : std::nullopt);
-}
-
 void ConvertDiagnostics::error(const slang::ast::Symbol& symbol, std::string message)
 {
     add(ConvertDiagnosticKind::Error, std::move(message), {}, {}, std::string(symbol.name),
@@ -9373,13 +9362,6 @@ void ConvertDiagnostics::warn(const slang::ast::Symbol& symbol, std::string mess
 {
     add(ConvertDiagnosticKind::Warning, std::move(message), {}, {}, std::string(symbol.name),
         symbol.location.valid() ? std::optional(symbol.location) : std::nullopt);
-}
-
-void ConvertDiagnostics::todo(const slang::SourceLocation& location, std::string message,
-                              std::string originSymbol)
-{
-    add(ConvertDiagnosticKind::Error, std::move(message), {}, {}, std::move(originSymbol),
-        location.valid() ? std::optional(location) : std::nullopt);
 }
 
 void ConvertDiagnostics::error(const slang::SourceLocation& location, std::string message,

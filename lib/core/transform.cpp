@@ -65,7 +65,6 @@ namespace wolvrix::lib::transform
                 return 1;
             case PassDiagnosticKind::Warning:
                 return 2;
-            case PassDiagnosticKind::Todo:
             case PassDiagnosticKind::Error:
             default:
                 return 3;

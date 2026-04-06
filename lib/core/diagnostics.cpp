@@ -11,14 +11,9 @@ namespace wolvrix::lib::diag
     {
         bool isErrorKind(DiagnosticKind kind)
         {
-            return kind == DiagnosticKind::Error || kind == DiagnosticKind::Todo;
+            return kind == DiagnosticKind::Error;
         }
     } // namespace
-
-    void Diagnostics::todo(std::string message, std::string context)
-    {
-        add(DiagnosticKind::Todo, std::move(message), std::move(context));
-    }
 
     void Diagnostics::error(std::string message, std::string context)
     {

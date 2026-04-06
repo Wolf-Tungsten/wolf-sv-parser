@@ -53,12 +53,8 @@ public:
     using wolvrix::lib::diag::Diagnostics::info;
     using wolvrix::lib::diag::Diagnostics::debug;
 
-    void todo(std::string message, std::string context = {});
-    void todo(const slang::ast::Symbol& symbol, std::string message);
     void error(const slang::ast::Symbol& symbol, std::string message);
     void warn(const slang::ast::Symbol& symbol, std::string message);
-    void todo(const slang::SourceLocation& location, std::string message,
-              std::string originSymbol = {});
     void error(const slang::SourceLocation& location, std::string message,
                std::string originSymbol = {});
     void warn(const slang::SourceLocation& location, std::string message,

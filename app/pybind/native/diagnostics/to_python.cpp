@@ -17,8 +17,6 @@ namespace wolvrix::app::pybind
         {
             switch (kind)
             {
-            case wolvrix::lib::diag::DiagnosticKind::Todo:
-                return "todo";
             case wolvrix::lib::diag::DiagnosticKind::Warning:
                 return "warning";
             case wolvrix::lib::diag::DiagnosticKind::Info:
@@ -41,8 +39,6 @@ namespace wolvrix::app::pybind
                 return "info";
             case wolvrix::lib::diag::DiagnosticKind::Warning:
                 return "warning";
-            case wolvrix::lib::diag::DiagnosticKind::Todo:
-                return "todo";
             case wolvrix::lib::diag::DiagnosticKind::Error:
             default:
                 return "error";

@@ -33,8 +33,9 @@ python3 -m pip install --no-build-isolation -e .
 import wolvrix
 
 with wolvrix.Session() as sess:
-    sess.set_log_level("info")
-    sess.set_diagnostics_policy("error")
+    sess.log_level = "info"
+    sess.diagnostics_print_min_level = "warning"
+    sess.diagnostics_raise_min_level = "error"
 
     sess.read_sv(
         "path/to/top.sv",
@@ -104,9 +105,16 @@ Configure them at the session level:
 
 ```python
 with wolvrix.Session() as sess:
-    sess.set_diagnostics_policy("error")   # none | warning | error
-    sess.set_log_level("warn")             # trace | debug | info | warn | error | off
+    sess.diagnostics_print_min_level = "warning"  # none | warning | error
+    sess.diagnostics_raise_min_level = "error"   # none | warning | error
+    sess.log_level = "warn"                      # trace | debug | info | warn | error | off
 ```
+
+Default behavior is usually enough:
+
+- warning and error diagnostics are printed automatically
+- error diagnostics raise automatically
+- every action still returns the diagnostics list for explicit inspection
 
 Useful helpers:
 

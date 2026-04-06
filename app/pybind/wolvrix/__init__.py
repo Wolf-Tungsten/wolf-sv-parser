@@ -28,7 +28,8 @@ class OpaqueValue:
 class Session:
     def __init__(self) -> None:
         self._capsule = _native.create_session()
-        self._diagnostics_policy = "error"
+        self._diagnostics_print_min_level = "warning"
+        self._diagnostics_raise_min_level = "error"
         self._log_level = "warn"
         self._history: list[dict[str, Any]] = []
 
@@ -85,17 +86,29 @@ class Session:
         self._ensure_open()
         _native.session_copy(self._capsule, src=src, dst=dst, replace=replace)
 
-    def set_diagnostics_policy(self, level: str) -> None:
-        self._diagnostics_policy = _normalize_diagnostics_policy(level)
+    @property
+    def diagnostics_print_min_level(self) -> str:
+        return self._diagnostics_print_min_level
 
-    def diagnostics_policy(self) -> str:
-        return self._diagnostics_policy
+    @diagnostics_print_min_level.setter
+    def diagnostics_print_min_level(self, level: str) -> None:
+        self._diagnostics_print_min_level = _normalize_diagnostics_print_min_level(level)
 
-    def set_log_level(self, level: str) -> None:
-        self._log_level = _normalize_log_level(level)
+    @property
+    def diagnostics_raise_min_level(self) -> str:
+        return self._diagnostics_raise_min_level
 
+    @diagnostics_raise_min_level.setter
+    def diagnostics_raise_min_level(self, level: str) -> None:
+        self._diagnostics_raise_min_level = _normalize_diagnostics_raise_min_level(level)
+
+    @property
     def log_level(self) -> str:
         return self._log_level
+
+    @log_level.setter
+    def log_level(self, level: str) -> None:
+        self._log_level = _normalize_log_level(level)
 
     def history(self) -> list[dict]:
         return [dict(item) for item in self._history]
@@ -302,7 +315,9 @@ class Session:
             exc = RuntimeError(f"{action} failed")
             setattr(exc, "diagnostics", result)
             raise exc
-        if _should_raise(result, self._diagnostics_policy):
+        if result:
+            print_diagnostics(result, min_level=self._diagnostics_print_min_level)
+        if _should_raise(result, self._diagnostics_raise_min_level):
             _raise_with_diagnostics(result)
         return result
 
@@ -499,12 +514,21 @@ def _compile_tkd_sched_kwargs(named: dict[str, Any]) -> list[str]:
     return out
 
 
-def _normalize_diagnostics_policy(level: str) -> str:
+def _normalize_diagnostics_print_min_level(level: str) -> str:
     name = str(level).lower()
     if name == "warn":
         name = "warning"
     if name not in {"none", "warning", "error"}:
-        raise ValueError("diagnostics policy must be one of: none, warning, error")
+        raise ValueError("diagnostics print min level must be one of: none, warning, error")
+    return name
+
+
+def _normalize_diagnostics_raise_min_level(level: str) -> str:
+    name = str(level).lower()
+    if name == "warn":
+        name = "warning"
+    if name not in {"none", "warning", "error"}:
+        raise ValueError("diagnostics raise min level must be one of: none, warning, error")
     return name
 
 
@@ -529,7 +553,6 @@ def _level_rank(level: str) -> int | None:
         "debug": 0,
         "info": 1,
         "warning": 2,
-        "todo": 3,
         "error": 3,
     }
     return ranks.get(name)
