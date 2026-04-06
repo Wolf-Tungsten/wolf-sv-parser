@@ -44,8 +44,8 @@ namespace wolvrix::app::pybind
                                  bool replace,
                                  std::string &error);
     void sessionEraseKey(SessionHandle &session, std::string_view key);
-    wolvrix::lib::transform::ScratchpadStore cloneScratchpadStore(
-        const wolvrix::lib::transform::ScratchpadStore &source);
+    wolvrix::lib::transform::SessionStore cloneSessionStore(
+        const wolvrix::lib::transform::SessionStore &source);
 
     bool parseStringList(PyObject *obj, std::vector<std::string> &out, std::string &error);
     wolvrix::lib::LogLevel parseLogLevel(std::string_view text, bool &ok);

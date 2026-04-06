@@ -44,26 +44,26 @@ namespace wolvrix::lib::transform
 
     using TransformDiagnostics = PassDiagnostics;
 
-    struct ScratchpadSlot
+    struct SessionSlot
     {
-        virtual ~ScratchpadSlot() = default;
-        virtual std::unique_ptr<ScratchpadSlot> clone() const = 0;
+        virtual ~SessionSlot() = default;
+        virtual std::unique_ptr<SessionSlot> clone() const = 0;
         virtual std::string_view kind() const noexcept { return "opaque"; }
     };
 
     template <typename T>
-    struct ScratchpadSlotValue : ScratchpadSlot
+    struct SessionSlotValue : SessionSlot
     {
         template <typename U>
-        explicit ScratchpadSlotValue(U &&v, std::string kind = {})
+        explicit SessionSlotValue(U &&v, std::string kind = {})
             : value(std::forward<U>(v)), kindName(std::move(kind)) {}
 
         T value;
         std::string kindName;
 
-        std::unique_ptr<ScratchpadSlot> clone() const override
+        std::unique_ptr<SessionSlot> clone() const override
         {
-            return std::make_unique<ScratchpadSlotValue<T>>(value, kindName);
+            return std::make_unique<SessionSlotValue<T>>(value, kindName);
         }
 
         std::string_view kind() const noexcept override
@@ -72,7 +72,7 @@ namespace wolvrix::lib::transform
         }
     };
 
-    using ScratchpadStore = std::unordered_map<std::string, std::unique_ptr<ScratchpadSlot>>;
+    using SessionStore = std::unordered_map<std::string, std::unique_ptr<SessionSlot>>;
 
     struct PassContext
     {
@@ -82,7 +82,7 @@ namespace wolvrix::lib::transform
         LogLevel logLevel = LogLevel::Warn;
         std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
         bool keepDeclaredSymbols = true;
-        ScratchpadStore *scratchpad = nullptr;
+        SessionStore *session = nullptr;
     };
 
     struct PassResult
@@ -125,38 +125,38 @@ namespace wolvrix::lib::transform
         wolvrix::lib::grh::Design &design() { return context_->design; }
         PassDiagnostics &diags() { return context_->diags; }
         PassVerbosity verbosity() const noexcept { return context_ ? context_->verbosity : PassVerbosity::Error; }
-        bool hasScratchpad(std::string_view key) const noexcept
+        bool hasSessionValue(std::string_view key) const noexcept
         {
-            if (!context_ || !context_->scratchpad)
+            if (!context_ || !context_->session)
             {
                 return false;
             }
-            return context_->scratchpad->find(std::string(key)) != context_->scratchpad->end();
+            return context_->session->find(std::string(key)) != context_->session->end();
         }
-        ScratchpadSlot *getScratchpadSlot(std::string_view key) noexcept
+        SessionSlot *getSessionSlot(std::string_view key) noexcept
         {
-            if (!context_ || !context_->scratchpad)
+            if (!context_ || !context_->session)
             {
                 return nullptr;
             }
-            auto it = context_->scratchpad->find(std::string(key));
-            return it == context_->scratchpad->end() ? nullptr : it->second.get();
+            auto it = context_->session->find(std::string(key));
+            return it == context_->session->end() ? nullptr : it->second.get();
         }
-        const ScratchpadSlot *getScratchpadSlot(std::string_view key) const noexcept
+        const SessionSlot *getSessionSlot(std::string_view key) const noexcept
         {
-            if (!context_ || !context_->scratchpad)
+            if (!context_ || !context_->session)
             {
                 return nullptr;
             }
-            auto it = context_->scratchpad->find(std::string(key));
-            return it == context_->scratchpad->end() ? nullptr : it->second.get();
+            auto it = context_->session->find(std::string(key));
+            return it == context_->session->end() ? nullptr : it->second.get();
         }
         template <typename T>
-        T *getScratchpad(std::string_view key) noexcept
+        T *getSessionValue(std::string_view key) noexcept
         {
-            if (auto *slot = getScratchpadSlot(key))
+            if (auto *slot = getSessionSlot(key))
             {
-                if (auto *typed = dynamic_cast<ScratchpadSlotValue<T> *>(slot))
+                if (auto *typed = dynamic_cast<SessionSlotValue<T> *>(slot))
                 {
                     return &typed->value;
                 }
@@ -164,11 +164,11 @@ namespace wolvrix::lib::transform
             return nullptr;
         }
         template <typename T>
-        const T *getScratchpad(std::string_view key) const noexcept
+        const T *getSessionValue(std::string_view key) const noexcept
         {
-            if (const auto *slot = getScratchpadSlot(key))
+            if (const auto *slot = getSessionSlot(key))
             {
-                if (const auto *typed = dynamic_cast<const ScratchpadSlotValue<T> *>(slot))
+                if (const auto *typed = dynamic_cast<const SessionSlotValue<T> *>(slot))
                 {
                     return &typed->value;
                 }
@@ -176,29 +176,29 @@ namespace wolvrix::lib::transform
             return nullptr;
         }
         template <typename T>
-        void setScratchpad(std::string key, T &&value)
+        void setSessionValue(std::string key, T &&value)
         {
-            setScratchpad(std::move(key), std::forward<T>(value), {});
+            setSessionValue(std::move(key), std::forward<T>(value), {});
         }
         template <typename T>
-        void setScratchpad(std::string key, T &&value, std::string kind)
+        void setSessionValue(std::string key, T &&value, std::string kind)
         {
-            if (!context_ || !context_->scratchpad)
+            if (!context_ || !context_->session)
             {
                 return;
             }
-            context_->scratchpad->insert_or_assign(
+            context_->session->insert_or_assign(
                 std::move(key),
-                std::make_unique<ScratchpadSlotValue<std::decay_t<T>>>(std::forward<T>(value),
+                std::make_unique<SessionSlotValue<std::decay_t<T>>>(std::forward<T>(value),
                                                                        std::move(kind)));
         }
-        void eraseScratchpad(std::string_view key)
+        void eraseSessionValue(std::string_view key)
         {
-            if (!context_ || !context_->scratchpad)
+            if (!context_ || !context_->session)
             {
                 return;
             }
-            context_->scratchpad->erase(std::string(key));
+            context_->session->erase(std::string(key));
         }
         void debug(std::string message, std::string context = {});
         void error(std::string message, std::string context = {});
@@ -240,7 +240,7 @@ namespace wolvrix::lib::transform
         LogLevel logLevel = LogLevel::Warn;
         std::function<void(LogLevel, std::string_view, std::string_view)> logSink;
         bool keepDeclaredSymbols = true;
-        ScratchpadStore *scratchpad = nullptr;
+        SessionStore *session = nullptr;
     };
 
     struct PassManagerResult

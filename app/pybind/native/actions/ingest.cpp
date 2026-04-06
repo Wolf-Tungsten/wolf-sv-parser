@@ -20,14 +20,14 @@ namespace wolvrix::app::pybind
     {
         PyObject *sessionObj = nullptr;
         PyObject *pathObj = nullptr;
-        const char *targetDesignKey = nullptr;
+        const char *outDesign = nullptr;
         PyObject *slangArgsObj = Py_None;
         int replace = 0;
         const char *logLevelText = "info";
         static const char *kwlist[] = {
-            "session", "path", "target_design_key", "slang_args", "replace", "log_level", nullptr};
+            "session", "path", "out_design", "slang_args", "replace", "log_level", nullptr};
         if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOs|Ops", const_cast<char **>(kwlist),
-                                         &sessionObj, &pathObj, &targetDesignKey,
+                                         &sessionObj, &pathObj, &outDesign,
                                          &slangArgsObj, &replace, &logLevelText))
         {
             return nullptr;
@@ -38,7 +38,7 @@ namespace wolvrix::app::pybind
             return nullptr;
         }
         std::string insertError;
-        if (!ensureSessionInsertable(*session, targetDesignKey, replace != 0, insertError))
+        if (!ensureSessionInsertable(*session, outDesign, replace != 0, insertError))
         {
             PyErr_SetString(PyExc_KeyError, insertError.c_str());
             return nullptr;
@@ -210,27 +210,27 @@ namespace wolvrix::app::pybind
         {
             if (replace)
             {
-                sessionEraseKey(*session, targetDesignKey);
+                sessionEraseKey(*session, outDesign);
             }
             session->designs.insert_or_assign(
-                std::string(targetDesignKey),
+                std::string(outDesign),
                 DesignHandle{std::move(design), std::move(compilation)});
         }
         return makeActionResult(success,
                                 converter.diagnostics().messages(),
-                                success ? sessionDesignSourceManager(*session, targetDesignKey)
+                                success ? sessionDesignSourceManager(*session, outDesign)
                                         : compilation->getSourceManager());
     }
 
     PyObject *py_session_clone_design(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
     {
         PyObject *sessionObj = nullptr;
-        const char *src = nullptr;
-        const char *dst = nullptr;
+        const char *design = nullptr;
+        const char *outDesign = nullptr;
         int replace = 0;
-        static const char *kwlist[] = {"session", "src", "dst", "replace", nullptr};
+        static const char *kwlist[] = {"session", "design", "out_design", "replace", nullptr};
         if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|p", const_cast<char **>(kwlist),
-                                         &sessionObj, &src, &dst, &replace))
+                                         &sessionObj, &design, &outDesign, &replace))
         {
             return nullptr;
         }
@@ -239,26 +239,26 @@ namespace wolvrix::app::pybind
         {
             return nullptr;
         }
-        auto srcIt = session->designs.find(src);
+        auto srcIt = session->designs.find(design);
         if (srcIt == session->designs.end())
         {
-            PyErr_Format(PyExc_KeyError, "design key not found: %s", src);
+            PyErr_Format(PyExc_KeyError, "design key not found: %s", design);
             return nullptr;
         }
         std::string insertError;
-        if (!ensureSessionInsertable(*session, dst, replace != 0, insertError))
+        if (!ensureSessionInsertable(*session, outDesign, replace != 0, insertError))
         {
             PyErr_SetString(PyExc_KeyError, insertError.c_str());
             return nullptr;
         }
         if (replace)
         {
-            sessionEraseKey(*session, dst);
+            sessionEraseKey(*session, outDesign);
         }
-        session->designs.insert_or_assign(std::string(dst),
+        session->designs.insert_or_assign(std::string(outDesign),
                                           DesignHandle{srcIt->second.design.clone(),
                                                        srcIt->second.compilation});
-        return makeActionResult(true, {}, sessionDesignSourceManager(*session, dst));
+        return makeActionResult(true, {}, sessionDesignSourceManager(*session, outDesign));
     }
 
 } // namespace wolvrix::app::pybind

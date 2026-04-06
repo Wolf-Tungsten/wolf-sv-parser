@@ -12,7 +12,7 @@ namespace wolvrix::app::pybind
 {
 
     using SessionNativeExportFn =
-        PyObject *(*)(const wolvrix::lib::transform::ScratchpadSlot &slot,
+        PyObject *(*)(const wolvrix::lib::transform::SessionSlot &slot,
                       std::string_view key,
                       std::string_view view);
 

@@ -1,80 +1,170 @@
 # wolvrix
 
-wolvrix converts high-level behavioral RTL (Verilog-2005/SystemVerilog subset) into a structured GRH (Graph RTL Hierarchy) representation, which can then be emitted back as structural Verilog designs. It supports configurable logic transformations and plugin extensions for simulation, synthesis, formal verification, and custom analysis workflows.
+Wolvrix parses SystemVerilog into GRH (Graph RTL Hierarchy), runs transform passes on that IR, and writes results back out through emitters and storage backends.
 
-## Project Overview
+Today, the main way to use Wolvrix is the Python API.
 
-wolvrix is a SystemVerilog parser built on [slang](https://github.com/MikePopoloski/slang), designed for analyzing and processing SystemVerilog RTL designs.
+The Python API is organized around a single `Session` object. Instead of passing standalone `Design` objects around in Python, you keep your working state inside the session:
 
-## Quick Start (Submodules + CMake)
+- read or load a design into a session key
+- run passes against that design key
+- write extra results into other session keys when needed
+- emit or store files from the same session
+
+This model keeps design data, intermediate pass results, diagnostics, and debugging state in one place.
+
+## Build
 
 ```bash
-# Initialize submodules
 git submodule update --init --recursive
-
-# Build with CMake (from repo root)
 cmake -S wolvrix -B wolvrix/build
 cmake --build wolvrix/build -j$(nproc)
 ```
 
-This flow requires CMake 3.26+ because the vendored `external/mt-kahypar` build is wired directly into the top-level project. The resulting binary will be available at `wolvrix/build/bin/wolvrix`. This CMake flow builds the native library, CLI, tests, and the vendored `mt-kahypar` backend used by `repcut`. By default, the vendored `mt-kahypar` build downloads its TBB dependency during configure and disables `hwloc` integration unless you override the upstream `KAHYPAR_*` options. Python installation is handled separately through `pip` + `scikit-build-core`.
-
-## Python Bindings (primary usage)
+Install the Python package:
 
 ```bash
-# Install editable package (from repo root) via scikit-build-core
-python3 -m pip install --no-build-isolation -e wolvrix
-
-# Basic template (bindings + run_pipeline)
-python3 - <<'PY'
-import wolvrix
-
-design, _read_diags = wolvrix.read_sv(
-    "path/to/file.sv",
-    slang_args=["--top", "top"],
-    log_level="info",             # dev log output (C++ side, immediate)
-    diagnostics="warn",           # diagnostics collection
-    print_diagnostics_level="info",
-    raise_diagnostics_level="error",
-)
-pipeline = [
-    "xmr-resolve",
-    "simplify",
-    "memory-init-check",
-    "stats",
-]
-changed, _pass_diags = wolvrix.run_pipeline(
-    design,
-    pipeline,
-    diagnostics="warn",
-    log_level="info",
-    print_diagnostics_level="info",
-    raise_diagnostics_level="error",
-)
-
-design.write_json("out.json")
-design.write_sv("out.sv")
-design.write_sv("out/top_a", top=["top_a"], split_modules=True)
-PY
+python3 -m pip install --no-build-isolation -e .
 ```
 
-`write_sv` now emits only the modules reachable from the selected tops. If `top` is omitted it starts from `design.topGraphs()`. With `split_modules=False` the `output` argument is a single `.sv` file path; with `split_modules=True` it is an output directory and each reachable module is written to `<module_name>.sv`.
+## The Basic Python Workflow
 
-### Log vs diagnostics
+```python
+import wolvrix
 
-- **Log**: developer/debug output printed immediately by C++ (not collected). Use `log_level` to control it.
-- **Diagnostics**: user-facing messages collected in C++ and returned to Python. Python controls printing via `print_diagnostics_level` and raising via `raise_diagnostics_level`.
+with wolvrix.Session() as sess:
+    sess.set_log_level("info")
+    sess.set_diagnostics_policy("error")
 
-Python helpers accept:
-- `print_diagnostics_level="info|warn|error|none"`
-- `raise_diagnostics_level="error|warn|info|none"` (raise if any diagnostic meets/exceeds this level).
+    sess.read_sv(
+        "path/to/top.sv",
+        out_design="design.main",
+        slang_args=["--top", "top"],
+    )
+
+    sess.run_pass("xmr-resolve", design="design.main")
+    sess.run_pass("simplify", design="design.main")
+    sess.run_pass("stats", design="design.main", out_stats="stats.main")
+
+    sess.store_json(design="design.main", output="build/main.json")
+    sess.emit_sv(design="design.main", output="build/main.sv")
+```
+
+What happens in this example:
+
+1. `read_sv(...)` creates a design and stores it under `design.main`.
+2. Each `run_pass(...)` call modifies `design.main` in place.
+3. `out_stats="stats.main"` stores a separate result in the same session.
+4. `store_json(...)` and `emit_sv(...)` write files using the design stored in the session.
+
+## Naming Rules
+
+The naming rules are intentionally simple:
+
+- use `out_design=...` when an action creates or loads a design
+- use `design=...` for the design being operated on
+- use `in_*` and `out_*` for session-based data flow
+- use regular keyword arguments for ordinary pass or emit configuration
+
+Example:
+
+```python
+with wolvrix.Session() as sess:
+    sess.read_sv("top.sv", out_design="design.main")
+    sess.run_pass(
+        "trigger-key-driven-schedule",
+        design="design.main",
+        path="top",
+        out_tkd_schedule="tkd.plan.main",
+        out_tkd_groups="tkd.groups.main",
+        out_tkd_meta="tkd.meta.main",
+    )
+```
+
+This reads naturally:
+
+- `design="design.main"` tells you which design is being worked on
+- `out_tkd_schedule=...` tells you which additional session value will be produced
+- `path="top"` is just pass configuration
+
+## Diagnostics And Logging
+
+Every action returns diagnostics as `list[dict]`.
+
+```python
+diags = sess.run_pass("stats", design="design.main", out_stats="stats.main")
+```
+
+Logging is separate from diagnostics:
+
+- diagnostics are structured results returned to Python
+- logs are C++ runtime messages printed directly from native code
+
+Configure them at the session level:
+
+```python
+with wolvrix.Session() as sess:
+    sess.set_diagnostics_policy("error")   # none | warning | error
+    sess.set_log_level("warn")             # trace | debug | info | warn | error | off
+```
+
+Useful helpers:
+
+```python
+text = wolvrix.format_diagnostics(diags, min_level="info")
+wolvrix.print_diagnostics(diags, min_level="warning")
+```
+
+## Working With Session Values
+
+The session is a key-value store.
+
+Common keys look like this:
+
+- `design.main`
+- `design.flat`
+- `stats.main`
+- `tkd.plan.main`
+- `tkd.groups.main`
+- `loops.main`
+
+You can inspect the session with:
+
+```python
+value = sess.get("stats.main")
+kind = sess.kind("stats.main")
+keys = sess.keys(prefix="tkd.")
+```
+
+Not every session value needs a rich Python representation.
+
+- if a `kind` has a Python adapter, `sess.get(...)` returns that adapter object
+- otherwise it returns `OpaqueValue`
+
+This is deliberate. Session values are not only for Python debugging; they are also how C++ passes and emitters pass data to each other.
+
+## Emit And Store APIs
+
+Currently implemented:
+
+```python
+sess.store_json(*, design: str, output: str, mode="pretty-compact", top=None)
+sess.emit_sv(*, design: str, output: str, top=None, split_modules=False)
+sess.emit_verilator_repcut_package(*, design: str, output: str, top=None)
+```
+
+These emitters do not yet consume extra session values, so they currently expose no `in_*` parameters. If you pass an unsupported `in_*`, the API raises an error instead of silently ignoring it.
+
+## Important Documents
+
+If you are new to Wolvrix, read these in order:
+
+1. [docs/grh/grh-ir.md](docs/grh/grh-ir.md)
+2. [docs/transform/README.md](docs/transform/README.md)
+3. [docs/python/python-binding-architecture.md](docs/python/python-binding-architecture.md)
 
 ## Tests
 
 ```bash
 ctest --test-dir wolvrix/build --output-on-failure
 ```
-
-## License
-
-This project uses the MIT License, same as slang. See `LICENSE`.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 from typing import Any
 
 from . import _wolvrix as _native
@@ -9,7 +10,9 @@ from .adapters import adapt_session_value
 __all__ = [
     "OpaqueValue",
     "Session",
+    "format_diagnostics",
     "list_passes",
+    "print_diagnostics",
 ]
 
 
@@ -97,11 +100,17 @@ class Session:
     def history(self) -> list[dict]:
         return [dict(item) for item in self._history]
 
+    def format_diagnostics(self, diagnostics: list[dict], *, min_level: str = "debug") -> str:
+        return format_diagnostics(diagnostics, min_level=min_level)
+
+    def print_diagnostics(self, diagnostics: list[dict], *, min_level: str = "debug", file=None) -> None:
+        print_diagnostics(diagnostics, min_level=min_level, file=file)
+
     def read_sv(
         self,
         path: str | None,
         *,
-        target_design_key: str = "design.main",
+        out_design: str = "design.main",
         slang_args: list[str] | None = None,
         replace: bool = False,
     ) -> list[dict]:
@@ -109,7 +118,7 @@ class Session:
         success, diagnostics = _native.session_read_sv(
             self._capsule,
             path=path,
-            target_design_key=target_design_key,
+            out_design=out_design,
             slang_args=slang_args or [],
             replace=replace,
             log_level=self._log_level,
@@ -118,7 +127,7 @@ class Session:
             "read_sv",
             diagnostics,
             success=bool(success),
-            target_design_key=target_design_key,
+            out_design=out_design,
             path=path,
         )
 
@@ -126,21 +135,21 @@ class Session:
         self,
         path: str,
         *,
-        target_design_key: str = "design.main",
+        out_design: str = "design.main",
         replace: bool = False,
     ) -> list[dict]:
         self._ensure_open()
         success, diagnostics = _native.session_read_json_file(
             self._capsule,
             path=path,
-            target_design_key=target_design_key,
+            out_design=out_design,
             replace=replace,
         )
         return self._complete_action(
             "read_json_file",
             diagnostics,
             success=bool(success),
-            target_design_key=target_design_key,
+            out_design=out_design,
             path=path,
         )
 
@@ -148,37 +157,37 @@ class Session:
         self,
         text: str,
         *,
-        target_design_key: str = "design.main",
+        out_design: str = "design.main",
         replace: bool = False,
     ) -> list[dict]:
         self._ensure_open()
         success, diagnostics = _native.session_load_json_text(
             self._capsule,
             text=text,
-            target_design_key=target_design_key,
+            out_design=out_design,
             replace=replace,
         )
         return self._complete_action(
             "load_json_text",
             diagnostics,
             success=bool(success),
-            target_design_key=target_design_key,
+            out_design=out_design,
         )
 
-    def clone_design(self, src: str, dst: str, *, replace: bool = False) -> list[dict]:
+    def clone_design(self, *, design: str, out_design: str, replace: bool = False) -> list[dict]:
         self._ensure_open()
         success, diagnostics = _native.session_clone_design(
             self._capsule,
-            src=src,
-            dst=dst,
+            design=design,
+            out_design=out_design,
             replace=replace,
         )
         return self._complete_action(
             "clone_design",
             diagnostics,
             success=bool(success),
-            src=src,
-            dst=dst,
+            design=design,
+            out_design=out_design,
         )
 
     def run_pass(
@@ -188,10 +197,10 @@ class Session:
         design: str,
         args: list[str] | None = None,
         dryrun: bool = False,
-        **named_session_keys,
+        **named_args,
     ) -> list[dict]:
         self._ensure_open()
-        canonical_name, pass_args = _compile_run_pass(name, args or [], named_session_keys)
+        canonical_name, pass_args = _compile_run_pass(name, args or [], named_args)
         success, changed, diagnostics = _native.session_run_pass(
             self._capsule,
             name=canonical_name,
@@ -241,8 +250,10 @@ class Session:
         output: str,
         top: list[str] | None = None,
         split_modules: bool = False,
+        **named_args,
     ) -> list[dict]:
         self._ensure_open()
+        _compile_emit_sv_kwargs(named_args)
         success, diagnostics = _native.session_emit_sv(
             self._capsule,
             design=design,
@@ -264,8 +275,10 @@ class Session:
         design: str,
         output: str,
         top: list[str] | None = None,
+        **named_args,
     ) -> list[dict]:
         self._ensure_open()
+        _compile_emit_verilator_repcut_package_kwargs(named_args)
         success, diagnostics = _native.session_emit_verilator_repcut_package(
             self._capsule,
             design=design,
@@ -307,6 +320,8 @@ def _compile_run_pass(name: str, args: list[str], named: dict[str, Any]) -> tupl
     compiled = list(args)
     if canonical_name == "hier-flatten":
         compiled.extend(_compile_hier_flatten_kwargs(named))
+    elif canonical_name == "comb-loop-elim":
+        compiled.extend(_compile_comb_loop_elim_kwargs(named))
     elif canonical_name == "mem-to-reg":
         compiled.extend(_compile_mem_to_reg_kwargs(named))
     elif canonical_name == "simplify":
@@ -357,6 +372,32 @@ def _compile_hier_flatten_kwargs(named: dict[str, Any]) -> list[str]:
     return out
 
 
+def _compile_comb_loop_elim_kwargs(named: dict[str, Any]) -> list[str]:
+    local = dict(named)
+    out: list[str] = []
+    max_analysis_nodes = _pop_named(local, "max_analysis_nodes", None)
+    if max_analysis_nodes is not None:
+        out.extend(["-max-analysis-nodes", str(max_analysis_nodes)])
+    num_threads = _pop_named(local, "num_threads", None)
+    if num_threads is not None:
+        out.extend(["-num-threads", str(num_threads)])
+    fix_false_loops = _pop_named(local, "fix_false_loops", None)
+    if fix_false_loops is True:
+        out.append("-fix-false-loops")
+    elif fix_false_loops is False:
+        out.append("-no-fix-false-loops")
+    max_fix_iterations = _pop_named(local, "max_fix_iterations", None)
+    if max_fix_iterations is not None:
+        out.extend(["-max-fix-iterations", str(max_fix_iterations)])
+    if _pop_named(local, "fail_on_true_loop", False):
+        out.append("-fail-on-true-loop")
+    output_key = _pop_named(local, "out_comb_loop_report", None)
+    if output_key is not None:
+        out.extend(["-output-key", str(output_key)])
+    _ensure_no_extra_named("comb-loop-elim", local)
+    return out
+
+
 def _compile_mem_to_reg_kwargs(named: dict[str, Any]) -> list[str]:
     local = dict(named)
     out: list[str] = []
@@ -391,7 +432,7 @@ def _compile_simplify_kwargs(named: dict[str, Any]) -> list[str]:
 def _compile_stats_kwargs(named: dict[str, Any]) -> list[str]:
     local = dict(named)
     out: list[str] = []
-    stats_key = _pop_named(local, "statskey", None)
+    stats_key = _pop_named(local, "out_stats", None)
     if stats_key is not None:
         out.extend(["-output-key", str(stats_key)])
     _ensure_no_extra_named("stats", local)
@@ -429,22 +470,32 @@ def _compile_repcut_kwargs(named: dict[str, Any]) -> list[str]:
     return out
 
 
+def _compile_emit_sv_kwargs(named: dict[str, Any]) -> None:
+    local = dict(named)
+    _ensure_no_extra_named("emit_sv", local)
+
+
+def _compile_emit_verilator_repcut_package_kwargs(named: dict[str, Any]) -> None:
+    local = dict(named)
+    _ensure_no_extra_named("emit_verilator_repcut_package", local)
+
+
 def _compile_tkd_sched_kwargs(named: dict[str, Any]) -> list[str]:
     local = dict(named)
     out: list[str] = []
     path = _pop_named(local, "path", None)
     if path is not None:
         out.extend(["-path", str(path)])
-    result_key = _pop_named(local, "tkdresultkey", None)
+    result_key = _pop_named(local, "out_tkd_schedule", None)
     if result_key is not None:
         out.extend(["-result-key", str(result_key)])
-    groups_key = _pop_named(local, "tkdgroupskey", None)
+    groups_key = _pop_named(local, "out_tkd_groups", None)
     if groups_key is not None:
         out.extend(["-groups-key", str(groups_key)])
-    meta_key = _pop_named(local, "tkdmetakey", None)
+    meta_key = _pop_named(local, "out_tkd_meta", None)
     if meta_key is not None:
         out.extend(["-meta-key", str(meta_key)])
-    _ensure_no_extra_named("tkd_sched", local)
+    _ensure_no_extra_named("trigger-key-driven-schedule", local)
     return out
 
 
@@ -499,10 +550,48 @@ def _should_raise(diags: list[dict], threshold: str) -> bool:
 
 
 def _format_diagnostics(diags: list[dict]) -> str:
-    if not diags:
-        return "wolvrix failed"
-    parts = [diag.get("text", "") for diag in diags if diag.get("text")]
-    return "\n".join(parts) if parts else "wolvrix failed"
+    return format_diagnostics(diags) or "wolvrix failed"
+
+
+def format_diagnostics(diags: list[dict], *, min_level: str = "debug") -> str:
+    threshold = _diagnostics_display_rank(min_level)
+    if threshold is None:
+        return ""
+    parts: list[str] = []
+    for diag in diags or []:
+        kind = str(diag.get("kind", "")).lower()
+        if kind == "warn":
+            kind = "warning"
+        rank = _level_rank(kind)
+        if rank is None or rank < threshold:
+            continue
+        text = str(diag.get("text", "")).strip()
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def print_diagnostics(diags: list[dict], *, min_level: str = "debug", file=None) -> None:
+    text = format_diagnostics(diags, min_level=min_level)
+    if not text:
+        return
+    stream = sys.stderr if file is None else file
+    stream.write(text)
+    if not text.endswith("\n"):
+        stream.write("\n")
+    if hasattr(stream, "flush"):
+        stream.flush()
+
+
+def _diagnostics_display_rank(level: str) -> int | None:
+    name = str(level).lower()
+    if name in {"off", "none"}:
+        return None
+    if name == "warn":
+        name = "warning"
+    if name not in {"debug", "info", "warning", "error"}:
+        raise ValueError("diagnostics print level must be one of: debug, info, warning, error, none")
+    return _level_rank(name)
 
 
 def _raise_with_diagnostics(diags: list[dict]) -> None:

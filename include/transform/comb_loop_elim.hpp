@@ -17,6 +17,8 @@ namespace wolvrix::lib::transform
         std::vector<wolvrix::lib::grh::ValueId> loopValues;
         std::vector<wolvrix::lib::grh::OperationId> loopOps;
         std::optional<wolvrix::lib::grh::SrcLoc> sourceLocation;
+        std::string status;
+        std::string diagnosticKind;
         std::string description;
     };
 
@@ -36,6 +38,9 @@ namespace wolvrix::lib::transform
 
         // Treat true loops as pass failures.
         bool failOnTrueLoop = false;
+
+        // Optional session key used to store loop reports for later inspection.
+        std::string outputKey;
     };
 
     class CombLoopElimPass : public Pass

@@ -70,7 +70,7 @@ namespace wolvrix::app::pybind
     struct SessionHandle
     {
         std::unordered_map<std::string, DesignHandle> designs;
-        wolvrix::lib::transform::ScratchpadStore nativeValues;
+        wolvrix::lib::transform::SessionStore nativeValues;
         std::unordered_map<std::string, PythonSessionValue> pythonValues;
 
         void clear()

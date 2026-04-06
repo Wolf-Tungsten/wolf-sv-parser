@@ -364,7 +364,7 @@ namespace wolvrix::lib::transform
             return id;
         }
 
-        std::string scratchpadKey(std::string_view modulePath, std::string_view suffix)
+        std::string sessionKey(std::string_view modulePath, std::string_view suffix)
         {
             std::string key = "tkds/";
             key.append(modulePath);
@@ -1032,17 +1032,17 @@ namespace wolvrix::lib::transform
         const TkdOpToGroupIndex opToGroupIndex{kInvalidTkdGroupId, groupIdByOpIndex};
         if (!options_.metaKey.empty())
         {
-            setScratchpad(options_.metaKey, meta, "tkd.meta");
+            setSessionValue(options_.metaKey, meta, "tkd.meta");
         }
         if (!options_.groupsKey.empty())
         {
-            setScratchpad(options_.groupsKey,
+            setSessionValue(options_.groupsKey,
                           TkdGroupBundle{sinkGroups, triggerGroups, simpleGroups},
                           "tkd.groups");
         }
         if (!options_.resultKey.empty())
         {
-            setScratchpad(options_.resultKey,
+            setSessionValue(options_.resultKey,
                           TkdScheduleResult{
                               meta,
                               triggerKeyPool,
@@ -1056,15 +1056,15 @@ namespace wolvrix::lib::transform
         }
         if (options_.resultKey.empty() && options_.groupsKey.empty() && options_.metaKey.empty())
         {
-            setScratchpad(scratchpadKey(modulePath, "meta"), meta, "tkd.meta");
-            setScratchpad(scratchpadKey(modulePath, "pools/triggerKeys"), triggerKeyPool, "tkd.trigger_keys");
-            setScratchpad(scratchpadKey(modulePath, "pools/affectedSinkSets"), affectedSinkSetPool, "tkd.affected_sink_sets");
-            setScratchpad(scratchpadKey(modulePath, "groups/sink"), sinkGroups, "tkd.sink_groups");
-            setScratchpad(scratchpadKey(modulePath, "groups/trigger"), triggerGroups, "tkd.trigger_groups");
-            setScratchpad(scratchpadKey(modulePath, "groups/simple"), simpleGroups, "tkd.simple_groups");
-            setScratchpad(scratchpadKey(modulePath, "index/opToTkdGroup"), opToGroupIndex, "tkd.op_group_index");
-            setScratchpad(scratchpadKey(modulePath, "plan/edges"), edges, "tkd.plan_edges");
-            setScratchpad(scratchpadKey(modulePath, "plan/topoOrder"), topoOrder, "tkd.topo_order");
+            setSessionValue(sessionKey(modulePath, "meta"), meta, "tkd.meta");
+            setSessionValue(sessionKey(modulePath, "pools/triggerKeys"), triggerKeyPool, "tkd.trigger_keys");
+            setSessionValue(sessionKey(modulePath, "pools/affectedSinkSets"), affectedSinkSetPool, "tkd.affected_sink_sets");
+            setSessionValue(sessionKey(modulePath, "groups/sink"), sinkGroups, "tkd.sink_groups");
+            setSessionValue(sessionKey(modulePath, "groups/trigger"), triggerGroups, "tkd.trigger_groups");
+            setSessionValue(sessionKey(modulePath, "groups/simple"), simpleGroups, "tkd.simple_groups");
+            setSessionValue(sessionKey(modulePath, "index/opToTkdGroup"), opToGroupIndex, "tkd.op_group_index");
+            setSessionValue(sessionKey(modulePath, "plan/edges"), edges, "tkd.plan_edges");
+            setSessionValue(sessionKey(modulePath, "plan/topoOrder"), topoOrder, "tkd.topo_order");
         }
 
         return result;

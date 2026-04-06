@@ -1,64 +1,78 @@
 # comb-loop-elim
 
-## 功能概述
+`comb-loop-elim` detects combinational loops and, when possible, repairs false loops.
 
-`comb-loop-elim` pass 检测并处理组合逻辑循环（combinational loops），支持识别和修复虚假循环（false loops）。
+The important point is that this pass is now diagnostics-first:
 
-## 详细说明
+- if it fixes a false loop, it reports that as `info`
+- if it finds a loop that it cannot safely resolve, it reports that as `warning`
+- it only writes a loop report to the session when you explicitly ask for one
 
-组合逻辑循环是指由组合逻辑操作构成的循环依赖关系，这通常是不期望的设计问题。该 pass 使用 Tarjan 强连通分量（SCC）算法来检测循环，并能够区分真实循环和虚假循环。
+## Python Example
 
-### 检测方法
-
-1. **构建依赖图**：从每个图的值（Value）构建后继依赖关系图
-2. **SCC 检测**：使用 Tarjan 算法找出所有强连通分量
-3. **边界操作识别**：将常量、寄存器读端口、锁存器读端口和 DPI-C 调用视为边界，不参与循环检测
-
-### 虚假循环修复
-
-对于检测到的循环，pass 会进一步分析：
-
-1. **位范围分析**：构建基于位范围的细粒度依赖图
-2. **切片分析**：分析静态切片（`kSliceStatic`）、动态切片（`kSliceDynamic`）和连接操作（`kConcat`）
-3. **冲突检测**：检查同一位范围是否存在重叠的写操作
-
-如果循环中的所有 SCC 都不存在位范围重叠，则判定为虚假循环，可以通过值拆分来修复。
-
-## 配置选项
-
-| 选项 | 默认值 | 说明 |
-|------|--------|------|
-| `-max-analysis-nodes` / `-max-nodes` | 0（无限制） | 每个图最大分析的节点数 |
-| `-num-threads` / `-threads` | 0（使用硬件并发数） | 分析线程数 |
-| `-fix-false-loops` / `-no-fix-false-loops` | true | 是否修复虚假循环 |
-| `-max-fix-iter` | 100 | 修复虚假循环的最大迭代次数 |
-| `-fail-on-true-loop` | false | 将真实循环视为 pass 失败 |
-
-## 使用示例
-
-```bash
-# 基本使用
-wolvrix --pass=comb-loop-elim input.sv
-
-# 启用多线程分析
-wolvrix --pass=comb-loop-elim:-num-threads=4 input.sv
-
-# 限制分析节点数
-wolvrix --pass=comb-loop-elim:-max-analysis-nodes=10000 input.sv
-
-# 不修复虚假循环，仅检测
-wolvrix --pass=comb-loop-elim:-no-fix-false-loops input.sv
+```python
+with wolvrix.Session() as sess:
+    sess.read_sv("top.sv", out_design="design.main")
+    diags = sess.run_pass(
+        "comb-loop-elim",
+        design="design.main",
+        out_comb_loop_report="loops.main",
+        fix_false_loops=True,
+        max_fix_iterations=100,
+        fail_on_true_loop=False,
+    )
+    wolvrix.print_diagnostics(diags, min_level="info")
 ```
 
-## 输出信息
+If you omit `out_comb_loop_report`, the pass still returns diagnostics, but it does not silently create a session value.
 
-- 检测到的循环数量和类型（真实循环/虚假循环）
-- 循环涉及的值和操作
-- 源代码位置信息（如果可用）
-- 修复操作的统计信息
+## What Counts As A Loop
 
-## 注意事项
+At a high level, the pass:
 
-- 大规模设计可能需要调整 `-max-analysis-nodes` 以平衡精度和性能
-- 虚假循环修复会修改 IR，可能影响后续的时序分析
-- 真实循环通常表明设计存在需要修复的问题
+1. builds a dependency graph over values
+2. runs Tarjan SCC detection
+3. treats constants, register read ports, latch read ports, and DPI-C calls as boundaries
+4. performs a finer-grained bit-range analysis for possible false loops
+
+If the apparent loop is only caused by non-overlapping bit usage, the pass can split values and repair it. That is considered a false loop.
+
+## Session Output
+
+Optional output:
+
+- `out_comb_loop_report`
+  - kind `comb-loop.reports`
+
+This is mainly for later inspection or debugging. The primary output of the pass is still diagnostics.
+
+## Key Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-max-analysis-nodes` | `0` | maximum nodes analyzed per graph, `0` means unlimited |
+| `-num-threads` | `0` | analysis thread count, `0` uses hardware concurrency |
+| `-fix-false-loops` / `-no-fix-false-loops` | true | whether to repair resolvable false loops |
+| `-max-fix-iterations` | `100` | maximum repair iterations |
+| `-fail-on-true-loop` | false | treat true loops as pass failure |
+| `-output-key` | empty | session key for an explicit loop report |
+
+## Diagnostic Policy Interaction
+
+This pass works especially well with session-level diagnostic policies.
+
+For example:
+
+- with `sess.set_diagnostics_policy("warning")`, any unresolved loop warning becomes an exception
+- with `sess.set_diagnostics_policy("error")`, warnings are returned but do not automatically raise
+
+That keeps the pass behavior easy to reason about:
+
+- diagnostics describe what happened
+- session policy decides whether that should stop execution
+
+## Notes
+
+- large designs may need `max_analysis_nodes` tuning
+- repairing false loops rewrites the IR
+- a true combinational loop usually indicates a real design problem

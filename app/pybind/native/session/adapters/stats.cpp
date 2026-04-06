@@ -10,7 +10,7 @@ namespace wolvrix::app::pybind
     namespace
     {
 
-        PyObject *exportStatsValue(const wolvrix::lib::transform::ScratchpadSlot &slot,
+        PyObject *exportStatsValue(const wolvrix::lib::transform::SessionSlot &slot,
                                    std::string_view key,
                                    std::string_view view)
         {
@@ -23,7 +23,7 @@ namespace wolvrix::app::pybind
             }
 
             const auto *typed =
-                dynamic_cast<const wolvrix::lib::transform::ScratchpadSlotValue<std::string> *>(&slot);
+                dynamic_cast<const wolvrix::lib::transform::SessionSlotValue<std::string> *>(&slot);
             if (!typed)
             {
                 PyErr_Format(PyExc_TypeError,

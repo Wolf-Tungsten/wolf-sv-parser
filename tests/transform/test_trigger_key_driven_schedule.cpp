@@ -208,21 +208,21 @@ namespace
             };
 
             const std::string base = "tkds/top/";
-            const auto *meta = getScratchpad<TkdScheduleMeta>(base + "meta");
-            const auto *triggerKeys = getScratchpad<std::vector<TkdTriggerKeyRecord>>(base + "pools/triggerKeys");
+            const auto *meta = getSessionValue<TkdScheduleMeta>(base + "meta");
+            const auto *triggerKeys = getSessionValue<std::vector<TkdTriggerKeyRecord>>(base + "pools/triggerKeys");
             const auto *affectedSinkSets =
-                getScratchpad<std::vector<TkdAffectedSinkSetRecord>>(base + "pools/affectedSinkSets");
-            const auto *sinkGroups = getScratchpad<std::vector<TkdSinkGroupRecord>>(base + "groups/sink");
+                getSessionValue<std::vector<TkdAffectedSinkSetRecord>>(base + "pools/affectedSinkSets");
+            const auto *sinkGroups = getSessionValue<std::vector<TkdSinkGroupRecord>>(base + "groups/sink");
             const auto *triggerGroups =
-                getScratchpad<std::vector<TkdTriggerGroupRecord>>(base + "groups/trigger");
-            const auto *simpleGroups = getScratchpad<std::vector<TkdSimpleGroupRecord>>(base + "groups/simple");
-            const auto *opToGroup = getScratchpad<TkdOpToGroupIndex>(base + "index/opToTkdGroup");
-            const auto *edges = getScratchpad<std::vector<TkdGroupEdge>>(base + "plan/edges");
-            const auto *topoOrder = getScratchpad<std::vector<TkdGroupId>>(base + "plan/topoOrder");
+                getSessionValue<std::vector<TkdTriggerGroupRecord>>(base + "groups/trigger");
+            const auto *simpleGroups = getSessionValue<std::vector<TkdSimpleGroupRecord>>(base + "groups/simple");
+            const auto *opToGroup = getSessionValue<TkdOpToGroupIndex>(base + "index/opToTkdGroup");
+            const auto *edges = getSessionValue<std::vector<TkdGroupEdge>>(base + "plan/edges");
+            const auto *topoOrder = getSessionValue<std::vector<TkdGroupId>>(base + "plan/topoOrder");
             if (!meta || !triggerKeys || !affectedSinkSets || !sinkGroups || !triggerGroups || !simpleGroups ||
                 !opToGroup || !edges || !topoOrder)
             {
-                return failPass("scratchpad entries missing");
+                return failPass("session entries missing");
             }
 
             auto *graph = design().findGraph("top");

@@ -861,7 +861,7 @@ namespace wolvrix::lib::transform
 
         if (!options_.outputKey.empty())
         {
-            setScratchpad(options_.outputKey, message, "stats");
+            setSessionValue(options_.outputKey, message, "stats");
         }
 
         info(message);

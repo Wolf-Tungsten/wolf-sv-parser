@@ -100,9 +100,36 @@ namespace
         {
             return fail("Expected comb-loop-elim to report changes for false loop");
         }
-        if (!diags.messages().empty())
+        bool foundResolvedInfo = false;
+        bool foundSummaryInfo = false;
+        for (const auto &msg : diags.messages())
         {
-            return fail("Expected no diagnostics for fixed false loop");
+            if (msg.passName != "comb-loop-elim")
+            {
+                continue;
+            }
+            if (msg.kind == PassDiagnosticKind::Warning)
+            {
+                return fail("Expected fixed false loop to avoid warning diagnostics");
+            }
+            if (msg.kind == PassDiagnosticKind::Info &&
+                msg.message.find("comb-loop-elim resolved false loops") != std::string::npos)
+            {
+                foundResolvedInfo = true;
+            }
+            if (msg.kind == PassDiagnosticKind::Info &&
+                msg.message.find("comb-loop-elim summary") != std::string::npos)
+            {
+                foundSummaryInfo = true;
+            }
+        }
+        if (!foundResolvedInfo)
+        {
+            return fail("Expected fixed false loop to emit an info diagnostic");
+        }
+        if (!foundSummaryInfo)
+        {
+            return fail("Expected fixed false loop to emit an info summary diagnostic");
         }
 
         if (graph.values().size() <= valuesBefore)
@@ -186,18 +213,31 @@ namespace
         }
 
         bool foundWarning = false;
+        bool foundSummaryInfo = false;
         for (const auto &msg : diags.messages())
         {
-            if (msg.passName == "comb-loop-elim" &&
+            if (msg.passName != "comb-loop-elim")
+            {
+                continue;
+            }
+            if (msg.kind == PassDiagnosticKind::Warning &&
                 msg.message.find("comb loop detected") != std::string::npos)
             {
                 foundWarning = true;
-                break;
+            }
+            if (msg.kind == PassDiagnosticKind::Info &&
+                msg.message.find("comb-loop-elim summary") != std::string::npos)
+            {
+                foundSummaryInfo = true;
             }
         }
         if (!foundWarning)
         {
             return fail("Expected comb-loop-elim warning for true loop");
+        }
+        if (!foundSummaryInfo)
+        {
+            return fail("Expected comb-loop-elim info summary for true loop");
         }
         return 0;
     }

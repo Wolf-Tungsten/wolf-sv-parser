@@ -13,11 +13,11 @@ namespace wolvrix::app::pybind
     {
         PyObject *sessionObj = nullptr;
         const char *path = nullptr;
-        const char *targetDesignKey = nullptr;
+        const char *outDesign = nullptr;
         int replace = 0;
-        static const char *kwlist[] = {"session", "path", "target_design_key", "replace", nullptr};
+        static const char *kwlist[] = {"session", "path", "out_design", "replace", nullptr};
         if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|p", const_cast<char **>(kwlist),
-                                         &sessionObj, &path, &targetDesignKey, &replace))
+                                         &sessionObj, &path, &outDesign, &replace))
         {
             return nullptr;
         }
@@ -27,7 +27,7 @@ namespace wolvrix::app::pybind
             return nullptr;
         }
         std::string insertError;
-        if (!ensureSessionInsertable(*session, targetDesignKey, replace != 0, insertError))
+        if (!ensureSessionInsertable(*session, outDesign, replace != 0, insertError))
         {
             PyErr_SetString(PyExc_KeyError, insertError.c_str());
             return nullptr;
@@ -48,9 +48,9 @@ namespace wolvrix::app::pybind
             auto design = wolvrix::lib::grh::Design::fromJsonString(contents);
             if (replace)
             {
-                sessionEraseKey(*session, targetDesignKey);
+                sessionEraseKey(*session, outDesign);
             }
-            session->designs.insert_or_assign(std::string(targetDesignKey),
+            session->designs.insert_or_assign(std::string(outDesign),
                                               DesignHandle{std::move(design), {}});
             return makeActionResult(true, {}, nullptr);
         }
@@ -67,11 +67,11 @@ namespace wolvrix::app::pybind
     {
         PyObject *sessionObj = nullptr;
         const char *text = nullptr;
-        const char *targetDesignKey = nullptr;
+        const char *outDesign = nullptr;
         int replace = 0;
-        static const char *kwlist[] = {"session", "text", "target_design_key", "replace", nullptr};
+        static const char *kwlist[] = {"session", "text", "out_design", "replace", nullptr};
         if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|p", const_cast<char **>(kwlist),
-                                         &sessionObj, &text, &targetDesignKey, &replace))
+                                         &sessionObj, &text, &outDesign, &replace))
         {
             return nullptr;
         }
@@ -81,7 +81,7 @@ namespace wolvrix::app::pybind
             return nullptr;
         }
         std::string insertError;
-        if (!ensureSessionInsertable(*session, targetDesignKey, replace != 0, insertError))
+        if (!ensureSessionInsertable(*session, outDesign, replace != 0, insertError))
         {
             PyErr_SetString(PyExc_KeyError, insertError.c_str());
             return nullptr;
@@ -92,9 +92,9 @@ namespace wolvrix::app::pybind
             auto design = wolvrix::lib::grh::Design::fromJsonString(text);
             if (replace)
             {
-                sessionEraseKey(*session, targetDesignKey);
+                sessionEraseKey(*session, outDesign);
             }
-            session->designs.insert_or_assign(std::string(targetDesignKey),
+            session->designs.insert_or_assign(std::string(outDesign),
                                               DesignHandle{std::move(design), {}});
             return makeActionResult(true, {}, nullptr);
         }

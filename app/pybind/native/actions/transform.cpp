@@ -76,7 +76,7 @@ namespace wolvrix::app::pybind
         wolvrix::lib::transform::PassManager manager;
         auto &options = manager.options();
         options.logLevel = logLevel;
-        options.scratchpad = dryrun ? nullptr : &session->nativeValues;
+        options.session = dryrun ? nullptr : &session->nativeValues;
         if (logLevel != wolvrix::lib::LogLevel::Off)
         {
             options.logSink = [](wolvrix::lib::LogLevel level,
@@ -99,8 +99,8 @@ namespace wolvrix::app::pybind
         if (dryrun)
         {
             wolvrix::lib::grh::Design tempDesign = design->clone();
-            auto tempScratchpad = cloneScratchpadStore(session->nativeValues);
-            options.scratchpad = &tempScratchpad;
+            auto tempSession = cloneSessionStore(session->nativeValues);
+            options.session = &tempSession;
             result = manager.run(tempDesign, diagnostics);
         }
         else

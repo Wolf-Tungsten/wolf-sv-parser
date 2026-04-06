@@ -310,10 +310,10 @@ namespace wolvrix::lib::transform
     PassManagerResult PassManager::run(wolvrix::lib::grh::Design &design, PassDiagnostics &diags)
     {
         PassManagerResult result;
-        ScratchpadStore localScratchpad;
-        ScratchpadStore *scratchpad = options_.scratchpad ? options_.scratchpad : &localScratchpad;
+        SessionStore localSession;
+        SessionStore *session = options_.session ? options_.session : &localSession;
         PassContext context{design, diags, options_.verbosity, options_.logLevel, options_.logSink,
-                            options_.keepDeclaredSymbols, scratchpad};
+                            options_.keepDeclaredSymbols, session};
         bool encounteredFailure = false;
         auto emitLog = [&](LogLevel level, std::string_view tag, std::string_view message) {
             if (!options_.logSink)
@@ -783,6 +783,19 @@ namespace wolvrix::lib::transform
                 else if (arg == "-fail-on-true-loop")
                 {
                     options.failOnTrueLoop = true;
+                }
+                else if (arg == "-output-key")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-output-key expects a value";
+                        return nullptr;
+                    }
+                    options.outputKey = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-output-key="))
+                {
+                    options.outputKey = std::string(arg.substr(std::string_view("-output-key=").size()));
                 }
                 else
                 {

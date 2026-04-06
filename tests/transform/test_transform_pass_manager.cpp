@@ -52,20 +52,20 @@ namespace
         std::vector<std::string> &order_;
     };
 
-    class ScratchpadCheckEmpty : public Pass
+    class SessionCheckEmpty : public Pass
     {
     public:
-        ScratchpadCheckEmpty(std::string id, bool &reuseFlag)
-            : Pass(std::move(id), "scratchpad-check"), reuseFlag_(reuseFlag)
+        SessionCheckEmpty(std::string id, bool &reuseFlag)
+            : Pass(std::move(id), "session-check"), reuseFlag_(reuseFlag)
         {
         }
 
         PassResult run() override
         {
-            if (hasScratchpad("count"))
+            if (hasSessionValue("count"))
             {
                 reuseFlag_ = true;
-                diags().error(id(), "scratchpad was not cleared between runs");
+                diags().error(id(), "session value was not cleared between runs");
                 return PassResult{false, true, {}};
             }
             return {};
@@ -75,17 +75,17 @@ namespace
         bool &reuseFlag_;
     };
 
-    class ScratchpadWriter : public Pass
+    class SessionWriter : public Pass
     {
     public:
-        ScratchpadWriter(std::string id, int value)
-            : Pass(std::move(id), "scratchpad-writer"), value_(value)
+        SessionWriter(std::string id, int value)
+            : Pass(std::move(id), "session-writer"), value_(value)
         {
         }
 
         PassResult run() override
         {
-            setScratchpad("count", value_);
+            setSessionValue("count", value_);
             return {};
         }
 
@@ -93,20 +93,20 @@ namespace
         int value_;
     };
 
-    class ScratchpadReader : public Pass
+    class SessionReader : public Pass
     {
     public:
-        ScratchpadReader(std::string id, int expected)
-            : Pass(std::move(id), "scratchpad-reader"), expected_(expected)
+        SessionReader(std::string id, int expected)
+            : Pass(std::move(id), "session-reader"), expected_(expected)
         {
         }
 
         PassResult run() override
         {
-            const int *value = getScratchpad<int>("count");
+            const int *value = getSessionValue<int>("count");
             if (value == nullptr || *value != expected_)
             {
-                diags().error(id(), "scratchpad value missing or mismatched");
+                diags().error(id(), "session value missing or mismatched");
                 return PassResult{false, true, {}};
             }
             return {};
@@ -247,30 +247,30 @@ int main()
         }
     }
 
-    // Case 4: scratchpad allows cross-pass data and resets per run
+    // Case 4: session allows cross-pass data and resets per run
     {
         PassManager manager;
-        bool scratchpadReused = false;
+        bool sessionReused = false;
 
-        manager.addPass(std::make_unique<ScratchpadCheckEmpty>("check", scratchpadReused));
-        manager.addPass(std::make_unique<ScratchpadWriter>("write", 7));
-        manager.addPass(std::make_unique<ScratchpadReader>("read", 7));
+        manager.addPass(std::make_unique<SessionCheckEmpty>("check", sessionReused));
+        manager.addPass(std::make_unique<SessionWriter>("write", 7));
+        manager.addPass(std::make_unique<SessionReader>("read", 7));
 
         PassDiagnostics diags;
         PassManagerResult result = manager.run(design, diags);
         if (!result.success || diags.hasError())
         {
-            return fail("Expected scratchpad pipeline to succeed on first run");
+            return fail("Expected session pipeline to succeed on first run");
         }
         diags.clear();
         result = manager.run(design, diags);
         if (!result.success || diags.hasError())
         {
-            return fail("Expected scratchpad pipeline to succeed on second run");
+            return fail("Expected session pipeline to succeed on second run");
         }
-        if (scratchpadReused)
+        if (sessionReused)
         {
-            return fail("Scratchpad should be cleared between PassManager runs");
+            return fail("Session values should be cleared between PassManager runs");
         }
     }
 

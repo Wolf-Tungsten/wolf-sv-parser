@@ -161,10 +161,10 @@ namespace wolvrix::app::pybind
         session.pythonValues.erase(ownedKey);
     }
 
-    wolvrix::lib::transform::ScratchpadStore cloneScratchpadStore(
-        const wolvrix::lib::transform::ScratchpadStore &source)
+    wolvrix::lib::transform::SessionStore cloneSessionStore(
+        const wolvrix::lib::transform::SessionStore &source)
     {
-        wolvrix::lib::transform::ScratchpadStore clone;
+        wolvrix::lib::transform::SessionStore clone;
         for (const auto &[key, slot] : source)
         {
             if (!slot)

@@ -2944,6 +2944,7 @@ namespace wolvrix::lib::transform
         std::size_t totalTrueLoops = 0;
         std::size_t totalFalseLoops = 0;
         std::size_t totalFalseLoopsFixed = 0;
+        std::vector<CombLoopReport> sessionReports;
 
         for (const auto &entry : design().graphs())
         {
@@ -3019,13 +3020,22 @@ namespace wolvrix::lib::transform
                 }
             };
 
-            auto emitLoopWarning = [&](const LoopInfo &loop, const std::string &message) {
+            auto emitLoopDiagnostic = [&](PassDiagnosticKind kind,
+                                          const LoopInfo &loop,
+                                          const std::string &message) {
                 for (ValueId valueId : loop.loopValues)
                 {
                     const Value value = graph.getValue(valueId);
                     if (value.srcLoc())
                     {
-                        warning(graph, value, message);
+                        if (kind == PassDiagnosticKind::Info)
+                        {
+                            info(graph, value, message);
+                        }
+                        else
+                        {
+                            warning(graph, value, message);
+                        }
                         return;
                     }
                 }
@@ -3038,14 +3048,28 @@ namespace wolvrix::lib::transform
                     const Operation op = graph.getOperation(opId);
                     if (op.srcLoc())
                     {
-                        warning(graph, op, message);
+                        if (kind == PassDiagnosticKind::Info)
+                        {
+                            info(graph, op, message);
+                        }
+                        else
+                        {
+                            warning(graph, op, message);
+                        }
                         return;
                     }
                 }
-                warning(graph, message);
+                if (kind == PassDiagnosticKind::Info)
+                {
+                    info(graph, message);
+                }
+                else
+                {
+                    warning(graph, message);
+                }
             };
 
-            auto recordTrueLoop = [&](const LoopInfo &loop) {
+            auto recordWarningLoop = [&](const LoopInfo &loop) {
                 CombLoopReport report;
                 report.graphName = graph.symbol();
                 report.loopValues = loop.loopValues;
@@ -3057,6 +3081,8 @@ namespace wolvrix::lib::transform
                     status = options_.fixFalseLoops ? "false-candidate-unresolved"
                                                     : "false-candidate-fix-disabled";
                 }
+                report.status = status;
+                report.diagnosticKind = "warning";
                 std::string analysisNote;
                 if (loop.analysisIncomplete)
                 {
@@ -3074,15 +3100,10 @@ namespace wolvrix::lib::transform
                         report.description.append("\n  note=false loop candidate; fix disabled");
                     }
                 }
-                emitLoopWarning(loop, report.description);
-                auto *existing = getScratchpad<std::vector<CombLoopReport>>("comb_loops");
-                if (existing)
+                emitLoopDiagnostic(PassDiagnosticKind::Warning, loop, report.description);
+                if (!options_.outputKey.empty())
                 {
-                    existing->push_back(report);
-                }
-                else
-                {
-                    setScratchpad("comb_loops", std::vector<CombLoopReport>{report}, "comb_loops");
+                    sessionReports.push_back(std::move(report));
                 }
                 if (options_.failOnTrueLoop)
                 {
@@ -3207,7 +3228,29 @@ namespace wolvrix::lib::transform
             std::size_t loopsDetected = initialLoopsDetected;
             for (const auto &loop : finalLoops)
             {
-                recordTrueLoop(loop);
+                recordWarningLoop(loop);
+            }
+
+            if (falseLoopsFixed > 0)
+            {
+                std::string message = "comb-loop-elim resolved false loops graph=" + graph.symbol();
+                message.append(" fixed=");
+                message.append(std::to_string(falseLoopsFixed));
+                message.append(" split-values=");
+                message.append(std::to_string(totalValuesSplit));
+                message.append(" split-ops=");
+                message.append(std::to_string(totalOpsRewritten));
+                info(graph, message);
+
+                if (!options_.outputKey.empty())
+                {
+                    CombLoopReport report;
+                    report.graphName = graph.symbol();
+                    report.status = "false-fixed";
+                    report.diagnosticKind = "info";
+                    report.description = message;
+                    sessionReports.push_back(std::move(report));
+                }
             }
 
             if (graphChanged)
@@ -3252,7 +3295,16 @@ namespace wolvrix::lib::transform
         summary.append(std::to_string(totalFalseLoops));
         summary.append(" false-fixed=");
         summary.append(std::to_string(totalFalseLoopsFixed));
+        if (totalLoopsDetected > 0)
+        {
+            info(summary);
+        }
         logInfo(std::move(summary));
+
+        if (!options_.outputKey.empty())
+        {
+            setSessionValue(options_.outputKey, std::move(sessionReports), "comb-loop.reports");
+        }
 
         return result;
     }
