@@ -1,5 +1,6 @@
 #include "core/transform.hpp"
 
+#include "transform/activity_schedule.hpp"
 #include "transform/blackbox_guard.hpp"
 #include "transform/comb_loop_elim.hpp"
 #include "transform/demo_stats.hpp"
@@ -7,15 +8,15 @@
 #include "transform/hrbcut.hpp"
 #include "transform/instance_inline.hpp"
 #include "transform/latch_transparent_read.hpp"
-#include "transform/memory_read_retime.hpp"
-#include "transform/repcut.hpp"
-#include "transform/slice_index_const.hpp"
-#include "transform/multidriven_guard.hpp"
-#include "transform/memory_init_check.hpp"
 #include "transform/mem_to_reg.hpp"
+#include "transform/memory_init_check.hpp"
+#include "transform/memory_read_retime.hpp"
+#include "transform/multidriven_guard.hpp"
+#include "transform/repcut.hpp"
 #include "transform/simplify.hpp"
-#include "transform/xmr_resolve.hpp"
+#include "transform/slice_index_const.hpp"
 #include "transform/strip_debug.hpp"
+#include "transform/xmr_resolve.hpp"
 
 #include <chrono>
 #include <exception>
@@ -408,6 +409,7 @@ namespace wolvrix::lib::transform
         return {
             "blackbox-guard",
             "comb-loop-elim",
+            "activity-schedule",
             "latch-transparent-read",
             "memory-read-retime",
             "slice-index-const",
@@ -553,6 +555,313 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<InstanceInlinePass>(options);
+        }
+        if (normalized == "activity-schedule")
+        {
+            ActivityScheduleOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    out = std::string(args[++i]);
+                    return true;
+                };
+                auto parseSizeArg = [&](std::string_view name, std::size_t &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    try
+                    {
+                        out = static_cast<std::size_t>(std::stoull(std::string(args[++i])));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = std::string("invalid ") + std::string(name) + " value";
+                        return false;
+                    }
+                    return true;
+                };
+                auto parseBoolArg = [&](std::string_view name, bool &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(name) + " expects a value";
+                        return false;
+                    }
+                    const std::string_view text = args[++i];
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        out = true;
+                        return true;
+                    }
+                    if (text == "false" || text == "0" || text == "off")
+                    {
+                        out = false;
+                        return true;
+                    }
+                    error = std::string("invalid ") + std::string(name) + " value";
+                    return false;
+                };
+
+                if (arg == "-path")
+                {
+                    if (!parseStringArg("-path", options.path))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-path="))
+                {
+                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
+                }
+                else if (arg == "-supernode-max-size")
+                {
+                    if (!parseSizeArg("-supernode-max-size", options.supernodeMaxSize))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-supernode-max-size="))
+                {
+                    try
+                    {
+                        options.supernodeMaxSize = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-supernode-max-size=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -supernode-max-size value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-coarsen")
+                {
+                    if (!parseBoolArg("-enable-coarsen", options.enableCoarsen))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-coarsen="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-coarsen=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableCoarsen = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableCoarsen = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-coarsen value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-chain-merge")
+                {
+                    if (!parseBoolArg("-enable-chain-merge", options.enableChainMerge))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-chain-merge="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-chain-merge=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableChainMerge = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableChainMerge = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-chain-merge value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-sibling-merge")
+                {
+                    if (!parseBoolArg("-enable-sibling-merge", options.enableSiblingMerge))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-sibling-merge="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-sibling-merge=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableSiblingMerge = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableSiblingMerge = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-sibling-merge value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-forward-merge")
+                {
+                    if (!parseBoolArg("-enable-forward-merge", options.enableForwardMerge))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-forward-merge="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-forward-merge=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableForwardMerge = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableForwardMerge = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-forward-merge value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-refine")
+                {
+                    if (!parseBoolArg("-enable-refine", options.enableRefine))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-refine="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-refine=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableRefine = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableRefine = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-refine value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-refine-max-iter")
+                {
+                    if (!parseSizeArg("-refine-max-iter", options.refineMaxIter))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-refine-max-iter="))
+                {
+                    try
+                    {
+                        options.refineMaxIter = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-refine-max-iter=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -refine-max-iter value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-replication")
+                {
+                    if (!parseBoolArg("-enable-replication", options.enableReplication))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-replication="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-replication=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableReplication = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableReplication = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-replication value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-replication-max-cost")
+                {
+                    if (!parseSizeArg("-replication-max-cost", options.replicationMaxCost))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-replication-max-cost="))
+                {
+                    try
+                    {
+                        options.replicationMaxCost = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-replication-max-cost=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -replication-max-cost value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-replication-max-targets")
+                {
+                    if (!parseSizeArg("-replication-max-targets", options.replicationMaxTargets))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-replication-max-targets="))
+                {
+                    try
+                    {
+                        options.replicationMaxTargets = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-replication-max-targets=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -replication-max-targets value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-cost-model")
+                {
+                    if (!parseStringArg("-cost-model", options.costModel))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-cost-model="))
+                {
+                    options.costModel = std::string(arg.substr(std::string_view("-cost-model=").size()));
+                }
+                else
+                {
+                    error = "unknown activity-schedule option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<ActivitySchedulePass>(options);
         }
         if (normalized == "simplify")
         {

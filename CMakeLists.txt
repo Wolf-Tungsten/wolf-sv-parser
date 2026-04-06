@@ -86,6 +86,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/core/store.cpp
     lib/core/ingest.cpp
     lib/core/transform.cpp
+    lib/transform/activity_schedule.cpp
     lib/transform/demo_stats.cpp
     lib/transform/const_fold.cpp
     lib/transform/redundant_elim.cpp
@@ -460,6 +461,17 @@ target_link_libraries(transform-comb-loop-elim
 )
 
 register_test_exe(transform-comb-loop-elim)
+
+add_executable(transform-activity-schedule
+    tests/transform/test_activity_schedule_pass.cpp
+)
+
+target_link_libraries(transform-activity-schedule
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-activity-schedule)
 
 add_executable(transform-xmr-resolve-inout
     tests/transform/test_xmr_resolve_inout.cpp
