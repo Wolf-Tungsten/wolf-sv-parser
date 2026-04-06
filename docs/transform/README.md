@@ -37,7 +37,6 @@ with wolvrix.Session() as sess:
 | [`slice-index-const`](slice-index-const.md) | convert constant dynamic slices to static slices | simplify slicing patterns |
 | [`multidriven-guard`](multidriven-guard.md) | detect multiple-driver conflicts | structural checking before flattening |
 | [`strip-debug`](strip-debug.md) | separate debug logic from main logic | DPI and system-task isolation |
-| [`trigger-key-driven-schedule`](trigger-key-driven-schedule.md) | build a static TKD schedule for one graph | event-driven execution planning |
 | [`xmr-resolve`](xmr-resolve.md) | resolve cross-module references | hierarchical cleanup |
 | [`memory-init-check`](memory-init-check.md) | validate memory initialization consistency | memory checking |
 | [`repcut`](repcut.md) | partition one graph with RepCut | large-graph partitioning |
@@ -85,9 +84,8 @@ wolvrix \
 9. `latch-transparent-read`
 10. `slice-index-const`
 11. `simplify`
-12. `trigger-key-driven-schedule`
-13. `comb-loop-elim`
-14. `stats`
+12. `comb-loop-elim`
+13. `stats`
 
 This is not a hard rule, but it is a reasonable starting point for a typical pipeline.
 
@@ -96,4 +94,3 @@ This is not a hard rule, but it is a reasonable starting point for a typical pip
 - some passes rewrite the IR, so intermediate results can become stale
 - `simplify` already includes several lower-level cleanup passes
 - path-based passes depend on stable hierarchy
-- `trigger-key-driven-schedule` writes planning data to the session instead of generating a new graph

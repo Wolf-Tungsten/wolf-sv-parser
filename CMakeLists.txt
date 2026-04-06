@@ -105,7 +105,6 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/strip_debug.cpp
     lib/transform/hrbcut.cpp
     lib/transform/repcut.cpp
-    lib/transform/trigger_key_driven_schedule.cpp
 )
 
 add_library(wolvrix-lib SHARED ${WOLVRIX_LIB_SOURCES})
@@ -574,17 +573,6 @@ target_compile_definitions(transform-repcut-partition-count
 )
 
 register_test_exe(transform-repcut-partition-count)
-
-add_executable(transform-trigger-key-driven-schedule
-    tests/transform/test_trigger_key_driven_schedule.cpp
-)
-
-target_link_libraries(transform-trigger-key-driven-schedule
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(transform-trigger-key-driven-schedule)
 
 # ingest: symbol collector
 add_executable(ingest-symbol-collector

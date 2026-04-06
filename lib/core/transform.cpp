@@ -14,7 +14,6 @@
 #include "transform/memory_init_check.hpp"
 #include "transform/mem_to_reg.hpp"
 #include "transform/simplify.hpp"
-#include "transform/trigger_key_driven_schedule.hpp"
 #include "transform/xmr_resolve.hpp"
 #include "transform/strip_debug.hpp"
 
@@ -421,7 +420,6 @@ namespace wolvrix::lib::transform
             "simplify",
             "stats",
             "strip-debug",
-            "trigger-key-driven-schedule",
             "hrbcut",
             "repcut",
         };
@@ -1292,75 +1290,6 @@ namespace wolvrix::lib::transform
             }
             return std::make_unique<RepcutPass>(options);
         }
-        if (normalized == "trigger-key-driven-schedule")
-        {
-            TriggerKeyDrivenScheduleOptions options;
-            for (std::size_t i = 0; i < args.size(); ++i)
-            {
-                const std::string_view arg = args[i];
-                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
-                    if (i + 1 >= args.size())
-                    {
-                        error = std::string(name) + " expects a value";
-                        return false;
-                    }
-                    out = std::string(args[++i]);
-                    return true;
-                };
-
-                if (arg == "-path")
-                {
-                    if (!parseStringArg("-path", options.path))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-path="))
-                {
-                    options.path = std::string(arg.substr(std::string_view("-path=").size()));
-                }
-                else if (arg == "-result-key")
-                {
-                    if (!parseStringArg("-result-key", options.resultKey))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-result-key="))
-                {
-                    options.resultKey = std::string(arg.substr(std::string_view("-result-key=").size()));
-                }
-                else if (arg == "-groups-key")
-                {
-                    if (!parseStringArg("-groups-key", options.groupsKey))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-groups-key="))
-                {
-                    options.groupsKey = std::string(arg.substr(std::string_view("-groups-key=").size()));
-                }
-                else if (arg == "-meta-key")
-                {
-                    if (!parseStringArg("-meta-key", options.metaKey))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-meta-key="))
-                {
-                    options.metaKey = std::string(arg.substr(std::string_view("-meta-key=").size()));
-                }
-                else
-                {
-                    error = "unknown trigger-key-driven-schedule option";
-                    return nullptr;
-                }
-            }
-            return std::make_unique<TriggerKeyDrivenSchedulePass>(options);
-        }
-
         error = "unknown pass: " + normalized;
         return nullptr;
     }

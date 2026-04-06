@@ -72,21 +72,13 @@ Example:
 ```python
 with wolvrix.Session() as sess:
     sess.read_sv("top.sv", out_design="design.main")
-    sess.run_pass(
-        "trigger-key-driven-schedule",
-        design="design.main",
-        path="top",
-        out_tkd_schedule="tkd.plan.main",
-        out_tkd_groups="tkd.groups.main",
-        out_tkd_meta="tkd.meta.main",
-    )
+    sess.run_pass("stats", design="design.main", out_stats="stats.main")
 ```
 
 This reads naturally:
 
 - `design="design.main"` tells you which design is being worked on
-- `out_tkd_schedule=...` tells you which additional session value will be produced
-- `path="top"` is just pass configuration
+- `out_stats=...` tells you which additional session value will be produced
 
 ## Diagnostics And Logging
 
@@ -132,8 +124,6 @@ Common keys look like this:
 - `design.main`
 - `design.flat`
 - `stats.main`
-- `tkd.plan.main`
-- `tkd.groups.main`
 - `loops.main`
 
 You can inspect the session with:
@@ -141,7 +131,7 @@ You can inspect the session with:
 ```python
 value = sess.get("stats.main")
 kind = sess.kind("stats.main")
-keys = sess.keys(prefix="tkd.")
+keys = sess.keys(prefix="stats.")
 ```
 
 Not every session value needs a rich Python representation.

@@ -345,8 +345,6 @@ def _compile_run_pass(name: str, args: list[str], named: dict[str, Any]) -> tupl
         compiled.extend(_compile_stats_kwargs(named))
     elif canonical_name == "repcut":
         compiled.extend(_compile_repcut_kwargs(named))
-    elif canonical_name == "trigger-key-driven-schedule":
-        compiled.extend(_compile_tkd_sched_kwargs(named))
     elif named:
         keys = ", ".join(sorted(named))
         raise TypeError(f"{name} does not accept named pass parameters: {keys}")
@@ -355,11 +353,7 @@ def _compile_run_pass(name: str, args: list[str], named: dict[str, Any]) -> tupl
 
 def _canonical_pass_name(name: str) -> str:
     value = str(name).strip()
-    lowered = value.lower().replace("_", "-")
-    aliases = {
-        "tkd-sched": "trigger-key-driven-schedule",
-    }
-    return aliases.get(lowered, lowered)
+    return value.lower().replace("_", "-")
 
 
 def _pop_named(mapping: dict[str, Any], key: str, default: Any = None) -> Any:
@@ -493,25 +487,6 @@ def _compile_emit_sv_kwargs(named: dict[str, Any]) -> None:
 def _compile_emit_verilator_repcut_package_kwargs(named: dict[str, Any]) -> None:
     local = dict(named)
     _ensure_no_extra_named("emit_verilator_repcut_package", local)
-
-
-def _compile_tkd_sched_kwargs(named: dict[str, Any]) -> list[str]:
-    local = dict(named)
-    out: list[str] = []
-    path = _pop_named(local, "path", None)
-    if path is not None:
-        out.extend(["-path", str(path)])
-    result_key = _pop_named(local, "out_tkd_schedule", None)
-    if result_key is not None:
-        out.extend(["-result-key", str(result_key)])
-    groups_key = _pop_named(local, "out_tkd_groups", None)
-    if groups_key is not None:
-        out.extend(["-groups-key", str(groups_key)])
-    meta_key = _pop_named(local, "out_tkd_meta", None)
-    if meta_key is not None:
-        out.extend(["-meta-key", str(meta_key)])
-    _ensure_no_extra_named("trigger-key-driven-schedule", local)
-    return out
 
 
 def _normalize_diagnostics_print_min_level(level: str) -> str:

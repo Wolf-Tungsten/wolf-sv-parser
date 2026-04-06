@@ -77,17 +77,12 @@ Examples of keys:
 - `design.main`
 - `design.flat`
 - `stats.main`
-- `tkd.plan.main`
-- `tkd.groups.main`
 - `loops.main`
 
 Examples of kinds:
 
 - `design`
 - `stats`
-- `tkd.result`
-- `tkd.groups`
-- `tkd.meta`
 - `comb-loop.reports`
 
 The key point is that all of these are ordinary session values. They do not use separate storage mechanisms in the public API.
@@ -101,20 +96,11 @@ They are also the intended handoff mechanism between native stages.
 Example:
 
 ```python
-sess.run_pass(
-    "trigger-key-driven-schedule",
-    design="design.dut",
-    out_tkd_schedule="tkd.result.dut",
-)
-
-sess.emit_cpp(
-    design="design.dut",
-    path="build/out.cpp",
-    in_tkd_schedule="tkd.result.dut",
-)
+sess.run_pass("stats", design="design.dut", out_stats="stats.dut")
+stats_value = sess.get("stats.dut")
 ```
 
-In this example, `tkd.result.dut` is produced by one native stage and consumed by another. Python only names the value and wires the stages together.
+In this example, `stats.dut` is produced by one native stage and then consumed by Python through the ordinary session API.
 
 ## Core Workflow
 
@@ -166,12 +152,6 @@ Examples:
 sess.read_sv("top.sv", out_design="design.main")
 sess.clone_design(design="design.main", out_design="design.copy")
 sess.run_pass("stats", design="design.main", out_stats="stats.main")
-sess.run_pass(
-    "trigger-key-driven-schedule",
-    design="design.main",
-    path="top",
-    out_tkd_schedule="tkd.plan.main",
-)
 ```
 
 This keeps calls readable:
