@@ -121,6 +121,16 @@ namespace wolvrix::lib::emit
         return stream;
     }
 
+    std::string Emit::resolveSessionPathPrefix(const wolvrix::lib::grh::Graph &graph,
+                                               const EmitOptions &options) const
+    {
+        if (options.sessionPathPrefix && !options.sessionPathPrefix->empty())
+        {
+            return *options.sessionPathPrefix;
+        }
+        return graph.symbol();
+    }
+
     EmitResult Emit::emit(const wolvrix::lib::grh::Design &design, const EmitOptions &options)
     {
         EmitResult result;

@@ -282,6 +282,30 @@ class Session:
             output=output,
         )
 
+    def emit_grhsim_cpp(
+        self,
+        *,
+        design: str,
+        output: str,
+        top: list[str] | None = None,
+        **named_args,
+    ) -> list[dict]:
+        self._ensure_open()
+        _compile_emit_grhsim_cpp_kwargs(named_args)
+        success, diagnostics = _native.session_emit_grhsim_cpp(
+            self._capsule,
+            design=design,
+            output=output,
+            top=top or [],
+        )
+        return self._complete_action(
+            "emit_grhsim_cpp",
+            diagnostics,
+            success=bool(success),
+            design=design,
+            output=output,
+        )
+
     def emit_verilator_repcut_package(
         self,
         *,
@@ -487,6 +511,11 @@ def _compile_emit_sv_kwargs(named: dict[str, Any]) -> None:
 def _compile_emit_verilator_repcut_package_kwargs(named: dict[str, Any]) -> None:
     local = dict(named)
     _ensure_no_extra_named("emit_verilator_repcut_package", local)
+
+
+def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
+    local = dict(named)
+    _ensure_no_extra_named("emit_grhsim_cpp", local)
 
 
 def _normalize_diagnostics_print_min_level(level: str) -> str:

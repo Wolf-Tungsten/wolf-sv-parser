@@ -3,6 +3,7 @@
 
 #include "core/diagnostics.hpp"
 #include "core/grh.hpp"
+#include "core/transform.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -38,6 +39,8 @@ namespace wolvrix::lib::emit
         std::map<std::string, std::string, std::less<>> attributes;
         bool traceUnderscoreValues = false;
         bool splitModules = false;
+        wolvrix::lib::transform::SessionStore *session = nullptr;
+        std::optional<std::string> sessionPathPrefix;
     };
 
     struct EmitResult
@@ -62,6 +65,24 @@ namespace wolvrix::lib::emit
         std::filesystem::path resolveOutputDir(const EmitOptions &options) const;
         bool ensureParentDirectory(const std::filesystem::path &path) const;
         std::unique_ptr<std::ofstream> openOutputFile(const std::filesystem::path &path) const;
+        std::string resolveSessionPathPrefix(const wolvrix::lib::grh::Graph &graph,
+                                             const EmitOptions &options) const;
+        template <typename T>
+        const T *getSessionValue(const EmitOptions &options, std::string_view key) const noexcept
+        {
+            if (options.session == nullptr)
+            {
+                return nullptr;
+            }
+            auto it = options.session->find(std::string(key));
+            if (it == options.session->end())
+            {
+                return nullptr;
+            }
+            auto *typed =
+                dynamic_cast<const wolvrix::lib::transform::SessionSlotValue<T> *>(it->second.get());
+            return typed ? &typed->value : nullptr;
+        }
 
         void reportError(std::string message, std::string context = {}) const;
         void reportWarning(std::string message, std::string context = {}) const;

@@ -1,5 +1,6 @@
 #include "native/module/methods.hpp"
 
+#include "emit/grhsim_cpp.hpp"
 #include "emit/system_verilog.hpp"
 #include "emit/verilator_repcut_package.hpp"
 #include "native/diagnostics/to_python.hpp"
@@ -127,6 +128,62 @@ namespace wolvrix::app::pybind
         }
         options.outputDir = outPath.string();
         options.topOverrides = std::move(topNames);
+
+        const auto result = emitter.emit(*design, options);
+        return makeActionResult(result.success && !diagnostics.hasError(),
+                                diagnostics.messages(),
+                                sessionDesignSourceManager(*session, designKey));
+    }
+
+    PyObject *py_session_emit_grhsim_cpp(PyObject * /*self*/, PyObject *args, PyObject *kwargs)
+    {
+        PyObject *sessionObj = nullptr;
+        const char *designKey = nullptr;
+        const char *output = nullptr;
+        PyObject *topListObj = Py_None;
+        static const char *kwlist[] = {"session", "design", "output", "top", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|O", const_cast<char **>(kwlist),
+                                         &sessionObj, &designKey, &output, &topListObj))
+        {
+            return nullptr;
+        }
+        SessionHandle *session = getSessionHandle(sessionObj);
+        if (!session)
+        {
+            return nullptr;
+        }
+        auto *design = sessionDesign(*session, designKey);
+        if (!design)
+        {
+            PyErr_Format(PyExc_KeyError, "design key not found: %s", designKey);
+            return nullptr;
+        }
+
+        std::vector<std::string> topNames;
+        std::string error;
+        if (!parseStringList(topListObj, topNames, error))
+        {
+            PyErr_SetString(PyExc_ValueError, error.c_str());
+            return nullptr;
+        }
+
+        wolvrix::lib::emit::EmitDiagnostics diagnostics;
+        wolvrix::lib::emit::EmitGrhSimCpp emitter(&diagnostics);
+        wolvrix::lib::emit::EmitOptions options;
+        const std::filesystem::path outPath(output);
+        if (outPath.empty())
+        {
+            PyErr_SetString(PyExc_ValueError,
+                            "emit_grhsim_cpp(...) expects an output directory");
+            return nullptr;
+        }
+        options.outputDir = outPath.string();
+        options.topOverrides = std::move(topNames);
+        options.session = &session->nativeValues;
+        if (options.topOverrides.size() == 1)
+        {
+            options.sessionPathPrefix = options.topOverrides.front();
+        }
 
         const auto result = emitter.emit(*design, options);
         return makeActionResult(result.success && !diagnostics.hasError(),

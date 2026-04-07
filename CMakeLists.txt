@@ -81,6 +81,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/core/load.cpp
     lib/core/emit.cpp
     lib/core/toposort.cpp
+    lib/emit/grhsim_cpp.cpp
     lib/emit/system_verilog.cpp
     lib/emit/verilator_repcut_package.cpp
     lib/core/store.cpp
@@ -389,6 +390,22 @@ target_compile_definitions(emit-sv-top-reachable
 )
 
 register_test_exe(emit-sv-top-reachable)
+
+add_executable(emit-grhsim-cpp
+    tests/emit/test_emit_grhsim_cpp.cpp
+)
+
+target_link_libraries(emit-grhsim-cpp
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(emit-grhsim-cpp
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-grhsim-cpp)
 
 add_executable(emit-verilator-repcut-package
     tests/emit/test_emit_verilator_repcut_package.cpp
