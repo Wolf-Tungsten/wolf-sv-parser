@@ -12,10 +12,12 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -145,6 +147,64 @@ namespace wolvrix::lib::emit
             catch (const std::exception &)
             {
                 return 128;
+            }
+        }
+
+        std::size_t parseScheduleBatchMaxOps(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("sched_batch_max_ops");
+            if (it == options.attributes.end())
+            {
+                return 512;
+            }
+            try
+            {
+                return static_cast<std::size_t>(std::stoull(it->second));
+            }
+            catch (const std::exception &)
+            {
+                return 512;
+            }
+        }
+
+        std::size_t parseScheduleBatchMaxEstimatedLines(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("sched_batch_max_estimated_lines");
+            if (it == options.attributes.end())
+            {
+                return 4096;
+            }
+            try
+            {
+                return static_cast<std::size_t>(std::stoull(it->second));
+            }
+            catch (const std::exception &)
+            {
+                return 4096;
+            }
+        }
+
+        std::size_t parseEmitParallelism(const EmitOptions &options)
+        {
+            auto fallback = []() -> std::size_t
+            {
+                const unsigned value = std::thread::hardware_concurrency();
+                return value == 0 ? 1u : static_cast<std::size_t>(value);
+            };
+
+            auto it = options.attributes.find("emit_parallelism");
+            if (it == options.attributes.end())
+            {
+                return fallback();
+            }
+            try
+            {
+                const std::size_t parsed = static_cast<std::size_t>(std::stoull(it->second));
+                return parsed == 0 ? fallback() : parsed;
+            }
+            catch (const std::exception &)
+            {
+                return fallback();
             }
         }
 
@@ -677,6 +737,14 @@ namespace wolvrix::lib::emit
             const ActivityScheduleEventDomainSinkGroups *eventDomainSinkGroups = nullptr;
         };
 
+        struct ScheduleBatch
+        {
+            std::size_t index = 0;
+            std::size_t estimatedLines = 0;
+            std::size_t opCount = 0;
+            std::vector<uint32_t> supernodeIds;
+        };
+
         struct StateDecl
         {
             enum class Kind
@@ -769,6 +837,8 @@ namespace wolvrix::lib::emit
             std::vector<std::string> inputFieldDecls;
             std::vector<std::string> outputFieldDecls;
         };
+
+        bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept;
 
         std::string dpiCppType(std::string_view typeName, int64_t width)
         {
@@ -1041,6 +1111,127 @@ namespace wolvrix::lib::emit
             std::ostringstream out;
             out << "std::array<std::uint64_t, " << logicWordCount(width) << ">";
             return out.str();
+        }
+
+        std::size_t estimateOperationEmitLines(const Graph &graph, const Operation &op)
+        {
+            switch (op.kind())
+            {
+            case OperationKind::kConstant:
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kLatchReadPort:
+                return 4;
+            case OperationKind::kMemoryReadPort:
+                return 6;
+            case OperationKind::kRegisterWritePort:
+            case OperationKind::kLatchWritePort:
+            case OperationKind::kMemoryWritePort:
+                return 7;
+            case OperationKind::kSystemTask:
+            case OperationKind::kDpicCall:
+                return 10;
+            case OperationKind::kAssign:
+            case OperationKind::kAdd:
+            case OperationKind::kSub:
+            case OperationKind::kMul:
+            case OperationKind::kDiv:
+            case OperationKind::kMod:
+            case OperationKind::kAnd:
+            case OperationKind::kOr:
+            case OperationKind::kXor:
+            case OperationKind::kXnor:
+            case OperationKind::kNot:
+            case OperationKind::kEq:
+            case OperationKind::kNe:
+            case OperationKind::kLt:
+            case OperationKind::kLe:
+            case OperationKind::kGt:
+            case OperationKind::kGe:
+            case OperationKind::kLogicAnd:
+            case OperationKind::kLogicOr:
+            case OperationKind::kLogicNot:
+            case OperationKind::kReduceAnd:
+            case OperationKind::kReduceNand:
+            case OperationKind::kReduceOr:
+            case OperationKind::kReduceNor:
+            case OperationKind::kReduceXor:
+            case OperationKind::kReduceXnor:
+            case OperationKind::kShl:
+            case OperationKind::kLShr:
+            case OperationKind::kAShr:
+            case OperationKind::kMux:
+            case OperationKind::kConcat:
+            case OperationKind::kReplicate:
+            case OperationKind::kSliceStatic:
+            case OperationKind::kSliceDynamic:
+                return opNeedsWordLogicEmit(graph, op) ? 8 : 5;
+            default:
+                return 2;
+            }
+        }
+
+        std::size_t estimateSupernodeEmitLines(const Graph &graph,
+                                               const ActivityScheduleSupernodeToOps &supernodeToOps,
+                                               uint32_t supernodeId)
+        {
+            std::size_t total = 8;
+            if (supernodeId >= supernodeToOps.size())
+            {
+                return total;
+            }
+            for (OperationId opId : supernodeToOps[supernodeId])
+            {
+                total += estimateOperationEmitLines(graph, graph.getOperation(opId));
+            }
+            return total;
+        }
+
+        std::vector<ScheduleBatch> buildScheduleBatches(const Graph &graph,
+                                                        const ScheduleRefs &schedule,
+                                                        std::size_t batchMaxOps,
+                                                        std::size_t batchMaxEstimatedLines)
+        {
+            std::vector<ScheduleBatch> batches;
+            ScheduleBatch current;
+            auto flushCurrent = [&]()
+            {
+                if (current.supernodeIds.empty())
+                {
+                    return;
+                }
+                current.index = batches.size();
+                batches.push_back(std::move(current));
+                current = ScheduleBatch{};
+            };
+
+            for (uint32_t supernodeId : *schedule.topoOrder)
+            {
+                const std::size_t supernodeOps =
+                    supernodeId < schedule.supernodeToOps->size() ? (*schedule.supernodeToOps)[supernodeId].size() : 0;
+                const std::size_t supernodeLines =
+                    estimateSupernodeEmitLines(graph, *schedule.supernodeToOps, supernodeId);
+                const bool hitOpBudget =
+                    batchMaxOps != 0 &&
+                    !current.supernodeIds.empty() &&
+                    current.opCount + supernodeOps > batchMaxOps;
+                const bool hitLineBudget =
+                    batchMaxEstimatedLines != 0 &&
+                    !current.supernodeIds.empty() &&
+                    current.estimatedLines + supernodeLines > batchMaxEstimatedLines;
+                if (hitOpBudget || hitLineBudget)
+                {
+                    flushCurrent();
+                }
+                current.supernodeIds.push_back(supernodeId);
+                current.opCount += supernodeOps;
+                current.estimatedLines += supernodeLines;
+            }
+            flushCurrent();
+            if (batches.empty())
+            {
+                batches.push_back(ScheduleBatch{});
+            }
+            return batches;
         }
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
@@ -1756,6 +1947,438 @@ namespace wolvrix::lib::emit
             return "(" + joinStrings(parts, " || ") + ")";
         }
 
+        std::optional<std::string> emitSchedBatchFile(const std::filesystem::path &schedPath,
+                                                      const std::filesystem::path &headerPath,
+                                                      const std::string &className,
+                                                      const Graph &graph,
+                                                      const EmitModel &model,
+                                                      const ScheduleRefs &schedule,
+                                                      const ScheduleBatch &batch)
+        {
+            std::ofstream stream(schedPath);
+            if (!stream.is_open())
+            {
+                return "failed to open output file: " + schedPath.string();
+            }
+
+            auto emitError = [](std::string_view message, std::string_view detail) -> std::optional<std::string>
+            {
+                if (detail.empty())
+                {
+                    return std::string(message);
+                }
+                return std::string(message) + ": " + std::string(detail);
+            };
+
+            stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            stream << "#include <cstdlib>\n";
+            stream << "#include <iostream>\n\n";
+            stream << "void " << className << "::eval_batch_" << batch.index << "()\n{\n";
+            for (uint32_t supernodeId : batch.supernodeIds)
+            {
+                std::vector<std::string> domainParts;
+                for (const auto &signature : (*schedule.supernodeEventDomains)[supernodeId])
+                {
+                    if (signature.empty())
+                    {
+                        domainParts.push_back("true");
+                    }
+                    else
+                    {
+                        const std::size_t domainIndex = model.eventDomainIndex.at(signature);
+                        if (!model.eventDomainPrecomputable[domainIndex])
+                        {
+                            domainParts.push_back("true");
+                        }
+                        else
+                        {
+                            domainParts.push_back("event_domain_hit_[" + std::to_string(domainIndex) + "]");
+                        }
+                    }
+                }
+                const std::string guardExpr = domainParts.empty() ? "true" : "(" + joinStrings(domainParts, " || ") + ")";
+                stream << "    if (!grhsim_test_bit(supernode_active_curr_, " << supernodeId << ") || !(" << guardExpr << ")) {\n";
+                stream << "        goto supernode_" << supernodeId << "_end;\n";
+                stream << "    }\n";
+                stream << "    {\n";
+                stream << "        bool supernode_changed = false;\n";
+                for (const auto opId : (*schedule.supernodeToOps)[supernodeId])
+                {
+                    const Operation op = graph.getOperation(opId);
+                    const auto operands = op.operands();
+                    stream << "        // op " << op.symbolText() << "\n";
+                    switch (op.kind())
+                    {
+                    case OperationKind::kConstant:
+                    {
+                        if (op.results().empty())
+                        {
+                            break;
+                        }
+                        const ValueId resultValue = op.results().front();
+                        const auto expr = constantExpr(graph, op, resultValue);
+                        if (!expr)
+                        {
+                            return emitError("unsupported constant emit", std::string(op.symbolText()));
+                        }
+                        const std::string lhs = valueRef(model, resultValue);
+                        if (graph.valueType(resultValue) == ValueType::Logic)
+                        {
+                            if (isWideLogicValue(graph, resultValue))
+                            {
+                                stream << "        {\n";
+                                stream << "            const auto next_value = " << *expr << ";\n";
+                                stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
+                                       << graph.valueWidth(resultValue) << ")) { supernode_changed = true; }\n";
+                                stream << "        }\n";
+                            }
+                            else
+                            {
+                                stream << "        {\n";
+                                stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                                       << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), " << graph.valueWidth(resultValue) << "));\n";
+                                stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
+                                stream << "        }\n";
+                            }
+                        }
+                        else
+                        {
+                            stream << "        { const auto next_value = " << *expr << "; if (" << lhs
+                                   << " != next_value) { " << lhs << " = next_value; supernode_changed = true; } }\n";
+                        }
+                        break;
+                    }
+                    case OperationKind::kRegisterReadPort:
+                    case OperationKind::kLatchReadPort:
+                    {
+                        if (op.results().empty())
+                        {
+                            break;
+                        }
+                        auto targetSymbol = getAttribute<std::string>(op, op.kind() == OperationKind::kRegisterReadPort ? "regSymbol" : "latchSymbol");
+                        if (!targetSymbol)
+                        {
+                            return emitError("storage read missing symbol", std::string(op.symbolText()));
+                        }
+                        const auto stateIt = model.stateBySymbol.find(*targetSymbol);
+                        if (stateIt == model.stateBySymbol.end())
+                        {
+                            return emitError("storage read target missing", *targetSymbol);
+                        }
+                        const std::string lhs = valueRef(model, op.results().front());
+                        if (isWideLogicValue(graph, op.results().front()))
+                        {
+                            stream << "        if (grhsim_assign_words(" << lhs << ", " << stateIt->second.fieldName << ", "
+                                   << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                        }
+                        else
+                        {
+                            stream << "        if (" << lhs << " != " << stateIt->second.fieldName << ") { "
+                                   << lhs << " = " << stateIt->second.fieldName << "; supernode_changed = true; }\n";
+                        }
+                        break;
+                    }
+                    case OperationKind::kMemoryReadPort:
+                    {
+                        if (op.results().empty() || operands.empty())
+                        {
+                            break;
+                        }
+                        auto memSymbol = getAttribute<std::string>(op, "memSymbol");
+                        if (!memSymbol)
+                        {
+                            return emitError("memory read missing memSymbol", std::string(op.symbolText()));
+                        }
+                        const auto stateIt = model.stateBySymbol.find(*memSymbol);
+                        if (stateIt == model.stateBySymbol.end())
+                        {
+                            return emitError("memory read target missing", *memSymbol);
+                        }
+                        const StateDecl &state = stateIt->second;
+                        const std::string lhs = valueRef(model, op.results().front());
+                        const std::string addrExpr = valueRef(model, operands[0]);
+                        stream << "        {\n";
+                        stream << "            const std::size_t row = static_cast<std::size_t>(" << addrExpr << ") % " << state.rowCount << ";\n";
+                        stream << "            const auto next_value = " << state.fieldName << "[row];\n";
+                        if (isWideLogicValue(graph, op.results().front()))
+                        {
+                            stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
+                                   << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                        }
+                        else
+                        {
+                            stream << "            if (" << lhs << " != next_value) { " << lhs
+                                   << " = next_value; supernode_changed = true; }\n";
+                        }
+                        stream << "        }\n";
+                        break;
+                    }
+                    case OperationKind::kAssign:
+                    case OperationKind::kAdd:
+                    case OperationKind::kSub:
+                    case OperationKind::kMul:
+                    case OperationKind::kDiv:
+                    case OperationKind::kMod:
+                    case OperationKind::kAnd:
+                    case OperationKind::kOr:
+                    case OperationKind::kXor:
+                    case OperationKind::kXnor:
+                    case OperationKind::kNot:
+                    case OperationKind::kEq:
+                    case OperationKind::kNe:
+                    case OperationKind::kLt:
+                    case OperationKind::kLe:
+                    case OperationKind::kGt:
+                    case OperationKind::kGe:
+                    case OperationKind::kLogicAnd:
+                    case OperationKind::kLogicOr:
+                    case OperationKind::kLogicNot:
+                    case OperationKind::kReduceAnd:
+                    case OperationKind::kReduceNand:
+                    case OperationKind::kReduceOr:
+                    case OperationKind::kReduceNor:
+                    case OperationKind::kReduceXor:
+                    case OperationKind::kReduceXnor:
+                    case OperationKind::kShl:
+                    case OperationKind::kLShr:
+                    case OperationKind::kAShr:
+                    case OperationKind::kMux:
+                    case OperationKind::kConcat:
+                    case OperationKind::kReplicate:
+                    case OperationKind::kSliceStatic:
+                    case OperationKind::kSliceDynamic:
+                    {
+                        if (op.results().empty())
+                        {
+                            break;
+                        }
+                        const ValueId resultValue = op.results().front();
+                        if (opNeedsWordLogicEmit(graph, op))
+                        {
+                            std::string emitErrorText;
+                            if (!emitWordLogicOperation(stream, graph, model, op, emitErrorText))
+                            {
+                                return emitError(emitErrorText, std::string(op.symbolText()));
+                            }
+                            break;
+                        }
+                        std::vector<std::string> operandExprs;
+                        operandExprs.reserve(operands.size());
+                        for (ValueId operand : operands)
+                        {
+                            operandExprs.push_back(valueRef(model, operand));
+                        }
+                        const std::string rhs = scalarAssignmentExpr(op.kind(), operandExprs, op, graph);
+                        if (rhs.empty())
+                        {
+                            return emitError("unsupported scalar expression emit", std::string(op.symbolText()));
+                        }
+                        const std::string lhs = valueRef(model, resultValue);
+                        stream << "        {\n";
+                        stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << rhs << "), " << graph.valueWidth(resultValue) << "));\n";
+                        stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
+                        stream << "        }\n";
+                        break;
+                    }
+                    case OperationKind::kRegisterWritePort:
+                    case OperationKind::kLatchWritePort:
+                    case OperationKind::kMemoryWritePort:
+                    {
+                        const auto writeIt = model.writeByOp.find(opId);
+                        if (writeIt == model.writeByOp.end())
+                        {
+                            return emitError("write metadata missing", std::string(op.symbolText()));
+                        }
+                        const WriteDecl &write = writeIt->second;
+                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
+                        const std::string eventExpr = exactEventExpr(graph, model, op);
+                        stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
+                        if (write.kind == StateDecl::Kind::Memory)
+                        {
+                            stream << "            " << write.pendingAddrField << " = static_cast<std::size_t>(" << valueRef(model, operands[1]) << ");\n";
+                            stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[2]) << ";\n";
+                            stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
+                        }
+                        else
+                        {
+                            stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[1]) << ";\n";
+                            stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[2]) << ";\n";
+                        }
+                        stream << "            " << write.pendingValidField << " = true;\n";
+                        stream << "        }\n";
+                        break;
+                    }
+                    case OperationKind::kSystemTask:
+                    {
+                        if (operands.empty())
+                        {
+                            break;
+                        }
+                        const std::string condExpr = valueRef(model, operands[0]);
+                        const std::string eventExpr = exactEventExpr(graph, model, op);
+                        const auto name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
+                        const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
+                        const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
+                        const std::string streamName = (name == "error" || name == "warning") ? "std::cerr" : "std::cout";
+                        stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
+                        stream << "            " << streamName << " << \"[" << name << "]\"";
+                        for (std::size_t i = 1; i < argEnd; ++i)
+                        {
+                            stream << " << \" \" << " << valueRef(model, operands[i]);
+                        }
+                        stream << " << std::endl;\n";
+                        if (name == "fatal" || name == "finish")
+                        {
+                            stream << "            std::abort();\n";
+                        }
+                        stream << "        }\n";
+                        break;
+                    }
+                    case OperationKind::kDpicCall:
+                    {
+                        const auto targetImport = getAttribute<std::string>(op, "targetImportSymbol");
+                        const auto inArgName = getAttribute<std::vector<std::string>>(op, "inArgName").value_or(std::vector<std::string>{});
+                        const auto outArgName = getAttribute<std::vector<std::string>>(op, "outArgName").value_or(std::vector<std::string>{});
+                        const auto inoutArgName = getAttribute<std::vector<std::string>>(op, "inoutArgName").value_or(std::vector<std::string>{});
+                        const bool hasReturn = getAttribute<bool>(op, "hasReturn").value_or(false);
+                        if (!targetImport)
+                        {
+                            return emitError("kDpicCall missing targetImportSymbol", std::string(op.symbolText()));
+                        }
+                        auto importIt = model.dpiImportBySymbol.find(*targetImport);
+                        if (importIt == model.dpiImportBySymbol.end())
+                        {
+                            return emitError("kDpicCall target import not found", *targetImport);
+                        }
+                        const DpiImportDecl &decl = importIt->second;
+                        const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
+                        const std::size_t inputCount = inArgName.size();
+                        const std::size_t inoutCount = inoutArgName.size();
+                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
+                        const std::string eventExpr = exactEventExpr(graph, model, op);
+                        stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
+                        std::size_t operandCursor = 1;
+                        std::size_t resultCursor = 0;
+                        if (hasReturn)
+                        {
+                            const ValueId returnValue = op.results()[0];
+                            stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol) << "(";
+                            std::vector<std::string> deferredArgs;
+                            operandCursor = 1;
+                            resultCursor = 1;
+                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                            {
+                                const std::string &direction = decl.argsDirection[i];
+                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
+                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
+                                if (direction == "input")
+                                {
+                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
+                                }
+                                else if (direction == "output")
+                                {
+                                    const std::string tempName = "dpi_out_" + std::to_string(i);
+                                    stream << "\n            " << argType << " " << tempName << "{};";
+                                    deferredArgs.push_back(tempName);
+                                }
+                                else
+                                {
+                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
+                                    stream << "\n            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";";
+                                    deferredArgs.push_back(tempName);
+                                }
+                            }
+                            stream << joinStrings(deferredArgs, ", ") << ");\n";
+                            stream << "            if (" << valueRef(model, returnValue) << " != dpi_ret) { "
+                                   << valueRef(model, returnValue) << " = dpi_ret; supernode_changed = true; }\n";
+                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                            {
+                                const std::string &direction = decl.argsDirection[i];
+                                if (direction == "output" || direction == "inout")
+                                {
+                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
+                                    if (resultCursor >= op.results().size())
+                                    {
+                                        continue;
+                                    }
+                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
+                                    stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
+                                           << " = " << tempName << "; supernode_changed = true; }\n";
+                                }
+                            }
+                        }
+                        else
+                        {
+                            std::vector<std::string> deferredArgs;
+                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                            {
+                                const std::string &direction = decl.argsDirection[i];
+                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
+                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
+                                if (direction == "input")
+                                {
+                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
+                                }
+                                else if (direction == "output")
+                                {
+                                    const std::string tempName = "dpi_out_" + std::to_string(i);
+                                    stream << "            " << argType << " " << tempName << "{};\n";
+                                    deferredArgs.push_back(tempName);
+                                }
+                                else
+                                {
+                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
+                                    stream << "            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";\n";
+                                    deferredArgs.push_back(tempName);
+                                }
+                            }
+                            stream << "            " << sanitizeIdentifier(decl.symbol) << "(" << joinStrings(deferredArgs, ", ") << ");\n";
+                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                            {
+                                const std::string &direction = decl.argsDirection[i];
+                                if (direction == "output" || direction == "inout")
+                                {
+                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
+                                    if (resultCursor >= op.results().size())
+                                    {
+                                        continue;
+                                    }
+                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
+                                    stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
+                                           << " = " << tempName << "; supernode_changed = true; }\n";
+                                }
+                            }
+                        }
+                        (void)inputCount;
+                        (void)inoutCount;
+                        (void)eventCount;
+                        stream << "        }\n";
+                        break;
+                    }
+                    case OperationKind::kRegister:
+                    case OperationKind::kLatch:
+                    case OperationKind::kMemory:
+                    case OperationKind::kDpicImport:
+                        break;
+                    default:
+                        return emitError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
+                    }
+                }
+                stream << "        if (supernode_changed) {\n";
+                for (uint32_t succ : (*schedule.dag)[supernodeId])
+                {
+                    stream << "            grhsim_set_bit(supernode_active_curr_, " << succ << ");\n";
+                }
+                stream << "        }\n";
+                stream << "    }\n";
+                stream << "supernode_" << supernodeId << "_end:\n";
+            }
+            stream << "    return;\n";
+            stream << "}\n";
+            return std::nullopt;
+        }
+
     } // namespace
 
     EmitResult EmitGrhSimCpp::emitImpl(const wolvrix::lib::grh::Design & /*design*/,
@@ -1824,6 +2447,8 @@ namespace wolvrix::lib::emit
         }
 
         const std::size_t eventPrecomputeMaxOps = parseEventPrecomputeMaxOps(options);
+        const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
+        const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
         std::vector<uint32_t> sourceSupernodeList;
         {
             std::vector<std::size_t> indegree(schedule.dag->size(), 0);
@@ -1863,6 +2488,9 @@ namespace wolvrix::lib::emit
             model.eventDomainPrecomputable[index] = precomputable;
         }
 
+        const std::vector<ScheduleBatch> scheduleBatches =
+            buildScheduleBatches(graph, schedule, schedBatchMaxOps, schedBatchMaxEstimatedLines);
+
         const std::filesystem::path outDir = resolveOutputDir(options);
         const std::string normalizedTop = sanitizeIdentifier(graph.symbol());
         const std::string className = "GrhSIM_" + normalizedTop;
@@ -1871,7 +2499,12 @@ namespace wolvrix::lib::emit
         const std::filesystem::path runtimePath = outDir / (prefix + "_runtime.hpp");
         const std::filesystem::path statePath = outDir / (prefix + "_state.cpp");
         const std::filesystem::path evalPath = outDir / (prefix + "_eval.cpp");
-        const std::filesystem::path schedPath = outDir / (prefix + "_sched_0.cpp");
+        std::vector<std::filesystem::path> schedPaths;
+        schedPaths.reserve(scheduleBatches.size());
+        for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+        {
+            schedPaths.push_back(outDir / (prefix + "_sched_" + std::to_string(batchIndex) + ".cpp"));
+        }
         const std::filesystem::path makefilePath = outDir / "Makefile";
 
         auto replaceClassMarker = [&](std::string text) -> std::string
@@ -2080,6 +2713,24 @@ inline std::array<std::uint64_t, N> grhsim_random_words(std::uint64_t &state, st
     return out;
 }
 
+template <std::size_t N, typename ShiftT>
+inline std::array<std::uint64_t, N> grhsim_shl_words(const std::array<std::uint64_t, N> &value,
+                                                     const ShiftT &shift,
+                                                     std::size_t width);
+
+template <std::size_t N, typename ShiftT>
+inline std::array<std::uint64_t, N> grhsim_lshr_words(const std::array<std::uint64_t, N> &value,
+                                                      const ShiftT &shift,
+                                                      std::size_t width);
+
+template <std::size_t N>
+inline bool grhsim_try_u128_words(const std::array<std::uint64_t, N> &value,
+                                  std::size_t width,
+                                  unsigned __int128 &out);
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_from_u128_words(unsigned __int128 value, std::size_t width);
+
 template <std::size_t N>
 inline bool grhsim_any_bits_words(const std::array<std::uint64_t, N> &value, std::size_t width)
 {
@@ -2117,14 +2768,95 @@ inline void grhsim_put_bit_words(std::array<std::uint64_t, N> &value, std::size_
     }
 }
 
+template <std::size_t N>
+inline void grhsim_clear_range_words(std::array<std::uint64_t, N> &value, std::size_t start, std::size_t width)
+{
+    if (width == 0 || N == 0) {
+        return;
+    }
+    const std::size_t totalBits = N * 64u;
+    if (start >= totalBits) {
+        return;
+    }
+    const std::size_t end = std::min(totalBits, start + width);
+    if (end <= start) {
+        return;
+    }
+    const std::size_t startWord = start / 64u;
+    const std::size_t endWord = (end - 1u) / 64u;
+    const std::size_t startBit = start & 63u;
+    const std::size_t endBits = ((end - 1u) & 63u) + 1u;
+    if (startWord == endWord) {
+        const std::uint64_t lowMask = startBit == 0 ? UINT64_C(0) : grhsim_mask(startBit);
+        const std::uint64_t highMask = endBits >= 64 ? UINT64_C(0) : ~grhsim_mask(endBits);
+        value[startWord] &= (lowMask | highMask);
+        return;
+    }
+    value[startWord] &= (startBit == 0 ? UINT64_C(0) : grhsim_mask(startBit));
+    for (std::size_t i = startWord + 1u; i < endWord && i < N; ++i) {
+        value[i] = 0;
+    }
+    if (endWord < N) {
+        value[endWord] &= (endBits >= 64 ? UINT64_C(0) : ~grhsim_mask(endBits));
+    }
+}
+
+template <std::size_t N>
+inline void grhsim_fill_range_words(std::array<std::uint64_t, N> &value, std::size_t start, std::size_t width)
+{
+    if (width == 0 || N == 0) {
+        return;
+    }
+    const std::size_t totalBits = N * 64u;
+    if (start >= totalBits) {
+        return;
+    }
+    const std::size_t end = std::min(totalBits, start + width);
+    if (end <= start) {
+        return;
+    }
+    const std::size_t startWord = start / 64u;
+    const std::size_t endWord = (end - 1u) / 64u;
+    const std::size_t startBit = start & 63u;
+    const std::size_t endBits = ((end - 1u) & 63u) + 1u;
+    if (startWord == endWord) {
+        const std::uint64_t lowMask = startBit == 0 ? ~UINT64_C(0) : ~grhsim_mask(startBit);
+        const std::uint64_t highMask = endBits >= 64 ? ~UINT64_C(0) : grhsim_mask(endBits);
+        value[startWord] |= (lowMask & highMask);
+        return;
+    }
+    value[startWord] |= (startBit == 0 ? ~UINT64_C(0) : ~grhsim_mask(startBit));
+    for (std::size_t i = startWord + 1u; i < endWord && i < N; ++i) {
+        value[i] = ~UINT64_C(0);
+    }
+    if (endWord < N) {
+        value[endWord] |= (endBits >= 64 ? ~UINT64_C(0) : grhsim_mask(endBits));
+    }
+}
+
 template <std::size_t DestN, std::size_t SrcN>
 inline void grhsim_insert_words(std::array<std::uint64_t, DestN> &dest,
                                 std::size_t destLsb,
                                 const std::array<std::uint64_t, SrcN> &src,
                                 std::size_t srcWidth)
 {
-    for (std::size_t bit = 0; bit < srcWidth; ++bit) {
-        grhsim_put_bit_words(dest, destLsb + bit, grhsim_get_bit_words(src, bit));
+    if (srcWidth == 0 || DestN == 0 || SrcN == 0) {
+        return;
+    }
+    grhsim_clear_range_words(dest, destLsb, srcWidth);
+    const std::size_t srcWords = (srcWidth + 63u) / 64u;
+    const std::size_t destWord = destLsb / 64u;
+    const std::size_t bitShift = destLsb & 63u;
+    for (std::size_t i = 0; i < srcWords && i < SrcN; ++i) {
+        std::uint64_t word = src[i];
+        const std::size_t wordWidth = (i + 1u == srcWords) ? (srcWidth - i * 64u) : 64u;
+        word = grhsim_trunc_u64(word, wordWidth);
+        if (destWord + i < DestN) {
+            dest[destWord + i] |= (bitShift == 0 ? word : (word << bitShift));
+        }
+        if (bitShift != 0 && destWord + i + 1u < DestN) {
+            dest[destWord + i + 1u] |= (word >> (64u - bitShift));
+        }
     }
 }
 
@@ -2134,8 +2866,21 @@ inline std::array<std::uint64_t, DestN> grhsim_slice_words(const std::array<std:
                                                            std::size_t width)
 {
     std::array<std::uint64_t, DestN> out{};
-    for (std::size_t bit = 0; bit < width; ++bit) {
-        grhsim_put_bit_words(out, bit, grhsim_get_bit_words(src, start + bit));
+    if (width == 0 || DestN == 0 || SrcN == 0) {
+        return out;
+    }
+    const std::size_t srcWord = start / 64u;
+    const std::size_t bitShift = start & 63u;
+    const std::size_t outWords = (width + 63u) / 64u;
+    for (std::size_t i = 0; i < outWords && i < DestN; ++i) {
+        const std::uint64_t low = (srcWord + i < SrcN) ? src[srcWord + i] : UINT64_C(0);
+        if (bitShift == 0) {
+            out[i] = low;
+        }
+        else {
+            const std::uint64_t high = (srcWord + i + 1u < SrcN) ? src[srcWord + i + 1u] : UINT64_C(0);
+            out[i] = (low >> bitShift) | (high << (64u - bitShift));
+        }
     }
     grhsim_trunc_words(out, width);
     return out;
@@ -2245,6 +2990,17 @@ template <std::size_t N>
 inline int grhsim_compare_unsigned_words(const std::array<std::uint64_t, N> &lhs,
                                          const std::array<std::uint64_t, N> &rhs)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, N * 64u, lhs128) && grhsim_try_u128_words(rhs, N * 64u, rhs128)) {
+        if (lhs128 < rhs128) {
+            return -1;
+        }
+        if (lhs128 > rhs128) {
+            return 1;
+        }
+        return 0;
+    }
     for (std::size_t i = N; i-- > 0;) {
         if (lhs[i] < rhs[i]) {
             return -1;
@@ -2254,6 +3010,88 @@ inline int grhsim_compare_unsigned_words(const std::array<std::uint64_t, N> &lhs
         }
     }
     return 0;
+}
+
+template <std::size_t N>
+inline bool grhsim_try_u64_words(const std::array<std::uint64_t, N> &value,
+                                 std::size_t width,
+                                 std::uint64_t &out)
+{
+    const std::size_t liveWords = (width + 63u) / 64u;
+    if (liveWords == 0 || N == 0) {
+        out = 0;
+        return true;
+    }
+    const std::size_t limit = liveWords < N ? liveWords : N;
+    for (std::size_t i = 1; i < limit; ++i) {
+        if (value[i] != 0) {
+            return false;
+        }
+    }
+    out = grhsim_trunc_u64(value[0], width >= 64 ? 64u : width);
+    return true;
+}
+
+template <std::size_t N>
+inline bool grhsim_try_u128_words(const std::array<std::uint64_t, N> &value,
+                                  std::size_t width,
+                                  unsigned __int128 &out)
+{
+    if (width > 128u) {
+        return false;
+    }
+    const std::size_t liveWords = (width + 63u) / 64u;
+    if (liveWords == 0 || N == 0) {
+        out = 0;
+        return true;
+    }
+    if (liveWords > 2u || liveWords > N) {
+        return false;
+    }
+    const std::uint64_t lo = value[0];
+    const std::uint64_t hi = liveWords >= 2u ? value[1] : UINT64_C(0);
+    out = static_cast<unsigned __int128>(lo) | (static_cast<unsigned __int128>(hi) << 64u);
+    return true;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_from_u128_words(unsigned __int128 value, std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    if constexpr (N > 0) {
+        out[0] = static_cast<std::uint64_t>(value);
+    }
+    if constexpr (N > 1) {
+        out[1] = static_cast<std::uint64_t>(value >> 64u);
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline bool grhsim_try_single_bit_words(const std::array<std::uint64_t, N> &value,
+                                        std::size_t width,
+                                        std::size_t &bitIndex)
+{
+    const std::size_t liveWords = (width + 63u) / 64u;
+    bool found = false;
+    bitIndex = 0;
+    for (std::size_t i = 0; i < liveWords && i < N; ++i) {
+        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;
+        const std::uint64_t word = grhsim_trunc_u64(value[i], wordWidth);
+        if (word == 0) {
+            continue;
+        }
+        if ((word & (word - 1u)) != 0) {
+            return false;
+        }
+        if (found) {
+            return false;
+        }
+        found = true;
+        bitIndex = i * 64u + static_cast<std::size_t>(__builtin_ctzll(word));
+    }
+    return found;
 }
 
 template <std::size_t N>
@@ -2327,6 +3165,11 @@ inline std::array<std::uint64_t, N> grhsim_add_words(const std::array<std::uint6
                                                      const std::array<std::uint64_t, N> &rhs,
                                                      std::size_t width)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, width, lhs128) && grhsim_try_u128_words(rhs, width, rhs128)) {
+        return grhsim_from_u128_words<N>(lhs128 + rhs128, width);
+    }
     std::array<std::uint64_t, N> out{};
     unsigned __int128 carry = 0;
     for (std::size_t i = 0; i < N; ++i) {
@@ -2344,6 +3187,11 @@ inline std::array<std::uint64_t, N> grhsim_sub_words(const std::array<std::uint6
                                                      const std::array<std::uint64_t, N> &rhs,
                                                      std::size_t width)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, width, lhs128) && grhsim_try_u128_words(rhs, width, rhs128)) {
+        return grhsim_from_u128_words<N>(lhs128 - rhs128, width);
+    }
     std::array<std::uint64_t, N> out{};
     std::uint64_t borrow = 0;
     for (std::size_t i = 0; i < N; ++i) {
@@ -2360,6 +3208,44 @@ inline std::array<std::uint64_t, N> grhsim_mul_words(const std::array<std::uint6
                                                      const std::array<std::uint64_t, N> &rhs,
                                                      std::size_t width)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, width, lhs128) && grhsim_try_u128_words(rhs, width, rhs128)) {
+        return grhsim_from_u128_words<N>(lhs128 * rhs128, width);
+    }
+
+    auto mulByWord = [&](const std::array<std::uint64_t, N> &value,
+                         std::uint64_t rhsWord) -> std::array<std::uint64_t, N>
+    {
+        std::array<std::uint64_t, N> out{};
+        unsigned __int128 carry = 0;
+        for (std::size_t i = 0; i < N; ++i) {
+            const unsigned __int128 accum =
+                static_cast<unsigned __int128>(value[i]) * static_cast<unsigned __int128>(rhsWord) + carry;
+            out[i] = static_cast<std::uint64_t>(accum);
+            carry = accum >> 64u;
+        }
+        grhsim_trunc_words(out, width);
+        return out;
+    };
+
+    std::uint64_t rhsWord = 0;
+    if (grhsim_try_u64_words(rhs, width, rhsWord)) {
+        return mulByWord(lhs, rhsWord);
+    }
+    std::uint64_t lhsWord = 0;
+    if (grhsim_try_u64_words(lhs, width, lhsWord)) {
+        return mulByWord(rhs, lhsWord);
+    }
+    std::size_t rhsBitIndex = 0;
+    if (grhsim_try_single_bit_words(rhs, width, rhsBitIndex)) {
+        return grhsim_shl_words(lhs, rhsBitIndex, width);
+    }
+    std::size_t lhsBitIndex = 0;
+    if (grhsim_try_single_bit_words(lhs, width, lhsBitIndex)) {
+        return grhsim_shl_words(rhs, lhsBitIndex, width);
+    }
+
     std::array<std::uint64_t, N> out{};
     for (std::size_t i = 0; i < N; ++i) {
         unsigned __int128 carry = 0;
@@ -2400,24 +3286,73 @@ inline void grhsim_shl1_words_inplace(std::array<std::uint64_t, N> &value, std::
 }
 
 template <std::size_t N>
+inline std::size_t grhsim_highest_bit_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    const std::size_t liveWords = (width + 63u) / 64u;
+    for (std::size_t i = liveWords; i-- > 0;) {
+        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;
+        const std::uint64_t word = grhsim_trunc_u64(value[i], wordWidth);
+        if (word != 0) {
+            return i * 64u + (63u - static_cast<std::size_t>(__builtin_clzll(word)));
+        }
+    }
+    return 0;
+}
+
+template <std::size_t N>
 inline std::array<std::uint64_t, N> grhsim_udiv_words(const std::array<std::uint64_t, N> &lhs,
                                                       const std::array<std::uint64_t, N> &rhs,
                                                       std::size_t width)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, width, lhs128) && grhsim_try_u128_words(rhs, width, rhs128)) {
+        if (rhs128 == 0) {
+            return {};
+        }
+        return grhsim_from_u128_words<N>(lhs128 / rhs128, width);
+    }
+
+    std::uint64_t rhsWord = 0;
+    if (grhsim_try_u64_words(rhs, width, rhsWord)) {
+        if (rhsWord == 0) {
+            return {};
+        }
+        std::array<std::uint64_t, N> quotient{};
+        unsigned __int128 remainder = 0;
+        const std::size_t liveWords = (width + 63u) / 64u;
+        for (std::size_t i = liveWords; i-- > 0;) {
+            const unsigned __int128 dividend =
+                (remainder << 64u) | static_cast<unsigned __int128>(lhs[i]);
+            quotient[i] = static_cast<std::uint64_t>(dividend / rhsWord);
+            remainder = dividend % rhsWord;
+        }
+        grhsim_trunc_words(quotient, width);
+        return quotient;
+    }
+    std::size_t rhsBitIndex = 0;
+    if (grhsim_try_single_bit_words(rhs, width, rhsBitIndex)) {
+        return grhsim_lshr_words(lhs, rhsBitIndex, width);
+    }
     if (!grhsim_any_bits_words(rhs, width)) {
         return {};
     }
     std::array<std::uint64_t, N> quotient{};
-    std::array<std::uint64_t, N> remainder{};
-    for (std::size_t bit = width; bit-- > 0;) {
-        grhsim_shl1_words_inplace(remainder, width);
-        if (grhsim_get_bit_words(lhs, bit)) {
-            remainder[0] |= 1;
+    std::array<std::uint64_t, N> remainder = lhs;
+    const std::size_t rhsHighestBit = grhsim_highest_bit_words(rhs, width);
+    while (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
+        const std::size_t remainderHighestBit = grhsim_highest_bit_words(remainder, width);
+        std::size_t shift = remainderHighestBit - rhsHighestBit;
+        auto shiftedDivisor = grhsim_shl_words(rhs, shift, width);
+        if (grhsim_compare_unsigned_words(remainder, shiftedDivisor) < 0) {
+            if (shift == 0) {
+                break;
+            }
+            --shift;
+            shiftedDivisor = grhsim_shl_words(rhs, shift, width);
         }
-        if (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
-            remainder = grhsim_sub_words(remainder, rhs, width);
-            grhsim_put_bit_words(quotient, bit, true);
-        }
+        remainder = grhsim_sub_words(remainder, shiftedDivisor, width);
+        grhsim_put_bit_words(quotient, shift, true);
     }
     grhsim_trunc_words(quotient, width);
     return quotient;
@@ -2428,18 +3363,60 @@ inline std::array<std::uint64_t, N> grhsim_umod_words(const std::array<std::uint
                                                       const std::array<std::uint64_t, N> &rhs,
                                                       std::size_t width)
 {
+    unsigned __int128 lhs128 = 0;
+    unsigned __int128 rhs128 = 0;
+    if (grhsim_try_u128_words(lhs, width, lhs128) && grhsim_try_u128_words(rhs, width, rhs128)) {
+        if (rhs128 == 0) {
+            return {};
+        }
+        return grhsim_from_u128_words<N>(lhs128 % rhs128, width);
+    }
+
+    std::uint64_t rhsWord = 0;
+    if (grhsim_try_u64_words(rhs, width, rhsWord)) {
+        if (rhsWord == 0) {
+            return {};
+        }
+        unsigned __int128 remainder = 0;
+        const std::size_t liveWords = (width + 63u) / 64u;
+        for (std::size_t i = liveWords; i-- > 0;) {
+            const unsigned __int128 dividend =
+                (remainder << 64u) | static_cast<unsigned __int128>(lhs[i]);
+            remainder = dividend % rhsWord;
+        }
+        std::array<std::uint64_t, N> out{};
+        if constexpr (N > 0) {
+            out[0] = static_cast<std::uint64_t>(remainder);
+        }
+        grhsim_trunc_words(out, width);
+        return out;
+    }
+    std::size_t rhsBitIndex = 0;
+    if (grhsim_try_single_bit_words(rhs, width, rhsBitIndex)) {
+        std::array<std::uint64_t, N> out{};
+        if (rhsBitIndex != 0) {
+            out = grhsim_slice_words<N>(lhs, 0, rhsBitIndex);
+        }
+        grhsim_trunc_words(out, width);
+        return out;
+    }
     if (!grhsim_any_bits_words(rhs, width)) {
         return {};
     }
-    std::array<std::uint64_t, N> remainder{};
-    for (std::size_t bit = width; bit-- > 0;) {
-        grhsim_shl1_words_inplace(remainder, width);
-        if (grhsim_get_bit_words(lhs, bit)) {
-            remainder[0] |= 1;
+    std::array<std::uint64_t, N> remainder = lhs;
+    const std::size_t rhsHighestBit = grhsim_highest_bit_words(rhs, width);
+    while (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
+        const std::size_t remainderHighestBit = grhsim_highest_bit_words(remainder, width);
+        std::size_t shift = remainderHighestBit - rhsHighestBit;
+        auto shiftedDivisor = grhsim_shl_words(rhs, shift, width);
+        if (grhsim_compare_unsigned_words(remainder, shiftedDivisor) < 0) {
+            if (shift == 0) {
+                break;
+            }
+            --shift;
+            shiftedDivisor = grhsim_shl_words(rhs, shift, width);
         }
-        if (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
-            remainder = grhsim_sub_words(remainder, rhs, width);
-        }
+        remainder = grhsim_sub_words(remainder, shiftedDivisor, width);
     }
     grhsim_trunc_words(remainder, width);
     return remainder;
@@ -2489,9 +3466,16 @@ inline std::array<std::uint64_t, N> grhsim_shl_words(const std::array<std::uint6
         return {};
     }
     std::array<std::uint64_t, N> out{};
-    for (std::size_t bit = 0; bit + amount < width; ++bit) {
-        if (grhsim_get_bit_words(value, bit)) {
-            grhsim_put_bit_words(out, bit + amount, true);
+    const std::size_t wordShift = amount / 64u;
+    const std::size_t bitShift = amount & 63u;
+    for (std::size_t i = N; i-- > 0;) {
+        if (i < wordShift) {
+            continue;
+        }
+        const std::uint64_t low = value[i - wordShift];
+        out[i] = (bitShift == 0 ? low : (low << bitShift));
+        if (bitShift != 0 && i > wordShift) {
+            out[i] |= (value[i - wordShift - 1u] >> (64u - bitShift));
         }
     }
     grhsim_trunc_words(out, width);
@@ -2508,9 +3492,16 @@ inline std::array<std::uint64_t, N> grhsim_lshr_words(const std::array<std::uint
         return {};
     }
     std::array<std::uint64_t, N> out{};
-    for (std::size_t bit = amount; bit < width; ++bit) {
-        if (grhsim_get_bit_words(value, bit)) {
-            grhsim_put_bit_words(out, bit - amount, true);
+    const std::size_t wordShift = amount / 64u;
+    const std::size_t bitShift = amount & 63u;
+    for (std::size_t i = 0; i < N; ++i) {
+        if (i + wordShift >= N) {
+            break;
+        }
+        const std::uint64_t high = value[i + wordShift];
+        out[i] = (bitShift == 0 ? high : (high >> bitShift));
+        if (bitShift != 0 && i + wordShift + 1u < N) {
+            out[i] |= (value[i + wordShift + 1u] << (64u - bitShift));
         }
     }
     grhsim_trunc_words(out, width);
@@ -2527,23 +3518,14 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
     if (amount >= width) {
         std::array<std::uint64_t, N> fill{};
         if (sign) {
-            for (std::size_t bit = 0; bit < width; ++bit) {
-                grhsim_put_bit_words(fill, bit, true);
-            }
+            grhsim_fill_range_words(fill, 0, width);
         }
         grhsim_trunc_words(fill, width);
         return fill;
     }
-    std::array<std::uint64_t, N> out{};
-    for (std::size_t bit = amount; bit < width; ++bit) {
-        if (grhsim_get_bit_words(value, bit)) {
-            grhsim_put_bit_words(out, bit - amount, true);
-        }
-    }
+    std::array<std::uint64_t, N> out = grhsim_lshr_words(value, shift, width);
     if (sign) {
-        for (std::size_t bit = width - amount; bit < width; ++bit) {
-            grhsim_put_bit_words(out, bit, true);
-        }
+        grhsim_fill_range_words(out, width - amount, amount);
     }
     grhsim_trunc_words(out, width);
     return out;
@@ -2583,6 +3565,7 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps->size() << ";\n";
+            *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
             *stream << "    static constexpr std::size_t kEventTermCount = " << model.eventTerms.size() << ";\n";
             *stream << "    static constexpr std::size_t kEventDomainCount = " << schedule.eventDomainSinkGroups->size() << ";\n";
             *stream << "    static constexpr std::size_t kEventPrecomputeMaxOps = " << eventPrecomputeMaxOps << ";\n\n";
@@ -2599,7 +3582,10 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
                 *stream << decl << '\n';
             }
             *stream << "\nprivate:\n";
-            *stream << "    void eval_batch_0();\n";
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                *stream << "    void eval_batch_" << batchIndex << "();\n";
+            }
             *stream << "    void commit_state_updates();\n";
             *stream << "    void refresh_outputs();\n\n";
             *stream << "    bool first_eval_ = true;\n";
@@ -2983,7 +3969,10 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
                 *stream << "        grhsim_set_bit(supernode_active_curr_, " << supernodeId << ");\n";
             }
             *stream << "    }\n\n";
-            *stream << "    eval_batch_0();\n";
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                *stream << "    eval_batch_" << batchIndex << "();\n";
+            }
             *stream << "    commit_state_updates();\n";
             *stream << "    refresh_outputs();\n\n";
             for (const auto &port : graph.inputPorts())
@@ -2997,442 +3986,72 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "}\n";
         }
 
+        const std::size_t emitParallelism =
+            std::min(parseEmitParallelism(options), scheduleBatches.empty() ? std::size_t{1} : scheduleBatches.size());
+        if (emitParallelism <= 1 || scheduleBatches.size() <= 1)
         {
-            auto stream = openOutputFile(schedPath);
-            if (!stream)
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                result.success = false;
-                return result;
+                if (auto error = emitSchedBatchFile(schedPaths[batchIndex],
+                                                    headerPath,
+                                                    className,
+                                                    graph,
+                                                    model,
+                                                    schedule,
+                                                    scheduleBatches[batchIndex]))
+                {
+                    reportError(*error, graph.symbol());
+                    result.success = false;
+                    return result;
+                }
             }
-            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
-            *stream << "#include <cstdlib>\n";
-            *stream << "#include <iostream>\n\n";
-            *stream << "void " << className << "::eval_batch_0()\n{\n";
-            for (uint32_t supernodeId : *schedule.topoOrder)
+        }
+        else
+        {
+            struct PendingSchedEmit
             {
-                std::vector<std::string> domainParts;
-                for (const auto &signature : (*schedule.supernodeEventDomains)[supernodeId])
+                std::size_t batchIndex = 0;
+                std::future<std::optional<std::string>> future;
+            };
+
+            std::vector<PendingSchedEmit> pending;
+            pending.reserve(emitParallelism);
+
+            auto launchBatch = [&](std::size_t batchIndex)
+            {
+                pending.push_back(PendingSchedEmit{
+                    .batchIndex = batchIndex,
+                    .future = std::async(std::launch::async,
+                                         [&, batchIndex]() -> std::optional<std::string>
+                                         {
+                                             return emitSchedBatchFile(schedPaths[batchIndex],
+                                                                       headerPath,
+                                                                       className,
+                                                                       graph,
+                                                                       model,
+                                                                       schedule,
+                                                                       scheduleBatches[batchIndex]);
+                                         }),
+                });
+            };
+
+            std::size_t launched = 0;
+            while (launched < scheduleBatches.size() || !pending.empty())
+            {
+                while (launched < scheduleBatches.size() && pending.size() < emitParallelism)
                 {
-                    if (signature.empty())
-                    {
-                        domainParts.push_back("true");
-                    }
-                    else
-                    {
-                        const std::size_t domainIndex = model.eventDomainIndex.at(signature);
-                        if (!model.eventDomainPrecomputable[domainIndex])
-                        {
-                            domainParts.push_back("true");
-                        }
-                        else
-                        {
-                            domainParts.push_back("event_domain_hit_[" + std::to_string(domainIndex) + "]");
-                        }
-                    }
+                    launchBatch(launched++);
                 }
-                const std::string guardExpr = domainParts.empty() ? "true" : "(" + joinStrings(domainParts, " || ") + ")";
-                *stream << "    if (!grhsim_test_bit(supernode_active_curr_, " << supernodeId << ") || !(" << guardExpr << ")) {\n";
-                *stream << "        goto supernode_" << supernodeId << "_end;\n";
-                *stream << "    }\n";
-                *stream << "    {\n";
-                *stream << "        bool supernode_changed = false;\n";
-                for (const auto opId : (*schedule.supernodeToOps)[supernodeId])
+
+                PendingSchedEmit task = std::move(pending.front());
+                pending.erase(pending.begin());
+                if (auto error = task.future.get())
                 {
-                    const Operation op = graph.getOperation(opId);
-                    const auto operands = op.operands();
-                    *stream << "        // op " << op.symbolText() << "\n";
-                    switch (op.kind())
-                    {
-                    case OperationKind::kConstant:
-                    {
-                        if (op.results().empty())
-                        {
-                            break;
-                        }
-                        const ValueId resultValue = op.results().front();
-                        const auto expr = constantExpr(graph, op, resultValue);
-                        if (!expr)
-                        {
-                            reportError("unsupported constant emit", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        const std::string lhs = valueRef(model, resultValue);
-                        if (graph.valueType(resultValue) == ValueType::Logic)
-                        {
-                            if (isWideLogicValue(graph, resultValue))
-                            {
-                                *stream << "        {\n";
-                                *stream << "            const auto next_value = " << *expr << ";\n";
-                                *stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
-                                        << graph.valueWidth(resultValue) << ")) { supernode_changed = true; }\n";
-                                *stream << "        }\n";
-                            }
-                            else
-                            {
-                                *stream << "        {\n";
-                                *stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
-                                        << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), " << graph.valueWidth(resultValue) << "));\n";
-                                *stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
-                                *stream << "        }\n";
-                            }
-                        }
-                        else
-                        {
-                            *stream << "        { const auto next_value = " << *expr << "; if (" << lhs
-                                    << " != next_value) { " << lhs << " = next_value; supernode_changed = true; } }\n";
-                        }
-                        break;
-                    }
-                    case OperationKind::kRegisterReadPort:
-                    case OperationKind::kLatchReadPort:
-                    {
-                        if (op.results().empty())
-                        {
-                            break;
-                        }
-                        auto targetSymbol = getAttribute<std::string>(op, op.kind() == OperationKind::kRegisterReadPort ? "regSymbol" : "latchSymbol");
-                        if (!targetSymbol)
-                        {
-                            reportError("storage read missing symbol", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        const auto stateIt = model.stateBySymbol.find(*targetSymbol);
-                        if (stateIt == model.stateBySymbol.end())
-                        {
-                            reportError("storage read target missing", *targetSymbol);
-                            result.success = false;
-                            return result;
-                        }
-                        const std::string lhs = valueRef(model, op.results().front());
-                        if (isWideLogicValue(graph, op.results().front()))
-                        {
-                            *stream << "        if (grhsim_assign_words(" << lhs << ", " << stateIt->second.fieldName << ", "
-                                    << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
-                        }
-                        else
-                        {
-                            *stream << "        if (" << lhs << " != " << stateIt->second.fieldName << ") { "
-                                    << lhs << " = " << stateIt->second.fieldName << "; supernode_changed = true; }\n";
-                        }
-                        break;
-                    }
-                    case OperationKind::kMemoryReadPort:
-                    {
-                        if (op.results().empty() || operands.empty())
-                        {
-                            break;
-                        }
-                        auto memSymbol = getAttribute<std::string>(op, "memSymbol");
-                        if (!memSymbol)
-                        {
-                            reportError("memory read missing memSymbol", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        const auto stateIt = model.stateBySymbol.find(*memSymbol);
-                        if (stateIt == model.stateBySymbol.end())
-                        {
-                            reportError("memory read target missing", *memSymbol);
-                            result.success = false;
-                            return result;
-                        }
-                        const StateDecl &state = stateIt->second;
-                        const std::string lhs = valueRef(model, op.results().front());
-                        const std::string addrExpr = valueRef(model, operands[0]);
-                        *stream << "        {\n";
-                        *stream << "            const std::size_t row = static_cast<std::size_t>(" << addrExpr << ") % " << state.rowCount << ";\n";
-                        *stream << "            const auto next_value = " << state.fieldName << "[row];\n";
-                        if (isWideLogicValue(graph, op.results().front()))
-                        {
-                            *stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
-                                    << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
-                        }
-                        else
-                        {
-                            *stream << "            if (" << lhs << " != next_value) { " << lhs
-                                    << " = next_value; supernode_changed = true; }\n";
-                        }
-                        *stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kAssign:
-                    case OperationKind::kAdd:
-                    case OperationKind::kSub:
-                    case OperationKind::kMul:
-                    case OperationKind::kDiv:
-                    case OperationKind::kMod:
-                    case OperationKind::kAnd:
-                    case OperationKind::kOr:
-                    case OperationKind::kXor:
-                    case OperationKind::kXnor:
-                    case OperationKind::kNot:
-                    case OperationKind::kEq:
-                    case OperationKind::kNe:
-                    case OperationKind::kLt:
-                    case OperationKind::kLe:
-                    case OperationKind::kGt:
-                    case OperationKind::kGe:
-                    case OperationKind::kLogicAnd:
-                    case OperationKind::kLogicOr:
-                    case OperationKind::kLogicNot:
-                    case OperationKind::kReduceAnd:
-                    case OperationKind::kReduceNand:
-                    case OperationKind::kReduceOr:
-                    case OperationKind::kReduceNor:
-                    case OperationKind::kReduceXor:
-                    case OperationKind::kReduceXnor:
-                    case OperationKind::kShl:
-                    case OperationKind::kLShr:
-                    case OperationKind::kAShr:
-                    case OperationKind::kMux:
-                    case OperationKind::kConcat:
-                    case OperationKind::kReplicate:
-                    case OperationKind::kSliceStatic:
-                    case OperationKind::kSliceDynamic:
-                    {
-                        if (op.results().empty())
-                        {
-                            break;
-                        }
-                        const ValueId resultValue = op.results().front();
-                        if (opNeedsWordLogicEmit(graph, op))
-                        {
-                            std::string emitError;
-                            if (!emitWordLogicOperation(*stream, graph, model, op, emitError))
-                            {
-                                reportError(emitError, std::string(op.symbolText()));
-                                result.success = false;
-                                return result;
-                            }
-                            break;
-                        }
-                        std::vector<std::string> operandExprs;
-                        operandExprs.reserve(operands.size());
-                        for (ValueId operand : operands)
-                        {
-                            operandExprs.push_back(valueRef(model, operand));
-                        }
-                        const std::string rhs = scalarAssignmentExpr(op.kind(), operandExprs, op, graph);
-                        if (rhs.empty())
-                        {
-                            reportError("unsupported scalar expression emit", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        const std::string lhs = valueRef(model, resultValue);
-                        *stream << "        {\n";
-                        *stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
-                                << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << rhs << "), " << graph.valueWidth(resultValue) << "));\n";
-                        *stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
-                        *stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kRegisterWritePort:
-                    case OperationKind::kLatchWritePort:
-                    case OperationKind::kMemoryWritePort:
-                    {
-                        const auto writeIt = model.writeByOp.find(opId);
-                        if (writeIt == model.writeByOp.end())
-                        {
-                            reportError("write metadata missing", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        const WriteDecl &write = writeIt->second;
-                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
-                        const std::string eventExpr = exactEventExpr(graph, model, op);
-                        *stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
-                        if (write.kind == StateDecl::Kind::Memory)
-                        {
-                            *stream << "            " << write.pendingAddrField << " = static_cast<std::size_t>(" << valueRef(model, operands[1]) << ");\n";
-                            *stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[2]) << ";\n";
-                            *stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
-                        }
-                        else
-                        {
-                            *stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[1]) << ";\n";
-                            *stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[2]) << ";\n";
-                        }
-                        *stream << "            " << write.pendingValidField << " = true;\n";
-                        *stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kSystemTask:
-                    {
-                        if (operands.empty())
-                        {
-                            break;
-                        }
-                        const std::string condExpr = valueRef(model, operands[0]);
-                        const std::string eventExpr = exactEventExpr(graph, model, op);
-                        const auto name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
-                        const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
-                        const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
-                        const std::string streamName = (name == "error" || name == "warning") ? "std::cerr" : "std::cout";
-                        *stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
-                        *stream << "            " << streamName << " << \"[" << name << "]\"";
-                        for (std::size_t i = 1; i < argEnd; ++i)
-                        {
-                            *stream << " << \" \" << " << valueRef(model, operands[i]);
-                        }
-                        *stream << " << std::endl;\n";
-                        if (name == "fatal" || name == "finish")
-                        {
-                            *stream << "            std::abort();\n";
-                        }
-                        *stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kDpicCall:
-                    {
-                        const auto targetImport = getAttribute<std::string>(op, "targetImportSymbol");
-                        const auto inArgName = getAttribute<std::vector<std::string>>(op, "inArgName").value_or(std::vector<std::string>{});
-                        const auto outArgName = getAttribute<std::vector<std::string>>(op, "outArgName").value_or(std::vector<std::string>{});
-                        const auto inoutArgName = getAttribute<std::vector<std::string>>(op, "inoutArgName").value_or(std::vector<std::string>{});
-                        const bool hasReturn = getAttribute<bool>(op, "hasReturn").value_or(false);
-                        if (!targetImport)
-                        {
-                            reportError("kDpicCall missing targetImportSymbol", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
-                        }
-                        auto importIt = model.dpiImportBySymbol.find(*targetImport);
-                        if (importIt == model.dpiImportBySymbol.end())
-                        {
-                            reportError("kDpicCall target import not found", *targetImport);
-                            result.success = false;
-                            return result;
-                        }
-                        const DpiImportDecl &decl = importIt->second;
-                        const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
-                        const std::size_t inputCount = inArgName.size();
-                        const std::size_t inoutCount = inoutArgName.size();
-                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
-                        const std::string eventExpr = exactEventExpr(graph, model, op);
-                        *stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
-                        std::vector<std::string> callArgs;
-                        std::size_t operandCursor = 1;
-                        std::size_t resultCursor = 0;
-                        if (hasReturn)
-                        {
-                            const ValueId returnValue = op.results()[0];
-                            *stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol) << "(";
-                            std::vector<std::string> deferredArgs;
-                            operandCursor = 1;
-                            resultCursor = 1;
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
-                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
-                                if (direction == "input")
-                                {
-                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
-                                }
-                                else if (direction == "output")
-                                {
-                                    const std::string tempName = "dpi_out_" + std::to_string(i);
-                                    *stream << "\n            " << argType << " " << tempName << "{};";
-                                    deferredArgs.push_back(tempName);
-                                }
-                                else
-                                {
-                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
-                                    *stream << "\n            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";";
-                                    deferredArgs.push_back(tempName);
-                                }
-                            }
-                            *stream << joinStrings(deferredArgs, ", ") << ");\n";
-                            *stream << "            if (" << valueRef(model, returnValue) << " != dpi_ret) { "
-                                    << valueRef(model, returnValue) << " = dpi_ret; supernode_changed = true; }\n";
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                if (direction == "output" || direction == "inout")
-                                {
-                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
-                                    if (resultCursor >= op.results().size())
-                                    {
-                                        continue;
-                                    }
-                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
-                                    *stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
-                                            << " = " << tempName << "; supernode_changed = true; }\n";
-                                }
-                            }
-                        }
-                        else
-                        {
-                            std::vector<std::string> deferredArgs;
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
-                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
-                                if (direction == "input")
-                                {
-                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
-                                }
-                                else if (direction == "output")
-                                {
-                                    const std::string tempName = "dpi_out_" + std::to_string(i);
-                                    *stream << "            " << argType << " " << tempName << "{};\n";
-                                    deferredArgs.push_back(tempName);
-                                }
-                                else
-                                {
-                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
-                                    *stream << "            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";\n";
-                                    deferredArgs.push_back(tempName);
-                                }
-                            }
-                            *stream << "            " << sanitizeIdentifier(decl.symbol) << "(" << joinStrings(deferredArgs, ", ") << ");\n";
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                if (direction == "output" || direction == "inout")
-                                {
-                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
-                                    if (resultCursor >= op.results().size())
-                                    {
-                                        continue;
-                                    }
-                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
-                                    *stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
-                                            << " = " << tempName << "; supernode_changed = true; }\n";
-                                }
-                            }
-                        }
-                        (void)inputCount;
-                        (void)inoutCount;
-                        (void)eventCount;
-                        *stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kRegister:
-                    case OperationKind::kLatch:
-                    case OperationKind::kMemory:
-                    case OperationKind::kDpicImport:
-                        break;
-                    default:
-                        reportError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
-                        result.success = false;
-                        return result;
-                    }
+                    reportError(*error, graph.symbol());
+                    result.success = false;
+                    return result;
                 }
-                *stream << "        if (supernode_changed) {\n";
-                for (uint32_t succ : (*schedule.dag)[supernodeId])
-                {
-                    *stream << "            grhsim_set_bit(supernode_active_curr_, " << succ << ");\n";
-                }
-                *stream << "        }\n";
-                *stream << "    }\n";
-                *stream << "supernode_" << supernodeId << "_end:\n";
             }
-            *stream << "    return;\n";
-            *stream << "}\n";
         }
 
         {
@@ -3447,7 +4066,12 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "ARFLAGS ?= rcs\n";
             *stream << "CXXFLAGS ?= -std=c++20 -O3\n";
             *stream << "LIB := lib" << prefix << ".a\n";
-            *stream << "SRCS := " << statePath.filename().string() << ' ' << evalPath.filename().string() << ' ' << schedPath.filename().string() << "\n";
+            *stream << "SRCS := " << statePath.filename().string() << ' ' << evalPath.filename().string();
+            for (const auto &schedPath : schedPaths)
+            {
+                *stream << ' ' << schedPath.filename().string();
+            }
+            *stream << "\n";
             *stream << "OBJS := $(SRCS:.cpp=.o)\n\n";
             *stream << "all: $(LIB)\n\n";
             *stream << "$(LIB): $(OBJS)\n";
@@ -3463,9 +4087,12 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             runtimePath.string(),
             statePath.string(),
             evalPath.string(),
-            schedPath.string(),
-            makefilePath.string(),
         };
+        for (const auto &schedPath : schedPaths)
+        {
+            result.artifacts.push_back(schedPath.string());
+        }
+        result.artifacts.push_back(makefilePath.string());
         return result;
     }
 

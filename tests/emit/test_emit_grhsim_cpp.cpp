@@ -3,11 +3,12 @@
 #include "emit/grhsim_cpp.hpp"
 #include "transform/activity_schedule.hpp"
 
+#include <array>
+#include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <array>
-#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,29 @@ namespace
             return {};
         }
         return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    }
+
+    std::vector<std::filesystem::path> collectSchedFiles(const std::filesystem::path &dir, std::string_view prefix)
+    {
+        std::vector<std::filesystem::path> files;
+        if (!std::filesystem::exists(dir))
+        {
+            return files;
+        }
+        for (const auto &entry : std::filesystem::directory_iterator(dir))
+        {
+            if (!entry.is_regular_file())
+            {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            if (name.rfind(std::string(prefix), 0) == 0 && name.ends_with(".cpp"))
+            {
+                files.push_back(entry.path());
+            }
+        }
+        std::sort(files.begin(), files.end());
+        return files;
     }
 
     ValueId makeLogicValue(Graph &graph, std::string_view name, int32_t width, bool isSigned = false)
@@ -79,6 +103,7 @@ namespace
         ValueId sh = makeLogicValue(graph, "sh", 3);
         ValueId rep2 = makeLogicValue(graph, "rep2", 2);
         ValueId sa = makeLogicValue(graph, "sa", 8, true);
+        ValueId midIn = makeLogicValue(graph, "mid_in", 96);
         ValueId wideIn = makeLogicValue(graph, "wide_in", 130);
         ValueId wideAddr = makeLogicValue(graph, "wide_addr", 2);
         graph.bindInputPort("clk", clk);
@@ -89,6 +114,7 @@ namespace
         graph.bindInputPort("sh", sh);
         graph.bindInputPort("rep2", rep2);
         graph.bindInputPort("sa", sa);
+        graph.bindInputPort("mid_in", midIn);
         graph.bindInputPort("wide_in", wideIn);
         graph.bindInputPort("wide_addr", wideAddr);
 
@@ -119,7 +145,11 @@ namespace
         ValueId wideZero = addConstant(graph, "const_wide_zero", "wide_zero", 130, "130'h0");
         ValueId wideOne = addConstant(graph, "const_wide_one", "wide_one", 130, "130'h1");
         ValueId wideTwo = addConstant(graph, "const_wide_two", "wide_two", 130, "130'h2");
+        ValueId wideGeneralDivisor = addConstant(graph, "const_wide_general_divisor", "wide_general_divisor", 130,
+                                                 "130'h080000000000000000000000000000003");
+        ValueId midWideConst = addConstant(graph, "const_mid_wide", "mid_wide_const", 96, "96'h000000010000000000000003");
         ValueId smallTwo = addConstant(graph, "const_small_two", "small_two", 2, "2'd2");
+        ValueId sh65 = addConstant(graph, "const_sh65", "sh65", 7, "7'd65");
         ValueId wideMask = addConstant(graph, "const_wide_mask", "wide_mask", 130, allOnesLiteral(130));
         ValueId fmt = addConstant(graph, "const_fmt", "fmt", 0, "\"q=%0d\"", ValueType::String);
 
@@ -303,6 +333,96 @@ namespace
         graph.addOperand(wideMod, wideTwo);
         graph.addResult(wideMod, wideModY);
         graph.bindOutputPort("wide_mod_y", wideModY);
+
+        ValueId widePow65 = makeLogicValue(graph, "wide_pow65", 130);
+        OperationId widePow65Op = graph.createOperation(OperationKind::kShl, graph.internSymbol("wide_pow65_op"));
+        graph.addOperand(widePow65Op, wideOne);
+        graph.addOperand(widePow65Op, sh65);
+        graph.addResult(widePow65Op, widePow65);
+
+        ValueId wideMulPowY = makeLogicValue(graph, "wide_mul_pow_y", 130);
+        OperationId wideMulPow = graph.createOperation(OperationKind::kMul, graph.internSymbol("wide_mul_pow_op"));
+        graph.addOperand(wideMulPow, wideIn);
+        graph.addOperand(wideMulPow, widePow65);
+        graph.addResult(wideMulPow, wideMulPowY);
+        graph.bindOutputPort("wide_mul_pow_y", wideMulPowY);
+
+        ValueId wideDivPowY = makeLogicValue(graph, "wide_div_pow_y", 130);
+        OperationId wideDivPow = graph.createOperation(OperationKind::kDiv, graph.internSymbol("wide_div_pow_op"));
+        graph.addOperand(wideDivPow, wideIn);
+        graph.addOperand(wideDivPow, widePow65);
+        graph.addResult(wideDivPow, wideDivPowY);
+        graph.bindOutputPort("wide_div_pow_y", wideDivPowY);
+
+        ValueId wideModPowY = makeLogicValue(graph, "wide_mod_pow_y", 130);
+        OperationId wideModPow = graph.createOperation(OperationKind::kMod, graph.internSymbol("wide_mod_pow_op"));
+        graph.addOperand(wideModPow, wideIn);
+        graph.addOperand(wideModPow, widePow65);
+        graph.addResult(wideModPow, wideModPowY);
+        graph.bindOutputPort("wide_mod_pow_y", wideModPowY);
+
+        ValueId wideDivGeneralY = makeLogicValue(graph, "wide_div_general_y", 130);
+        OperationId wideDivGeneral = graph.createOperation(OperationKind::kDiv, graph.internSymbol("wide_div_general_op"));
+        graph.addOperand(wideDivGeneral, wideIn);
+        graph.addOperand(wideDivGeneral, wideGeneralDivisor);
+        graph.addResult(wideDivGeneral, wideDivGeneralY);
+        graph.bindOutputPort("wide_div_general_y", wideDivGeneralY);
+
+        ValueId wideModGeneralY = makeLogicValue(graph, "wide_mod_general_y", 130);
+        OperationId wideModGeneral = graph.createOperation(OperationKind::kMod, graph.internSymbol("wide_mod_general_op"));
+        graph.addOperand(wideModGeneral, wideIn);
+        graph.addOperand(wideModGeneral, wideGeneralDivisor);
+        graph.addResult(wideModGeneral, wideModGeneralY);
+        graph.bindOutputPort("wide_mod_general_y", wideModGeneralY);
+
+        ValueId midMulY = makeLogicValue(graph, "mid_mul_y", 96);
+        OperationId midMul = graph.createOperation(OperationKind::kMul, graph.internSymbol("mid_mul_op"));
+        graph.addOperand(midMul, midIn);
+        graph.addOperand(midMul, midWideConst);
+        graph.addResult(midMul, midMulY);
+        graph.bindOutputPort("mid_mul_y", midMulY);
+
+        ValueId midDivY = makeLogicValue(graph, "mid_div_y", 96);
+        OperationId midDiv = graph.createOperation(OperationKind::kDiv, graph.internSymbol("mid_div_op"));
+        graph.addOperand(midDiv, midIn);
+        graph.addOperand(midDiv, midWideConst);
+        graph.addResult(midDiv, midDivY);
+        graph.bindOutputPort("mid_div_y", midDivY);
+
+        ValueId midModY = makeLogicValue(graph, "mid_mod_y", 96);
+        OperationId midMod = graph.createOperation(OperationKind::kMod, graph.internSymbol("mid_mod_op"));
+        graph.addOperand(midMod, midIn);
+        graph.addOperand(midMod, midWideConst);
+        graph.addResult(midMod, midModY);
+        graph.bindOutputPort("mid_mod_y", midModY);
+
+        ValueId midAddY = makeLogicValue(graph, "mid_add_y", 96);
+        OperationId midAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("mid_add_op"));
+        graph.addOperand(midAdd, midIn);
+        graph.addOperand(midAdd, midWideConst);
+        graph.addResult(midAdd, midAddY);
+        graph.bindOutputPort("mid_add_y", midAddY);
+
+        ValueId midSubY = makeLogicValue(graph, "mid_sub_y", 96);
+        OperationId midSub = graph.createOperation(OperationKind::kSub, graph.internSymbol("mid_sub_op"));
+        graph.addOperand(midSub, midIn);
+        graph.addOperand(midSub, midWideConst);
+        graph.addResult(midSub, midSubY);
+        graph.bindOutputPort("mid_sub_y", midSubY);
+
+        ValueId midEqY = makeLogicValue(graph, "mid_eq_y", 1);
+        OperationId midEq = graph.createOperation(OperationKind::kEq, graph.internSymbol("mid_eq_op"));
+        graph.addOperand(midEq, midIn);
+        graph.addOperand(midEq, midWideConst);
+        graph.addResult(midEq, midEqY);
+        graph.bindOutputPort("mid_eq_y", midEqY);
+
+        ValueId midLtY = makeLogicValue(graph, "mid_lt_y", 1);
+        OperationId midLt = graph.createOperation(OperationKind::kLt, graph.internSymbol("mid_lt_op"));
+        graph.addOperand(midLt, midIn);
+        graph.addOperand(midLt, midWideConst);
+        graph.addResult(midLt, midLtY);
+        graph.bindOutputPort("mid_lt_y", midLtY);
 
         ValueId wideAndY = makeLogicValue(graph, "wide_and_y", 130);
         OperationId wideAnd = graph.createOperation(OperationKind::kAnd, graph.internSymbol("wide_and_op"));
@@ -509,6 +629,9 @@ int main()
         EmitGrhSimCpp emitter(&diag);
         options.session = &session;
         options.sessionPathPrefix = std::string("top");
+        options.attributes["sched_batch_max_ops"] = "8";
+        options.attributes["sched_batch_max_estimated_lines"] = "96";
+        options.attributes["emit_parallelism"] = "2";
 
         EmitResult result = emitter.emit(design, options);
         if (!result.success)
@@ -519,27 +642,31 @@ int main()
         {
             return fail("EmitGrhSimCpp reported diagnostics errors");
         }
-        if (result.artifacts.size() != 6)
+        if (result.artifacts.size() < 7)
         {
-            return fail("EmitGrhSimCpp should report six artifacts");
+            return fail("EmitGrhSimCpp should report split schedule artifacts");
         }
 
         const std::filesystem::path headerPath = outDir / "grhsim_top.hpp";
         const std::filesystem::path statePath = outDir / "grhsim_top_state.cpp";
         const std::filesystem::path evalPath = outDir / "grhsim_top_eval.cpp";
-        const std::filesystem::path schedPath = outDir / "grhsim_top_sched_0.cpp";
         const std::filesystem::path makefilePath = outDir / "Makefile";
+        const std::vector<std::filesystem::path> schedFiles = collectSchedFiles(outDir, "grhsim_top_sched_");
         if (!std::filesystem::exists(headerPath) || !std::filesystem::exists(statePath) || !std::filesystem::exists(evalPath) ||
-            !std::filesystem::exists(schedPath) || !std::filesystem::exists(makefilePath))
+            !std::filesystem::exists(makefilePath) || schedFiles.size() < 2)
         {
-            return fail("Expected generated grhsim artifacts to exist");
+            return fail("Expected generated grhsim split schedule artifacts to exist");
         }
 
         const std::string header = readFile(headerPath);
         const std::string state = readFile(statePath);
         const std::string eval = readFile(evalPath);
-        const std::string sched = readFile(schedPath);
         const std::string makefile = readFile(makefilePath);
+        std::string sched;
+        for (const auto &path : schedFiles)
+        {
+            sched += readFile(path);
+        }
 
     if (header.find("class GrhSIM_top") == std::string::npos)
     {
@@ -548,6 +675,10 @@ int main()
     if (header.find("kEventPrecomputeMaxOps = 128") == std::string::npos)
     {
         return fail("Missing default event_precompute_max_ops emission");
+    }
+    if (header.find("kBatchCount = ") == std::string::npos || header.find("void eval_batch_1();") == std::string::npos)
+    {
+        return fail("Missing split batch declarations");
     }
     if (header.find("void set_clk(bool value);") == std::string::npos)
     {
@@ -590,6 +721,10 @@ int main()
     {
         return fail("Missing eval precompute / head activation logic");
     }
+    if (eval.find("eval_batch_0();") == std::string::npos || eval.find("eval_batch_1();") == std::string::npos)
+    {
+        return fail("Missing multi-batch eval dispatch");
+    }
     if (sched.find("grhsim_test_bit") == std::string::npos || sched.find("supernode_") == std::string::npos)
     {
         return fail("Missing emitted supernode scheduling code");
@@ -616,9 +751,10 @@ int main()
     {
         return fail("Missing DPI import declaration");
     }
-    if (makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos)
+    if (makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos ||
+        makefile.find("grhsim_top_sched_1.cpp") == std::string::npos)
     {
-        return fail("Missing Makefile skeleton");
+        return fail("Missing split Makefile skeleton");
     }
 
         const std::string buildCmd = "make -C " + outDir.string();
@@ -729,6 +865,84 @@ int main()
         harness << "    trunc_words(out, width);\n";
         harness << "    return out;\n";
         harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static int compare_words(const std::array<std::uint64_t, N>& lhs,\n";
+        harness << "                         const std::array<std::uint64_t, N>& rhs)\n";
+        harness << "{\n";
+        harness << "    for (std::size_t i = N; i-- > 0;) {\n";
+        harness << "        if (lhs[i] < rhs[i]) return -1;\n";
+        harness << "        if (lhs[i] > rhs[i]) return 1;\n";
+        harness << "    }\n";
+        harness << "    return 0;\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> sub_words(std::array<std::uint64_t, N> lhs,\n";
+        harness << "                                               const std::array<std::uint64_t, N>& rhs,\n";
+        harness << "                                               std::size_t width)\n";
+        harness << "{\n";
+        harness << "    std::uint64_t borrow = 0;\n";
+        harness << "    for (std::size_t i = 0; i < N; ++i) {\n";
+        harness << "        const std::uint64_t rhs_word = rhs[i] + borrow;\n";
+        harness << "        borrow = (rhs_word < rhs[i] || lhs[i] < rhs_word) ? 1 : 0;\n";
+        harness << "        lhs[i] -= rhs_word;\n";
+        harness << "    }\n";
+        harness << "    trunc_words(lhs, width);\n";
+        harness << "    return lhs;\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::size_t highest_bit_words(const std::array<std::uint64_t, N>& value, std::size_t width)\n";
+        harness << "{\n";
+        harness << "    const std::size_t live_words = (width + 63u) / 64u;\n";
+        harness << "    for (std::size_t i = live_words; i-- > 0;) {\n";
+        harness << "        const std::size_t word_width = (i + 1u == live_words) ? (width - i * 64u) : 64u;\n";
+        harness << "        const std::uint64_t word = word_width < 64u ? (value[i] & ((UINT64_C(1) << word_width) - 1u)) : value[i];\n";
+        harness << "        if (word != 0) return i * 64u + (63u - static_cast<std::size_t>(__builtin_clzll(word)));\n";
+        harness << "    }\n";
+        harness << "    return 0;\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> udiv_words_general(std::array<std::uint64_t, N> lhs,\n";
+        harness << "                                                       const std::array<std::uint64_t, N>& rhs,\n";
+        harness << "                                                       std::size_t width)\n";
+        harness << "{\n";
+        harness << "    std::array<std::uint64_t, N> quotient{};\n";
+        harness << "    if (compare_words(lhs, rhs) < 0) return quotient;\n";
+        harness << "    const std::size_t rhs_highest = highest_bit_words(rhs, width);\n";
+        harness << "    while (compare_words(lhs, rhs) >= 0) {\n";
+        harness << "        std::size_t shift = highest_bit_words(lhs, width) - rhs_highest;\n";
+        harness << "        auto shifted = shl_words(rhs, shift, width);\n";
+        harness << "        if (compare_words(lhs, shifted) < 0) {\n";
+        harness << "            --shift;\n";
+        harness << "            shifted = shl_words(rhs, shift, width);\n";
+        harness << "        }\n";
+        harness << "        lhs = sub_words(lhs, shifted, width);\n";
+        harness << "        put_bit(quotient, shift, true);\n";
+        harness << "    }\n";
+        harness << "    trunc_words(quotient, width);\n";
+        harness << "    return quotient;\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> umod_words_general(std::array<std::uint64_t, N> lhs,\n";
+        harness << "                                                       const std::array<std::uint64_t, N>& rhs,\n";
+        harness << "                                                       std::size_t width)\n";
+        harness << "{\n";
+        harness << "    if (compare_words(lhs, rhs) < 0) {\n";
+        harness << "        trunc_words(lhs, width);\n";
+        harness << "        return lhs;\n";
+        harness << "    }\n";
+        harness << "    const std::size_t rhs_highest = highest_bit_words(rhs, width);\n";
+        harness << "    while (compare_words(lhs, rhs) >= 0) {\n";
+        harness << "        std::size_t shift = highest_bit_words(lhs, width) - rhs_highest;\n";
+        harness << "        auto shifted = shl_words(rhs, shift, width);\n";
+        harness << "        if (compare_words(lhs, shifted) < 0) {\n";
+        harness << "            --shift;\n";
+        harness << "            shifted = shl_words(rhs, shift, width);\n";
+        harness << "        }\n";
+        harness << "        lhs = sub_words(lhs, shifted, width);\n";
+        harness << "    }\n";
+        harness << "    trunc_words(lhs, width);\n";
+        harness << "    return lhs;\n";
+        harness << "}\n\n";
         harness << "template <std::size_t DestN, std::size_t HiN, std::size_t LoN>\n";
         harness << "static std::array<std::uint64_t, DestN> concat_words(const std::array<std::uint64_t, HiN>& hi,\n";
         harness << "                                                      std::size_t hi_width,\n";
@@ -768,6 +982,20 @@ int main()
         harness << "    trunc_words(out, width);\n";
         harness << "    return out;\n";
         harness << "}\n\n";
+        harness << "using u128 = unsigned __int128;\n\n";
+        harness << "static u128 to_u128(const std::array<std::uint64_t, 2>& value)\n";
+        harness << "{\n";
+        harness << "    return static_cast<u128>(value[0]) | (static_cast<u128>(value[1]) << 64u);\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> from_u128(u128 value, std::size_t width)\n";
+        harness << "{\n";
+        harness << "    std::array<std::uint64_t, N> out{};\n";
+        harness << "    if constexpr (N > 0) out[0] = static_cast<std::uint64_t>(value);\n";
+        harness << "    if constexpr (N > 1) out[1] = static_cast<std::uint64_t>(value >> 64u);\n";
+        harness << "    trunc_words(out, width);\n";
+        harness << "    return out;\n";
+        harness << "}\n\n";
         harness << "extern \"C\" void trace_sum(std::uint8_t value)\n";
         harness << "{\n";
         harness << "    g_last_trace = value;\n";
@@ -781,8 +1009,19 @@ int main()
         harness << "    const std::array<std::uint64_t, 3> wide_mem_init{UINT64_C(1), UINT64_C(0), UINT64_C(1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_zero{};\n";
         harness << "    const std::array<std::uint64_t, 1> two_bit_one{UINT64_C(1)};\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_general_divisor{UINT64_C(3), UINT64_C(0x8000000000000000), UINT64_C(0)};\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_value{UINT64_C(0x1122334455667788), UINT64_C(0x0000000012345678)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_one = add_one(wide_zero, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_two = add_one(wide_one, 130);\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_pow65 = shl_words(wide_one, 65, 130);\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_div_general_expected = udiv_words_general(wide_value_a, wide_general_divisor, 130);\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_mod_general_expected = umod_words_general(wide_value_a, wide_general_divisor, 130);\n";
+        harness << "    const u128 mid_rhs_u128 = (static_cast<u128>(UINT64_C(1)) << 64u) | UINT64_C(3);\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_mul_expected = from_u128<2>(to_u128(mid_value) * mid_rhs_u128, 96);\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_div_expected = from_u128<2>(to_u128(mid_value) / mid_rhs_u128, 96);\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_mod_expected = from_u128<2>(to_u128(mid_value) % mid_rhs_u128, 96);\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_add_expected = from_u128<2>(to_u128(mid_value) + mid_rhs_u128, 96);\n";
+        harness << "    const std::array<std::uint64_t, 2> mid_sub_expected = from_u128<2>(to_u128(mid_value) - mid_rhs_u128, 96);\n";
         harness << "    std::uint64_t random_state_a = seed_a;\n";
         harness << "    const std::uint32_t rand_expected_a = static_cast<std::uint32_t>(splitmix64_next(random_state_a));\n";
         harness << "    const std::array<std::uint64_t, 3> rand_wide_expected_a = random_words<3>(random_state_a, 130);\n";
@@ -796,6 +1035,7 @@ int main()
         harness << "    sim.set_sh(static_cast<std::uint8_t>(2));\n";
         harness << "    sim.set_rep2(static_cast<std::uint8_t>(2));\n";
         harness << "    sim.set_sa(static_cast<std::uint8_t>(0xF0));\n";
+        harness << "    sim.set_mid_in(mid_value);\n";
         harness << "    sim.set_wide_in(wide_value_a);\n";
         harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
         harness << "    sim.set_clk(false);\n";
@@ -822,6 +1062,18 @@ int main()
         harness << "    if (!same_words(sim.get_wide_mul_y(), shl_words(wide_value_a, 1, 132))) return 33;\n";
         harness << "    if (!same_words(sim.get_wide_div_y(), lshr_words(wide_value_a, 1, 130))) return 34;\n";
         harness << "    if (!same_words(sim.get_wide_mod_y(), wide_one)) return 35;\n";
+        harness << "    if (!same_words(sim.get_wide_mul_pow_y(), shl_words(wide_value_a, 65, 130))) return 58;\n";
+        harness << "    if (!same_words(sim.get_wide_div_pow_y(), lshr_words(wide_value_a, 65, 130))) return 59;\n";
+        harness << "    if (!same_words(sim.get_wide_mod_pow_y(), slice_words<3>(wide_value_a, 0, 65))) return 60;\n";
+        harness << "    if (!same_words(sim.get_wide_div_general_y(), wide_div_general_expected)) return 68;\n";
+        harness << "    if (!same_words(sim.get_wide_mod_general_y(), wide_mod_general_expected)) return 69;\n";
+        harness << "    if (!same_words(sim.get_mid_mul_y(), mid_mul_expected)) return 61;\n";
+        harness << "    if (!same_words(sim.get_mid_div_y(), mid_div_expected)) return 62;\n";
+        harness << "    if (!same_words(sim.get_mid_mod_y(), mid_mod_expected)) return 63;\n";
+        harness << "    if (!same_words(sim.get_mid_add_y(), mid_add_expected)) return 64;\n";
+        harness << "    if (!same_words(sim.get_mid_sub_y(), mid_sub_expected)) return 65;\n";
+        harness << "    if (sim.get_mid_eq_y()) return 66;\n";
+        harness << "    if (sim.get_mid_lt_y()) return 67;\n";
         harness << "    if (!same_words(sim.get_wide_and_y(), wide_value_a)) return 36;\n";
         harness << "    if (!same_words(sim.get_wide_or_y(), wide_value_a)) return 37;\n";
         harness << "    if (!same_words(sim.get_wide_xor_y(), wide_value_a)) return 38;\n";
@@ -871,13 +1123,15 @@ int main()
     }
 
         const std::filesystem::path harnessExe = outDir / "grhsim_top_harness";
-        const std::string compileHarnessCmd =
+        std::string compileHarnessCmd =
             "c++ -std=c++20 -O2 -I" + outDir.string() +
             " " + (outDir / "grhsim_top_state.cpp").string() +
-            " " + (outDir / "grhsim_top_eval.cpp").string() +
-            " " + (outDir / "grhsim_top_sched_0.cpp").string() +
-            " " + harnessPath.string() +
-            " -o " + harnessExe.string();
+            " " + (outDir / "grhsim_top_eval.cpp").string();
+        for (const auto &schedPath : schedFiles)
+        {
+            compileHarnessCmd += " " + schedPath.string();
+        }
+        compileHarnessCmd += " " + harnessPath.string() + " -o " + harnessExe.string();
         if (std::system(compileHarnessCmd.c_str()) != 0)
         {
             return fail("Generated grhsim harness failed to compile");
