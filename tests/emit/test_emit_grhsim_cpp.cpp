@@ -69,6 +69,11 @@ namespace
         return graph.createValue(graph.internSymbol(std::string(name)), 0, false, ValueType::String);
     }
 
+    ValueId makeRealValue(Graph &graph, std::string_view name)
+    {
+        return graph.createValue(graph.internSymbol(std::string(name)), 0, false, ValueType::Real);
+    }
+
     ValueId addConstant(Graph &graph,
                         std::string_view opName,
                         std::string_view valueName,
@@ -1075,6 +1080,148 @@ namespace
         return design;
     }
 
+    Design buildDpiCallDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId a = makeLogicValue(graph, "a", 8, true);
+        ValueId wide = makeLogicValue(graph, "wide", 130);
+        ValueId realIn = makeRealValue(graph, "real_in");
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("wide", wide);
+        graph.bindInputPort("real_in", realIn);
+
+        ValueId one = addConstant(graph, "const_one_dpi", "one_dpi", 1, "1'b1");
+        ValueId label = addConstant(graph, "const_dpi_label", "dpi_label", 0, "\"tag\"", ValueType::String);
+
+        OperationId mixImport = graph.createOperation(OperationKind::kDpicImport,
+                                                      graph.internSymbol("dpi_mix"));
+        graph.setAttr(mixImport, "argsDirection",
+                      std::vector<std::string>{"input", "input", "input", "input", "output", "output"});
+        graph.setAttr(mixImport, "argsWidth", std::vector<int64_t>{8, 130, 64, 0, 16, 0});
+        graph.setAttr(mixImport, "argsName",
+                      std::vector<std::string>{"a", "wide", "r", "label", "sum", "text"});
+        graph.setAttr(mixImport, "argsSigned", std::vector<bool>{true, false, false, false, true, false});
+        graph.setAttr(mixImport, "argsType",
+                      std::vector<std::string>{"logic", "logic", "real", "string", "logic", "string"});
+        graph.setAttr(mixImport, "hasReturn", true);
+        graph.setAttr(mixImport, "returnWidth", static_cast<int64_t>(32));
+        graph.setAttr(mixImport, "returnSigned", true);
+        graph.setAttr(mixImport, "returnType", std::string("logic"));
+
+        ValueId retY = makeLogicValue(graph, "ret_y", 32, true);
+        ValueId sumY = makeLogicValue(graph, "sum_y", 16, true);
+        ValueId textY = makeStringValue(graph, "text_y");
+        OperationId mixCall = graph.createOperation(OperationKind::kDpicCall,
+                                                    graph.internSymbol("dpi_mix_call"));
+        graph.addOperand(mixCall, one);
+        graph.addOperand(mixCall, label);
+        graph.addOperand(mixCall, realIn);
+        graph.addOperand(mixCall, wide);
+        graph.addOperand(mixCall, a);
+        graph.addOperand(mixCall, clk);
+        graph.addResult(mixCall, retY);
+        graph.addResult(mixCall, textY);
+        graph.addResult(mixCall, sumY);
+        graph.setAttr(mixCall, "targetImportSymbol", std::string("dpi_mix"));
+        graph.setAttr(mixCall, "inArgName", std::vector<std::string>{"label", "r", "wide", "a"});
+        graph.setAttr(mixCall, "outArgName", std::vector<std::string>{"text", "sum"});
+        graph.setAttr(mixCall, "hasReturn", true);
+        graph.setAttr(mixCall, "eventEdge", std::vector<std::string>{"posedge"});
+        graph.bindOutputPort("ret_y", retY);
+        graph.bindOutputPort("sum_y", sumY);
+        graph.bindOutputPort("text_y", textY);
+
+        OperationId packImport = graph.createOperation(OperationKind::kDpicImport,
+                                                       graph.internSymbol("dpi_pack"));
+        graph.setAttr(packImport, "argsDirection", std::vector<std::string>{"input", "output"});
+        graph.setAttr(packImport, "argsWidth", std::vector<int64_t>{8, 8});
+        graph.setAttr(packImport, "argsName", std::vector<std::string>{"a", "mirror"});
+        graph.setAttr(packImport, "argsSigned", std::vector<bool>{false, false});
+        graph.setAttr(packImport, "argsType", std::vector<std::string>{"logic", "logic"});
+        graph.setAttr(packImport, "hasReturn", false);
+
+        ValueId mirrorY = makeLogicValue(graph, "mirror_y", 8);
+        OperationId packCall = graph.createOperation(OperationKind::kDpicCall,
+                                                     graph.internSymbol("dpi_pack_call"));
+        graph.addOperand(packCall, one);
+        graph.addOperand(packCall, a);
+        graph.addOperand(packCall, clk);
+        graph.addResult(packCall, mirrorY);
+        graph.setAttr(packCall, "targetImportSymbol", std::string("dpi_pack"));
+        graph.setAttr(packCall, "inArgName", std::vector<std::string>{"a"});
+        graph.setAttr(packCall, "outArgName", std::vector<std::string>{"mirror"});
+        graph.setAttr(packCall, "hasReturn", false);
+        graph.setAttr(packCall, "eventEdge", std::vector<std::string>{"posedge"});
+        graph.bindOutputPort("mirror_y", mirrorY);
+
+        OperationId wideImport = graph.createOperation(OperationKind::kDpicImport,
+                                                       graph.internSymbol("dpi_wide_echo"));
+        graph.setAttr(wideImport, "argsDirection", std::vector<std::string>{"input", "output"});
+        graph.setAttr(wideImport, "argsWidth", std::vector<int64_t>{130, 130});
+        graph.setAttr(wideImport, "argsName", std::vector<std::string>{"wide", "out"});
+        graph.setAttr(wideImport, "argsSigned", std::vector<bool>{false, false});
+        graph.setAttr(wideImport, "argsType", std::vector<std::string>{"logic", "logic"});
+        graph.setAttr(wideImport, "hasReturn", false);
+
+        ValueId wideY = makeLogicValue(graph, "wide_y", 130);
+        OperationId wideCall = graph.createOperation(OperationKind::kDpicCall,
+                                                     graph.internSymbol("dpi_wide_call"));
+        graph.addOperand(wideCall, one);
+        graph.addOperand(wideCall, wide);
+        graph.addOperand(wideCall, clk);
+        graph.addResult(wideCall, wideY);
+        graph.setAttr(wideCall, "targetImportSymbol", std::string("dpi_wide_echo"));
+        graph.setAttr(wideCall, "inArgName", std::vector<std::string>{"wide"});
+        graph.setAttr(wideCall, "outArgName", std::vector<std::string>{"out"});
+        graph.setAttr(wideCall, "hasReturn", false);
+        graph.setAttr(wideCall, "eventEdge", std::vector<std::string>{"posedge"});
+        graph.bindOutputPort("wide_y", wideY);
+
+        return design;
+    }
+
+    Design buildInvalidDpiInoutDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId data = makeLogicValue(graph, "data", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("data", data);
+
+        ValueId one = addConstant(graph, "const_one_invalid_dpi", "one_invalid_dpi", 1, "1'b1");
+
+        OperationId dpiImport = graph.createOperation(OperationKind::kDpicImport,
+                                                      graph.internSymbol("dpi_inout"));
+        graph.setAttr(dpiImport, "argsDirection", std::vector<std::string>{"inout"});
+        graph.setAttr(dpiImport, "argsWidth", std::vector<int64_t>{8});
+        graph.setAttr(dpiImport, "argsName", std::vector<std::string>{"x"});
+        graph.setAttr(dpiImport, "argsSigned", std::vector<bool>{false});
+        graph.setAttr(dpiImport, "argsType", std::vector<std::string>{"logic"});
+        graph.setAttr(dpiImport, "hasReturn", false);
+
+        OperationId dpiCall = graph.createOperation(OperationKind::kDpicCall,
+                                                    graph.internSymbol("dpi_inout_call"));
+        graph.addOperand(dpiCall, one);
+        graph.addOperand(dpiCall, data);
+        graph.addOperand(dpiCall, clk);
+        graph.setAttr(dpiCall, "targetImportSymbol", std::string("dpi_inout"));
+        graph.setAttr(dpiCall, "inArgName", std::vector<std::string>{});
+        graph.setAttr(dpiCall, "outArgName", std::vector<std::string>{});
+        graph.setAttr(dpiCall, "inoutArgName", std::vector<std::string>{"x"});
+        graph.setAttr(dpiCall, "hasReturn", false);
+        graph.setAttr(dpiCall, "eventEdge", std::vector<std::string>{"posedge"});
+
+        return design;
+    }
+
 } // namespace
 
 #ifndef WOLF_SV_EMIT_ARTIFACT_DIR
@@ -2007,6 +2154,150 @@ int main()
             {
                 return fail("terminating system-task final output missing for " + taskCase.name);
             }
+        }
+
+        const std::filesystem::path dpiDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_dpi";
+        std::filesystem::remove_all(dpiDir);
+        Design dpiDesign = buildDpiCallDesign();
+        EmitDiagnostics dpiDiag;
+        EmitResult dpiResult;
+        if (!emitWithActivitySchedule(dpiDesign, dpiDir, dpiDiag, dpiResult))
+        {
+            return fail("dpi activity-schedule pass failed");
+        }
+        if (!dpiResult.success || dpiDiag.hasError())
+        {
+            return fail("dpi emit failed");
+        }
+        const std::string dpiHeaderText = readFile(dpiDir / "grhsim_top.hpp");
+        if (dpiHeaderText.find("extern \"C\" std::int32_t dpi_mix") == std::string::npos ||
+            dpiHeaderText.find("const std::array<std::uint64_t, 3> & wide") == std::string::npos ||
+            dpiHeaderText.find("const std::string & label") == std::string::npos ||
+            dpiHeaderText.find("std::int16_t & sum") == std::string::npos ||
+            dpiHeaderText.find("std::string & text") == std::string::npos)
+        {
+            return fail("dpi header declaration mismatch");
+        }
+        const std::filesystem::path dpiStatePath = dpiDir / "grhsim_top_state.cpp";
+        const std::filesystem::path dpiEvalPath = dpiDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> dpiSchedFiles =
+            collectSchedFiles(dpiDir, "grhsim_top_sched_");
+        if (dpiSchedFiles.empty())
+        {
+            return fail("dpi schedule files missing");
+        }
+        const std::filesystem::path dpiHarnessPath = dpiDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(dpiHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create dpi harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <array>\n";
+            harness << "#include <cstdint>\n";
+            harness << "#include <string>\n\n";
+            harness << "static int g_mix_calls = 0;\n";
+            harness << "static int g_pack_calls = 0;\n";
+            harness << "static int g_wide_calls = 0;\n\n";
+            harness << "extern \"C\" std::int32_t dpi_mix(std::int8_t a,\n";
+            harness << "                                 const std::array<std::uint64_t, 3> &wide,\n";
+            harness << "                                 double r,\n";
+            harness << "                                 const std::string &label,\n";
+            harness << "                                 std::int16_t &sum,\n";
+            harness << "                                 std::string &text)\n";
+            harness << "{\n";
+            harness << "    ++g_mix_calls;\n";
+            harness << "    sum = static_cast<std::int16_t>(static_cast<int>(a) + static_cast<int>(wide[0] & UINT64_C(0xFF)) + static_cast<int>(r * 4.0));\n";
+            harness << "    text = label + \":\" + std::to_string(static_cast<int>(sum));\n";
+            harness << "    return static_cast<std::int32_t>(-2 * static_cast<std::int32_t>(sum));\n";
+            harness << "}\n\n";
+            harness << "extern \"C\" void dpi_pack(std::uint8_t a, std::uint8_t &mirror)\n";
+            harness << "{\n";
+            harness << "    ++g_pack_calls;\n";
+            harness << "    mirror = static_cast<std::uint8_t>(a ^ UINT8_C(0x5A));\n";
+            harness << "}\n\n";
+            harness << "extern \"C\" void dpi_wide_echo(const std::array<std::uint64_t, 3> &wide,\n";
+            harness << "                               std::array<std::uint64_t, 3> &out)\n";
+            harness << "{\n";
+            harness << "    ++g_wide_calls;\n";
+            harness << "    out = wide;\n";
+            harness << "    out[0] ^= UINT64_C(0xFF);\n";
+            harness << "    out[2] ^= UINT64_C(0x1);\n";
+            harness << "}\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    const std::array<std::uint64_t, 3> wide_value{UINT64_C(0x21), UINT64_C(0x123456789ABCDEF0), UINT64_C(0x2)};\n";
+            harness << "    auto wide_expected = wide_value;\n";
+            harness << "    wide_expected[0] ^= UINT64_C(0xFF);\n";
+            harness << "    wide_expected[2] ^= UINT64_C(0x1);\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.set_a(static_cast<std::uint8_t>(5));\n";
+            harness << "    sim.set_wide(wide_value);\n";
+            harness << "    sim.set_real_in(1.5);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (g_mix_calls != 0 || g_pack_calls != 0 || g_wide_calls != 0) return 1;\n";
+            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(0)) return 2;\n";
+            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(0)) return 3;\n";
+            harness << "    if (!sim.get_text_y().empty()) return 4;\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (g_mix_calls != 1 || g_pack_calls != 1 || g_wide_calls != 1) return 5;\n";
+            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(44)) return 6;\n";
+            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(-88)) return 7;\n";
+            harness << "    if (sim.get_text_y() != std::string(\"tag:44\")) return 8;\n";
+            harness << "    if (sim.get_mirror_y() != static_cast<std::uint8_t>(0x5F)) return 9;\n";
+            harness << "    if (sim.get_wide_y() != wide_expected) return 10;\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (g_mix_calls != 1 || g_pack_calls != 1 || g_wide_calls != 1) return 11;\n";
+            harness << "    sim.set_a(static_cast<std::uint8_t>(0xF8));\n";
+            harness << "    sim.set_real_in(0.5);\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (g_mix_calls != 2 || g_pack_calls != 2 || g_wide_calls != 2) return 12;\n";
+            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(27)) return 13;\n";
+            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(-54)) return 14;\n";
+            harness << "    if (sim.get_text_y() != std::string(\"tag:27\")) return 15;\n";
+            harness << "    if (sim.get_mirror_y() != static_cast<std::uint8_t>(0xA2)) return 16;\n";
+            harness << "    if (sim.get_wide_y() != wide_expected) return 17;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::filesystem::path dpiHarnessExe = dpiDir / "grhsim_top_harness";
+        std::string dpiCompileCmd =
+            "c++ -std=c++20 -O2 -I" + dpiDir.string() +
+            " " + dpiStatePath.string() +
+            " " + dpiEvalPath.string();
+        for (const auto &schedPath : dpiSchedFiles)
+        {
+            dpiCompileCmd += " " + schedPath.string();
+        }
+        dpiCompileCmd += " " + dpiHarnessPath.string() + " -o " + dpiHarnessExe.string();
+        if (std::system(dpiCompileCmd.c_str()) != 0)
+        {
+            return fail("dpi harness failed to compile");
+        }
+        if (std::system(dpiHarnessExe.string().c_str()) != 0)
+        {
+            return fail("dpi harness failed to run");
+        }
+
+        const std::filesystem::path invalidDpiDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_dpi_invalid_inout";
+        std::filesystem::remove_all(invalidDpiDir);
+        Design invalidDpiDesign = buildInvalidDpiInoutDesign();
+        EmitDiagnostics invalidDpiDiag;
+        EmitResult invalidDpiResult;
+        if (!emitWithActivitySchedule(invalidDpiDesign, invalidDpiDir, invalidDpiDiag, invalidDpiResult))
+        {
+            return fail("invalid dpi activity-schedule pass failed");
+        }
+        if (invalidDpiResult.success || !invalidDpiDiag.hasError())
+        {
+            return fail("invalid dpi inout emit should fail validation");
         }
 
         const std::filesystem::path invalidDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_regwrite_invalid";

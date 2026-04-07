@@ -863,6 +863,7 @@ namespace wolvrix::lib::emit
         };
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept;
+        std::string valueRef(const EmitModel &model, ValueId value);
 
         std::optional<slang::SVInt> constLogicValue(const Graph &graph, ValueId value, int32_t width)
         {
@@ -1173,13 +1174,87 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
-        std::string dpiCppType(std::string_view typeName, int64_t width)
+        std::string dpiLoweredTypeName(std::string_view typeName)
         {
             std::string lowered;
             lowered.reserve(typeName.size());
             for (unsigned char ch : typeName)
             {
                 lowered.push_back(static_cast<char>(std::tolower(ch)));
+            }
+            return lowered;
+        }
+
+        bool dpiTypeIsString(std::string_view typeName)
+        {
+            return dpiLoweredTypeName(typeName) == "string";
+        }
+
+        bool dpiTypeIsReal(std::string_view typeName)
+        {
+            const std::string lowered = dpiLoweredTypeName(typeName);
+            return lowered == "real" || lowered == "shortreal";
+        }
+
+        bool dpiTypeIsShortReal(std::string_view typeName)
+        {
+            return dpiLoweredTypeName(typeName) == "shortreal";
+        }
+
+        bool dpiTypeIsLogicLike(std::string_view typeName)
+        {
+            return !dpiTypeIsString(typeName) && !dpiTypeIsReal(typeName);
+        }
+
+        int64_t dpiEffectiveWidth(std::string_view typeName, int64_t width)
+        {
+            const std::string lowered = dpiLoweredTypeName(typeName);
+            if (lowered == "byte")
+            {
+                return 8;
+            }
+            if (lowered == "shortint")
+            {
+                return 16;
+            }
+            if (lowered == "int" || lowered == "integer")
+            {
+                return 32;
+            }
+            if (lowered == "longint" || lowered == "time")
+            {
+                return 64;
+            }
+            return width > 0 ? width : 1;
+        }
+
+        std::string dpiScalarLogicCppType(int64_t width, bool isSigned)
+        {
+            if (width <= 1)
+            {
+                return "bool";
+            }
+            if (width <= 8)
+            {
+                return isSigned ? "std::int8_t" : "std::uint8_t";
+            }
+            if (width <= 16)
+            {
+                return isSigned ? "std::int16_t" : "std::uint16_t";
+            }
+            if (width <= 32)
+            {
+                return isSigned ? "std::int32_t" : "std::uint32_t";
+            }
+            return isSigned ? "std::int64_t" : "std::uint64_t";
+        }
+
+        std::string dpiBaseCppType(std::string_view typeName, int64_t width, bool isSigned)
+        {
+            const std::string lowered = dpiLoweredTypeName(typeName);
+            if (dpiTypeIsShortReal(typeName))
+            {
+                return "float";
             }
             if (lowered == "real" || lowered == "shortreal")
             {
@@ -1189,7 +1264,292 @@ namespace wolvrix::lib::emit
             {
                 return "std::string";
             }
-            return logicCppType(static_cast<int32_t>(width));
+            const int64_t effectiveWidth = dpiEffectiveWidth(typeName, width);
+            if (effectiveWidth <= 64)
+            {
+                return dpiScalarLogicCppType(effectiveWidth, isSigned);
+            }
+            return logicCppType(static_cast<int32_t>(effectiveWidth));
+        }
+
+        std::string dpiCppType(std::string_view typeName,
+                               int64_t width,
+                               bool isSigned,
+                               bool isOutputRef)
+        {
+            const std::string baseType = dpiBaseCppType(typeName, width, isSigned);
+            if (isOutputRef)
+            {
+                return baseType + " &";
+            }
+            if (dpiTypeIsString(typeName) || dpiEffectiveWidth(typeName, width) > 64)
+            {
+                return "const " + baseType + " &";
+            }
+            return baseType;
+        }
+
+        int findNameIndex(const std::vector<std::string> &names, std::string_view needle)
+        {
+            for (std::size_t i = 0; i < names.size(); ++i)
+            {
+                if (names[i] == needle)
+                {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        }
+
+        ValueType dpiExpectedValueType(std::string_view typeName)
+        {
+            if (dpiTypeIsString(typeName))
+            {
+                return ValueType::String;
+            }
+            if (dpiTypeIsReal(typeName))
+            {
+                return ValueType::Real;
+            }
+            return ValueType::Logic;
+        }
+
+        bool validateDpiValueType(const Graph &graph,
+                                  ValueId value,
+                                  std::string_view typeName,
+                                  int64_t width,
+                                  std::string_view context,
+                                  std::string &error)
+        {
+            const ValueType expectedType = dpiExpectedValueType(typeName);
+            if (graph.valueType(value) != expectedType)
+            {
+                error = std::string(context) + " value type mismatch";
+                return false;
+            }
+            if (expectedType == ValueType::Logic)
+            {
+                const int64_t expectedWidth = dpiEffectiveWidth(typeName, width);
+                if (graph.valueWidth(value) != expectedWidth)
+                {
+                    error = std::string(context) + " width mismatch";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        std::string dpiValueExpr(const Graph &graph,
+                                 const EmitModel &model,
+                                 ValueId value,
+                                 std::string_view typeName,
+                                 int64_t width,
+                                 bool isSigned)
+        {
+            const std::string ref = valueRef(model, value);
+            if (dpiTypeIsShortReal(typeName))
+            {
+                return "static_cast<float>(" + ref + ")";
+            }
+            if (dpiTypeIsReal(typeName) || dpiTypeIsString(typeName))
+            {
+                return ref;
+            }
+            const int64_t effectiveWidth = dpiEffectiveWidth(typeName, width);
+            if (effectiveWidth > 64)
+            {
+                return ref;
+            }
+            return "static_cast<" + dpiBaseCppType(typeName, width, isSigned) + ">(" + ref + ")";
+        }
+
+        bool validateDpicCall(const Graph &graph,
+                              const Operation &op,
+                              const EmitModel &model,
+                              std::string &error)
+        {
+            const std::string opName = std::string(op.symbolText());
+            const auto operands = op.operands();
+            if (operands.empty())
+            {
+                error = "kDpicCall missing callCond operand: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            {
+                error = "kDpicCall callCond must be 1-bit logic: " + opName;
+                return false;
+            }
+
+            const auto targetImport = getAttribute<std::string>(op, "targetImportSymbol");
+            if (!targetImport)
+            {
+                error = "kDpicCall missing targetImportSymbol: " + opName;
+                return false;
+            }
+            auto importIt = model.dpiImportBySymbol.find(*targetImport);
+            if (importIt == model.dpiImportBySymbol.end())
+            {
+                error = "kDpicCall target import not found: " + *targetImport;
+                return false;
+            }
+            const DpiImportDecl &decl = importIt->second;
+
+            const std::vector<std::string> inArgName =
+                getAttribute<std::vector<std::string>>(op, "inArgName").value_or(std::vector<std::string>{});
+            const std::vector<std::string> outArgName =
+                getAttribute<std::vector<std::string>>(op, "outArgName").value_or(std::vector<std::string>{});
+            const std::vector<std::string> inoutArgName =
+                getAttribute<std::vector<std::string>>(op, "inoutArgName").value_or(std::vector<std::string>{});
+            const std::vector<std::string> eventEdges =
+                getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{});
+            const bool hasReturn = getAttribute<bool>(op, "hasReturn").value_or(false);
+
+            if (!inoutArgName.empty())
+            {
+                error = "kDpicCall inout args are not supported in grhsim-cpp emit: " + opName;
+                return false;
+            }
+            for (const std::string &direction : decl.argsDirection)
+            {
+                if (direction == "inout")
+                {
+                    error = "kDpicImport with inout args is not supported in grhsim-cpp emit: " + decl.symbol;
+                    return false;
+                }
+            }
+            if (hasReturn != decl.hasReturn)
+            {
+                error = "kDpicCall hasReturn mismatch: " + opName;
+                return false;
+            }
+            if (operands.size() != 1 + inArgName.size() + eventEdges.size())
+            {
+                error = "kDpicCall operand count mismatch: " + opName;
+                return false;
+            }
+            const std::size_t expectedResults = (hasReturn ? 1u : 0u) + outArgName.size();
+            if (op.results().size() != expectedResults)
+            {
+                error = "kDpicCall result count mismatch: " + opName;
+                return false;
+            }
+            for (std::size_t i = 0; i < eventEdges.size(); ++i)
+            {
+                const ValueId eventValue = operands[1 + inArgName.size() + i];
+                if (graph.valueType(eventValue) != ValueType::Logic || graph.valueWidth(eventValue) != 1)
+                {
+                    error = "kDpicCall event operand must be 1-bit logic: " + opName;
+                    return false;
+                }
+            }
+
+            auto validateUniqueNames = [&](const std::vector<std::string> &names, std::string_view kind) -> bool
+            {
+                std::unordered_set<std::string> seen;
+                for (const std::string &name : names)
+                {
+                    if (!seen.insert(name).second)
+                    {
+                        error = "kDpicCall duplicate " + std::string(kind) + " name: " + opName;
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (!validateUniqueNames(inArgName, "input arg") || !validateUniqueNames(outArgName, "output arg"))
+            {
+                return false;
+            }
+
+            std::size_t importInputCount = 0;
+            std::size_t importOutputCount = 0;
+            for (const std::string &direction : decl.argsDirection)
+            {
+                if (direction == "input")
+                {
+                    ++importInputCount;
+                }
+                else if (direction == "output")
+                {
+                    ++importOutputCount;
+                }
+            }
+            if (inArgName.size() != importInputCount || outArgName.size() != importOutputCount)
+            {
+                error = "kDpicCall arg group size mismatch: " + opName;
+                return false;
+            }
+
+            std::size_t resultBase = 0;
+            if (hasReturn)
+            {
+                if (!validateDpiValueType(graph,
+                                          op.results()[0],
+                                          decl.returnType,
+                                          decl.returnWidth,
+                                          "kDpicCall return",
+                                          error))
+                {
+                    error += ": " + opName;
+                    return false;
+                }
+                resultBase = 1;
+            }
+
+            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+            {
+                const std::string &direction = decl.argsDirection[i];
+                const std::string formalName =
+                    i < decl.argsName.size() ? decl.argsName[i] : ("arg" + std::to_string(i));
+                const std::string_view typeName =
+                    i < decl.argsType.size() ? std::string_view(decl.argsType[i]) : std::string_view("logic");
+                const int64_t width = i < decl.argsWidth.size() ? decl.argsWidth[i] : 1;
+                if (direction == "input")
+                {
+                    const int inputIndex = findNameIndex(inArgName, formalName);
+                    if (inputIndex < 0)
+                    {
+                        error = "kDpicCall missing matching input arg " + formalName + ": " + opName;
+                        return false;
+                    }
+                    if (!validateDpiValueType(graph,
+                                              operands[1 + static_cast<std::size_t>(inputIndex)],
+                                              typeName,
+                                              width,
+                                              "kDpicCall input arg",
+                                              error))
+                    {
+                        error += ": " + opName + " formal=" + formalName;
+                        return false;
+                    }
+                }
+                else if (direction == "output")
+                {
+                    const int outputIndex = findNameIndex(outArgName, formalName);
+                    if (outputIndex < 0)
+                    {
+                        error = "kDpicCall missing matching output arg " + formalName + ": " + opName;
+                        return false;
+                    }
+                    if (!validateDpiValueType(graph,
+                                              op.results()[resultBase + static_cast<std::size_t>(outputIndex)],
+                                              typeName,
+                                              width,
+                                              "kDpicCall output arg",
+                                              error))
+                    {
+                        error += ": " + opName + " formal=" + formalName;
+                        return false;
+                    }
+                }
+                else
+                {
+                    error = "kDpicImport has unsupported arg direction for grhsim-cpp emit: " + decl.symbol;
+                    return false;
+                }
+            }
+            return true;
         }
 
         bool buildModel(const Graph &graph,
@@ -1319,6 +1679,19 @@ namespace wolvrix::lib::emit
                     decl.returnWidth = getAttribute<int64_t>(op, "returnWidth").value_or(64);
                     decl.returnSigned = getAttribute<bool>(op, "returnSigned").value_or(false);
                     decl.returnType = getAttribute<std::string>(op, "returnType").value_or(std::string("logic"));
+                    decl.argsName.resize(decl.argsDirection.size());
+                    decl.argsWidth.resize(decl.argsDirection.size(), 1);
+                    decl.argsSigned.resize(decl.argsDirection.size(), false);
+                    decl.argsType.resize(decl.argsDirection.size(), std::string("logic"));
+                    for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                    {
+                        if (decl.argsName[i].empty())
+                        {
+                            decl.argsName[i] = "arg" + std::to_string(i);
+                        }
+                        decl.argsWidth[i] = dpiEffectiveWidth(decl.argsType[i], decl.argsWidth[i]);
+                    }
+                    decl.returnWidth = dpiEffectiveWidth(decl.returnType, decl.returnWidth);
                     model.dpiImportBySymbol.insert_or_assign(decl.symbol, decl);
                     model.dpiImports.push_back(decl);
                     break;
@@ -1334,6 +1707,14 @@ namespace wolvrix::lib::emit
                 if (op.kind() == OperationKind::kSystemTask)
                 {
                     if (!validateSystemTask(graph, op, error))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (op.kind() == OperationKind::kDpicCall)
+                {
+                    if (!validateDpicCall(graph, op, model, error))
                     {
                         return false;
                     }
@@ -1479,26 +1860,23 @@ namespace wolvrix::lib::emit
                                                 defaultInitExpr(graph, value) + ";");
             }
 
-            for (const auto &decl : model.dpiImports)
-            {
-                std::vector<std::string> args;
-                const std::size_t argCount = decl.argsDirection.size();
-                for (std::size_t i = 0; i < argCount; ++i)
+                for (const auto &decl : model.dpiImports)
                 {
-                    const std::string baseType =
-                        dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
-                                   i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
+                    std::vector<std::string> args;
+                    const std::size_t argCount = decl.argsDirection.size();
+                    for (std::size_t i = 0; i < argCount; ++i)
+                    {
+                    const std::string argType =
+                        dpiCppType(i < decl.argsType.size() ? std::string_view(decl.argsType[i]) : std::string_view("logic"),
+                                   i < decl.argsWidth.size() ? decl.argsWidth[i] : 64,
+                                   i < decl.argsSigned.size() ? decl.argsSigned[i] : false,
+                                   decl.argsDirection[i] == "output" || decl.argsDirection[i] == "inout");
                     const std::string &direction = decl.argsDirection[i];
-                    if (direction == "output" || direction == "inout")
-                    {
-                        args.push_back(baseType + " &" + sanitizeIdentifier(i < decl.argsName.size() ? decl.argsName[i] : ("arg" + std::to_string(i))));
+                    (void)direction;
+                    args.push_back(argType + " " + sanitizeIdentifier(i < decl.argsName.size() ? decl.argsName[i] : ("arg" + std::to_string(i))));
                     }
-                    else
-                    {
-                        args.push_back(baseType + " " + sanitizeIdentifier(i < decl.argsName.size() ? decl.argsName[i] : ("arg" + std::to_string(i))));
-                    }
-                }
-                const std::string returnType = decl.hasReturn ? dpiCppType(decl.returnType, decl.returnWidth) : "void";
+                const std::string returnType =
+                    decl.hasReturn ? dpiBaseCppType(decl.returnType, decl.returnWidth, decl.returnSigned) : "void";
                 model.dpiDecls.push_back("extern \"C\" " + returnType + " " + sanitizeIdentifier(decl.symbol) + "(" +
                                          joinStrings(args, ", ") + ");");
             }
@@ -2845,7 +3223,6 @@ namespace wolvrix::lib::emit
                         const auto targetImport = getAttribute<std::string>(op, "targetImportSymbol");
                         const auto inArgName = getAttribute<std::vector<std::string>>(op, "inArgName").value_or(std::vector<std::string>{});
                         const auto outArgName = getAttribute<std::vector<std::string>>(op, "outArgName").value_or(std::vector<std::string>{});
-                        const auto inoutArgName = getAttribute<std::vector<std::string>>(op, "inoutArgName").value_or(std::vector<std::string>{});
                         const bool hasReturn = getAttribute<bool>(op, "hasReturn").value_or(false);
                         if (!targetImport)
                         {
@@ -2857,57 +3234,72 @@ namespace wolvrix::lib::emit
                             return emitError("kDpicCall target import not found", *targetImport);
                         }
                         const DpiImportDecl &decl = importIt->second;
-                        const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
-                        const std::size_t inputCount = inArgName.size();
-                        const std::size_t inoutCount = inoutArgName.size();
                         const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
                         const std::string eventExpr = exactEventExpr(graph, model, op);
                         stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
-                        std::size_t operandCursor = 1;
-                        std::size_t resultCursor = 0;
+                        std::vector<std::string> deferredArgs;
+                        std::size_t resultBase = hasReturn ? 1u : 0u;
+                        for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
+                        {
+                            const std::string &direction = decl.argsDirection[i];
+                            const std::string &formalName = decl.argsName[i];
+                            const std::string_view argType =
+                                i < decl.argsType.size() ? std::string_view(decl.argsType[i]) : std::string_view("logic");
+                            const int64_t argWidth = i < decl.argsWidth.size() ? decl.argsWidth[i] : 1;
+                            const bool argSigned = i < decl.argsSigned.size() ? decl.argsSigned[i] : false;
+                            if (direction == "input")
+                            {
+                                const int inputIndex = findNameIndex(inArgName, formalName);
+                                if (inputIndex < 0)
+                                {
+                                    return emitError("kDpicCall missing matching input arg", formalName);
+                                }
+                                deferredArgs.push_back(dpiValueExpr(graph,
+                                                                    model,
+                                                                    operands[1 + static_cast<std::size_t>(inputIndex)],
+                                                                    argType,
+                                                                    argWidth,
+                                                                    argSigned));
+                            }
+                            else if (direction == "output")
+                            {
+                                const int outputIndex = findNameIndex(outArgName, formalName);
+                                if (outputIndex < 0)
+                                {
+                                    return emitError("kDpicCall missing matching output arg", formalName);
+                                }
+                                const std::string tempName = "dpi_out_" + std::to_string(i);
+                                stream << "            "
+                                       << dpiBaseCppType(argType, argWidth, argSigned)
+                                       << " " << tempName << "{};\n";
+                                deferredArgs.push_back(tempName);
+                            }
+                            else
+                            {
+                                return emitError("kDpicCall inout args are not supported in grhsim-cpp emit",
+                                                 std::string(op.symbolText()));
+                            }
+                        }
                         if (hasReturn)
                         {
                             const ValueId returnValue = op.results()[0];
-                            stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol) << "(";
-                            std::vector<std::string> deferredArgs;
-                            operandCursor = 1;
-                            resultCursor = 1;
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
-                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
-                                if (direction == "input")
-                                {
-                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
-                                }
-                                else if (direction == "output")
-                                {
-                                    const std::string tempName = "dpi_out_" + std::to_string(i);
-                                    stream << "\n            " << argType << " " << tempName << "{};";
-                                    deferredArgs.push_back(tempName);
-                                }
-                                else
-                                {
-                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
-                                    stream << "\n            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";";
-                                    deferredArgs.push_back(tempName);
-                                }
-                            }
-                            stream << joinStrings(deferredArgs, ", ") << ");\n";
+                            stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
+                                   << "(" << joinStrings(deferredArgs, ", ") << ");\n";
                             stream << "            if (" << valueRef(model, returnValue) << " != dpi_ret) { "
                                    << valueRef(model, returnValue) << " = dpi_ret; supernode_changed = true; }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
                                 const std::string &direction = decl.argsDirection[i];
-                                if (direction == "output" || direction == "inout")
+                                if (direction == "output")
                                 {
-                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
-                                    if (resultCursor >= op.results().size())
+                                    const int outputIndex = findNameIndex(outArgName, decl.argsName[i]);
+                                    if (outputIndex < 0)
                                     {
                                         continue;
                                     }
-                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
+                                    const std::string tempName = "dpi_out_" + std::to_string(i);
+                                    const std::string lhs =
+                                        valueRef(model, op.results()[resultBase + static_cast<std::size_t>(outputIndex)]);
                                     stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
                                            << " = " << tempName << "; supernode_changed = true; }\n";
                                 }
@@ -2915,49 +3307,25 @@ namespace wolvrix::lib::emit
                         }
                         else
                         {
-                            std::vector<std::string> deferredArgs;
-                            for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
-                            {
-                                const std::string &direction = decl.argsDirection[i];
-                                const std::string argType = dpiCppType(i < decl.argsType.size() ? decl.argsType[i] : std::string_view("logic"),
-                                                                       i < decl.argsWidth.size() ? decl.argsWidth[i] : 64);
-                                if (direction == "input")
-                                {
-                                    deferredArgs.push_back(valueRef(model, operands[operandCursor++]));
-                                }
-                                else if (direction == "output")
-                                {
-                                    const std::string tempName = "dpi_out_" + std::to_string(i);
-                                    stream << "            " << argType << " " << tempName << "{};\n";
-                                    deferredArgs.push_back(tempName);
-                                }
-                                else
-                                {
-                                    const std::string tempName = "dpi_inout_" + std::to_string(i);
-                                    stream << "            " << argType << " " << tempName << " = " << valueRef(model, operands[operandCursor++]) << ";\n";
-                                    deferredArgs.push_back(tempName);
-                                }
-                            }
                             stream << "            " << sanitizeIdentifier(decl.symbol) << "(" << joinStrings(deferredArgs, ", ") << ");\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
                                 const std::string &direction = decl.argsDirection[i];
-                                if (direction == "output" || direction == "inout")
+                                if (direction == "output")
                                 {
-                                    const std::string tempName = (direction == "output" ? "dpi_out_" : "dpi_inout_") + std::to_string(i);
-                                    if (resultCursor >= op.results().size())
+                                    const int outputIndex = findNameIndex(outArgName, decl.argsName[i]);
+                                    if (outputIndex < 0)
                                     {
                                         continue;
                                     }
-                                    const std::string lhs = valueRef(model, op.results()[resultCursor++]);
+                                    const std::string tempName = "dpi_out_" + std::to_string(i);
+                                    const std::string lhs =
+                                        valueRef(model, op.results()[resultBase + static_cast<std::size_t>(outputIndex)]);
                                     stream << "            if (" << lhs << " != " << tempName << ") { " << lhs
                                            << " = " << tempName << "; supernode_changed = true; }\n";
                                 }
                             }
                         }
-                        (void)inputCount;
-                        (void)inoutCount;
-                        (void)eventCount;
                         stream << "        }\n";
                         break;
                     }
