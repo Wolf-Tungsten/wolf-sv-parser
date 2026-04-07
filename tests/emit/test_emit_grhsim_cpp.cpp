@@ -944,6 +944,137 @@ namespace
         return design;
     }
 
+    Design buildSystemTaskDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId data = makeLogicValue(graph, "data", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("data", data);
+        graph.bindOutputPort("data_out", data);
+
+        ValueId one = addConstant(graph, "const_one_sys", "one_sys", 1, "1'b1");
+        ValueId handle = addConstant(graph, "const_file_handle", "file_handle", 32, "32'd10");
+        ValueId fmtInit = addConstant(graph, "const_fmt_init", "fmt_init", 0, "\"init-once\"", ValueType::String);
+        ValueId fmtInitEdge = addConstant(graph, "const_fmt_init_edge", "fmt_init_edge", 0,
+                                          "\"init-edge=%0d\"", ValueType::String);
+        ValueId fmtDisplay = addConstant(graph, "const_fmt_display", "fmt_display", 0,
+                                         "\"d=%0d h=%0h b=%b s=%s r=%0.2f\"", ValueType::String);
+        ValueId fmtInfo = addConstant(graph, "const_fmt_info", "fmt_info", 0, "\"info=%0d\"", ValueType::String);
+        ValueId fmtWarn = addConstant(graph, "const_fmt_warn", "fmt_warn", 0, "\"warn=%0d\"", ValueType::String);
+        ValueId fmtErr = addConstant(graph, "const_fmt_err", "fmt_err", 0, "\"err=%0d\"", ValueType::String);
+        ValueId fmtWrite = addConstant(graph, "const_fmt_write", "fmt_write", 0, "\"fw=%0d\"", ValueType::String);
+        ValueId fmtFdisplay = addConstant(graph, "const_fmt_fdisplay", "fmt_fdisplay", 0, "\"|fd=%0d\"", ValueType::String);
+        ValueId fmtFinal = addConstant(graph, "const_fmt_final", "fmt_final", 0, "\"final=%0d\"", ValueType::String);
+        ValueId strArg = addConstant(graph, "const_str_arg", "str_arg", 0, "\"ok\"", ValueType::String);
+        ValueId realArg = addConstant(graph, "const_real_arg", "real_arg", 0, "3.25", ValueType::Real);
+        ValueId dumpfileName = addConstant(graph, "const_dumpfile_name", "dumpfile_name", 0, "\"waves.out\"",
+                                           ValueType::String);
+
+        auto addTask = [&](std::string_view symbolName,
+                           std::string_view taskName,
+                           const std::vector<ValueId> &args,
+                           std::string_view procKind,
+                           bool hasTiming,
+                           const std::vector<ValueId> &events = {},
+                           const std::vector<std::string> &eventEdges = {})
+        {
+            OperationId op = graph.createOperation(OperationKind::kSystemTask,
+                                                   graph.internSymbol(std::string(symbolName)));
+            graph.addOperand(op, one);
+            for (ValueId arg : args)
+            {
+                graph.addOperand(op, arg);
+            }
+            for (ValueId evt : events)
+            {
+                graph.addOperand(op, evt);
+            }
+            graph.setAttr(op, "name", std::string(taskName));
+            graph.setAttr(op, "procKind", std::string(procKind));
+            graph.setAttr(op, "hasTiming", hasTiming);
+            if (!eventEdges.empty())
+            {
+                graph.setAttr(op, "eventEdge", eventEdges);
+            }
+        };
+
+        addTask("task_init_once", "display", {fmtInit}, "initial", false);
+        addTask("task_init_edge", "display", {fmtInitEdge, data}, "initial", true, {clk}, {"posedge"});
+        addTask("task_display", "display", {fmtDisplay, data, data, data, strArg, realArg},
+                "always_ff", false, {clk}, {"posedge"});
+        addTask("task_info", "info", {fmtInfo, data}, "initial", false);
+        addTask("task_warning", "warning", {fmtWarn, data}, "initial", false);
+        addTask("task_error", "error", {fmtErr, data}, "initial", false);
+        addTask("task_dumpfile", "dumpfile", {dumpfileName}, "initial", false);
+        addTask("task_dumpvars", "dumpvars", {}, "initial", false);
+        addTask("task_fwrite", "fwrite", {handle, fmtWrite, data}, "initial", false);
+        addTask("task_final", "display", {fmtFinal, data}, "final", false);
+        addTask("task_final_fdisplay", "fdisplay", {handle, fmtFdisplay, data}, "final", false);
+
+        return design;
+    }
+
+    Design buildTerminatingSystemTaskDesign(std::string_view taskName,
+                                            int exitCode,
+                                            std::string_view prefix)
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId data = makeLogicValue(graph, "data", 8);
+        graph.bindInputPort("data", data);
+        graph.bindOutputPort("data_out", data);
+
+        ValueId one = addConstant(graph,
+                                  std::string(prefix) + "_const_one",
+                                  std::string(prefix) + "_one",
+                                  1,
+                                  "1'b1");
+        ValueId code = addConstant(graph,
+                                   std::string(prefix) + "_const_code",
+                                   std::string(prefix) + "_code",
+                                   32,
+                                   "32'd" + std::to_string(exitCode));
+        ValueId fmt = addConstant(graph,
+                                  std::string(prefix) + "_const_fmt",
+                                  std::string(prefix) + "_fmt",
+                                  0,
+                                  "\"" + std::string(taskName) + "=%0d\"",
+                                  ValueType::String);
+        ValueId fmtFinal = addConstant(graph,
+                                       std::string(prefix) + "_const_final_fmt",
+                                       std::string(prefix) + "_final_fmt",
+                                       0,
+                                       "\"final-" + std::string(taskName) + "=%0d\"",
+                                       ValueType::String);
+
+        OperationId task = graph.createOperation(OperationKind::kSystemTask,
+                                                 graph.internSymbol(std::string(prefix) + "_task"));
+        graph.addOperand(task, one);
+        graph.addOperand(task, code);
+        graph.addOperand(task, fmt);
+        graph.addOperand(task, data);
+        graph.setAttr(task, "name", std::string(taskName));
+        graph.setAttr(task, "procKind", std::string("initial"));
+        graph.setAttr(task, "hasTiming", false);
+
+        OperationId finalTask = graph.createOperation(OperationKind::kSystemTask,
+                                                      graph.internSymbol(std::string(prefix) + "_final_task"));
+        graph.addOperand(finalTask, one);
+        graph.addOperand(finalTask, fmtFinal);
+        graph.addOperand(finalTask, data);
+        graph.setAttr(finalTask, "name", std::string("display"));
+        graph.setAttr(finalTask, "procKind", std::string("final"));
+        graph.setAttr(finalTask, "hasTiming", false);
+
+        return design;
+    }
+
 } // namespace
 
 #ifndef WOLF_SV_EMIT_ARTIFACT_DIR
@@ -1577,7 +1708,7 @@ int main()
             return fail("Generated grhsim harness failed to run");
         }
         const std::string harnessOutput = readFile(harnessLog);
-        if (harnessOutput.find("[display]") == std::string::npos)
+        if (harnessOutput.find("q=5") == std::string::npos)
         {
             return fail("Generated grhsim harness missing system task output");
         }
@@ -1677,6 +1808,205 @@ int main()
         if (std::system(regWriteHarnessExe.string().c_str()) != 0)
         {
             return fail("register-write harness failed to run");
+        }
+
+        const std::filesystem::path systemTaskDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_systemtask";
+        std::filesystem::remove_all(systemTaskDir);
+        Design systemTaskDesign = buildSystemTaskDesign();
+        EmitDiagnostics systemTaskDiag;
+        EmitResult systemTaskResult;
+        if (!emitWithActivitySchedule(systemTaskDesign, systemTaskDir, systemTaskDiag, systemTaskResult))
+        {
+            return fail("system-task activity-schedule pass failed");
+        }
+        if (!systemTaskResult.success || systemTaskDiag.hasError())
+        {
+            return fail("system-task emit failed");
+        }
+        const std::filesystem::path systemTaskHeaderPath = systemTaskDir / "grhsim_top.hpp";
+        const std::filesystem::path systemTaskStatePath = systemTaskDir / "grhsim_top_state.cpp";
+        const std::filesystem::path systemTaskEvalPath = systemTaskDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> systemTaskSchedFiles =
+            collectSchedFiles(systemTaskDir, "grhsim_top_sched_");
+        if (!std::filesystem::exists(systemTaskHeaderPath) || !std::filesystem::exists(systemTaskStatePath) ||
+            !std::filesystem::exists(systemTaskEvalPath) || systemTaskSchedFiles.empty())
+        {
+            return fail("system-task artifacts missing");
+        }
+        const std::filesystem::path systemTaskHarnessPath = systemTaskDir / "grhsim_top_harness.cpp";
+        const std::filesystem::path systemTaskFilePath = systemTaskDir / "system_task_output.log";
+        {
+            std::ofstream harness(systemTaskHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create system-task harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <cstdint>\n";
+            harness << "#include <filesystem>\n";
+            harness << "#include <string>\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    const std::filesystem::path filePath = std::filesystem::path(\""
+                    << systemTaskFilePath.string() << "\");\n";
+            harness << "    {\n";
+            harness << "        GrhSIM_top sim;\n";
+            harness << "        if (!sim.bind_output_file(10, filePath.string())) return 1;\n";
+            harness << "        sim.init();\n";
+            harness << "        sim.set_clk(false);\n";
+            harness << "        sim.set_data(static_cast<std::uint8_t>(42));\n";
+            harness << "        sim.eval();\n";
+            harness << "        if (sim.dumpfile_path() != std::string(\"waves.out\")) return 2;\n";
+            harness << "        if (!sim.dumpvars_enabled()) return 3;\n";
+            harness << "        sim.set_clk(true);\n";
+            harness << "        sim.eval();\n";
+            harness << "        if (sim.get_data_out() != static_cast<std::uint8_t>(42)) return 4;\n";
+            harness << "    }\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+
+        const std::filesystem::path systemTaskHarnessExe = systemTaskDir / "grhsim_top_harness";
+        std::string systemTaskCompileCmd =
+            "c++ -std=c++20 -O2 -I" + systemTaskDir.string() +
+            " " + systemTaskStatePath.string() +
+            " " + systemTaskEvalPath.string();
+        for (const auto &schedPath : systemTaskSchedFiles)
+        {
+            systemTaskCompileCmd += " " + schedPath.string();
+        }
+        systemTaskCompileCmd += " " + systemTaskHarnessPath.string() + " -o " + systemTaskHarnessExe.string();
+        if (std::system(systemTaskCompileCmd.c_str()) != 0)
+        {
+            return fail("system-task harness failed to compile");
+        }
+        const std::filesystem::path systemTaskHarnessLog = systemTaskDir / "grhsim_top_harness.log";
+        const std::string runSystemTaskHarnessCmd =
+            systemTaskHarnessExe.string() + " > " + systemTaskHarnessLog.string() + " 2>&1";
+        if (std::system(runSystemTaskHarnessCmd.c_str()) != 0)
+        {
+            return fail("system-task harness failed to run");
+        }
+        const std::string systemTaskLog = readFile(systemTaskHarnessLog);
+        const std::string systemTaskFileText = readFile(systemTaskFilePath);
+        auto countSubstring = [](std::string_view text, std::string_view needle) -> std::size_t
+        {
+            if (needle.empty())
+            {
+                return 0;
+            }
+            std::size_t count = 0;
+            std::size_t pos = 0;
+            while ((pos = text.find(needle, pos)) != std::string_view::npos)
+            {
+                ++count;
+                pos += needle.size();
+            }
+            return count;
+        };
+        if (countSubstring(systemTaskLog, "init-once") != 1)
+        {
+            return fail("system-task initial non-timed display should run exactly once");
+        }
+        if (countSubstring(systemTaskLog, "init-edge=42") != 1)
+        {
+            return fail("system-task initial timed display should trigger on edge");
+        }
+        if (systemTaskLog.find("d=42 h=2a b=101010 s=ok r=3.25") == std::string::npos)
+        {
+            return fail("system-task formatted display output mismatch");
+        }
+        if (systemTaskLog.find("[info] info=42") == std::string::npos ||
+            systemTaskLog.find("[warning] warn=42") == std::string::npos ||
+            systemTaskLog.find("[error] err=42") == std::string::npos)
+        {
+            return fail("system-task severity outputs missing");
+        }
+        if (systemTaskLog.find("final=42") == std::string::npos)
+        {
+            return fail("system-task final output missing");
+        }
+        if (systemTaskFileText != "fw=42|fd=42\n")
+        {
+            return fail("system-task file output mismatch");
+        }
+
+        struct TerminatingTaskCase
+        {
+            std::string name;
+            int exitCode = 0;
+        };
+        for (const TerminatingTaskCase &taskCase :
+             std::vector<TerminatingTaskCase>{{"finish", 7}, {"stop", 9}, {"fatal", 11}})
+        {
+            const std::filesystem::path termDir =
+                std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / ("grhsim_cpp_systemtask_" + taskCase.name);
+            std::filesystem::remove_all(termDir);
+            Design termDesign =
+                buildTerminatingSystemTaskDesign(taskCase.name, taskCase.exitCode, taskCase.name);
+            EmitDiagnostics termDiag;
+            EmitResult termResult;
+            if (!emitWithActivitySchedule(termDesign, termDir, termDiag, termResult))
+            {
+                return fail("terminating system-task activity-schedule pass failed for " + taskCase.name);
+            }
+            if (!termResult.success || termDiag.hasError())
+            {
+                return fail("terminating system-task emit failed for " + taskCase.name);
+            }
+            const std::filesystem::path termStatePath = termDir / "grhsim_top_state.cpp";
+            const std::filesystem::path termEvalPath = termDir / "grhsim_top_eval.cpp";
+            const std::vector<std::filesystem::path> termSchedFiles =
+                collectSchedFiles(termDir, "grhsim_top_sched_");
+            const std::filesystem::path termHarnessPath = termDir / "grhsim_top_harness.cpp";
+            {
+                std::ofstream harness(termHarnessPath);
+                if (!harness.is_open())
+                {
+                    return fail("Failed to create terminating system-task harness for " + taskCase.name);
+                }
+                harness << "#include \"grhsim_top.hpp\"\n";
+                harness << "#include <cstdint>\n\n";
+                harness << "int main()\n";
+                harness << "{\n";
+                harness << "    GrhSIM_top sim;\n";
+                harness << "    sim.init();\n";
+                harness << "    sim.set_data(static_cast<std::uint8_t>(42));\n";
+                harness << "    sim.eval();\n";
+                harness << "    return 0;\n";
+                harness << "}\n";
+            }
+            const std::filesystem::path termHarnessExe = termDir / "grhsim_top_harness";
+            std::string termCompileCmd =
+                "c++ -std=c++20 -O2 -I" + termDir.string() +
+                " " + termStatePath.string() +
+                " " + termEvalPath.string();
+            for (const auto &schedPath : termSchedFiles)
+            {
+                termCompileCmd += " " + schedPath.string();
+            }
+            termCompileCmd += " " + termHarnessPath.string() + " -o " + termHarnessExe.string();
+            if (std::system(termCompileCmd.c_str()) != 0)
+            {
+                return fail("terminating system-task harness failed to compile for " + taskCase.name);
+            }
+            const std::filesystem::path termHarnessLog = termDir / "grhsim_top_harness.log";
+            const std::string runTermHarnessCmd =
+                termHarnessExe.string() + " > " + termHarnessLog.string() + " 2>&1";
+            const int termRunRc = std::system(runTermHarnessCmd.c_str());
+            if (termRunRc != taskCase.exitCode && termRunRc != (taskCase.exitCode << 8))
+            {
+                return fail("terminating system-task exit code mismatch for " + taskCase.name);
+            }
+            const std::string termLog = readFile(termHarnessLog);
+            if (termLog.find(taskCase.name + "=42") == std::string::npos)
+            {
+                return fail("terminating system-task main output missing for " + taskCase.name);
+            }
+            if (termLog.find("final-" + taskCase.name + "=42") == std::string::npos)
+            {
+                return fail("terminating system-task final output missing for " + taskCase.name);
+            }
         }
 
         const std::filesystem::path invalidDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_regwrite_invalid";

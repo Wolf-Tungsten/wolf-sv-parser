@@ -1073,6 +1073,106 @@ namespace wolvrix::lib::emit
             return true;
         }
 
+        bool validateSystemTask(const Graph &graph,
+                                const Operation &op,
+                                std::string &error)
+        {
+            const auto operands = op.operands();
+            const std::string opName = std::string(op.symbolText());
+            if (!op.results().empty())
+            {
+                error = "kSystemTask must not have results: " + opName;
+                return false;
+            }
+            if (operands.empty())
+            {
+                error = "kSystemTask missing callCond operand: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            {
+                error = "kSystemTask callCond must be 1-bit logic: " + opName;
+                return false;
+            }
+            auto name = getAttribute<std::string>(op, "name");
+            if (!name || name->empty())
+            {
+                error = "kSystemTask missing name: " + opName;
+                return false;
+            }
+            auto eventEdges = getAttribute<std::vector<std::string>>(op, "eventEdge");
+            const std::size_t eventCount = eventEdges ? eventEdges->size() : 0;
+            if (operands.size() < 1 + eventCount)
+            {
+                error = "kSystemTask eventEdge size mismatch: " + opName;
+                return false;
+            }
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                const ValueId eventValue = operands[operands.size() - eventCount + i];
+                if (graph.valueType(eventValue) != ValueType::Logic || graph.valueWidth(eventValue) != 1)
+                {
+                    error = "kSystemTask event operand must be 1-bit logic: " + opName;
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool systemTaskIsFinal(const Operation &op)
+        {
+            return getAttribute<std::string>(op, "procKind").value_or(std::string()) == "final";
+        }
+
+        bool systemTaskRunsOnlyOnInitialEval(const Operation &op)
+        {
+            const std::string procKind = getAttribute<std::string>(op, "procKind").value_or(std::string());
+            const bool hasTiming = getAttribute<bool>(op, "hasTiming").value_or(false);
+            return procKind == "initial" && !hasTiming;
+        }
+
+        std::string systemTaskArgExpr(const Graph &graph,
+                                      const EmitModel &model,
+                                      ValueId value)
+        {
+            auto ref = [&]() -> std::string
+            {
+                if (auto it = model.inputFieldByValue.find(value); it != model.inputFieldByValue.end())
+                {
+                    return it->second;
+                }
+                if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
+                {
+                    return it->second;
+                }
+                return "/*missing_system_task_arg*/";
+            };
+            const std::string signedText = graph.valueSigned(value) ? "true" : "false";
+            switch (graph.valueType(value))
+            {
+            case ValueType::String:
+                return "grhsim_make_task_arg(" + ref() + ")";
+            case ValueType::Real:
+                return "grhsim_make_task_arg(static_cast<double>(" + ref() + "))";
+            case ValueType::Logic:
+            default:
+                break;
+            }
+            if (isWideLogicValue(graph, value))
+            {
+                std::ostringstream out;
+                out << "grhsim_make_task_arg(" << ref() << ", "
+                    << graph.valueWidth(value) << ", "
+                    << signedText << ")";
+                return out.str();
+            }
+            std::ostringstream out;
+            out << "grhsim_make_task_arg(static_cast<std::uint64_t>(" << ref() << "), "
+                << graph.valueWidth(value) << ", "
+                << signedText << ")";
+            return out.str();
+        }
+
         std::string dpiCppType(std::string_view typeName, int64_t width)
         {
             std::string lowered;
@@ -1231,6 +1331,14 @@ namespace wolvrix::lib::emit
             for (OperationId opId : graph.operations())
             {
                 const Operation op = graph.getOperation(opId);
+                if (op.kind() == OperationKind::kSystemTask)
+                {
+                    if (!validateSystemTask(graph, op, error))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
                 if (op.kind() == OperationKind::kRegisterWritePort ||
                     op.kind() == OperationKind::kLatchWritePort ||
                     op.kind() == OperationKind::kMemoryWritePort)
@@ -2702,17 +2810,32 @@ namespace wolvrix::lib::emit
                         const auto name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
                         const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
                         const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
-                        const std::string streamName = (name == "error" || name == "warning") ? "std::cerr" : "std::cout";
-                        stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
-                        stream << "            " << streamName << " << \"[" << name << "]\"";
-                        for (std::size_t i = 1; i < argEnd; ++i)
+                        if (systemTaskIsFinal(op))
                         {
-                            stream << " << \" \" << " << valueRef(model, operands[i]);
+                            break;
                         }
-                        stream << " << std::endl;\n";
-                        if (name == "fatal" || name == "finish")
+                        std::string procGuard = "true";
+                        if (systemTaskRunsOnlyOnInitialEval(op))
                         {
-                            stream << "            std::abort();\n";
+                            procGuard = "first_eval_";
+                        }
+                        stream << "        if ((" << condExpr << ") && (" << eventExpr << ") && (" << procGuard << ")) {\n";
+                        if (argEnd <= 1)
+                        {
+                            stream << "            execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                        }
+                        else
+                        {
+                            stream << "            execute_system_task(\"" << escapeCppString(name) << "\", {";
+                            for (std::size_t i = 1; i < argEnd; ++i)
+                            {
+                                if (i != 1)
+                                {
+                                    stream << ", ";
+                                }
+                                stream << systemTaskArgExpr(graph, model, operands[i]);
+                            }
+                            stream << "});\n";
                         }
                         stream << "        }\n";
                         break;
@@ -3008,9 +3131,22 @@ namespace wolvrix::lib::emit
                 return result;
             }
             *stream << "#pragma once\n\n";
+            *stream << "#include <algorithm>\n";
             *stream << "#include <array>\n";
+            *stream << "#include <cmath>\n";
             *stream << "#include <cstddef>\n";
+            *stream << "#include <cstdlib>\n";
             *stream << "#include <cstdint>\n";
+            *stream << "#include <fstream>\n";
+            *stream << "#include <iomanip>\n";
+            *stream << "#include <initializer_list>\n";
+            *stream << "#include <iostream>\n";
+            *stream << "#include <limits>\n";
+            *stream << "#include <sstream>\n";
+            *stream << "#include <string>\n";
+            *stream << "#include <string_view>\n";
+            *stream << "#include <unordered_map>\n";
+            *stream << "#include <utility>\n";
             *stream << "#include <vector>\n\n";
             *stream << "inline std::uint64_t grhsim_mask(std::size_t width)\n{\n";
             *stream << "    if (width == 0) return UINT64_C(0);\n";
@@ -4125,6 +4261,476 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "inline bool grhsim_test_bit(const std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
             *stream << "    return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;\n";
             *stream << "}\n";
+            *stream << R"CPP(
+
+enum class grhsim_task_arg_kind {
+    Logic,
+    Real,
+    String,
+};
+
+struct grhsim_task_arg {
+    grhsim_task_arg_kind kind = grhsim_task_arg_kind::Logic;
+    std::size_t width = 0;
+    bool isSigned = false;
+    bool isWide = false;
+    std::uint64_t scalarValue = 0;
+    std::vector<std::uint64_t> words;
+    double realValue = 0.0;
+    std::string stringValue;
+};
+
+inline grhsim_task_arg grhsim_make_task_arg(std::uint64_t value, std::size_t width, bool isSigned)
+{
+    grhsim_task_arg arg;
+    arg.kind = grhsim_task_arg_kind::Logic;
+    arg.width = width;
+    arg.isSigned = isSigned;
+    arg.isWide = false;
+    arg.scalarValue = grhsim_trunc_u64(value, width == 0 ? 64u : width);
+    return arg;
+}
+
+template <std::size_t N>
+inline grhsim_task_arg grhsim_make_task_arg(const std::array<std::uint64_t, N> &value,
+                                            std::size_t width,
+                                            bool isSigned)
+{
+    grhsim_task_arg arg;
+    arg.kind = grhsim_task_arg_kind::Logic;
+    arg.width = width;
+    arg.isSigned = isSigned;
+    arg.isWide = true;
+    arg.words.assign(value.begin(), value.end());
+    const std::size_t liveWords = (width + 63u) / 64u;
+    if (arg.words.size() < liveWords) {
+        arg.words.resize(liveWords, 0);
+    }
+    if (width != 0 && !arg.words.empty()) {
+        const std::size_t tailWidth = width - ((liveWords - 1u) * 64u);
+        arg.words[liveWords - 1u] = grhsim_trunc_u64(arg.words[liveWords - 1u], tailWidth);
+    }
+    return arg;
+}
+
+inline grhsim_task_arg grhsim_make_task_arg(double value)
+{
+    grhsim_task_arg arg;
+    arg.kind = grhsim_task_arg_kind::Real;
+    arg.realValue = value;
+    return arg;
+}
+
+inline grhsim_task_arg grhsim_make_task_arg(const std::string &value)
+{
+    grhsim_task_arg arg;
+    arg.kind = grhsim_task_arg_kind::String;
+    arg.stringValue = value;
+    return arg;
+}
+
+inline grhsim_task_arg grhsim_make_task_arg(std::string &&value)
+{
+    grhsim_task_arg arg;
+    arg.kind = grhsim_task_arg_kind::String;
+    arg.stringValue = std::move(value);
+    return arg;
+}
+
+inline grhsim_task_arg grhsim_make_task_arg(const char *value)
+{
+    return grhsim_make_task_arg(std::string(value == nullptr ? "" : value));
+}
+
+inline void grhsim_task_trunc_words(std::vector<std::uint64_t> &words, std::size_t width)
+{
+    const std::size_t liveWords = (width + 63u) / 64u;
+    if (words.size() < liveWords) {
+        words.resize(liveWords, 0);
+    }
+    if (liveWords == 0) {
+        words.clear();
+        return;
+    }
+    words.resize(liveWords);
+    const std::size_t tailWidth = width - ((liveWords - 1u) * 64u);
+    words[liveWords - 1u] = grhsim_trunc_u64(words[liveWords - 1u], tailWidth);
+}
+
+inline bool grhsim_task_words_is_zero(const std::vector<std::uint64_t> &words)
+{
+    for (std::uint64_t word : words) {
+        if (word != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool grhsim_task_sign_bit(const std::vector<std::uint64_t> &words, std::size_t width)
+{
+    if (width == 0 || words.empty()) {
+        return false;
+    }
+    const std::size_t wordIndex = (width - 1u) / 64u;
+    const std::size_t bitIndex = (width - 1u) & 63u;
+    if (wordIndex >= words.size()) {
+        return false;
+    }
+    return ((words[wordIndex] >> bitIndex) & UINT64_C(1)) != 0;
+}
+
+inline void grhsim_task_negate_words(std::vector<std::uint64_t> &words, std::size_t width)
+{
+    for (std::uint64_t &word : words) {
+        word = ~word;
+    }
+    std::uint64_t carry = 1;
+    for (std::uint64_t &word : words) {
+        const std::uint64_t next = word + carry;
+        carry = (next < word) ? 1 : 0;
+        word = next;
+        if (carry == 0) {
+            break;
+        }
+    }
+    grhsim_task_trunc_words(words, width);
+}
+
+inline std::uint32_t grhsim_task_divmod_words(std::vector<std::uint64_t> &words, std::uint32_t base)
+{
+    unsigned __int128 rem = 0;
+    for (std::size_t i = words.size(); i-- > 0;) {
+        const unsigned __int128 cur = (rem << 64u) | words[i];
+        words[i] = static_cast<std::uint64_t>(cur / base);
+        rem = cur % base;
+    }
+    return static_cast<std::uint32_t>(rem);
+}
+
+inline std::string grhsim_task_unsigned_words_to_base(std::vector<std::uint64_t> words,
+                                                      std::size_t width,
+                                                      std::uint32_t base,
+                                                      bool uppercase)
+{
+    grhsim_task_trunc_words(words, width);
+    if (words.empty() || grhsim_task_words_is_zero(words)) {
+        return "0";
+    }
+    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    std::string out;
+    while (!grhsim_task_words_is_zero(words)) {
+        const std::uint32_t rem = grhsim_task_divmod_words(words, base);
+        out.push_back(digits[rem]);
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+inline std::string grhsim_task_logic_to_base(const grhsim_task_arg &arg,
+                                             std::uint32_t base,
+                                             bool uppercase)
+{
+    if (!arg.isWide) {
+        if (base == 10u) {
+            return std::to_string(grhsim_trunc_u64(arg.scalarValue, arg.width == 0 ? 64u : arg.width));
+        }
+        if (base == 16u) {
+            std::ostringstream out;
+            out << std::hex << (uppercase ? std::uppercase : std::nouppercase)
+                << grhsim_trunc_u64(arg.scalarValue, arg.width == 0 ? 64u : arg.width);
+            return out.str();
+        }
+        if (base == 8u) {
+            std::ostringstream out;
+            out << std::oct << grhsim_trunc_u64(arg.scalarValue, arg.width == 0 ? 64u : arg.width);
+            return out.str();
+        }
+        if (base == 2u) {
+            const std::size_t width = arg.width == 0 ? 1u : arg.width;
+            std::string out;
+            out.reserve(width);
+            const std::uint64_t value = grhsim_trunc_u64(arg.scalarValue, width >= 64u ? 64u : width);
+            for (std::size_t i = 0; i < width; ++i) {
+                out.push_back(((value >> (width - i - 1u)) & UINT64_C(1)) != 0 ? '1' : '0');
+            }
+            const std::size_t pos = out.find_first_not_of('0');
+            return pos == std::string::npos ? "0" : out.substr(pos);
+        }
+        return std::to_string(grhsim_trunc_u64(arg.scalarValue, arg.width == 0 ? 64u : arg.width));
+    }
+    return grhsim_task_unsigned_words_to_base(arg.words, arg.width, base, uppercase);
+}
+
+inline std::string grhsim_task_logic_to_decimal(const grhsim_task_arg &arg, bool signedMode)
+{
+    if (!signedMode) {
+        return grhsim_task_logic_to_base(arg, 10u, false);
+    }
+    if (!arg.isWide) {
+        return std::to_string(grhsim_sign_extend_i64(arg.scalarValue, arg.width == 0 ? 64u : arg.width));
+    }
+    std::vector<std::uint64_t> words = arg.words;
+    grhsim_task_trunc_words(words, arg.width);
+    const bool negative = grhsim_task_sign_bit(words, arg.width);
+    if (negative) {
+        grhsim_task_negate_words(words, arg.width);
+    }
+    std::string out = grhsim_task_unsigned_words_to_base(words, arg.width, 10u, false);
+    if (negative && out != "0") {
+        out.insert(out.begin(), '-');
+    }
+    return out;
+}
+
+inline std::string grhsim_task_default_arg_text(const grhsim_task_arg &arg)
+{
+    switch (arg.kind) {
+    case grhsim_task_arg_kind::String:
+        return arg.stringValue;
+    case grhsim_task_arg_kind::Real: {
+        std::ostringstream out;
+        out << std::defaultfloat << arg.realValue;
+        return out.str();
+    }
+    case grhsim_task_arg_kind::Logic:
+    default:
+        return grhsim_task_logic_to_decimal(arg, arg.isSigned);
+    }
+}
+
+inline std::uint64_t grhsim_task_arg_u64(const grhsim_task_arg &arg)
+{
+    switch (arg.kind) {
+    case grhsim_task_arg_kind::Real:
+        return static_cast<std::uint64_t>(arg.realValue);
+    case grhsim_task_arg_kind::String:
+        return arg.stringValue.empty() ? 0 : static_cast<std::uint64_t>(static_cast<unsigned char>(arg.stringValue.front()));
+    case grhsim_task_arg_kind::Logic:
+    default:
+        return arg.isWide ? (arg.words.empty() ? 0 : arg.words.front())
+                          : grhsim_trunc_u64(arg.scalarValue, arg.width == 0 ? 64u : arg.width);
+    }
+}
+
+inline std::string grhsim_task_apply_width(std::string text,
+                                           int width,
+                                           bool leftJustify,
+                                           bool zeroPad)
+{
+    if (width <= 0 || static_cast<int>(text.size()) >= width) {
+        return text;
+    }
+    const std::size_t padCount = static_cast<std::size_t>(width - static_cast<int>(text.size()));
+    const char pad = zeroPad && !leftJustify ? '0' : ' ';
+    if (leftJustify) {
+        text.append(padCount, pad);
+        return text;
+    }
+    if (pad == '0' && !text.empty() && text.front() == '-') {
+        return std::string("-") + std::string(padCount, '0') + text.substr(1);
+    }
+    return std::string(padCount, pad) + text;
+}
+
+inline std::string grhsim_task_format_one(const grhsim_task_arg &arg,
+                                          char spec,
+                                          int width,
+                                          int precision,
+                                          bool leftJustify,
+                                          bool zeroPad)
+{
+    std::string text;
+    switch (spec) {
+    case 'd':
+    case 'i':
+        if (arg.kind == grhsim_task_arg_kind::Logic) {
+            text = grhsim_task_logic_to_decimal(arg, arg.isSigned);
+        }
+        else if (arg.kind == grhsim_task_arg_kind::Real) {
+            text = std::to_string(static_cast<long long>(arg.realValue));
+        }
+        else {
+            text = grhsim_task_default_arg_text(arg);
+        }
+        break;
+    case 'u':
+        text = (arg.kind == grhsim_task_arg_kind::Logic)
+                   ? grhsim_task_logic_to_decimal(arg, false)
+                   : std::to_string(grhsim_task_arg_u64(arg));
+        break;
+    case 'h':
+    case 'x':
+        text = (arg.kind == grhsim_task_arg_kind::Logic)
+                   ? grhsim_task_logic_to_base(arg, 16u, false)
+                   : grhsim_task_default_arg_text(arg);
+        break;
+    case 'H':
+    case 'X':
+        text = (arg.kind == grhsim_task_arg_kind::Logic)
+                   ? grhsim_task_logic_to_base(arg, 16u, true)
+                   : grhsim_task_default_arg_text(arg);
+        break;
+    case 'b':
+        text = (arg.kind == grhsim_task_arg_kind::Logic)
+                   ? grhsim_task_logic_to_base(arg, 2u, false)
+                   : grhsim_task_default_arg_text(arg);
+        break;
+    case 'o':
+        text = (arg.kind == grhsim_task_arg_kind::Logic)
+                   ? grhsim_task_logic_to_base(arg, 8u, false)
+                   : grhsim_task_default_arg_text(arg);
+        break;
+    case 'c':
+        text.assign(1, static_cast<char>(grhsim_task_arg_u64(arg) & UINT64_C(0xff)));
+        break;
+    case 's':
+        text = (arg.kind == grhsim_task_arg_kind::String) ? arg.stringValue : grhsim_task_default_arg_text(arg);
+        break;
+    case 'e':
+    case 'E':
+    case 'f':
+    case 'F':
+    case 'g':
+    case 'G': {
+        const double value = (arg.kind == grhsim_task_arg_kind::Real)
+                                 ? arg.realValue
+                                 : static_cast<double>(grhsim_task_arg_u64(arg));
+        std::ostringstream out;
+        if (precision >= 0) {
+            out << std::setprecision(precision);
+        }
+        switch (spec) {
+        case 'e':
+            out << std::scientific << std::nouppercase;
+            break;
+        case 'E':
+            out << std::scientific << std::uppercase;
+            break;
+        case 'f':
+            out << std::fixed << std::nouppercase;
+            break;
+        case 'F':
+            out << std::fixed << std::uppercase;
+            break;
+        case 'G':
+            out << std::uppercase;
+            [[fallthrough]];
+        case 'g':
+        default:
+            break;
+        }
+        out << value;
+        text = out.str();
+        break;
+    }
+    case 't':
+        text = std::to_string(grhsim_task_arg_u64(arg));
+        break;
+    case 'v':
+        text = grhsim_task_default_arg_text(arg);
+        break;
+    default:
+        text = grhsim_task_default_arg_text(arg);
+        break;
+    }
+    return grhsim_task_apply_width(std::move(text), width, leftJustify, zeroPad);
+}
+
+inline std::string grhsim_format_task_message(const std::vector<grhsim_task_arg> &items)
+{
+    if (items.empty()) {
+        return {};
+    }
+    if (items.front().kind != grhsim_task_arg_kind::String) {
+        std::string out;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (i != 0) {
+                out.push_back(' ');
+            }
+            out += grhsim_task_default_arg_text(items[i]);
+        }
+        return out;
+    }
+
+    std::string out;
+    const std::string &fmt = items.front().stringValue;
+    std::size_t argIndex = 1;
+    for (std::size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] != '%') {
+            out.push_back(fmt[i]);
+            continue;
+        }
+        if (i + 1u >= fmt.size()) {
+            out.push_back('%');
+            break;
+        }
+        if (fmt[i + 1u] == '%') {
+            out.push_back('%');
+            ++i;
+            continue;
+        }
+        ++i;
+        bool leftJustify = false;
+        bool zeroPad = false;
+        while (i < fmt.size()) {
+            if (fmt[i] == '-') {
+                leftJustify = true;
+                ++i;
+                continue;
+            }
+            if (fmt[i] == '0') {
+                zeroPad = true;
+                ++i;
+                continue;
+            }
+            break;
+        }
+        int fieldWidth = 0;
+        while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
+            fieldWidth = fieldWidth * 10 + static_cast<int>(fmt[i] - '0');
+            ++i;
+        }
+        int precision = -1;
+        if (i < fmt.size() && fmt[i] == '.') {
+            ++i;
+            precision = 0;
+            while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
+                precision = precision * 10 + static_cast<int>(fmt[i] - '0');
+                ++i;
+            }
+        }
+        while (i < fmt.size() && (fmt[i] == 'l' || fmt[i] == 'L' || fmt[i] == 'z')) {
+            ++i;
+        }
+        if (i >= fmt.size()) {
+            break;
+        }
+        const char spec = fmt[i];
+        if (spec == 'm') {
+            out += "top";
+            continue;
+        }
+        if (argIndex >= items.size()) {
+            out.push_back('%');
+            out.push_back(spec);
+            continue;
+        }
+        out += grhsim_task_format_one(items[argIndex++],
+                                      spec,
+                                      fieldWidth,
+                                      precision,
+                                      leftJustify,
+                                      zeroPad);
+    }
+    return out;
+}
+
+inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_arg> args)
+{
+    return grhsim_format_task_message(std::vector<grhsim_task_arg>(args.begin(), args.end()));
+}
+)CPP";
         }
 
         {
@@ -4157,9 +4763,18 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    static constexpr std::size_t kEventDomainCount = " << schedule.eventDomainSinkGroups->size() << ";\n";
             *stream << "    static constexpr std::size_t kEventPrecomputeMaxOps = " << eventPrecomputeMaxOps << ";\n\n";
             *stream << "    " << className << "();\n";
+            *stream << "    ~" << className << "();\n";
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
+            *stream << "    bool bind_output_file(std::uint64_t handle, const std::string &path, bool append = false);\n";
+            *stream << "    void close_output_file(std::uint64_t handle);\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
+            *stream << "    [[nodiscard]] bool finish_requested() const;\n";
+            *stream << "    [[nodiscard]] bool stop_requested() const;\n";
+            *stream << "    [[nodiscard]] bool fatal_requested() const;\n";
+            *stream << "    [[nodiscard]] int system_exit_code() const;\n";
+            *stream << "    [[nodiscard]] const std::string &dumpfile_path() const;\n";
+            *stream << "    [[nodiscard]] bool dumpvars_enabled() const;\n";
             for (const auto &decl : model.inputSetDecls)
             {
                 *stream << decl << '\n';
@@ -4174,14 +4789,41 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             {
                 *stream << "    void eval_batch_" << batchIndex << "();\n";
             }
+            *stream << "    struct PendingSystemTaskText {\n";
+            *stream << "        bool useHandle = false;\n";
+            *stream << "        std::uint64_t handle = 0;\n";
+            *stream << "        bool useStderr = false;\n";
+            *stream << "        bool newline = true;\n";
+            *stream << "        std::string text;\n";
+            *stream << "    };\n";
             *stream << "    void commit_state_updates();\n";
             *stream << "    void refresh_outputs();\n\n";
+            *stream << "    void execute_system_task(std::string_view name, std::initializer_list<grhsim_task_arg> args);\n";
+            *stream << "    void flush_deferred_system_task_texts();\n";
+            *stream << "    void finalize();\n";
+            *stream << "    [[noreturn]] void terminate_host_process(int exitCode);\n";
+            *stream << "    std::ostream *resolve_output_stream(std::uint64_t handle, bool useStderr);\n";
+            *stream << "    void emit_system_task_text(bool useHandle,\n";
+            *stream << "                               std::uint64_t handle,\n";
+            *stream << "                               bool useStderr,\n";
+            *stream << "                               bool newline,\n";
+            *stream << "                               std::string text,\n";
+            *stream << "                               bool deferred);\n\n";
             *stream << "    bool first_eval_ = true;\n";
+            *stream << "    bool finalized_ = false;\n";
             *stream << "    bool state_feedback_pending_ = true;\n";
             *stream << "    bool side_effect_feedback_ = false;\n";
             *stream << "    bool register_write_conflict_ = false;\n";
+            *stream << "    bool finish_requested_ = false;\n";
+            *stream << "    bool stop_requested_ = false;\n";
+            *stream << "    bool fatal_requested_ = false;\n";
+            *stream << "    int system_exit_code_ = 0;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
+            *stream << "    std::string dumpfile_path_;\n";
+            *stream << "    bool dumpvars_enabled_ = false;\n";
+            *stream << "    std::unordered_map<std::uint64_t, std::ofstream> output_files_;\n";
+            *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
             *stream << "    std::vector<std::uint64_t> supernode_active_curr_;\n";
             *stream << "    std::vector<bool> event_term_hit_;\n";
             *stream << "    std::vector<bool> event_domain_hit_;\n\n";
@@ -4286,6 +4928,9 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "      event_domain_hit_(kEventDomainCount, true)\n";
             *stream << "{\n";
             *stream << "}\n\n";
+            *stream << className << "::~" << className << "()\n{\n";
+            *stream << "    finalize();\n";
+            *stream << "}\n\n";
             *stream << "void " << className << "::init()\n{\n";
             for (const auto &port : graph.outputPorts())
             {
@@ -4389,15 +5034,278 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
             *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
             *stream << "    first_eval_ = true;\n";
+            *stream << "    finalized_ = false;\n";
             *stream << "    state_feedback_pending_ = true;\n";
             *stream << "    side_effect_feedback_ = false;\n";
             *stream << "    register_write_conflict_ = false;\n";
+            *stream << "    finish_requested_ = false;\n";
+            *stream << "    stop_requested_ = false;\n";
+            *stream << "    fatal_requested_ = false;\n";
+            *stream << "    system_exit_code_ = 0;\n";
+            *stream << "    dumpfile_path_.clear();\n";
+            *stream << "    dumpvars_enabled_ = false;\n";
+            *stream << "    deferred_system_task_texts_.clear();\n";
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
             *stream << "    random_seed_ = seed;\n";
             *stream << "}\n\n";
+            *stream << "bool " << className << "::bind_output_file(std::uint64_t handle,\n";
+            *stream << "                                 const std::string &path,\n";
+            *stream << "                                 bool append)\n{\n";
+            *stream << "    if (handle <= 2) {\n";
+            *stream << "        return false;\n";
+            *stream << "    }\n";
+            *stream << "    std::ofstream stream(path, append ? (std::ios::out | std::ios::app) : (std::ios::out | std::ios::trunc));\n";
+            *stream << "    if (!stream.is_open()) {\n";
+            *stream << "        return false;\n";
+            *stream << "    }\n";
+            *stream << "    output_files_[handle] = std::move(stream);\n";
+            *stream << "    return true;\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::close_output_file(std::uint64_t handle)\n{\n";
+            *stream << "    if (auto it = output_files_.find(handle); it != output_files_.end()) {\n";
+            *stream << "        it->second.flush();\n";
+            *stream << "        it->second.close();\n";
+            *stream << "        output_files_.erase(it);\n";
+            *stream << "    }\n";
+            *stream << "}\n\n";
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::finish_requested() const\n{\n";
+            *stream << "    return finish_requested_;\n";
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::stop_requested() const\n{\n";
+            *stream << "    return stop_requested_;\n";
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::fatal_requested() const\n{\n";
+            *stream << "    return fatal_requested_;\n";
+            *stream << "}\n\n";
+            *stream << "int " << className << "::system_exit_code() const\n{\n";
+            *stream << "    return system_exit_code_;\n";
+            *stream << "}\n\n";
+            *stream << "const std::string &" << className << "::dumpfile_path() const\n{\n";
+            *stream << "    return dumpfile_path_;\n";
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::dumpvars_enabled() const\n{\n";
+            *stream << "    return dumpvars_enabled_;\n";
+            *stream << "}\n\n";
+            *stream << "std::ostream *" << className << "::resolve_output_stream(std::uint64_t handle,\n";
+            *stream << "                                        bool useStderr)\n{\n";
+            *stream << "    if (handle == 1) {\n";
+            *stream << "        return &std::cout;\n";
+            *stream << "    }\n";
+            *stream << "    if (handle == 2) {\n";
+            *stream << "        return &std::cerr;\n";
+            *stream << "    }\n";
+            *stream << "    if (auto it = output_files_.find(handle); it != output_files_.end()) {\n";
+            *stream << "        return &it->second;\n";
+            *stream << "    }\n";
+            *stream << "    return useStderr ? &std::cerr : nullptr;\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::emit_system_task_text(bool useHandle,\n";
+            *stream << "                                std::uint64_t handle,\n";
+            *stream << "                                bool useStderr,\n";
+            *stream << "                                bool newline,\n";
+            *stream << "                                std::string text,\n";
+            *stream << "                                bool deferred)\n{\n";
+            *stream << "    if (deferred) {\n";
+            *stream << "        deferred_system_task_texts_.push_back(PendingSystemTaskText{\n";
+            *stream << "            .useHandle = useHandle,\n";
+            *stream << "            .handle = handle,\n";
+            *stream << "            .useStderr = useStderr,\n";
+            *stream << "            .newline = newline,\n";
+            *stream << "            .text = std::move(text),\n";
+            *stream << "        });\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    std::ostream *out = nullptr;\n";
+            *stream << "    if (useHandle) {\n";
+            *stream << "        out = resolve_output_stream(handle, useStderr);\n";
+            *stream << "    }\n";
+            *stream << "    else {\n";
+            *stream << "        out = useStderr ? &std::cerr : &std::cout;\n";
+            *stream << "    }\n";
+            *stream << "    if (out == nullptr) {\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    (*out) << text;\n";
+            *stream << "    if (newline) {\n";
+            *stream << "        (*out) << '\\n';\n";
+            *stream << "    }\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::flush_deferred_system_task_texts()\n{\n";
+            *stream << "    for (auto &item : deferred_system_task_texts_) {\n";
+            *stream << "        emit_system_task_text(item.useHandle,\n";
+            *stream << "                              item.handle,\n";
+            *stream << "                              item.useStderr,\n";
+            *stream << "                              item.newline,\n";
+            *stream << "                              std::move(item.text),\n";
+            *stream << "                              false);\n";
+            *stream << "    }\n";
+            *stream << "    deferred_system_task_texts_.clear();\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
+            *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
+            *stream << "    const std::vector<grhsim_task_arg> items(args.begin(), args.end());\n";
+            *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
+            *stream << "        emit_system_task_text(false,\n";
+            *stream << "                              0,\n";
+            *stream << "                              false,\n";
+            *stream << "                              name != \"write\",\n";
+            *stream << "                              grhsim_format_task_message(items),\n";
+            *stream << "                              name == \"strobe\");\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"fdisplay\" || name == \"fwrite\") {\n";
+            *stream << "        if (items.empty()) {\n";
+            *stream << "            return;\n";
+            *stream << "        }\n";
+            *stream << "        const std::uint64_t handle = grhsim_task_arg_u64(items.front());\n";
+            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + 1, items.end());\n";
+            *stream << "        emit_system_task_text(true,\n";
+            *stream << "                              handle,\n";
+            *stream << "                              false,\n";
+            *stream << "                              name == \"fdisplay\",\n";
+            *stream << "                              grhsim_format_task_message(msgArgs),\n";
+            *stream << "                              false);\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"fflush\") {\n";
+            *stream << "        if (items.empty()) {\n";
+            *stream << "            std::cout.flush();\n";
+            *stream << "            std::cerr.flush();\n";
+            *stream << "            for (auto &[handle, stream] : output_files_) {\n";
+            *stream << "                (void)handle;\n";
+            *stream << "                stream.flush();\n";
+            *stream << "            }\n";
+            *stream << "            return;\n";
+            *stream << "        }\n";
+            *stream << "        if (std::ostream *out = resolve_output_stream(grhsim_task_arg_u64(items.front()), false)) {\n";
+            *stream << "            out->flush();\n";
+            *stream << "        }\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"fclose\") {\n";
+            *stream << "        if (!items.empty()) {\n";
+            *stream << "            close_output_file(grhsim_task_arg_u64(items.front()));\n";
+            *stream << "        }\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"dumpfile\") {\n";
+            *stream << "        if (!items.empty()) {\n";
+            *stream << "            dumpfile_path_ = grhsim_task_default_arg_text(items.front());\n";
+            *stream << "        }\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"dumpvars\") {\n";
+            *stream << "        dumpvars_enabled_ = true;\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"info\" || name == \"warning\" || name == \"error\") {\n";
+            *stream << "        const bool useStderr = (name == \"warning\" || name == \"error\");\n";
+            *stream << "        const std::string prefix = \"[\" + std::string(name) + \"] \";\n";
+            *stream << "        emit_system_task_text(false,\n";
+            *stream << "                              0,\n";
+            *stream << "                              useStderr,\n";
+            *stream << "                              true,\n";
+            *stream << "                              prefix + grhsim_format_task_message(items),\n";
+            *stream << "                              false);\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"fatal\") {\n";
+            *stream << "        std::size_t msgStart = 0;\n";
+            *stream << "        int exitCode = 1;\n";
+            *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
+            *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
+            *stream << "            msgStart = 1;\n";
+            *stream << "        }\n";
+            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+            *stream << "        fatal_requested_ = true;\n";
+            *stream << "        system_exit_code_ = exitCode;\n";
+            *stream << "        emit_system_task_text(false,\n";
+            *stream << "                              0,\n";
+            *stream << "                              true,\n";
+            *stream << "                              true,\n";
+            *stream << "                              std::string(\"[fatal] \") + grhsim_format_task_message(msgArgs),\n";
+            *stream << "                              false);\n";
+            *stream << "        terminate_host_process(exitCode);\n";
+            *stream << "    }\n";
+            *stream << "    if (name == \"finish\" || name == \"stop\") {\n";
+            *stream << "        std::size_t msgStart = 0;\n";
+            *stream << "        int exitCode = 0;\n";
+            *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
+            *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
+            *stream << "            msgStart = 1;\n";
+            *stream << "        }\n";
+            *stream << "        if (name == \"finish\") {\n";
+            *stream << "            finish_requested_ = true;\n";
+            *stream << "        }\n";
+            *stream << "        else {\n";
+            *stream << "            stop_requested_ = true;\n";
+            *stream << "        }\n";
+            *stream << "        system_exit_code_ = exitCode;\n";
+            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+            *stream << "        if (!msgArgs.empty()) {\n";
+            *stream << "            emit_system_task_text(false,\n";
+            *stream << "                                  0,\n";
+            *stream << "                                  false,\n";
+            *stream << "                                  true,\n";
+            *stream << "                                  std::string(\"[\") + std::string(name) + \"] \" + grhsim_format_task_message(msgArgs),\n";
+            *stream << "                                  false);\n";
+            *stream << "        }\n";
+            *stream << "        terminate_host_process(exitCode);\n";
+            *stream << "    }\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::finalize()\n{\n";
+            *stream << "    if (finalized_) {\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    finalized_ = true;\n";
+            for (OperationId opId : graph.operations())
+            {
+                const Operation op = graph.getOperation(opId);
+                if (op.kind() != OperationKind::kSystemTask || !systemTaskIsFinal(op))
+                {
+                    continue;
+                }
+                const auto operands = op.operands();
+                const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
+                const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
+                const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
+                *stream << "    if (" << valueRef(model, operands[0]) << ") {\n";
+                if (argEnd <= 1)
+                {
+                    *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                }
+                else
+                {
+                    *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {";
+                    for (std::size_t i = 1; i < argEnd; ++i)
+                    {
+                        if (i != 1)
+                        {
+                            *stream << ", ";
+                        }
+                        *stream << systemTaskArgExpr(graph, model, operands[i]);
+                    }
+                    *stream << "});\n";
+                }
+                *stream << "    }\n";
+            }
+            *stream << "    flush_deferred_system_task_texts();\n";
+            *stream << "    for (auto &[handle, stream] : output_files_) {\n";
+            *stream << "        (void)handle;\n";
+            *stream << "        stream.flush();\n";
+            *stream << "        stream.close();\n";
+            *stream << "    }\n";
+            *stream << "    output_files_.clear();\n";
+            *stream << "}\n\n";
+            *stream << "[[noreturn]] void " << className << "::terminate_host_process(int exitCode)\n{\n";
+            *stream << "    finalize();\n";
+            *stream << "    std::cout.flush();\n";
+            *stream << "    std::cerr.flush();\n";
+            *stream << "    std::exit(exitCode);\n";
             *stream << "}\n\n";
             for (const auto &impl : model.inputSetImpls)
             {
@@ -4549,7 +5457,6 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    std::fill(supernode_active_curr_.begin(), supernode_active_curr_.end(), 0);\n";
             *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
             *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
-            *stream << "    first_eval_ = false;\n";
             *stream << "    state_feedback_pending_ = false;\n";
             *stream << "    side_effect_feedback_ = false;\n\n";
 
@@ -4625,6 +5532,7 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
                 *stream << "    eval_batch_" << batchIndex << "();\n";
             }
             *stream << "    commit_state_updates();\n";
+            *stream << "    flush_deferred_system_task_texts();\n";
             *stream << "    refresh_outputs();\n\n";
             for (const auto &port : graph.inputPorts())
             {
@@ -4634,6 +5542,7 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             {
                 *stream << "    " << prevField << " = " << model.eventCurrentVarByValue.at(value) << ";\n";
             }
+            *stream << "    first_eval_ = false;\n";
             *stream << "}\n";
         }
 
