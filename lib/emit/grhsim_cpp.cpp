@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -327,6 +329,341 @@ namespace wolvrix::lib::emit
             }
         }
 
+        std::optional<slang::SVInt> parseConstLiteral(std::string_view literal)
+        {
+            std::string compact;
+            compact.reserve(literal.size());
+            for (char ch : literal)
+            {
+                if (ch == '_' || std::isspace(static_cast<unsigned char>(ch)))
+                {
+                    continue;
+                }
+                compact.push_back(ch);
+            }
+            if (compact.empty() || compact.front() == '"' || compact.front() == '$')
+            {
+                return std::nullopt;
+            }
+
+            bool negative = false;
+            if (compact.front() == '-' || compact.front() == '+')
+            {
+                negative = compact.front() == '-';
+                compact.erase(compact.begin());
+            }
+            if (compact.empty())
+            {
+                return std::nullopt;
+            }
+
+            try
+            {
+                slang::SVInt parsed = slang::SVInt::fromString(compact);
+                if (negative)
+                {
+                    parsed = -parsed;
+                }
+                return parsed;
+            }
+            catch (const std::exception &)
+            {
+                return std::nullopt;
+            }
+        }
+
+        std::optional<std::string> logicValueToCppExpr(const slang::SVInt &value, int32_t width)
+        {
+            if (width <= 0)
+            {
+                return std::nullopt;
+            }
+            slang::SVInt sized = value.resize(static_cast<slang::bitwidth_t>(width));
+            if (sized.hasUnknown())
+            {
+                return std::nullopt;
+            }
+            if (!isWideLogicWidth(width))
+            {
+                const auto raw = sized.as<std::uint64_t>();
+                if (!raw)
+                {
+                    return std::nullopt;
+                }
+                return "static_cast<" + logicCppType(width) + ">(UINT64_C(" + std::to_string(*raw) + "))";
+            }
+
+            std::ostringstream out;
+            const std::size_t words = logicWordCount(width);
+            out << "std::array<std::uint64_t, " << words << ">{";
+            const std::uint64_t *rawWords = sized.getRawPtr();
+            for (std::size_t i = 0; i < words; ++i)
+            {
+                if (i != 0)
+                {
+                    out << ", ";
+                }
+                out << "UINT64_C(" << rawWords[i] << ")";
+            }
+            out << "}";
+            return out.str();
+        }
+
+        std::optional<std::string> logicLiteralToCppExpr(std::string_view literal, int32_t width)
+        {
+            auto parsed = parseConstLiteral(literal);
+            if (!parsed)
+            {
+                return std::nullopt;
+            }
+            return logicValueToCppExpr(*parsed, width);
+        }
+
+        bool hasAnyMemoryInitAttrs(const Operation &op)
+        {
+            return op.attr("initKind").has_value() ||
+                   op.attr("initFile").has_value() ||
+                   op.attr("initValue").has_value() ||
+                   op.attr("initStart").has_value() ||
+                   op.attr("initLen").has_value();
+        }
+
+        bool tokenizeReadmemText(std::string_view text,
+                                 std::vector<std::string> &tokens,
+                                 std::string &error)
+        {
+            tokens.clear();
+            for (std::size_t i = 0; i < text.size();)
+            {
+                const char ch = text[i];
+                if (std::isspace(static_cast<unsigned char>(ch)))
+                {
+                    ++i;
+                    continue;
+                }
+                if (ch == '/' && i + 1 < text.size())
+                {
+                    if (text[i + 1] == '/')
+                    {
+                        i += 2;
+                        while (i < text.size() && text[i] != '\n')
+                        {
+                            ++i;
+                        }
+                        continue;
+                    }
+                    if (text[i + 1] == '*')
+                    {
+                        const std::size_t end = text.find("*/", i + 2);
+                        if (end == std::string_view::npos)
+                        {
+                            error = "unterminated block comment in readmem file";
+                            return false;
+                        }
+                        i = end + 2;
+                        continue;
+                    }
+                }
+
+                const std::size_t begin = i;
+                while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i])))
+                {
+                    if (text[i] == '/' && i + 1 < text.size() &&
+                        (text[i + 1] == '/' || text[i + 1] == '*'))
+                    {
+                        break;
+                    }
+                    ++i;
+                }
+                if (i > begin)
+                {
+                    tokens.emplace_back(text.substr(begin, i - begin));
+                }
+            }
+            return true;
+        }
+
+        std::optional<std::size_t> parseReadmemAddress(std::string_view token)
+        {
+            if (token.empty())
+            {
+                return std::nullopt;
+            }
+            std::size_t value = 0;
+            for (unsigned char ch : token)
+            {
+                if (ch == '_')
+                {
+                    continue;
+                }
+                value <<= 4;
+                if (ch >= '0' && ch <= '9')
+                {
+                    value |= static_cast<std::size_t>(ch - '0');
+                }
+                else if (ch >= 'a' && ch <= 'f')
+                {
+                    value |= static_cast<std::size_t>(ch - 'a' + 10);
+                }
+                else if (ch >= 'A' && ch <= 'F')
+                {
+                    value |= static_cast<std::size_t>(ch - 'A' + 10);
+                }
+                else
+                {
+                    return std::nullopt;
+                }
+            }
+            return value;
+        }
+
+        struct InitExprCode
+        {
+            std::string expr;
+            bool requiresRuntime = false;
+        };
+
+        InitExprCode randomInitExprForWidth(int32_t width);
+
+        bool buildMemoryInitRowExprs(const Operation &memoryOp,
+                                     int32_t width,
+                                     int64_t rowCount,
+                                     std::vector<std::optional<InitExprCode>> &rowExprs,
+                                     std::string &error)
+        {
+            rowExprs.assign(static_cast<std::size_t>(rowCount), std::nullopt);
+            if (!hasAnyMemoryInitAttrs(memoryOp))
+            {
+                return true;
+            }
+
+            auto kindsOpt = getAttribute<std::vector<std::string>>(memoryOp, "initKind");
+            auto filesOpt = getAttribute<std::vector<std::string>>(memoryOp, "initFile");
+            auto startsOpt = getAttribute<std::vector<int64_t>>(memoryOp, "initStart");
+            auto lensOpt = getAttribute<std::vector<int64_t>>(memoryOp, "initLen");
+            auto values = getAttribute<std::vector<std::string>>(memoryOp, "initValue").value_or(std::vector<std::string>{});
+
+            if (!kindsOpt || !filesOpt || !startsOpt || !lensOpt)
+            {
+                error = "memory init attrs incomplete: " + std::string(memoryOp.symbolText());
+                return false;
+            }
+
+            const auto &kinds = *kindsOpt;
+            const auto &files = *filesOpt;
+            const auto &starts = *startsOpt;
+            const auto &lens = *lensOpt;
+            if (kinds.size() != files.size() ||
+                kinds.size() != starts.size() ||
+                kinds.size() != lens.size())
+            {
+                error = "memory init attr size mismatch: " + std::string(memoryOp.symbolText());
+                return false;
+            }
+
+            for (std::size_t i = 0; i < kinds.size(); ++i)
+            {
+                const int64_t start = starts[i];
+                const int64_t len = lens[i];
+                const std::size_t lower = start < 0 ? 0u : static_cast<std::size_t>(std::max<int64_t>(0, start));
+                const std::size_t upper = start < 0
+                                              ? static_cast<std::size_t>(rowCount)
+                                              : static_cast<std::size_t>(std::min<int64_t>(rowCount,
+                                                                                            len <= 0 ? rowCount : start + len));
+
+                if (kinds[i] == "literal")
+                {
+                    const std::string literal = (i < values.size() && !values[i].empty()) ? values[i] : "0";
+                    std::optional<InitExprCode> initExpr;
+                    if (literal == "$random")
+                    {
+                        initExpr = randomInitExprForWidth(width);
+                    }
+                    else if (auto expr = logicLiteralToCppExpr(literal, width))
+                    {
+                        initExpr = InitExprCode{.expr = *expr, .requiresRuntime = false};
+                    }
+                    if (!initExpr)
+                    {
+                        error = "memory literal init is not statically evaluable: " + std::string(memoryOp.symbolText());
+                        return false;
+                    }
+                    for (std::size_t row = lower; row < upper; ++row)
+                    {
+                        rowExprs[row] = *initExpr;
+                    }
+                    continue;
+                }
+
+                if (kinds[i] != "readmemh" && kinds[i] != "readmemb")
+                {
+                    error = "unsupported memory initKind on " + std::string(memoryOp.symbolText()) + ": " + kinds[i];
+                    return false;
+                }
+                if (files[i].empty())
+                {
+                    error = "memory initFile missing on " + std::string(memoryOp.symbolText());
+                    return false;
+                }
+
+                std::filesystem::path initPath(files[i]);
+                if (initPath.is_relative())
+                {
+                    initPath = std::filesystem::current_path() / initPath;
+                }
+                std::ifstream stream(initPath, std::ios::in | std::ios::binary);
+                if (!stream.is_open())
+                {
+                    error = "failed to open memory initFile: " + initPath.string();
+                    return false;
+                }
+                const std::string text{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+                std::vector<std::string> tokens;
+                if (!tokenizeReadmemText(text, tokens, error))
+                {
+                    error = initPath.string() + ": " + error;
+                    return false;
+                }
+
+                const bool isHex = kinds[i] == "readmemh";
+                std::size_t row = lower;
+                for (const std::string &token : tokens)
+                {
+                    if (!token.empty() && token.front() == '@')
+                    {
+                        auto addr = parseReadmemAddress(std::string_view(token).substr(1));
+                        if (!addr)
+                        {
+                            error = "invalid readmem address token in " + initPath.string() + ": " + token;
+                            return false;
+                        }
+                        row = *addr;
+                        continue;
+                    }
+
+                    if (row >= static_cast<std::size_t>(rowCount))
+                    {
+                        ++row;
+                        continue;
+                    }
+                    if (row >= lower && row < upper)
+                    {
+                        std::string literal = std::to_string(width) + (isHex ? "'h" : "'b") + token;
+                        auto expr = logicLiteralToCppExpr(literal, width);
+                        if (!expr)
+                        {
+                            error = "invalid readmem data token in " + initPath.string() + ": " + token;
+                            return false;
+                        }
+                        rowExprs[row] = InitExprCode{.expr = *expr, .requiresRuntime = false};
+                    }
+                    ++row;
+                }
+            }
+
+            return true;
+        }
+
         struct ScheduleRefs
         {
             const ActivityScheduleSupernodeToOps *supernodeToOps = nullptr;
@@ -356,7 +693,27 @@ namespace wolvrix::lib::emit
             int32_t width = 0;
             bool isSigned = false;
             int64_t rowCount = 0;
+            std::optional<InitExprCode> initExpr;
+            std::vector<std::optional<InitExprCode>> memoryInitRowExprs;
         };
+
+        InitExprCode randomInitExprForWidth(int32_t width)
+        {
+            InitExprCode init;
+            init.requiresRuntime = true;
+            if (isWideLogicWidth(width))
+            {
+                std::ostringstream out;
+                out << "grhsim_random_words<" << logicWordCount(width) << ">(random_state_, " << width << ")";
+                init.expr = out.str();
+            }
+            else
+            {
+                init.expr = "static_cast<" + logicCppType(width) + ">(grhsim_random_u64(random_state_, " +
+                            std::to_string(width) + "))";
+            }
+            return init;
+        }
 
         struct WriteDecl
         {
@@ -400,6 +757,7 @@ namespace wolvrix::lib::emit
             std::vector<bool> eventDomainPrecomputable;
             std::vector<WriteDecl> writes;
             std::vector<DpiImportDecl> dpiImports;
+            std::vector<std::string> stateOrder;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
             std::vector<std::string> writeFieldDecls;
@@ -503,6 +861,10 @@ namespace wolvrix::lib::emit
                         const std::string elemType = logicCppType(state.width);
                         state.cppType = "std::vector<" + elemType + ">";
                         state.fieldName = "state_mem_" + sanitizeIdentifier(state.symbol);
+                        if (!buildMemoryInitRowExprs(op, state.width, state.rowCount, state.memoryInitRowExprs, error))
+                        {
+                            return false;
+                        }
                         std::ostringstream decl;
                         decl << "    " << state.cppType << " " << state.fieldName << ";";
                         model.stateFieldDecls.push_back(decl.str());
@@ -518,9 +880,26 @@ namespace wolvrix::lib::emit
                         state.cppType = cppType;
                         state.fieldName = (state.kind == StateDecl::Kind::Register ? "state_reg_" : "state_latch_") +
                                           sanitizeIdentifier(state.symbol);
+                        if (auto initValue = getAttribute<std::string>(op, "initValue"))
+                        {
+                            if (*initValue == "$random")
+                            {
+                                state.initExpr = randomInitExprForWidth(state.width);
+                            }
+                            else if (auto expr = logicLiteralToCppExpr(*initValue, state.width))
+                            {
+                                state.initExpr = InitExprCode{.expr = *expr, .requiresRuntime = false};
+                            }
+                            else
+                            {
+                                error = "storage initValue is not statically evaluable: " + state.symbol;
+                                return false;
+                            }
+                        }
                         model.stateFieldDecls.push_back("    " + cppType + " " + state.fieldName + " = " +
                                                         defaultInitExprForLogicWidth(state.width) + ";");
                     }
+                    model.stateOrder.push_back(state.symbol);
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
                     break;
                 }
@@ -1616,6 +1995,15 @@ namespace wolvrix::lib::emit
             *stream << "inline bool grhsim_event_negedge(std::uint64_t curr, std::uint64_t prev)\n{\n";
             *stream << "    return curr == 0 && prev != 0;\n";
             *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_splitmix64_next(std::uint64_t &state)\n{\n";
+            *stream << "    std::uint64_t z = (state += UINT64_C(0x9E3779B97F4A7C15));\n";
+            *stream << "    z = (z ^ (z >> 30u)) * UINT64_C(0xBF58476D1CE4E5B9);\n";
+            *stream << "    z = (z ^ (z >> 27u)) * UINT64_C(0x94D049BB133111EB);\n";
+            *stream << "    return z ^ (z >> 31u);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_random_u64(std::uint64_t &state, std::size_t width)\n{\n";
+            *stream << "    return grhsim_trunc_u64(grhsim_splitmix64_next(state), width);\n";
+            *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline void grhsim_trunc_words(std::array<std::uint64_t, N> &value, std::size_t width)\n{\n";
             *stream << "    const std::size_t liveWords = (width + 63u) / 64u;\n";
@@ -1678,6 +2066,17 @@ inline std::array<std::uint64_t, DestN> grhsim_cast_words(const std::array<std::
         out[i] = value[i];
     }
     grhsim_trunc_words(out, destWidth);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_random_words(std::uint64_t &state, std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = grhsim_splitmix64_next(state);
+    }
+    grhsim_trunc_words(out, width);
     return out;
 }
 
@@ -2188,6 +2587,8 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    static constexpr std::size_t kEventDomainCount = " << schedule.eventDomainSinkGroups->size() << ";\n";
             *stream << "    static constexpr std::size_t kEventPrecomputeMaxOps = " << eventPrecomputeMaxOps << ";\n\n";
             *stream << "    " << className << "();\n";
+            *stream << "    void init();\n";
+            *stream << "    void set_random_seed(std::uint64_t seed);\n";
             for (const auto &decl : model.inputSetDecls)
             {
                 *stream << decl << '\n';
@@ -2204,6 +2605,8 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    bool first_eval_ = true;\n";
             *stream << "    bool state_feedback_pending_ = true;\n";
             *stream << "    bool side_effect_feedback_ = false;\n";
+            *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
+            *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
             *stream << "    std::vector<std::uint64_t> supernode_active_curr_;\n";
             *stream << "    std::vector<bool> event_term_hit_;\n";
             *stream << "    std::vector<bool> event_domain_hit_;\n\n";
@@ -2254,19 +2657,168 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
                 return result;
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            bool emittedInitNamespace = false;
+            for (const std::string &stateSymbol : model.stateOrder)
+            {
+                const StateDecl &state = model.stateBySymbol.at(stateSymbol);
+                if (state.kind != StateDecl::Kind::Memory || state.memoryInitRowExprs.empty())
+                {
+                    continue;
+                }
+                std::vector<std::size_t> initRows;
+                initRows.reserve(state.memoryInitRowExprs.size());
+                for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
+                {
+                    if (state.memoryInitRowExprs[row].has_value() && !state.memoryInitRowExprs[row]->requiresRuntime)
+                    {
+                        initRows.push_back(row);
+                    }
+                }
+                if (initRows.empty())
+                {
+                    continue;
+                }
+                if (!emittedInitNamespace)
+                {
+                    *stream << "namespace {\n";
+                    emittedInitNamespace = true;
+                }
+                const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
+                *stream << "constexpr std::size_t " << base << "_rows[] = {";
+                for (std::size_t i = 0; i < initRows.size(); ++i)
+                {
+                    if (i != 0)
+                    {
+                        *stream << ", ";
+                    }
+                    *stream << initRows[i];
+                }
+                *stream << "};\n";
+                *stream << "constexpr " << logicCppType(state.width) << " " << base << "_data[] = {\n";
+                for (std::size_t row : initRows)
+                {
+                    *stream << "    " << state.memoryInitRowExprs[row]->expr << ",\n";
+                }
+                *stream << "};\n\n";
+            }
+            if (emittedInitNamespace)
+            {
+                *stream << "} // namespace\n\n";
+            }
             *stream << className << "::" << className << "()\n";
             *stream << "    : supernode_active_curr_((kSupernodeCount + 63u) / 64u, 0),\n";
             *stream << "      event_term_hit_(kEventTermCount, false),\n";
             *stream << "      event_domain_hit_(kEventDomainCount, true)\n";
             *stream << "{\n";
-            for (const auto &[symbol, state] : model.stateBySymbol)
+            *stream << "}\n\n";
+            *stream << "void " << className << "::init()\n{\n";
+            for (const auto &port : graph.outputPorts())
             {
+                *stream << "    out_" << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
+            }
+            if (!graph.outputPorts().empty())
+            {
+                *stream << '\n';
+            }
+            for (ValueId valueId : graph.values())
+            {
+                auto it = model.valueFieldByValue.find(valueId);
+                if (it == model.valueFieldByValue.end())
+                {
+                    continue;
+                }
+                *stream << "    " << it->second << " = " << defaultInitExpr(graph, valueId) << ";\n";
+            }
+            if (!graph.values().empty())
+            {
+                *stream << '\n';
+            }
+            *stream << "    random_state_ = random_seed_;\n";
+            for (const std::string &stateSymbol : model.stateOrder)
+            {
+                const StateDecl &state = model.stateBySymbol.at(stateSymbol);
                 if (state.kind == StateDecl::Kind::Memory)
                 {
                     *stream << "    " << state.fieldName << ".assign(" << state.rowCount << ", "
                             << logicCppType(state.width) << "{});\n";
+                    std::size_t initCount = 0;
+                    for (const auto &rowExpr : state.memoryInitRowExprs)
+                    {
+                        if (rowExpr.has_value() && !rowExpr->requiresRuntime)
+                        {
+                            ++initCount;
+                        }
+                    }
+                    if (initCount != 0)
+                    {
+                        const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
+                        *stream << "    for (std::size_t i = 0; i < " << initCount << "; ++i) {\n";
+                        *stream << "        " << state.fieldName << "[" << base << "_rows[i]] = " << base << "_data[i];\n";
+                        *stream << "    }\n";
+                    }
+                    for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
+                    {
+                        if (!state.memoryInitRowExprs[row].has_value() || !state.memoryInitRowExprs[row]->requiresRuntime)
+                        {
+                            continue;
+                        }
+                        *stream << "    " << state.fieldName << "[" << row << "] = "
+                                << state.memoryInitRowExprs[row]->expr << ";\n";
+                    }
+                }
+                else if (state.initExpr)
+                {
+                    *stream << "    " << state.fieldName << " = " << state.initExpr->expr << ";\n";
                 }
             }
+            if (!model.stateOrder.empty())
+            {
+                *stream << '\n';
+            }
+            for (const auto &write : model.writes)
+            {
+                const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
+                *stream << "    " << write.pendingValidField << " = false;\n";
+                if (state.kind == StateDecl::Kind::Memory)
+                {
+                    *stream << "    " << write.pendingAddrField << " = 0;\n";
+                }
+                *stream << "    " << write.pendingDataField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
+                *stream << "    " << write.pendingMaskField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
+            }
+            if (!model.writes.empty())
+            {
+                *stream << '\n';
+            }
+            for (const auto &port : graph.inputPorts())
+            {
+                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << model.inputFieldByValue.at(port.value) << ";\n";
+            }
+            if (!graph.inputPorts().empty())
+            {
+                *stream << '\n';
+            }
+            for (const auto &[value, prevField] : model.prevEventFieldByValue)
+            {
+                std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
+                std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
+                std::size_t totalOps = 0;
+                auto expr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
+                *stream << "    " << prevField << " = " << (expr ? *expr : valueRef(model, value)) << ";\n";
+            }
+            if (!model.prevEventFieldByValue.empty())
+            {
+                *stream << '\n';
+            }
+            *stream << "    std::fill(supernode_active_curr_.begin(), supernode_active_curr_.end(), 0);\n";
+            *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
+            *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
+            *stream << "    first_eval_ = true;\n";
+            *stream << "    state_feedback_pending_ = true;\n";
+            *stream << "    side_effect_feedback_ = false;\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
+            *stream << "    random_seed_ = seed;\n";
             *stream << "}\n\n";
             for (const auto &impl : model.inputSetImpls)
             {

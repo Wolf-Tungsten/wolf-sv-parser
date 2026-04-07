@@ -65,7 +65,7 @@ namespace
         return std::to_string(width) + "'b" + std::string(static_cast<std::size_t>(width), '1');
     }
 
-    Design buildDesign()
+    Design buildDesign(const std::string &wideMemInitFile)
     {
         Design design;
         Graph &graph = design.createGraph("top");
@@ -95,6 +95,19 @@ namespace
         OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("reg_q"));
         graph.setAttr(reg, "width", static_cast<int64_t>(8));
         graph.setAttr(reg, "isSigned", false);
+        graph.setAttr(reg, "initValue", std::string("8'h2"));
+
+        OperationId randReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("rand_reg_q"));
+        graph.setAttr(randReg, "width", static_cast<int64_t>(32));
+        graph.setAttr(randReg, "isSigned", false);
+        graph.setAttr(randReg, "initValue", std::string("$random"));
+
+        ValueId randRegQ = makeLogicValue(graph, "rand_reg_q_read", 32);
+        OperationId randRegRead = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                        graph.internSymbol("rand_reg_q_read_op"));
+        graph.addResult(randRegRead, randRegQ);
+        graph.setAttr(randRegRead, "regSymbol", std::string("rand_reg_q"));
+        graph.bindOutputPort("rand_y", randRegQ);
 
         ValueId regQ = makeLogicValue(graph, "reg_q_read", 8);
         OperationId regRead = graph.createOperation(OperationKind::kRegisterReadPort,
@@ -198,6 +211,19 @@ namespace
         OperationId wideReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("wide_reg_q"));
         graph.setAttr(wideReg, "width", static_cast<int64_t>(130));
         graph.setAttr(wideReg, "isSigned", false);
+        graph.setAttr(wideReg, "initValue", std::string("130'h2"));
+
+        OperationId wideRandReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("wide_rand_reg_q"));
+        graph.setAttr(wideRandReg, "width", static_cast<int64_t>(130));
+        graph.setAttr(wideRandReg, "isSigned", false);
+        graph.setAttr(wideRandReg, "initValue", std::string("$random"));
+
+        ValueId wideRandRegQ = makeLogicValue(graph, "wide_rand_reg_q_read", 130);
+        OperationId wideRandRegRead = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                            graph.internSymbol("wide_rand_reg_q_read_op"));
+        graph.addResult(wideRandRegRead, wideRandRegQ);
+        graph.setAttr(wideRandRegRead, "regSymbol", std::string("wide_rand_reg_q"));
+        graph.bindOutputPort("rand_wide_y", wideRandRegQ);
 
         ValueId wideRegQ = makeLogicValue(graph, "wide_reg_q_read", 130);
         OperationId wideRegRead = graph.createOperation(OperationKind::kRegisterReadPort,
@@ -219,6 +245,11 @@ namespace
         graph.setAttr(wideMem, "width", static_cast<int64_t>(130));
         graph.setAttr(wideMem, "row", static_cast<int64_t>(4));
         graph.setAttr(wideMem, "isSigned", false);
+        graph.setAttr(wideMem, "initKind", std::vector<std::string>{"readmemh"});
+        graph.setAttr(wideMem, "initFile", std::vector<std::string>{wideMemInitFile});
+        graph.setAttr(wideMem, "initValue", std::vector<std::string>{""});
+        graph.setAttr(wideMem, "initStart", std::vector<int64_t>{0});
+        graph.setAttr(wideMem, "initLen", std::vector<int64_t>{0});
 
         ValueId wideMemQ = makeLogicValue(graph, "wide_mem_q", 130);
         OperationId wideMemRead = graph.createOperation(OperationKind::kMemoryReadPort,
@@ -450,7 +481,24 @@ int main()
 {
     try
     {
-        Design design = buildDesign();
+        EmitOptions options;
+        options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR) + "/grhsim_cpp";
+        const std::filesystem::path outDir = std::filesystem::path(*options.outputDir);
+        std::filesystem::create_directories(outDir);
+        const std::filesystem::path wideMemInitPath = outDir / "wide_mem_init.hex";
+        {
+            std::ofstream initFile(wideMemInitPath);
+            if (!initFile.is_open())
+            {
+                return fail("Failed to create wide memory init file");
+            }
+            initFile << "0\n";
+            initFile << "100000000000000000000000000000001\n";
+            initFile << "0\n";
+            initFile << "0\n";
+        }
+
+        Design design = buildDesign(wideMemInitPath.string());
         SessionStore session;
         if (!runActivitySchedule(design, session))
         {
@@ -459,8 +507,6 @@ int main()
 
         EmitDiagnostics diag;
         EmitGrhSimCpp emitter(&diag);
-        EmitOptions options;
-        options.outputDir = std::string(WOLF_SV_EMIT_ARTIFACT_DIR) + "/grhsim_cpp";
         options.session = &session;
         options.sessionPathPrefix = std::string("top");
 
@@ -478,7 +524,6 @@ int main()
             return fail("EmitGrhSimCpp should report six artifacts");
         }
 
-        const std::filesystem::path outDir = std::filesystem::path(*options.outputDir);
         const std::filesystem::path headerPath = outDir / "grhsim_top.hpp";
         const std::filesystem::path statePath = outDir / "grhsim_top_state.cpp";
         const std::filesystem::path evalPath = outDir / "grhsim_top_eval.cpp";
@@ -507,6 +552,14 @@ int main()
     if (header.find("void set_clk(bool value);") == std::string::npos)
     {
         return fail("Missing input setter declaration");
+    }
+    if (header.find("void init();") == std::string::npos)
+    {
+        return fail("Missing explicit init declaration");
+    }
+    if (header.find("void set_random_seed(std::uint64_t seed);") == std::string::npos)
+    {
+        return fail("Missing random seed setter declaration");
     }
     if (header.find("std::uint8_t get_y() const;") == std::string::npos)
     {
@@ -544,6 +597,20 @@ int main()
     if (sched.find("display_task") == std::string::npos || sched.find("trace_dpi_call") == std::string::npos)
     {
         return fail("Missing side-effect op anchors in schedule file");
+    }
+    if (state.find(wideMemInitPath.string()) != std::string::npos)
+    {
+        return fail("Generated state file should embed init data instead of reading initFile at runtime");
+    }
+    if (state.find("k_mem_init_wide_mem_rows") == std::string::npos ||
+        state.find("k_mem_init_wide_mem_data") == std::string::npos)
+    {
+        return fail("Missing embedded memory init data emission");
+    }
+    if (state.find("random_seed_ = seed;") == std::string::npos ||
+        state.find("random_state_ = random_seed_") == std::string::npos)
+    {
+        return fail("Missing random seed plumbing in state init");
     }
     if (header.find("extern \"C\" void trace_sum") == std::string::npos)
     {
@@ -686,6 +753,21 @@ int main()
         harness << "    trunc_words(out, value_width * rep);\n";
         harness << "    return out;\n";
         harness << "}\n\n";
+        harness << "static std::uint64_t splitmix64_next(std::uint64_t& state)\n";
+        harness << "{\n";
+        harness << "    std::uint64_t z = (state += UINT64_C(0x9E3779B97F4A7C15));\n";
+        harness << "    z = (z ^ (z >> 30u)) * UINT64_C(0xBF58476D1CE4E5B9);\n";
+        harness << "    z = (z ^ (z >> 27u)) * UINT64_C(0x94D049BB133111EB);\n";
+        harness << "    return z ^ (z >> 31u);\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> random_words(std::uint64_t& state, std::size_t width)\n";
+        harness << "{\n";
+        harness << "    std::array<std::uint64_t, N> out{};\n";
+        harness << "    for (std::size_t i = 0; i < N; ++i) out[i] = splitmix64_next(state);\n";
+        harness << "    trunc_words(out, width);\n";
+        harness << "    return out;\n";
+        harness << "}\n\n";
         harness << "extern \"C\" void trace_sum(std::uint8_t value)\n";
         harness << "{\n";
         harness << "    g_last_trace = value;\n";
@@ -693,11 +775,20 @@ int main()
         harness << "int main()\n";
         harness << "{\n";
         harness << "    GrhSIM_top sim;\n";
+        harness << "    const std::uint64_t seed_a = UINT64_C(0x123456789ABCDEF0);\n";
+        harness << "    const std::uint64_t seed_b = UINT64_C(0x0F1E2D3C4B5A6978);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_value_a{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0FEDCBA987654321), UINT64_C(0x2)};\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_mem_init{UINT64_C(1), UINT64_C(0), UINT64_C(1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_zero{};\n";
         harness << "    const std::array<std::uint64_t, 1> two_bit_one{UINT64_C(1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_one = add_one(wide_zero, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_two = add_one(wide_one, 130);\n";
+        harness << "    std::uint64_t random_state_a = seed_a;\n";
+        harness << "    const std::uint32_t rand_expected_a = static_cast<std::uint32_t>(splitmix64_next(random_state_a));\n";
+        harness << "    const std::array<std::uint64_t, 3> rand_wide_expected_a = random_words<3>(random_state_a, 130);\n";
+        harness << "    std::uint64_t random_state_b = seed_b;\n";
+        harness << "    const std::uint32_t rand_expected_b = static_cast<std::uint32_t>(splitmix64_next(random_state_b));\n";
+        harness << "    const std::array<std::uint64_t, 3> rand_wide_expected_b = random_words<3>(random_state_b, 130);\n";
         harness << "    sim.set_en(true);\n";
         harness << "    sim.set_a(static_cast<std::uint8_t>(3));\n";
         harness << "    sim.set_comb(static_cast<std::uint8_t>(0xB6));\n";
@@ -708,8 +799,12 @@ int main()
         harness << "    sim.set_wide_in(wide_value_a);\n";
         harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
         harness << "    sim.set_clk(false);\n";
+        harness << "    sim.set_random_seed(seed_a);\n";
+        harness << "    sim.init();\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(3)) return 1;\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 1;\n";
+        harness << "    if (sim.get_rand_y() != rand_expected_a) return 7;\n";
+        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 8;\n";
         harness << "    if (sim.get_mul_y() != static_cast<std::uint8_t>(34)) return 11;\n";
         harness << "    if (sim.get_div_y() != static_cast<std::uint8_t>(60)) return 12;\n";
         harness << "    if (sim.get_mod_y() != static_cast<std::uint8_t>(2)) return 13;\n";
@@ -720,8 +815,8 @@ int main()
         harness << "    if (!sim.get_red_xor_y()) return 18;\n";
         harness << "    if (sim.get_slice_y() != static_cast<std::uint8_t>(5)) return 19;\n";
         harness << "    if (sim.get_rep_y() != static_cast<std::uint8_t>(0xAA)) return 20;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_zero)) return 21;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_zero)) return 22;\n";
+        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 21;\n";
+        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 22;\n";
         harness << "    if (!same_words(sim.get_wide_add_y(), add_one(wide_value_a, 130))) return 31;\n";
         harness << "    if (!same_words(sim.get_wide_sub_y(), sub_one(wide_value_a, 130))) return 32;\n";
         harness << "    if (!same_words(sim.get_wide_mul_y(), shl_words(wide_value_a, 1, 132))) return 33;\n";
@@ -746,21 +841,31 @@ int main()
         harness << "    if (!same_words(sim.get_wide_slice_dyn_y(), slice_words<2>(wide_value_a, 1, 65))) return 52;\n";
         harness << "    sim.set_clk(true);\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(3)) return 2;\n";
-        harness << "    if (g_last_trace != static_cast<std::uint8_t>(3)) return 3;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_zero)) return 23;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_zero)) return 24;\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 2;\n";
+        harness << "    if (g_last_trace != static_cast<std::uint8_t>(5)) return 3;\n";
+        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 23;\n";
+        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 24;\n";
         harness << "    sim.set_clk(false);\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(6)) return 4;\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 4;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 25;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 26;\n";
         harness << "    sim.set_clk(true);\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(6)) return 5;\n";
-        harness << "    if (g_last_trace != static_cast<std::uint8_t>(6)) return 6;\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 5;\n";
+        harness << "    if (g_last_trace != static_cast<std::uint8_t>(8)) return 6;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 27;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 28;\n";
+        harness << "    if (sim.get_rand_y() != rand_expected_a) return 29;\n";
+        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 30;\n";
+        harness << "    sim.set_random_seed(seed_b);\n";
+        harness << "    sim.init();\n";
+        harness << "    sim.eval();\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 53;\n";
+        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 54;\n";
+        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 55;\n";
+        harness << "    if (sim.get_rand_y() != rand_expected_b) return 56;\n";
+        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_b)) return 57;\n";
         harness << "    return 0;\n";
         harness << "}\n";
     }
