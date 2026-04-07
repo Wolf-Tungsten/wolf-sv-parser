@@ -785,6 +785,20 @@ namespace wolvrix::lib::emit
 
         struct WriteDecl
         {
+            enum class MemoryMaskMode
+            {
+                kDynamic,
+                kConstZero,
+                kConstAllOnes,
+            };
+
+            enum class MemoryAddrMode
+            {
+                kGeneric,
+                kInRange,
+                kPow2Wrap,
+            };
+
             OperationId opId;
             StateDecl::Kind kind = StateDecl::Kind::Register;
             std::string symbol;
@@ -792,6 +806,15 @@ namespace wolvrix::lib::emit
             std::string pendingDataField;
             std::string pendingMaskField;
             std::string pendingAddrField;
+            MemoryMaskMode memoryMaskMode = MemoryMaskMode::kDynamic;
+            MemoryAddrMode memoryAddrMode = MemoryAddrMode::kGeneric;
+            std::size_t memoryRowMask = 0;
+        };
+
+        struct RegisterWriteGroup
+        {
+            std::string symbol;
+            std::vector<std::size_t> writeIndices;
         };
 
         struct DpiImportDecl
@@ -824,6 +847,7 @@ namespace wolvrix::lib::emit
             std::vector<ActivityScheduleEventTerm> eventTerms;
             std::vector<bool> eventDomainPrecomputable;
             std::vector<WriteDecl> writes;
+            std::vector<RegisterWriteGroup> registerWriteGroups;
             std::vector<DpiImportDecl> dpiImports;
             std::vector<std::string> stateOrder;
             std::vector<std::string> valueFieldDecls;
@@ -839,6 +863,215 @@ namespace wolvrix::lib::emit
         };
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept;
+
+        std::optional<slang::SVInt> constLogicValue(const Graph &graph, ValueId value, int32_t width)
+        {
+            if (graph.valueType(value) != ValueType::Logic || width <= 0)
+            {
+                return std::nullopt;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() != OperationKind::kConstant)
+            {
+                return std::nullopt;
+            }
+            auto literal = getAttribute<std::string>(defOp, "constValue");
+            if (!literal)
+            {
+                return std::nullopt;
+            }
+            auto parsed = parseConstLiteral(*literal);
+            if (!parsed)
+            {
+                return std::nullopt;
+            }
+            parsed = parsed->resize(static_cast<slang::bitwidth_t>(width));
+            if (parsed->hasUnknown())
+            {
+                return std::nullopt;
+            }
+            return parsed;
+        }
+
+        bool isConstLogicAllZero(const Graph &graph, ValueId value, int32_t width)
+        {
+            auto parsed = constLogicValue(graph, value, width);
+            if (!parsed)
+            {
+                return false;
+            }
+            const std::size_t words = logicWordCount(width);
+            const std::uint64_t *rawWords = parsed->getRawPtr();
+            for (std::size_t i = 0; i < words; ++i)
+            {
+                if (rawWords[i] != 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool isConstLogicAllOnes(const Graph &graph, ValueId value, int32_t width)
+        {
+            auto parsed = constLogicValue(graph, value, width);
+            if (!parsed)
+            {
+                return false;
+            }
+            const std::size_t words = logicWordCount(width);
+            const std::uint64_t *rawWords = parsed->getRawPtr();
+            for (std::size_t i = 0; i < words; ++i)
+            {
+                const std::size_t wordWidth =
+                    (i + 1u == words) ? (static_cast<std::size_t>(width) - i * 64u) : 64u;
+                const std::uint64_t expected = wordWidth >= 64u ? ~UINT64_C(0) : ((UINT64_C(1) << wordWidth) - 1u);
+                if (rawWords[i] != expected)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool isPowerOfTwoU64(std::uint64_t value) noexcept
+        {
+            return value != 0 && (value & (value - 1u)) == 0;
+        }
+
+        std::size_t minUnsignedBitsForRange(std::uint64_t exclusiveUpperBound) noexcept
+        {
+            std::size_t bits = 0;
+            std::uint64_t limit = 1;
+            while (limit < exclusiveUpperBound)
+            {
+                limit <<= 1u;
+                ++bits;
+            }
+            return bits;
+        }
+
+        bool validateRegisterWritePort(const Graph &graph,
+                                       const Operation &op,
+                                       const StateDecl &state,
+                                       std::string &error)
+        {
+            const auto operands = op.operands();
+            const std::string opName = std::string(op.symbolText());
+            if (!op.results().empty())
+            {
+                error = "kRegisterWritePort must not have results: " + opName;
+                return false;
+            }
+            if (operands.size() < 4)
+            {
+                error = "kRegisterWritePort missing operands: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            {
+                error = "kRegisterWritePort updateCond must be 1-bit logic: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[1]) != ValueType::Logic || graph.valueWidth(operands[1]) != state.width)
+            {
+                error = "kRegisterWritePort nextValue width/type mismatch: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[2]) != ValueType::Logic || graph.valueWidth(operands[2]) != state.width)
+            {
+                error = "kRegisterWritePort mask width/type mismatch: " + opName;
+                return false;
+            }
+            auto eventEdges = getAttribute<std::vector<std::string>>(op, "eventEdge");
+            if (!eventEdges)
+            {
+                error = "kRegisterWritePort missing eventEdge: " + opName;
+                return false;
+            }
+            const std::size_t eventCount = operands.size() - 3;
+            if (eventEdges->size() != eventCount)
+            {
+                error = "kRegisterWritePort eventEdge size mismatch: " + opName;
+                return false;
+            }
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                const ValueId eventValue = operands[3 + i];
+                if (graph.valueType(eventValue) != ValueType::Logic || graph.valueWidth(eventValue) != 1)
+                {
+                    error = "kRegisterWritePort event operand must be 1-bit logic: " + opName;
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool validateMemoryWritePort(const Graph &graph,
+                                     const Operation &op,
+                                     const StateDecl &state,
+                                     std::string &error)
+        {
+            const auto operands = op.operands();
+            const std::string opName = std::string(op.symbolText());
+            if (!op.results().empty())
+            {
+                error = "kMemoryWritePort must not have results: " + opName;
+                return false;
+            }
+            if (operands.size() < 5)
+            {
+                error = "kMemoryWritePort missing operands: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            {
+                error = "kMemoryWritePort updateCond must be 1-bit logic: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[1]) != ValueType::Logic || graph.valueWidth(operands[1]) <= 0)
+            {
+                error = "kMemoryWritePort addr must be logic: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[2]) != ValueType::Logic || graph.valueWidth(operands[2]) != state.width)
+            {
+                error = "kMemoryWritePort data width/type mismatch: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[3]) != ValueType::Logic || graph.valueWidth(operands[3]) != state.width)
+            {
+                error = "kMemoryWritePort mask width/type mismatch: " + opName;
+                return false;
+            }
+            auto eventEdges = getAttribute<std::vector<std::string>>(op, "eventEdge");
+            if (!eventEdges)
+            {
+                error = "kMemoryWritePort missing eventEdge: " + opName;
+                return false;
+            }
+            const std::size_t eventCount = operands.size() - 4;
+            if (eventEdges->size() != eventCount)
+            {
+                error = "kMemoryWritePort eventEdge size mismatch: " + opName;
+                return false;
+            }
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                const ValueId eventValue = operands[4 + i];
+                if (graph.valueType(eventValue) != ValueType::Logic || graph.valueWidth(eventValue) != 1)
+                {
+                    error = "kMemoryWritePort event operand must be 1-bit logic: " + opName;
+                    return false;
+                }
+            }
+            return true;
+        }
 
         std::string dpiCppType(std::string_view typeName, int64_t width)
         {
@@ -1021,6 +1254,60 @@ namespace wolvrix::lib::emit
                         return false;
                     }
                     write.symbol = *targetSymbol;
+                    const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
+                    if (write.kind == StateDecl::Kind::Register)
+                    {
+                        if (state.kind != StateDecl::Kind::Register)
+                        {
+                            error = "kRegisterWritePort target is not a register: " + write.symbol;
+                            return false;
+                        }
+                        if (!validateRegisterWritePort(graph, op, state, error))
+                        {
+                            return false;
+                        }
+                    }
+                    else if (write.kind == StateDecl::Kind::Memory)
+                    {
+                        if (state.kind != StateDecl::Kind::Memory)
+                        {
+                            error = "kMemoryWritePort target is not a memory: " + write.symbol;
+                            return false;
+                        }
+                        if (!validateMemoryWritePort(graph, op, state, error))
+                        {
+                            return false;
+                        }
+                        const auto operands = op.operands();
+                        const ValueId addrValue = operands[1];
+                        const ValueId maskValue = operands[3];
+                        if (isConstLogicAllZero(graph, maskValue, state.width))
+                        {
+                            write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstZero;
+                        }
+                        else if (isConstLogicAllOnes(graph, maskValue, state.width))
+                        {
+                            write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstAllOnes;
+                        }
+                        if (state.rowCount > 0)
+                        {
+                            const std::uint64_t rowCount = static_cast<std::uint64_t>(state.rowCount);
+                            if (isPowerOfTwoU64(rowCount))
+                            {
+                                write.memoryAddrMode = WriteDecl::MemoryAddrMode::kPow2Wrap;
+                                write.memoryRowMask = static_cast<std::size_t>(rowCount - 1u);
+                            }
+                            else
+                            {
+                                const int32_t addrWidth = graph.valueWidth(addrValue);
+                                if (addrWidth > 0 && addrWidth < 64 &&
+                                    (UINT64_C(1) << static_cast<std::size_t>(addrWidth)) <= rowCount)
+                                {
+                                    write.memoryAddrMode = WriteDecl::MemoryAddrMode::kInRange;
+                                }
+                            }
+                        }
+                    }
                     const std::string base = "pending_" + opDebugName(graph, opId) + "_" + std::to_string(opId.index);
                     write.pendingValidField = base + "_valid";
                     write.pendingDataField = base + "_data";
@@ -1029,7 +1316,6 @@ namespace wolvrix::lib::emit
                     model.writeByOp.emplace(opId, write);
                     model.writes.push_back(write);
 
-                    const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
                     model.writeFieldDecls.push_back("    bool " + write.pendingValidField + " = false;");
                     if (write.kind == StateDecl::Kind::Memory)
                     {
@@ -1040,6 +1326,24 @@ namespace wolvrix::lib::emit
                     model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingDataField + " = " + initExpr + ";");
                     model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingMaskField + " = " + initExpr + ";");
                 }
+            }
+
+            std::unordered_map<std::string, std::size_t> registerWriteGroupIndex;
+            for (std::size_t writeIndex = 0; writeIndex < model.writes.size(); ++writeIndex)
+            {
+                const WriteDecl &write = model.writes[writeIndex];
+                if (write.kind != StateDecl::Kind::Register)
+                {
+                    continue;
+                }
+                auto [it, inserted] = registerWriteGroupIndex.emplace(write.symbol, model.registerWriteGroups.size());
+                if (inserted)
+                {
+                    RegisterWriteGroup group;
+                    group.symbol = write.symbol;
+                    model.registerWriteGroups.push_back(std::move(group));
+                }
+                model.registerWriteGroups[it->second].writeIndices.push_back(writeIndex);
             }
 
             for (const auto &group : *schedule.eventDomainSinkGroups)
@@ -1106,6 +1410,11 @@ namespace wolvrix::lib::emit
             return "/*missing_value_ref*/";
         }
 
+        std::string boolLiteral(bool value)
+        {
+            return value ? "true" : "false";
+        }
+
         std::string wordsArrayTypeForWidth(int32_t width)
         {
             std::ostringstream out;
@@ -1143,6 +1452,10 @@ namespace wolvrix::lib::emit
             case OperationKind::kNot:
             case OperationKind::kEq:
             case OperationKind::kNe:
+            case OperationKind::kCaseEq:
+            case OperationKind::kCaseNe:
+            case OperationKind::kWildcardEq:
+            case OperationKind::kWildcardNe:
             case OperationKind::kLt:
             case OperationKind::kLe:
             case OperationKind::kGt:
@@ -1164,6 +1477,8 @@ namespace wolvrix::lib::emit
             case OperationKind::kReplicate:
             case OperationKind::kSliceStatic:
             case OperationKind::kSliceDynamic:
+            case OperationKind::kSliceArray:
+            case OperationKind::kSystemFunction:
                 return opNeedsWordLogicEmit(graph, op) ? 8 : 5;
             default:
                 return 2;
@@ -1262,7 +1577,8 @@ namespace wolvrix::lib::emit
             out << "grhsim_cast_words<" << logicWordCount(destWidth) << ">("
                 << valueRef(model, value) << ", "
                 << graph.valueWidth(value) << ", "
-                << destWidth << ")";
+                << destWidth << ", "
+                << boolLiteral(graph.valueSigned(value)) << ")";
             return out.str();
         }
 
@@ -1408,6 +1724,8 @@ namespace wolvrix::lib::emit
                 return true;
             }
             case OperationKind::kEq:
+            case OperationKind::kCaseEq:
+            case OperationKind::kWildcardEq:
             {
                 const int32_t width = compareWidth();
                 emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
@@ -1417,6 +1735,8 @@ namespace wolvrix::lib::emit
                 return true;
             }
             case OperationKind::kNe:
+            case OperationKind::kCaseNe:
+            case OperationKind::kWildcardNe:
             {
                 const int32_t width = compareWidth();
                 emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
@@ -1636,6 +1956,23 @@ namespace wolvrix::lib::emit
                 emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
                 return true;
             }
+            case OperationKind::kSliceArray:
+            {
+                const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth");
+                if (!sliceWidth)
+                {
+                    error = "kSliceArray missing sliceWidth";
+                    return false;
+                }
+                std::ostringstream out;
+                out << "grhsim_slice_words<" << resultWords << ">("
+                    << wordsExprForValue(graph, model, operands[0], graph.valueWidth(operands[0])) << ", "
+                    << "(" << valueRef(model, operands[1]) << ") * " << *sliceWidth << ", "
+                    << graph.valueWidth(operands[0]) << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
             default:
                 error = "unsupported wide logic emit op: " + std::string(op.symbolText());
                 return false;
@@ -1713,6 +2050,10 @@ namespace wolvrix::lib::emit
                     case OperationKind::kXnor:
                     case OperationKind::kEq:
                     case OperationKind::kNe:
+                    case OperationKind::kCaseEq:
+                    case OperationKind::kCaseNe:
+                    case OperationKind::kWildcardEq:
+                    case OperationKind::kWildcardNe:
                     case OperationKind::kLt:
                     case OperationKind::kLe:
                     case OperationKind::kGt:
@@ -1735,6 +2076,8 @@ namespace wolvrix::lib::emit
                     case OperationKind::kReplicate:
                     case OperationKind::kSliceStatic:
                     case OperationKind::kSliceDynamic:
+                    case OperationKind::kSliceArray:
+                    case OperationKind::kSystemFunction:
                     {
                         if (!isScalarLogicValue(graph, value))
                         {
@@ -1786,52 +2129,100 @@ namespace wolvrix::lib::emit
         {
             const auto resultWidth =
                 op.results().empty() ? 64 : static_cast<std::size_t>(graph.valueWidth(op.results().front()));
+            auto operandExpr = [&](std::size_t index, std::size_t width) -> std::string
+            {
+                const ValueId value = op.operands()[index];
+                return "grhsim_cast_u64(static_cast<std::uint64_t>(" + operands[index] + "), " +
+                       std::to_string(graph.valueWidth(value)) + ", " + std::to_string(width) + ", " +
+                       boolLiteral(graph.valueSigned(value)) + ")";
+            };
+            auto compareWidth = [&]() -> std::size_t
+            {
+                std::size_t width = 1;
+                for (ValueId value : op.operands())
+                {
+                    width = std::max(width, static_cast<std::size_t>(graph.valueWidth(value)));
+                }
+                return width;
+            };
             switch (kind)
             {
             case OperationKind::kAssign:
-                return operands[0];
+                return operandExpr(0, resultWidth);
             case OperationKind::kAdd:
-                return "(" + operands[0] + " + " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " + " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kSub:
-                return "(" + operands[0] + " - " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " - " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kMul:
-                return "(" + operands[0] + " * " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " * " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kDiv:
             {
                 const bool signedMode =
                     graph.valueSigned(op.operands()[0]) && graph.valueSigned(op.operands()[1]);
                 return std::string(signedMode ? "grhsim_sdiv_u64(" : "grhsim_udiv_u64(") +
-                       operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+                       operandExpr(0, resultWidth) + ", " + operandExpr(1, resultWidth) + ", " +
+                       std::to_string(resultWidth) + ")";
             }
             case OperationKind::kMod:
             {
                 const bool signedMode =
                     graph.valueSigned(op.operands()[0]) && graph.valueSigned(op.operands()[1]);
                 return std::string(signedMode ? "grhsim_smod_u64(" : "grhsim_umod_u64(") +
-                       operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+                       operandExpr(0, resultWidth) + ", " + operandExpr(1, resultWidth) + ", " +
+                       std::to_string(resultWidth) + ")";
             }
             case OperationKind::kAnd:
-                return "(" + operands[0] + " & " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " & " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kOr:
-                return "(" + operands[0] + " | " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " | " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kXor:
-                return "(" + operands[0] + " ^ " + operands[1] + ")";
+                return "(" + operandExpr(0, resultWidth) + " ^ " + operandExpr(1, resultWidth) + ")";
             case OperationKind::kXnor:
-                return "(~(" + operands[0] + " ^ " + operands[1] + "))";
+                return "(~(" + operandExpr(0, resultWidth) + " ^ " + operandExpr(1, resultWidth) + "))";
             case OperationKind::kNot:
-                return "(~(" + operands[0] + "))";
+                return "(~(" + operandExpr(0, resultWidth) + "))";
             case OperationKind::kEq:
-                return "((" + operands[0] + ") == (" + operands[1] + "))";
+            case OperationKind::kCaseEq:
+            case OperationKind::kWildcardEq:
+            {
+                const std::size_t width = compareWidth();
+                return "((" + operandExpr(0, width) + ") == (" + operandExpr(1, width) + "))";
+            }
             case OperationKind::kNe:
-                return "((" + operands[0] + ") != (" + operands[1] + "))";
+            case OperationKind::kCaseNe:
+            case OperationKind::kWildcardNe:
+            {
+                const std::size_t width = compareWidth();
+                return "((" + operandExpr(0, width) + ") != (" + operandExpr(1, width) + "))";
+            }
             case OperationKind::kLt:
-                return "((" + operands[0] + ") < (" + operands[1] + "))";
             case OperationKind::kLe:
-                return "((" + operands[0] + ") <= (" + operands[1] + "))";
             case OperationKind::kGt:
-                return "((" + operands[0] + ") > (" + operands[1] + "))";
             case OperationKind::kGe:
-                return "((" + operands[0] + ") >= (" + operands[1] + "))";
+            {
+                const std::size_t width = compareWidth();
+                const bool signedMode =
+                    graph.valueSigned(op.operands()[0]) && graph.valueSigned(op.operands()[1]);
+                const std::string cmpExpr = signedMode
+                                                ? "grhsim_compare_signed_u64(" + operandExpr(0, width) + ", " +
+                                                      operandExpr(1, width) + ", " + std::to_string(width) + ")"
+                                                : "grhsim_compare_unsigned_u64(" + operandExpr(0, width) + ", " +
+                                                      operandExpr(1, width) + ", " + std::to_string(width) + ")";
+                switch (kind)
+                {
+                case OperationKind::kLt:
+                    return "(" + cmpExpr + " < 0)";
+                case OperationKind::kLe:
+                    return "(" + cmpExpr + " <= 0)";
+                case OperationKind::kGt:
+                    return "(" + cmpExpr + " > 0)";
+                case OperationKind::kGe:
+                    return "(" + cmpExpr + " >= 0)";
+                default:
+                    break;
+                }
+                return {};
+            }
             case OperationKind::kLogicAnd:
                 return "((" + operands[0] + ") && (" + operands[1] + "))";
             case OperationKind::kLogicOr:
@@ -1851,16 +2242,29 @@ namespace wolvrix::lib::emit
             case OperationKind::kReduceXnor:
                 return "grhsim_reduce_xnor_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
             case OperationKind::kShl:
-                return "grhsim_shl_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+                return "grhsim_shl_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
             case OperationKind::kLShr:
-                return "grhsim_lshr_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+                return "grhsim_lshr_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
             case OperationKind::kAShr:
-                return "grhsim_ashr_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+                return "grhsim_ashr_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
             case OperationKind::kMux:
-                return "((" + operands[0] + ") ? (" + operands[1] + ") : (" + operands[2] + "))";
+                return "((" + operands[0] + ") ? (" + operandExpr(1, resultWidth) + ") : (" + operandExpr(2, resultWidth) + "))";
             case OperationKind::kConcat:
-                return "grhsim_concat_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) +
-                       ", " + operands[1] + ", " + std::to_string(graph.valueWidth(op.operands()[1])) + ")";
+            {
+                if (operands.empty())
+                {
+                    return {};
+                }
+                std::string expr = operands[0];
+                int32_t accumWidth = graph.valueWidth(op.operands()[0]);
+                for (std::size_t i = 1; i < operands.size(); ++i)
+                {
+                    expr = "grhsim_concat_u64(" + expr + ", " + std::to_string(accumWidth) + ", " +
+                           operands[i] + ", " + std::to_string(graph.valueWidth(op.operands()[i])) + ")";
+                    accumWidth += graph.valueWidth(op.operands()[i]);
+                }
+                return expr;
+            }
             case OperationKind::kReplicate:
             {
                 const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
@@ -1884,6 +2288,26 @@ namespace wolvrix::lib::emit
                 const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth").value_or(1);
                 return "grhsim_slice_dynamic_u64(" + operands[0] + ", " + operands[1] + ", " +
                        std::to_string(sliceWidth) + ")";
+            }
+            case OperationKind::kSliceArray:
+            {
+                const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth");
+                if (!sliceWidth)
+                {
+                    return {};
+                }
+                return "grhsim_slice_dynamic_u64(" + operands[0] + ", ((" + operands[1] + ") * " +
+                       std::to_string(*sliceWidth) + "), " + std::to_string(*sliceWidth) + ")";
+            }
+            case OperationKind::kSystemFunction:
+            {
+                const auto name = getAttribute<std::string>(op, "name");
+                if (!name || *name != "clog2" || operands.size() != 1)
+                {
+                    return {};
+                }
+                return "grhsim_clog2_u64(" + operands[0] + ", " +
+                       std::to_string(graph.valueWidth(op.operands()[0])) + ")";
             }
             default:
                 break;
@@ -1945,6 +2369,26 @@ namespace wolvrix::lib::emit
                 return "true";
             }
             return "(" + joinStrings(parts, " || ") + ")";
+        }
+
+        std::string memoryWriteRowExpr(const Graph &graph,
+                                       const EmitModel &model,
+                                       const WriteDecl &write,
+                                       ValueId addrValue,
+                                       const StateDecl &state)
+        {
+            const std::string addrExpr = valueRef(model, addrValue);
+            switch (write.memoryAddrMode)
+            {
+            case WriteDecl::MemoryAddrMode::kPow2Wrap:
+                return "grhsim_index_pow2_words(" + addrExpr + ", " + std::to_string(write.memoryRowMask) + ")";
+            case WriteDecl::MemoryAddrMode::kInRange:
+                return "grhsim_index_in_range_words(" + addrExpr + ")";
+            case WriteDecl::MemoryAddrMode::kGeneric:
+            default:
+                break;
+            }
+            return "grhsim_index_words(" + addrExpr + ", " + std::to_string(state.rowCount) + ")";
         }
 
         std::optional<std::string> emitSchedBatchFile(const std::filesystem::path &schedPath,
@@ -2096,19 +2540,32 @@ namespace wolvrix::lib::emit
                         }
                         const StateDecl &state = stateIt->second;
                         const std::string lhs = valueRef(model, op.results().front());
-                        const std::string addrExpr = valueRef(model, operands[0]);
                         stream << "        {\n";
-                        stream << "            const std::size_t row = static_cast<std::size_t>(" << addrExpr << ") % " << state.rowCount << ";\n";
-                        stream << "            const auto next_value = " << state.fieldName << "[row];\n";
+                        stream << "            const std::size_t row = grhsim_index_words(" << valueRef(model, operands[0])
+                               << ", " << state.rowCount << ");\n";
                         if (isWideLogicValue(graph, op.results().front()))
                         {
+                            stream << "            if (row >= " << state.rowCount << ") {\n";
+                            stream << "                if (grhsim_assign_words(" << lhs << ", "
+                                   << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ", "
+                                   << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                            stream << "            } else {\n";
+                            stream << "                const auto next_value = " << state.fieldName << "[row];\n";
                             stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
                                    << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                            stream << "            }\n";
                         }
                         else
                         {
+                            stream << "            if (row >= " << state.rowCount << ") {\n";
+                            stream << "                if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
+                                   << ") { " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
+                                   << "; supernode_changed = true; }\n";
+                            stream << "            } else {\n";
+                            stream << "                const auto next_value = " << state.fieldName << "[row];\n";
                             stream << "            if (" << lhs << " != next_value) { " << lhs
                                    << " = next_value; supernode_changed = true; }\n";
+                            stream << "            }\n";
                         }
                         stream << "        }\n";
                         break;
@@ -2126,6 +2583,10 @@ namespace wolvrix::lib::emit
                     case OperationKind::kNot:
                     case OperationKind::kEq:
                     case OperationKind::kNe:
+                    case OperationKind::kCaseEq:
+                    case OperationKind::kCaseNe:
+                    case OperationKind::kWildcardEq:
+                    case OperationKind::kWildcardNe:
                     case OperationKind::kLt:
                     case OperationKind::kLe:
                     case OperationKind::kGt:
@@ -2147,12 +2608,20 @@ namespace wolvrix::lib::emit
                     case OperationKind::kReplicate:
                     case OperationKind::kSliceStatic:
                     case OperationKind::kSliceDynamic:
+                    case OperationKind::kSliceArray:
+                    case OperationKind::kSystemFunction:
                     {
                         if (op.results().empty())
                         {
                             break;
                         }
                         const ValueId resultValue = op.results().front();
+                        if (op.kind() == OperationKind::kSystemFunction &&
+                            graph.valueType(resultValue) != ValueType::Logic)
+                        {
+                            return emitError("unsupported kSystemFunction result type in grhsim-cpp emit",
+                                             std::string(op.symbolText()));
+                        }
                         if (opNeedsWordLogicEmit(graph, op))
                         {
                             std::string emitErrorText;
@@ -2196,16 +2665,29 @@ namespace wolvrix::lib::emit
                         stream << "        if ((" << condExpr << ") && (" << eventExpr << ")) {\n";
                         if (write.kind == StateDecl::Kind::Memory)
                         {
-                            stream << "            " << write.pendingAddrField << " = static_cast<std::size_t>(" << valueRef(model, operands[1]) << ");\n";
-                            stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[2]) << ";\n";
-                            stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
+                            const StateDecl &state = model.stateBySymbol.at(write.symbol);
+                            if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
+                            {
+                                stream << "            // constant zero mask: no memory update\n";
+                            }
+                            else
+                            {
+                                stream << "            " << write.pendingAddrField << " = "
+                                       << memoryWriteRowExpr(graph, model, write, operands[1], state) << ";\n";
+                                stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[2]) << ";\n";
+                                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+                                {
+                                    stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
+                                }
+                                stream << "            " << write.pendingValidField << " = true;\n";
+                            }
                         }
                         else
                         {
                             stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[1]) << ";\n";
                             stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[2]) << ";\n";
+                            stream << "            " << write.pendingValidField << " = true;\n";
                         }
-                        stream << "            " << write.pendingValidField << " = true;\n";
                         stream << "        }\n";
                         break;
                     }
@@ -2546,6 +3028,30 @@ namespace wolvrix::lib::emit
             *stream << "    if ((value & sign) == 0) return static_cast<std::int64_t>(value);\n";
             *stream << "    return static_cast<std::int64_t>(value | ~grhsim_mask(width));\n";
             *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_cast_u64(std::uint64_t value,\n";
+            *stream << "                                   std::size_t srcWidth,\n";
+            *stream << "                                   std::size_t destWidth,\n";
+            *stream << "                                   bool srcSigned)\n{\n";
+            *stream << "    value = grhsim_trunc_u64(value, srcWidth);\n";
+            *stream << "    if (srcSigned) {\n";
+            *stream << "        value = static_cast<std::uint64_t>(grhsim_sign_extend_i64(value, srcWidth));\n";
+            *stream << "    }\n";
+            *stream << "    return grhsim_trunc_u64(value, destWidth);\n";
+            *stream << "}\n\n";
+            *stream << "inline int grhsim_compare_unsigned_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    lhs = grhsim_trunc_u64(lhs, width);\n";
+            *stream << "    rhs = grhsim_trunc_u64(rhs, width);\n";
+            *stream << "    if (lhs < rhs) return -1;\n";
+            *stream << "    if (lhs > rhs) return 1;\n";
+            *stream << "    return 0;\n";
+            *stream << "}\n\n";
+            *stream << "inline int grhsim_compare_signed_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    const std::int64_t lhsSigned = grhsim_sign_extend_i64(lhs, width);\n";
+            *stream << "    const std::int64_t rhsSigned = grhsim_sign_extend_i64(rhs, width);\n";
+            *stream << "    if (lhsSigned < rhsSigned) return -1;\n";
+            *stream << "    if (lhsSigned > rhsSigned) return 1;\n";
+            *stream << "    return 0;\n";
+            *stream << "}\n\n";
             *stream << "inline std::uint64_t grhsim_concat_u64(std::uint64_t lhs, std::size_t lhsWidth, std::uint64_t rhs, std::size_t rhsWidth)\n{\n";
             *stream << "    const std::uint64_t lhsBits = grhsim_trunc_u64(lhs, lhsWidth);\n";
             *stream << "    const std::uint64_t rhsBits = grhsim_trunc_u64(rhs, rhsWidth);\n";
@@ -2566,6 +3072,17 @@ namespace wolvrix::lib::emit
             *stream << "inline std::uint64_t grhsim_slice_dynamic_u64(std::uint64_t value, std::uint64_t start, std::size_t width)\n{\n";
             *stream << "    if (start >= 64) return 0;\n";
             *stream << "    return grhsim_trunc_u64(value >> start, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_clog2_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    value = grhsim_trunc_u64(value, width);\n";
+            *stream << "    if (value <= 1) return 0;\n";
+            *stream << "    std::uint64_t result = 0;\n";
+            *stream << "    value -= 1;\n";
+            *stream << "    while (value != 0) {\n";
+            *stream << "        value >>= 1u;\n";
+            *stream << "        ++result;\n";
+            *stream << "    }\n";
+            *stream << "    return result;\n";
             *stream << "}\n\n";
             *stream << "inline std::uint64_t grhsim_shl_u64(std::uint64_t value, std::uint64_t shift, std::size_t width)\n{\n";
             *stream << "    if (shift >= 64) return 0;\n";
@@ -2675,13 +3192,45 @@ namespace wolvrix::lib::emit
             *stream << "    grhsim_trunc_words(out, width);\n";
             *stream << "    return out;\n";
             *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline bool grhsim_apply_masked_words_inplace(std::array<std::uint64_t, N> &dst,\n";
+            *stream << "                                             const std::array<std::uint64_t, N> &data,\n";
+            *stream << "                                             const std::array<std::uint64_t, N> &mask,\n";
+            *stream << "                                             std::size_t width)\n{\n";
+            *stream << "    bool changed = false;\n";
+            *stream << "    const std::size_t liveWords = (width + 63u) / 64u;\n";
+            *stream << "    for (std::size_t i = 0; i < liveWords && i < N; ++i) {\n";
+            *stream << "        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;\n";
+            *stream << "        const std::uint64_t wordMask = grhsim_trunc_u64(mask[i], wordWidth);\n";
+            *stream << "        const std::uint64_t next = (dst[i] & ~wordMask) | (grhsim_trunc_u64(data[i], wordWidth) & wordMask);\n";
+            *stream << "        changed = changed || (dst[i] != next);\n";
+            *stream << "        dst[i] = next;\n";
+            *stream << "    }\n";
+            *stream << "    for (std::size_t i = liveWords; i < N; ++i) {\n";
+            *stream << "        changed = changed || (dst[i] != 0);\n";
+            *stream << "        dst[i] = 0;\n";
+            *stream << "    }\n";
+            *stream << "    return changed;\n";
+            *stream << "}\n\n";
             *stream << R"CPP(
 template <std::size_t DestN, typename T>
-inline std::array<std::uint64_t, DestN> grhsim_cast_words(T value, std::size_t srcWidth, std::size_t destWidth)
+inline std::array<std::uint64_t, DestN> grhsim_cast_words(T value,
+                                                          std::size_t srcWidth,
+                                                          std::size_t destWidth,
+                                                          bool srcSigned)
 {
     std::array<std::uint64_t, DestN> out{};
     if constexpr (DestN > 0) {
         out[0] = grhsim_trunc_u64(static_cast<std::uint64_t>(value), srcWidth);
+        if (srcSigned && srcWidth != 0 &&
+            ((out[0] >> ((srcWidth >= 64u ? 63u : srcWidth - 1u))) & UINT64_C(1)) != 0) {
+            if (srcWidth < 64u) {
+                out[0] |= ~grhsim_mask(srcWidth);
+            }
+            for (std::size_t i = 1; i < DestN; ++i) {
+                out[i] = ~UINT64_C(0);
+            }
+        }
     }
     grhsim_trunc_words(out, destWidth);
     return out;
@@ -2690,13 +3239,27 @@ inline std::array<std::uint64_t, DestN> grhsim_cast_words(T value, std::size_t s
 template <std::size_t DestN, std::size_t SrcN>
 inline std::array<std::uint64_t, DestN> grhsim_cast_words(const std::array<std::uint64_t, SrcN> &value,
                                                           std::size_t srcWidth,
-                                                          std::size_t destWidth)
+                                                          std::size_t destWidth,
+                                                          bool srcSigned)
 {
     std::array<std::uint64_t, DestN> out{};
     const std::size_t srcWords = (srcWidth + 63u) / 64u;
     const std::size_t limit = srcWords < SrcN ? srcWords : SrcN;
     for (std::size_t i = 0; i < limit && i < DestN; ++i) {
         out[i] = value[i];
+    }
+    if (srcSigned && srcWidth != 0) {
+        const std::size_t signWord = (srcWidth - 1u) / 64u;
+        const std::size_t signBit = (srcWidth - 1u) & 63u;
+        const bool neg = signWord < DestN && ((out[signWord] >> signBit) & UINT64_C(1)) != 0;
+        if (neg) {
+            if (signWord < DestN && signBit != 63u) {
+                out[signWord] |= (~UINT64_C(0)) << (signBit + 1u);
+            }
+            for (std::size_t i = signWord + 1u; i < DestN; ++i) {
+                out[i] = ~UINT64_C(0);
+            }
+        }
     }
     grhsim_trunc_words(out, destWidth);
     return out;
@@ -2908,6 +3471,30 @@ inline std::size_t grhsim_index_words(const std::array<std::uint64_t, N> &value,
         return cap;
     }
     return static_cast<std::size_t>(value[0]);
+}
+
+template <typename T>
+inline std::size_t grhsim_index_in_range_words(T value)
+{
+    return static_cast<std::size_t>(static_cast<std::uint64_t>(value));
+}
+
+template <std::size_t N>
+inline std::size_t grhsim_index_in_range_words(const std::array<std::uint64_t, N> &value)
+{
+    return N == 0 ? 0 : static_cast<std::size_t>(value[0]);
+}
+
+template <typename T>
+inline std::size_t grhsim_index_pow2_words(T value, std::size_t mask)
+{
+    return static_cast<std::size_t>(static_cast<std::uint64_t>(value)) & mask;
+}
+
+template <std::size_t N>
+inline std::size_t grhsim_index_pow2_words(const std::array<std::uint64_t, N> &value, std::size_t mask)
+{
+    return (N == 0 ? 0 : static_cast<std::size_t>(value[0])) & mask;
 }
 
 template <std::size_t DestN, std::size_t SrcN, typename ShiftT>
@@ -3572,6 +4159,7 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    " << className << "();\n";
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
+            *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
             for (const auto &decl : model.inputSetDecls)
             {
                 *stream << decl << '\n';
@@ -3591,6 +4179,7 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    bool first_eval_ = true;\n";
             *stream << "    bool state_feedback_pending_ = true;\n";
             *stream << "    bool side_effect_feedback_ = false;\n";
+            *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
             *stream << "    std::vector<std::uint64_t> supernode_active_curr_;\n";
@@ -3802,9 +4391,13 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    first_eval_ = true;\n";
             *stream << "    state_feedback_pending_ = true;\n";
             *stream << "    side_effect_feedback_ = false;\n";
+            *stream << "    register_write_conflict_ = false;\n";
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
             *stream << "    random_seed_ = seed;\n";
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
+            *stream << "    return register_write_conflict_;\n";
             *stream << "}\n\n";
             for (const auto &impl : model.inputSetImpls)
             {
@@ -3814,33 +4407,59 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             {
                 *stream << replaceClassMarker(impl) << '\n';
             }
-            *stream << "void " << className << "::commit_state_updates()\n{\n";
-            *stream << "    bool any_state_change = false;\n";
-            for (const auto &write : model.writes)
+            auto emitCommitWrite = [&](const WriteDecl &write)
             {
                 const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
                 *stream << "    if (" << write.pendingValidField << ") {\n";
                 if (state.kind == StateDecl::Kind::Memory)
                 {
-                    *stream << "        const std::size_t row = " << write.pendingAddrField << " % " << state.rowCount << ";\n";
-                    if (isWideLogicWidth(state.width))
+                    *stream << "        const std::size_t row = " << write.pendingAddrField << ";\n";
+                    *stream << "        if (row < " << state.rowCount << ") {\n";
+                    if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                     {
-                        *stream << "        const auto merged = grhsim_merge_words_masked(" << state.fieldName << "[row], "
-                                << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
-                        *stream << "        if (grhsim_assign_words(" << state.fieldName << "[row], merged, " << state.width << ")) {\n";
-                        *stream << "            any_state_change = true;\n";
-                        *stream << "        }\n";
+                        if (isWideLogicWidth(state.width))
+                        {
+                            *stream << "            if (grhsim_assign_words(" << state.fieldName << "[row], "
+                                    << write.pendingDataField << ", " << state.width << ")) {\n";
+                            *stream << "                any_state_change = true;\n";
+                            *stream << "            }\n";
+                        }
+                        else
+                        {
+                            *stream << "            const auto next_value = static_cast<" << logicCppType(state.width)
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
+                                    << "), " << state.width << "));\n";
+                            *stream << "            if (" << state.fieldName << "[row] != next_value) {\n";
+                            *stream << "                " << state.fieldName << "[row] = next_value;\n";
+                            *stream << "                any_state_change = true;\n";
+                            *stream << "            }\n";
+                        }
                     }
                     else
                     {
-                        *stream << "        const auto merged = static_cast<" << logicCppType(state.width) << ">((" << state.fieldName
-                                << "[row] & ~" << write.pendingMaskField << ") | (" << write.pendingDataField
-                                << " & " << write.pendingMaskField << "));\n";
-                        *stream << "        if (" << state.fieldName << "[row] != merged) {\n";
-                        *stream << "            " << state.fieldName << "[row] = merged;\n";
-                        *stream << "            any_state_change = true;\n";
-                        *stream << "        }\n";
+                        if (isWideLogicWidth(state.width))
+                        {
+                            *stream << "            if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
+                                    << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ")) {\n";
+                            *stream << "                any_state_change = true;\n";
+                            *stream << "            }\n";
+                        }
+                        else
+                        {
+                            *stream << "            const auto mask = static_cast<" << logicCppType(state.width)
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingMaskField
+                                    << "), " << state.width << "));\n";
+                            *stream << "            const auto merged = static_cast<" << logicCppType(state.width)
+                                    << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
+                                    << "), " << state.width << ")) & mask));\n";
+                            *stream << "            if (" << state.fieldName << "[row] != merged) {\n";
+                            *stream << "                " << state.fieldName << "[row] = merged;\n";
+                            *stream << "                any_state_change = true;\n";
+                            *stream << "            }\n";
+                        }
                     }
+                    *stream << "        }\n";
                 }
                 else
                 {
@@ -3865,6 +4484,38 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
                 }
                 *stream << "        " << write.pendingValidField << " = false;\n";
                 *stream << "    }\n";
+            };
+            *stream << "void " << className << "::commit_state_updates()\n{\n";
+            *stream << "    bool any_state_change = false;\n";
+            *stream << "    register_write_conflict_ = false;\n";
+            for (const auto &group : model.registerWriteGroups)
+            {
+                const std::string groupName = sanitizeIdentifier(group.symbol);
+                *stream << "    {\n";
+                *stream << "        bool saw_write_" << groupName << " = false;\n";
+                for (std::size_t writeIndex : group.writeIndices)
+                {
+                    const WriteDecl &write = model.writes[writeIndex];
+                    *stream << "        if (" << write.pendingValidField << ") {\n";
+                    *stream << "            if (saw_write_" << groupName << ") {\n";
+                    *stream << "                register_write_conflict_ = true;\n";
+                    *stream << "            }\n";
+                    *stream << "            saw_write_" << groupName << " = true;\n";
+                    *stream << "        }\n";
+                }
+                for (std::size_t writeIndex : group.writeIndices)
+                {
+                    emitCommitWrite(model.writes[writeIndex]);
+                }
+                *stream << "    }\n";
+            }
+            for (const auto &write : model.writes)
+            {
+                if (write.kind == StateDecl::Kind::Register)
+                {
+                    continue;
+                }
+                emitCommitWrite(write);
             }
             *stream << "    state_feedback_pending_ = state_feedback_pending_ || any_state_change;\n";
             *stream << "}\n\n";

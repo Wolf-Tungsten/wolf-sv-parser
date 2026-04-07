@@ -74,9 +74,10 @@ namespace
                         std::string_view valueName,
                         int32_t width,
                         std::string literal,
-                        ValueType type = ValueType::Logic)
+                        ValueType type = ValueType::Logic,
+                        bool isSigned = false)
     {
-        ValueId value = graph.createValue(graph.internSymbol(std::string(valueName)), width, false, type);
+        ValueId value = graph.createValue(graph.internSymbol(std::string(valueName)), width, isSigned, type);
         OperationId op = graph.createOperation(OperationKind::kConstant,
                                                graph.internSymbol(std::string(opName)));
         graph.addResult(op, value);
@@ -103,9 +104,13 @@ namespace
         ValueId sh = makeLogicValue(graph, "sh", 3);
         ValueId rep2 = makeLogicValue(graph, "rep2", 2);
         ValueId sa = makeLogicValue(graph, "sa", 8, true);
+        ValueId ss4 = makeLogicValue(graph, "ss4", 4, true);
         ValueId midIn = makeLogicValue(graph, "mid_in", 96);
         ValueId wideIn = makeLogicValue(graph, "wide_in", 130);
+        ValueId wideMaskDyn = makeLogicValue(graph, "wide_mask_dyn", 130);
         ValueId wideAddr = makeLogicValue(graph, "wide_addr", 2);
+        ValueId wideMemIdx = makeLogicValue(graph, "wide_mem_idx", 65);
+        ValueId wideSignedIn = makeLogicValue(graph, "wide_signed_in", 65, true);
         graph.bindInputPort("clk", clk);
         graph.bindInputPort("en", en);
         graph.bindInputPort("a", a);
@@ -114,9 +119,13 @@ namespace
         graph.bindInputPort("sh", sh);
         graph.bindInputPort("rep2", rep2);
         graph.bindInputPort("sa", sa);
+        graph.bindInputPort("ss4", ss4);
         graph.bindInputPort("mid_in", midIn);
         graph.bindInputPort("wide_in", wideIn);
+        graph.bindInputPort("wide_mask_dyn", wideMaskDyn);
         graph.bindInputPort("wide_addr", wideAddr);
+        graph.bindInputPort("wide_mem_idx", wideMemIdx);
+        graph.bindInputPort("wide_signed_in", wideSignedIn);
 
         OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("reg_q"));
         graph.setAttr(reg, "width", static_cast<int64_t>(8));
@@ -151,7 +160,13 @@ namespace
         ValueId smallTwo = addConstant(graph, "const_small_two", "small_two", 2, "2'd2");
         ValueId sh65 = addConstant(graph, "const_sh65", "sh65", 7, "7'd65");
         ValueId wideMask = addConstant(graph, "const_wide_mask", "wide_mask", 130, allOnesLiteral(130));
+        ValueId idxWriteData = addConstant(graph, "const_idx_write_data", "idx_write_data", 8, "8'h44");
         ValueId fmt = addConstant(graph, "const_fmt", "fmt", 0, "\"q=%0d\"", ValueType::String);
+        ValueId signedOne8 = addConstant(graph, "const_signed_one8", "signed_one8", 8, "8'sd1", ValueType::Logic, true);
+        ValueId signedTwo8 = addConstant(graph, "const_signed_two8", "signed_two8", 8, "8'sd2", ValueType::Logic, true);
+        ValueId signedThree8 = addConstant(graph, "const_signed_three8", "signed_three8", 8, "8'sd3", ValueType::Logic, true);
+        ValueId wideSignedOne = addConstant(graph, "const_wide_signed_one", "wide_signed_one", 130, "130'sd1", ValueType::Logic, true);
+        ValueId wideSignedTwo = addConstant(graph, "const_wide_signed_two", "wide_signed_two", 130, "130'sd2", ValueType::Logic, true);
 
         ValueId sum = makeLogicValue(graph, "sum", 8);
         OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("sum_add"));
@@ -229,6 +244,138 @@ namespace
         graph.setAttr(repOp, "rep", static_cast<int64_t>(4));
         graph.bindOutputPort("rep_y", repY);
 
+        ValueId caseEqY = makeLogicValue(graph, "case_eq_y", 1);
+        OperationId caseEq = graph.createOperation(OperationKind::kCaseEq, graph.internSymbol("case_eq_op"));
+        graph.addOperand(caseEq, comb);
+        graph.addOperand(caseEq, a);
+        graph.addResult(caseEq, caseEqY);
+        graph.bindOutputPort("case_eq_y", caseEqY);
+
+        ValueId caseNeY = makeLogicValue(graph, "case_ne_y", 1);
+        OperationId caseNe = graph.createOperation(OperationKind::kCaseNe, graph.internSymbol("case_ne_op"));
+        graph.addOperand(caseNe, comb);
+        graph.addOperand(caseNe, a);
+        graph.addResult(caseNe, caseNeY);
+        graph.bindOutputPort("case_ne_y", caseNeY);
+
+        ValueId wildcardEqY = makeLogicValue(graph, "wildcard_eq_y", 1);
+        OperationId wildcardEq = graph.createOperation(OperationKind::kWildcardEq, graph.internSymbol("wildcard_eq_op"));
+        graph.addOperand(wildcardEq, a);
+        graph.addOperand(wildcardEq, b);
+        graph.addResult(wildcardEq, wildcardEqY);
+        graph.bindOutputPort("wildcard_eq_y", wildcardEqY);
+
+        ValueId wildcardNeY = makeLogicValue(graph, "wildcard_ne_y", 1);
+        OperationId wildcardNe = graph.createOperation(OperationKind::kWildcardNe, graph.internSymbol("wildcard_ne_op"));
+        graph.addOperand(wildcardNe, comb);
+        graph.addOperand(wildcardNe, b);
+        graph.addResult(wildcardNe, wildcardNeY);
+        graph.bindOutputPort("wildcard_ne_y", wildcardNeY);
+
+        ValueId sliceArrayIn = makeLogicValue(graph, "slice_array_in", 24);
+        OperationId sliceArrayConcat = graph.createOperation(OperationKind::kConcat,
+                                                             graph.internSymbol("slice_array_concat_op"));
+        graph.addOperand(sliceArrayConcat, comb);
+        graph.addOperand(sliceArrayConcat, b);
+        graph.addOperand(sliceArrayConcat, a);
+        graph.addResult(sliceArrayConcat, sliceArrayIn);
+
+        ValueId sliceArrayY = makeLogicValue(graph, "slice_array_y", 8);
+        OperationId sliceArray = graph.createOperation(OperationKind::kSliceArray,
+                                                       graph.internSymbol("slice_array_op"));
+        graph.addOperand(sliceArray, sliceArrayIn);
+        graph.addOperand(sliceArray, rep2);
+        graph.addResult(sliceArray, sliceArrayY);
+        graph.setAttr(sliceArray, "sliceWidth", static_cast<int64_t>(8));
+        graph.bindOutputPort("slice_array_y", sliceArrayY);
+
+        ValueId clog2Y = makeLogicValue(graph, "clog2_y", 32);
+        OperationId clog2Op = graph.createOperation(OperationKind::kSystemFunction,
+                                                    graph.internSymbol("clog2_op"));
+        graph.addOperand(clog2Op, comb);
+        graph.addResult(clog2Op, clog2Y);
+        graph.setAttr(clog2Op, "name", std::string("clog2"));
+        graph.bindOutputPort("clog2_y", clog2Y);
+
+        ValueId signedAssignY = makeLogicValue(graph, "signed_assign_y", 8, true);
+        OperationId signedAssign = graph.createOperation(OperationKind::kAssign, graph.internSymbol("signed_assign_op"));
+        graph.addOperand(signedAssign, ss4);
+        graph.addResult(signedAssign, signedAssignY);
+        graph.bindOutputPort("signed_assign_y", signedAssignY);
+
+        ValueId signedAddY = makeLogicValue(graph, "signed_add_y", 8, true);
+        OperationId signedAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("signed_add_op"));
+        graph.addOperand(signedAdd, ss4);
+        graph.addOperand(signedAdd, sa);
+        graph.addResult(signedAdd, signedAddY);
+        graph.bindOutputPort("signed_add_y", signedAddY);
+
+        ValueId mixedAddY = makeLogicValue(graph, "mixed_add_y", 8);
+        OperationId mixedAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("mixed_add_op"));
+        graph.addOperand(mixedAdd, ss4);
+        graph.addOperand(mixedAdd, b);
+        graph.addResult(mixedAdd, mixedAddY);
+        graph.bindOutputPort("mixed_add_y", mixedAddY);
+
+        ValueId signedDivY = makeLogicValue(graph, "signed_div_y", 8, true);
+        OperationId signedDiv = graph.createOperation(OperationKind::kDiv, graph.internSymbol("signed_div_op"));
+        graph.addOperand(signedDiv, ss4);
+        graph.addOperand(signedDiv, signedTwo8);
+        graph.addResult(signedDiv, signedDivY);
+        graph.bindOutputPort("signed_div_y", signedDivY);
+
+        ValueId signedModY = makeLogicValue(graph, "signed_mod_y", 8, true);
+        OperationId signedMod = graph.createOperation(OperationKind::kMod, graph.internSymbol("signed_mod_op"));
+        graph.addOperand(signedMod, ss4);
+        graph.addOperand(signedMod, signedThree8);
+        graph.addResult(signedMod, signedModY);
+        graph.bindOutputPort("signed_mod_y", signedModY);
+
+        ValueId signedLtY = makeLogicValue(graph, "signed_lt_y", 1);
+        OperationId signedLt = graph.createOperation(OperationKind::kLt, graph.internSymbol("signed_lt_op"));
+        graph.addOperand(signedLt, ss4);
+        graph.addOperand(signedLt, signedOne8);
+        graph.addResult(signedLt, signedLtY);
+        graph.bindOutputPort("signed_lt_y", signedLtY);
+
+        ValueId mixedLtY = makeLogicValue(graph, "mixed_lt_y", 1);
+        OperationId mixedLt = graph.createOperation(OperationKind::kLt, graph.internSymbol("mixed_lt_op"));
+        graph.addOperand(mixedLt, ss4);
+        graph.addOperand(mixedLt, b);
+        graph.addResult(mixedLt, mixedLtY);
+        graph.bindOutputPort("mixed_lt_y", mixedLtY);
+
+        ValueId wideSignedAssignY = makeLogicValue(graph, "wide_signed_assign_y", 130, true);
+        OperationId wideSignedAssign = graph.createOperation(OperationKind::kAssign,
+                                                             graph.internSymbol("wide_signed_assign_op"));
+        graph.addOperand(wideSignedAssign, wideSignedIn);
+        graph.addResult(wideSignedAssign, wideSignedAssignY);
+        graph.bindOutputPort("wide_signed_assign_y", wideSignedAssignY);
+
+        ValueId wideSignedDivY = makeLogicValue(graph, "wide_signed_div_y", 130, true);
+        OperationId wideSignedDiv = graph.createOperation(OperationKind::kDiv,
+                                                          graph.internSymbol("wide_signed_div_op"));
+        graph.addOperand(wideSignedDiv, wideSignedIn);
+        graph.addOperand(wideSignedDiv, wideSignedTwo);
+        graph.addResult(wideSignedDiv, wideSignedDivY);
+        graph.bindOutputPort("wide_signed_div_y", wideSignedDivY);
+
+        ValueId wideSignedLtY = makeLogicValue(graph, "wide_signed_lt_y", 1);
+        OperationId wideSignedLt = graph.createOperation(OperationKind::kLt,
+                                                         graph.internSymbol("wide_signed_lt_op"));
+        graph.addOperand(wideSignedLt, wideSignedIn);
+        graph.addOperand(wideSignedLt, wideSignedOne);
+        graph.addResult(wideSignedLt, wideSignedLtY);
+        graph.bindOutputPort("wide_signed_lt_y", wideSignedLtY);
+
+        ValueId wideMixedLtY = makeLogicValue(graph, "wide_mixed_lt_y", 1);
+        OperationId wideMixedLt = graph.createOperation(OperationKind::kLt,
+                                                        graph.internSymbol("wide_mixed_lt_op"));
+        graph.addOperand(wideMixedLt, wideSignedIn);
+        graph.addOperand(wideMixedLt, wideTwo);
+        graph.addResult(wideMixedLt, wideMixedLtY);
+        graph.bindOutputPort("wide_mixed_lt_y", wideMixedLtY);
+
         OperationId write = graph.createOperation(OperationKind::kRegisterWritePort,
                                                   graph.internSymbol("reg_q_write"));
         graph.addOperand(write, en);
@@ -298,6 +445,62 @@ namespace
         graph.addOperand(wideMemWrite, clk);
         graph.setAttr(wideMemWrite, "memSymbol", std::string("wide_mem"));
         graph.setAttr(wideMemWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        OperationId wideMaskedMem = graph.createOperation(OperationKind::kMemory, graph.internSymbol("wide_masked_mem"));
+        graph.setAttr(wideMaskedMem, "width", static_cast<int64_t>(130));
+        graph.setAttr(wideMaskedMem, "row", static_cast<int64_t>(4));
+        graph.setAttr(wideMaskedMem, "isSigned", false);
+        graph.setAttr(wideMaskedMem, "initKind", std::vector<std::string>{});
+        graph.setAttr(wideMaskedMem, "initFile", std::vector<std::string>{});
+        graph.setAttr(wideMaskedMem, "initValue", std::vector<std::string>{});
+        graph.setAttr(wideMaskedMem, "initStart", std::vector<int64_t>{});
+        graph.setAttr(wideMaskedMem, "initLen", std::vector<int64_t>{});
+
+        ValueId wideMaskedMemQ = makeLogicValue(graph, "wide_masked_mem_q", 130);
+        OperationId wideMaskedMemRead = graph.createOperation(OperationKind::kMemoryReadPort,
+                                                              graph.internSymbol("wide_masked_mem_read"));
+        graph.addOperand(wideMaskedMemRead, wideAddr);
+        graph.addResult(wideMaskedMemRead, wideMaskedMemQ);
+        graph.setAttr(wideMaskedMemRead, "memSymbol", std::string("wide_masked_mem"));
+        graph.bindOutputPort("wide_masked_mem_y", wideMaskedMemQ);
+
+        OperationId wideMaskedMemWrite = graph.createOperation(OperationKind::kMemoryWritePort,
+                                                               graph.internSymbol("wide_masked_mem_write"));
+        graph.addOperand(wideMaskedMemWrite, en);
+        graph.addOperand(wideMaskedMemWrite, wideAddr);
+        graph.addOperand(wideMaskedMemWrite, wideIn);
+        graph.addOperand(wideMaskedMemWrite, wideMaskDyn);
+        graph.addOperand(wideMaskedMemWrite, clk);
+        graph.setAttr(wideMaskedMemWrite, "memSymbol", std::string("wide_masked_mem"));
+        graph.setAttr(wideMaskedMemWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        OperationId idxMem = graph.createOperation(OperationKind::kMemory, graph.internSymbol("idx_mem"));
+        graph.setAttr(idxMem, "width", static_cast<int64_t>(8));
+        graph.setAttr(idxMem, "row", static_cast<int64_t>(3));
+        graph.setAttr(idxMem, "isSigned", false);
+        graph.setAttr(idxMem, "initKind", std::vector<std::string>{"literal", "literal", "literal"});
+        graph.setAttr(idxMem, "initFile", std::vector<std::string>{"", "", ""});
+        graph.setAttr(idxMem, "initValue", std::vector<std::string>{"8'h11", "8'h22", "8'h33"});
+        graph.setAttr(idxMem, "initStart", std::vector<int64_t>{0, 1, 2});
+        graph.setAttr(idxMem, "initLen", std::vector<int64_t>{1, 1, 1});
+
+        ValueId idxMemQ = makeLogicValue(graph, "idx_mem_q", 8);
+        OperationId idxMemRead = graph.createOperation(OperationKind::kMemoryReadPort,
+                                                       graph.internSymbol("idx_mem_read"));
+        graph.addOperand(idxMemRead, wideMemIdx);
+        graph.addResult(idxMemRead, idxMemQ);
+        graph.setAttr(idxMemRead, "memSymbol", std::string("idx_mem"));
+        graph.bindOutputPort("idx_mem_y", idxMemQ);
+
+        OperationId idxMemWrite = graph.createOperation(OperationKind::kMemoryWritePort,
+                                                        graph.internSymbol("idx_mem_write"));
+        graph.addOperand(idxMemWrite, en);
+        graph.addOperand(idxMemWrite, wideMemIdx);
+        graph.addOperand(idxMemWrite, idxWriteData);
+        graph.addOperand(idxMemWrite, mask);
+        graph.addOperand(idxMemWrite, clk);
+        graph.setAttr(idxMemWrite, "memSymbol", std::string("idx_mem"));
+        graph.setAttr(idxMemWrite, "eventEdge", std::vector<std::string>{"posedge"});
 
         ValueId wideAddY = makeLogicValue(graph, "wide_add_y", 130);
         OperationId wideAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("wide_add_op"));
@@ -591,6 +794,156 @@ namespace
         return result.success && !diags.hasError();
     }
 
+    bool emitWithActivitySchedule(Design &design,
+                                  const std::filesystem::path &outDir,
+                                  EmitDiagnostics &diag,
+                                  EmitResult &result)
+    {
+        SessionStore session;
+        if (!runActivitySchedule(design, session))
+        {
+            return false;
+        }
+
+        std::filesystem::create_directories(outDir);
+        EmitOptions options;
+        options.outputDir = outDir.string();
+        options.session = &session;
+        options.sessionPathPrefix = std::string("top");
+        options.attributes["sched_batch_max_ops"] = "8";
+        options.attributes["sched_batch_max_estimated_lines"] = "96";
+        options.attributes["emit_parallelism"] = "2";
+
+        EmitGrhSimCpp emitter(&diag);
+        result = emitter.emit(design, options);
+        return true;
+    }
+
+    Design buildRegisterWriteInteractionDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId rstN = makeLogicValue(graph, "rst_n", 1);
+        ValueId seqD = makeLogicValue(graph, "seq_d", 8);
+        ValueId rstValue = makeLogicValue(graph, "rst_value", 8);
+        ValueId writeA = makeLogicValue(graph, "write_a", 8);
+        ValueId writeB = makeLogicValue(graph, "write_b", 8);
+        ValueId fireA = makeLogicValue(graph, "fire_a", 1);
+        ValueId fireB = makeLogicValue(graph, "fire_b", 1);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("rst_n", rstN);
+        graph.bindInputPort("seq_d", seqD);
+        graph.bindInputPort("rst_value", rstValue);
+        graph.bindInputPort("write_a", writeA);
+        graph.bindInputPort("write_b", writeB);
+        graph.bindInputPort("fire_a", fireA);
+        graph.bindInputPort("fire_b", fireB);
+
+        ValueId one = addConstant(graph, "const_one", "one", 1, "1'b1");
+        ValueId mask = addConstant(graph, "const_mask_ff", "mask_ff", 8, "8'hFF");
+
+        OperationId seqReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("seq_reg"));
+        graph.setAttr(seqReg, "width", static_cast<int64_t>(8));
+        graph.setAttr(seqReg, "isSigned", false);
+        graph.setAttr(seqReg, "initValue", std::string("8'h00"));
+
+        ValueId seqQ = makeLogicValue(graph, "seq_q", 8);
+        OperationId seqRead = graph.createOperation(OperationKind::kRegisterReadPort, graph.internSymbol("seq_read"));
+        graph.addResult(seqRead, seqQ);
+        graph.setAttr(seqRead, "regSymbol", std::string("seq_reg"));
+        graph.bindOutputPort("seq_q", seqQ);
+
+        OperationId seqClkWrite = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                        graph.internSymbol("seq_clk_write"));
+        graph.addOperand(seqClkWrite, one);
+        graph.addOperand(seqClkWrite, seqD);
+        graph.addOperand(seqClkWrite, mask);
+        graph.addOperand(seqClkWrite, clk);
+        graph.setAttr(seqClkWrite, "regSymbol", std::string("seq_reg"));
+        graph.setAttr(seqClkWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        OperationId seqRstWrite = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                        graph.internSymbol("seq_rst_write"));
+        graph.addOperand(seqRstWrite, one);
+        graph.addOperand(seqRstWrite, rstValue);
+        graph.addOperand(seqRstWrite, mask);
+        graph.addOperand(seqRstWrite, rstN);
+        graph.setAttr(seqRstWrite, "regSymbol", std::string("seq_reg"));
+        graph.setAttr(seqRstWrite, "eventEdge", std::vector<std::string>{"negedge"});
+
+        OperationId conflictReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("conflict_reg"));
+        graph.setAttr(conflictReg, "width", static_cast<int64_t>(8));
+        graph.setAttr(conflictReg, "isSigned", false);
+        graph.setAttr(conflictReg, "initValue", std::string("8'h00"));
+
+        ValueId conflictQ = makeLogicValue(graph, "conflict_q", 8);
+        OperationId conflictRead = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                         graph.internSymbol("conflict_read"));
+        graph.addResult(conflictRead, conflictQ);
+        graph.setAttr(conflictRead, "regSymbol", std::string("conflict_reg"));
+        graph.bindOutputPort("conflict_q", conflictQ);
+
+        OperationId conflictWriteA = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                           graph.internSymbol("conflict_write_a"));
+        graph.addOperand(conflictWriteA, fireA);
+        graph.addOperand(conflictWriteA, writeA);
+        graph.addOperand(conflictWriteA, mask);
+        graph.addOperand(conflictWriteA, clk);
+        graph.setAttr(conflictWriteA, "regSymbol", std::string("conflict_reg"));
+        graph.setAttr(conflictWriteA, "eventEdge", std::vector<std::string>{"posedge"});
+
+        OperationId conflictWriteB = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                           graph.internSymbol("conflict_write_b"));
+        graph.addOperand(conflictWriteB, fireB);
+        graph.addOperand(conflictWriteB, writeB);
+        graph.addOperand(conflictWriteB, mask);
+        graph.addOperand(conflictWriteB, clk);
+        graph.setAttr(conflictWriteB, "regSymbol", std::string("conflict_reg"));
+        graph.setAttr(conflictWriteB, "eventEdge", std::vector<std::string>{"posedge"});
+
+        return design;
+    }
+
+    Design buildInvalidRegisterWriteDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId data = makeLogicValue(graph, "data", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("data", data);
+
+        ValueId one = addConstant(graph, "const_one", "one", 1, "1'b1");
+        ValueId badMask = addConstant(graph, "const_bad_mask", "bad_mask", 4, "4'hF");
+
+        OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("bad_reg"));
+        graph.setAttr(reg, "width", static_cast<int64_t>(8));
+        graph.setAttr(reg, "isSigned", false);
+        graph.setAttr(reg, "initValue", std::string("8'h00"));
+
+        ValueId q = makeLogicValue(graph, "q", 8);
+        OperationId read = graph.createOperation(OperationKind::kRegisterReadPort, graph.internSymbol("bad_reg_read"));
+        graph.addResult(read, q);
+        graph.setAttr(read, "regSymbol", std::string("bad_reg"));
+        graph.bindOutputPort("q", q);
+
+        OperationId write = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                  graph.internSymbol("bad_reg_write"));
+        graph.addOperand(write, one);
+        graph.addOperand(write, data);
+        graph.addOperand(write, badMask);
+        graph.addOperand(write, clk);
+        graph.setAttr(write, "regSymbol", std::string("bad_reg"));
+        graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+
+        return design;
+    }
+
 } // namespace
 
 #ifndef WOLF_SV_EMIT_ARTIFACT_DIR
@@ -717,6 +1070,29 @@ int main()
     {
         return fail("Missing emitted wide combinational helper calls");
     }
+    if (sched.find("grhsim_clog2_u64") == std::string::npos ||
+        sched.find("slice_array_op") == std::string::npos ||
+        sched.find("wildcard_eq_op") == std::string::npos)
+    {
+        return fail("Missing emitted small-width combinational coverage");
+    }
+    if (sched.find("grhsim_cast_u64") == std::string::npos ||
+        sched.find("grhsim_compare_signed_u64") == std::string::npos ||
+        sched.find("grhsim_compare_signed_words") == std::string::npos ||
+        sched.find("grhsim_sdiv_words") == std::string::npos)
+    {
+        return fail("Missing emitted signed combinational helper coverage");
+    }
+    if (sched.find("grhsim_index_words") == std::string::npos ||
+        sched.find("idx_mem_read") == std::string::npos)
+    {
+        return fail("Missing emitted memory read address handling coverage");
+    }
+    if (sched.find("grhsim_index_pow2_words") == std::string::npos ||
+        state.find("grhsim_apply_masked_words_inplace") == std::string::npos)
+    {
+        return fail("Missing emitted memory write optimization coverage");
+    }
     if (eval.find("seed_head_eval") == std::string::npos || eval.find("event_domain_hit_") == std::string::npos)
     {
         return fail("Missing eval precompute / head activation logic");
@@ -840,6 +1216,16 @@ int main()
         harness << "    for (auto& word : value) word = ~word;\n";
         harness << "    trunc_words(value, width);\n";
         harness << "    return value;\n";
+        harness << "}\n\n";
+        harness << "template <std::size_t N>\n";
+        harness << "static std::array<std::uint64_t, N> mask_merge_words(std::array<std::uint64_t, N> base,\n";
+        harness << "                                                const std::array<std::uint64_t, N>& data,\n";
+        harness << "                                                const std::array<std::uint64_t, N>& mask,\n";
+        harness << "                                                std::size_t width)\n";
+        harness << "{\n";
+        harness << "    for (std::size_t i = 0; i < N; ++i) base[i] = (base[i] & ~mask[i]) | (data[i] & mask[i]);\n";
+        harness << "    trunc_words(base, width);\n";
+        harness << "    return base;\n";
         harness << "}\n\n";
         harness << "template <std::size_t N>\n";
         harness << "static std::array<std::uint64_t, N> shl_words(const std::array<std::uint64_t, N>& value, std::size_t amount, std::size_t width)\n";
@@ -1006,16 +1392,23 @@ int main()
         harness << "    const std::uint64_t seed_a = UINT64_C(0x123456789ABCDEF0);\n";
         harness << "    const std::uint64_t seed_b = UINT64_C(0x0F1E2D3C4B5A6978);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_value_a{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0FEDCBA987654321), UINT64_C(0x2)};\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_mask_dyn{UINT64_C(0xFFFF0000FFFF0000), UINT64_C(0x00FF00FF00FF00FF), UINT64_C(0x1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_mem_init{UINT64_C(1), UINT64_C(0), UINT64_C(1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_zero{};\n";
         harness << "    const std::array<std::uint64_t, 1> two_bit_one{UINT64_C(1)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_general_divisor{UINT64_C(3), UINT64_C(0x8000000000000000), UINT64_C(0)};\n";
+        harness << "    const std::array<std::uint64_t, 2> wide_mem_idx_row2{UINT64_C(2), UINT64_C(0)};\n";
+        harness << "    const std::array<std::uint64_t, 2> wide_mem_idx_oor{UINT64_C(0), UINT64_C(1)};\n";
+        harness << "    const std::array<std::uint64_t, 2> wide_signed_value{UINT64_C(0xFFFFFFFFFFFFFFFE), UINT64_C(0x1)};\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_signed_assign_expected{UINT64_C(0xFFFFFFFFFFFFFFFE), UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x3)};\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_signed_div_expected{UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0xFFFFFFFFFFFFFFFF), UINT64_C(0x3)};\n";
         harness << "    const std::array<std::uint64_t, 2> mid_value{UINT64_C(0x1122334455667788), UINT64_C(0x0000000012345678)};\n";
         harness << "    const std::array<std::uint64_t, 3> wide_one = add_one(wide_zero, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_two = add_one(wide_one, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_pow65 = shl_words(wide_one, 65, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_div_general_expected = udiv_words_general(wide_value_a, wide_general_divisor, 130);\n";
         harness << "    const std::array<std::uint64_t, 3> wide_mod_general_expected = umod_words_general(wide_value_a, wide_general_divisor, 130);\n";
+        harness << "    const std::array<std::uint64_t, 3> wide_masked_expected = mask_merge_words(wide_zero, wide_value_a, wide_mask_dyn, 130);\n";
         harness << "    const u128 mid_rhs_u128 = (static_cast<u128>(UINT64_C(1)) << 64u) | UINT64_C(3);\n";
         harness << "    const std::array<std::uint64_t, 2> mid_mul_expected = from_u128<2>(to_u128(mid_value) * mid_rhs_u128, 96);\n";
         harness << "    const std::array<std::uint64_t, 2> mid_div_expected = from_u128<2>(to_u128(mid_value) / mid_rhs_u128, 96);\n";
@@ -1035,9 +1428,13 @@ int main()
         harness << "    sim.set_sh(static_cast<std::uint8_t>(2));\n";
         harness << "    sim.set_rep2(static_cast<std::uint8_t>(2));\n";
         harness << "    sim.set_sa(static_cast<std::uint8_t>(0xF0));\n";
+        harness << "    sim.set_ss4(static_cast<std::uint8_t>(0xE));\n";
         harness << "    sim.set_mid_in(mid_value);\n";
         harness << "    sim.set_wide_in(wide_value_a);\n";
+        harness << "    sim.set_wide_mask_dyn(wide_mask_dyn);\n";
         harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
+        harness << "    sim.set_wide_signed_in(wide_signed_value);\n";
         harness << "    sim.set_clk(false);\n";
         harness << "    sim.set_random_seed(seed_a);\n";
         harness << "    sim.init();\n";
@@ -1055,8 +1452,23 @@ int main()
         harness << "    if (!sim.get_red_xor_y()) return 18;\n";
         harness << "    if (sim.get_slice_y() != static_cast<std::uint8_t>(5)) return 19;\n";
         harness << "    if (sim.get_rep_y() != static_cast<std::uint8_t>(0xAA)) return 20;\n";
+        harness << "    if (sim.get_case_eq_y()) return 70;\n";
+        harness << "    if (!sim.get_case_ne_y()) return 71;\n";
+        harness << "    if (!sim.get_wildcard_eq_y()) return 72;\n";
+        harness << "    if (!sim.get_wildcard_ne_y()) return 73;\n";
+        harness << "    if (sim.get_slice_array_y() != static_cast<std::uint8_t>(0xB6)) return 74;\n";
+        harness << "    if (sim.get_clog2_y() != static_cast<std::uint32_t>(8)) return 75;\n";
+        harness << "    if (sim.get_signed_assign_y() != static_cast<std::uint8_t>(0xFE)) return 76;\n";
+        harness << "    if (sim.get_signed_add_y() != static_cast<std::uint8_t>(0xEE)) return 77;\n";
+        harness << "    if (sim.get_mixed_add_y() != static_cast<std::uint8_t>(1)) return 78;\n";
+        harness << "    if (sim.get_signed_div_y() != static_cast<std::uint8_t>(0xFF)) return 79;\n";
+        harness << "    if (sim.get_signed_mod_y() != static_cast<std::uint8_t>(0xFE)) return 80;\n";
+        harness << "    if (!sim.get_signed_lt_y()) return 81;\n";
+        harness << "    if (sim.get_mixed_lt_y()) return 82;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 21;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 22;\n";
+        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_zero)) return 89;\n";
+        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x33)) return 87;\n";
         harness << "    if (!same_words(sim.get_wide_add_y(), add_one(wide_value_a, 130))) return 31;\n";
         harness << "    if (!same_words(sim.get_wide_sub_y(), sub_one(wide_value_a, 130))) return 32;\n";
         harness << "    if (!same_words(sim.get_wide_mul_y(), shl_words(wide_value_a, 1, 132))) return 33;\n";
@@ -1091,6 +1503,14 @@ int main()
         harness << "    if (!same_words(sim.get_wide_rep_y(), replicate_words<5>(wide_value_a, 130, 2))) return 50;\n";
         harness << "    if (!same_words(sim.get_wide_slice_static_y(), slice_words<2>(wide_value_a, 5, 65))) return 51;\n";
         harness << "    if (!same_words(sim.get_wide_slice_dyn_y(), slice_words<2>(wide_value_a, 1, 65))) return 52;\n";
+        harness << "    if (!same_words(sim.get_wide_signed_assign_y(), wide_signed_assign_expected)) return 83;\n";
+        harness << "    if (!same_words(sim.get_wide_signed_div_y(), wide_signed_div_expected)) return 84;\n";
+        harness << "    if (!sim.get_wide_signed_lt_y()) return 85;\n";
+        harness << "    if (sim.get_wide_mixed_lt_y()) return 86;\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_oor);\n";
+        harness << "    sim.eval();\n";
+        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x00)) return 88;\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
         harness << "    sim.set_clk(true);\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 2;\n";
@@ -1102,20 +1522,33 @@ int main()
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 4;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 25;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 26;\n";
+        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_masked_expected)) return 90;\n";
+        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x44)) return 91;\n";
         harness << "    sim.set_clk(true);\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 5;\n";
         harness << "    if (g_last_trace != static_cast<std::uint8_t>(8)) return 6;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 27;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 28;\n";
+        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_masked_expected)) return 92;\n";
         harness << "    if (sim.get_rand_y() != rand_expected_a) return 29;\n";
         harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 30;\n";
+        harness << "    sim.set_clk(false);\n";
+        harness << "    sim.eval();\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_oor);\n";
+        harness << "    sim.set_clk(true);\n";
+        harness << "    sim.eval();\n";
+        harness << "    sim.set_clk(false);\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
+        harness << "    sim.eval();\n";
+        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x44)) return 93;\n";
         harness << "    sim.set_random_seed(seed_b);\n";
         harness << "    sim.init();\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 53;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 54;\n";
         harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 55;\n";
+        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_zero)) return 94;\n";
         harness << "    if (sim.get_rand_y() != rand_expected_b) return 56;\n";
         harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_b)) return 57;\n";
         harness << "    return 0;\n";
@@ -1147,6 +1580,116 @@ int main()
         if (harnessOutput.find("[display]") == std::string::npos)
         {
             return fail("Generated grhsim harness missing system task output");
+        }
+
+        const std::filesystem::path regWriteDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_regwrite";
+        Design regWriteDesign = buildRegisterWriteInteractionDesign();
+        EmitDiagnostics regWriteDiag;
+        EmitResult regWriteResult;
+        if (!emitWithActivitySchedule(regWriteDesign, regWriteDir, regWriteDiag, regWriteResult))
+        {
+            return fail("register-write interaction activity-schedule pass failed");
+        }
+        if (!regWriteResult.success || regWriteDiag.hasError())
+        {
+            return fail("register-write interaction emit failed");
+        }
+        const std::filesystem::path regWriteHeaderPath = regWriteDir / "grhsim_top.hpp";
+        const std::filesystem::path regWriteStatePath = regWriteDir / "grhsim_top_state.cpp";
+        const std::filesystem::path regWriteEvalPath = regWriteDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> regWriteSchedFiles = collectSchedFiles(regWriteDir, "grhsim_top_sched_");
+        if (!std::filesystem::exists(regWriteHeaderPath) || !std::filesystem::exists(regWriteStatePath) ||
+            !std::filesystem::exists(regWriteEvalPath) || regWriteSchedFiles.empty())
+        {
+            return fail("register-write interaction artifacts missing");
+        }
+        if (readFile(regWriteHeaderPath).find("had_register_write_conflict") == std::string::npos)
+        {
+            return fail("Missing register write conflict getter emission");
+        }
+
+        const std::filesystem::path regWriteHarnessPath = regWriteDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(regWriteHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create register-write harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.set_rst_n(true);\n";
+            harness << "    sim.set_seq_d(static_cast<std::uint8_t>(0x12));\n";
+            harness << "    sim.set_rst_value(static_cast<std::uint8_t>(0x34));\n";
+            harness << "    sim.set_write_a(static_cast<std::uint8_t>(0x55));\n";
+            harness << "    sim.set_write_b(static_cast<std::uint8_t>(0xAA));\n";
+            harness << "    sim.set_fire_a(false);\n";
+            harness << "    sim.set_fire_b(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x00)) return 1;\n";
+            harness << "    if (sim.had_register_write_conflict()) return 2;\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.had_register_write_conflict()) return 3;\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x12)) return 4;\n";
+            harness << "    sim.set_rst_n(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.had_register_write_conflict()) return 5;\n";
+            harness << "    sim.set_rst_n(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x34)) return 6;\n";
+            harness << "    sim.set_fire_a(true);\n";
+            harness << "    sim.set_fire_b(true);\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!sim.had_register_write_conflict()) return 7;\n";
+            harness << "    sim.set_fire_a(false);\n";
+            harness << "    sim.set_fire_b(false);\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    const std::uint8_t conflict_q = sim.get_conflict_q();\n";
+            harness << "    if (conflict_q != static_cast<std::uint8_t>(0x55) && conflict_q != static_cast<std::uint8_t>(0xAA)) return 8;\n";
+            harness << "    if (sim.had_register_write_conflict()) return 9;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+
+        const std::filesystem::path regWriteHarnessExe = regWriteDir / "grhsim_top_harness";
+        std::string regWriteCompileCmd =
+            "c++ -std=c++20 -O2 -I" + regWriteDir.string() +
+            " " + regWriteStatePath.string() +
+            " " + regWriteEvalPath.string();
+        for (const auto &schedPath : regWriteSchedFiles)
+        {
+            regWriteCompileCmd += " " + schedPath.string();
+        }
+        regWriteCompileCmd += " " + regWriteHarnessPath.string() + " -o " + regWriteHarnessExe.string();
+        if (std::system(regWriteCompileCmd.c_str()) != 0)
+        {
+            return fail("register-write harness failed to compile");
+        }
+        if (std::system(regWriteHarnessExe.string().c_str()) != 0)
+        {
+            return fail("register-write harness failed to run");
+        }
+
+        const std::filesystem::path invalidDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_regwrite_invalid";
+        Design invalidRegWriteDesign = buildInvalidRegisterWriteDesign();
+        EmitDiagnostics invalidDiag;
+        EmitResult invalidResult;
+        if (!emitWithActivitySchedule(invalidRegWriteDesign, invalidDir, invalidDiag, invalidResult))
+        {
+            return fail("invalid register-write activity-schedule pass failed");
+        }
+        if (invalidResult.success || !invalidDiag.hasError())
+        {
+            return fail("invalid register-write emit should fail validation");
         }
 
         return 0;
