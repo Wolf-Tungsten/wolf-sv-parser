@@ -153,20 +153,28 @@ namespace wolvrix::lib::emit
                    graph.valueWidth(value) <= 64;
         }
 
-        std::string cppTypeForValue(const Graph &graph, ValueId value)
+        std::size_t logicWordCount(int32_t width) noexcept
         {
-            switch (graph.valueType(value))
+            if (width <= 0)
             {
-            case ValueType::Real:
-                return "double";
-            case ValueType::String:
-                return "std::string";
-            case ValueType::Logic:
-            default:
-                break;
+                return 0;
             }
+            return (static_cast<std::size_t>(width) + 63u) / 64u;
+        }
 
-            const int32_t width = graph.valueWidth(value);
+        bool isWideLogicWidth(int32_t width) noexcept
+        {
+            return width > 64;
+        }
+
+        bool isWideLogicValue(const Graph &graph, ValueId value) noexcept
+        {
+            return graph.valueType(value) == ValueType::Logic &&
+                   isWideLogicWidth(graph.valueWidth(value));
+        }
+
+        std::string logicCppType(int32_t width)
+        {
             if (width <= 1)
             {
                 return "bool";
@@ -188,8 +196,36 @@ namespace wolvrix::lib::emit
                 return "std::uint64_t";
             }
             std::ostringstream out;
-            out << "std::array<std::uint64_t, " << ((static_cast<std::size_t>(width) + 63u) / 64u) << ">";
+            out << "std::array<std::uint64_t, " << logicWordCount(width) << ">";
             return out.str();
+        }
+
+        std::string defaultInitExprForLogicWidth(int32_t width)
+        {
+            if (width <= 1)
+            {
+                return "false";
+            }
+            if (width <= 64)
+            {
+                return "0";
+            }
+            return "{}";
+        }
+
+        std::string cppTypeForValue(const Graph &graph, ValueId value)
+        {
+            switch (graph.valueType(value))
+            {
+            case ValueType::Real:
+                return "double";
+            case ValueType::String:
+                return "std::string";
+            case ValueType::Logic:
+            default:
+                break;
+            }
+            return logicCppType(graph.valueWidth(value));
         }
 
         std::string defaultInitExpr(const Graph &graph, ValueId value)
@@ -204,15 +240,7 @@ namespace wolvrix::lib::emit
             default:
                 break;
             }
-            if (graph.valueWidth(value) <= 1)
-            {
-                return "false";
-            }
-            if (graph.valueWidth(value) <= 64)
-            {
-                return "0";
-            }
-            return "{}";
+            return defaultInitExprForLogicWidth(graph.valueWidth(value));
         }
 
         std::string valueDebugName(const Graph &graph, ValueId value)
@@ -258,21 +286,39 @@ namespace wolvrix::lib::emit
             default:
                 break;
             }
-            if (!isScalarLogicValue(graph, resultValue))
-            {
-                return std::nullopt;
-            }
             try
             {
                 slang::SVInt parsed = slang::SVInt::fromString(*literal);
                 parsed = parsed.resize(static_cast<slang::bitwidth_t>(graph.valueWidth(resultValue)));
-                const auto raw = parsed.as<uint64_t>();
-                if (!raw)
+                if (parsed.hasUnknown())
                 {
                     return std::nullopt;
                 }
+                if (!isWideLogicValue(graph, resultValue))
+                {
+                    const auto raw = parsed.as<uint64_t>();
+                    if (!raw)
+                    {
+                        return std::nullopt;
+                    }
+                    std::ostringstream out;
+                    out << "UINT64_C(" << *raw << ")";
+                    return out.str();
+                }
+
                 std::ostringstream out;
-                out << "UINT64_C(" << *raw << ")";
+                const std::size_t words = logicWordCount(graph.valueWidth(resultValue));
+                out << "std::array<std::uint64_t, " << words << ">{";
+                const std::uint64_t *rawWords = parsed.getRawPtr();
+                for (std::size_t i = 0; i < words; ++i)
+                {
+                    if (i != 0)
+                    {
+                        out << ", ";
+                    }
+                    out << "UINT64_C(" << rawWords[i] << ")";
+                }
+                out << "}";
                 return out.str();
             }
             catch (const std::exception &)
@@ -382,23 +428,7 @@ namespace wolvrix::lib::emit
             {
                 return "std::string";
             }
-            if (width <= 1)
-            {
-                return "bool";
-            }
-            if (width <= 8)
-            {
-                return "std::uint8_t";
-            }
-            if (width <= 16)
-            {
-                return "std::uint16_t";
-            }
-            if (width <= 32)
-            {
-                return "std::uint32_t";
-            }
-            return "std::uint64_t";
+            return logicCppType(static_cast<int32_t>(width));
         }
 
         bool buildModel(const Graph &graph,
@@ -470,8 +500,7 @@ namespace wolvrix::lib::emit
                             return false;
                         }
                         state.rowCount = *row;
-                        const std::string elemType =
-                            dpiCppType("logic", state.width);
+                        const std::string elemType = logicCppType(state.width);
                         state.cppType = "std::vector<" + elemType + ">";
                         state.fieldName = "state_mem_" + sanitizeIdentifier(state.symbol);
                         std::ostringstream decl;
@@ -480,16 +509,17 @@ namespace wolvrix::lib::emit
                     }
                     else
                     {
-                        if (state.width <= 0 || state.width > 64)
+                        if (state.width <= 0)
                         {
-                            error = "storage width >64 not implemented yet: " + state.symbol;
+                            error = "storage width must be positive: " + state.symbol;
                             return false;
                         }
-                        const std::string cppType = dpiCppType("logic", state.width);
+                        const std::string cppType = logicCppType(state.width);
                         state.cppType = cppType;
                         state.fieldName = (state.kind == StateDecl::Kind::Register ? "state_reg_" : "state_latch_") +
                                           sanitizeIdentifier(state.symbol);
-                        model.stateFieldDecls.push_back("    " + cppType + " " + state.fieldName + " = 0;");
+                        model.stateFieldDecls.push_back("    " + cppType + " " + state.fieldName + " = " +
+                                                        defaultInitExprForLogicWidth(state.width) + ";");
                     }
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
                     break;
@@ -556,12 +586,10 @@ namespace wolvrix::lib::emit
                     {
                         model.writeFieldDecls.push_back("    std::size_t " + write.pendingAddrField + " = 0;");
                     }
-                    model.writeFieldDecls.push_back("    " + (write.kind == StateDecl::Kind::Memory ? dpiCppType("logic", state.width) : state.cppType) +
-                                                    " " + write.pendingDataField +
-                                                    (write.kind == StateDecl::Kind::Memory ? " = 0;" : " = 0;"));
-                    model.writeFieldDecls.push_back("    " + (write.kind == StateDecl::Kind::Memory ? dpiCppType("logic", state.width) : state.cppType) +
-                                                    " " + write.pendingMaskField +
-                                                    (write.kind == StateDecl::Kind::Memory ? " = 0;" : " = 0;"));
+                    const std::string fieldType = write.kind == StateDecl::Kind::Memory ? logicCppType(state.width) : state.cppType;
+                    const std::string initExpr = defaultInitExprForLogicWidth(state.width);
+                    model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingDataField + " = " + initExpr + ";");
+                    model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingMaskField + " = " + initExpr + ";");
                 }
             }
 
@@ -629,6 +657,421 @@ namespace wolvrix::lib::emit
             return "/*missing_value_ref*/";
         }
 
+        std::string wordsArrayTypeForWidth(int32_t width)
+        {
+            std::ostringstream out;
+            out << "std::array<std::uint64_t, " << logicWordCount(width) << ">";
+            return out.str();
+        }
+
+        bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
+        {
+            for (ValueId value : op.operands())
+            {
+                if (isWideLogicValue(graph, value))
+                {
+                    return true;
+                }
+            }
+            for (ValueId value : op.results())
+            {
+                if (isWideLogicValue(graph, value))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::string wordsExprForValue(const Graph &graph,
+                                      const EmitModel &model,
+                                      ValueId value,
+                                      int32_t destWidth)
+        {
+            std::ostringstream out;
+            out << "grhsim_cast_words<" << logicWordCount(destWidth) << ">("
+                << valueRef(model, value) << ", "
+                << graph.valueWidth(value) << ", "
+                << destWidth << ")";
+            return out.str();
+        }
+
+        void emitLogicAssignFromWordsExpr(std::ostream &stream,
+                                          const Graph &graph,
+                                          const EmitModel &model,
+                                          ValueId resultValue,
+                                          const std::string &wordsExpr)
+        {
+            const std::string lhs = valueRef(model, resultValue);
+            const int32_t resultWidth = graph.valueWidth(resultValue);
+            stream << "        {\n";
+            stream << "            const auto next_words = " << wordsExpr << ";\n";
+            if (isWideLogicValue(graph, resultValue))
+            {
+                stream << "            if (grhsim_assign_words(" << lhs << ", next_words, " << resultWidth
+                       << ")) { supernode_changed = true; }\n";
+            }
+            else
+            {
+                stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                       << ">(grhsim_trunc_u64(next_words[0], " << resultWidth << "));\n";
+                stream << "            if (" << lhs << " != next_value) { " << lhs
+                       << " = next_value; supernode_changed = true; }\n";
+            }
+            stream << "        }\n";
+        }
+
+        void emitLogicAssignFromBoolExpr(std::ostream &stream,
+                                         const Graph &graph,
+                                         const EmitModel &model,
+                                         ValueId resultValue,
+                                         const std::string &boolExpr)
+        {
+            const std::string lhs = valueRef(model, resultValue);
+            stream << "        {\n";
+            stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                   << ">(" << boolExpr << ");\n";
+            stream << "            if (" << lhs << " != next_value) { " << lhs
+                   << " = next_value; supernode_changed = true; }\n";
+            stream << "        }\n";
+        }
+
+        std::string scalarAssignmentExpr(OperationKind kind,
+                                         const std::vector<std::string> &operands,
+                                         const Operation &op,
+                                         const Graph &graph);
+
+        bool emitWordLogicOperation(std::ostream &stream,
+                                    const Graph &graph,
+                                    const EmitModel &model,
+                                    const Operation &op,
+                                    std::string &error)
+        {
+            if (op.results().empty())
+            {
+                return true;
+            }
+            const auto operands = op.operands();
+            const ValueId resultValue = op.results().front();
+            const int32_t resultWidth = graph.valueWidth(resultValue);
+            const std::size_t resultWords = logicWordCount(resultWidth);
+
+            auto unaryWords = [&](ValueId operand, int32_t width) -> std::string
+            {
+                return wordsExprForValue(graph, model, operand, width);
+            };
+            auto binaryWords = [&](ValueId lhs, ValueId rhs, int32_t width, std::string_view helper) -> std::string
+            {
+                std::ostringstream out;
+                out << helper << "("
+                    << wordsExprForValue(graph, model, lhs, width) << ", "
+                    << wordsExprForValue(graph, model, rhs, width) << ", "
+                    << width << ")";
+                return out.str();
+            };
+            auto compareWidth = [&]() -> int32_t
+            {
+                int32_t width = 1;
+                for (ValueId value : operands)
+                {
+                    width = std::max(width, graph.valueWidth(value));
+                }
+                return width;
+            };
+
+            switch (op.kind())
+            {
+            case OperationKind::kAssign:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, unaryWords(operands[0], resultWidth));
+                return true;
+            case OperationKind::kAdd:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_add_words"));
+                return true;
+            case OperationKind::kSub:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_sub_words"));
+                return true;
+            case OperationKind::kMul:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_mul_words"));
+                return true;
+            case OperationKind::kDiv:
+            {
+                const bool signedMode =
+                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth,
+                                                         signedMode ? "grhsim_sdiv_words" : "grhsim_udiv_words"));
+                return true;
+            }
+            case OperationKind::kMod:
+            {
+                const bool signedMode =
+                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth,
+                                                         signedMode ? "grhsim_smod_words" : "grhsim_umod_words"));
+                return true;
+            }
+            case OperationKind::kAnd:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_and_words"));
+                return true;
+            case OperationKind::kOr:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_or_words"));
+                return true;
+            case OperationKind::kXor:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_xor_words"));
+                return true;
+            case OperationKind::kXnor:
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                             binaryWords(operands[0], operands[1], resultWidth, "grhsim_xnor_words"));
+                return true;
+            case OperationKind::kNot:
+            {
+                std::ostringstream out;
+                out << "grhsim_not_words(" << unaryWords(operands[0], resultWidth) << ", " << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kEq:
+            {
+                const int32_t width = compareWidth();
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_compare_unsigned_words(" +
+                                                wordsExprForValue(graph, model, operands[0], width) + ", " +
+                                                wordsExprForValue(graph, model, operands[1], width) + ") == 0");
+                return true;
+            }
+            case OperationKind::kNe:
+            {
+                const int32_t width = compareWidth();
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_compare_unsigned_words(" +
+                                                wordsExprForValue(graph, model, operands[0], width) + ", " +
+                                                wordsExprForValue(graph, model, operands[1], width) + ") != 0");
+                return true;
+            }
+            case OperationKind::kLt:
+            case OperationKind::kLe:
+            case OperationKind::kGt:
+            case OperationKind::kGe:
+            {
+                const int32_t width = compareWidth();
+                const bool signedMode =
+                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
+                const std::string cmpExpr = signedMode
+                                                ? ("grhsim_compare_signed_words(" +
+                                                   wordsExprForValue(graph, model, operands[0], width) + ", " +
+                                                   wordsExprForValue(graph, model, operands[1], width) + ", " +
+                                                   std::to_string(width) + ")")
+                                                : ("grhsim_compare_unsigned_words(" +
+                                                   wordsExprForValue(graph, model, operands[0], width) + ", " +
+                                                   wordsExprForValue(graph, model, operands[1], width) + ")");
+                std::string predicate;
+                switch (op.kind())
+                {
+                case OperationKind::kLt:
+                    predicate = cmpExpr + " < 0";
+                    break;
+                case OperationKind::kLe:
+                    predicate = cmpExpr + " <= 0";
+                    break;
+                case OperationKind::kGt:
+                    predicate = cmpExpr + " > 0";
+                    break;
+                case OperationKind::kGe:
+                    predicate = cmpExpr + " >= 0";
+                    break;
+                default:
+                    break;
+                }
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue, predicate);
+                return true;
+            }
+            case OperationKind::kLogicAnd:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_any_bits_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ") && grhsim_any_bits_words(" +
+                                                unaryWords(operands[1], graph.valueWidth(operands[1])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[1])) + ")");
+                return true;
+            case OperationKind::kLogicOr:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_any_bits_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ") || grhsim_any_bits_words(" +
+                                                unaryWords(operands[1], graph.valueWidth(operands[1])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[1])) + ")");
+                return true;
+            case OperationKind::kLogicNot:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "!grhsim_any_bits_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceAnd:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_and_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceNand:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_nand_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceOr:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_or_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceNor:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_nor_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceXor:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_xor_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kReduceXnor:
+                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                            "grhsim_reduce_xnor_words(" +
+                                                unaryWords(operands[0], graph.valueWidth(operands[0])) + ", " +
+                                                std::to_string(graph.valueWidth(operands[0])) + ")");
+                return true;
+            case OperationKind::kShl:
+            {
+                std::ostringstream out;
+                out << "grhsim_shl_words("
+                    << unaryWords(operands[0], resultWidth) << ", "
+                    << valueRef(model, operands[1]) << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kLShr:
+            {
+                std::ostringstream out;
+                out << "grhsim_lshr_words("
+                    << unaryWords(operands[0], resultWidth) << ", "
+                    << valueRef(model, operands[1]) << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kAShr:
+            {
+                std::ostringstream out;
+                out << "grhsim_ashr_words("
+                    << unaryWords(operands[0], resultWidth) << ", "
+                    << valueRef(model, operands[1]) << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kMux:
+            {
+                std::ostringstream out;
+                out << "((" << valueRef(model, operands[0]) << ") ? "
+                    << wordsExprForValue(graph, model, operands[1], resultWidth) << " : "
+                    << wordsExprForValue(graph, model, operands[2], resultWidth) << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kConcat:
+            {
+                stream << "        {\n";
+                stream << "            " << wordsArrayTypeForWidth(resultWidth) << " next_words{};\n";
+                stream << "            std::size_t concat_cursor = " << resultWidth << ";\n";
+                for (ValueId operand : operands)
+                {
+                    const int32_t operandWidth = graph.valueWidth(operand);
+                    stream << "            concat_cursor -= " << operandWidth << ";\n";
+                    stream << "            grhsim_insert_words(next_words, concat_cursor, "
+                           << wordsExprForValue(graph, model, operand, operandWidth) << ", "
+                           << operandWidth << ");\n";
+                }
+                if (isWideLogicValue(graph, resultValue))
+                {
+                    stream << "            if (grhsim_assign_words(" << valueRef(model, resultValue)
+                           << ", next_words, " << resultWidth << ")) { supernode_changed = true; }\n";
+                }
+                else
+                {
+                    stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                           << ">(grhsim_trunc_u64(next_words[0], " << resultWidth << "));\n";
+                    stream << "            if (" << valueRef(model, resultValue) << " != next_value) { "
+                           << valueRef(model, resultValue) << " = next_value; supernode_changed = true; }\n";
+                }
+                stream << "        }\n";
+                return true;
+            }
+            case OperationKind::kReplicate:
+            {
+                const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
+                const int32_t operandWidth = graph.valueWidth(operands[0]);
+                stream << "        {\n";
+                stream << "            " << wordsArrayTypeForWidth(resultWidth) << " next_words{};\n";
+                stream << "            for (std::size_t rep_index = 0; rep_index < " << rep << "; ++rep_index) {\n";
+                stream << "                grhsim_insert_words(next_words, rep_index * " << operandWidth << ", "
+                       << wordsExprForValue(graph, model, operands[0], operandWidth) << ", "
+                       << operandWidth << ");\n";
+                stream << "            }\n";
+                stream << "            grhsim_trunc_words(next_words, " << resultWidth << ");\n";
+                if (isWideLogicValue(graph, resultValue))
+                {
+                    stream << "            if (grhsim_assign_words(" << valueRef(model, resultValue)
+                           << ", next_words, " << resultWidth << ")) { supernode_changed = true; }\n";
+                }
+                else
+                {
+                    stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                           << ">(grhsim_trunc_u64(next_words[0], " << resultWidth << "));\n";
+                    stream << "            if (" << valueRef(model, resultValue) << " != next_value) { "
+                           << valueRef(model, resultValue) << " = next_value; supernode_changed = true; }\n";
+                }
+                stream << "        }\n";
+                return true;
+            }
+            case OperationKind::kSliceStatic:
+            {
+                const auto sliceStart = getAttribute<int64_t>(op, "sliceStart").value_or(0);
+                std::ostringstream out;
+                out << "grhsim_slice_words<" << resultWords << ">("
+                    << wordsExprForValue(graph, model, operands[0], graph.valueWidth(operands[0])) << ", "
+                    << sliceStart << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            case OperationKind::kSliceDynamic:
+            {
+                std::ostringstream out;
+                out << "grhsim_slice_words<" << resultWords << ">("
+                    << wordsExprForValue(graph, model, operands[0], graph.valueWidth(operands[0])) << ", "
+                    << valueRef(model, operands[1]) << ", "
+                    << graph.valueWidth(operands[0]) << ", "
+                    << resultWidth << ")";
+                emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, out.str());
+                return true;
+            }
+            default:
+                error = "unsupported wide logic emit op: " + std::string(op.symbolText());
+                return false;
+            }
+        }
+
         std::optional<std::string> pureExprForValue(const Graph &graph,
                                                     const EmitModel &model,
                                                     ValueId value,
@@ -691,9 +1134,13 @@ namespace wolvrix::lib::emit
                     case OperationKind::kAssign:
                     case OperationKind::kAdd:
                     case OperationKind::kSub:
+                    case OperationKind::kMul:
+                    case OperationKind::kDiv:
+                    case OperationKind::kMod:
                     case OperationKind::kAnd:
                     case OperationKind::kOr:
                     case OperationKind::kXor:
+                    case OperationKind::kXnor:
                     case OperationKind::kEq:
                     case OperationKind::kNe:
                     case OperationKind::kLt:
@@ -704,9 +1151,20 @@ namespace wolvrix::lib::emit
                     case OperationKind::kLogicOr:
                     case OperationKind::kNot:
                     case OperationKind::kLogicNot:
+                    case OperationKind::kReduceAnd:
+                    case OperationKind::kReduceNand:
+                    case OperationKind::kReduceOr:
+                    case OperationKind::kReduceNor:
+                    case OperationKind::kReduceXor:
+                    case OperationKind::kReduceXnor:
+                    case OperationKind::kShl:
+                    case OperationKind::kLShr:
+                    case OperationKind::kAShr:
                     case OperationKind::kMux:
                     case OperationKind::kConcat:
+                    case OperationKind::kReplicate:
                     case OperationKind::kSliceStatic:
+                    case OperationKind::kSliceDynamic:
                     {
                         if (!isScalarLogicValue(graph, value))
                         {
@@ -732,89 +1190,10 @@ namespace wolvrix::lib::emit
                             break;
                         }
                         cost += 1;
-                        switch (op.kind())
+                        expr = scalarAssignmentExpr(op.kind(), operandExprs, op, graph);
+                        if (expr && expr->empty())
                         {
-                        case OperationKind::kAssign:
-                            expr = "(" + operandExprs[0] + ")";
-                            break;
-                        case OperationKind::kAdd:
-                            expr = "(" + operandExprs[0] + " + " + operandExprs[1] + ")";
-                            break;
-                        case OperationKind::kSub:
-                            expr = "(" + operandExprs[0] + " - " + operandExprs[1] + ")";
-                            break;
-                        case OperationKind::kAnd:
-                            expr = "(" + operandExprs[0] + " & " + operandExprs[1] + ")";
-                            break;
-                        case OperationKind::kOr:
-                            expr = "(" + operandExprs[0] + " | " + operandExprs[1] + ")";
-                            break;
-                        case OperationKind::kXor:
-                            expr = "(" + operandExprs[0] + " ^ " + operandExprs[1] + ")";
-                            break;
-                        case OperationKind::kEq:
-                            expr = "((" + operandExprs[0] + ") == (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kNe:
-                            expr = "((" + operandExprs[0] + ") != (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kLt:
-                            expr = "((" + operandExprs[0] + ") < (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kLe:
-                            expr = "((" + operandExprs[0] + ") <= (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kGt:
-                            expr = "((" + operandExprs[0] + ") > (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kGe:
-                            expr = "((" + operandExprs[0] + ") >= (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kLogicAnd:
-                            expr = "((" + operandExprs[0] + ") && (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kLogicOr:
-                            expr = "((" + operandExprs[0] + ") || (" + operandExprs[1] + "))";
-                            break;
-                        case OperationKind::kNot:
-                            expr = "(~(" + operandExprs[0] + "))";
-                            break;
-                        case OperationKind::kLogicNot:
-                            expr = "(!(" + operandExprs[0] + "))";
-                            break;
-                        case OperationKind::kMux:
-                            expr = "((" + operandExprs[0] + ") ? (" + operandExprs[1] + ") : (" + operandExprs[2] + "))";
-                            break;
-                        case OperationKind::kConcat:
-                        {
-                            if (operands.size() != 2 || !isScalarLogicValue(graph, operands[1]))
-                            {
-                                break;
-                            }
-                            expr = "((" + operandExprs[0] + " << " + std::to_string(graph.valueWidth(operands[1])) +
-                                   ") | (" + operandExprs[1] + "))";
-                            break;
-                        }
-                        case OperationKind::kSliceStatic:
-                        {
-                            auto sliceStart = getAttribute<int64_t>(op, "sliceStart");
-                            auto sliceEnd = getAttribute<int64_t>(op, "sliceEnd");
-                            if (!sliceStart || !sliceEnd)
-                            {
-                                break;
-                            }
-                            const int64_t start = *sliceStart;
-                            const int64_t width = *sliceEnd - *sliceStart + 1;
-                            expr = "((" + operandExprs[0] + " >> " + std::to_string(start) + "))";
-                            if (width < 64)
-                            {
-                                expr = "(((" + operandExprs[0] + " >> " + std::to_string(start) + ") & UINT64_C(" +
-                                       std::to_string((UINT64_C(1) << width) - 1) + ")))";
-                            }
-                            break;
-                        }
-                        default:
-                            break;
+                            expr.reset();
                         }
                         break;
                     }
@@ -835,6 +1214,8 @@ namespace wolvrix::lib::emit
                                          const Operation &op,
                                          const Graph &graph)
         {
+            const auto resultWidth =
+                op.results().empty() ? 64 : static_cast<std::size_t>(graph.valueWidth(op.results().front()));
             switch (kind)
             {
             case OperationKind::kAssign:
@@ -843,12 +1224,30 @@ namespace wolvrix::lib::emit
                 return "(" + operands[0] + " + " + operands[1] + ")";
             case OperationKind::kSub:
                 return "(" + operands[0] + " - " + operands[1] + ")";
+            case OperationKind::kMul:
+                return "(" + operands[0] + " * " + operands[1] + ")";
+            case OperationKind::kDiv:
+            {
+                const bool signedMode =
+                    graph.valueSigned(op.operands()[0]) && graph.valueSigned(op.operands()[1]);
+                return std::string(signedMode ? "grhsim_sdiv_u64(" : "grhsim_udiv_u64(") +
+                       operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+            }
+            case OperationKind::kMod:
+            {
+                const bool signedMode =
+                    graph.valueSigned(op.operands()[0]) && graph.valueSigned(op.operands()[1]);
+                return std::string(signedMode ? "grhsim_smod_u64(" : "grhsim_umod_u64(") +
+                       operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+            }
             case OperationKind::kAnd:
                 return "(" + operands[0] + " & " + operands[1] + ")";
             case OperationKind::kOr:
                 return "(" + operands[0] + " | " + operands[1] + ")";
             case OperationKind::kXor:
                 return "(" + operands[0] + " ^ " + operands[1] + ")";
+            case OperationKind::kXnor:
+                return "(~(" + operands[0] + " ^ " + operands[1] + "))";
             case OperationKind::kNot:
                 return "(~(" + operands[0] + "))";
             case OperationKind::kEq:
@@ -869,10 +1268,35 @@ namespace wolvrix::lib::emit
                 return "((" + operands[0] + ") || (" + operands[1] + "))";
             case OperationKind::kLogicNot:
                 return "(!(" + operands[0] + "))";
+            case OperationKind::kReduceAnd:
+                return "grhsim_reduce_and_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kReduceNand:
+                return "grhsim_reduce_nand_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kReduceOr:
+                return "grhsim_reduce_or_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kReduceNor:
+                return "grhsim_reduce_nor_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kReduceXor:
+                return "grhsim_reduce_xor_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kReduceXnor:
+                return "grhsim_reduce_xnor_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")";
+            case OperationKind::kShl:
+                return "grhsim_shl_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+            case OperationKind::kLShr:
+                return "grhsim_lshr_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
+            case OperationKind::kAShr:
+                return "grhsim_ashr_u64(" + operands[0] + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")";
             case OperationKind::kMux:
                 return "((" + operands[0] + ") ? (" + operands[1] + ") : (" + operands[2] + "))";
             case OperationKind::kConcat:
-                return "((" + operands[0] + " << " + std::to_string(graph.valueWidth(op.operands()[1])) + ") | (" + operands[1] + "))";
+                return "grhsim_concat_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) +
+                       ", " + operands[1] + ", " + std::to_string(graph.valueWidth(op.operands()[1])) + ")";
+            case OperationKind::kReplicate:
+            {
+                const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
+                return "grhsim_replicate_u64(" + operands[0] + ", " +
+                       std::to_string(graph.valueWidth(op.operands()[0])) + ", " + std::to_string(rep) + ")";
+            }
             case OperationKind::kSliceStatic:
             {
                 const auto sliceStart = getAttribute<int64_t>(op, "sliceStart").value_or(0);
@@ -884,6 +1308,12 @@ namespace wolvrix::lib::emit
                 }
                 std::uint64_t mask = width <= 0 ? 0u : ((UINT64_C(1) << width) - 1u);
                 return "(((" + operands[0] + ") >> " + std::to_string(sliceStart) + ") & UINT64_C(" + std::to_string(mask) + "))";
+            }
+            case OperationKind::kSliceDynamic:
+            {
+                const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth").value_or(1);
+                return "grhsim_slice_dynamic_u64(" + operands[0] + ", " + operands[1] + ", " +
+                       std::to_string(sliceWidth) + ")";
             }
             default:
                 break;
@@ -1084,6 +1514,7 @@ namespace wolvrix::lib::emit
                 return result;
             }
             *stream << "#pragma once\n\n";
+            *stream << "#include <array>\n";
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdint>\n";
             *stream << "#include <vector>\n\n";
@@ -1095,12 +1526,631 @@ namespace wolvrix::lib::emit
             *stream << "inline std::uint64_t grhsim_trunc_u64(std::uint64_t value, std::size_t width)\n{\n";
             *stream << "    return value & grhsim_mask(width);\n";
             *stream << "}\n\n";
+            *stream << "inline std::int64_t grhsim_sign_extend_i64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    if (width == 0) return 0;\n";
+            *stream << "    value = grhsim_trunc_u64(value, width);\n";
+            *stream << "    if (width >= 64) return static_cast<std::int64_t>(value);\n";
+            *stream << "    const std::uint64_t sign = UINT64_C(1) << (width - 1u);\n";
+            *stream << "    if ((value & sign) == 0) return static_cast<std::int64_t>(value);\n";
+            *stream << "    return static_cast<std::int64_t>(value | ~grhsim_mask(width));\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_concat_u64(std::uint64_t lhs, std::size_t lhsWidth, std::uint64_t rhs, std::size_t rhsWidth)\n{\n";
+            *stream << "    const std::uint64_t lhsBits = grhsim_trunc_u64(lhs, lhsWidth);\n";
+            *stream << "    const std::uint64_t rhsBits = grhsim_trunc_u64(rhs, rhsWidth);\n";
+            *stream << "    if (rhsWidth >= 64) return rhsBits;\n";
+            *stream << "    return grhsim_trunc_u64((lhsBits << rhsWidth) | rhsBits, lhsWidth + rhsWidth);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_replicate_u64(std::uint64_t value, std::size_t elemWidth, std::size_t rep)\n{\n";
+            *stream << "    if (elemWidth == 0 || rep == 0) return 0;\n";
+            *stream << "    const std::uint64_t elem = grhsim_trunc_u64(value, elemWidth);\n";
+            *stream << "    std::uint64_t out = 0;\n";
+            *stream << "    for (std::size_t i = 0; i < rep; ++i) {\n";
+            *stream << "        const std::size_t shift = i * elemWidth;\n";
+            *stream << "        if (shift >= 64) break;\n";
+            *stream << "        out |= (elem << shift);\n";
+            *stream << "    }\n";
+            *stream << "    return grhsim_trunc_u64(out, elemWidth * rep);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_slice_dynamic_u64(std::uint64_t value, std::uint64_t start, std::size_t width)\n{\n";
+            *stream << "    if (start >= 64) return 0;\n";
+            *stream << "    return grhsim_trunc_u64(value >> start, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_shl_u64(std::uint64_t value, std::uint64_t shift, std::size_t width)\n{\n";
+            *stream << "    if (shift >= 64) return 0;\n";
+            *stream << "    return grhsim_trunc_u64(value << shift, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_lshr_u64(std::uint64_t value, std::uint64_t shift, std::size_t width)\n{\n";
+            *stream << "    if (shift >= 64) return 0;\n";
+            *stream << "    return grhsim_trunc_u64(grhsim_trunc_u64(value, width) >> shift, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_ashr_u64(std::uint64_t value, std::uint64_t shift, std::size_t width)\n{\n";
+            *stream << "    if (width == 0) return 0;\n";
+            *stream << "    const std::uint64_t bounded = shift >= 64 ? 63 : shift;\n";
+            *stream << "    const std::int64_t signedValue = grhsim_sign_extend_i64(value, width);\n";
+            *stream << "    return grhsim_trunc_u64(static_cast<std::uint64_t>(signedValue >> bounded), width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_udiv_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    const std::uint64_t divisor = grhsim_trunc_u64(rhs, width);\n";
+            *stream << "    if (divisor == 0) return 0;\n";
+            *stream << "    return grhsim_trunc_u64(grhsim_trunc_u64(lhs, width) / divisor, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_umod_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    const std::uint64_t divisor = grhsim_trunc_u64(rhs, width);\n";
+            *stream << "    if (divisor == 0) return 0;\n";
+            *stream << "    return grhsim_trunc_u64(grhsim_trunc_u64(lhs, width) % divisor, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_sdiv_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    const std::int64_t divisor = grhsim_sign_extend_i64(rhs, width);\n";
+            *stream << "    if (divisor == 0) return 0;\n";
+            *stream << "    const std::int64_t dividend = grhsim_sign_extend_i64(lhs, width);\n";
+            *stream << "    return grhsim_trunc_u64(static_cast<std::uint64_t>(dividend / divisor), width);\n";
+            *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_smod_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
+            *stream << "    const std::int64_t divisor = grhsim_sign_extend_i64(rhs, width);\n";
+            *stream << "    if (divisor == 0) return 0;\n";
+            *stream << "    const std::int64_t dividend = grhsim_sign_extend_i64(lhs, width);\n";
+            *stream << "    return grhsim_trunc_u64(static_cast<std::uint64_t>(dividend % divisor), width);\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_and_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    if (width == 0) return false;\n";
+            *stream << "    return grhsim_trunc_u64(value, width) == grhsim_mask(width);\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_nand_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    return !grhsim_reduce_and_u64(value, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_or_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    return grhsim_trunc_u64(value, width) != 0;\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_nor_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    return !grhsim_reduce_or_u64(value, width);\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_xor_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    return (__builtin_popcountll(grhsim_trunc_u64(value, width)) & 1) != 0;\n";
+            *stream << "}\n\n";
+            *stream << "inline bool grhsim_reduce_xnor_u64(std::uint64_t value, std::size_t width)\n{\n";
+            *stream << "    return !grhsim_reduce_xor_u64(value, width);\n";
+            *stream << "}\n\n";
             *stream << "inline bool grhsim_event_posedge(std::uint64_t curr, std::uint64_t prev)\n{\n";
             *stream << "    return curr != 0 && prev == 0;\n";
             *stream << "}\n\n";
             *stream << "inline bool grhsim_event_negedge(std::uint64_t curr, std::uint64_t prev)\n{\n";
             *stream << "    return curr == 0 && prev != 0;\n";
             *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline void grhsim_trunc_words(std::array<std::uint64_t, N> &value, std::size_t width)\n{\n";
+            *stream << "    const std::size_t liveWords = (width + 63u) / 64u;\n";
+            *stream << "    for (std::size_t i = liveWords; i < N; ++i) {\n";
+            *stream << "        value[i] = 0;\n";
+            *stream << "    }\n";
+            *stream << "    if constexpr (N > 0) {\n";
+            *stream << "        if (liveWords != 0) {\n";
+            *stream << "            const std::size_t tailWidth = width - ((liveWords - 1u) * 64u);\n";
+            *stream << "            value[liveWords - 1u] = grhsim_trunc_u64(value[liveWords - 1u], tailWidth);\n";
+            *stream << "        }\n";
+            *stream << "    }\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline bool grhsim_equal_words(const std::array<std::uint64_t, N> &lhs, const std::array<std::uint64_t, N> &rhs)\n{\n";
+            *stream << "    return lhs == rhs;\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline bool grhsim_assign_words(std::array<std::uint64_t, N> &dst, std::array<std::uint64_t, N> src, std::size_t width)\n{\n";
+            *stream << "    grhsim_trunc_words(src, width);\n";
+            *stream << "    if (dst == src) {\n";
+            *stream << "        return false;\n";
+            *stream << "    }\n";
+            *stream << "    dst = src;\n";
+            *stream << "    return true;\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline std::array<std::uint64_t, N> grhsim_merge_words_masked(const std::array<std::uint64_t, N> &base,\n";
+            *stream << "                                                           const std::array<std::uint64_t, N> &data,\n";
+            *stream << "                                                           const std::array<std::uint64_t, N> &mask,\n";
+            *stream << "                                                           std::size_t width)\n{\n";
+            *stream << "    std::array<std::uint64_t, N> out{};\n";
+            *stream << "    for (std::size_t i = 0; i < N; ++i) {\n";
+            *stream << "        out[i] = (base[i] & ~mask[i]) | (data[i] & mask[i]);\n";
+            *stream << "    }\n";
+            *stream << "    grhsim_trunc_words(out, width);\n";
+            *stream << "    return out;\n";
+            *stream << "}\n\n";
+            *stream << R"CPP(
+template <std::size_t DestN, typename T>
+inline std::array<std::uint64_t, DestN> grhsim_cast_words(T value, std::size_t srcWidth, std::size_t destWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    if constexpr (DestN > 0) {
+        out[0] = grhsim_trunc_u64(static_cast<std::uint64_t>(value), srcWidth);
+    }
+    grhsim_trunc_words(out, destWidth);
+    return out;
+}
+
+template <std::size_t DestN, std::size_t SrcN>
+inline std::array<std::uint64_t, DestN> grhsim_cast_words(const std::array<std::uint64_t, SrcN> &value,
+                                                          std::size_t srcWidth,
+                                                          std::size_t destWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    const std::size_t srcWords = (srcWidth + 63u) / 64u;
+    const std::size_t limit = srcWords < SrcN ? srcWords : SrcN;
+    for (std::size_t i = 0; i < limit && i < DestN; ++i) {
+        out[i] = value[i];
+    }
+    grhsim_trunc_words(out, destWidth);
+    return out;
+}
+
+template <std::size_t N>
+inline bool grhsim_any_bits_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    const std::size_t liveWords = (width + 63u) / 64u;
+    for (std::size_t i = 0; i < liveWords && i < N; ++i) {
+        const std::uint64_t word = (i + 1u == liveWords) ? grhsim_trunc_u64(value[i], width - i * 64u) : value[i];
+        if (word != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <std::size_t N>
+inline bool grhsim_get_bit_words(const std::array<std::uint64_t, N> &value, std::size_t index)
+{
+    if (index / 64u >= N) {
+        return false;
+    }
+    return (value[index / 64u] & (UINT64_C(1) << (index & 63u))) != 0;
+}
+
+template <std::size_t N>
+inline void grhsim_put_bit_words(std::array<std::uint64_t, N> &value, std::size_t index, bool bit)
+{
+    if (index / 64u >= N) {
+        return;
+    }
+    const std::uint64_t mask = UINT64_C(1) << (index & 63u);
+    if (bit) {
+        value[index / 64u] |= mask;
+    }
+    else {
+        value[index / 64u] &= ~mask;
+    }
+}
+
+template <std::size_t DestN, std::size_t SrcN>
+inline void grhsim_insert_words(std::array<std::uint64_t, DestN> &dest,
+                                std::size_t destLsb,
+                                const std::array<std::uint64_t, SrcN> &src,
+                                std::size_t srcWidth)
+{
+    for (std::size_t bit = 0; bit < srcWidth; ++bit) {
+        grhsim_put_bit_words(dest, destLsb + bit, grhsim_get_bit_words(src, bit));
+    }
+}
+
+template <std::size_t DestN, std::size_t SrcN>
+inline std::array<std::uint64_t, DestN> grhsim_slice_words(const std::array<std::uint64_t, SrcN> &src,
+                                                           std::size_t start,
+                                                           std::size_t width)
+{
+    std::array<std::uint64_t, DestN> out{};
+    for (std::size_t bit = 0; bit < width; ++bit) {
+        grhsim_put_bit_words(out, bit, grhsim_get_bit_words(src, start + bit));
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <typename T>
+inline std::size_t grhsim_index_words(T value, std::size_t cap)
+{
+    const std::uint64_t raw = static_cast<std::uint64_t>(value);
+    if (raw >= cap) {
+        return cap;
+    }
+    return static_cast<std::size_t>(raw);
+}
+
+template <std::size_t N>
+inline std::size_t grhsim_index_words(const std::array<std::uint64_t, N> &value, std::size_t cap)
+{
+    for (std::size_t i = 1; i < N; ++i) {
+        if (value[i] != 0) {
+            return cap;
+        }
+    }
+    if (value[0] >= cap) {
+        return cap;
+    }
+    return static_cast<std::size_t>(value[0]);
+}
+
+template <std::size_t DestN, std::size_t SrcN, typename ShiftT>
+inline std::array<std::uint64_t, DestN> grhsim_slice_words(const std::array<std::uint64_t, SrcN> &src,
+                                                           const ShiftT &start,
+                                                           std::size_t srcWidth,
+                                                           std::size_t width)
+{
+    return grhsim_slice_words<DestN>(src, grhsim_index_words(start, srcWidth), width);
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_not_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = ~value[i];
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_and_words(const std::array<std::uint64_t, N> &lhs,
+                                                     const std::array<std::uint64_t, N> &rhs,
+                                                     std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = lhs[i] & rhs[i];
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_or_words(const std::array<std::uint64_t, N> &lhs,
+                                                    const std::array<std::uint64_t, N> &rhs,
+                                                    std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = lhs[i] | rhs[i];
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_xor_words(const std::array<std::uint64_t, N> &lhs,
+                                                     const std::array<std::uint64_t, N> &rhs,
+                                                     std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = lhs[i] ^ rhs[i];
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_xnor_words(const std::array<std::uint64_t, N> &lhs,
+                                                      const std::array<std::uint64_t, N> &rhs,
+                                                      std::size_t width)
+{
+    return grhsim_not_words(grhsim_xor_words(lhs, rhs, width), width);
+}
+
+template <std::size_t N>
+inline bool grhsim_sign_bit_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    if (width == 0) {
+        return false;
+    }
+    return grhsim_get_bit_words(value, width - 1u);
+}
+
+template <std::size_t N>
+inline int grhsim_compare_unsigned_words(const std::array<std::uint64_t, N> &lhs,
+                                         const std::array<std::uint64_t, N> &rhs)
+{
+    for (std::size_t i = N; i-- > 0;) {
+        if (lhs[i] < rhs[i]) {
+            return -1;
+        }
+        if (lhs[i] > rhs[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+template <std::size_t N>
+inline int grhsim_compare_signed_words(const std::array<std::uint64_t, N> &lhs,
+                                       const std::array<std::uint64_t, N> &rhs,
+                                       std::size_t width)
+{
+    const bool lhsNeg = grhsim_sign_bit_words(lhs, width);
+    const bool rhsNeg = grhsim_sign_bit_words(rhs, width);
+    if (lhsNeg != rhsNeg) {
+        return lhsNeg ? -1 : 1;
+    }
+    const int cmp = grhsim_compare_unsigned_words(lhs, rhs);
+    return lhsNeg ? -cmp : cmp;
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_and_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    if (width == 0) {
+        return false;
+    }
+    const std::size_t liveWords = (width + 63u) / 64u;
+    for (std::size_t i = 0; i < liveWords && i < N; ++i) {
+        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;
+        if (grhsim_trunc_u64(value[i], wordWidth) != grhsim_mask(wordWidth)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_nand_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    return !grhsim_reduce_and_words(value, width);
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_or_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    return grhsim_any_bits_words(value, width);
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_nor_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    return !grhsim_reduce_or_words(value, width);
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_xor_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    unsigned parity = 0;
+    const std::size_t liveWords = (width + 63u) / 64u;
+    for (std::size_t i = 0; i < liveWords && i < N; ++i) {
+        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;
+        parity ^= static_cast<unsigned>(__builtin_popcountll(grhsim_trunc_u64(value[i], wordWidth)) & 1u);
+    }
+    return (parity & 1u) != 0;
+}
+
+template <std::size_t N>
+inline bool grhsim_reduce_xnor_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    return !grhsim_reduce_xor_words(value, width);
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_add_words(const std::array<std::uint64_t, N> &lhs,
+                                                     const std::array<std::uint64_t, N> &rhs,
+                                                     std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    unsigned __int128 carry = 0;
+    for (std::size_t i = 0; i < N; ++i) {
+        const unsigned __int128 sum =
+            static_cast<unsigned __int128>(lhs[i]) + static_cast<unsigned __int128>(rhs[i]) + carry;
+        out[i] = static_cast<std::uint64_t>(sum);
+        carry = sum >> 64u;
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_sub_words(const std::array<std::uint64_t, N> &lhs,
+                                                     const std::array<std::uint64_t, N> &rhs,
+                                                     std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    std::uint64_t borrow = 0;
+    for (std::size_t i = 0; i < N; ++i) {
+        const std::uint64_t rhsWord = rhs[i] + borrow;
+        borrow = (rhsWord < rhs[i] || lhs[i] < rhsWord) ? 1 : 0;
+        out[i] = lhs[i] - rhsWord;
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_mul_words(const std::array<std::uint64_t, N> &lhs,
+                                                     const std::array<std::uint64_t, N> &rhs,
+                                                     std::size_t width)
+{
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        unsigned __int128 carry = 0;
+        for (std::size_t j = 0; j + i < N; ++j) {
+            const unsigned __int128 accum =
+                static_cast<unsigned __int128>(out[i + j]) +
+                static_cast<unsigned __int128>(lhs[i]) * static_cast<unsigned __int128>(rhs[j]) +
+                carry;
+            out[i + j] = static_cast<std::uint64_t>(accum);
+            carry = accum >> 64u;
+        }
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_negate_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    std::array<std::uint64_t, N> out = grhsim_not_words(value, width);
+    std::array<std::uint64_t, N> one{};
+    if constexpr (N > 0) {
+        one[0] = 1;
+    }
+    return grhsim_add_words(out, one, width);
+}
+
+template <std::size_t N>
+inline void grhsim_shl1_words_inplace(std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    std::uint64_t carry = 0;
+    for (std::size_t i = 0; i < N; ++i) {
+        const std::uint64_t nextCarry = value[i] >> 63u;
+        value[i] = (value[i] << 1u) | carry;
+        carry = nextCarry;
+    }
+    grhsim_trunc_words(value, width);
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_udiv_words(const std::array<std::uint64_t, N> &lhs,
+                                                      const std::array<std::uint64_t, N> &rhs,
+                                                      std::size_t width)
+{
+    if (!grhsim_any_bits_words(rhs, width)) {
+        return {};
+    }
+    std::array<std::uint64_t, N> quotient{};
+    std::array<std::uint64_t, N> remainder{};
+    for (std::size_t bit = width; bit-- > 0;) {
+        grhsim_shl1_words_inplace(remainder, width);
+        if (grhsim_get_bit_words(lhs, bit)) {
+            remainder[0] |= 1;
+        }
+        if (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
+            remainder = grhsim_sub_words(remainder, rhs, width);
+            grhsim_put_bit_words(quotient, bit, true);
+        }
+    }
+    grhsim_trunc_words(quotient, width);
+    return quotient;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_umod_words(const std::array<std::uint64_t, N> &lhs,
+                                                      const std::array<std::uint64_t, N> &rhs,
+                                                      std::size_t width)
+{
+    if (!grhsim_any_bits_words(rhs, width)) {
+        return {};
+    }
+    std::array<std::uint64_t, N> remainder{};
+    for (std::size_t bit = width; bit-- > 0;) {
+        grhsim_shl1_words_inplace(remainder, width);
+        if (grhsim_get_bit_words(lhs, bit)) {
+            remainder[0] |= 1;
+        }
+        if (grhsim_compare_unsigned_words(remainder, rhs) >= 0) {
+            remainder = grhsim_sub_words(remainder, rhs, width);
+        }
+    }
+    grhsim_trunc_words(remainder, width);
+    return remainder;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_sdiv_words(const std::array<std::uint64_t, N> &lhs,
+                                                      const std::array<std::uint64_t, N> &rhs,
+                                                      std::size_t width)
+{
+    const bool lhsNeg = grhsim_sign_bit_words(lhs, width);
+    const bool rhsNeg = grhsim_sign_bit_words(rhs, width);
+    const auto lhsAbs = lhsNeg ? grhsim_negate_words(lhs, width) : lhs;
+    const auto rhsAbs = rhsNeg ? grhsim_negate_words(rhs, width) : rhs;
+    auto quotient = grhsim_udiv_words(lhsAbs, rhsAbs, width);
+    if (lhsNeg != rhsNeg) {
+        quotient = grhsim_negate_words(quotient, width);
+    }
+    grhsim_trunc_words(quotient, width);
+    return quotient;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_smod_words(const std::array<std::uint64_t, N> &lhs,
+                                                      const std::array<std::uint64_t, N> &rhs,
+                                                      std::size_t width)
+{
+    const bool lhsNeg = grhsim_sign_bit_words(lhs, width);
+    const bool rhsNeg = grhsim_sign_bit_words(rhs, width);
+    const auto lhsAbs = lhsNeg ? grhsim_negate_words(lhs, width) : lhs;
+    const auto rhsAbs = rhsNeg ? grhsim_negate_words(rhs, width) : rhs;
+    auto remainder = grhsim_umod_words(lhsAbs, rhsAbs, width);
+    if (lhsNeg) {
+        remainder = grhsim_negate_words(remainder, width);
+    }
+    grhsim_trunc_words(remainder, width);
+    return remainder;
+}
+
+template <std::size_t N, typename ShiftT>
+inline std::array<std::uint64_t, N> grhsim_shl_words(const std::array<std::uint64_t, N> &value,
+                                                     const ShiftT &shift,
+                                                     std::size_t width)
+{
+    const std::size_t amount = grhsim_index_words(shift, width);
+    if (amount >= width) {
+        return {};
+    }
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t bit = 0; bit + amount < width; ++bit) {
+        if (grhsim_get_bit_words(value, bit)) {
+            grhsim_put_bit_words(out, bit + amount, true);
+        }
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N, typename ShiftT>
+inline std::array<std::uint64_t, N> grhsim_lshr_words(const std::array<std::uint64_t, N> &value,
+                                                      const ShiftT &shift,
+                                                      std::size_t width)
+{
+    const std::size_t amount = grhsim_index_words(shift, width);
+    if (amount >= width) {
+        return {};
+    }
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t bit = amount; bit < width; ++bit) {
+        if (grhsim_get_bit_words(value, bit)) {
+            grhsim_put_bit_words(out, bit - amount, true);
+        }
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N, typename ShiftT>
+inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint64_t, N> &value,
+                                                      const ShiftT &shift,
+                                                      std::size_t width)
+{
+    const std::size_t amount = grhsim_index_words(shift, width);
+    const bool sign = grhsim_sign_bit_words(value, width);
+    if (amount >= width) {
+        std::array<std::uint64_t, N> fill{};
+        if (sign) {
+            for (std::size_t bit = 0; bit < width; ++bit) {
+                grhsim_put_bit_words(fill, bit, true);
+            }
+        }
+        grhsim_trunc_words(fill, width);
+        return fill;
+    }
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t bit = amount; bit < width; ++bit) {
+        if (grhsim_get_bit_words(value, bit)) {
+            grhsim_put_bit_words(out, bit - amount, true);
+        }
+    }
+    if (sign) {
+        for (std::size_t bit = width - amount; bit < width; ++bit) {
+            grhsim_put_bit_words(out, bit, true);
+        }
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+)CPP";
             *stream << "inline void grhsim_set_bit(std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
             *stream << "    bits[index >> 6] |= (UINT64_C(1) << (index & 63u));\n";
             *stream << "}\n\n";
@@ -1213,7 +2263,8 @@ namespace wolvrix::lib::emit
             {
                 if (state.kind == StateDecl::Kind::Memory)
                 {
-                    *stream << "    " << state.fieldName << ".assign(" << state.rowCount << ", 0);\n";
+                    *stream << "    " << state.fieldName << ".assign(" << state.rowCount << ", "
+                            << logicCppType(state.width) << "{});\n";
                 }
             }
             *stream << "}\n\n";
@@ -1234,21 +2285,45 @@ namespace wolvrix::lib::emit
                 if (state.kind == StateDecl::Kind::Memory)
                 {
                     *stream << "        const std::size_t row = " << write.pendingAddrField << " % " << state.rowCount << ";\n";
-                    *stream << "        const auto merged = static_cast<" << dpiCppType("logic", state.width) << ">((" << state.fieldName
-                            << "[row] & ~" << write.pendingMaskField << ") | (" << write.pendingDataField << " & " << write.pendingMaskField << "));\n";
-                    *stream << "        if (" << state.fieldName << "[row] != merged) {\n";
-                    *stream << "            " << state.fieldName << "[row] = merged;\n";
-                    *stream << "            any_state_change = true;\n";
-                    *stream << "        }\n";
+                    if (isWideLogicWidth(state.width))
+                    {
+                        *stream << "        const auto merged = grhsim_merge_words_masked(" << state.fieldName << "[row], "
+                                << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
+                        *stream << "        if (grhsim_assign_words(" << state.fieldName << "[row], merged, " << state.width << ")) {\n";
+                        *stream << "            any_state_change = true;\n";
+                        *stream << "        }\n";
+                    }
+                    else
+                    {
+                        *stream << "        const auto merged = static_cast<" << logicCppType(state.width) << ">((" << state.fieldName
+                                << "[row] & ~" << write.pendingMaskField << ") | (" << write.pendingDataField
+                                << " & " << write.pendingMaskField << "));\n";
+                        *stream << "        if (" << state.fieldName << "[row] != merged) {\n";
+                        *stream << "            " << state.fieldName << "[row] = merged;\n";
+                        *stream << "            any_state_change = true;\n";
+                        *stream << "        }\n";
+                    }
                 }
                 else
                 {
-                    *stream << "        const auto merged = static_cast<" << state.cppType << ">((" << state.fieldName
-                            << " & ~" << write.pendingMaskField << ") | (" << write.pendingDataField << " & " << write.pendingMaskField << "));\n";
-                    *stream << "        if (" << state.fieldName << " != merged) {\n";
-                    *stream << "            " << state.fieldName << " = merged;\n";
-                    *stream << "            any_state_change = true;\n";
-                    *stream << "        }\n";
+                    if (isWideLogicWidth(state.width))
+                    {
+                        *stream << "        const auto merged = grhsim_merge_words_masked(" << state.fieldName << ", "
+                                << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
+                        *stream << "        if (grhsim_assign_words(" << state.fieldName << ", merged, " << state.width << ")) {\n";
+                        *stream << "            any_state_change = true;\n";
+                        *stream << "        }\n";
+                    }
+                    else
+                    {
+                        *stream << "        const auto merged = static_cast<" << state.cppType << ">((" << state.fieldName
+                                << " & ~" << write.pendingMaskField << ") | (" << write.pendingDataField
+                                << " & " << write.pendingMaskField << "));\n";
+                        *stream << "        if (" << state.fieldName << " != merged) {\n";
+                        *stream << "            " << state.fieldName << " = merged;\n";
+                        *stream << "            any_state_change = true;\n";
+                        *stream << "        }\n";
+                    }
                 }
                 *stream << "        " << write.pendingValidField << " = false;\n";
                 *stream << "    }\n";
@@ -1433,11 +2508,22 @@ namespace wolvrix::lib::emit
                         const std::string lhs = valueRef(model, resultValue);
                         if (graph.valueType(resultValue) == ValueType::Logic)
                         {
-                            *stream << "        {\n";
-                            *stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), " << graph.valueWidth(resultValue) << "));\n";
-                            *stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
-                            *stream << "        }\n";
+                            if (isWideLogicValue(graph, resultValue))
+                            {
+                                *stream << "        {\n";
+                                *stream << "            const auto next_value = " << *expr << ";\n";
+                                *stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
+                                        << graph.valueWidth(resultValue) << ")) { supernode_changed = true; }\n";
+                                *stream << "        }\n";
+                            }
+                            else
+                            {
+                                *stream << "        {\n";
+                                *stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
+                                        << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), " << graph.valueWidth(resultValue) << "));\n";
+                                *stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
+                                *stream << "        }\n";
+                            }
                         }
                         else
                         {
@@ -1468,8 +2554,16 @@ namespace wolvrix::lib::emit
                             return result;
                         }
                         const std::string lhs = valueRef(model, op.results().front());
-                        *stream << "        if (" << lhs << " != " << stateIt->second.fieldName << ") { "
-                                << lhs << " = " << stateIt->second.fieldName << "; supernode_changed = true; }\n";
+                        if (isWideLogicValue(graph, op.results().front()))
+                        {
+                            *stream << "        if (grhsim_assign_words(" << lhs << ", " << stateIt->second.fieldName << ", "
+                                    << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                        }
+                        else
+                        {
+                            *stream << "        if (" << lhs << " != " << stateIt->second.fieldName << ") { "
+                                    << lhs << " = " << stateIt->second.fieldName << "; supernode_changed = true; }\n";
+                        }
                         break;
                     }
                     case OperationKind::kMemoryReadPort:
@@ -1498,16 +2592,29 @@ namespace wolvrix::lib::emit
                         *stream << "        {\n";
                         *stream << "            const std::size_t row = static_cast<std::size_t>(" << addrExpr << ") % " << state.rowCount << ";\n";
                         *stream << "            const auto next_value = " << state.fieldName << "[row];\n";
-                        *stream << "            if (" << lhs << " != next_value) { " << lhs << " = next_value; supernode_changed = true; }\n";
+                        if (isWideLogicValue(graph, op.results().front()))
+                        {
+                            *stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
+                                    << graph.valueWidth(op.results().front()) << ")) { supernode_changed = true; }\n";
+                        }
+                        else
+                        {
+                            *stream << "            if (" << lhs << " != next_value) { " << lhs
+                                    << " = next_value; supernode_changed = true; }\n";
+                        }
                         *stream << "        }\n";
                         break;
                     }
                     case OperationKind::kAssign:
                     case OperationKind::kAdd:
                     case OperationKind::kSub:
+                    case OperationKind::kMul:
+                    case OperationKind::kDiv:
+                    case OperationKind::kMod:
                     case OperationKind::kAnd:
                     case OperationKind::kOr:
                     case OperationKind::kXor:
+                    case OperationKind::kXnor:
                     case OperationKind::kNot:
                     case OperationKind::kEq:
                     case OperationKind::kNe:
@@ -1518,20 +2625,36 @@ namespace wolvrix::lib::emit
                     case OperationKind::kLogicAnd:
                     case OperationKind::kLogicOr:
                     case OperationKind::kLogicNot:
+                    case OperationKind::kReduceAnd:
+                    case OperationKind::kReduceNand:
+                    case OperationKind::kReduceOr:
+                    case OperationKind::kReduceNor:
+                    case OperationKind::kReduceXor:
+                    case OperationKind::kReduceXnor:
+                    case OperationKind::kShl:
+                    case OperationKind::kLShr:
+                    case OperationKind::kAShr:
                     case OperationKind::kMux:
                     case OperationKind::kConcat:
+                    case OperationKind::kReplicate:
                     case OperationKind::kSliceStatic:
+                    case OperationKind::kSliceDynamic:
                     {
                         if (op.results().empty())
                         {
                             break;
                         }
                         const ValueId resultValue = op.results().front();
-                        if (!isScalarLogicValue(graph, resultValue))
+                        if (opNeedsWordLogicEmit(graph, op))
                         {
-                            reportError("non-scalar op emit not implemented", std::string(op.symbolText()));
-                            result.success = false;
-                            return result;
+                            std::string emitError;
+                            if (!emitWordLogicOperation(*stream, graph, model, op, emitError))
+                            {
+                                reportError(emitError, std::string(op.symbolText()));
+                                result.success = false;
+                                return result;
+                            }
+                            break;
                         }
                         std::vector<std::string> operandExprs;
                         operandExprs.reserve(operands.size());

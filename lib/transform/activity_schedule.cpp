@@ -1340,21 +1340,43 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
-                const auto op = graph.getOperation(opId);
-                if (!isReplicationCandidateKind(op.kind()) || op.results().size() != 1)
+                std::optional<wolvrix::lib::grh::Operation> op;
+                try
+                {
+                    op = graph.getOperation(opId);
+                }
+                catch (const std::exception &ex)
+                {
+                    error = "activity-schedule replication getOperation failed symbol=" +
+                            std::string(graph.symbolText(opSym)) + ": " + ex.what();
+                    return false;
+                }
+                if (!isReplicationCandidateKind(op->kind()) || op->results().size() != 1)
                 {
                     continue;
                 }
-                const int cost = replicationCost(op.kind());
+                const int cost = replicationCost(op->kind());
                 if (cost < 0 || static_cast<std::size_t>(cost) > maxCost)
                 {
                     continue;
                 }
 
-                const auto result = op.results().front();
+                const auto result = op->results().front();
                 std::unordered_map<uint32_t, std::vector<wolvrix::lib::grh::ValueUser>> usersByTarget;
                 usersByTarget.reserve(4);
-                for (const auto user : graph.getValue(result).users())
+                std::vector<wolvrix::lib::grh::ValueUser> resultUsers;
+                try
+                {
+                    const auto resultValue = graph.getValue(result);
+                    resultUsers.assign(resultValue.users().begin(), resultValue.users().end());
+                }
+                catch (const std::exception &ex)
+                {
+                    error = "activity-schedule replication getValue/users failed source=" +
+                            describeOp(graph, opId) + ": " + ex.what();
+                    return false;
+                }
+                for (const auto user : resultUsers)
                 {
                     const auto userSym = graph.operationSymbol(user.operation);
                     const auto userIt = symbolToSupernode.find(userSym);
@@ -1376,7 +1398,17 @@ namespace wolvrix::lib::transform
                     continue;
                 }
 
-                const auto resultInfo = graph.getValue(result);
+                std::optional<wolvrix::lib::grh::Value> resultInfo;
+                try
+                {
+                    resultInfo = graph.getValue(result);
+                }
+                catch (const std::exception &ex)
+                {
+                    error = "activity-schedule replication getValue(resultInfo) failed source=" +
+                            describeOp(graph, opId) + ": " + ex.what();
+                    return false;
+                }
                 for (const auto &[targetSupernode, users] : usersByTarget)
                 {
                     if (users.empty())
@@ -1385,33 +1417,46 @@ namespace wolvrix::lib::transform
                     }
 
                     const auto cloneSym = graph.makeInternalOpSym();
-                    const auto cloneOp = graph.createOperation(op.kind(), cloneSym);
-                    if (op.srcLoc())
+                    const auto cloneOp = graph.createOperation(op->kind(), cloneSym);
+                    if (op->srcLoc())
                     {
-                        graph.setOpSrcLoc(cloneOp, *op.srcLoc());
+                        graph.setOpSrcLoc(cloneOp, *op->srcLoc());
                     }
-                    for (const auto &attr : op.attrs())
+                    for (const auto &attr : op->attrs())
                     {
                         graph.setAttr(cloneOp, attr.key, attr.value);
                     }
-                    for (const auto operand : op.operands())
+                    for (const auto operand : op->operands())
                     {
                         graph.addOperand(cloneOp, operand);
                     }
 
                     const auto cloneResult = graph.createValue(graph.makeInternalValSym(),
-                                                               resultInfo.width(),
-                                                               resultInfo.isSigned(),
-                                                               resultInfo.type());
-                    if (resultInfo.srcLoc())
+                                                               resultInfo->width(),
+                                                               resultInfo->isSigned(),
+                                                               resultInfo->type());
+                    if (resultInfo->srcLoc())
                     {
-                        graph.setValueSrcLoc(cloneResult, *resultInfo.srcLoc());
+                        graph.setValueSrcLoc(cloneResult, *resultInfo->srcLoc());
                     }
                     graph.addResult(cloneOp, cloneResult);
 
                     for (const auto user : users)
                     {
-                        graph.replaceOperand(user.operation, user.operandIndex, cloneResult);
+                        try
+                        {
+                            graph.replaceOperand(user.operation, user.operandIndex, cloneResult);
+                        }
+                        catch (const std::exception &ex)
+                        {
+                            error = "activity-schedule replication replaceOperand failed source=" +
+                                    describeOp(graph, opId) +
+                                    " targetSupernode=" + std::to_string(targetSupernode) +
+                                    " userOpIndex=" + std::to_string(user.operation.index) +
+                                    " operandIndex=" + std::to_string(user.operandIndex) +
+                                    ": " + ex.what();
+                            return false;
+                        }
                     }
 
                     partition.clusters[targetSupernode].push_back(cloneSym);
