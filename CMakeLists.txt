@@ -407,6 +407,15 @@ target_compile_definitions(emit-grhsim-cpp
 
 register_test_exe(emit-grhsim-cpp)
 
+add_executable(hdlbits-grhsim-driver
+    app/tools/hdlbits_grhsim_driver.cpp
+)
+
+target_link_libraries(hdlbits-grhsim-driver
+    PRIVATE
+        wolvrix-lib
+)
+
 add_executable(emit-verilator-repcut-package
     tests/emit/test_emit_verilator_repcut_package.cpp
 )

@@ -1087,7 +1087,7 @@ namespace
         return design;
     }
 
-    Design buildSystemTaskDesign()
+    Design buildSystemTaskDesign(std::string_view filePath)
     {
         Design design;
         Graph &graph = design.createGraph("top");
@@ -1095,12 +1095,14 @@ namespace
 
         ValueId clk = makeLogicValue(graph, "clk", 1);
         ValueId data = makeLogicValue(graph, "data", 8);
+        ValueId handle = makeLogicValue(graph, "file_handle", 32);
+        ValueId fileError = makeLogicValue(graph, "file_error", 32);
         graph.bindInputPort("clk", clk);
         graph.bindInputPort("data", data);
         graph.bindOutputPort("data_out", data);
+        graph.bindOutputPort("file_error", fileError);
 
         ValueId one = addConstant(graph, "const_one_sys", "one_sys", 1, "1'b1");
-        ValueId handle = addConstant(graph, "const_file_handle", "file_handle", 32, "32'd10");
         ValueId fmtInit = addConstant(graph, "const_fmt_init", "fmt_init", 0, "\"init-once\"", ValueType::String);
         ValueId fmtInitEdge = addConstant(graph, "const_fmt_init_edge", "fmt_init_edge", 0,
                                           "\"init-edge=%0d\"", ValueType::String);
@@ -1116,6 +1118,32 @@ namespace
         ValueId realArg = addConstant(graph, "const_real_arg", "real_arg", 0, "3.25", ValueType::Real);
         ValueId dumpfileName = addConstant(graph, "const_dumpfile_name", "dumpfile_name", 0, "\"waves.out\"",
                                            ValueType::String);
+        ValueId fopenPath = addConstant(graph,
+                                        "const_fopen_path",
+                                        "fopen_path",
+                                        0,
+                                        "\"" + std::string(filePath) + "\"",
+                                        ValueType::String);
+        ValueId fopenMode = addConstant(graph, "const_fopen_mode", "fopen_mode", 0, "\"w\"", ValueType::String);
+
+        OperationId fopenOp = graph.createOperation(OperationKind::kSystemFunction,
+                                                    graph.internSymbol("fopen_op"));
+        graph.addOperand(fopenOp, fopenPath);
+        graph.addOperand(fopenOp, fopenMode);
+        graph.addResult(fopenOp, handle);
+        graph.setAttr(fopenOp, "name", std::string("fopen"));
+        graph.setAttr(fopenOp, "hasSideEffects", true);
+        graph.setAttr(fopenOp, "procKind", std::string("initial"));
+        graph.setAttr(fopenOp, "hasTiming", false);
+
+        OperationId ferrorOp = graph.createOperation(OperationKind::kSystemFunction,
+                                                     graph.internSymbol("ferror_op"));
+        graph.addOperand(ferrorOp, handle);
+        graph.addResult(ferrorOp, fileError);
+        graph.setAttr(ferrorOp, "name", std::string("ferror"));
+        graph.setAttr(ferrorOp, "hasSideEffects", true);
+        graph.setAttr(ferrorOp, "procKind", std::string("always_comb"));
+        graph.setAttr(ferrorOp, "hasTiming", false);
 
         auto addTask = [&](std::string_view symbolName,
                            std::string_view taskName,
@@ -1417,17 +1445,19 @@ int main()
         }
 
         const std::filesystem::path headerPath = outDir / "grhsim_top.hpp";
+        const std::filesystem::path runtimePath = outDir / "grhsim_top_runtime.hpp";
         const std::filesystem::path statePath = outDir / "grhsim_top_state.cpp";
         const std::filesystem::path evalPath = outDir / "grhsim_top_eval.cpp";
         const std::filesystem::path makefilePath = outDir / "Makefile";
         const std::vector<std::filesystem::path> schedFiles = collectSchedFiles(outDir, "grhsim_top_sched_");
-        if (!std::filesystem::exists(headerPath) || !std::filesystem::exists(statePath) || !std::filesystem::exists(evalPath) ||
-            !std::filesystem::exists(makefilePath) || schedFiles.size() < 2)
+        if (!std::filesystem::exists(headerPath) || !std::filesystem::exists(runtimePath) || !std::filesystem::exists(statePath) ||
+            !std::filesystem::exists(evalPath) || !std::filesystem::exists(makefilePath) || schedFiles.size() < 2)
         {
             return fail("Expected generated grhsim split schedule artifacts to exist");
         }
 
         const std::string header = readFile(headerPath);
+        const std::string runtime = readFile(runtimePath);
         const std::string state = readFile(statePath);
         const std::string eval = readFile(evalPath);
         const std::string makefile = readFile(makefilePath);
@@ -1449,13 +1479,13 @@ int main()
     {
         return fail("Missing split batch declarations");
     }
-    if (header.find("void set_clk(bool value);") == std::string::npos)
+    if (header.find("bool clk = false;") == std::string::npos)
     {
-        return fail("Missing input setter declaration");
+        return fail("Missing public input field declaration");
     }
-    if (header.find("void set_pad_in(std::uint8_t value);") == std::string::npos)
+    if (header.find("struct Inout_pad {") == std::string::npos || header.find("} pad;") == std::string::npos)
     {
-        return fail("Missing inout input setter declaration");
+        return fail("Missing public inout field declaration");
     }
     if (header.find("void init();") == std::string::npos)
     {
@@ -1465,14 +1495,18 @@ int main()
     {
         return fail("Missing random seed setter declaration");
     }
-    if (header.find("std::uint8_t get_y() const;") == std::string::npos)
+    if (runtime.find("inline std::uint64_t grhsim_mask") == std::string::npos)
     {
-        return fail("Missing output getter declaration");
+        return fail("Missing runtime helper header");
     }
-    if (header.find("std::uint8_t get_pad_out() const;") == std::string::npos ||
-        header.find("bool get_pad_oe() const;") == std::string::npos)
+    if (header.find("std::uint8_t y = ") == std::string::npos)
     {
-        return fail("Missing inout output getter declarations");
+        return fail("Missing public output field declaration");
+    }
+    if (header.find("std::uint8_t out = ") == std::string::npos ||
+        header.find("bool oe = false;") == std::string::npos)
+    {
+        return fail("Missing public inout output field declarations");
     }
     if (header.find("std::array<std::uint64_t, 3> out_wide_y") == std::string::npos)
     {
@@ -1543,8 +1577,7 @@ int main()
     {
         return fail("Missing embedded memory init data emission");
     }
-    if (state.find("random_seed_ = seed;") == std::string::npos ||
-        state.find("random_state_ = random_seed_") == std::string::npos)
+    if (state.find("random_state_ = random_seed_") == std::string::npos)
     {
         return fail("Missing random seed plumbing in state init");
     }
@@ -1848,168 +1881,168 @@ int main()
         harness << "    const std::array<std::uint64_t, 3> rand_wide_expected_b = random_words<3>(random_state_b, 130);\n";
         harness << "    sim.set_random_seed(seed_a);\n";
         harness << "    sim.init();\n";
-        harness << "    sim.set_en(true);\n";
-        harness << "    sim.set_a(static_cast<std::uint8_t>(3));\n";
-        harness << "    sim.set_comb(static_cast<std::uint8_t>(0xB6));\n";
-        harness << "    sim.set_b(static_cast<std::uint8_t>(3));\n";
-        harness << "    sim.set_sh(static_cast<std::uint8_t>(2));\n";
-        harness << "    sim.set_rep2(static_cast<std::uint8_t>(2));\n";
-        harness << "    sim.set_sa(static_cast<std::uint8_t>(0xF0));\n";
-        harness << "    sim.set_ss4(static_cast<std::uint8_t>(0xE));\n";
-        harness << "    sim.set_mid_in(mid_value);\n";
-        harness << "    sim.set_wide_in(wide_value_a);\n";
-        harness << "    sim.set_wide_mask_dyn(wide_mask_dyn);\n";
-        harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
-        harness << "    sim.set_wide_signed_in(wide_signed_value);\n";
-        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(7));\n";
-        harness << "    sim.set_clk(false);\n";
+        harness << "    sim.en = true;\n";
+        harness << "    sim.a = static_cast<std::uint8_t>(3);\n";
+        harness << "    sim.comb = static_cast<std::uint8_t>(0xB6);\n";
+        harness << "    sim.b = static_cast<std::uint8_t>(3);\n";
+        harness << "    sim.sh = static_cast<std::uint8_t>(2);\n";
+        harness << "    sim.rep2 = static_cast<std::uint8_t>(2);\n";
+        harness << "    sim.sa = static_cast<std::uint8_t>(0xF0);\n";
+        harness << "    sim.ss4 = static_cast<std::uint8_t>(0xE);\n";
+        harness << "    sim.mid_in = mid_value;\n";
+        harness << "    sim.wide_in = wide_value_a;\n";
+        harness << "    sim.wide_mask_dyn = wide_mask_dyn;\n";
+        harness << "    sim.wide_addr = static_cast<std::uint8_t>(1);\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_row2;\n";
+        harness << "    sim.wide_signed_in = wide_signed_value;\n";
+        harness << "    sim.pad.in = static_cast<std::uint8_t>(7);\n";
+        harness << "    sim.clk = false;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 1;\n";
-        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(10)) return 95;\n";
-        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0xB5)) return 96;\n";
-        harness << "    if (!sim.get_pad_oe()) return 97;\n";
-        harness << "    if (sim.get_rand_y() != rand_expected_a) return 7;\n";
-        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 8;\n";
-        harness << "    if (sim.get_mul_y() != static_cast<std::uint8_t>(34)) return 11;\n";
-        harness << "    if (sim.get_div_y() != static_cast<std::uint8_t>(60)) return 12;\n";
-        harness << "    if (sim.get_mod_y() != static_cast<std::uint8_t>(2)) return 13;\n";
-        harness << "    if (sim.get_shl_y() != static_cast<std::uint8_t>(0xD8)) return 14;\n";
-        harness << "    if (sim.get_lshr_y() != static_cast<std::uint8_t>(0x2D)) return 15;\n";
-        harness << "    if (sim.get_ashr_y() != static_cast<std::uint8_t>(0xFC)) return 16;\n";
-        harness << "    if (!sim.get_red_or_y()) return 17;\n";
-        harness << "    if (!sim.get_red_xor_y()) return 18;\n";
-        harness << "    if (sim.get_slice_y() != static_cast<std::uint8_t>(5)) return 19;\n";
-        harness << "    if (sim.get_rep_y() != static_cast<std::uint8_t>(0xAA)) return 20;\n";
-        harness << "    if (sim.get_case_eq_y()) return 70;\n";
-        harness << "    if (!sim.get_case_ne_y()) return 71;\n";
-        harness << "    if (!sim.get_wildcard_eq_y()) return 72;\n";
-        harness << "    if (!sim.get_wildcard_ne_y()) return 73;\n";
-        harness << "    if (sim.get_slice_array_y() != static_cast<std::uint8_t>(0xB6)) return 74;\n";
-        harness << "    if (sim.get_clog2_y() != static_cast<std::uint32_t>(8)) return 75;\n";
-        harness << "    if (sim.get_signed_assign_y() != static_cast<std::uint8_t>(0xFE)) return 76;\n";
-        harness << "    if (sim.get_signed_add_y() != static_cast<std::uint8_t>(0xEE)) return 77;\n";
-        harness << "    if (sim.get_mixed_add_y() != static_cast<std::uint8_t>(1)) return 78;\n";
-        harness << "    if (sim.get_signed_div_y() != static_cast<std::uint8_t>(0xFF)) return 79;\n";
-        harness << "    if (sim.get_signed_mod_y() != static_cast<std::uint8_t>(0xFE)) return 80;\n";
-        harness << "    if (!sim.get_signed_lt_y()) return 81;\n";
-        harness << "    if (sim.get_mixed_lt_y()) return 82;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 21;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 22;\n";
-        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_zero)) return 89;\n";
-        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x33)) return 87;\n";
-        harness << "    if (!same_words(sim.get_wide_add_y(), add_one(wide_value_a, 130))) return 31;\n";
-        harness << "    if (!same_words(sim.get_wide_sub_y(), sub_one(wide_value_a, 130))) return 32;\n";
-        harness << "    if (!same_words(sim.get_wide_mul_y(), shl_words(wide_value_a, 1, 132))) return 33;\n";
-        harness << "    if (!same_words(sim.get_wide_div_y(), lshr_words(wide_value_a, 1, 130))) return 34;\n";
-        harness << "    if (!same_words(sim.get_wide_mod_y(), wide_one)) return 35;\n";
-        harness << "    if (!same_words(sim.get_wide_mul_pow_y(), shl_words(wide_value_a, 65, 130))) return 58;\n";
-        harness << "    if (!same_words(sim.get_wide_div_pow_y(), lshr_words(wide_value_a, 65, 130))) return 59;\n";
-        harness << "    if (!same_words(sim.get_wide_mod_pow_y(), slice_words<3>(wide_value_a, 0, 65))) return 60;\n";
-        harness << "    if (!same_words(sim.get_wide_div_general_y(), wide_div_general_expected)) return 68;\n";
-        harness << "    if (!same_words(sim.get_wide_mod_general_y(), wide_mod_general_expected)) return 69;\n";
-        harness << "    if (!same_words(sim.get_mid_mul_y(), mid_mul_expected)) return 61;\n";
-        harness << "    if (!same_words(sim.get_mid_div_y(), mid_div_expected)) return 62;\n";
-        harness << "    if (!same_words(sim.get_mid_mod_y(), mid_mod_expected)) return 63;\n";
-        harness << "    if (!same_words(sim.get_mid_add_y(), mid_add_expected)) return 64;\n";
-        harness << "    if (!same_words(sim.get_mid_sub_y(), mid_sub_expected)) return 65;\n";
-        harness << "    if (sim.get_mid_eq_y()) return 66;\n";
-        harness << "    if (sim.get_mid_lt_y()) return 67;\n";
-        harness << "    if (!same_words(sim.get_wide_and_y(), wide_value_a)) return 36;\n";
-        harness << "    if (!same_words(sim.get_wide_or_y(), wide_value_a)) return 37;\n";
-        harness << "    if (!same_words(sim.get_wide_xor_y(), wide_value_a)) return 38;\n";
-        harness << "    if (!same_words(sim.get_wide_xnor_y(), wide_value_a)) return 39;\n";
-        harness << "    if (!same_words(sim.get_wide_not_y(), not_words(wide_value_a, 130))) return 40;\n";
-        harness << "    if (!sim.get_wide_eq_y()) return 41;\n";
-        harness << "    if (!sim.get_wide_lt_y()) return 42;\n";
-        harness << "    if (!sim.get_wide_logic_and_y()) return 43;\n";
-        harness << "    if (!sim.get_wide_reduce_or_y()) return 44;\n";
-        harness << "    if (!same_words(sim.get_wide_shl_y(), shl_words(wide_value_a, 1, 130))) return 45;\n";
-        harness << "    if (!same_words(sim.get_wide_lshr_y(), lshr_words(wide_value_a, 1, 130))) return 46;\n";
-        harness << "    if (!same_words(sim.get_wide_ashr_y(), not_words(wide_zero, 130))) return 47;\n";
-        harness << "    if (!same_words(sim.get_wide_mux_y(), wide_value_a)) return 48;\n";
-        harness << "    if (!same_words(sim.get_wide_concat_y(), concat_words<3>(two_bit_one, 2, wide_value_a, 130))) return 49;\n";
-        harness << "    if (!same_words(sim.get_wide_rep_y(), replicate_words<5>(wide_value_a, 130, 2))) return 50;\n";
-        harness << "    if (!same_words(sim.get_wide_slice_static_y(), slice_words<2>(wide_value_a, 5, 65))) return 51;\n";
-        harness << "    if (!same_words(sim.get_wide_slice_dyn_y(), slice_words<2>(wide_value_a, 1, 65))) return 52;\n";
-        harness << "    if (!same_words(sim.get_wide_signed_assign_y(), wide_signed_assign_expected)) return 83;\n";
-        harness << "    if (!same_words(sim.get_wide_signed_div_y(), wide_signed_div_expected)) return 84;\n";
-        harness << "    if (!sim.get_wide_signed_lt_y()) return 85;\n";
-        harness << "    if (sim.get_wide_mixed_lt_y()) return 86;\n";
-        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(0x10));\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(5)) return 1;\n";
+        harness << "    if (sim.pad_seen_y != static_cast<std::uint8_t>(10)) return 95;\n";
+        harness << "    if (sim.pad.out != static_cast<std::uint8_t>(0xB5)) return 96;\n";
+        harness << "    if (!sim.pad.oe) return 97;\n";
+        harness << "    if (sim.rand_y != rand_expected_a) return 7;\n";
+        harness << "    if (!same_words(sim.rand_wide_y, rand_wide_expected_a)) return 8;\n";
+        harness << "    if (sim.mul_y != static_cast<std::uint8_t>(34)) return 11;\n";
+        harness << "    if (sim.div_y != static_cast<std::uint8_t>(60)) return 12;\n";
+        harness << "    if (sim.mod_y != static_cast<std::uint8_t>(2)) return 13;\n";
+        harness << "    if (sim.shl_y != static_cast<std::uint8_t>(0xD8)) return 14;\n";
+        harness << "    if (sim.lshr_y != static_cast<std::uint8_t>(0x2D)) return 15;\n";
+        harness << "    if (sim.ashr_y != static_cast<std::uint8_t>(0xFC)) return 16;\n";
+        harness << "    if (!sim.red_or_y) return 17;\n";
+        harness << "    if (!sim.red_xor_y) return 18;\n";
+        harness << "    if (sim.slice_y != static_cast<std::uint8_t>(5)) return 19;\n";
+        harness << "    if (sim.rep_y != static_cast<std::uint8_t>(0xAA)) return 20;\n";
+        harness << "    if (sim.case_eq_y) return 70;\n";
+        harness << "    if (!sim.case_ne_y) return 71;\n";
+        harness << "    if (!sim.wildcard_eq_y) return 72;\n";
+        harness << "    if (!sim.wildcard_ne_y) return 73;\n";
+        harness << "    if (sim.slice_array_y != static_cast<std::uint8_t>(0xB6)) return 74;\n";
+        harness << "    if (sim.clog2_y != static_cast<std::uint32_t>(8)) return 75;\n";
+        harness << "    if (sim.signed_assign_y != static_cast<std::uint8_t>(0xFE)) return 76;\n";
+        harness << "    if (sim.signed_add_y != static_cast<std::uint8_t>(0xEE)) return 77;\n";
+        harness << "    if (sim.mixed_add_y != static_cast<std::uint8_t>(1)) return 78;\n";
+        harness << "    if (sim.signed_div_y != static_cast<std::uint8_t>(0xFF)) return 79;\n";
+        harness << "    if (sim.signed_mod_y != static_cast<std::uint8_t>(0xFE)) return 80;\n";
+        harness << "    if (!sim.signed_lt_y) return 81;\n";
+        harness << "    if (sim.mixed_lt_y) return 82;\n";
+        harness << "    if (!same_words(sim.wide_y, wide_two)) return 21;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_mem_init)) return 22;\n";
+        harness << "    if (!same_words(sim.wide_masked_mem_y, wide_zero)) return 89;\n";
+        harness << "    if (sim.idx_mem_y != static_cast<std::uint8_t>(0x33)) return 87;\n";
+        harness << "    if (!same_words(sim.wide_add_y, add_one(wide_value_a, 130))) return 31;\n";
+        harness << "    if (!same_words(sim.wide_sub_y, sub_one(wide_value_a, 130))) return 32;\n";
+        harness << "    if (!same_words(sim.wide_mul_y, shl_words(wide_value_a, 1, 132))) return 33;\n";
+        harness << "    if (!same_words(sim.wide_div_y, lshr_words(wide_value_a, 1, 130))) return 34;\n";
+        harness << "    if (!same_words(sim.wide_mod_y, wide_one)) return 35;\n";
+        harness << "    if (!same_words(sim.wide_mul_pow_y, shl_words(wide_value_a, 65, 130))) return 58;\n";
+        harness << "    if (!same_words(sim.wide_div_pow_y, lshr_words(wide_value_a, 65, 130))) return 59;\n";
+        harness << "    if (!same_words(sim.wide_mod_pow_y, slice_words<3>(wide_value_a, 0, 65))) return 60;\n";
+        harness << "    if (!same_words(sim.wide_div_general_y, wide_div_general_expected)) return 68;\n";
+        harness << "    if (!same_words(sim.wide_mod_general_y, wide_mod_general_expected)) return 69;\n";
+        harness << "    if (!same_words(sim.mid_mul_y, mid_mul_expected)) return 61;\n";
+        harness << "    if (!same_words(sim.mid_div_y, mid_div_expected)) return 62;\n";
+        harness << "    if (!same_words(sim.mid_mod_y, mid_mod_expected)) return 63;\n";
+        harness << "    if (!same_words(sim.mid_add_y, mid_add_expected)) return 64;\n";
+        harness << "    if (!same_words(sim.mid_sub_y, mid_sub_expected)) return 65;\n";
+        harness << "    if (sim.mid_eq_y) return 66;\n";
+        harness << "    if (sim.mid_lt_y) return 67;\n";
+        harness << "    if (!same_words(sim.wide_and_y, wide_value_a)) return 36;\n";
+        harness << "    if (!same_words(sim.wide_or_y, wide_value_a)) return 37;\n";
+        harness << "    if (!same_words(sim.wide_xor_y, wide_value_a)) return 38;\n";
+        harness << "    if (!same_words(sim.wide_xnor_y, wide_value_a)) return 39;\n";
+        harness << "    if (!same_words(sim.wide_not_y, not_words(wide_value_a, 130))) return 40;\n";
+        harness << "    if (!sim.wide_eq_y) return 41;\n";
+        harness << "    if (!sim.wide_lt_y) return 42;\n";
+        harness << "    if (!sim.wide_logic_and_y) return 43;\n";
+        harness << "    if (!sim.wide_reduce_or_y) return 44;\n";
+        harness << "    if (!same_words(sim.wide_shl_y, shl_words(wide_value_a, 1, 130))) return 45;\n";
+        harness << "    if (!same_words(sim.wide_lshr_y, lshr_words(wide_value_a, 1, 130))) return 46;\n";
+        harness << "    if (!same_words(sim.wide_ashr_y, not_words(wide_zero, 130))) return 47;\n";
+        harness << "    if (!same_words(sim.wide_mux_y, wide_value_a)) return 48;\n";
+        harness << "    if (!same_words(sim.wide_concat_y, concat_words<3>(two_bit_one, 2, wide_value_a, 130))) return 49;\n";
+        harness << "    if (!same_words(sim.wide_rep_y, replicate_words<5>(wide_value_a, 130, 2))) return 50;\n";
+        harness << "    if (!same_words(sim.wide_slice_static_y, slice_words<2>(wide_value_a, 5, 65))) return 51;\n";
+        harness << "    if (!same_words(sim.wide_slice_dyn_y, slice_words<2>(wide_value_a, 1, 65))) return 52;\n";
+        harness << "    if (!same_words(sim.wide_signed_assign_y, wide_signed_assign_expected)) return 83;\n";
+        harness << "    if (!same_words(sim.wide_signed_div_y, wide_signed_div_expected)) return 84;\n";
+        harness << "    if (!sim.wide_signed_lt_y) return 85;\n";
+        harness << "    if (sim.wide_mixed_lt_y) return 86;\n";
+        harness << "    sim.pad.in = static_cast<std::uint8_t>(0x10);\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(0x13)) return 98;\n";
-        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0xB5)) return 99;\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_oor);\n";
+        harness << "    if (sim.pad_seen_y != static_cast<std::uint8_t>(0x13)) return 98;\n";
+        harness << "    if (sim.pad.out != static_cast<std::uint8_t>(0xB5)) return 99;\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_oor;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x00)) return 88;\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
-        harness << "    sim.set_clk(true);\n";
+        harness << "    if (sim.idx_mem_y != static_cast<std::uint8_t>(0x00)) return 88;\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_row2;\n";
+        harness << "    sim.clk = true;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 2;\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(5)) return 2;\n";
         harness << "    if (g_last_trace != static_cast<std::uint8_t>(5)) return 3;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 23;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 24;\n";
-        harness << "    sim.set_clk(false);\n";
+        harness << "    if (!same_words(sim.wide_y, wide_two)) return 23;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_mem_init)) return 24;\n";
+        harness << "    sim.clk = false;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 4;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 25;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 26;\n";
-        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_masked_expected)) return 90;\n";
-        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x44)) return 91;\n";
-        harness << "    sim.set_clk(true);\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(8)) return 4;\n";
+        harness << "    if (!same_words(sim.wide_y, wide_value_a)) return 25;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_value_a)) return 26;\n";
+        harness << "    if (!same_words(sim.wide_masked_mem_y, wide_masked_expected)) return 90;\n";
+        harness << "    if (sim.idx_mem_y != static_cast<std::uint8_t>(0x44)) return 91;\n";
+        harness << "    sim.clk = true;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(8)) return 5;\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(8)) return 5;\n";
         harness << "    if (g_last_trace != static_cast<std::uint8_t>(8)) return 6;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_value_a)) return 27;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_value_a)) return 28;\n";
-        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_masked_expected)) return 92;\n";
-        harness << "    if (sim.get_rand_y() != rand_expected_a) return 29;\n";
-        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 30;\n";
-        harness << "    sim.set_clk(false);\n";
+        harness << "    if (!same_words(sim.wide_y, wide_value_a)) return 27;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_value_a)) return 28;\n";
+        harness << "    if (!same_words(sim.wide_masked_mem_y, wide_masked_expected)) return 92;\n";
+        harness << "    if (sim.rand_y != rand_expected_a) return 29;\n";
+        harness << "    if (!same_words(sim.rand_wide_y, rand_wide_expected_a)) return 30;\n";
+        harness << "    sim.clk = false;\n";
         harness << "    sim.eval();\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_oor);\n";
-        harness << "    sim.set_clk(true);\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_oor;\n";
+        harness << "    sim.clk = true;\n";
         harness << "    sim.eval();\n";
-        harness << "    sim.set_clk(false);\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
+        harness << "    sim.clk = false;\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_row2;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x44)) return 93;\n";
+        harness << "    if (sim.idx_mem_y != static_cast<std::uint8_t>(0x44)) return 93;\n";
         harness << "    sim.set_random_seed(seed_b);\n";
         harness << "    sim.init();\n";
-        harness << "    sim.set_en(true);\n";
-        harness << "    sim.set_a(static_cast<std::uint8_t>(3));\n";
-        harness << "    sim.set_comb(static_cast<std::uint8_t>(0xB6));\n";
-        harness << "    sim.set_b(static_cast<std::uint8_t>(3));\n";
-        harness << "    sim.set_sh(static_cast<std::uint8_t>(2));\n";
-        harness << "    sim.set_rep2(static_cast<std::uint8_t>(2));\n";
-        harness << "    sim.set_sa(static_cast<std::uint8_t>(0xF0));\n";
-        harness << "    sim.set_ss4(static_cast<std::uint8_t>(0xE));\n";
-        harness << "    sim.set_mid_in(mid_value);\n";
-        harness << "    sim.set_wide_in(wide_value_a);\n";
-        harness << "    sim.set_wide_mask_dyn(wide_mask_dyn);\n";
-        harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
-        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
-        harness << "    sim.set_wide_signed_in(wide_signed_value);\n";
-        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(7));\n";
-        harness << "    sim.set_clk(false);\n";
+        harness << "    sim.en = true;\n";
+        harness << "    sim.a = static_cast<std::uint8_t>(3);\n";
+        harness << "    sim.comb = static_cast<std::uint8_t>(0xB6);\n";
+        harness << "    sim.b = static_cast<std::uint8_t>(3);\n";
+        harness << "    sim.sh = static_cast<std::uint8_t>(2);\n";
+        harness << "    sim.rep2 = static_cast<std::uint8_t>(2);\n";
+        harness << "    sim.sa = static_cast<std::uint8_t>(0xF0);\n";
+        harness << "    sim.ss4 = static_cast<std::uint8_t>(0xE);\n";
+        harness << "    sim.mid_in = mid_value;\n";
+        harness << "    sim.wide_in = wide_value_a;\n";
+        harness << "    sim.wide_mask_dyn = wide_mask_dyn;\n";
+        harness << "    sim.wide_addr = static_cast<std::uint8_t>(1);\n";
+        harness << "    sim.wide_mem_idx = wide_mem_idx_row2;\n";
+        harness << "    sim.wide_signed_in = wide_signed_value;\n";
+        harness << "    sim.pad.in = static_cast<std::uint8_t>(7);\n";
+        harness << "    sim.clk = false;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 53;\n";
-        harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 54;\n";
-        harness << "    if (!same_words(sim.get_wide_mem_y(), wide_mem_init)) return 55;\n";
-        harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_zero)) return 94;\n";
-        harness << "    if (sim.get_rand_y() != rand_expected_b) return 56;\n";
-        harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_b)) return 57;\n";
-        harness << "    sim.set_en(true);\n";
-        harness << "    sim.set_a(static_cast<std::uint8_t>(9));\n";
-        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(4));\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(5)) return 53;\n";
+        harness << "    if (!same_words(sim.wide_y, wide_two)) return 54;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_mem_init)) return 55;\n";
+        harness << "    if (!same_words(sim.wide_masked_mem_y, wide_zero)) return 94;\n";
+        harness << "    if (sim.rand_y != rand_expected_b) return 56;\n";
+        harness << "    if (!same_words(sim.rand_wide_y, rand_wide_expected_b)) return 57;\n";
+        harness << "    sim.en = true;\n";
+        harness << "    sim.a = static_cast<std::uint8_t>(9);\n";
+        harness << "    sim.pad.in = static_cast<std::uint8_t>(4);\n";
         harness << "    sim.init();\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(2)) return 100;\n";
-        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(0)) return 101;\n";
-        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0)) return 102;\n";
-        harness << "    if (sim.get_pad_oe()) return 103;\n";
-        harness << "    if (sim.get_rand_y() != rand_expected_b) return 104;\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(2)) return 100;\n";
+        harness << "    if (sim.pad_seen_y != static_cast<std::uint8_t>(0)) return 101;\n";
+        harness << "    if (sim.pad.out != static_cast<std::uint8_t>(0)) return 102;\n";
+        harness << "    if (sim.pad.oe) return 103;\n";
+        harness << "    if (sim.rand_y != rand_expected_b) return 104;\n";
         harness << "    return 0;\n";
         harness << "}\n";
     }
@@ -2080,39 +2113,39 @@ int main()
             harness << "{\n";
             harness << "    GrhSIM_top sim;\n";
             harness << "    sim.init();\n";
-            harness << "    sim.set_clk(false);\n";
-            harness << "    sim.set_rst_n(true);\n";
-            harness << "    sim.set_seq_d(static_cast<std::uint8_t>(0x12));\n";
-            harness << "    sim.set_rst_value(static_cast<std::uint8_t>(0x34));\n";
-            harness << "    sim.set_write_a(static_cast<std::uint8_t>(0x55));\n";
-            harness << "    sim.set_write_b(static_cast<std::uint8_t>(0xAA));\n";
-            harness << "    sim.set_fire_a(false);\n";
-            harness << "    sim.set_fire_b(false);\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.rst_n = true;\n";
+            harness << "    sim.seq_d = static_cast<std::uint8_t>(0x12);\n";
+            harness << "    sim.rst_value = static_cast<std::uint8_t>(0x34);\n";
+            harness << "    sim.write_a = static_cast<std::uint8_t>(0x55);\n";
+            harness << "    sim.write_b = static_cast<std::uint8_t>(0xAA);\n";
+            harness << "    sim.fire_a = false;\n";
+            harness << "    sim.fire_b = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x00)) return 1;\n";
+            harness << "    if (sim.seq_q != static_cast<std::uint8_t>(0x00)) return 1;\n";
             harness << "    if (sim.had_register_write_conflict()) return 2;\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
             harness << "    if (sim.had_register_write_conflict()) return 3;\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x12)) return 4;\n";
-            harness << "    sim.set_rst_n(false);\n";
+            harness << "    if (sim.seq_q != static_cast<std::uint8_t>(0x12)) return 4;\n";
+            harness << "    sim.rst_n = false;\n";
             harness << "    sim.eval();\n";
             harness << "    if (sim.had_register_write_conflict()) return 5;\n";
-            harness << "    sim.set_rst_n(true);\n";
+            harness << "    sim.rst_n = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_seq_q() != static_cast<std::uint8_t>(0x34)) return 6;\n";
-            harness << "    sim.set_fire_a(true);\n";
-            harness << "    sim.set_fire_b(true);\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (sim.seq_q != static_cast<std::uint8_t>(0x34)) return 6;\n";
+            harness << "    sim.fire_a = true;\n";
+            harness << "    sim.fire_b = true;\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
             harness << "    if (!sim.had_register_write_conflict()) return 7;\n";
-            harness << "    sim.set_fire_a(false);\n";
-            harness << "    sim.set_fire_b(false);\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.fire_a = false;\n";
+            harness << "    sim.fire_b = false;\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    const std::uint8_t conflict_q = sim.get_conflict_q();\n";
+            harness << "    const std::uint8_t conflict_q = sim.conflict_q;\n";
             harness << "    if (conflict_q != static_cast<std::uint8_t>(0x55) && conflict_q != static_cast<std::uint8_t>(0xAA)) return 8;\n";
             harness << "    if (sim.had_register_write_conflict()) return 9;\n";
             harness << "    return 0;\n";
@@ -2204,61 +2237,61 @@ int main()
             harness << "    const std::array<std::uint64_t, 3> gate_zero{};\n";
             harness << "    GrhSIM_top sim;\n";
             harness << "    sim.init();\n";
-            harness << "    sim.set_clk(false);\n";
-            harness << "    sim.set_aux_clk(false);\n";
-            harness << "    sim.set_data(static_cast<std::uint8_t>(0x5A));\n";
-            harness << "    sim.set_gate_in(gate_magic);\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.aux_clk = false;\n";
+            harness << "    sim.data = static_cast<std::uint8_t>(0x5A);\n";
+            harness << "    sim.gate_in = gate_magic;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gate_match()) return 1;\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 2;\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 13;\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (sim.gate_match) return 1;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 2;\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 13;\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gate_match()) return 3;\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 4;\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 14;\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    if (sim.gate_match) return 3;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 4;\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 14;\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (!sim.get_gate_match()) return 5;\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 6;\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 15;\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (!sim.gate_match) return 5;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 6;\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 15;\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (!sim.get_gate_match()) return 7;\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 8;\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 16;\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    if (!sim.gate_match) return 7;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 8;\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 16;\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x5A)) return 9;\n";
-            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x5A)) return 9;\n";
+            harness << "    sim.aux_clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.aux_clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 17;\n";
-            harness << "    sim.set_gate_in(gate_zero);\n";
-            harness << "    sim.set_data(static_cast<std::uint8_t>(0xA5));\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x5A)) return 17;\n";
+            harness << "    sim.gate_in = gate_zero;\n";
+            harness << "    sim.data = static_cast<std::uint8_t>(0xA5);\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0xA5)) return 10;\n";
-            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0xA5)) return 10;\n";
+            harness << "    sim.aux_clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.aux_clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 18;\n";
-            harness << "    if (sim.get_gate_match()) return 11;\n";
-            harness << "    sim.set_data(static_cast<std::uint8_t>(0x3C));\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x5A)) return 18;\n";
+            harness << "    if (sim.gate_match) return 11;\n";
+            harness << "    sim.data = static_cast<std::uint8_t>(0x3C);\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0xA5)) return 12;\n";
-            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0xA5)) return 12;\n";
+            harness << "    sim.aux_clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.aux_clk = false;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 19;\n";
+            harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x5A)) return 19;\n";
             harness << "    return 0;\n";
             harness << "}\n";
         }
@@ -2283,7 +2316,8 @@ int main()
 
         const std::filesystem::path systemTaskDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_systemtask";
         std::filesystem::remove_all(systemTaskDir);
-        Design systemTaskDesign = buildSystemTaskDesign();
+        const std::filesystem::path systemTaskFilePath = systemTaskDir / "system_task_output.log";
+        Design systemTaskDesign = buildSystemTaskDesign(systemTaskFilePath.string());
         EmitDiagnostics systemTaskDiag;
         EmitResult systemTaskResult;
         if (!emitWithActivitySchedule(systemTaskDesign, systemTaskDir, systemTaskDiag, systemTaskResult))
@@ -2305,7 +2339,6 @@ int main()
             return fail("system-task artifacts missing");
         }
         const std::filesystem::path systemTaskHarnessPath = systemTaskDir / "grhsim_top_harness.cpp";
-        const std::filesystem::path systemTaskFilePath = systemTaskDir / "system_task_output.log";
         {
             std::ofstream harness(systemTaskHarnessPath);
             if (!harness.is_open())
@@ -2314,24 +2347,22 @@ int main()
             }
             harness << "#include \"grhsim_top.hpp\"\n";
             harness << "#include <cstdint>\n";
-            harness << "#include <filesystem>\n";
             harness << "#include <string>\n\n";
             harness << "int main()\n";
             harness << "{\n";
-            harness << "    const std::filesystem::path filePath = std::filesystem::path(\""
-                    << systemTaskFilePath.string() << "\");\n";
             harness << "    {\n";
             harness << "        GrhSIM_top sim;\n";
-            harness << "        if (!sim.bind_output_file(10, filePath.string())) return 1;\n";
             harness << "        sim.init();\n";
-            harness << "        sim.set_clk(false);\n";
-            harness << "        sim.set_data(static_cast<std::uint8_t>(42));\n";
+            harness << "        sim.clk = false;\n";
+            harness << "        sim.data = static_cast<std::uint8_t>(42);\n";
             harness << "        sim.eval();\n";
-            harness << "        if (sim.dumpfile_path() != std::string(\"waves.out\")) return 2;\n";
-            harness << "        if (!sim.dumpvars_enabled()) return 3;\n";
-            harness << "        sim.set_clk(true);\n";
+            harness << "        if (sim.dumpfile_path() != std::string(\"waves.out\")) return 1;\n";
+            harness << "        if (!sim.dumpvars_enabled()) return 2;\n";
+            harness << "        if (sim.file_error != static_cast<std::uint32_t>(0)) return 3;\n";
+            harness << "        sim.clk = true;\n";
             harness << "        sim.eval();\n";
-            harness << "        if (sim.get_data_out() != static_cast<std::uint8_t>(42)) return 4;\n";
+            harness << "        if (sim.data_out != static_cast<std::uint8_t>(42)) return 4;\n";
+            harness << "        if (sim.file_error != static_cast<std::uint32_t>(0)) return 5;\n";
             harness << "    }\n";
             harness << "    return 0;\n";
             harness << "}\n";
@@ -2442,7 +2473,7 @@ int main()
                 harness << "{\n";
                 harness << "    GrhSIM_top sim;\n";
                 harness << "    sim.init();\n";
-                harness << "    sim.set_data(static_cast<std::uint8_t>(42));\n";
+                harness << "    sim.data = static_cast<std::uint8_t>(42);\n";
                 harness << "    sim.eval();\n";
                 harness << "    return 0;\n";
                 harness << "}\n";
@@ -2557,36 +2588,36 @@ int main()
             harness << "    wide_expected[2] ^= UINT64_C(0x1);\n";
             harness << "    GrhSIM_top sim;\n";
             harness << "    sim.init();\n";
-            harness << "    sim.set_clk(false);\n";
-            harness << "    sim.set_a(static_cast<std::uint8_t>(5));\n";
-            harness << "    sim.set_wide(wide_value);\n";
-            harness << "    sim.set_real_in(1.5);\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(5);\n";
+            harness << "    sim.wide = wide_value;\n";
+            harness << "    sim.real_in = 1.5;\n";
             harness << "    sim.eval();\n";
             harness << "    if (g_mix_calls != 0 || g_pack_calls != 0 || g_wide_calls != 0) return 1;\n";
-            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(0)) return 2;\n";
-            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(0)) return 3;\n";
-            harness << "    if (!sim.get_text_y().empty()) return 4;\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    if (sim.ret_y != static_cast<std::uint32_t>(0)) return 2;\n";
+            harness << "    if (sim.sum_y != static_cast<std::uint16_t>(0)) return 3;\n";
+            harness << "    if (!sim.text_y.empty()) return 4;\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
             harness << "    if (g_mix_calls != 1 || g_pack_calls != 1 || g_wide_calls != 1) return 5;\n";
-            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(44)) return 6;\n";
-            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(-88)) return 7;\n";
-            harness << "    if (sim.get_text_y() != std::string(\"tag:44\")) return 8;\n";
-            harness << "    if (sim.get_mirror_y() != static_cast<std::uint8_t>(0x5F)) return 9;\n";
-            harness << "    if (sim.get_wide_y() != wide_expected) return 10;\n";
-            harness << "    sim.set_clk(false);\n";
+            harness << "    if (sim.sum_y != static_cast<std::uint16_t>(44)) return 6;\n";
+            harness << "    if (sim.ret_y != static_cast<std::uint32_t>(-88)) return 7;\n";
+            harness << "    if (sim.text_y != std::string(\"tag:44\")) return 8;\n";
+            harness << "    if (sim.mirror_y != static_cast<std::uint8_t>(0x5F)) return 9;\n";
+            harness << "    if (sim.wide_y != wide_expected) return 10;\n";
+            harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
             harness << "    if (g_mix_calls != 1 || g_pack_calls != 1 || g_wide_calls != 1) return 11;\n";
-            harness << "    sim.set_a(static_cast<std::uint8_t>(0xF8));\n";
-            harness << "    sim.set_real_in(0.5);\n";
-            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(0xF8);\n";
+            harness << "    sim.real_in = 0.5;\n";
+            harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
             harness << "    if (g_mix_calls != 2 || g_pack_calls != 2 || g_wide_calls != 2) return 12;\n";
-            harness << "    if (sim.get_sum_y() != static_cast<std::uint16_t>(27)) return 13;\n";
-            harness << "    if (sim.get_ret_y() != static_cast<std::uint32_t>(-54)) return 14;\n";
-            harness << "    if (sim.get_text_y() != std::string(\"tag:27\")) return 15;\n";
-            harness << "    if (sim.get_mirror_y() != static_cast<std::uint8_t>(0xA2)) return 16;\n";
-            harness << "    if (sim.get_wide_y() != wide_expected) return 17;\n";
+            harness << "    if (sim.sum_y != static_cast<std::uint16_t>(27)) return 13;\n";
+            harness << "    if (sim.ret_y != static_cast<std::uint32_t>(-54)) return 14;\n";
+            harness << "    if (sim.text_y != std::string(\"tag:27\")) return 15;\n";
+            harness << "    if (sim.mirror_y != static_cast<std::uint8_t>(0xA2)) return 16;\n";
+            harness << "    if (sim.wide_y != wide_expected) return 17;\n";
             harness << "    return 0;\n";
             harness << "}\n";
         }

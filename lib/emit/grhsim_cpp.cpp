@@ -855,12 +855,10 @@ namespace wolvrix::lib::emit
             std::vector<std::string> stateFieldDecls;
             std::vector<std::string> writeFieldDecls;
             std::vector<std::string> dpiDecls;
-            std::vector<std::string> inputSetDecls;
-            std::vector<std::string> outputGetDecls;
-            std::vector<std::string> inputSetImpls;
-            std::vector<std::string> outputGetImpls;
+            std::vector<std::string> publicPortDecls;
             std::vector<std::string> inputFieldDecls;
             std::vector<std::string> outputFieldDecls;
+            bool needsSystemTaskRuntime = false;
         };
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept;
@@ -1127,6 +1125,13 @@ namespace wolvrix::lib::emit
         }
 
         bool systemTaskRunsOnlyOnInitialEval(const Operation &op)
+        {
+            const std::string procKind = getAttribute<std::string>(op, "procKind").value_or(std::string());
+            const bool hasTiming = getAttribute<bool>(op, "hasTiming").value_or(false);
+            return procKind == "initial" && !hasTiming;
+        }
+
+        bool systemFunctionRunsOnlyOnInitialEval(const Operation &op)
         {
             const std::string procKind = getAttribute<std::string>(op, "procKind").value_or(std::string());
             const bool hasTiming = getAttribute<bool>(op, "hasTiming").value_or(false);
@@ -1568,8 +1573,7 @@ namespace wolvrix::lib::emit
                 model.prevInputFieldByValue.emplace(valueId, "prev_" + fieldStem);
                 model.inputFieldDecls.push_back("    " + typeName + " " + fieldStem + " = " + defaultInitExpr(graph, valueId) + ";");
                 model.inputFieldDecls.push_back("    " + typeName + " prev_" + fieldStem + " = " + defaultInitExpr(graph, valueId) + ";");
-                model.inputSetDecls.push_back("    void set_" + apiStem + "(" + typeName + " value);");
-                model.inputSetImpls.push_back("void CLASS::set_" + apiStem + "(" + typeName + " value)\n{\n    " + fieldStem + " = value;\n}\n");
+                model.publicPortDecls.push_back("    " + typeName + " " + apiStem + " = " + defaultInitExpr(graph, valueId) + ";");
             };
 
             auto registerReadableEndpoint =
@@ -1577,8 +1581,7 @@ namespace wolvrix::lib::emit
                     const std::string typeName = cppTypeForValue(graph, valueId);
                     const std::string initExpr = initializeField ? defaultInitExpr(graph, valueId) : typeName + "{}";
                     model.outputFieldDecls.push_back("    " + typeName + " " + fieldStem + " = " + initExpr + ";");
-                    model.outputGetDecls.push_back("    [[nodiscard]] " + typeName + " get_" + apiStem + "() const;");
-                    model.outputGetImpls.push_back(typeName + " CLASS::get_" + apiStem + "() const\n{\n    return " + fieldStem + ";\n}\n");
+                    model.publicPortDecls.push_back("    " + typeName + " " + apiStem + " = " + initExpr + ";");
                 };
 
             for (const auto &port : graph.inputPorts())
@@ -1596,9 +1599,20 @@ namespace wolvrix::lib::emit
             for (const auto &port : graph.inoutPorts())
             {
                 const std::string name = sanitizeIdentifier(port.name);
-                registerInputEndpoint(port.in, "inout_" + name + "_in", name + "_in");
-                registerReadableEndpoint(port.out, "inout_" + name + "_out", name + "_out", true);
-                registerReadableEndpoint(port.oe, "inout_" + name + "_oe", name + "_oe", true);
+                const std::string inType = cppTypeForValue(graph, port.in);
+                const std::string outType = cppTypeForValue(graph, port.out);
+                const std::string oeType = cppTypeForValue(graph, port.oe);
+                model.inputFieldByValue.emplace(port.in, "inout_" + name + "_in");
+                model.prevInputFieldByValue.emplace(port.in, "prev_inout_" + name + "_in");
+                model.inputFieldDecls.push_back("    " + inType + " inout_" + name + "_in = " + defaultInitExpr(graph, port.in) + ";");
+                model.inputFieldDecls.push_back("    " + inType + " prev_inout_" + name + "_in = " + defaultInitExpr(graph, port.in) + ";");
+                model.outputFieldDecls.push_back("    " + outType + " inout_" + name + "_out = " + defaultInitExpr(graph, port.out) + ";");
+                model.outputFieldDecls.push_back("    " + oeType + " inout_" + name + "_oe = " + defaultInitExpr(graph, port.oe) + ";");
+                model.publicPortDecls.push_back("    struct Inout_" + name + " {\n"
+                                                "        " + inType + " in = " + defaultInitExpr(graph, port.in) + ";\n"
+                                                "        " + outType + " out = " + defaultInitExpr(graph, port.out) + ";\n"
+                                                "        " + oeType + " oe = " + defaultInitExpr(graph, port.oe) + ";\n"
+                                                "    } " + name + ";");
             }
 
             for (ValueId valueId : graph.values())
@@ -1729,9 +1743,19 @@ namespace wolvrix::lib::emit
                 const Operation op = graph.getOperation(opId);
                 if (op.kind() == OperationKind::kSystemTask)
                 {
+                    model.needsSystemTaskRuntime = true;
                     if (!validateSystemTask(graph, op, error))
                     {
                         return false;
+                    }
+                    continue;
+                }
+                if (op.kind() == OperationKind::kSystemFunction)
+                {
+                    const std::string name = getAttribute<std::string>(op, "name").value_or(std::string());
+                    if (name == "fopen" || name == "ferror")
+                    {
+                        model.needsSystemTaskRuntime = true;
                     }
                     continue;
                 }
@@ -3726,6 +3750,69 @@ namespace wolvrix::lib::emit
                             return emitError("unsupported kSystemFunction result type in grhsim-cpp emit",
                                              std::string(op.symbolText()));
                         }
+                        if (op.kind() == OperationKind::kSystemFunction)
+                        {
+                            const std::string name = getAttribute<std::string>(op, "name").value_or(std::string());
+                            if (name == "fopen")
+                            {
+                                if (isWideLogicValue(graph, resultValue))
+                                {
+                                    return emitError("unsupported wide kSystemFunction fopen result in grhsim-cpp emit",
+                                                     std::string(op.symbolText()));
+                                }
+                                if (operands.empty() || operands.size() > 2)
+                                {
+                                    return emitError("unsupported kSystemFunction fopen arity in grhsim-cpp emit",
+                                                     std::string(op.symbolText()));
+                                }
+                                const std::string lhs = valueRef(model, resultValue);
+                                const std::string pathExpr =
+                                    "grhsim_task_default_arg_text(" + systemTaskArgExpr(graph, model, operands[0]) + ")";
+                                const std::string modeExpr =
+                                    operands.size() >= 2
+                                        ? ("grhsim_task_default_arg_text(" +
+                                           systemTaskArgExpr(graph, model, operands[1]) + ")")
+                                        : std::string("std::string(\"r\")");
+                                std::string procGuard = "true";
+                                if (systemFunctionRunsOnlyOnInitialEval(op))
+                                {
+                                    procGuard = "first_eval_";
+                                }
+                                stream << "        if (" << procGuard << ") {\n";
+                                stream << "            const auto next_value = static_cast<"
+                                       << cppTypeForValue(graph, resultValue) << ">(grhsim_trunc_u64(open_file_handle("
+                                       << pathExpr << ", " << modeExpr << "), "
+                                       << graph.valueWidth(resultValue) << "));\n";
+                                stream << "            if (" << lhs << " != next_value) { " << lhs
+                                       << " = next_value; supernode_changed = true; }\n";
+                                stream << "        }\n";
+                                break;
+                            }
+                            if (name == "ferror")
+                            {
+                                if (isWideLogicValue(graph, resultValue))
+                                {
+                                    return emitError("unsupported wide kSystemFunction ferror result in grhsim-cpp emit",
+                                                     std::string(op.symbolText()));
+                                }
+                                if (operands.size() != 1)
+                                {
+                                    return emitError("unsupported kSystemFunction ferror arity in grhsim-cpp emit",
+                                                     std::string(op.symbolText()));
+                                }
+                                const std::string lhs = valueRef(model, resultValue);
+                                stream << "        {\n";
+                                stream << "            const auto next_value = static_cast<"
+                                       << cppTypeForValue(graph, resultValue)
+                                       << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(file_error_status(grhsim_task_arg_u64("
+                                       << systemTaskArgExpr(graph, model, operands[0]) << "))), "
+                                       << graph.valueWidth(resultValue) << "));\n";
+                                stream << "            if (" << lhs << " != next_value) { " << lhs
+                                       << " = next_value; supernode_changed = true; }\n";
+                                stream << "        }\n";
+                                break;
+                            }
+                        }
                         if (opNeedsWordLogicEmit(graph, op))
                         {
                             std::string emitErrorText;
@@ -4048,6 +4135,20 @@ namespace wolvrix::lib::emit
             result.success = false;
             return result;
         }
+        for (OperationId opId : graph.operations())
+        {
+            const Operation op = graph.getOperation(opId);
+            if (op.kind() != OperationKind::kSystemFunction)
+            {
+                continue;
+            }
+            const std::string name = getAttribute<std::string>(op, "name").value_or(std::string());
+            if (name == "fopen" && !systemFunctionRunsOnlyOnInitialEval(op))
+            {
+                reportWarning("$fopen may execute multiple times; use initial without timing control for one-shot open semantics",
+                              std::string(op.symbolText()));
+            }
+        }
 
         const std::size_t eventPrecomputeMaxOps = parseEventPrecomputeMaxOps(options);
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
@@ -4116,17 +4217,6 @@ namespace wolvrix::lib::emit
         }
         const std::filesystem::path makefilePath = outDir / "Makefile";
 
-        auto replaceClassMarker = [&](std::string text) -> std::string
-        {
-            std::size_t pos = 0;
-            while ((pos = text.find("CLASS", pos)) != std::string::npos)
-            {
-                text.replace(pos, 5, className);
-                pos += className.size();
-            }
-            return text;
-        };
-
         {
             auto stream = openOutputFile(runtimePath);
             if (!stream)
@@ -4141,17 +4231,20 @@ namespace wolvrix::lib::emit
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdlib>\n";
             *stream << "#include <cstdint>\n";
-            *stream << "#include <fstream>\n";
-            *stream << "#include <iomanip>\n";
-            *stream << "#include <initializer_list>\n";
-            *stream << "#include <iostream>\n";
             *stream << "#include <limits>\n";
-            *stream << "#include <sstream>\n";
             *stream << "#include <string>\n";
-            *stream << "#include <string_view>\n";
-            *stream << "#include <unordered_map>\n";
-            *stream << "#include <utility>\n";
             *stream << "#include <vector>\n\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "#include <fstream>\n";
+                *stream << "#include <iomanip>\n";
+                *stream << "#include <initializer_list>\n";
+                *stream << "#include <iostream>\n";
+                *stream << "#include <sstream>\n";
+                *stream << "#include <string_view>\n";
+                *stream << "#include <unordered_map>\n";
+                *stream << "#include <utility>\n\n";
+            }
             *stream << "inline std::uint64_t grhsim_mask(std::size_t width)\n{\n";
             *stream << "    if (width == 0) return UINT64_C(0);\n";
             *stream << "    if (width >= 64) return ~UINT64_C(0);\n";
@@ -5295,7 +5388,9 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "inline bool grhsim_test_bit(const std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
             *stream << "    return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;\n";
             *stream << "}\n";
-            *stream << R"CPP(
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << R"CPP(
 
 enum class grhsim_task_arg_kind {
     Logic,
@@ -5765,6 +5860,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
     return grhsim_format_task_message(std::vector<grhsim_task_arg>(args.begin(), args.end()));
 }
 )CPP";
+            }
         }
 
         {
@@ -5800,21 +5896,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    ~" << className << "();\n";
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
-            *stream << "    bool bind_output_file(std::uint64_t handle, const std::string &path, bool append = false);\n";
-            *stream << "    void close_output_file(std::uint64_t handle);\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
-            *stream << "    [[nodiscard]] bool finish_requested() const;\n";
-            *stream << "    [[nodiscard]] bool stop_requested() const;\n";
-            *stream << "    [[nodiscard]] bool fatal_requested() const;\n";
-            *stream << "    [[nodiscard]] int system_exit_code() const;\n";
-            *stream << "    [[nodiscard]] const std::string &dumpfile_path() const;\n";
-            *stream << "    [[nodiscard]] bool dumpvars_enabled() const;\n";
-            for (const auto &decl : model.inputSetDecls)
+            if (model.needsSystemTaskRuntime)
             {
-                *stream << decl << '\n';
+                *stream << "    [[nodiscard]] bool finish_requested() const;\n";
+                *stream << "    [[nodiscard]] bool stop_requested() const;\n";
+                *stream << "    [[nodiscard]] bool fatal_requested() const;\n";
+                *stream << "    [[nodiscard]] int system_exit_code() const;\n";
+                *stream << "    [[nodiscard]] const std::string &dumpfile_path() const;\n";
+                *stream << "    [[nodiscard]] bool dumpvars_enabled() const;\n";
             }
             *stream << "    void eval();\n";
-            for (const auto &decl : model.outputGetDecls)
+            for (const auto &decl : model.publicPortDecls)
             {
                 *stream << decl << '\n';
             }
@@ -5823,41 +5916,69 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    void eval_batch_" << batchIndex << "();\n";
             }
-            *stream << "    struct PendingSystemTaskText {\n";
-            *stream << "        bool useHandle = false;\n";
-            *stream << "        std::uint64_t handle = 0;\n";
-            *stream << "        bool useStderr = false;\n";
-            *stream << "        bool newline = true;\n";
-            *stream << "        std::string text;\n";
-            *stream << "    };\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    struct PendingSystemTaskText {\n";
+                *stream << "        bool useHandle = false;\n";
+                *stream << "        std::uint64_t handle = 0;\n";
+                *stream << "        bool useStderr = false;\n";
+                *stream << "        bool newline = true;\n";
+                *stream << "        std::string text;\n";
+                *stream << "    };\n";
+                *stream << "    struct FileHandleEntry {\n";
+                *stream << "        std::fstream stream;\n";
+                *stream << "        bool canRead = false;\n";
+                *stream << "        bool canWrite = false;\n";
+                *stream << "        int errorCode = 0;\n";
+                *stream << "    };\n";
+            }
             *stream << "    void commit_state_updates();\n";
             *stream << "    void refresh_outputs();\n\n";
-            *stream << "    void execute_system_task(std::string_view name, std::initializer_list<grhsim_task_arg> args);\n";
-            *stream << "    void flush_deferred_system_task_texts();\n";
-            *stream << "    void finalize();\n";
-            *stream << "    [[noreturn]] void terminate_host_process(int exitCode);\n";
-            *stream << "    std::ostream *resolve_output_stream(std::uint64_t handle, bool useStderr);\n";
-            *stream << "    void emit_system_task_text(bool useHandle,\n";
-            *stream << "                               std::uint64_t handle,\n";
-            *stream << "                               bool useStderr,\n";
-            *stream << "                               bool newline,\n";
-            *stream << "                               std::string text,\n";
-            *stream << "                               bool deferred);\n\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    static bool parse_file_open_mode(std::string_view mode,\n";
+                *stream << "                                     std::ios::openmode &openMode,\n";
+                *stream << "                                     bool &canRead,\n";
+                *stream << "                                     bool &canWrite);\n";
+                *stream << "    std::uint64_t open_file_handle(const std::string &path, const std::string &mode);\n";
+                *stream << "    int file_error_status(std::uint64_t handle) const;\n";
+                *stream << "    void close_file_handle(std::uint64_t handle);\n";
+                *stream << "    void clear_file_error(std::uint64_t handle);\n";
+                *stream << "    void set_file_error(std::uint64_t handle, int errorCode);\n";
+                *stream << "    void execute_system_task(std::string_view name, std::initializer_list<grhsim_task_arg> args);\n";
+                *stream << "    void flush_deferred_system_task_texts();\n";
+                *stream << "    void finalize();\n";
+                *stream << "    [[noreturn]] void terminate_host_process(int exitCode);\n";
+                *stream << "    std::ostream *resolve_output_stream(std::uint64_t handle, bool useStderr);\n";
+                *stream << "    void emit_system_task_text(bool useHandle,\n";
+                *stream << "                               std::uint64_t handle,\n";
+                *stream << "                               bool useStderr,\n";
+                *stream << "                               bool newline,\n";
+                *stream << "                               std::string text,\n";
+                *stream << "                               bool deferred);\n\n";
+            }
             *stream << "    bool first_eval_ = true;\n";
-            *stream << "    bool finalized_ = false;\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    bool finalized_ = false;\n";
+            }
             *stream << "    bool state_feedback_pending_ = true;\n";
             *stream << "    bool side_effect_feedback_ = false;\n";
             *stream << "    bool register_write_conflict_ = false;\n";
-            *stream << "    bool finish_requested_ = false;\n";
-            *stream << "    bool stop_requested_ = false;\n";
-            *stream << "    bool fatal_requested_ = false;\n";
-            *stream << "    int system_exit_code_ = 0;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
-            *stream << "    std::string dumpfile_path_;\n";
-            *stream << "    bool dumpvars_enabled_ = false;\n";
-            *stream << "    std::unordered_map<std::uint64_t, std::ofstream> output_files_;\n";
-            *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    bool finish_requested_ = false;\n";
+                *stream << "    bool stop_requested_ = false;\n";
+                *stream << "    bool fatal_requested_ = false;\n";
+                *stream << "    int system_exit_code_ = 0;\n";
+                *stream << "    std::string dumpfile_path_;\n";
+                *stream << "    bool dumpvars_enabled_ = false;\n";
+                *stream << "    std::uint64_t next_file_handle_ = UINT64_C(3);\n";
+                *stream << "    std::unordered_map<std::uint64_t, FileHandleEntry> file_handles_;\n";
+                *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
+            }
             *stream << "    std::vector<std::uint64_t> supernode_active_curr_;\n";
             *stream << "    std::vector<bool> event_term_hit_;\n";
             *stream << "    std::vector<bool> event_domain_hit_;\n\n";
@@ -5963,15 +6084,23 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "{\n";
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
-            *stream << "    finalize();\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    finalize();\n";
+            }
             *stream << "}\n\n";
             *stream << "void " << className << "::init()\n{\n";
             for (const auto &port : graph.inputPorts())
             {
+                *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
                 *stream << "    " << model.inputFieldByValue.at(port.value) << " = " << defaultInitExpr(graph, port.value) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
+                const std::string name = sanitizeIdentifier(port.name);
+                *stream << "    " << name << ".in = " << defaultInitExpr(graph, port.in) << ";\n";
+                *stream << "    " << name << ".out = " << defaultInitExpr(graph, port.out) << ";\n";
+                *stream << "    " << name << ".oe = " << defaultInitExpr(graph, port.oe) << ";\n";
                 *stream << "    " << model.inputFieldByValue.at(port.in) << " = " << defaultInitExpr(graph, port.in) << ";\n";
             }
             if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
@@ -5980,6 +6109,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             for (const auto &port : graph.outputPorts())
             {
+                *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
                 *stream << "    out_" << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
@@ -6098,286 +6228,431 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
             *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
             *stream << "    first_eval_ = true;\n";
-            *stream << "    finalized_ = false;\n";
             *stream << "    state_feedback_pending_ = true;\n";
             *stream << "    side_effect_feedback_ = false;\n";
             *stream << "    register_write_conflict_ = false;\n";
-            *stream << "    finish_requested_ = false;\n";
-            *stream << "    stop_requested_ = false;\n";
-            *stream << "    fatal_requested_ = false;\n";
-            *stream << "    system_exit_code_ = 0;\n";
-            *stream << "    dumpfile_path_.clear();\n";
-            *stream << "    dumpvars_enabled_ = false;\n";
-            *stream << "    deferred_system_task_texts_.clear();\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    finalized_ = false;\n";
+                *stream << "    finish_requested_ = false;\n";
+                *stream << "    stop_requested_ = false;\n";
+                *stream << "    fatal_requested_ = false;\n";
+                *stream << "    system_exit_code_ = 0;\n";
+                *stream << "    dumpfile_path_.clear();\n";
+                *stream << "    dumpvars_enabled_ = false;\n";
+                *stream << "    next_file_handle_ = UINT64_C(3);\n";
+                *stream << "    file_handles_.clear();\n";
+                *stream << "    deferred_system_task_texts_.clear();\n";
+            }
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
             *stream << "    random_seed_ = seed;\n";
             *stream << "}\n\n";
-            *stream << "bool " << className << "::bind_output_file(std::uint64_t handle,\n";
-            *stream << "                                 const std::string &path,\n";
-            *stream << "                                 bool append)\n{\n";
-            *stream << "    if (handle <= 2) {\n";
-            *stream << "        return false;\n";
-            *stream << "    }\n";
-            *stream << "    std::ofstream stream(path, append ? (std::ios::out | std::ios::app) : (std::ios::out | std::ios::trunc));\n";
-            *stream << "    if (!stream.is_open()) {\n";
-            *stream << "        return false;\n";
-            *stream << "    }\n";
-            *stream << "    output_files_[handle] = std::move(stream);\n";
-            *stream << "    return true;\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::close_output_file(std::uint64_t handle)\n{\n";
-            *stream << "    if (auto it = output_files_.find(handle); it != output_files_.end()) {\n";
-            *stream << "        it->second.flush();\n";
-            *stream << "        it->second.close();\n";
-            *stream << "        output_files_.erase(it);\n";
-            *stream << "    }\n";
-            *stream << "}\n\n";
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
             *stream << "}\n\n";
-            *stream << "bool " << className << "::finish_requested() const\n{\n";
-            *stream << "    return finish_requested_;\n";
-            *stream << "}\n\n";
-            *stream << "bool " << className << "::stop_requested() const\n{\n";
-            *stream << "    return stop_requested_;\n";
-            *stream << "}\n\n";
-            *stream << "bool " << className << "::fatal_requested() const\n{\n";
-            *stream << "    return fatal_requested_;\n";
-            *stream << "}\n\n";
-            *stream << "int " << className << "::system_exit_code() const\n{\n";
-            *stream << "    return system_exit_code_;\n";
-            *stream << "}\n\n";
-            *stream << "const std::string &" << className << "::dumpfile_path() const\n{\n";
-            *stream << "    return dumpfile_path_;\n";
-            *stream << "}\n\n";
-            *stream << "bool " << className << "::dumpvars_enabled() const\n{\n";
-            *stream << "    return dumpvars_enabled_;\n";
-            *stream << "}\n\n";
-            *stream << "std::ostream *" << className << "::resolve_output_stream(std::uint64_t handle,\n";
-            *stream << "                                        bool useStderr)\n{\n";
-            *stream << "    if (handle == 1) {\n";
-            *stream << "        return &std::cout;\n";
-            *stream << "    }\n";
-            *stream << "    if (handle == 2) {\n";
-            *stream << "        return &std::cerr;\n";
-            *stream << "    }\n";
-            *stream << "    if (auto it = output_files_.find(handle); it != output_files_.end()) {\n";
-            *stream << "        return &it->second;\n";
-            *stream << "    }\n";
-            *stream << "    return useStderr ? &std::cerr : nullptr;\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::emit_system_task_text(bool useHandle,\n";
-            *stream << "                                std::uint64_t handle,\n";
-            *stream << "                                bool useStderr,\n";
-            *stream << "                                bool newline,\n";
-            *stream << "                                std::string text,\n";
-            *stream << "                                bool deferred)\n{\n";
-            *stream << "    if (deferred) {\n";
-            *stream << "        deferred_system_task_texts_.push_back(PendingSystemTaskText{\n";
-            *stream << "            .useHandle = useHandle,\n";
-            *stream << "            .handle = handle,\n";
-            *stream << "            .useStderr = useStderr,\n";
-            *stream << "            .newline = newline,\n";
-            *stream << "            .text = std::move(text),\n";
-            *stream << "        });\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    std::ostream *out = nullptr;\n";
-            *stream << "    if (useHandle) {\n";
-            *stream << "        out = resolve_output_stream(handle, useStderr);\n";
-            *stream << "    }\n";
-            *stream << "    else {\n";
-            *stream << "        out = useStderr ? &std::cerr : &std::cout;\n";
-            *stream << "    }\n";
-            *stream << "    if (out == nullptr) {\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    (*out) << text;\n";
-            *stream << "    if (newline) {\n";
-            *stream << "        (*out) << '\\n';\n";
-            *stream << "    }\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::flush_deferred_system_task_texts()\n{\n";
-            *stream << "    for (auto &item : deferred_system_task_texts_) {\n";
-            *stream << "        emit_system_task_text(item.useHandle,\n";
-            *stream << "                              item.handle,\n";
-            *stream << "                              item.useStderr,\n";
-            *stream << "                              item.newline,\n";
-            *stream << "                              std::move(item.text),\n";
-            *stream << "                              false);\n";
-            *stream << "    }\n";
-            *stream << "    deferred_system_task_texts_.clear();\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
-            *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
-            *stream << "    const std::vector<grhsim_task_arg> items(args.begin(), args.end());\n";
-            *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
-            *stream << "        emit_system_task_text(false,\n";
-            *stream << "                              0,\n";
-            *stream << "                              false,\n";
-            *stream << "                              name != \"write\",\n";
-            *stream << "                              grhsim_format_task_message(items),\n";
-            *stream << "                              name == \"strobe\");\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"fdisplay\" || name == \"fwrite\") {\n";
-            *stream << "        if (items.empty()) {\n";
-            *stream << "            return;\n";
-            *stream << "        }\n";
-            *stream << "        const std::uint64_t handle = grhsim_task_arg_u64(items.front());\n";
-            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + 1, items.end());\n";
-            *stream << "        emit_system_task_text(true,\n";
-            *stream << "                              handle,\n";
-            *stream << "                              false,\n";
-            *stream << "                              name == \"fdisplay\",\n";
-            *stream << "                              grhsim_format_task_message(msgArgs),\n";
-            *stream << "                              false);\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"fflush\") {\n";
-            *stream << "        if (items.empty()) {\n";
-            *stream << "            std::cout.flush();\n";
-            *stream << "            std::cerr.flush();\n";
-            *stream << "            for (auto &[handle, stream] : output_files_) {\n";
-            *stream << "                (void)handle;\n";
-            *stream << "                stream.flush();\n";
-            *stream << "            }\n";
-            *stream << "            return;\n";
-            *stream << "        }\n";
-            *stream << "        if (std::ostream *out = resolve_output_stream(grhsim_task_arg_u64(items.front()), false)) {\n";
-            *stream << "            out->flush();\n";
-            *stream << "        }\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"fclose\") {\n";
-            *stream << "        if (!items.empty()) {\n";
-            *stream << "            close_output_file(grhsim_task_arg_u64(items.front()));\n";
-            *stream << "        }\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"dumpfile\") {\n";
-            *stream << "        if (!items.empty()) {\n";
-            *stream << "            dumpfile_path_ = grhsim_task_default_arg_text(items.front());\n";
-            *stream << "        }\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"dumpvars\") {\n";
-            *stream << "        dumpvars_enabled_ = true;\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"info\" || name == \"warning\" || name == \"error\") {\n";
-            *stream << "        const bool useStderr = (name == \"warning\" || name == \"error\");\n";
-            *stream << "        const std::string prefix = \"[\" + std::string(name) + \"] \";\n";
-            *stream << "        emit_system_task_text(false,\n";
-            *stream << "                              0,\n";
-            *stream << "                              useStderr,\n";
-            *stream << "                              true,\n";
-            *stream << "                              prefix + grhsim_format_task_message(items),\n";
-            *stream << "                              false);\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"fatal\") {\n";
-            *stream << "        std::size_t msgStart = 0;\n";
-            *stream << "        int exitCode = 1;\n";
-            *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
-            *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
-            *stream << "            msgStart = 1;\n";
-            *stream << "        }\n";
-            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
-            *stream << "        fatal_requested_ = true;\n";
-            *stream << "        system_exit_code_ = exitCode;\n";
-            *stream << "        emit_system_task_text(false,\n";
-            *stream << "                              0,\n";
-            *stream << "                              true,\n";
-            *stream << "                              true,\n";
-            *stream << "                              std::string(\"[fatal] \") + grhsim_format_task_message(msgArgs),\n";
-            *stream << "                              false);\n";
-            *stream << "        terminate_host_process(exitCode);\n";
-            *stream << "    }\n";
-            *stream << "    if (name == \"finish\" || name == \"stop\") {\n";
-            *stream << "        std::size_t msgStart = 0;\n";
-            *stream << "        int exitCode = 0;\n";
-            *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
-            *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
-            *stream << "            msgStart = 1;\n";
-            *stream << "        }\n";
-            *stream << "        if (name == \"finish\") {\n";
-            *stream << "            finish_requested_ = true;\n";
-            *stream << "        }\n";
-            *stream << "        else {\n";
-            *stream << "            stop_requested_ = true;\n";
-            *stream << "        }\n";
-            *stream << "        system_exit_code_ = exitCode;\n";
-            *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
-            *stream << "        if (!msgArgs.empty()) {\n";
-            *stream << "            emit_system_task_text(false,\n";
-            *stream << "                                  0,\n";
-            *stream << "                                  false,\n";
-            *stream << "                                  true,\n";
-            *stream << "                                  std::string(\"[\") + std::string(name) + \"] \" + grhsim_format_task_message(msgArgs),\n";
-            *stream << "                                  false);\n";
-            *stream << "        }\n";
-            *stream << "        terminate_host_process(exitCode);\n";
-            *stream << "    }\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::finalize()\n{\n";
-            *stream << "    if (finalized_) {\n";
-            *stream << "        return;\n";
-            *stream << "    }\n";
-            *stream << "    finalized_ = true;\n";
-            for (OperationId opId : graph.operations())
+            if (model.needsSystemTaskRuntime)
             {
-                const Operation op = graph.getOperation(opId);
-                if (op.kind() != OperationKind::kSystemTask || !systemTaskIsFinal(op))
-                {
-                    continue;
-                }
-                const auto operands = op.operands();
-                const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
-                const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
-                const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
-                *stream << "    if (" << valueRef(model, operands[0]) << ") {\n";
-                if (argEnd <= 1)
-                {
-                    *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
-                }
-                else
-                {
-                    *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {";
-                    for (std::size_t i = 1; i < argEnd; ++i)
-                    {
-                        if (i != 1)
-                        {
-                            *stream << ", ";
-                        }
-                        *stream << systemTaskArgExpr(graph, model, operands[i]);
-                    }
-                    *stream << "});\n";
-                }
+                *stream << "bool " << className << "::parse_file_open_mode(std::string_view mode,\n";
+                *stream << "                                 std::ios::openmode &openMode,\n";
+                *stream << "                                 bool &canRead,\n";
+                *stream << "                                 bool &canWrite)\n{\n";
+                *stream << "    openMode = std::ios::openmode{};\n";
+                *stream << "    canRead = false;\n";
+                *stream << "    canWrite = false;\n";
+                *stream << "    if (mode.empty()) {\n";
+                *stream << "        mode = \"r\";\n";
                 *stream << "    }\n";
-            }
-            *stream << "    flush_deferred_system_task_texts();\n";
-            *stream << "    for (auto &[handle, stream] : output_files_) {\n";
-            *stream << "        (void)handle;\n";
-            *stream << "        stream.flush();\n";
-            *stream << "        stream.close();\n";
-            *stream << "    }\n";
-            *stream << "    output_files_.clear();\n";
-            *stream << "}\n\n";
-            *stream << "[[noreturn]] void " << className << "::terminate_host_process(int exitCode)\n{\n";
-            *stream << "    finalize();\n";
-            *stream << "    std::cout.flush();\n";
-            *stream << "    std::cerr.flush();\n";
-            *stream << "    std::exit(exitCode);\n";
-            *stream << "}\n\n";
-            for (const auto &impl : model.inputSetImpls)
-            {
-                *stream << replaceClassMarker(impl) << '\n';
-            }
-            for (const auto &impl : model.outputGetImpls)
-            {
-                *stream << replaceClassMarker(impl) << '\n';
+                *stream << "    char base = '\\0';\n";
+                *stream << "    bool binary = false;\n";
+                *stream << "    bool plus = false;\n";
+                *stream << "    for (char ch : mode) {\n";
+                *stream << "        switch (ch) {\n";
+                *stream << "        case 'r':\n";
+                *stream << "        case 'w':\n";
+                *stream << "        case 'a':\n";
+                *stream << "            if (base != '\\0') {\n";
+                *stream << "                return false;\n";
+                *stream << "            }\n";
+                *stream << "            base = ch;\n";
+                *stream << "            break;\n";
+                *stream << "        case 'b':\n";
+                *stream << "            binary = true;\n";
+                *stream << "            break;\n";
+                *stream << "        case '+':\n";
+                *stream << "            plus = true;\n";
+                *stream << "            break;\n";
+                *stream << "        default:\n";
+                *stream << "            return false;\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    switch (base) {\n";
+                *stream << "    case 'r':\n";
+                *stream << "        openMode = std::ios::in;\n";
+                *stream << "        canRead = true;\n";
+                *stream << "        break;\n";
+                *stream << "    case 'w':\n";
+                *stream << "        openMode = std::ios::out | std::ios::trunc;\n";
+                *stream << "        canWrite = true;\n";
+                *stream << "        break;\n";
+                *stream << "    case 'a':\n";
+                *stream << "        openMode = std::ios::out | std::ios::app;\n";
+                *stream << "        canWrite = true;\n";
+                *stream << "        break;\n";
+                *stream << "    default:\n";
+                *stream << "        return false;\n";
+                *stream << "    }\n";
+                *stream << "    if (plus) {\n";
+                *stream << "        openMode |= std::ios::in | std::ios::out;\n";
+                *stream << "        canRead = true;\n";
+                *stream << "        canWrite = true;\n";
+                *stream << "    }\n";
+                *stream << "    if (binary) {\n";
+                *stream << "        openMode |= std::ios::binary;\n";
+                *stream << "    }\n";
+                *stream << "    return true;\n";
+                *stream << "}\n\n";
+                *stream << "std::uint64_t " << className << "::open_file_handle(const std::string &path,\n";
+                *stream << "                                       const std::string &mode)\n{\n";
+                *stream << "    std::ios::openmode openMode{};\n";
+                *stream << "    bool canRead = false;\n";
+                *stream << "    bool canWrite = false;\n";
+                *stream << "    if (!parse_file_open_mode(mode, openMode, canRead, canWrite)) {\n";
+                *stream << "        return UINT64_C(0);\n";
+                *stream << "    }\n";
+                *stream << "    FileHandleEntry entry;\n";
+                *stream << "    entry.canRead = canRead;\n";
+                *stream << "    entry.canWrite = canWrite;\n";
+                *stream << "    entry.stream.open(path, openMode);\n";
+                *stream << "    if (!entry.stream.is_open()) {\n";
+                *stream << "        return UINT64_C(0);\n";
+                *stream << "    }\n";
+                *stream << "    std::uint64_t handle = next_file_handle_ <= UINT64_C(2) ? UINT64_C(3) : next_file_handle_;\n";
+                *stream << "    const std::uint64_t start = handle;\n";
+                *stream << "    while (file_handles_.find(handle) != file_handles_.end()) {\n";
+                *stream << "        ++handle;\n";
+                *stream << "        if (handle <= UINT64_C(2)) {\n";
+                *stream << "            handle = UINT64_C(3);\n";
+                *stream << "        }\n";
+                *stream << "        if (handle == start) {\n";
+                *stream << "            return UINT64_C(0);\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    file_handles_.emplace(handle, std::move(entry));\n";
+                *stream << "    next_file_handle_ = handle + UINT64_C(1);\n";
+                *stream << "    if (next_file_handle_ <= UINT64_C(2)) {\n";
+                *stream << "        next_file_handle_ = UINT64_C(3);\n";
+                *stream << "    }\n";
+                *stream << "    return handle;\n";
+                *stream << "}\n\n";
+                *stream << "int " << className << "::file_error_status(std::uint64_t handle) const\n{\n";
+                *stream << "    if (handle <= UINT64_C(2)) {\n";
+                *stream << "        return 0;\n";
+                *stream << "    }\n";
+                *stream << "    if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "        return it->second.errorCode;\n";
+                *stream << "    }\n";
+                *stream << "    return 1;\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::close_file_handle(std::uint64_t handle)\n{\n";
+                *stream << "    if (handle == UINT64_C(1)) {\n";
+                *stream << "        std::cout.flush();\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (handle == UINT64_C(2)) {\n";
+                *stream << "        std::cerr.flush();\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "        if (it->second.canWrite) {\n";
+                *stream << "            it->second.stream.flush();\n";
+                *stream << "        }\n";
+                *stream << "        it->second.stream.close();\n";
+                *stream << "        file_handles_.erase(it);\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::clear_file_error(std::uint64_t handle)\n{\n";
+                *stream << "    if (handle <= UINT64_C(2)) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "        it->second.errorCode = 0;\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::set_file_error(std::uint64_t handle, int errorCode)\n{\n";
+                *stream << "    if (handle <= UINT64_C(2)) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "        it->second.errorCode = errorCode;\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "bool " << className << "::finish_requested() const\n{\n";
+                *stream << "    return finish_requested_;\n";
+                *stream << "}\n\n";
+                *stream << "bool " << className << "::stop_requested() const\n{\n";
+                *stream << "    return stop_requested_;\n";
+                *stream << "}\n\n";
+                *stream << "bool " << className << "::fatal_requested() const\n{\n";
+                *stream << "    return fatal_requested_;\n";
+                *stream << "}\n\n";
+                *stream << "int " << className << "::system_exit_code() const\n{\n";
+                *stream << "    return system_exit_code_;\n";
+                *stream << "}\n\n";
+                *stream << "const std::string &" << className << "::dumpfile_path() const\n{\n";
+                *stream << "    return dumpfile_path_;\n";
+                *stream << "}\n\n";
+                *stream << "bool " << className << "::dumpvars_enabled() const\n{\n";
+                *stream << "    return dumpvars_enabled_;\n";
+                *stream << "}\n\n";
+                *stream << "std::ostream *" << className << "::resolve_output_stream(std::uint64_t handle,\n";
+                *stream << "                                        bool useStderr)\n{\n";
+                *stream << "    (void)useStderr;\n";
+                *stream << "    if (handle == 1) {\n";
+                *stream << "        return &std::cout;\n";
+                *stream << "    }\n";
+                *stream << "    if (handle == 2) {\n";
+                *stream << "        return &std::cerr;\n";
+                *stream << "    }\n";
+                *stream << "    if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "        if (!it->second.canWrite || !it->second.stream.is_open()) {\n";
+                *stream << "            it->second.errorCode = 1;\n";
+                *stream << "            return nullptr;\n";
+                *stream << "        }\n";
+                *stream << "        it->second.errorCode = 0;\n";
+                *stream << "        return &it->second.stream;\n";
+                *stream << "    }\n";
+                *stream << "    return nullptr;\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::emit_system_task_text(bool useHandle,\n";
+                *stream << "                                std::uint64_t handle,\n";
+                *stream << "                                bool useStderr,\n";
+                *stream << "                                bool newline,\n";
+                *stream << "                                std::string text,\n";
+                *stream << "                                bool deferred)\n{\n";
+                *stream << "    if (deferred) {\n";
+                *stream << "        deferred_system_task_texts_.push_back(PendingSystemTaskText{\n";
+                *stream << "            .useHandle = useHandle,\n";
+                *stream << "            .handle = handle,\n";
+                *stream << "            .useStderr = useStderr,\n";
+                *stream << "            .newline = newline,\n";
+                *stream << "            .text = std::move(text),\n";
+                *stream << "        });\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    std::ostream *out = nullptr;\n";
+                *stream << "    if (useHandle) {\n";
+                *stream << "        out = resolve_output_stream(handle, useStderr);\n";
+                *stream << "    }\n";
+                *stream << "    else {\n";
+                *stream << "        out = useStderr ? &std::cerr : &std::cout;\n";
+                *stream << "    }\n";
+                *stream << "    if (out == nullptr) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    (*out) << text;\n";
+                *stream << "    if (newline) {\n";
+                *stream << "        (*out) << '\\n';\n";
+                *stream << "    }\n";
+                *stream << "    if (useHandle && handle > UINT64_C(2)) {\n";
+                *stream << "        clear_file_error(handle);\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::flush_deferred_system_task_texts()\n{\n";
+                *stream << "    for (auto &item : deferred_system_task_texts_) {\n";
+                *stream << "        emit_system_task_text(item.useHandle,\n";
+                *stream << "                              item.handle,\n";
+                *stream << "                              item.useStderr,\n";
+                *stream << "                              item.newline,\n";
+                *stream << "                              std::move(item.text),\n";
+                *stream << "                              false);\n";
+                *stream << "    }\n";
+                *stream << "    deferred_system_task_texts_.clear();\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
+                *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
+                *stream << "    const std::vector<grhsim_task_arg> items(args.begin(), args.end());\n";
+                *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
+                *stream << "        emit_system_task_text(false,\n";
+                *stream << "                              0,\n";
+                *stream << "                              false,\n";
+                *stream << "                              name != \"write\",\n";
+                *stream << "                              grhsim_format_task_message(items),\n";
+                *stream << "                              name == \"strobe\");\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"fdisplay\" || name == \"fwrite\") {\n";
+                *stream << "        if (items.empty()) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        const std::uint64_t handle = grhsim_task_arg_u64(items.front());\n";
+                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + 1, items.end());\n";
+                *stream << "        emit_system_task_text(true,\n";
+                *stream << "                              handle,\n";
+                *stream << "                              false,\n";
+                *stream << "                              name == \"fdisplay\",\n";
+                *stream << "                              grhsim_format_task_message(msgArgs),\n";
+                *stream << "                              false);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"fflush\") {\n";
+                *stream << "        if (items.empty()) {\n";
+                *stream << "            std::cout.flush();\n";
+                *stream << "            std::cerr.flush();\n";
+                *stream << "            for (auto &[handle, entry] : file_handles_) {\n";
+                *stream << "                if (entry.canWrite) {\n";
+                *stream << "                    entry.stream.flush();\n";
+                *stream << "                    entry.errorCode = 0;\n";
+                *stream << "                }\n";
+                *stream << "            }\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        const std::uint64_t handle = grhsim_task_arg_u64(items.front());\n";
+                *stream << "        if (handle == UINT64_C(1)) {\n";
+                *stream << "            std::cout.flush();\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        if (handle == UINT64_C(2)) {\n";
+                *stream << "            std::cerr.flush();\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        if (auto it = file_handles_.find(handle); it != file_handles_.end()) {\n";
+                *stream << "            if (it->second.canWrite && it->second.stream.is_open()) {\n";
+                *stream << "                it->second.stream.flush();\n";
+                *stream << "                it->second.errorCode = 0;\n";
+                *stream << "            }\n";
+                *stream << "            else {\n";
+                *stream << "                it->second.errorCode = 1;\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
+                *stream << "        else {\n";
+                *stream << "            set_file_error(handle, 1);\n";
+                *stream << "        }\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"fclose\") {\n";
+                *stream << "        if (!items.empty()) {\n";
+                *stream << "            close_file_handle(grhsim_task_arg_u64(items.front()));\n";
+                *stream << "        }\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"dumpfile\") {\n";
+                *stream << "        if (!items.empty()) {\n";
+                *stream << "            dumpfile_path_ = grhsim_task_default_arg_text(items.front());\n";
+                *stream << "        }\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"dumpvars\") {\n";
+                *stream << "        dumpvars_enabled_ = true;\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"info\" || name == \"warning\" || name == \"error\") {\n";
+                *stream << "        const bool useStderr = (name == \"warning\" || name == \"error\");\n";
+                *stream << "        const std::string prefix = \"[\" + std::string(name) + \"] \";\n";
+                *stream << "        emit_system_task_text(false,\n";
+                *stream << "                              0,\n";
+                *stream << "                              useStderr,\n";
+                *stream << "                              true,\n";
+                *stream << "                              prefix + grhsim_format_task_message(items),\n";
+                *stream << "                              false);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"fatal\") {\n";
+                *stream << "        std::size_t msgStart = 0;\n";
+                *stream << "        int exitCode = 1;\n";
+                *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
+                *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
+                *stream << "            msgStart = 1;\n";
+                *stream << "        }\n";
+                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+                *stream << "        fatal_requested_ = true;\n";
+                *stream << "        system_exit_code_ = exitCode;\n";
+                *stream << "        emit_system_task_text(false,\n";
+                *stream << "                              0,\n";
+                *stream << "                              true,\n";
+                *stream << "                              true,\n";
+                *stream << "                              std::string(\"[fatal] \") + grhsim_format_task_message(msgArgs),\n";
+                *stream << "                              false);\n";
+                *stream << "        terminate_host_process(exitCode);\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"finish\" || name == \"stop\") {\n";
+                *stream << "        std::size_t msgStart = 0;\n";
+                *stream << "        int exitCode = 0;\n";
+                *stream << "        if (!items.empty() && items.front().kind == grhsim_task_arg_kind::Logic) {\n";
+                *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
+                *stream << "            msgStart = 1;\n";
+                *stream << "        }\n";
+                *stream << "        if (name == \"finish\") {\n";
+                *stream << "            finish_requested_ = true;\n";
+                *stream << "        }\n";
+                *stream << "        else {\n";
+                *stream << "            stop_requested_ = true;\n";
+                *stream << "        }\n";
+                *stream << "        system_exit_code_ = exitCode;\n";
+                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+                *stream << "        if (!msgArgs.empty()) {\n";
+                *stream << "            emit_system_task_text(false,\n";
+                *stream << "                                  0,\n";
+                *stream << "                                  false,\n";
+                *stream << "                                  true,\n";
+                *stream << "                                  std::string(\"[\") + std::string(name) + \"] \" + grhsim_format_task_message(msgArgs),\n";
+                *stream << "                                  false);\n";
+                *stream << "        }\n";
+                *stream << "        terminate_host_process(exitCode);\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::finalize()\n{\n";
+                *stream << "    if (finalized_) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    finalized_ = true;\n";
+                for (OperationId opId : graph.operations())
+                {
+                    const Operation op = graph.getOperation(opId);
+                    if (op.kind() != OperationKind::kSystemTask || !systemTaskIsFinal(op))
+                    {
+                        continue;
+                    }
+                    const auto operands = op.operands();
+                    const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
+                    const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
+                    const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
+                    *stream << "    if (" << valueRef(model, operands[0]) << ") {\n";
+                    if (argEnd <= 1)
+                    {
+                        *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                    }
+                    else
+                    {
+                        *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {";
+                        for (std::size_t i = 1; i < argEnd; ++i)
+                        {
+                            if (i != 1)
+                            {
+                                *stream << ", ";
+                            }
+                            *stream << systemTaskArgExpr(graph, model, operands[i]);
+                        }
+                        *stream << "});\n";
+                    }
+                    *stream << "    }\n";
+                }
+                *stream << "    flush_deferred_system_task_texts();\n";
+                *stream << "    for (auto &[handle, entry] : file_handles_) {\n";
+                *stream << "        (void)handle;\n";
+                *stream << "        if (entry.canWrite) {\n";
+                *stream << "            entry.stream.flush();\n";
+                *stream << "        }\n";
+                *stream << "        entry.stream.close();\n";
+                *stream << "    }\n";
+                *stream << "    file_handles_.clear();\n";
+                *stream << "}\n\n";
+                *stream << "[[noreturn]] void " << className << "::terminate_host_process(int exitCode)\n{\n";
+                *stream << "    finalize();\n";
+                *stream << "    std::cout.flush();\n";
+                *stream << "    std::cerr.flush();\n";
+                *stream << "    std::exit(exitCode);\n";
+                *stream << "}\n\n";
             }
             auto emitCommitWrite = [&](const WriteDecl &write)
             {
@@ -6494,13 +6769,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "void " << className << "::refresh_outputs()\n{\n";
             for (const auto &port : graph.outputPorts())
             {
-                *stream << "    out_" << sanitizeIdentifier(port.name) << " = " << valueRef(model, port.value) << ";\n";
+                const std::string name = sanitizeIdentifier(port.name);
+                *stream << "    out_" << name << " = " << valueRef(model, port.value) << ";\n";
+                *stream << "    " << name << " = out_" << name << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
                 const std::string name = sanitizeIdentifier(port.name);
                 *stream << "    inout_" << name << "_out = " << valueRef(model, port.out) << ";\n";
                 *stream << "    inout_" << name << "_oe = " << valueRef(model, port.oe) << ";\n";
+                *stream << "    " << name << ".out = inout_" << name << "_out;\n";
+                *stream << "    " << name << ".oe = inout_" << name << "_oe;\n";
             }
             *stream << "}\n";
         }
@@ -6514,6 +6793,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
             *stream << "void " << className << "::eval()\n{\n";
+            for (const auto &port : graph.inputPorts())
+            {
+                *stream << "    " << model.inputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                *stream << "    " << model.inputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
+            }
+            if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
+            {
+                *stream << '\n';
+            }
             *stream << "    const bool initial_eval = first_eval_;\n";
             *stream << "    bool seed_head_eval = initial_eval || state_feedback_pending_ || side_effect_feedback_;\n";
             for (const auto &port : graph.inputPorts())
@@ -6713,7 +7004,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    eval_batch_" << batchIndex << "();\n";
             }
             *stream << "    commit_state_updates();\n";
-            *stream << "    flush_deferred_system_task_texts();\n";
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "    flush_deferred_system_task_texts();\n";
+            }
             *stream << "    refresh_outputs();\n\n";
             for (const auto &port : graph.inputPorts())
             {

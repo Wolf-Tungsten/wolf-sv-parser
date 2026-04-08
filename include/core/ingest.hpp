@@ -284,6 +284,8 @@ struct ExprNode {
     bool isSigned = false;
     wolvrix::lib::grh::ValueType valueType = wolvrix::lib::grh::ValueType::Logic;
     bool hasSideEffects = false;
+    ProcKind procKind = ProcKind::Unknown;
+    bool hasTiming = false;
     slang::SourceLocation location{};
 };
 

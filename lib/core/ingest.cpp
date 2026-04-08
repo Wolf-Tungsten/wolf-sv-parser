@@ -51,6 +51,8 @@
 
 namespace wolvrix::lib::ingest {
 
+static std::string procKindText(ProcKind kind);
+
 // Visitor to force resolution of all expression types before parallel conversion.
 // This ensures thread-safe access to the AST by resolving all lazy bindings
 // that might not be triggered by DiagnosticVisitor (which uses VisitStatements=false
@@ -7241,6 +7243,8 @@ private:
                     sysNode.hasSideEffects =
                         (name == "random" || name == "urandom" || name == "urandom_range" ||
                          name == "fopen" || name == "ferror");
+                    sysNode.procKind = eventContext.procKind;
+                    sysNode.hasTiming = eventContext.hasTiming;
 
                     for (const auto* arg : args)
                     {
@@ -7297,6 +7301,8 @@ private:
                     sysNode.location = expr.sourceRange.start();
                     sysNode.tempSymbol = makeTempSymbol();
                     sysNode.isSigned = expr.type ? expr.type->isSigned() : false;
+                    sysNode.procKind = eventContext.procKind;
+                    sysNode.hasTiming = eventContext.hasTiming;
 
                     for (const auto* arg : args)
                     {
@@ -16348,6 +16354,8 @@ private:
             {
                 graph_.setAttr(op, "hasSideEffects", true);
             }
+            graph_.setAttr(op, "procKind", procKindText(node.procKind));
+            graph_.setAttr(op, "hasTiming", node.hasTiming);
         }
 
         wolvrix::lib::grh::SymbolId sym =
