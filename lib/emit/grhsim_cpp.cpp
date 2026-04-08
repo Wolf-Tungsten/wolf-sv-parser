@@ -7008,6 +7008,32 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    flush_deferred_system_task_texts();\n";
             }
+            *stream << "    if (state_feedback_pending_) {\n";
+            *stream << "        std::fill(supernode_active_curr_.begin(), supernode_active_curr_.end(), 0);\n";
+            *stream << "        std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
+            *stream << "        std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), false);\n";
+            for (const auto &group : *schedule.eventDomainSinkGroups)
+            {
+                const std::size_t domainIndex = model.eventDomainIndex.at(group.signature);
+                if (group.signature.empty())
+                {
+                    *stream << "        event_domain_hit_[" << domainIndex << "] = true;\n";
+                }
+            }
+            for (uint32_t supernodeId : sourceSupernodeList)
+            {
+                *stream << "        grhsim_set_bit(supernode_active_curr_, " << supernodeId << ");\n";
+            }
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                *stream << "        eval_batch_" << batchIndex << "();\n";
+            }
+            if (model.needsSystemTaskRuntime)
+            {
+                *stream << "        flush_deferred_system_task_texts();\n";
+            }
+            *stream << "        state_feedback_pending_ = false;\n";
+            *stream << "    }\n";
             *stream << "    refresh_outputs();\n\n";
             for (const auto &port : graph.inputPorts())
             {
