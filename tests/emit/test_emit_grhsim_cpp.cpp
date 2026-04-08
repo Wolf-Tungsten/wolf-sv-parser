@@ -36,6 +36,22 @@ namespace
         return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
 
+    std::size_t countSubstring(std::string_view text, std::string_view needle)
+    {
+        if (needle.empty())
+        {
+            return 0;
+        }
+        std::size_t count = 0;
+        std::size_t pos = 0;
+        while ((pos = text.find(needle, pos)) != std::string_view::npos)
+        {
+            ++count;
+            pos += needle.size();
+        }
+        return count;
+    }
+
     std::vector<std::filesystem::path> collectSchedFiles(const std::filesystem::path &dir, std::string_view prefix)
     {
         std::vector<std::filesystem::path> files;
@@ -116,6 +132,7 @@ namespace
         ValueId wideAddr = makeLogicValue(graph, "wide_addr", 2);
         ValueId wideMemIdx = makeLogicValue(graph, "wide_mem_idx", 65);
         ValueId wideSignedIn = makeLogicValue(graph, "wide_signed_in", 65, true);
+        ValueId padIn = makeLogicValue(graph, "pad_in", 8);
         graph.bindInputPort("clk", clk);
         graph.bindInputPort("en", en);
         graph.bindInputPort("a", a);
@@ -179,6 +196,26 @@ namespace
         graph.addOperand(add, a);
         graph.addResult(add, sum);
         graph.bindOutputPort("y", sum);
+
+        ValueId padSeenY = makeLogicValue(graph, "pad_seen_y", 8);
+        OperationId padSeenAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("pad_seen_add"));
+        graph.addOperand(padSeenAdd, padIn);
+        graph.addOperand(padSeenAdd, a);
+        graph.addResult(padSeenAdd, padSeenY);
+        graph.bindOutputPort("pad_seen_y", padSeenY);
+
+        ValueId padOut = makeLogicValue(graph, "pad_out", 8);
+        OperationId padOutXor = graph.createOperation(OperationKind::kXor, graph.internSymbol("pad_out_xor"));
+        graph.addOperand(padOutXor, comb);
+        graph.addOperand(padOutXor, a);
+        graph.addResult(padOutXor, padOut);
+
+        ValueId padOe = makeLogicValue(graph, "pad_oe", 1);
+        OperationId padOeAssign = graph.createOperation(OperationKind::kAssign, graph.internSymbol("pad_oe_assign"));
+        graph.addOperand(padOeAssign, en);
+        graph.addResult(padOeAssign, padOe);
+
+        graph.bindInoutPort("pad", padIn, padOut, padOe);
 
         ValueId mulY = makeLogicValue(graph, "mul_y", 8);
         OperationId mul = graph.createOperation(OperationKind::kMul, graph.internSymbol("mul_op"));
@@ -949,6 +986,107 @@ namespace
         return design;
     }
 
+    Design buildGatedClockDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId auxClk = makeLogicValue(graph, "aux_clk", 1);
+        ValueId data = makeLogicValue(graph, "data", 8);
+        ValueId gateIn = makeLogicValue(graph, "gate_in", 130);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("aux_clk", auxClk);
+        graph.bindInputPort("data", data);
+        graph.bindInputPort("gate_in", gateIn);
+
+        ValueId one = addConstant(graph, "const_one_gc", "one_gc", 1, "1'b1");
+        ValueId mask8 = addConstant(graph, "const_mask8_gc", "mask8_gc", 8, "8'hFF");
+        ValueId mask130 = addConstant(graph, "const_mask130_gc", "mask130_gc", 130, allOnesLiteral(130));
+        ValueId gateMagic = addConstant(graph, "const_gate_magic", "gate_magic", 130,
+                                        "130'h200000000000000000000000000000001");
+
+        OperationId gateReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("gate_reg"));
+        graph.setAttr(gateReg, "width", static_cast<int64_t>(130));
+        graph.setAttr(gateReg, "isSigned", false);
+        graph.setAttr(gateReg, "initValue", std::string("130'h0"));
+
+        ValueId gateQ = makeLogicValue(graph, "gate_q", 130);
+        OperationId gateRead = graph.createOperation(OperationKind::kRegisterReadPort, graph.internSymbol("gate_read"));
+        graph.addResult(gateRead, gateQ);
+        graph.setAttr(gateRead, "regSymbol", std::string("gate_reg"));
+
+        OperationId gateWrite = graph.createOperation(OperationKind::kRegisterWritePort, graph.internSymbol("gate_write"));
+        graph.addOperand(gateWrite, one);
+        graph.addOperand(gateWrite, gateIn);
+        graph.addOperand(gateWrite, mask130);
+        graph.addOperand(gateWrite, clk);
+        graph.setAttr(gateWrite, "regSymbol", std::string("gate_reg"));
+        graph.setAttr(gateWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        ValueId gateMatch = makeLogicValue(graph, "gate_match", 1);
+        OperationId gateEq = graph.createOperation(OperationKind::kEq, graph.internSymbol("gate_eq"));
+        graph.addOperand(gateEq, gateQ);
+        graph.addOperand(gateEq, gateMagic);
+        graph.addResult(gateEq, gateMatch);
+        graph.bindOutputPort("gate_match", gateMatch);
+
+        ValueId gatedClk = makeLogicValue(graph, "gated_clk", 1);
+        OperationId gatedClkOp = graph.createOperation(OperationKind::kAnd, graph.internSymbol("gated_clk_and"));
+        graph.addOperand(gatedClkOp, clk);
+        graph.addOperand(gatedClkOp, gateMatch);
+        graph.addResult(gatedClkOp, gatedClk);
+
+        ValueId gatedAuxClk = makeLogicValue(graph, "gated_aux_clk", 1);
+        OperationId gatedAuxClkOp = graph.createOperation(OperationKind::kAnd, graph.internSymbol("gated_aux_clk_and"));
+        graph.addOperand(gatedAuxClkOp, auxClk);
+        graph.addOperand(gatedAuxClkOp, gateMatch);
+        graph.addResult(gatedAuxClkOp, gatedAuxClk);
+
+        OperationId gatedReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("gated_reg"));
+        graph.setAttr(gatedReg, "width", static_cast<int64_t>(8));
+        graph.setAttr(gatedReg, "isSigned", false);
+        graph.setAttr(gatedReg, "initValue", std::string("8'h00"));
+
+        ValueId gatedQ = makeLogicValue(graph, "gated_q", 8);
+        OperationId gatedRead = graph.createOperation(OperationKind::kRegisterReadPort, graph.internSymbol("gated_read"));
+        graph.addResult(gatedRead, gatedQ);
+        graph.setAttr(gatedRead, "regSymbol", std::string("gated_reg"));
+        graph.bindOutputPort("gated_q", gatedQ);
+
+        OperationId gatedWrite = graph.createOperation(OperationKind::kRegisterWritePort, graph.internSymbol("gated_write"));
+        graph.addOperand(gatedWrite, one);
+        graph.addOperand(gatedWrite, data);
+        graph.addOperand(gatedWrite, mask8);
+        graph.addOperand(gatedWrite, gatedClk);
+        graph.setAttr(gatedWrite, "regSymbol", std::string("gated_reg"));
+        graph.setAttr(gatedWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        OperationId gatedAuxReg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("gated_aux_reg"));
+        graph.setAttr(gatedAuxReg, "width", static_cast<int64_t>(8));
+        graph.setAttr(gatedAuxReg, "isSigned", false);
+        graph.setAttr(gatedAuxReg, "initValue", std::string("8'h00"));
+
+        ValueId gatedAuxQ = makeLogicValue(graph, "gated_aux_q", 8);
+        OperationId gatedAuxRead = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                         graph.internSymbol("gated_aux_read"));
+        graph.addResult(gatedAuxRead, gatedAuxQ);
+        graph.setAttr(gatedAuxRead, "regSymbol", std::string("gated_aux_reg"));
+        graph.bindOutputPort("gated_aux_q", gatedAuxQ);
+
+        OperationId gatedAuxWrite =
+            graph.createOperation(OperationKind::kRegisterWritePort, graph.internSymbol("gated_aux_write"));
+        graph.addOperand(gatedAuxWrite, one);
+        graph.addOperand(gatedAuxWrite, data);
+        graph.addOperand(gatedAuxWrite, mask8);
+        graph.addOperand(gatedAuxWrite, gatedAuxClk);
+        graph.setAttr(gatedAuxWrite, "regSymbol", std::string("gated_aux_reg"));
+        graph.setAttr(gatedAuxWrite, "eventEdge", std::vector<std::string>{"posedge"});
+
+        return design;
+    }
+
     Design buildSystemTaskDesign()
     {
         Design design;
@@ -1315,6 +1453,10 @@ int main()
     {
         return fail("Missing input setter declaration");
     }
+    if (header.find("void set_pad_in(std::uint8_t value);") == std::string::npos)
+    {
+        return fail("Missing inout input setter declaration");
+    }
     if (header.find("void init();") == std::string::npos)
     {
         return fail("Missing explicit init declaration");
@@ -1326,6 +1468,11 @@ int main()
     if (header.find("std::uint8_t get_y() const;") == std::string::npos)
     {
         return fail("Missing output getter declaration");
+    }
+    if (header.find("std::uint8_t get_pad_out() const;") == std::string::npos ||
+        header.find("bool get_pad_oe() const;") == std::string::npos)
+    {
+        return fail("Missing inout output getter declarations");
     }
     if (header.find("std::array<std::uint64_t, 3> out_wide_y") == std::string::npos)
     {
@@ -1699,6 +1846,8 @@ int main()
         harness << "    std::uint64_t random_state_b = seed_b;\n";
         harness << "    const std::uint32_t rand_expected_b = static_cast<std::uint32_t>(splitmix64_next(random_state_b));\n";
         harness << "    const std::array<std::uint64_t, 3> rand_wide_expected_b = random_words<3>(random_state_b, 130);\n";
+        harness << "    sim.set_random_seed(seed_a);\n";
+        harness << "    sim.init();\n";
         harness << "    sim.set_en(true);\n";
         harness << "    sim.set_a(static_cast<std::uint8_t>(3));\n";
         harness << "    sim.set_comb(static_cast<std::uint8_t>(0xB6));\n";
@@ -1713,11 +1862,13 @@ int main()
         harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
         harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
         harness << "    sim.set_wide_signed_in(wide_signed_value);\n";
+        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(7));\n";
         harness << "    sim.set_clk(false);\n";
-        harness << "    sim.set_random_seed(seed_a);\n";
-        harness << "    sim.init();\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 1;\n";
+        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(10)) return 95;\n";
+        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0xB5)) return 96;\n";
+        harness << "    if (!sim.get_pad_oe()) return 97;\n";
         harness << "    if (sim.get_rand_y() != rand_expected_a) return 7;\n";
         harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_a)) return 8;\n";
         harness << "    if (sim.get_mul_y() != static_cast<std::uint8_t>(34)) return 11;\n";
@@ -1785,6 +1936,10 @@ int main()
         harness << "    if (!same_words(sim.get_wide_signed_div_y(), wide_signed_div_expected)) return 84;\n";
         harness << "    if (!sim.get_wide_signed_lt_y()) return 85;\n";
         harness << "    if (sim.get_wide_mixed_lt_y()) return 86;\n";
+        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(0x10));\n";
+        harness << "    sim.eval();\n";
+        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(0x13)) return 98;\n";
+        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0xB5)) return 99;\n";
         harness << "    sim.set_wide_mem_idx(wide_mem_idx_oor);\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x00)) return 88;\n";
@@ -1822,6 +1977,22 @@ int main()
         harness << "    if (sim.get_idx_mem_y() != static_cast<std::uint8_t>(0x44)) return 93;\n";
         harness << "    sim.set_random_seed(seed_b);\n";
         harness << "    sim.init();\n";
+        harness << "    sim.set_en(true);\n";
+        harness << "    sim.set_a(static_cast<std::uint8_t>(3));\n";
+        harness << "    sim.set_comb(static_cast<std::uint8_t>(0xB6));\n";
+        harness << "    sim.set_b(static_cast<std::uint8_t>(3));\n";
+        harness << "    sim.set_sh(static_cast<std::uint8_t>(2));\n";
+        harness << "    sim.set_rep2(static_cast<std::uint8_t>(2));\n";
+        harness << "    sim.set_sa(static_cast<std::uint8_t>(0xF0));\n";
+        harness << "    sim.set_ss4(static_cast<std::uint8_t>(0xE));\n";
+        harness << "    sim.set_mid_in(mid_value);\n";
+        harness << "    sim.set_wide_in(wide_value_a);\n";
+        harness << "    sim.set_wide_mask_dyn(wide_mask_dyn);\n";
+        harness << "    sim.set_wide_addr(static_cast<std::uint8_t>(1));\n";
+        harness << "    sim.set_wide_mem_idx(wide_mem_idx_row2);\n";
+        harness << "    sim.set_wide_signed_in(wide_signed_value);\n";
+        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(7));\n";
+        harness << "    sim.set_clk(false);\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.get_y() != static_cast<std::uint8_t>(5)) return 53;\n";
         harness << "    if (!same_words(sim.get_wide_y(), wide_two)) return 54;\n";
@@ -1829,6 +2000,16 @@ int main()
         harness << "    if (!same_words(sim.get_wide_masked_mem_y(), wide_zero)) return 94;\n";
         harness << "    if (sim.get_rand_y() != rand_expected_b) return 56;\n";
         harness << "    if (!same_words(sim.get_rand_wide_y(), rand_wide_expected_b)) return 57;\n";
+        harness << "    sim.set_en(true);\n";
+        harness << "    sim.set_a(static_cast<std::uint8_t>(9));\n";
+        harness << "    sim.set_pad_in(static_cast<std::uint8_t>(4));\n";
+        harness << "    sim.init();\n";
+        harness << "    sim.eval();\n";
+        harness << "    if (sim.get_y() != static_cast<std::uint8_t>(2)) return 100;\n";
+        harness << "    if (sim.get_pad_seen_y() != static_cast<std::uint8_t>(0)) return 101;\n";
+        harness << "    if (sim.get_pad_out() != static_cast<std::uint8_t>(0)) return 102;\n";
+        harness << "    if (sim.get_pad_oe()) return 103;\n";
+        harness << "    if (sim.get_rand_y() != rand_expected_b) return 104;\n";
         harness << "    return 0;\n";
         harness << "}\n";
     }
@@ -1955,6 +2136,149 @@ int main()
         if (std::system(regWriteHarnessExe.string().c_str()) != 0)
         {
             return fail("register-write harness failed to run");
+        }
+
+        const std::filesystem::path gatedDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_gated_clock";
+        std::filesystem::remove_all(gatedDir);
+        Design gatedDesign = buildGatedClockDesign();
+        SessionStore gatedSession;
+        if (!runActivitySchedule(gatedDesign, gatedSession))
+        {
+            return fail("gated-clock activity-schedule pass failed");
+        }
+        std::filesystem::create_directories(gatedDir);
+        EmitOptions gatedOptions;
+        gatedOptions.outputDir = gatedDir.string();
+        gatedOptions.session = &gatedSession;
+        gatedOptions.sessionPathPrefix = std::string("top");
+        gatedOptions.attributes["sched_batch_max_ops"] = "8";
+        gatedOptions.attributes["sched_batch_max_estimated_lines"] = "96";
+        gatedOptions.attributes["emit_parallelism"] = "2";
+        gatedOptions.attributes["event_precompute_max_ops"] = "1";
+        EmitDiagnostics gatedDiag;
+        EmitGrhSimCpp gatedEmitter(&gatedDiag);
+        EmitResult gatedResult = gatedEmitter.emit(gatedDesign, gatedOptions);
+        if (!gatedResult.success || gatedDiag.hasError())
+        {
+            return fail("gated-clock emit failed");
+        }
+        const std::filesystem::path gatedStatePath = gatedDir / "grhsim_top_state.cpp";
+        const std::filesystem::path gatedEvalPath = gatedDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> gatedSchedFiles =
+            collectSchedFiles(gatedDir, "grhsim_top_sched_");
+        if (gatedSchedFiles.empty())
+        {
+            return fail("gated-clock schedule files missing");
+        }
+        std::string gatedSchedText;
+        for (const auto &schedPath : gatedSchedFiles)
+        {
+            gatedSchedText += readFile(schedPath);
+        }
+        const std::string gatedEvalText = readFile(gatedEvalPath);
+        if (gatedSchedText.find("curr_evt_") == std::string::npos)
+        {
+            return fail("gated-clock exact event logic should reuse curr_evt cache");
+        }
+        if (countSubstring(gatedEvalText, "grhsim_compare_unsigned_words") != 1)
+        {
+            return fail("gated-clock shared compare cone should be emitted once in eval");
+        }
+        if (gatedSchedText.find("grhsim_event_posedge(curr_evt_") == std::string::npos)
+        {
+            return fail("gated-clock exact event logic should use cached event values");
+        }
+        const std::filesystem::path gatedHarnessPath = gatedDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(gatedHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create gated-clock harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <array>\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    const std::array<std::uint64_t, 3> gate_magic{UINT64_C(1), UINT64_C(0), UINT64_C(2)};\n";
+            harness << "    const std::array<std::uint64_t, 3> gate_zero{};\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.set_data(static_cast<std::uint8_t>(0x5A));\n";
+            harness << "    sim.set_gate_in(gate_magic);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gate_match()) return 1;\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 2;\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 13;\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gate_match()) return 3;\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 4;\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 14;\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!sim.get_gate_match()) return 5;\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 6;\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 15;\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!sim.get_gate_match()) return 7;\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x00)) return 8;\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x00)) return 16;\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0x5A)) return 9;\n";
+            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 17;\n";
+            harness << "    sim.set_gate_in(gate_zero);\n";
+            harness << "    sim.set_data(static_cast<std::uint8_t>(0xA5));\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0xA5)) return 10;\n";
+            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 18;\n";
+            harness << "    if (sim.get_gate_match()) return 11;\n";
+            harness << "    sim.set_data(static_cast<std::uint8_t>(0x3C));\n";
+            harness << "    sim.set_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.set_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_q() != static_cast<std::uint8_t>(0xA5)) return 12;\n";
+            harness << "    sim.set_aux_clk(true);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.set_aux_clk(false);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.get_gated_aux_q() != static_cast<std::uint8_t>(0x5A)) return 19;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::filesystem::path gatedHarnessExe = gatedDir / "grhsim_top_harness";
+        std::string gatedCompileCmd =
+            "c++ -std=c++20 -O2 -I" + gatedDir.string() +
+            " " + gatedStatePath.string() +
+            " " + gatedEvalPath.string();
+        for (const auto &schedPath : gatedSchedFiles)
+        {
+            gatedCompileCmd += " " + schedPath.string();
+        }
+        gatedCompileCmd += " " + gatedHarnessPath.string() + " -o " + gatedHarnessExe.string();
+        if (std::system(gatedCompileCmd.c_str()) != 0)
+        {
+            return fail("gated-clock harness failed to compile");
+        }
+        if (std::system(gatedHarnessExe.string().c_str()) != 0)
+        {
+            return fail("gated-clock harness failed to run");
         }
 
         const std::filesystem::path systemTaskDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_systemtask";
