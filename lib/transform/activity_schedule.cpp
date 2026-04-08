@@ -328,6 +328,7 @@ namespace wolvrix::lib::transform
             ActivityScheduleOpToSupernode opToSupernode;
             ActivityScheduleOpSymbolToSupernode opSymbolToSupernode;
             ActivityScheduleDag dag;
+            ActivityScheduleValueFanout valueFanout;
             ActivityScheduleTopoOrder topoOrder;
             ActivityScheduleHeadEvalSupernodes headEvalSupernodes;
             ActivityScheduleOpEventDomains opEventDomains;
@@ -1551,6 +1552,10 @@ namespace wolvrix::lib::transform
             build.opToSupernode.assign(finalOpData.maxOpIndex, kInvalidActivitySupernodeId);
             build.opSymbolToSupernode.reserve(finalOpData.topoOps.size());
             build.dag.resize(liveClusters.size());
+            if (!graph.values().empty())
+            {
+                build.valueFanout.resize(graph.values().back().index);
+            }
             build.opEventDomains.resize(finalOpData.maxOpIndex);
             if (finalOpData.maxOpIndex > 0)
             {
@@ -1596,6 +1601,35 @@ namespace wolvrix::lib::transform
             for (auto &succs : build.dag)
             {
                 std::sort(succs.begin(), succs.end());
+            }
+            for (wolvrix::lib::grh::OperationId toOpId : finalOpData.topoOps)
+            {
+                const wolvrix::lib::grh::Operation toOp = graph.getOperation(toOpId);
+                const uint32_t toNode = supernodeOfOp[toOpId.index];
+                if (toNode == kInvalidActivitySupernodeId)
+                {
+                    continue;
+                }
+                for (wolvrix::lib::grh::ValueId operand : toOp.operands())
+                {
+                    const wolvrix::lib::grh::OperationId defOpId = graph.valueDef(operand);
+                    if (!defOpId.valid())
+                    {
+                        continue;
+                    }
+                    const uint32_t fromNode = supernodeOfOp[defOpId.index];
+                    if (fromNode == kInvalidActivitySupernodeId || fromNode == toNode || operand.index == 0 ||
+                        operand.index > build.valueFanout.size())
+                    {
+                        continue;
+                    }
+                    build.valueFanout[operand.index - 1].push_back(toNode);
+                }
+            }
+            for (auto &succs : build.valueFanout)
+            {
+                std::sort(succs.begin(), succs.end());
+                succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
             }
 
             wolvrix::lib::toposort::TopoDag<uint32_t> finalTopoDag;
@@ -2186,6 +2220,7 @@ namespace wolvrix::lib::transform
                         build.opSymbolToSupernode,
                         "activity-schedule.op-symbol-to-supernode");
         setSessionValue(keyPrefix + "dag", build.dag, "activity-schedule.dag");
+        setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
         setSessionValue(keyPrefix + "topo_order", build.topoOrder, "activity-schedule.topo-order");
         setSessionValue(keyPrefix + "head_eval_supernodes",
                         build.headEvalSupernodes,

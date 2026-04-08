@@ -104,6 +104,7 @@ namespace wolvrix::lib::transform
     using ActivityScheduleOpSymbolToSupernode =
         std::unordered_map<wolvrix::lib::grh::SymbolId, uint32_t, ActivityScheduleSymbolIdHash>;
     using ActivityScheduleDag = std::vector<std::vector<uint32_t>>;
+    using ActivityScheduleValueFanout = std::vector<std::vector<uint32_t>>;
     using ActivityScheduleTopoOrder = std::vector<uint32_t>;
     using ActivityScheduleHeadEvalSupernodes = std::vector<uint32_t>;
     using ActivityScheduleOpEventDomains =
