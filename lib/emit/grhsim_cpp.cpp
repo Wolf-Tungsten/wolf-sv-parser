@@ -135,11 +135,46 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
+        bool allStringsEqual(const std::vector<std::string> &items, std::string_view value)
+        {
+            return std::all_of(items.begin(), items.end(), [&](const std::string &item) { return item == value; });
+        }
+
         template <typename T>
         void sortUniqueVector(std::vector<T> &items)
         {
             std::sort(items.begin(), items.end());
             items.erase(std::unique(items.begin(), items.end()), items.end());
+        }
+
+        constexpr std::size_t kInvalidIndex = static_cast<std::size_t>(-1);
+
+        std::size_t bitWordCount(std::size_t bitCount) noexcept
+        {
+            return (bitCount + 63u) / 64u;
+        }
+
+        std::map<std::size_t, std::uint64_t> buildBitWordMasks(const std::vector<uint32_t> &indices)
+        {
+            std::map<std::size_t, std::uint64_t> masks;
+            for (uint32_t index : indices)
+            {
+                const std::size_t word = static_cast<std::size_t>(index) >> 6;
+                const std::size_t bit = static_cast<std::size_t>(index) & 63u;
+                masks[word] |= (UINT64_C(1) << bit);
+            }
+            return masks;
+        }
+
+        void emitBitMaskSetStatements(std::ostream &stream,
+                                      std::string_view bitsExpr,
+                                      const std::vector<uint32_t> &indices,
+                                      std::string_view indent)
+        {
+            for (const auto &[word, mask] : buildBitWordMasks(indices))
+            {
+                stream << indent << bitsExpr << "[" << word << "] |= UINT64_C(" << mask << ");\n";
+            }
         }
 
         struct EmitModel;
@@ -796,6 +831,13 @@ namespace wolvrix::lib::emit
             std::vector<uint32_t> supernodeIds;
         };
 
+        struct BatchWordSegment
+        {
+            std::size_t wordIndex = 0;
+            std::uint64_t wordMask = 0;
+            std::vector<uint32_t> supernodeIds;
+        };
+
         struct StateDecl
         {
             enum class Kind
@@ -858,6 +900,8 @@ namespace wolvrix::lib::emit
             std::string pendingDataField;
             std::string pendingMaskField;
             std::string pendingAddrField;
+            std::size_t emitIndex = 0;
+            std::size_t registerWriteGroupIndex = kInvalidIndex;
             MemoryMaskMode memoryMaskMode = MemoryMaskMode::kDynamic;
             MemoryAddrMode memoryAddrMode = MemoryAddrMode::kGeneric;
             std::size_t memoryRowMask = 0;
@@ -1659,9 +1703,8 @@ namespace wolvrix::lib::emit
                     return;
                 }
                 const std::string typeName = cppTypeForValue(graph, valueId);
-                model.inputFieldByValue.emplace(valueId, fieldStem);
+                model.inputFieldByValue.emplace(valueId, apiStem);
                 model.prevInputFieldByValue.emplace(valueId, "prev_" + fieldStem);
-                model.inputFieldDecls.push_back("    " + typeName + " " + fieldStem + " = " + defaultInitExpr(graph, valueId) + ";");
                 model.inputFieldDecls.push_back("    " + typeName + " prev_" + fieldStem + " = " + defaultInitExpr(graph, valueId) + ";");
                 model.publicPortDecls.push_back("    " + typeName + " " + apiStem + " = " + defaultInitExpr(graph, valueId) + ";");
             };
@@ -1670,7 +1713,7 @@ namespace wolvrix::lib::emit
                 [&](ValueId valueId, const std::string &fieldStem, const std::string &apiStem, bool initializeField) {
                     const std::string typeName = cppTypeForValue(graph, valueId);
                     const std::string initExpr = initializeField ? defaultInitExpr(graph, valueId) : typeName + "{}";
-                    model.outputFieldDecls.push_back("    " + typeName + " " + fieldStem + " = " + initExpr + ";");
+                    (void)fieldStem;
                     model.publicPortDecls.push_back("    " + typeName + " " + apiStem + " = " + initExpr + ";");
                 };
 
@@ -1692,12 +1735,9 @@ namespace wolvrix::lib::emit
                 const std::string inType = cppTypeForValue(graph, port.in);
                 const std::string outType = cppTypeForValue(graph, port.out);
                 const std::string oeType = cppTypeForValue(graph, port.oe);
-                model.inputFieldByValue.emplace(port.in, "inout_" + name + "_in");
+                model.inputFieldByValue.emplace(port.in, name + ".in");
                 model.prevInputFieldByValue.emplace(port.in, "prev_inout_" + name + "_in");
-                model.inputFieldDecls.push_back("    " + inType + " inout_" + name + "_in = " + defaultInitExpr(graph, port.in) + ";");
                 model.inputFieldDecls.push_back("    " + inType + " prev_inout_" + name + "_in = " + defaultInitExpr(graph, port.in) + ";");
-                model.outputFieldDecls.push_back("    " + outType + " inout_" + name + "_out = " + defaultInitExpr(graph, port.out) + ";");
-                model.outputFieldDecls.push_back("    " + oeType + " inout_" + name + "_oe = " + defaultInitExpr(graph, port.oe) + ";");
                 model.publicPortDecls.push_back("    struct Inout_" + name + " {\n"
                                                 "        " + inType + " in = " + defaultInitExpr(graph, port.in) + ";\n"
                                                 "        " + outType + " out = " + defaultInitExpr(graph, port.out) + ";\n"
@@ -1942,6 +1982,7 @@ namespace wolvrix::lib::emit
                     write.pendingDataField = base + "_data";
                     write.pendingMaskField = base + "_mask";
                     write.pendingAddrField = base + "_addr";
+                    write.emitIndex = model.writes.size();
                     model.writeByOp.emplace(opId, write);
                     model.writes.push_back(write);
 
@@ -1972,6 +2013,8 @@ namespace wolvrix::lib::emit
                     group.symbol = write.symbol;
                     model.registerWriteGroups.push_back(std::move(group));
                 }
+                model.writes[writeIndex].registerWriteGroupIndex = it->second;
+                model.writeByOp.insert_or_assign(model.writes[writeIndex].opId, model.writes[writeIndex]);
                 model.registerWriteGroups[it->second].writeIndices.push_back(writeIndex);
             }
 
@@ -2287,6 +2330,39 @@ namespace wolvrix::lib::emit
                 batches.push_back(ScheduleBatch{});
             }
             return batches;
+        }
+
+        std::vector<BatchWordSegment> buildBatchWordSegments(const std::vector<uint32_t> &supernodeIds)
+        {
+            std::vector<BatchWordSegment> segments;
+            BatchWordSegment current;
+            bool hasCurrent = false;
+            auto flushCurrent = [&]() {
+                if (!hasCurrent || current.supernodeIds.empty())
+                {
+                    return;
+                }
+                segments.push_back(std::move(current));
+                current = BatchWordSegment{};
+                hasCurrent = false;
+            };
+
+            for (uint32_t supernodeId : supernodeIds)
+            {
+                const std::size_t wordIndex = static_cast<std::size_t>(supernodeId) >> 6;
+                const std::uint64_t bitMask = UINT64_C(1) << (static_cast<std::size_t>(supernodeId) & 63u);
+                if (!hasCurrent || current.wordIndex != wordIndex)
+                {
+                    flushCurrent();
+                    current.wordIndex = wordIndex;
+                    current.wordMask = 0;
+                    hasCurrent = true;
+                }
+                current.wordMask |= bitMask;
+                current.supernodeIds.push_back(supernodeId);
+            }
+            flushCurrent();
+            return segments;
         }
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
@@ -3461,8 +3537,17 @@ namespace wolvrix::lib::emit
             auto operandExpr = [&](std::size_t index, std::size_t width) -> std::string
             {
                 const ValueId value = op.operands()[index];
+                const std::size_t srcWidth = static_cast<std::size_t>(graph.valueWidth(value));
+                if (srcWidth == width)
+                {
+                    if (width == 1)
+                    {
+                        return operands[index];
+                    }
+                    return "static_cast<std::uint64_t>(" + operands[index] + ")";
+                }
                 return "grhsim_cast_u64(static_cast<std::uint64_t>(" + operands[index] + "), " +
-                       std::to_string(graph.valueWidth(value)) + ", " + std::to_string(width) + ", " +
+                       std::to_string(srcWidth) + ", " + std::to_string(width) + ", " +
                        boolLiteral(graph.valueSigned(value)) + ")";
             };
             auto compareWidth = [&]() -> std::size_t
@@ -3790,8 +3875,18 @@ namespace wolvrix::lib::emit
             stream << "#include <iostream>\n\n";
             stream << "void " << className << "::eval_batch_" << batch.index << "()\n{\n";
             stream << "    // Batch " << batch.index << ": evaluate a contiguous supernode range in topo order.\n";
-            for (uint32_t supernodeId : batch.supernodeIds)
+            const std::vector<BatchWordSegment> wordSegments = buildBatchWordSegments(batch.supernodeIds);
+            for (std::size_t segmentIndex = 0; segmentIndex < wordSegments.size(); ++segmentIndex)
             {
+                const BatchWordSegment &segment = wordSegments[segmentIndex];
+                stream << "\n";
+                stream << "    // Word segment " << segmentIndex << ": skip this contiguous topo slice when none of its activity bits are set.\n";
+                stream << "    if ((supernode_active_curr_[" << segment.wordIndex << "] & UINT64_C("
+                       << segment.wordMask << ")) == 0) {\n";
+                stream << "        goto word_segment_" << segmentIndex << "_end;\n";
+                stream << "    }\n";
+                for (uint32_t supernodeId : segment.supernodeIds)
+                {
                 std::vector<std::string> domainParts;
                 for (const auto &signature : (*schedule.supernodeEventDomains)[supernodeId])
                 {
@@ -3812,16 +3907,22 @@ namespace wolvrix::lib::emit
                         }
                     }
                 }
-                const std::string guardExpr = domainParts.empty() ? "true" : "(" + joinStrings(domainParts, " || ") + ")";
-                stream << "\n";
+                const std::string guardExpr =
+                    (domainParts.empty() || allStringsEqual(domainParts, "true")) ? "true"
+                                                                                  : "(" + joinStrings(domainParts, " || ") + ")";
                 stream << "    // Supernode " << supernodeId << ": run only when propagated activity and event-domain guard both hit.\n";
-                stream << "    if (!grhsim_test_bit(supernode_active_curr_, " << supernodeId << ")) {\n";
+                stream << "    if ((supernode_active_curr_[" << (supernodeId >> 6) << "] & UINT64_C("
+                       << (UINT64_C(1) << (supernodeId & 63u)) << ")) == 0) {\n";
                 stream << "        goto supernode_" << supernodeId << "_end;\n";
                 stream << "    }\n";
-                stream << "    if (!(" << guardExpr << ")) {\n";
-                stream << "        goto supernode_" << supernodeId << "_end;\n";
-                stream << "    }\n";
-                stream << "    grhsim_clear_bit(supernode_active_curr_, " << supernodeId << ");\n";
+                if (guardExpr != "true")
+                {
+                    stream << "    if (!(" << guardExpr << ")) {\n";
+                    stream << "        goto supernode_" << supernodeId << "_end;\n";
+                    stream << "    }\n";
+                }
+                stream << "    supernode_active_curr_[" << (supernodeId >> 6) << "] &= ~UINT64_C("
+                       << (UINT64_C(1) << (supernodeId & 63u)) << ");\n";
                 stream << "    {\n";
                 for (const auto opId : (*schedule.supernodeToOps)[supernodeId])
                 {
@@ -4240,6 +4341,8 @@ namespace wolvrix::lib::emit
                                     stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
                                 }
                                 stream << "            " << write.pendingValidField << " = true;\n";
+                                stream << "            grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
+                                       << write.emitIndex << "u);\n";
                             }
                         }
                         else
@@ -4247,6 +4350,8 @@ namespace wolvrix::lib::emit
                             stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[1]) << ";\n";
                             stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[2]) << ";\n";
                             stream << "            " << write.pendingValidField << " = true;\n";
+                            stream << "            grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
+                                   << write.emitIndex << "u);\n";
                         }
                         stream << "        }\n";
                         break;
@@ -4434,6 +4539,8 @@ namespace wolvrix::lib::emit
                 }
                 stream << "    }\n";
                 stream << "supernode_" << supernodeId << "_end:\n";
+                }
+                stream << "word_segment_" << segmentIndex << "_end:\n";
             }
             stream << "    return;\n";
             stream << "}\n";
@@ -5761,14 +5868,34 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
 }
 
 )CPP";
-            *stream << "inline void grhsim_set_bit(std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
+            *stream << "template <typename BitWords>\n";
+            *stream << "inline void grhsim_set_bit(BitWords &bits, std::size_t index)\n{\n";
             *stream << "    bits[index >> 6] |= (UINT64_C(1) << (index & 63u));\n";
             *stream << "}\n\n";
-            *stream << "inline void grhsim_clear_bit(std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
+            *stream << "template <typename BitWords>\n";
+            *stream << "inline void grhsim_clear_bit(BitWords &bits, std::size_t index)\n{\n";
             *stream << "    bits[index >> 6] &= ~(UINT64_C(1) << (index & 63u));\n";
             *stream << "}\n\n";
-            *stream << "inline bool grhsim_test_bit(const std::vector<std::uint64_t> &bits, std::size_t index)\n{\n";
+            *stream << "template <typename BitWords>\n";
+            *stream << "inline bool grhsim_test_bit(const BitWords &bits, std::size_t index)\n{\n";
             *stream << "    return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline void grhsim_mark_pending_write(std::array<std::uint32_t, N> &touchedIndices,\n";
+            *stream << "                                      std::array<std::uint8_t, N> &touchedFlags,\n";
+            *stream << "                                      std::size_t &touchedCount,\n";
+            *stream << "                                      std::uint32_t writeIndex)\n{\n";
+            *stream << "    if constexpr (N > 0) {\n";
+            *stream << "        if (touchedFlags[writeIndex] == 0) {\n";
+            *stream << "            touchedFlags[writeIndex] = 1;\n";
+            *stream << "            touchedIndices[touchedCount++] = writeIndex;\n";
+            *stream << "        }\n";
+            *stream << "    } else {\n";
+            *stream << "        (void)touchedIndices;\n";
+            *stream << "        (void)touchedFlags;\n";
+            *stream << "        (void)touchedCount;\n";
+            *stream << "        (void)writeIndex;\n";
+            *stream << "    }\n";
             *stream << "}\n";
             if (model.needsSystemTaskRuntime)
             {
@@ -6270,9 +6397,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps->size() << ";\n";
+            *stream << "    static constexpr std::size_t kSupernodeWordCount = (kSupernodeCount + 63u) / 64u;\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
             *stream << "    static constexpr std::size_t kEventTermCount = " << model.eventTerms.size() << ";\n";
             *stream << "    static constexpr std::size_t kEventDomainCount = " << schedule.eventDomainSinkGroups->size() << ";\n";
+            *stream << "    static constexpr std::size_t kWriteCount = " << model.writes.size() << ";\n";
             *stream << "    static constexpr std::size_t kEventPrecomputeMaxOps = " << eventPrecomputeMaxOps << ";\n\n";
             *stream << "    " << className << "();\n";
             *stream << "    ~" << className << "();\n";
@@ -6359,9 +6488,16 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::unordered_map<std::uint64_t, FileHandleEntry> file_handles_;\n";
                 *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
             }
-            *stream << "    std::vector<std::uint64_t> supernode_active_curr_;\n";
-            *stream << "    std::vector<bool> event_term_hit_;\n";
-            *stream << "    std::vector<bool> event_domain_hit_;\n\n";
+            *stream << "    std::array<std::uint64_t, kSupernodeWordCount> supernode_active_curr_{};\n";
+            *stream << "    std::array<std::uint8_t, kEventTermCount> event_term_hit_{};\n";
+            *stream << "    std::array<std::uint8_t, kEventDomainCount> event_domain_hit_{};\n";
+            if (!model.writes.empty())
+            {
+                *stream << "    std::array<std::uint32_t, kWriteCount> touched_write_indices_{};\n";
+                *stream << "    std::array<std::uint8_t, kWriteCount> touched_write_flags_{};\n";
+                *stream << "    std::size_t touched_write_count_ = 0;\n";
+            }
+            *stream << '\n';
             for (const auto &decl : model.inputFieldDecls)
             {
                 *stream << decl << '\n';
@@ -6466,9 +6602,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "} // namespace\n\n";
             }
             *stream << className << "::" << className << "()\n";
-            *stream << "    : supernode_active_curr_((kSupernodeCount + 63u) / 64u, 0),\n";
-            *stream << "      event_term_hit_(kEventTermCount, false),\n";
-            *stream << "      event_domain_hit_(kEventDomainCount, true)\n";
             *stream << "{\n";
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
@@ -6478,11 +6611,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "}\n\n";
             *stream << "void " << className << "::init()\n{\n";
-            *stream << "    // Initialize public port mirrors and internal input snapshots.\n";
+            *stream << "    // Initialize public input ports and previous-eval baselines.\n";
             for (const auto &port : graph.inputPorts())
             {
                 *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
-                *stream << "    " << model.inputFieldByValue.at(port.value) << " = " << defaultInitExpr(graph, port.value) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
@@ -6490,23 +6622,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    " << name << ".in = " << defaultInitExpr(graph, port.in) << ";\n";
                 *stream << "    " << name << ".out = " << defaultInitExpr(graph, port.out) << ";\n";
                 *stream << "    " << name << ".oe = " << defaultInitExpr(graph, port.oe) << ";\n";
-                *stream << "    " << model.inputFieldByValue.at(port.in) << " = " << defaultInitExpr(graph, port.in) << ";\n";
             }
             if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
             {
                 *stream << '\n';
             }
-            *stream << "    // Initialize public outputs and their internal mirrors.\n";
+            *stream << "    // Initialize public outputs.\n";
             for (const auto &port : graph.outputPorts())
             {
                 *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
-                *stream << "    out_" << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
-            }
-            for (const auto &port : graph.inoutPorts())
-            {
-                const std::string name = sanitizeIdentifier(port.name);
-                *stream << "    inout_" << name << "_out = " << defaultInitExpr(graph, port.out) << ";\n";
-                *stream << "    inout_" << name << "_oe = " << defaultInitExpr(graph, port.oe) << ";\n";
             }
             if (!graph.outputPorts().empty() || !graph.inoutPorts().empty())
             {
@@ -6597,11 +6721,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             for (const auto &port : graph.inputPorts())
             {
-                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << model.inputFieldByValue.at(port.value) << ";\n";
+                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
-                *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << model.inputFieldByValue.at(port.in) << ";\n";
+                *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
             }
             if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
             {
@@ -6632,9 +6756,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << '\n';
             }
             *stream << "    // Reset per-eval scheduling state.\n";
-            *stream << "    std::fill(supernode_active_curr_.begin(), supernode_active_curr_.end(), 0);\n";
-            *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
-            *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
+            *stream << "    supernode_active_curr_.fill(UINT64_C(0));\n";
+            *stream << "    event_term_hit_.fill(0);\n";
+            *stream << "    event_domain_hit_.fill(0);\n";
+            if (!model.writes.empty())
+            {
+                *stream << "    touched_write_indices_.fill(0);\n";
+                *stream << "    touched_write_flags_.fill(0);\n";
+                *stream << "    touched_write_count_ = 0;\n";
+            }
             *stream << "    first_eval_ = true;\n";
             *stream << "    register_write_conflict_ = false;\n";
             for (const std::string &stateSymbol : model.stateOrder)
@@ -7065,89 +7195,87 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::exit(exitCode);\n";
                 *stream << "}\n\n";
             }
-            auto emitCommitWrite = [&](const WriteDecl &write)
+            auto emitCommitWriteBody = [&](const WriteDecl &write, std::string_view indent)
             {
                 const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
-                *stream << "    if (" << write.pendingValidField << ") {\n";
                 if (state.kind == StateDecl::Kind::Memory)
                 {
-                    *stream << "        const std::size_t row = " << write.pendingAddrField << ";\n";
-                    *stream << "        if (row < " << state.rowCount << ") {\n";
+                    *stream << indent << "const std::size_t row = " << write.pendingAddrField << ";\n";
+                    *stream << indent << "if (row < " << state.rowCount << ") {\n";
                     if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                     {
                         if (isWideLogicWidth(state.width))
                         {
-                            *stream << "            if (grhsim_assign_words(" << state.fieldName << "[row], "
+                            *stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
                                     << write.pendingDataField << ", " << state.width << ")) {\n";
-                            *stream << "                any_state_change = true;\n";
-                            *stream << "                " << state.nextEvalDirtyField << " = true;\n";
-                            *stream << "            }\n";
+                            *stream << indent << "        any_state_change = true;\n";
+                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "    }\n";
                         }
                         else
                         {
-                            *stream << "            const auto next_value = static_cast<" << logicCppType(state.width)
+                            *stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
                                     << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
                                     << "), " << state.width << "));\n";
-                            *stream << "            if (" << state.fieldName << "[row] != next_value) {\n";
-                            *stream << "                " << state.fieldName << "[row] = next_value;\n";
-                            *stream << "                any_state_change = true;\n";
-                            *stream << "                " << state.nextEvalDirtyField << " = true;\n";
-                            *stream << "            }\n";
+                            *stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
+                            *stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
+                            *stream << indent << "        any_state_change = true;\n";
+                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "    }\n";
                         }
                     }
                     else
                     {
                         if (isWideLogicWidth(state.width))
                         {
-                            *stream << "            if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
+                            *stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
                                     << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ")) {\n";
-                            *stream << "                any_state_change = true;\n";
-                            *stream << "                " << state.nextEvalDirtyField << " = true;\n";
-                            *stream << "            }\n";
+                            *stream << indent << "        any_state_change = true;\n";
+                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "    }\n";
                         }
                         else
                         {
-                            *stream << "            const auto mask = static_cast<" << logicCppType(state.width)
+                            *stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
                                     << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingMaskField
                                     << "), " << state.width << "));\n";
-                            *stream << "            const auto merged = static_cast<" << logicCppType(state.width)
+                            *stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
                                     << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
                                     << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
                                     << "), " << state.width << ")) & mask));\n";
-                            *stream << "            if (" << state.fieldName << "[row] != merged) {\n";
-                            *stream << "                " << state.fieldName << "[row] = merged;\n";
-                            *stream << "                any_state_change = true;\n";
-                            *stream << "                " << state.nextEvalDirtyField << " = true;\n";
-                            *stream << "            }\n";
+                            *stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
+                            *stream << indent << "        " << state.fieldName << "[row] = merged;\n";
+                            *stream << indent << "        any_state_change = true;\n";
+                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "    }\n";
                         }
                     }
-                    *stream << "        }\n";
+                    *stream << indent << "}\n";
                 }
                 else
                 {
                     if (isWideLogicWidth(state.width))
                     {
-                        *stream << "        const auto merged = grhsim_merge_words_masked(" << state.fieldName << ", "
+                        *stream << indent << "const auto merged = grhsim_merge_words_masked(" << state.fieldName << ", "
                                 << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
-                        *stream << "        if (grhsim_assign_words(" << state.fieldName << ", merged, " << state.width << ")) {\n";
-                        *stream << "            any_state_change = true;\n";
-                        *stream << "            " << state.nextEvalDirtyField << " = true;\n";
-                        *stream << "        }\n";
+                        *stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", merged, " << state.width << ")) {\n";
+                        *stream << indent << "    any_state_change = true;\n";
+                        *stream << indent << "    " << state.nextEvalDirtyField << " = true;\n";
+                        *stream << indent << "}\n";
                     }
                     else
                     {
-                        *stream << "        const auto merged = static_cast<" << state.cppType << ">((" << state.fieldName
+                        *stream << indent << "const auto merged = static_cast<" << state.cppType << ">((" << state.fieldName
                                 << " & ~" << write.pendingMaskField << ") | (" << write.pendingDataField
                                 << " & " << write.pendingMaskField << "));\n";
-                        *stream << "        if (" << state.fieldName << " != merged) {\n";
-                        *stream << "            " << state.fieldName << " = merged;\n";
-                        *stream << "            any_state_change = true;\n";
-                        *stream << "            " << state.nextEvalDirtyField << " = true;\n";
-                        *stream << "        }\n";
+                        *stream << indent << "if (" << state.fieldName << " != merged) {\n";
+                        *stream << indent << "    " << state.fieldName << " = merged;\n";
+                        *stream << indent << "    any_state_change = true;\n";
+                        *stream << indent << "    " << state.nextEvalDirtyField << " = true;\n";
+                        *stream << indent << "}\n";
                     }
                 }
-                *stream << "        " << write.pendingValidField << " = false;\n";
-                *stream << "    }\n";
+                *stream << indent << write.pendingValidField << " = false;\n";
             };
             *stream << "void " << className << "::commit_state_updates()\n{\n";
             *stream << "    // Apply staged state writes after the scheduled combinational phase completes.\n";
@@ -7155,51 +7283,51 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    register_write_conflict_ = false;\n";
             for (const auto &group : model.registerWriteGroups)
             {
-                const std::string groupName = sanitizeIdentifier(group.symbol);
-                *stream << "    {\n";
-                *stream << "        // Multiple live write ports to the same register are reported but still committed without ordering guarantees.\n";
-                *stream << "        bool saw_write_" << groupName << " = false;\n";
-                for (std::size_t writeIndex : group.writeIndices)
-                {
-                    const WriteDecl &write = model.writes[writeIndex];
-                    *stream << "        if (" << write.pendingValidField << ") {\n";
-                    *stream << "            if (saw_write_" << groupName << ") {\n";
-                    *stream << "                register_write_conflict_ = true;\n";
-                    *stream << "            }\n";
-                    *stream << "            saw_write_" << groupName << " = true;\n";
-                    *stream << "        }\n";
-                }
-                for (std::size_t writeIndex : group.writeIndices)
-                {
-                    emitCommitWrite(model.writes[writeIndex]);
-                }
-                *stream << "    }\n";
+                *stream << "    bool saw_write_group_" << sanitizeIdentifier(group.symbol) << " = false;\n";
             }
-            for (const auto &write : model.writes)
+            if (!model.writes.empty())
             {
-                if (write.kind == StateDecl::Kind::Register)
+                *stream << "    for (std::size_t touchedIndex = 0; touchedIndex < touched_write_count_; ++touchedIndex) {\n";
+                *stream << "        const std::uint32_t writeIndex = touched_write_indices_[touchedIndex];\n";
+                *stream << "        touched_write_flags_[writeIndex] = 0;\n";
+                *stream << "        switch (writeIndex) {\n";
+                for (const auto &write : model.writes)
                 {
-                    continue;
+                    *stream << "        case " << write.emitIndex << "u:\n";
+                    if (write.registerWriteGroupIndex != kInvalidIndex)
+                    {
+                        const std::string groupName =
+                            sanitizeIdentifier(model.registerWriteGroups[write.registerWriteGroupIndex].symbol);
+                        *stream << "            if (saw_write_group_" << groupName << ") {\n";
+                        *stream << "                register_write_conflict_ = true;\n";
+                        *stream << "            }\n";
+                        *stream << "            saw_write_group_" << groupName << " = true;\n";
+                    }
+                    *stream << "            if (" << write.pendingValidField << ") {\n";
+                    emitCommitWriteBody(write, "                ");
+                    *stream << "            }\n";
+                    *stream << "            break;\n";
                 }
-                emitCommitWrite(write);
+                *stream << "        default:\n";
+                *stream << "            break;\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    touched_write_count_ = 0;\n";
             }
             *stream << "    (void)any_state_change;\n";
             *stream << "}\n\n";
             *stream << "void " << className << "::refresh_outputs()\n{\n";
-            *stream << "    // Publish the latest value fields to the public output and inout mirrors.\n";
+            *stream << "    // Publish the latest value fields to the public outputs.\n";
             for (const auto &port : graph.outputPorts())
             {
                 const std::string name = sanitizeIdentifier(port.name);
-                *stream << "    out_" << name << " = " << valueRef(model, port.value) << ";\n";
-                *stream << "    " << name << " = out_" << name << ";\n";
+                *stream << "    " << name << " = " << valueRef(model, port.value) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
                 const std::string name = sanitizeIdentifier(port.name);
-                *stream << "    inout_" << name << "_out = " << valueRef(model, port.out) << ";\n";
-                *stream << "    inout_" << name << "_oe = " << valueRef(model, port.oe) << ";\n";
-                *stream << "    " << name << ".out = inout_" << name << "_out;\n";
-                *stream << "    " << name << ".oe = inout_" << name << "_oe;\n";
+                *stream << "    " << name << ".out = " << valueRef(model, port.out) << ";\n";
+                *stream << "    " << name << ".oe = " << valueRef(model, port.oe) << ";\n";
             }
             *stream << "}\n";
         }
@@ -7213,28 +7341,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
             *stream << "void " << className << "::eval()\n{\n";
-            *stream << "    // Snapshot public inputs into the internal input mirrors consumed by the scheduled graph.\n";
-            for (const auto &port : graph.inputPorts())
-            {
-                *stream << "    " << model.inputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
-            }
-            for (const auto &port : graph.inoutPorts())
-            {
-                *stream << "    " << model.inputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
-            }
-            if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
-            {
-                *stream << '\n';
-            }
             *stream << "    // Seed eval entry from static first-eval heads, changed inputs, and states changed by the previous eval.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
             if (!model.firstEvalSeedSupernodes.empty())
             {
                 *stream << "    if (initial_eval) {\n";
-                for (uint32_t supernodeId : model.firstEvalSeedSupernodes)
-                {
-                    *stream << "        grhsim_set_bit(supernode_active_curr_, " << supernodeId << ");\n";
-                }
+                emitBitMaskSetStatements(*stream, "supernode_active_curr_", model.firstEvalSeedSupernodes, "        ");
                 *stream << "    }\n";
             }
             std::map<std::vector<uint32_t>, SeedGroup> inputSeedGroups;
@@ -7266,10 +7378,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 (void)supernodes;
                 *stream << "    if (!initial_eval && (" << joinStrings(group.conditions, " || ") << ")) {\n";
-                for (uint32_t supernodeId : group.supernodes)
-                {
-                    *stream << "        grhsim_set_bit(supernode_active_curr_, " << supernodeId << ");\n";
-                }
+                emitBitMaskSetStatements(*stream, "supernode_active_curr_", group.supernodes, "        ");
                 *stream << "    }\n";
             }
             std::map<std::vector<uint32_t>, SeedGroup> stateSeedGroups;
@@ -7294,20 +7403,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 (void)supernodes;
                 *stream << "    if (!initial_eval && (" << joinStrings(group.conditions, " || ") << ")) {\n";
-                for (uint32_t supernodeId : group.supernodes)
-                {
-                    *stream << "        grhsim_set_bit(supernode_active_curr_, " << supernodeId << ");\n";
-                }
+                emitBitMaskSetStatements(*stream, "supernode_active_curr_", group.supernodes, "        ");
                 for (const std::string &clear : group.clears)
                 {
                     *stream << "        " << clear << " = false;\n";
                 }
                 *stream << "    }\n";
             }
-            *stream << "    // Reset per-eval event-hit caches.\n";
-            *stream << "    std::fill(event_term_hit_.begin(), event_term_hit_.end(), false);\n";
-            *stream << "    std::fill(event_domain_hit_.begin(), event_domain_hit_.end(), true);\n";
-            *stream << '\n';
+            if (!model.eventTerms.empty() || !schedule.eventDomainSinkGroups->empty())
+            {
+                *stream << '\n';
+            }
 
             {
                 if (!model.prevEventFieldByValue.empty())
@@ -7455,7 +7561,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << '\n';
 
-            if (!schedule.eventDomainSinkGroups->empty())
+            bool emitsEventDomainHits = false;
+            for (const auto &group : *schedule.eventDomainSinkGroups)
+            {
+                const std::size_t domainIndex = model.eventDomainIndex.at(group.signature);
+                if (!group.signature.empty() && model.eventDomainPrecomputable[domainIndex])
+                {
+                    emitsEventDomainHits = true;
+                    break;
+                }
+            }
+            if (emitsEventDomainHits)
             {
                 *stream << "    // Reduce event terms into event-domain hits; non-precomputable domains conservatively stay enabled.\n";
             }
@@ -7464,12 +7580,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const std::size_t domainIndex = model.eventDomainIndex.at(group.signature);
                 if (group.signature.empty())
                 {
-                    *stream << "    event_domain_hit_[" << domainIndex << "] = true;\n";
                     continue;
                 }
                 if (!model.eventDomainPrecomputable[domainIndex])
                 {
-                    *stream << "    event_domain_hit_[" << domainIndex << "] = true;\n";
                     continue;
                 }
                 std::vector<std::string> parts;
@@ -7497,11 +7611,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    // Publish current inputs/event values as the previous-eval baseline for the next call.\n";
             for (const auto &port : graph.inputPorts())
             {
-                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << model.inputFieldByValue.at(port.value) << ";\n";
+                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
             }
             for (const auto &port : graph.inoutPorts())
             {
-                *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << model.inputFieldByValue.at(port.in) << ";\n";
+                *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
             }
             for (const auto &[value, prevField] : model.prevEventFieldByValue)
             {
