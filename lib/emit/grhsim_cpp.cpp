@@ -39,18 +39,9 @@ namespace wolvrix::lib::emit
         using wolvrix::lib::grh::ValueId;
         using wolvrix::lib::grh::ValueIdHash;
         using wolvrix::lib::grh::ValueType;
-        using wolvrix::lib::transform::ActivityScheduleEventDomainSignature;
-        using wolvrix::lib::transform::ActivityScheduleEventDomainSignatureHash;
-        using wolvrix::lib::transform::ActivityScheduleEventDomainSinkGroups;
-        using wolvrix::lib::transform::ActivityScheduleEventDomainSinks;
-        using wolvrix::lib::transform::ActivityScheduleEventTerm;
-        using wolvrix::lib::transform::ActivityScheduleEventTermHash;
-        using wolvrix::lib::transform::ActivityScheduleHeadEvalSupernodes;
-        using wolvrix::lib::transform::ActivityScheduleSupernodeEventDomains;
-        using wolvrix::lib::transform::ActivityScheduleSupernodeToOpSymbols;
+        using wolvrix::lib::transform::ActivityScheduleStateReadSupernodes;
         using wolvrix::lib::transform::ActivityScheduleSupernodeToOps;
         using wolvrix::lib::transform::ActivityScheduleTopoOrder;
-        using wolvrix::lib::transform::ActivityScheduleDag;
         using wolvrix::lib::transform::ActivityScheduleValueFanout;
 
         template <typename T>
@@ -168,12 +159,14 @@ namespace wolvrix::lib::emit
 
         void emitBitMaskSetStatements(std::ostream &stream,
                                       std::string_view bitsExpr,
+                                      std::string_view activeWordCountExpr,
                                       const std::vector<uint32_t> &indices,
                                       std::string_view indent)
         {
             for (const auto &[word, mask] : buildBitWordMasks(indices))
             {
-                stream << indent << bitsExpr << "[" << word << "] |= UINT64_C(" << mask << ");\n";
+                stream << indent << "grhsim_set_word_mask(" << bitsExpr << ", " << activeWordCountExpr << ", " << word
+                       << ", UINT64_C(" << mask << "));\n";
             }
         }
 
@@ -189,51 +182,6 @@ namespace wolvrix::lib::emit
             std::string expr;
             bool alreadyBoundedToResultWidth = false;
         };
-
-        struct SeedGroup
-        {
-            std::vector<uint32_t> supernodes;
-            std::vector<std::string> conditions;
-            std::vector<std::string> clears;
-        };
-
-        void appendSeedGroupCondition(std::map<std::vector<uint32_t>, SeedGroup> &groups,
-                                      const std::vector<uint32_t> &supernodes,
-                                      std::string condition,
-                                      std::optional<std::string> clear = std::nullopt)
-        {
-            if (supernodes.empty())
-            {
-                return;
-            }
-            auto &group = groups[supernodes];
-            if (group.supernodes.empty())
-            {
-                group.supernodes = supernodes;
-            }
-            group.conditions.push_back(std::move(condition));
-            if (clear)
-            {
-                group.clears.push_back(std::move(*clear));
-            }
-        }
-
-        std::size_t parseEventPrecomputeMaxOps(const EmitOptions &options)
-        {
-            auto it = options.attributes.find("event_precompute_max_ops");
-            if (it == options.attributes.end())
-            {
-                return 128;
-            }
-            try
-            {
-                return static_cast<std::size_t>(std::stoull(it->second));
-            }
-            catch (const std::exception &)
-            {
-                return 128;
-            }
-        }
 
         std::size_t parseScheduleBatchMaxOps(const EmitOptions &options)
         {
@@ -809,18 +757,56 @@ namespace wolvrix::lib::emit
             return true;
         }
 
+        struct EventOperandInfo
+        {
+            std::vector<ValueId> values;
+            std::vector<std::string> edges;
+        };
+
+        EventOperandInfo collectEventOperands(const Operation &op)
+        {
+            EventOperandInfo info;
+            info.edges = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{});
+            if (info.edges.empty())
+            {
+                return info;
+            }
+
+            const auto operands = op.operands();
+            std::size_t eventStart = operands.size();
+            switch (op.kind())
+            {
+            case OperationKind::kRegisterWritePort:
+                eventStart = 3;
+                break;
+            case OperationKind::kMemoryWritePort:
+                eventStart = 4;
+                break;
+            case OperationKind::kSystemTask:
+            case OperationKind::kDpicCall:
+                eventStart = operands.size() >= info.edges.size() ? operands.size() - info.edges.size() : operands.size();
+                break;
+            default:
+                eventStart = operands.size();
+                break;
+            }
+
+            const std::size_t eventCount = std::min(info.edges.size(), operands.size() - std::min(eventStart, operands.size()));
+            info.values.reserve(eventCount);
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                info.values.push_back(operands[eventStart + i]);
+            }
+            info.edges.resize(eventCount);
+            return info;
+        }
+
         struct ScheduleRefs
         {
-            const ActivityScheduleSupernodeToOps *supernodeToOps = nullptr;
-            const ActivityScheduleSupernodeToOpSymbols *supernodeToOpSymbols = nullptr;
-            const ActivityScheduleDag *dag = nullptr;
-            const ActivityScheduleValueFanout *valueFanout = nullptr;
-            const ActivityScheduleTopoOrder *topoOrder = nullptr;
-            const ActivityScheduleHeadEvalSupernodes *headEvalSupernodes = nullptr;
-            const ActivityScheduleSupernodeEventDomains *supernodeEventDomains = nullptr;
-            const wolvrix::lib::transform::ActivityScheduleValueEventDomains *valueEventDomains = nullptr;
-            const ActivityScheduleEventDomainSinks *eventDomainSinks = nullptr;
-            const ActivityScheduleEventDomainSinkGroups *eventDomainSinkGroups = nullptr;
+            const ActivityScheduleSupernodeToOps &supernodeToOps;
+            const ActivityScheduleValueFanout &valueFanout;
+            const ActivityScheduleTopoOrder &topoOrder;
+            const ActivityScheduleStateReadSupernodes &stateReadSupernodes;
         };
 
         struct ScheduleBatch
@@ -854,7 +840,6 @@ namespace wolvrix::lib::emit
             int32_t width = 0;
             bool isSigned = false;
             int64_t rowCount = 0;
-            std::string nextEvalDirtyField;
             std::optional<InitExprCode> initExpr;
             std::vector<std::optional<InitExprCode>> memoryInitRowExprs;
         };
@@ -927,28 +912,29 @@ namespace wolvrix::lib::emit
             std::string returnType;
         };
 
+        struct EventSampleDecl
+        {
+            std::vector<ValueId> values;
+            std::vector<std::string> edges;
+            std::vector<std::string> prevFieldNames;
+        };
+
         struct EmitModel
         {
             std::unordered_map<ValueId, std::string, ValueIdHash> inputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> prevInputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> valueFieldByValue;
-            std::unordered_map<ValueId, std::string, ValueIdHash> prevEventFieldByValue;
-            std::unordered_map<ValueId, std::string, ValueIdHash> eventCurrentVarByValue;
-            std::unordered_map<ValueId, bool, ValueIdHash> eventValuePrecomputable;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> inputHeadSupernodesByValue;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> boundaryFanoutByValue;
             std::unordered_map<std::string, StateDecl> stateBySymbol;
             std::unordered_map<std::string, std::vector<uint32_t>> stateHeadSupernodesBySymbol;
             std::unordered_map<OperationId, WriteDecl, OperationIdHash> writeByOp;
+            std::unordered_map<OperationId, EventSampleDecl, OperationIdHash> eventSamplesByOp;
             std::unordered_map<std::string, DpiImportDecl> dpiImportBySymbol;
-            std::unordered_map<ActivityScheduleEventTerm, std::size_t, ActivityScheduleEventTermHash> eventTermIndex;
-            std::unordered_map<ActivityScheduleEventDomainSignature, std::size_t, ActivityScheduleEventDomainSignatureHash>
-                eventDomainIndex;
-            std::vector<ActivityScheduleEventTerm> eventTerms;
-            std::vector<bool> eventDomainPrecomputable;
             std::vector<WriteDecl> writes;
             std::vector<RegisterWriteGroup> registerWriteGroups;
             std::vector<DpiImportDecl> dpiImports;
+            std::vector<std::string> eventFieldDecls;
             std::vector<std::string> stateOrder;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
@@ -956,9 +942,6 @@ namespace wolvrix::lib::emit
             std::vector<std::string> dpiDecls;
             std::vector<std::string> publicPortDecls;
             std::vector<std::string> inputFieldDecls;
-            std::vector<std::string> outputFieldDecls;
-            std::vector<std::string> runtimeFieldDecls;
-            std::vector<uint32_t> firstEvalSeedSupernodes;
             bool needsSystemTaskRuntime = false;
         };
 
@@ -974,7 +957,7 @@ namespace wolvrix::lib::emit
             }
             for (uint32_t succ : it->second)
             {
-                stream << indent << "grhsim_set_bit(supernode_active_curr_, " << succ << ");\n";
+                stream << indent << "grhsim_set_bit(supernode_active_curr_, active_word_count_, " << succ << ");\n";
             }
         }
 
@@ -1791,7 +1774,6 @@ namespace wolvrix::lib::emit
                         const std::string elemType = logicCppType(state.width);
                         state.cppType = "std::vector<" + elemType + ">";
                         state.fieldName = "state_mem_" + sanitizeIdentifier(state.symbol);
-                        state.nextEvalDirtyField = "state_dirty_" + sanitizeIdentifier(state.symbol);
                         if (!buildMemoryInitRowExprs(op, state.width, state.rowCount, state.memoryInitRowExprs, error))
                         {
                             return false;
@@ -1811,7 +1793,6 @@ namespace wolvrix::lib::emit
                         state.cppType = cppType;
                         state.fieldName = (state.kind == StateDecl::Kind::Register ? "state_reg_" : "state_latch_") +
                                           sanitizeIdentifier(state.symbol);
-                        state.nextEvalDirtyField = "state_dirty_" + sanitizeIdentifier(state.symbol);
                         if (auto initValue = getAttribute<std::string>(op, "initValue"))
                         {
                             if (*initValue == "$random")
@@ -1833,7 +1814,6 @@ namespace wolvrix::lib::emit
                     }
                     model.stateOrder.push_back(state.symbol);
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
-                    model.runtimeFieldDecls.push_back("    bool " + state.nextEvalDirtyField + " = false;");
                     break;
                 }
                 case OperationKind::kDpicImport:
@@ -2018,130 +1998,74 @@ namespace wolvrix::lib::emit
                 model.registerWriteGroups[it->second].writeIndices.push_back(writeIndex);
             }
 
-            for (const auto &group : *schedule.eventDomainSinkGroups)
-            {
-                const std::size_t domainIndex = model.eventDomainIndex.size();
-                model.eventDomainIndex.emplace(group.signature, domainIndex);
-                model.eventDomainPrecomputable.push_back(true);
-                for (const auto &term : group.signature.terms)
+            auto registerEventSamples = [&](OperationId opId, const Operation &op) {
+                EventOperandInfo info = collectEventOperands(op);
+                if (info.values.empty())
                 {
-                    if (model.eventTermIndex.find(term) == model.eventTermIndex.end())
-                    {
-                        const std::size_t termIndex = model.eventTerms.size();
-                        model.eventTerms.push_back(term);
-                        model.eventTermIndex.emplace(term, termIndex);
-                        const std::string prevField = "prev_evt_" + valueDebugName(graph, term.value) + "_" + std::to_string(term.value.index);
-                        model.prevEventFieldByValue.emplace(term.value, prevField);
-                        model.eventCurrentVarByValue.emplace(term.value, "curr_evt_" + std::to_string(termIndex));
-                    }
+                    return;
                 }
-            }
-
-            for (const auto &[value, prevField] : model.prevEventFieldByValue)
-            {
-                model.valueFieldDecls.push_back("    " + cppTypeForValue(graph, value) + " " + prevField + " = " +
-                                                defaultInitExpr(graph, value) + ";");
-            }
-            for (const auto &[value, currField] : model.eventCurrentVarByValue)
-            {
-                model.valueFieldDecls.push_back("    " + cppTypeForValue(graph, value) + " " + currField + " = " +
-                                                defaultInitExpr(graph, value) + ";");
-            }
-            if (schedule.valueFanout != nullptr)
-            {
-                for (ValueId valueId : graph.values())
+                EventSampleDecl samples;
+                samples.values = std::move(info.values);
+                samples.edges = std::move(info.edges);
+                samples.prevFieldNames.reserve(samples.values.size());
+                for (std::size_t i = 0; i < samples.values.size(); ++i)
                 {
-                    if (valueId.index == 0 || valueId.index > schedule.valueFanout->size())
-                    {
-                        continue;
-                    }
-                    const auto &succs = (*schedule.valueFanout)[valueId.index - 1];
-                    if (!succs.empty())
-                    {
-                        model.boundaryFanoutByValue.emplace(valueId, succs);
-                    }
+                    const ValueId value = samples.values[i];
+                    const std::string fieldName =
+                        "prev_evt_" + opDebugName(graph, opId) + "_" + std::to_string(opId.index) + "_" + std::to_string(i);
+                    samples.prevFieldNames.push_back(fieldName);
+                    model.eventFieldDecls.push_back("    " + cppTypeForValue(graph, value) + " " + fieldName + " = " +
+                                                    defaultInitExpr(graph, value) + ";");
                 }
-            }
-
-            auto appendHeadSupernode = [](std::vector<uint32_t> &supernodes, uint32_t supernodeId) {
-                supernodes.push_back(supernodeId);
+                model.eventSamplesByOp.insert_or_assign(opId, std::move(samples));
             };
 
-            for (uint32_t supernodeId = 0; supernodeId < schedule.supernodeToOps->size(); ++supernodeId)
+            for (OperationId opId : graph.operations())
             {
-                for (const auto opId : (*schedule.supernodeToOps)[supernodeId])
+                const Operation op = graph.getOperation(opId);
+                switch (op.kind())
+                {
+                case OperationKind::kRegisterWritePort:
+                case OperationKind::kLatchWritePort:
+                case OperationKind::kMemoryWritePort:
+                case OperationKind::kSystemTask:
+                case OperationKind::kDpicCall:
+                    registerEventSamples(opId, op);
+                    break;
+                default:
+                    break;
+                }
+            }
+            for (ValueId valueId : graph.values())
+            {
+                if (valueId.index == 0 || valueId.index > schedule.valueFanout.size())
+                {
+                    continue;
+                }
+                const auto &succs = schedule.valueFanout[valueId.index - 1];
+                if (!succs.empty())
+                {
+                    model.boundaryFanoutByValue.emplace(valueId, succs);
+                }
+            }
+
+            for (const auto &[stateSymbol, supernodes] : schedule.stateReadSupernodes)
+            {
+                auto &dst = model.stateHeadSupernodesBySymbol[stateSymbol];
+                dst.insert(dst.end(), supernodes.begin(), supernodes.end());
+            }
+
+            for (uint32_t supernodeId = 0; supernodeId < schedule.supernodeToOps.size(); ++supernodeId)
+            {
+                for (const auto opId : schedule.supernodeToOps[supernodeId])
                 {
                     const Operation op = graph.getOperation(opId);
                     for (const ValueId operand : op.operands())
                     {
                         if (model.inputFieldByValue.find(operand) != model.inputFieldByValue.end())
                         {
-                            appendHeadSupernode(model.inputHeadSupernodesByValue[operand], supernodeId);
+                            model.inputHeadSupernodesByValue[operand].push_back(supernodeId);
                         }
-                        const OperationId defOpId = graph.valueDef(operand);
-                        if (!defOpId.valid())
-                        {
-                            continue;
-                        }
-                        const Operation defOp = graph.getOperation(defOpId);
-                        switch (defOp.kind())
-                        {
-                        case OperationKind::kRegisterReadPort:
-                        {
-                            if (auto regSymbol = getAttribute<std::string>(defOp, "regSymbol"))
-                            {
-                                appendHeadSupernode(model.stateHeadSupernodesBySymbol[*regSymbol], supernodeId);
-                            }
-                            break;
-                        }
-                        case OperationKind::kLatchReadPort:
-                        {
-                            if (auto latchSymbol = getAttribute<std::string>(defOp, "latchSymbol"))
-                            {
-                                appendHeadSupernode(model.stateHeadSupernodesBySymbol[*latchSymbol], supernodeId);
-                            }
-                            break;
-                        }
-                        case OperationKind::kMemoryReadPort:
-                        {
-                            if (auto memSymbol = getAttribute<std::string>(defOp, "memSymbol"))
-                            {
-                                appendHeadSupernode(model.stateHeadSupernodesBySymbol[*memSymbol], supernodeId);
-                            }
-                            break;
-                        }
-                        default:
-                            break;
-                        }
-                    }
-                    switch (op.kind())
-                    {
-                    case OperationKind::kRegisterReadPort:
-                    {
-                        if (auto regSymbol = getAttribute<std::string>(op, "regSymbol"))
-                        {
-                            appendHeadSupernode(model.stateHeadSupernodesBySymbol[*regSymbol], supernodeId);
-                        }
-                        break;
-                    }
-                    case OperationKind::kLatchReadPort:
-                    {
-                        if (auto latchSymbol = getAttribute<std::string>(op, "latchSymbol"))
-                        {
-                            appendHeadSupernode(model.stateHeadSupernodesBySymbol[*latchSymbol], supernodeId);
-                        }
-                        break;
-                    }
-                    case OperationKind::kMemoryReadPort:
-                    {
-                        if (auto memSymbol = getAttribute<std::string>(op, "memSymbol"))
-                        {
-                            appendHeadSupernode(model.stateHeadSupernodesBySymbol[*memSymbol], supernodeId);
-                        }
-                        break;
-                    }
-                    default:
-                        break;
                     }
                 }
             }
@@ -2302,12 +2226,12 @@ namespace wolvrix::lib::emit
                 current = ScheduleBatch{};
             };
 
-            for (uint32_t supernodeId : *schedule.topoOrder)
+            for (uint32_t supernodeId : schedule.topoOrder)
             {
                 const std::size_t supernodeOps =
-                    supernodeId < schedule.supernodeToOps->size() ? (*schedule.supernodeToOps)[supernodeId].size() : 0;
+                    supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
                 const std::size_t supernodeLines =
-                    estimateSupernodeEmitLines(graph, *schedule.supernodeToOps, supernodeId);
+                    estimateSupernodeEmitLines(graph, schedule.supernodeToOps, supernodeId);
                 const bool hitOpBudget =
                     batchMaxOps != 0 &&
                     !current.supernodeIds.empty() &&
@@ -3740,84 +3664,56 @@ namespace wolvrix::lib::emit
 
         std::optional<std::string> exactEventExpr(const Graph &graph,
                                                   const EmitModel &model,
+                                                  OperationId opId,
                                                   const Operation &op)
         {
-            auto eventEdges = getAttribute<std::vector<std::string>>(op, "eventEdge");
-            const auto operands = op.operands();
-            if (!eventEdges || eventEdges->empty())
+            const auto sampleIt = model.eventSamplesByOp.find(opId);
+            if (sampleIt == model.eventSamplesByOp.end() || sampleIt->second.values.empty())
             {
                 return std::string("true");
             }
-            std::size_t eventStart = operands.size() - eventEdges->size();
-            if (op.kind() == OperationKind::kRegisterWritePort)
-            {
-                eventStart = 3;
-            }
-            else if (op.kind() == OperationKind::kMemoryWritePort)
-            {
-                eventStart = 4;
-            }
 
+            const EventSampleDecl &samples = sampleIt->second;
             std::vector<std::string> parts;
-            for (std::size_t i = 0; i < eventEdges->size(); ++i)
+            for (std::size_t i = 0; i < samples.values.size(); ++i)
             {
-                if (eventStart + i >= operands.size())
+                const ValueId value = samples.values[i];
+                const std::string current = valueRef(model, value);
+                const std::string &prevField = samples.prevFieldNames[i];
+                const std::string &edge = samples.edges[i];
+                if (edge.empty())
                 {
+                    parts.push_back("((" + current + ") != (" + prevField + "))");
                     continue;
                 }
-                const ValueId value = operands[eventStart + i];
-                std::string current;
-                if (auto currentIt = model.eventCurrentVarByValue.find(value); currentIt != model.eventCurrentVarByValue.end())
-                {
-                    current = currentIt->second;
-                }
-                else
-                {
-                    std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
-                    std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
-                    std::size_t totalOps = 0;
-                    auto currentExpr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
-                    if (!currentExpr)
-                    {
-                        return std::nullopt;
-                    }
-                    current = *currentExpr;
-                }
-                auto prevIt = model.prevEventFieldByValue.find(value);
-                if (prevIt == model.prevEventFieldByValue.end())
-                {
-                    parts.push_back("true");
-                    continue;
-                }
-                const std::string &edge = (*eventEdges)[i];
                 if (isWideLogicValue(graph, value))
                 {
                     if (edge == "posedge")
                     {
-                        parts.push_back("grhsim_event_posedge_words(" + current + ", " + prevIt->second + ", " +
+                        parts.push_back("grhsim_event_posedge_words(" + current + ", " + prevField + ", " +
                                         std::to_string(graph.valueWidth(value)) + ")");
                     }
                     else if (edge == "negedge")
                     {
-                        parts.push_back("grhsim_event_negedge_words(" + current + ", " + prevIt->second + ", " +
+                        parts.push_back("grhsim_event_negedge_words(" + current + ", " + prevField + ", " +
                                         std::to_string(graph.valueWidth(value)) + ")");
                     }
                     else
                     {
-                        parts.push_back("(grhsim_compare_unsigned_words(" + current + ", " + prevIt->second + ") != 0)");
+                        parts.push_back("(grhsim_compare_unsigned_words(" + current + ", " + prevField + ") != 0)");
                     }
                 }
                 else if (edge == "posedge")
                 {
-                    parts.push_back("grhsim_event_posedge(" + current + ", " + prevIt->second + ")");
+                    parts.push_back("grhsim_event_posedge(" + current + ", " + prevField + ")");
                 }
                 else if (edge == "negedge")
                 {
-                    parts.push_back("grhsim_event_negedge(" + current + ", " + prevIt->second + ")");
+                    parts.push_back("grhsim_event_negedge(" + current + ", " + prevField + ")");
                 }
                 else
                 {
-                    parts.push_back("((" + current + ") != (" + prevIt->second + "))");
+                    parts.push_back("((" + current + ") != (" + prevField + "))");
                 }
             }
             if (parts.empty())
@@ -3825,6 +3721,23 @@ namespace wolvrix::lib::emit
                 return std::string("true");
             }
             return "(" + joinStrings(parts, " || ") + ")";
+        }
+
+        void emitRefreshEventSamples(std::ostream &stream,
+                                     const EmitModel &model,
+                                     OperationId opId,
+                                     std::string_view indent)
+        {
+            const auto it = model.eventSamplesByOp.find(opId);
+            if (it == model.eventSamplesByOp.end())
+            {
+                return;
+            }
+            const EventSampleDecl &samples = it->second;
+            for (std::size_t i = 0; i < samples.values.size(); ++i)
+            {
+                stream << indent << samples.prevFieldNames[i] << " = " << valueRef(model, samples.values[i]) << ";\n";
+            }
         }
 
         std::string memoryWriteRowExpr(const Graph &graph,
@@ -3887,50 +3800,20 @@ namespace wolvrix::lib::emit
                 stream << "    }\n";
                 for (uint32_t supernodeId : segment.supernodeIds)
                 {
-                std::vector<std::string> domainParts;
-                for (const auto &signature : (*schedule.supernodeEventDomains)[supernodeId])
-                {
-                    if (signature.empty())
-                    {
-                        domainParts.push_back("true");
-                    }
-                    else
-                    {
-                        const std::size_t domainIndex = model.eventDomainIndex.at(signature);
-                        if (!model.eventDomainPrecomputable[domainIndex])
-                        {
-                            domainParts.push_back("true");
-                        }
-                        else
-                        {
-                            domainParts.push_back("event_domain_hit_[" + std::to_string(domainIndex) + "]");
-                        }
-                    }
-                }
-                const std::string guardExpr =
-                    (domainParts.empty() || allStringsEqual(domainParts, "true")) ? "true"
-                                                                                  : "(" + joinStrings(domainParts, " || ") + ")";
-                stream << "    // Supernode " << supernodeId << ": run only when propagated activity and event-domain guard both hit.\n";
-                stream << "    if ((supernode_active_curr_[" << (supernodeId >> 6) << "] & UINT64_C("
+                    stream << "    // Supernode " << supernodeId << ": run when its activity bit is set.\n";
+                    stream << "    if ((supernode_active_curr_[" << (supernodeId >> 6) << "] & UINT64_C("
                        << (UINT64_C(1) << (supernodeId & 63u)) << ")) == 0) {\n";
-                stream << "        goto supernode_" << supernodeId << "_end;\n";
-                stream << "    }\n";
-                if (guardExpr != "true")
-                {
-                    stream << "    if (!(" << guardExpr << ")) {\n";
                     stream << "        goto supernode_" << supernodeId << "_end;\n";
                     stream << "    }\n";
-                }
-                stream << "    supernode_active_curr_[" << (supernodeId >> 6) << "] &= ~UINT64_C("
-                       << (UINT64_C(1) << (supernodeId & 63u)) << ");\n";
-                stream << "    {\n";
-                for (const auto opId : (*schedule.supernodeToOps)[supernodeId])
-                {
-                    const Operation op = graph.getOperation(opId);
-                    const auto operands = op.operands();
-                    stream << "        // op " << op.symbolText() << "\n";
-                    switch (op.kind())
+                    stream << "    grhsim_clear_bit(supernode_active_curr_, active_word_count_, " << supernodeId << ");\n";
+                    stream << "    {\n";
+                    for (const auto opId : schedule.supernodeToOps[supernodeId])
                     {
+                        const Operation op = graph.getOperation(opId);
+                        const auto operands = op.operands();
+                        stream << "        // op " << op.symbolText() << "\n";
+                        switch (op.kind())
+                        {
                     case OperationKind::kConstant:
                     {
                         if (op.results().empty())
@@ -4317,7 +4200,7 @@ namespace wolvrix::lib::emit
                         }
                         const WriteDecl &write = writeIt->second;
                         const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
-                        const auto eventExpr = exactEventExpr(graph, model, op);
+                        const auto eventExpr = exactEventExpr(graph, model, opId, op);
                         if (!eventExpr)
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
@@ -4354,6 +4237,7 @@ namespace wolvrix::lib::emit
                                    << write.emitIndex << "u);\n";
                         }
                         stream << "        }\n";
+                        emitRefreshEventSamples(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kSystemTask:
@@ -4370,7 +4254,7 @@ namespace wolvrix::lib::emit
                         {
                             break;
                         }
-                        const auto eventExpr = exactEventExpr(graph, model, op);
+                        const auto eventExpr = exactEventExpr(graph, model, opId, op);
                         if (!eventExpr)
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
@@ -4400,6 +4284,7 @@ namespace wolvrix::lib::emit
                             stream << "});\n";
                         }
                         stream << "        }\n";
+                        emitRefreshEventSamples(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kDpicCall:
@@ -4419,7 +4304,7 @@ namespace wolvrix::lib::emit
                         }
                         const DpiImportDecl &decl = importIt->second;
                         const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
-                        const auto eventExpr = exactEventExpr(graph, model, op);
+                        const auto eventExpr = exactEventExpr(graph, model, opId, op);
                         if (!eventExpr)
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
@@ -4526,6 +4411,7 @@ namespace wolvrix::lib::emit
                             }
                         }
                         stream << "        }\n";
+                        emitRefreshEventSamples(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kRegister:
@@ -4575,38 +4461,26 @@ namespace wolvrix::lib::emit
 
         const auto &graph = *topGraphs.front();
         const std::string sessionPrefix = resolveSessionPathPrefix(graph, options) + ".activity_schedule.";
-        ScheduleRefs schedule;
-        schedule.supernodeToOps =
+        const auto *supernodeToOps =
             getSessionValue<ActivityScheduleSupernodeToOps>(options, sessionPrefix + "supernode_to_ops");
-        schedule.supernodeToOpSymbols =
-            getSessionValue<ActivityScheduleSupernodeToOpSymbols>(options, sessionPrefix + "supernode_to_op_symbols");
-        schedule.dag =
-            getSessionValue<ActivityScheduleDag>(options, sessionPrefix + "dag");
-        schedule.valueFanout =
+        const auto *valueFanout =
             getSessionValue<ActivityScheduleValueFanout>(options, sessionPrefix + "value_fanout");
-        schedule.topoOrder =
+        const auto *topoOrder =
             getSessionValue<ActivityScheduleTopoOrder>(options, sessionPrefix + "topo_order");
-        schedule.headEvalSupernodes =
-            getSessionValue<ActivityScheduleHeadEvalSupernodes>(options, sessionPrefix + "head_eval_supernodes");
-        schedule.supernodeEventDomains =
-            getSessionValue<ActivityScheduleSupernodeEventDomains>(options, sessionPrefix + "supernode_event_domains");
-        schedule.valueEventDomains =
-            getSessionValue<wolvrix::lib::transform::ActivityScheduleValueEventDomains>(options,
-                                                                                        sessionPrefix + "value_event_domains");
-        schedule.eventDomainSinks =
-            getSessionValue<ActivityScheduleEventDomainSinks>(options, sessionPrefix + "event_domain_sinks");
-        schedule.eventDomainSinkGroups =
-            getSessionValue<ActivityScheduleEventDomainSinkGroups>(options, sessionPrefix + "event_domain_sink_groups");
-        if (schedule.supernodeToOps == nullptr || schedule.dag == nullptr || schedule.valueFanout == nullptr ||
-            schedule.topoOrder == nullptr ||
-            schedule.headEvalSupernodes == nullptr || schedule.supernodeEventDomains == nullptr ||
-            schedule.valueEventDomains == nullptr || schedule.eventDomainSinks == nullptr ||
-            schedule.eventDomainSinkGroups == nullptr)
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(options, sessionPrefix + "state_read_supernodes");
+        if (supernodeToOps == nullptr || valueFanout == nullptr || topoOrder == nullptr || stateReadSupernodes == nullptr)
         {
             reportError("missing activity-schedule session data", sessionPrefix);
             result.success = false;
             return result;
         }
+        const ScheduleRefs schedule{
+            .supernodeToOps = *supernodeToOps,
+            .valueFanout = *valueFanout,
+            .topoOrder = *topoOrder,
+            .stateReadSupernodes = *stateReadSupernodes,
+        };
 
         EmitModel model;
         std::string buildError;
@@ -4631,58 +4505,8 @@ namespace wolvrix::lib::emit
             }
         }
 
-        const std::size_t eventPrecomputeMaxOps = parseEventPrecomputeMaxOps(options);
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
-        std::vector<uint32_t> sourceSupernodeList;
-        {
-            std::vector<std::size_t> indegree(schedule.dag->size(), 0);
-            for (std::size_t supernodeId = 0; supernodeId < schedule.dag->size(); ++supernodeId)
-            {
-                for (uint32_t succ : (*schedule.dag)[supernodeId])
-                {
-                    if (succ < indegree.size())
-                    {
-                        ++indegree[succ];
-                    }
-                }
-            }
-            for (std::size_t supernodeId = 0; supernodeId < indegree.size(); ++supernodeId)
-            {
-                if (indegree[supernodeId] == 0)
-                {
-                    sourceSupernodeList.push_back(static_cast<uint32_t>(supernodeId));
-                }
-            }
-        }
-        model.firstEvalSeedSupernodes = *schedule.headEvalSupernodes;
-        model.firstEvalSeedSupernodes.insert(model.firstEvalSeedSupernodes.end(),
-                                             sourceSupernodeList.begin(),
-                                             sourceSupernodeList.end());
-        sortUniqueVector(model.firstEvalSeedSupernodes);
-        for (const auto &[value, prevField] : model.prevEventFieldByValue)
-        {
-            (void)prevField;
-            std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
-            std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
-            std::size_t totalOps = 0;
-            auto expr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
-            model.eventValuePrecomputable[value] = expr.has_value() && totalOps <= eventPrecomputeMaxOps;
-        }
-        for (const auto &[signature, index] : model.eventDomainIndex)
-        {
-            bool precomputable = true;
-            for (const auto &term : signature.terms)
-            {
-                auto it = model.eventValuePrecomputable.find(term.value);
-                if (it == model.eventValuePrecomputable.end() || !it->second)
-                {
-                    precomputable = false;
-                    break;
-                }
-            }
-            model.eventDomainPrecomputable[index] = precomputable;
-        }
 
         const std::vector<ScheduleBatch> scheduleBatches =
             buildScheduleBatches(graph, schedule, schedBatchMaxOps, schedBatchMaxEstimatedLines);
@@ -5869,12 +5693,30 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
 
 )CPP";
             *stream << "template <typename BitWords>\n";
-            *stream << "inline void grhsim_set_bit(BitWords &bits, std::size_t index)\n{\n";
-            *stream << "    bits[index >> 6] |= (UINT64_C(1) << (index & 63u));\n";
+            *stream << "inline void grhsim_set_word_mask(BitWords &bits,\n";
+            *stream << "                                std::size_t &activeWordCount,\n";
+            *stream << "                                std::size_t wordIndex,\n";
+            *stream << "                                std::uint64_t mask)\n{\n";
+            *stream << "    const std::uint64_t oldWord = bits[wordIndex];\n";
+            *stream << "    const std::uint64_t newWord = oldWord | mask;\n";
+            *stream << "    bits[wordIndex] = newWord;\n";
+            *stream << "    if (oldWord == UINT64_C(0) && newWord != UINT64_C(0)) {\n";
+            *stream << "        ++activeWordCount;\n";
+            *stream << "    }\n";
             *stream << "}\n\n";
             *stream << "template <typename BitWords>\n";
-            *stream << "inline void grhsim_clear_bit(BitWords &bits, std::size_t index)\n{\n";
-            *stream << "    bits[index >> 6] &= ~(UINT64_C(1) << (index & 63u));\n";
+            *stream << "inline void grhsim_set_bit(BitWords &bits, std::size_t &activeWordCount, std::size_t index)\n{\n";
+            *stream << "    grhsim_set_word_mask(bits, activeWordCount, index >> 6, UINT64_C(1) << (index & 63u));\n";
+            *stream << "}\n\n";
+            *stream << "template <typename BitWords>\n";
+            *stream << "inline void grhsim_clear_bit(BitWords &bits, std::size_t &activeWordCount, std::size_t index)\n{\n";
+            *stream << "    const std::size_t wordIndex = index >> 6;\n";
+            *stream << "    const std::uint64_t oldWord = bits[wordIndex];\n";
+            *stream << "    const std::uint64_t newWord = oldWord & ~(UINT64_C(1) << (index & 63u));\n";
+            *stream << "    bits[wordIndex] = newWord;\n";
+            *stream << "    if (oldWord != UINT64_C(0) && newWord == UINT64_C(0)) {\n";
+            *stream << "        --activeWordCount;\n";
+            *stream << "    }\n";
             *stream << "}\n\n";
             *stream << "template <typename BitWords>\n";
             *stream << "inline bool grhsim_test_bit(const BitWords &bits, std::size_t index)\n{\n";
@@ -6396,13 +6238,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
-            *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps->size() << ";\n";
+            *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
             *stream << "    static constexpr std::size_t kSupernodeWordCount = (kSupernodeCount + 63u) / 64u;\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
-            *stream << "    static constexpr std::size_t kEventTermCount = " << model.eventTerms.size() << ";\n";
-            *stream << "    static constexpr std::size_t kEventDomainCount = " << schedule.eventDomainSinkGroups->size() << ";\n";
             *stream << "    static constexpr std::size_t kWriteCount = " << model.writes.size() << ";\n";
-            *stream << "    static constexpr std::size_t kEventPrecomputeMaxOps = " << eventPrecomputeMaxOps << ";\n\n";
+            *stream << "\n";
             *stream << "    " << className << "();\n";
             *stream << "    ~" << className << "();\n";
             *stream << "    void init();\n";
@@ -6489,8 +6329,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
             }
             *stream << "    std::array<std::uint64_t, kSupernodeWordCount> supernode_active_curr_{};\n";
-            *stream << "    std::array<std::uint8_t, kEventTermCount> event_term_hit_{};\n";
-            *stream << "    std::array<std::uint8_t, kEventDomainCount> event_domain_hit_{};\n";
+            *stream << "    std::size_t active_word_count_ = 0;\n";
             if (!model.writes.empty())
             {
                 *stream << "    std::array<std::uint32_t, kWriteCount> touched_write_indices_{};\n";
@@ -6503,14 +6342,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << decl << '\n';
             }
             if (!model.inputFieldDecls.empty())
-            {
-                *stream << '\n';
-            }
-            for (const auto &decl : model.outputFieldDecls)
-            {
-                *stream << decl << '\n';
-            }
-            if (!model.outputFieldDecls.empty())
             {
                 *stream << '\n';
             }
@@ -6530,11 +6361,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
-            for (const auto &decl : model.runtimeFieldDecls)
+            for (const auto &decl : model.eventFieldDecls)
             {
                 *stream << decl << '\n';
             }
-            if (!model.runtimeFieldDecls.empty())
+            if (!model.eventFieldDecls.empty())
             {
                 *stream << '\n';
             }
@@ -6731,34 +6562,30 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
-            for (const auto &[value, prevField] : model.prevEventFieldByValue)
+            if (!model.eventSamplesByOp.empty())
             {
-                std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
-                std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
-                std::size_t totalOps = 0;
-                auto expr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
-                *stream << "    " << prevField << " = " << (expr ? *expr : valueRef(model, value)) << ";\n";
+                *stream << "    // Establish previous-sample baselines for event-sensitive ops.\n";
             }
-            if (!model.prevEventFieldByValue.empty())
+            for (const auto &[opId, samples] : model.eventSamplesByOp)
             {
-                *stream << '\n';
+                (void)opId;
+                for (std::size_t i = 0; i < samples.values.size(); ++i)
+                {
+                    const ValueId value = samples.values[i];
+                    std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
+                    std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
+                    std::size_t totalOps = 0;
+                    auto expr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
+                    *stream << "    " << samples.prevFieldNames[i] << " = " << (expr ? *expr : valueRef(model, value)) << ";\n";
+                }
             }
-            if (!model.eventCurrentVarByValue.empty())
-            {
-                *stream << "    // Clear current event-expression temporaries.\n";
-            }
-            for (const auto &[value, currField] : model.eventCurrentVarByValue)
-            {
-                *stream << "    " << currField << " = " << defaultInitExpr(graph, value) << ";\n";
-            }
-            if (!model.eventCurrentVarByValue.empty())
+            if (!model.eventSamplesByOp.empty())
             {
                 *stream << '\n';
             }
             *stream << "    // Reset per-eval scheduling state.\n";
             *stream << "    supernode_active_curr_.fill(UINT64_C(0));\n";
-            *stream << "    event_term_hit_.fill(0);\n";
-            *stream << "    event_domain_hit_.fill(0);\n";
+            *stream << "    active_word_count_ = 0;\n";
             if (!model.writes.empty())
             {
                 *stream << "    touched_write_indices_.fill(0);\n";
@@ -6767,11 +6594,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "    first_eval_ = true;\n";
             *stream << "    register_write_conflict_ = false;\n";
-            for (const std::string &stateSymbol : model.stateOrder)
-            {
-                const StateDecl &state = model.stateBySymbol.at(stateSymbol);
-                *stream << "    " << state.nextEvalDirtyField << " = false;\n";
-            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    finalized_ = false;\n";
@@ -7198,6 +7020,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             auto emitCommitWriteBody = [&](const WriteDecl &write, std::string_view indent)
             {
                 const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
+                *stream << indent << "bool state_changed = false;\n";
                 if (state.kind == StateDecl::Kind::Memory)
                 {
                     *stream << indent << "const std::size_t row = " << write.pendingAddrField << ";\n";
@@ -7208,8 +7031,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         {
                             *stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
                                     << write.pendingDataField << ", " << state.width << ")) {\n";
-                            *stream << indent << "        any_state_change = true;\n";
-                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                         else
@@ -7219,8 +7041,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                                     << "), " << state.width << "));\n";
                             *stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
                             *stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
-                            *stream << indent << "        any_state_change = true;\n";
-                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                     }
@@ -7230,8 +7051,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         {
                             *stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
                                     << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ")) {\n";
-                            *stream << indent << "        any_state_change = true;\n";
-                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                         else
@@ -7245,8 +7065,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                                     << "), " << state.width << ")) & mask));\n";
                             *stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
                             *stream << indent << "        " << state.fieldName << "[row] = merged;\n";
-                            *stream << indent << "        any_state_change = true;\n";
-                            *stream << indent << "        " << state.nextEvalDirtyField << " = true;\n";
+                            *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                     }
@@ -7259,8 +7078,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         *stream << indent << "const auto merged = grhsim_merge_words_masked(" << state.fieldName << ", "
                                 << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
                         *stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", merged, " << state.width << ")) {\n";
-                        *stream << indent << "    any_state_change = true;\n";
-                        *stream << indent << "    " << state.nextEvalDirtyField << " = true;\n";
+                        *stream << indent << "    state_changed = true;\n";
                         *stream << indent << "}\n";
                     }
                     else
@@ -7270,17 +7088,22 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                                 << " & " << write.pendingMaskField << "));\n";
                         *stream << indent << "if (" << state.fieldName << " != merged) {\n";
                         *stream << indent << "    " << state.fieldName << " = merged;\n";
-                        *stream << indent << "    any_state_change = true;\n";
-                        *stream << indent << "    " << state.nextEvalDirtyField << " = true;\n";
+                        *stream << indent << "    state_changed = true;\n";
                         *stream << indent << "}\n";
                     }
                 }
+                *stream << indent << "if (state_changed) {\n";
+                const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
+                if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
+                {
+                    emitBitMaskSetStatements(
+                        *stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                }
+                *stream << indent << "}\n";
                 *stream << indent << write.pendingValidField << " = false;\n";
             };
             *stream << "void " << className << "::commit_state_updates()\n{\n";
             *stream << "    // Apply staged state writes after the scheduled combinational phase completes.\n";
-            *stream << "    bool any_state_change = false;\n";
-            *stream << "    register_write_conflict_ = false;\n";
             for (const auto &group : model.registerWriteGroups)
             {
                 *stream << "    bool saw_write_group_" << sanitizeIdentifier(group.symbol) << " = false;\n";
@@ -7314,7 +7137,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    }\n";
                 *stream << "    touched_write_count_ = 0;\n";
             }
-            *stream << "    (void)any_state_change;\n";
             *stream << "}\n\n";
             *stream << "void " << className << "::refresh_outputs()\n{\n";
             *stream << "    // Publish the latest value fields to the public outputs.\n";
@@ -7341,15 +7163,21 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
             *stream << "void " << className << "::eval()\n{\n";
-            *stream << "    // Seed eval entry from static first-eval heads, changed inputs, and states changed by the previous eval.\n";
+            *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
-            if (!model.firstEvalSeedSupernodes.empty())
+            *stream << "    register_write_conflict_ = false;\n";
+            *stream << "    if (initial_eval) {\n";
+            *stream << "        for (auto &word : supernode_active_curr_) {\n";
+            *stream << "            word = ~UINT64_C(0);\n";
+            *stream << "        }\n";
+            *stream << "        active_word_count_ = kSupernodeWordCount;\n";
+            if (!schedule.supernodeToOps.empty() && (schedule.supernodeToOps.size() & 63u) != 0)
             {
-                *stream << "    if (initial_eval) {\n";
-                emitBitMaskSetStatements(*stream, "supernode_active_curr_", model.firstEvalSeedSupernodes, "        ");
-                *stream << "    }\n";
+                const std::uint64_t tailMask = (UINT64_C(1) << (schedule.supernodeToOps.size() & 63u)) - 1u;
+                *stream << "        supernode_active_curr_[kSupernodeWordCount - 1] &= UINT64_C(" << tailMask << ");\n";
             }
-            std::map<std::vector<uint32_t>, SeedGroup> inputSeedGroups;
+            *stream << "    }\n";
+            std::map<std::vector<uint32_t>, std::vector<std::string>> inputSeedGroups;
             for (const auto &port : graph.inputPorts())
             {
                 const auto it = model.inputHeadSupernodesByValue.find(port.value);
@@ -7357,10 +7185,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                appendSeedGroupCondition(inputSeedGroups,
-                                         it->second,
-                                         "(" + model.inputFieldByValue.at(port.value) + " != " +
-                                             model.prevInputFieldByValue.at(port.value) + ")");
+                inputSeedGroups[it->second].push_back("(" + model.inputFieldByValue.at(port.value) + " != " +
+                                                      model.prevInputFieldByValue.at(port.value) + ")");
             }
             for (const auto &port : graph.inoutPorts())
             {
@@ -7369,246 +7195,32 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                appendSeedGroupCondition(inputSeedGroups,
-                                         it->second,
-                                         "(" + model.inputFieldByValue.at(port.in) + " != " +
-                                             model.prevInputFieldByValue.at(port.in) + ")");
+                inputSeedGroups[it->second].push_back("(" + model.inputFieldByValue.at(port.in) + " != " +
+                                                      model.prevInputFieldByValue.at(port.in) + ")");
             }
-            for (const auto &[supernodes, group] : inputSeedGroups)
+            for (const auto &[supernodes, conditions] : inputSeedGroups)
             {
-                (void)supernodes;
-                *stream << "    if (!initial_eval && (" << joinStrings(group.conditions, " || ") << ")) {\n";
-                emitBitMaskSetStatements(*stream, "supernode_active_curr_", group.supernodes, "        ");
+                *stream << "    if (!initial_eval && (" << joinStrings(conditions, " || ") << ")) {\n";
+                emitBitMaskSetStatements(*stream, "supernode_active_curr_", "active_word_count_", supernodes, "        ");
                 *stream << "    }\n";
             }
-            std::map<std::vector<uint32_t>, SeedGroup> stateSeedGroups;
-            for (const std::string &stateSymbol : model.stateOrder)
-            {
-                const auto stateIt = model.stateBySymbol.find(stateSymbol);
-                if (stateIt == model.stateBySymbol.end())
-                {
-                    continue;
-                }
-                const auto headsIt = model.stateHeadSupernodesBySymbol.find(stateSymbol);
-                if (headsIt == model.stateHeadSupernodesBySymbol.end() || headsIt->second.empty())
-                {
-                    continue;
-                }
-                appendSeedGroupCondition(stateSeedGroups,
-                                         headsIt->second,
-                                         stateIt->second.nextEvalDirtyField,
-                                         stateIt->second.nextEvalDirtyField);
-            }
-            for (const auto &[supernodes, group] : stateSeedGroups)
-            {
-                (void)supernodes;
-                *stream << "    if (!initial_eval && (" << joinStrings(group.conditions, " || ") << ")) {\n";
-                emitBitMaskSetStatements(*stream, "supernode_active_curr_", group.supernodes, "        ");
-                for (const std::string &clear : group.clears)
-                {
-                    *stream << "        " << clear << " = false;\n";
-                }
-                *stream << "    }\n";
-            }
-            if (!model.eventTerms.empty() || !schedule.eventDomainSinkGroups->empty())
-            {
-                *stream << '\n';
-            }
-
-            {
-                if (!model.prevEventFieldByValue.empty())
-                {
-                    *stream << "    // Materialize current values for event terms so edge detection can compare against the previous eval.\n";
-                }
-                std::vector<ValueId> orderedEventExprValues;
-                std::unordered_set<ValueId, ValueIdHash> visiting;
-                std::unordered_set<ValueId, ValueIdHash> visited;
-                bool eventExprProgramValid = true;
-                for (const auto &[value, prevField] : model.prevEventFieldByValue)
-                {
-                    (void)prevField;
-                    if (!eventExprTopoCollect(graph, value, visiting, visited, orderedEventExprValues))
-                    {
-                        eventExprProgramValid = false;
-                        break;
-                    }
-                }
-                std::unordered_map<ValueId, std::string, ValueIdHash> materializedRefs;
-                if (eventExprProgramValid)
-                {
-                    for (ValueId value : orderedEventExprValues)
-                    {
-                        const bool isEventValue = model.eventCurrentVarByValue.contains(value);
-                        if (!isEventValue)
-                        {
-                            auto expr = eventExprMaterializedBodyForValue(graph, model, value, materializedRefs);
-                            if (!expr)
-                            {
-                                eventExprProgramValid = false;
-                                break;
-                            }
-                            const std::string tempName = "evt_tmp_" + valueDebugName(graph, value) + "_" + std::to_string(value.index);
-                            *stream << "    const auto " << tempName << " = " << *expr << ";\n";
-                            materializedRefs.emplace(value, tempName);
-                            continue;
-                        }
-                        auto expr = eventExprMaterializedBodyForValue(graph, model, value, materializedRefs);
-                        if (!expr)
-                        {
-                            eventExprProgramValid = false;
-                            break;
-                        }
-                        const std::string &currField = model.eventCurrentVarByValue.at(value);
-                        *stream << "    " << currField << " = " << *expr << ";\n";
-                        materializedRefs.emplace(value, currField);
-                    }
-                    if (eventExprProgramValid)
-                    {
-                        for (const auto &[value, currField] : model.eventCurrentVarByValue)
-                        {
-                            if (materializedRefs.contains(value))
-                            {
-                                continue;
-                            }
-                            auto expr = eventExprMaterializedBodyForValue(graph, model, value, materializedRefs);
-                            if (!expr)
-                            {
-                                eventExprProgramValid = false;
-                                break;
-                            }
-                            *stream << "    " << currField << " = " << *expr << ";\n";
-                            materializedRefs.emplace(value, currField);
-                        }
-                    }
-                }
-                if (!eventExprProgramValid)
-                {
-                    for (const auto &[value, prevField] : model.prevEventFieldByValue)
-                    {
-                        (void)prevField;
-                        std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> cache;
-                        std::unordered_map<ValueId, std::size_t, ValueIdHash> costCache;
-                        std::size_t totalOps = 0;
-                        auto expr = pureExprForValue(graph, model, value, cache, costCache, totalOps);
-                        if (expr)
-                        {
-                            *stream << "    " << model.eventCurrentVarByValue.at(value) << " = " << *expr << ";\n";
-                        }
-                        else
-                        {
-                            *stream << "    " << model.eventCurrentVarByValue.at(value) << " = " << valueRef(model, value) << ";\n";
-                        }
-                    }
-                }
-            }
-            if (!model.prevEventFieldByValue.empty())
-            {
-                *stream << '\n';
-            }
-
-            if (!model.eventTerms.empty())
-            {
-                *stream << "    // Compute atomic event-term hits such as posedge/negedge/changed.\n";
-            }
-            for (std::size_t termIndex = 0; termIndex < model.eventTerms.size(); ++termIndex)
-            {
-                const auto &term = model.eventTerms[termIndex];
-                const std::string currVar = model.eventCurrentVarByValue.at(term.value);
-                const bool precomputable =
-                    model.eventValuePrecomputable.contains(term.value) && model.eventValuePrecomputable.at(term.value);
-                if (precomputable)
-                {
-                    if (isWideLogicValue(graph, term.value))
-                    {
-                        if (term.edge == "posedge")
-                        {
-                            *stream << "    event_term_hit_[" << termIndex << "] = grhsim_event_posedge_words(" << currVar << ", "
-                                    << model.prevEventFieldByValue.at(term.value) << ", "
-                                    << graph.valueWidth(term.value) << ");\n";
-                        }
-                        else if (term.edge == "negedge")
-                        {
-                            *stream << "    event_term_hit_[" << termIndex << "] = grhsim_event_negedge_words(" << currVar << ", "
-                                    << model.prevEventFieldByValue.at(term.value) << ", "
-                                    << graph.valueWidth(term.value) << ");\n";
-                        }
-                        else
-                        {
-                            *stream << "    event_term_hit_[" << termIndex << "] = (grhsim_compare_unsigned_words(" << currVar
-                                    << ", " << model.prevEventFieldByValue.at(term.value) << ") != 0);\n";
-                        }
-                    }
-                    else if (term.edge == "posedge")
-                    {
-                        *stream << "    event_term_hit_[" << termIndex << "] = grhsim_event_posedge(" << currVar << ", "
-                                << model.prevEventFieldByValue.at(term.value) << ");\n";
-                    }
-                    else if (term.edge == "negedge")
-                    {
-                        *stream << "    event_term_hit_[" << termIndex << "] = grhsim_event_negedge(" << currVar << ", "
-                                << model.prevEventFieldByValue.at(term.value) << ");\n";
-                    }
-                    else
-                    {
-                        *stream << "    event_term_hit_[" << termIndex << "] = (" << currVar << " != "
-                                << model.prevEventFieldByValue.at(term.value) << ");\n";
-                    }
-                }
-                else
-                {
-                    *stream << "    event_term_hit_[" << termIndex << "] = false;\n";
-                }
-            }
             *stream << '\n';
-
-            bool emitsEventDomainHits = false;
-            for (const auto &group : *schedule.eventDomainSinkGroups)
-            {
-                const std::size_t domainIndex = model.eventDomainIndex.at(group.signature);
-                if (!group.signature.empty() && model.eventDomainPrecomputable[domainIndex])
-                {
-                    emitsEventDomainHits = true;
-                    break;
-                }
-            }
-            if (emitsEventDomainHits)
-            {
-                *stream << "    // Reduce event terms into event-domain hits; non-precomputable domains conservatively stay enabled.\n";
-            }
-            for (const auto &group : *schedule.eventDomainSinkGroups)
-            {
-                const std::size_t domainIndex = model.eventDomainIndex.at(group.signature);
-                if (group.signature.empty())
-                {
-                    continue;
-                }
-                if (!model.eventDomainPrecomputable[domainIndex])
-                {
-                    continue;
-                }
-                std::vector<std::string> parts;
-                for (const auto &term : group.signature.terms)
-                {
-                    parts.push_back("event_term_hit_[" + std::to_string(model.eventTermIndex.at(term)) + "]");
-                }
-                *stream << "    event_domain_hit_[" << domainIndex << "] = " << joinStrings(parts, " || ") << ";\n";
-            }
-            *stream << '\n';
-
-            *stream << "    // Execute scheduled supernode batches in global topo order.\n";
+            *stream << "    while (active_word_count_ != 0) {\n";
+            *stream << "        // Propagate current activity through scheduled supernodes.\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                *stream << "    eval_batch_" << batchIndex << "();\n";
+                *stream << "        eval_batch_" << batchIndex << "();\n";
             }
-            *stream << "    // Commit staged state updates after the combinational phase.\n";
-            *stream << "    commit_state_updates();\n";
+            *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
+            *stream << "        commit_state_updates();\n";
+            *stream << "    }\n";
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    flush_deferred_system_task_texts();\n";
             }
             *stream << "    // Refresh public outputs after the final visible state of this eval is known.\n";
             *stream << "    refresh_outputs();\n\n";
-            *stream << "    // Publish current inputs/event values as the previous-eval baseline for the next call.\n";
+            *stream << "    // Publish current inputs as the previous-eval baseline for the next call.\n";
             for (const auto &port : graph.inputPorts())
             {
                 *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
@@ -7616,10 +7228,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             for (const auto &port : graph.inoutPorts())
             {
                 *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
-            }
-            for (const auto &[value, prevField] : model.prevEventFieldByValue)
-            {
-                *stream << "    " << prevField << " = " << model.eventCurrentVarByValue.at(value) << ";\n";
             }
             *stream << "    first_eval_ = false;\n";
             *stream << "}\n";

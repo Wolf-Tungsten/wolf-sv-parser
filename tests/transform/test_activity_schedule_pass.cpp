@@ -109,119 +109,34 @@ int main()
         }
 
         const std::string keyPrefix = "top.activity_schedule.";
-        const auto *supernodes =
-            getSessionValue<ActivityScheduleSupernodes>(session, keyPrefix + "supernodes");
         const auto *supernodeToOps =
             getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
-        const auto *supernodeToOpSymbols =
-            getSessionValue<ActivityScheduleSupernodeToOpSymbols>(session, keyPrefix + "supernode_to_op_symbols");
         const auto *opToSupernode =
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
-        const auto *opSymbolToSupernode =
-            getSessionValue<ActivityScheduleOpSymbolToSupernode>(session, keyPrefix + "op_symbol_to_supernode");
-        const auto *dag =
-            getSessionValue<ActivityScheduleDag>(session, keyPrefix + "dag");
+        const auto *valueFanout =
+            getSessionValue<ActivityScheduleValueFanout>(session, keyPrefix + "value_fanout");
         const auto *topoOrder =
             getSessionValue<ActivityScheduleTopoOrder>(session, keyPrefix + "topo_order");
-        const auto *headEval =
-            getSessionValue<ActivityScheduleHeadEvalSupernodes>(session, keyPrefix + "head_eval_supernodes");
-        const auto *opEventDomains =
-            getSessionValue<ActivityScheduleOpEventDomains>(session, keyPrefix + "op_event_domains");
-        const auto *valueEventDomains =
-            getSessionValue<ActivityScheduleValueEventDomains>(session, keyPrefix + "value_event_domains");
-        const auto *supernodeEventDomains =
-            getSessionValue<ActivityScheduleSupernodeEventDomains>(session, keyPrefix + "supernode_event_domains");
-        const auto *eventDomainSinks =
-            getSessionValue<ActivityScheduleEventDomainSinks>(session, keyPrefix + "event_domain_sinks");
-        const auto *eventDomainSinkGroups =
-            getSessionValue<ActivityScheduleEventDomainSinkGroups>(session, keyPrefix + "event_domain_sink_groups");
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(session, keyPrefix + "state_read_supernodes");
 
-        if (supernodes == nullptr || supernodeToOps == nullptr || supernodeToOpSymbols == nullptr ||
-            opToSupernode == nullptr || opSymbolToSupernode == nullptr || dag == nullptr ||
-            topoOrder == nullptr || headEval == nullptr || opEventDomains == nullptr ||
-            valueEventDomains == nullptr || supernodeEventDomains == nullptr ||
-            eventDomainSinks == nullptr || eventDomainSinkGroups == nullptr)
+        if (supernodeToOps == nullptr || opToSupernode == nullptr || valueFanout == nullptr ||
+            topoOrder == nullptr || stateReadSupernodes == nullptr)
         {
             return fail("Expected all activity-schedule session outputs to exist");
         }
 
-        if (supernodes->size() != 3 || supernodeToOps->size() != 3 || supernodeToOpSymbols->size() != 3 ||
-            dag->size() != 3 || topoOrder->size() != 3 || supernodeEventDomains->size() != 3)
+        if (supernodeToOps->size() != 3 || topoOrder->size() != 3)
         {
             return fail("Unexpected activity-schedule supernode shape after coarsen/partition");
         }
 
-        for (std::size_t i = 0; i < supernodes->size(); ++i)
+        for (std::size_t i = 0; i < supernodeToOps->size(); ++i)
         {
-            if ((*supernodes)[i] != i)
-            {
-                return fail("Expected dense supernode ids");
-            }
-            if ((*supernodeToOps)[i].empty() || (*supernodeToOpSymbols)[i].empty())
+            if ((*supernodeToOps)[i].empty())
             {
                 return fail("Expected non-empty supernodes");
             }
-            if ((*supernodeToOps)[i].size() != (*supernodeToOpSymbols)[i].size())
-            {
-                return fail("Expected op/op-symbol cardinality match per supernode");
-            }
-        }
-
-        if (eventDomainSinks->size() != 2)
-        {
-            return fail("Expected exactly two sink entries");
-        }
-
-        bool foundOutputSink = false;
-        bool foundWriteSink = false;
-        for (const auto &sink : *eventDomainSinks)
-        {
-            if (sink.sinkOp == addOp)
-            {
-                if (!sink.signature.empty())
-                {
-                    return fail("Output sink should have empty event-domain");
-                }
-                foundOutputSink = true;
-            }
-            if (sink.sinkOp == writeOp)
-            {
-                if (sink.signature.terms.size() != 1 ||
-                    sink.signature.terms[0].value != clk ||
-                    sink.signature.terms[0].edge != "posedge")
-                {
-                    return fail("Register write sink should carry clk posedge event-domain");
-                }
-                foundWriteSink = true;
-            }
-        }
-        if (!foundOutputSink || !foundWriteSink)
-        {
-            return fail("Missing expected sink entries");
-        }
-        if (eventDomainSinkGroups->size() != 2)
-        {
-            return fail("Expected two grouped event-domain sink entries");
-        }
-        bool foundEmptyGroup = false;
-        bool foundPosedgeGroup = false;
-        for (const auto &group : *eventDomainSinkGroups)
-        {
-            if (group.signature.empty())
-            {
-                foundEmptyGroup = group.sinkOps.size() == 1 && group.sinkOps.front() == addOp;
-                continue;
-            }
-            if (group.signature.terms.size() == 1 &&
-                group.signature.terms[0].value == clk &&
-                group.signature.terms[0].edge == "posedge")
-            {
-                foundPosedgeGroup = group.sinkOps.size() == 1 && group.sinkOps.front() == writeOp;
-            }
-        }
-        if (!foundEmptyGroup || !foundPosedgeGroup)
-        {
-            return fail("Expected grouped event-domain sinks to match sink signatures");
         }
 
         const uint32_t addSupernode = (*opToSupernode)[addOp.index - 1];
@@ -246,90 +161,29 @@ int main()
             return fail("Register write supernode should stay isolated");
         }
 
-        const auto addSym = graph.operationSymbol(addOp);
-        const auto writeSym = graph.operationSymbol(writeOp);
-        if (!addSym.valid() || !writeSym.valid())
-        {
-            return fail("Expected final op symbols to be valid");
-        }
-        auto addIt = opSymbolToSupernode->find(addSym);
-        auto writeIt = opSymbolToSupernode->find(writeSym);
-        if (addIt == opSymbolToSupernode->end() || writeIt == opSymbolToSupernode->end() ||
-            addIt->second != addSupernode || writeIt->second != writeSupernode)
-        {
-            return fail("Expected op_symbol_to_supernode mapping to match op_to_supernode");
-        }
-
-        auto containsSupernode = [](const auto &nodes, uint32_t id) {
-            return std::find(nodes.begin(), nodes.end(), id) != nodes.end();
-        };
-        if (!containsSupernode(*headEval, addSupernode) || !containsSupernode(*headEval, writeSupernode))
-        {
-            return fail("Expected add/write supernodes to be marked head-eval");
-        }
-
-        if ((*supernodeEventDomains)[writeSupernode].size() != 1 ||
-            (*supernodeEventDomains)[writeSupernode][0].terms.size() != 1)
-        {
-            return fail("Write supernode should have one non-empty event-domain");
-        }
-        if ((*supernodeEventDomains)[maskSupernode].size() != 1)
-        {
-            return fail("Mask supernode should inherit the register-write event-domain");
-        }
-        if ((*supernodeEventDomains)[addSupernode].size() != 2)
-        {
-            return fail("Merged read/add supernode should carry both empty and non-empty event-domains");
-        }
-
-        const auto &addDomains = (*supernodeEventDomains)[addSupernode];
-        bool hasEmpty = false;
-        bool hasPosedge = false;
-        for (const auto &domain : addDomains)
-        {
-            if (domain.empty())
-            {
-                hasEmpty = true;
-                continue;
-            }
-            if (domain.terms.size() == 1 && domain.terms[0].value == clk && domain.terms[0].edge == "posedge")
-            {
-                hasPosedge = true;
-            }
-        }
-        if (!hasEmpty || !hasPosedge)
-        {
-            return fail("Merged read/add supernode should contain both output and write sink domains");
-        }
         if (addOp.index == 0 || writeOp.index == 0 || sumValue.index == 0 || clk.index == 0)
         {
             return fail("Expected valid op/value ids");
         }
-        if ((*opEventDomains)[addOp.index - 1].size() != 2)
+        auto stateReadersIt = stateReadSupernodes->find("q");
+        if (stateReadersIt == stateReadSupernodes->end())
         {
-            return fail("Add op should carry both output and write event-domains");
+            return fail("Expected state_read_supernodes to contain q");
         }
-        if ((*opEventDomains)[writeOp.index - 1].size() != 1 ||
-            (*opEventDomains)[writeOp.index - 1][0].terms.size() != 1)
+        if (stateReadersIt->second.size() != 1 || stateReadersIt->second.front() != addSupernode)
         {
-            return fail("Write op should carry one non-empty event-domain");
-        }
-        if ((*valueEventDomains)[sumValue.index - 1].size() != 2)
-        {
-            return fail("Sum value should carry both output and write event-domains");
-        }
-        if ((*valueEventDomains)[clk.index - 1].size() != 1 ||
-            (*valueEventDomains)[clk.index - 1][0].terms.size() != 1 ||
-            (*valueEventDomains)[clk.index - 1][0].terms[0].value != clk)
-        {
-            return fail("Clock value should carry the write event-domain");
+            return fail("Expected q readers to map to the merged read/add supernode");
         }
 
-        if ((*dag)[addSupernode].empty() ||
-            std::find((*dag)[addSupernode].begin(), (*dag)[addSupernode].end(), writeSupernode) ==
-                (*dag)[addSupernode].end())
+        if (sumValue.index == 0 || sumValue.index > valueFanout->size())
         {
-            return fail("Expected DAG edge from read/add supernode to write supernode");
+            return fail("Expected valid sum value fanout entry");
+        }
+        if ((*valueFanout)[sumValue.index - 1].empty() ||
+            std::find((*valueFanout)[sumValue.index - 1].begin(), (*valueFanout)[sumValue.index - 1].end(), writeSupernode) ==
+                (*valueFanout)[sumValue.index - 1].end())
+        {
+            return fail("Expected value fanout from sum value into write supernode");
         }
     }
 
@@ -390,17 +244,15 @@ int main()
         }
 
         const std::string keyPrefix = "top2.activity_schedule.";
-        const auto *supernodes =
-            getSessionValue<ActivityScheduleSupernodes>(session, keyPrefix + "supernodes");
         const auto *supernodeToOps =
             getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
         const auto *opToSupernode =
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
-        if (supernodes == nullptr || supernodeToOps == nullptr || opToSupernode == nullptr)
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
             return fail("Expected bounded partition session outputs");
         }
-        if (supernodes->size() != 2 || supernodeToOps->size() != 2)
+        if (supernodeToOps->size() != 2)
         {
             return fail("Expected DP partition to produce two supernodes under max-size=2");
         }
@@ -483,15 +335,13 @@ int main()
         }
 
         const std::string keyPrefix = "top3.activity_schedule.";
-        const auto *supernodes =
-            getSessionValue<ActivityScheduleSupernodes>(session, keyPrefix + "supernodes");
         const auto *supernodeToOps =
             getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
-        const auto *opSymbolToSupernode =
-            getSessionValue<ActivityScheduleOpSymbolToSupernode>(session, keyPrefix + "op_symbol_to_supernode");
-        const auto *dag =
-            getSessionValue<ActivityScheduleDag>(session, keyPrefix + "dag");
-        if (supernodes == nullptr || supernodeToOps == nullptr || opSymbolToSupernode == nullptr || dag == nullptr)
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        const auto *valueFanout =
+            getSessionValue<ActivityScheduleValueFanout>(session, keyPrefix + "value_fanout");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr || valueFanout == nullptr)
         {
             return fail("Expected replication session outputs");
         }
@@ -519,7 +369,7 @@ int main()
             return fail("Expected shared add to be replicated into two cloned add ops");
         }
 
-        if (supernodes->size() != 2 || supernodeToOps->size() != 2)
+        if (supernodeToOps->size() != 2)
         {
             return fail("Expected replication to collapse the empty source supernode");
         }
@@ -530,20 +380,15 @@ int main()
                 return fail("Expected each replicated consumer supernode to contain clone plus consumer");
             }
         }
-        if (!dag->empty() && (!(*dag)[0].empty() || !(*dag)[1].empty()))
+        for (const auto &succs : *valueFanout)
         {
-            return fail("Expected no residual DAG edge after replication removes shared dependency");
+            if (!succs.empty())
+            {
+                return fail("Expected no residual cross-supernode value fanout after replication");
+            }
         }
 
-        const auto andSym = graph.lookupSymbol("use_and");
-        const auto xorSym = graph.lookupSymbol("use_xor");
-        auto andIt = opSymbolToSupernode->find(andSym);
-        auto xorIt = opSymbolToSupernode->find(xorSym);
-        if (andIt == opSymbolToSupernode->end() || xorIt == opSymbolToSupernode->end())
-        {
-            return fail("Expected consumer symbols to remain mapped to supernodes");
-        }
-        if (andIt->second == xorIt->second)
+        if ((*opToSupernode)[andOp.index - 1] == (*opToSupernode)[xorOp.index - 1])
         {
             return fail("Expected replicated consumers to stay in separate supernodes");
         }

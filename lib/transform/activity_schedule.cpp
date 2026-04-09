@@ -228,114 +228,29 @@ namespace wolvrix::lib::transform
             return !isStorageDeclOpKind(kind) && !isHierLikeOpKind(kind);
         }
 
-        bool isEventBoundarySinkKind(wolvrix::lib::grh::OperationKind kind) noexcept
+        std::optional<std::string> stateSymbolForReadOp(const wolvrix::lib::grh::Operation &op)
         {
-            switch (kind)
+            switch (op.kind())
             {
-            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
-            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-            case wolvrix::lib::grh::OperationKind::kSystemTask:
-            case wolvrix::lib::grh::OperationKind::kDpicCall:
-                return true;
+            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+                return getAttrString(op, "regSymbol");
+            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
+                return getAttrString(op, "latchSymbol");
+            case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
+                return getAttrString(op, "memSymbol");
             default:
-                return false;
+                return std::nullopt;
             }
-        }
-
-        bool participatesInBackwardPropagation(wolvrix::lib::grh::OperationKind kind) noexcept
-        {
-            if (isHierLikeOpKind(kind) || kind == wolvrix::lib::grh::OperationKind::kDpicImport)
-            {
-                return false;
-            }
-            if (kind == wolvrix::lib::grh::OperationKind::kSystemTask)
-            {
-                return false;
-            }
-            if (kind == wolvrix::lib::grh::OperationKind::kDpicCall)
-            {
-                return false;
-            }
-            return isPartitionableOpKind(kind);
-        }
-
-        std::string valueSortKey(const wolvrix::lib::grh::Graph &graph,
-                                 wolvrix::lib::grh::ValueId value)
-        {
-            const wolvrix::lib::grh::SymbolId sym = graph.valueSymbol(value);
-            if (sym.valid())
-            {
-                return std::string(graph.symbolText(sym));
-            }
-            return std::string("_v") + std::to_string(value.index);
-        }
-
-        void normalizeSignature(const wolvrix::lib::grh::Graph &graph,
-                                ActivityScheduleEventDomainSignature &signature)
-        {
-            std::sort(signature.terms.begin(), signature.terms.end(),
-                      [&](const auto &lhs, const auto &rhs) {
-                          const std::string lhsKey = valueSortKey(graph, lhs.value);
-                          const std::string rhsKey = valueSortKey(graph, rhs.value);
-                          if (lhsKey != rhsKey)
-                          {
-                              return lhsKey < rhsKey;
-                          }
-                          if (lhs.value != rhs.value)
-                          {
-                              return lhs.value.index < rhs.value.index;
-                          }
-                          return lhs.edge < rhs.edge;
-                      });
-            signature.terms.erase(std::unique(signature.terms.begin(), signature.terms.end()),
-                                  signature.terms.end());
-        }
-
-        bool signatureLess(const wolvrix::lib::grh::Graph &graph,
-                           const ActivityScheduleEventDomainSignature &lhs,
-                           const ActivityScheduleEventDomainSignature &rhs)
-        {
-            if (lhs.terms.size() != rhs.terms.size())
-            {
-                return lhs.terms.size() < rhs.terms.size();
-            }
-            for (std::size_t i = 0; i < lhs.terms.size(); ++i)
-            {
-                const std::string lhsKey = valueSortKey(graph, lhs.terms[i].value);
-                const std::string rhsKey = valueSortKey(graph, rhs.terms[i].value);
-                if (lhsKey != rhsKey)
-                {
-                    return lhsKey < rhsKey;
-                }
-                if (lhs.terms[i].value != rhs.terms[i].value)
-                {
-                    return lhs.terms[i].value.index < rhs.terms[i].value.index;
-                }
-                if (lhs.terms[i].edge != rhs.terms[i].edge)
-                {
-                    return lhs.terms[i].edge < rhs.terms[i].edge;
-                }
-            }
-            return false;
         }
 
         struct ActivityScheduleBuild
         {
-            ActivityScheduleSupernodes supernodes;
             ActivityScheduleSupernodeToOps supernodeToOps;
-            ActivityScheduleSupernodeToOpSymbols supernodeToOpSymbols;
             ActivityScheduleOpToSupernode opToSupernode;
-            ActivityScheduleOpSymbolToSupernode opSymbolToSupernode;
-            ActivityScheduleDag dag;
+            std::vector<std::vector<uint32_t>> dag;
             ActivityScheduleValueFanout valueFanout;
             ActivityScheduleTopoOrder topoOrder;
-            ActivityScheduleHeadEvalSupernodes headEvalSupernodes;
-            ActivityScheduleOpEventDomains opEventDomains;
-            ActivityScheduleValueEventDomains valueEventDomains;
-            ActivityScheduleSupernodeEventDomains supernodeEventDomains;
-            ActivityScheduleEventDomainSinks eventDomainSinks;
-            ActivityScheduleEventDomainSinkGroups eventDomainSinkGroups;
+            ActivityScheduleStateReadSupernodes stateReadSupernodes;
         };
 
         struct ActivityOpData
@@ -1285,9 +1200,10 @@ namespace wolvrix::lib::transform
             return values;
         }
 
-        ActivityScheduleOpSymbolToSupernode buildSymbolToSupernodeMap(const SymbolPartition &partition)
+        std::unordered_map<wolvrix::lib::grh::SymbolId, uint32_t, ActivityScheduleSymbolIdHash>
+        buildSymbolToSupernodeMap(const SymbolPartition &partition)
         {
-            ActivityScheduleOpSymbolToSupernode out;
+            std::unordered_map<wolvrix::lib::grh::SymbolId, uint32_t, ActivityScheduleSymbolIdHash> out;
             std::size_t total = 0;
             for (const auto &cluster : partition.clusters)
             {
@@ -1545,23 +1461,13 @@ namespace wolvrix::lib::transform
                       [](const auto &lhs, const auto &rhs) { return lhs.minTopoPos < rhs.minTopoPos; });
 
             build = ActivityScheduleBuild{};
-            build.supernodes.resize(liveClusters.size());
-            std::iota(build.supernodes.begin(), build.supernodes.end(), 0);
             build.supernodeToOps.resize(liveClusters.size());
-            build.supernodeToOpSymbols.resize(liveClusters.size());
             build.opToSupernode.assign(finalOpData.maxOpIndex, kInvalidActivitySupernodeId);
-            build.opSymbolToSupernode.reserve(finalOpData.topoOps.size());
             build.dag.resize(liveClusters.size());
             if (!graph.values().empty())
             {
                 build.valueFanout.resize(graph.values().back().index);
             }
-            build.opEventDomains.resize(finalOpData.maxOpIndex);
-            if (finalOpData.maxOpIndex > 0)
-            {
-                build.valueEventDomains.resize(graph.values().empty() ? 0 : graph.values().back().index);
-            }
-            build.supernodeEventDomains.resize(liveClusters.size());
             supernodeOfOp.assign(finalOpData.maxOpIndex + 1, kInvalidActivitySupernodeId);
 
             for (std::size_t supernodeId = 0; supernodeId < liveClusters.size(); ++supernodeId)
@@ -1569,11 +1475,8 @@ namespace wolvrix::lib::transform
                 for (const auto topoPos : liveClusters[supernodeId].topoPositions)
                 {
                     const auto opId = finalOpData.topoOps[topoPos];
-                    const auto opSym = finalOpData.topoSymbols[topoPos];
                     build.supernodeToOps[supernodeId].push_back(opId);
-                    build.supernodeToOpSymbols[supernodeId].push_back(opSym);
                     build.opToSupernode[opId.index - 1] = static_cast<uint32_t>(supernodeId);
-                    build.opSymbolToSupernode.emplace(opSym, static_cast<uint32_t>(supernodeId));
                     supernodeOfOp[opId.index] = static_cast<uint32_t>(supernodeId);
                 }
             }
@@ -1632,13 +1535,43 @@ namespace wolvrix::lib::transform
                 succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
             }
 
+            for (const auto opId : graph.operations())
+            {
+                const auto op = graph.getOperation(opId);
+                if (!isStateReadOpKind(op.kind()))
+                {
+                    continue;
+                }
+                const auto stateSymbol = stateSymbolForReadOp(op);
+                if (!stateSymbol || stateSymbol->empty())
+                {
+                    continue;
+                }
+                if (opId.index >= supernodeOfOp.size())
+                {
+                    continue;
+                }
+                const uint32_t supernodeId = supernodeOfOp[opId.index];
+                if (supernodeId == kInvalidActivitySupernodeId)
+                {
+                    continue;
+                }
+                build.stateReadSupernodes[*stateSymbol].push_back(supernodeId);
+            }
+            for (auto &[stateSymbol, supernodes] : build.stateReadSupernodes)
+            {
+                (void)stateSymbol;
+                std::sort(supernodes.begin(), supernodes.end());
+                supernodes.erase(std::unique(supernodes.begin(), supernodes.end()), supernodes.end());
+            }
+
             wolvrix::lib::toposort::TopoDag<uint32_t> finalTopoDag;
-            finalTopoDag.reserveNodes(build.supernodes.size());
-            for (uint32_t supernodeId = 0; supernodeId < build.supernodes.size(); ++supernodeId)
+            finalTopoDag.reserveNodes(build.supernodeToOps.size());
+            for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
             {
                 finalTopoDag.addNode(supernodeId);
             }
-            for (uint32_t supernodeId = 0; supernodeId < build.supernodes.size(); ++supernodeId)
+            for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
             {
                 for (const auto succ : build.dag[supernodeId])
                 {
@@ -1660,86 +1593,6 @@ namespace wolvrix::lib::transform
                 return false;
             }
             return true;
-        }
-
-        ActivityScheduleEventDomainSignature extractSinkSignature(
-            const wolvrix::lib::grh::Graph &graph,
-            const wolvrix::lib::grh::Operation &op,
-            bool &valid)
-        {
-            valid = true;
-            ActivityScheduleEventDomainSignature signature;
-            const auto operands = op.operands();
-            const auto eventEdges = getAttrValue<std::vector<std::string>>(op, "eventEdge");
-            std::size_t eventStart = operands.size();
-
-            switch (op.kind())
-            {
-            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
-                if (!eventEdges)
-                {
-                    valid = false;
-                    return signature;
-                }
-                if (operands.size() < 3 || operands.size() < 3 + eventEdges->size())
-                {
-                    valid = false;
-                    return signature;
-                }
-                eventStart = 3;
-                break;
-            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-                if (!eventEdges)
-                {
-                    valid = false;
-                    return signature;
-                }
-                if (operands.size() < 4 || operands.size() < 4 + eventEdges->size())
-                {
-                    valid = false;
-                    return signature;
-                }
-                eventStart = 4;
-                break;
-            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-                return signature;
-            case wolvrix::lib::grh::OperationKind::kSystemTask:
-            case wolvrix::lib::grh::OperationKind::kDpicCall:
-                if (!eventEdges || eventEdges->empty())
-                {
-                    return signature;
-                }
-                if (operands.size() < eventEdges->size())
-                {
-                    valid = false;
-                    return signature;
-                }
-                eventStart = operands.size() - eventEdges->size();
-                break;
-            default:
-                return signature;
-            }
-
-            if (!eventEdges)
-            {
-                return signature;
-            }
-            for (std::size_t i = 0; i < eventEdges->size(); ++i)
-            {
-                signature.terms.push_back(ActivityScheduleEventTerm{operands[eventStart + i], (*eventEdges)[i]});
-            }
-            normalizeSignature(graph, signature);
-            return signature;
-        }
-
-        bool hasReturnValue(const wolvrix::lib::grh::Operation &op) noexcept
-        {
-            const auto hasReturnAttr = getAttrValue<bool>(op, "hasReturn");
-            if (hasReturnAttr)
-            {
-                return *hasReturnAttr;
-            }
-            return !op.results().empty();
         }
 
     } // namespace
@@ -1923,336 +1776,30 @@ namespace wolvrix::lib::transform
             return result;
         }
 
-        std::vector<uint8_t> headEvalFlag(build.supernodes.size(), 0);
-        for (const auto opId : finalOpData.topoOps)
-        {
-            bool isHeadEval = false;
-            for (const auto operand : graph->opOperands(opId))
-            {
-                if (graph->valueIsInput(operand))
-                {
-                    isHeadEval = true;
-                    break;
-                }
-                const auto defOp = graph->valueDef(operand);
-                if (defOp.valid() && isStateReadOpKind(graph->opKind(defOp)))
-                {
-                    isHeadEval = true;
-                    break;
-                }
-            }
-            if (!isHeadEval)
-            {
-                continue;
-            }
-            const uint32_t supernodeId = supernodeOfOp[opId.index];
-            if (supernodeId == kInvalidActivitySupernodeId || headEvalFlag[supernodeId] != 0)
-            {
-                continue;
-            }
-            headEvalFlag[supernodeId] = 1;
-            build.headEvalSupernodes.push_back(supernodeId);
-        }
-
-        std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> sinkSet;
-        sinkSet.reserve(graph->operations().size() / 8 + 8);
-        for (const auto opId : graph->operations())
-        {
-            const auto op = graph->getOperation(opId);
-            switch (op.kind())
-            {
-            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
-            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-            case wolvrix::lib::grh::OperationKind::kSystemTask:
-                sinkSet.insert(opId);
-                break;
-            case wolvrix::lib::grh::OperationKind::kDpicCall:
-                if (!hasReturnValue(op))
-                {
-                    sinkSet.insert(opId);
-                }
-                break;
-            default:
-                break;
-            }
-        }
-        for (const auto &port : graph->outputPorts())
-        {
-            const auto defOp = graph->valueDef(port.value);
-            if (defOp.valid())
-            {
-                sinkSet.insert(defOp);
-            }
-        }
-        for (const auto &port : graph->inoutPorts())
-        {
-            const auto outDef = graph->valueDef(port.out);
-            if (outDef.valid())
-            {
-                sinkSet.insert(outDef);
-            }
-            const auto oeDef = graph->valueDef(port.oe);
-            if (oeDef.valid())
-            {
-                sinkSet.insert(oeDef);
-            }
-        }
-
-        std::vector<wolvrix::lib::grh::OperationId> sinkOps(sinkSet.begin(), sinkSet.end());
-        std::sort(sinkOps.begin(), sinkOps.end(),
-                  [](const auto &lhs, const auto &rhs) { return lhs.index < rhs.index; });
-
-        std::unordered_map<ActivityScheduleEventDomainSignature,
-                           std::vector<wolvrix::lib::grh::OperationId>,
-                           ActivityScheduleEventDomainSignatureHash>
-            sinksBySignature;
-        sinksBySignature.reserve(sinkOps.size());
-
-        for (const auto sinkOpId : sinkOps)
-        {
-            const auto op = graph->getOperation(sinkOpId);
-            bool signatureValid = false;
-            auto signature = extractSinkSignature(*graph, op, signatureValid);
-            if (!signatureValid)
-            {
-                error(*graph,
-                      op,
-                      "activity-schedule sink event-domain extraction failed for " + describeOp(*graph, sinkOpId));
-                result.failed = true;
-                continue;
-            }
-            build.eventDomainSinks.push_back(ActivityScheduleEventDomainSink{sinkOpId, signature});
-            sinksBySignature[signature].push_back(sinkOpId);
-        }
-        if (result.failed)
-        {
-            return result;
-        }
-
-        std::sort(build.eventDomainSinks.begin(), build.eventDomainSinks.end(),
-                  [](const auto &lhs, const auto &rhs) { return lhs.sinkOp.index < rhs.sinkOp.index; });
-
-        std::vector<ActivityScheduleEventDomainSignature> signatureTable;
-        signatureTable.reserve(sinksBySignature.size());
-        for (const auto &entry : sinksBySignature)
-        {
-            signatureTable.push_back(entry.first);
-        }
-        std::sort(signatureTable.begin(), signatureTable.end(),
-                  [&](const auto &lhs, const auto &rhs) { return signatureLess(*graph, lhs, rhs); });
-
-        std::unordered_map<ActivityScheduleEventDomainSignature, uint32_t, ActivityScheduleEventDomainSignatureHash>
-            signatureIds;
-        signatureIds.reserve(signatureTable.size());
-        build.eventDomainSinkGroups.reserve(signatureTable.size());
-        for (uint32_t id = 0; id < signatureTable.size(); ++id)
-        {
-            signatureIds.emplace(signatureTable[id], id);
-            auto sinks = sinksBySignature[signatureTable[id]];
-            std::sort(sinks.begin(), sinks.end(),
-                      [](const auto &lhs, const auto &rhs) { return lhs.index < rhs.index; });
-            build.eventDomainSinkGroups.push_back(ActivityScheduleEventDomainSinkGroup{
-                .signature = signatureTable[id],
-                .sinkOps = std::move(sinks),
-            });
-        }
-
-        std::vector<std::vector<uint32_t>> opSignatureIds(build.opEventDomains.size());
-        std::vector<std::vector<uint32_t>> valueSignatureIds(build.valueEventDomains.size());
-        std::vector<std::vector<uint32_t>> supernodeSignatureIds(build.supernodes.size());
-        std::vector<uint8_t> isStopSinkByOpIndex(finalOpData.maxOpIndex + 1, 0);
-        for (const auto sinkOpId : sinkOps)
-        {
-            if (isEventBoundarySinkKind(graph->opKind(sinkOpId)))
-            {
-                isStopSinkByOpIndex[sinkOpId.index] = 1;
-            }
-        }
-
-        for (const auto &entry : sinksBySignature)
-        {
-            auto itSig = signatureIds.find(entry.first);
-            if (itSig == signatureIds.end())
-            {
-                continue;
-            }
-            const uint32_t signatureId = itSig->second;
-
-            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> groupSeeds(
-                entry.second.begin(), entry.second.end());
-            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> visited;
-            visited.reserve(entry.second.size() * 4 + 16);
-            std::vector<wolvrix::lib::grh::OperationId> stack(entry.second.begin(), entry.second.end());
-
-            while (!stack.empty())
-            {
-                const auto opId = stack.back();
-                stack.pop_back();
-                if (!visited.insert(opId).second)
-                {
-                    continue;
-                }
-
-                if (opId.index > 0 && opId.index - 1 < opSignatureIds.size())
-                {
-                    opSignatureIds[opId.index - 1].push_back(signatureId);
-                }
-                if (opId.index < supernodeOfOp.size())
-                {
-                    const uint32_t supernodeId = supernodeOfOp[opId.index];
-                    if (supernodeId != kInvalidActivitySupernodeId)
-                    {
-                        supernodeSignatureIds[supernodeId].push_back(signatureId);
-                    }
-                }
-
-                const auto op = graph->getOperation(opId);
-                for (const auto result : op.results())
-                {
-                    if (!result.valid() || result.index == 0 || result.index - 1 >= valueSignatureIds.size())
-                    {
-                        continue;
-                    }
-                    if (graph->valueIsOutput(result) || graph->valueIsInout(result))
-                    {
-                        valueSignatureIds[result.index - 1].push_back(signatureId);
-                    }
-                }
-                for (const auto operand : op.operands())
-                {
-                    if (operand.valid() && operand.index > 0 && operand.index - 1 < valueSignatureIds.size())
-                    {
-                        valueSignatureIds[operand.index - 1].push_back(signatureId);
-                    }
-                    if (graph->valueIsInput(operand))
-                    {
-                        continue;
-                    }
-                    const auto defOp = graph->valueDef(operand);
-                    if (!defOp.valid())
-                    {
-                        continue;
-                    }
-                    if (defOp.index >= isStopSinkByOpIndex.size())
-                    {
-                        continue;
-                    }
-                    if (isStopSinkByOpIndex[defOp.index] != 0 && groupSeeds.find(defOp) == groupSeeds.end())
-                    {
-                        continue;
-                    }
-                    const auto defKind = graph->opKind(defOp);
-                    if (!participatesInBackwardPropagation(defKind))
-                    {
-                        if (isStateReadOpKind(defKind) && defOp.index < supernodeOfOp.size())
-                        {
-                            if (defOp.index > 0 && defOp.index - 1 < opSignatureIds.size())
-                            {
-                                opSignatureIds[defOp.index - 1].push_back(signatureId);
-                            }
-                            const uint32_t supernodeId = supernodeOfOp[defOp.index];
-                            if (supernodeId != kInvalidActivitySupernodeId)
-                            {
-                                supernodeSignatureIds[supernodeId].push_back(signatureId);
-                            }
-                        }
-                        continue;
-                    }
-                    stack.push_back(defOp);
-                }
-            }
-        }
-
-        for (std::size_t opIdx = 0; opIdx < opSignatureIds.size(); ++opIdx)
-        {
-            auto &ids = opSignatureIds[opIdx];
-            std::sort(ids.begin(), ids.end());
-            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-            auto &domains = build.opEventDomains[opIdx];
-            domains.reserve(ids.size());
-            for (const auto signatureId : ids)
-            {
-                domains.push_back(signatureTable[signatureId]);
-            }
-        }
-
-        for (std::size_t valueIdx = 0; valueIdx < valueSignatureIds.size(); ++valueIdx)
-        {
-            auto &ids = valueSignatureIds[valueIdx];
-            std::sort(ids.begin(), ids.end());
-            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-            auto &domains = build.valueEventDomains[valueIdx];
-            domains.reserve(ids.size());
-            for (const auto signatureId : ids)
-            {
-                domains.push_back(signatureTable[signatureId]);
-            }
-        }
-
-        for (std::size_t supernodeId = 0; supernodeId < supernodeSignatureIds.size(); ++supernodeId)
-        {
-            auto &ids = supernodeSignatureIds[supernodeId];
-            std::sort(ids.begin(), ids.end());
-            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-            auto &domains = build.supernodeEventDomains[supernodeId];
-            domains.reserve(ids.size());
-            for (const auto signatureId : ids)
-            {
-                domains.push_back(signatureTable[signatureId]);
-            }
-            std::sort(domains.begin(), domains.end(),
-                      [&](const auto &lhs, const auto &rhs) { return signatureLess(*graph, lhs, rhs); });
-        }
-
         const std::string keyPrefix = options_.path + ".activity_schedule.";
-        setSessionValue(keyPrefix + "supernodes", build.supernodes, "activity-schedule.supernodes");
         setSessionValue(keyPrefix + "supernode_to_ops",
                         build.supernodeToOps,
                         "activity-schedule.supernode-to-ops");
-        setSessionValue(keyPrefix + "supernode_to_op_symbols",
-                        build.supernodeToOpSymbols,
-                        "activity-schedule.supernode-to-op-symbols");
         setSessionValue(keyPrefix + "op_to_supernode",
                         build.opToSupernode,
                         "activity-schedule.op-to-supernode");
-        setSessionValue(keyPrefix + "op_symbol_to_supernode",
-                        build.opSymbolToSupernode,
-                        "activity-schedule.op-symbol-to-supernode");
-        setSessionValue(keyPrefix + "dag", build.dag, "activity-schedule.dag");
         setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
         setSessionValue(keyPrefix + "topo_order", build.topoOrder, "activity-schedule.topo-order");
-        setSessionValue(keyPrefix + "head_eval_supernodes",
-                        build.headEvalSupernodes,
-                        "activity-schedule.head-eval-supernodes");
-        setSessionValue(keyPrefix + "op_event_domains",
-                        build.opEventDomains,
-                        "activity-schedule.op-event-domains");
-        setSessionValue(keyPrefix + "value_event_domains",
-                        build.valueEventDomains,
-                        "activity-schedule.value-event-domains");
-        setSessionValue(keyPrefix + "supernode_event_domains",
-                        build.supernodeEventDomains,
-                        "activity-schedule.supernode-event-domains");
-        setSessionValue(keyPrefix + "event_domain_sinks",
-                        build.eventDomainSinks,
-                        "activity-schedule.event-domain-sinks");
-        setSessionValue(keyPrefix + "event_domain_sink_groups",
-                        build.eventDomainSinkGroups,
-                        "activity-schedule.event-domain-sink-groups");
+        setSessionValue(keyPrefix + "state_read_supernodes",
+                        build.stateReadSupernodes,
+                        "activity-schedule.state-read-supernodes");
 
         std::ostringstream summary;
         summary << "activity-schedule: path=" << options_.path
                 << " graph=" << graph->symbol()
-                << " supernodes=" << build.supernodes.size()
+                << " supernodes=" << build.supernodeToOps.size()
                 << " seed_supernodes=" << seedSupernodeCount
                 << " coarse_supernodes=" << coarseSupernodeCount
                 << " dp_supernodes=" << dpSupernodeCount
                 << " eligible_ops=" << finalOpData.topoOps.size()
                 << " replication_cloned=" << replicationStats.clonedOps
                 << " replication_erased=" << replicationStats.erasedOps
-                << " sink_count=" << build.eventDomainSinks.size()
-                << " head_eval=" << build.headEvalSupernodes.size()
+                << " state_read_sets=" << build.stateReadSupernodes.size()
                 << " graph_changed=" << (graphChanged ? "true" : "false");
         logInfo(summary.str());
 

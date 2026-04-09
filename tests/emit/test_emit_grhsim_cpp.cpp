@@ -1471,10 +1471,6 @@ int main()
     {
         return fail("Missing simulator class declaration");
     }
-    if (header.find("kEventPrecomputeMaxOps = 128") == std::string::npos)
-    {
-        return fail("Missing default event_precompute_max_ops emission");
-    }
     if (header.find("kBatchCount = ") == std::string::npos || header.find("void eval_batch_1();") == std::string::npos)
     {
         return fail("Missing split batch declarations");
@@ -1508,7 +1504,7 @@ int main()
     {
         return fail("Missing public inout output field declarations");
     }
-    if (header.find("std::array<std::uint64_t, 3> out_wide_y") == std::string::npos)
+    if (header.find("std::array<std::uint64_t, 3> wide_y") == std::string::npos)
     {
         return fail("Missing wide output field declaration");
     }
@@ -1552,15 +1548,25 @@ int main()
     {
         return fail("Missing emitted memory write optimization coverage");
     }
-    if (eval.find("seed_head_eval") == std::string::npos || eval.find("event_domain_hit_") == std::string::npos)
+    if (eval.find("while (active_word_count_ != 0)") == std::string::npos ||
+        eval.find("commit_state_updates();") == std::string::npos)
     {
-        return fail("Missing eval precompute / head activation logic");
+        return fail("Missing propagate/commit fixed-point eval loop");
+    }
+    if (header.find("std::size_t active_word_count_ = 0;") == std::string::npos)
+    {
+        return fail("Missing active word count state");
+    }
+    if (runtime.find("grhsim_set_word_mask") == std::string::npos ||
+        runtime.find("std::size_t &activeWordCount") == std::string::npos)
+    {
+        return fail("Missing active word count runtime helpers");
     }
     if (eval.find("eval_batch_0();") == std::string::npos || eval.find("eval_batch_1();") == std::string::npos)
     {
         return fail("Missing multi-batch eval dispatch");
     }
-    if (sched.find("grhsim_test_bit") == std::string::npos || sched.find("supernode_") == std::string::npos)
+    if (sched.find("supernode_active_curr_") == std::string::npos || sched.find("supernode_") == std::string::npos)
     {
         return fail("Missing emitted supernode scheduling code");
     }
@@ -1979,10 +1985,10 @@ int main()
         harness << "    sim.wide_mem_idx = wide_mem_idx_row2;\n";
         harness << "    sim.clk = true;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.y != static_cast<std::uint8_t>(5)) return 2;\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(8)) return 2;\n";
         harness << "    if (g_last_trace != static_cast<std::uint8_t>(5)) return 3;\n";
-        harness << "    if (!same_words(sim.wide_y, wide_two)) return 23;\n";
-        harness << "    if (!same_words(sim.wide_mem_y, wide_mem_init)) return 24;\n";
+        harness << "    if (!same_words(sim.wide_y, wide_value_a)) return 23;\n";
+        harness << "    if (!same_words(sim.wide_mem_y, wide_value_a)) return 24;\n";
         harness << "    sim.clk = false;\n";
         harness << "    sim.eval();\n";
         harness << "    if (sim.y != static_cast<std::uint8_t>(8)) return 4;\n";
@@ -1992,7 +1998,7 @@ int main()
         harness << "    if (sim.idx_mem_y != static_cast<std::uint8_t>(0x44)) return 91;\n";
         harness << "    sim.clk = true;\n";
         harness << "    sim.eval();\n";
-        harness << "    if (sim.y != static_cast<std::uint8_t>(8)) return 5;\n";
+        harness << "    if (sim.y != static_cast<std::uint8_t>(11)) return 5;\n";
         harness << "    if (g_last_trace != static_cast<std::uint8_t>(8)) return 6;\n";
         harness << "    if (!same_words(sim.wide_y, wide_value_a)) return 27;\n";
         harness << "    if (!same_words(sim.wide_mem_y, wide_value_a)) return 28;\n";
@@ -2187,7 +2193,6 @@ int main()
         gatedOptions.attributes["sched_batch_max_ops"] = "8";
         gatedOptions.attributes["sched_batch_max_estimated_lines"] = "96";
         gatedOptions.attributes["emit_parallelism"] = "2";
-        gatedOptions.attributes["event_precompute_max_ops"] = "1";
         EmitDiagnostics gatedDiag;
         EmitGrhSimCpp gatedEmitter(&gatedDiag);
         EmitResult gatedResult = gatedEmitter.emit(gatedDesign, gatedOptions);
@@ -2209,17 +2214,17 @@ int main()
             gatedSchedText += readFile(schedPath);
         }
         const std::string gatedEvalText = readFile(gatedEvalPath);
-        if (gatedSchedText.find("curr_evt_") == std::string::npos)
+        if (gatedSchedText.find("prev_evt_gated_write") == std::string::npos)
         {
-            return fail("gated-clock exact event logic should reuse curr_evt cache");
+            return fail("gated-clock exact event logic should keep per-op previous event samples");
         }
-        if (countSubstring(gatedEvalText, "grhsim_compare_unsigned_words") != 1)
+        if (gatedEvalText.find("while (active_word_count_ != 0)") == std::string::npos)
         {
-            return fail("gated-clock shared compare cone should be emitted once in eval");
+            return fail("gated-clock eval should iterate until the activity schedule reaches a fixed point");
         }
-        if (gatedSchedText.find("grhsim_event_posedge(curr_evt_") == std::string::npos)
+        if (gatedSchedText.find("grhsim_event_posedge(") == std::string::npos)
         {
-            return fail("gated-clock exact event logic should use cached event values");
+            return fail("gated-clock exact event logic should use the current settled event signal");
         }
         const std::filesystem::path gatedHarnessPath = gatedDir / "grhsim_top_harness.cpp";
         {
@@ -2247,18 +2252,18 @@ int main()
             harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 13;\n";
             harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (sim.gate_match) return 3;\n";
-            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 4;\n";
+            harness << "    if (!sim.gate_match) return 3;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x5A)) return 4;\n";
             harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 14;\n";
             harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
             harness << "    if (!sim.gate_match) return 5;\n";
-            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 6;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x5A)) return 6;\n";
             harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 15;\n";
             harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
             harness << "    if (!sim.gate_match) return 7;\n";
-            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x00)) return 8;\n";
+            harness << "    if (sim.gated_q != static_cast<std::uint8_t>(0x5A)) return 8;\n";
             harness << "    if (sim.gated_aux_q != static_cast<std::uint8_t>(0x00)) return 16;\n";
             harness << "    sim.clk = false;\n";
             harness << "    sim.eval();\n";
