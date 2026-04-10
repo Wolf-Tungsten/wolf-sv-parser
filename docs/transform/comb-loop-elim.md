@@ -8,6 +8,12 @@ The important point is that this pass is now diagnostics-first:
 - if it finds a loop that it cannot safely resolve, it reports that as `warning`
 - it only writes a loop report to the session when you explicitly ask for one
 
+Recent behavior change:
+
+- before this update, resolvable false loops were repaired mainly by generic value splitting
+- after this update, the pass first tries a cheaper slice-retarget fast path for loop entrances such as `slice(assign(concat(...)), const)`
+- only loops that still remain after retargeting fall back to the generic split-and-rewrite path
+
 ## Python Example
 
 ```python
@@ -36,6 +42,311 @@ At a high level, the pass:
 4. performs a finer-grained bit-range analysis for possible false loops
 
 If the apparent loop is only caused by non-overlapping bit usage, the pass can split values and repair it. That is considered a false loop.
+
+## False-Loop Repair Strategy
+
+The pass now repairs false loops in two stages:
+
+1. retarget loop-entry slices
+2. if that is insufficient, split loop values into bit-range fragments and rewrite the affected ops
+
+The first stage is intentionally narrow. It only handles slice-like entrances that can be rewritten without creating a new dependency:
+
+- `kSliceStatic`
+- `kSliceDynamic` with a constant index
+- retarget through `kAssign`
+- retarget through `kConcat`
+
+When the selected slice fully covers a concat operand, the pass can rewrite:
+
+- to `kAssign` if the whole operand is selected
+- to `kSliceStatic` if only part of the operand is selected
+
+The pass rejects this rewrite if the chosen new base already depends on the slice result transitively. That guard is important for avoiding pseudo-loop rewrites that would turn a false loop into a real one.
+
+## Carry-Chain Example
+
+This pattern appears in HDLBits `043` after `hier-flatten`:
+
+```text
+cout_temp = concat(stage100_cout, ..., stage2_cout, stage1_cout)
+stage2_cin = slice(cout_temp, 0)
+stage3_cin = slice(cout_temp, 1)
+...
+stage100_cin = slice(cout_temp, 98)
+```
+
+At whole-value granularity this looks cyclic:
+
+```text
+cout_temp -> slice -> stageN_cin -> ... -> stageN_cout -> concat -> cout_temp
+```
+
+But it is actually a false loop, because each `stageN_cin` only depends on one disjoint bit of `cout_temp`, and that bit comes from the previous stage's `cout`.
+
+## What Actually Changed
+
+The key difference is not "both rewrite the loop". The key difference is **where** the rewrite happens.
+
+- before the fix: rewrite the **whole SCC representation**
+- after the fix: rewrite only the **loop entrance slices**
+
+For the same carry-chain false loop, the two strategies look like this.
+
+### Before: Rewrite The Whole SCC
+
+Input shape:
+
+```text
+cout_temp = concat(cout_100, ..., cout_2, cout_1)
+cin_2 = slice(cout_temp, 0)
+cin_3 = slice(cout_temp, 1)
+...
+```
+
+Old repair strategy:
+
+```text
+tmp_cout_temp_bit_0 = cout_1
+tmp_cout_temp_bit_1 = cout_2
+...
+cin_2 = tmp_cout_temp_bit_0
+cin_3 = tmp_cout_temp_bit_1
+...
+cout_temp_full_view = concat(..., tmp_cout_temp_bit_1, tmp_cout_temp_bit_0)
+```
+
+That is, the old path created new temporary values for bus fragments, rewired the loop to use those temporaries, and then rebuilt a full-bus view with another `concat` if needed.
+
+So the repair touched:
+
+- the bus being read from
+- the bus being written back
+- many intermediate values in the SCC
+- extra reassembly `concat` ops when a full-value view was still needed
+
+### After: Rewrite Only The Entrances
+
+Input shape:
+
+```text
+cout_temp = concat(cout_100, ..., cout_2, cout_1)
+cin_2 = slice(cout_temp, 0)
+cin_3 = slice(cout_temp, 1)
+...
+```
+
+New repair strategy:
+
+```text
+cout_temp = concat(cout_100, ..., cout_2, cout_1)
+cin_2 = cout_1
+cin_3 = cout_2
+...
+```
+
+That is, the pass does **not** first split `cout_temp` into fragments. It directly rewrites each loop-entry slice to the specific concat operand that actually feeds that bit.
+
+So the repair touches only:
+
+- the `slice(cout_temp, const)` entrances
+
+and does **not** rewrite the whole SCC into fragment form.
+
+### Short Version
+
+If the previous wording felt like "the same thing", use this rule of thumb:
+
+- before: "break the bus apart, then rebuild the loop around fragments"
+- after: "leave the bus alone, only change `cin_i` from `slice(bus, i)` to the exact source bit producer"
+
+## Concrete Two-Stage Example
+
+Here is the smallest useful example that matches the HDLBits `043` carry-chain shape.
+
+Assume the flattened IR is conceptually:
+
+```text
+cout_1 = f(cin)
+cin_2 = slice(cout_temp, 0)
+cout_2 = f(cin_2)
+cout_temp = concat(cout_2, cout_1)
+```
+
+### Why This Looks Like A Loop
+
+At whole-value granularity, the dependency graph looks like:
+
+```text
+cout_temp -> cin_2 -> cout_2 -> cout_temp
+```
+
+So a loop detector that only sees whole values will say:
+
+```text
+"there is a loop through cout_temp"
+```
+
+### Why It Is Actually A False Loop
+
+The important detail is that `cin_2` does **not** read all of `cout_temp`.
+It only reads bit 0:
+
+```text
+cout_temp[0] = cout_1
+cout_temp[1] = cout_2
+cin_2       = cout_temp[0]
+```
+
+So in reality:
+
+```text
+cin_2 = cout_1
+cout_2 = f(cout_1)
+```
+
+There is no real combinational self-feedback. The apparent loop only comes from representing the two bits as one whole bus value.
+
+### Before The Fix
+
+The old repair path handled this by fragmenting the whole loop:
+
+```text
+tmp_cout_temp_bit_0 = new temporary value for bit 0 of cout_temp
+tmp_cout_temp_bit_1 = new temporary value for bit 1 of cout_temp
+
+tmp_cout_temp_bit_0 = cout_1
+tmp_cout_temp_bit_1 = cout_2
+
+cin_2 = tmp_cout_temp_bit_0
+```
+
+And if some later user still needed the full bus, it could also create:
+
+```text
+tmp_cout_temp_full = concat(tmp_cout_temp_bit_1, tmp_cout_temp_bit_0)
+```
+
+This is the important part:
+
+- the pass created new temporary values for bus fragments
+- then rewired the loop to use those temporaries
+- so even though only `cin_2 = slice(cout_temp, 0)` was problematic, the old repair path rewrote the bus representation itself
+
+### After The Fix
+
+The new repair path looks at the same entrance:
+
+```text
+cin_2 = slice(cout_temp, 0)
+cout_temp = concat(cout_2, cout_1)
+```
+
+and directly notices:
+
+```text
+bit 0 of cout_temp comes entirely from cout_1
+```
+
+So it rewrites only that entrance:
+
+```text
+cout_1 = f(cin)
+cin_2 = cout_1
+cout_2 = f(cin_2)
+cout_temp = concat(cout_2, cout_1)
+```
+
+No fragmentation of `cout_temp` is needed.
+
+### Why This Matters For `043`
+
+`043` is just this same pattern repeated many times:
+
+```text
+cin_2  = previous cout bit
+cin_3  = previous cout bit
+...
+cin_100 = previous cout bit
+```
+
+So:
+
+- the old path rewrote a large false-loop SCC into fragment form
+- the new path rewrites each entrance directly to the exact previous-stage `cout`
+
+That is why the old behavior reported:
+
+```text
+split-values=794 split-ops=7031
+```
+
+while the new behavior reports:
+
+```text
+retargeted-slices=297 split-values=0 split-ops=0
+```
+
+### Behavior Before The Fix
+
+Previously `comb-loop-elim` repaired this kind of loop by generic fragmentation:
+
+- split loop values into many bit-range fragments
+- rewrite the carry cone into fragment-level ops
+- let later passes try to clean up the expanded IR
+
+That means the pass did not preserve the original carry-chain shape. Instead of keeping:
+
+```text
+stage2_cin = slice(cout_temp, 0)
+stage3_cin = slice(cout_temp, 1)
+...
+```
+
+and then simplifying those entrances directly, it first decomposed loop values such as `cout_temp` into many bit-range fragments:
+
+```text
+tmp_cout_temp_bit_0 = bit 0 of cout_temp
+tmp_cout_temp_bit_1 = bit 1 of cout_temp
+...
+```
+
+Then it rewrote the loop-related ops so they operated on fragments instead of on the original values:
+
+- `slice` became fragment-to-fragment copies or smaller static slices
+- `concat` became fragment assembly ops
+- `assign` was duplicated at fragment granularity
+- when a full-value view was still needed, the pass created a new `concat` to stitch all fragments back together
+
+For a carry chain like HDLBits `043`, this is much heavier than necessary. The false loop is only at the bus entry points, but the generic split path rewrote a large part of the carry cone as if the entire SCC needed fragment-level normalization.
+
+For DUT `043`, that produced diagnostics like:
+
+```text
+split-values=794 split-ops=7031
+```
+
+### Behavior After The Fix
+
+Now the pass first rewrites the loop entrances directly:
+
+```text
+stage2_cin = stage1_cout
+stage3_cin = stage2_cout
+...
+```
+
+So the false loop is removed without fragmenting the whole carry chain. For the same DUT `043`, the pass now reports:
+
+```text
+retargeted-slices=297 split-values=0 split-ops=0
+```
+
+In practice this means:
+
+- `comb-loop-elim` no longer causes the main IR blow-up for this pattern
+- `simplify` has much less cleanup work afterward
+- later passes such as `activity-schedule` start from a much smaller graph
 
 ## Session Output
 
@@ -75,4 +386,5 @@ That keeps the pass behavior easy to reason about:
 
 - large designs may need `max_analysis_nodes` tuning
 - repairing false loops rewrites the IR
+- false-loop repair is no longer synonymous with value splitting; diagnostics may now show `retargeted-slices > 0` with `split-values = 0`
 - a true combinational loop usually indicates a real design problem

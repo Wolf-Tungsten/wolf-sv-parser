@@ -158,6 +158,49 @@ namespace wolvrix::lib::transform
             return std::nullopt;
         }
 
+        bool dependsTransitivelyOn(const wolvrix::lib::grh::Graph &graph,
+                                   wolvrix::lib::grh::ValueId valueId,
+                                   wolvrix::lib::grh::ValueId targetId)
+        {
+            if (!valueId.valid() || !targetId.valid())
+            {
+                return false;
+            }
+            std::vector<wolvrix::lib::grh::ValueId> stack{valueId};
+            std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash> visited;
+            while (!stack.empty())
+            {
+                const wolvrix::lib::grh::ValueId current = stack.back();
+                stack.pop_back();
+                if (!current.valid())
+                {
+                    continue;
+                }
+                if (current == targetId)
+                {
+                    return true;
+                }
+                if (!visited.insert(current).second)
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::OperationId defOpId = graph.getValue(current).definingOp();
+                if (!defOpId.valid())
+                {
+                    continue;
+                }
+                const wolvrix::lib::grh::Operation defOp = graph.getOperation(defOpId);
+                for (const auto operandId : defOp.operands())
+                {
+                    if (operandId.valid())
+                    {
+                        stack.push_back(operandId);
+                    }
+                }
+            }
+            return false;
+        }
+
         bool isValuePortBound(const wolvrix::lib::grh::Graph &graph, wolvrix::lib::grh::ValueId value)
         {
             for (const auto &port : graph.inputPorts())
@@ -1046,6 +1089,10 @@ namespace wolvrix::lib::transform
                 }
                 const wolvrix::lib::grh::ValueId operandId = concatOperands[i];
                 if (!operandId.valid())
+                {
+                    break;
+                }
+                if (dependsTransitivelyOn(ctx.graph, operandId, resultId))
                 {
                     break;
                 }

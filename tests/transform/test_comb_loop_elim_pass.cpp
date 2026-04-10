@@ -58,6 +58,35 @@ namespace
         return op;
     }
 
+    wolvrix::lib::grh::ValueId makeConst(wolvrix::lib::grh::Graph &graph,
+                                         const std::string &name,
+                                         int32_t width,
+                                         const std::string &literal)
+    {
+        const auto value = makeValue(graph, name, width);
+        const auto op = graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant,
+                                              graph.internSymbol(name + "_op"));
+        graph.addResult(op, value);
+        graph.setAttr(op, "constValue", literal);
+        return value;
+    }
+
+    wolvrix::lib::grh::OperationId makeSliceDynamic(wolvrix::lib::grh::Graph &graph,
+                                                    wolvrix::lib::grh::ValueId base,
+                                                    wolvrix::lib::grh::ValueId index,
+                                                    wolvrix::lib::grh::ValueId result,
+                                                    int64_t width,
+                                                    const std::string &name)
+    {
+        const auto op = graph.createOperation(wolvrix::lib::grh::OperationKind::kSliceDynamic,
+                                              graph.internSymbol(name));
+        graph.addOperand(op, base);
+        graph.addOperand(op, index);
+        graph.addResult(op, result);
+        graph.setAttr(op, "sliceWidth", width);
+        return op;
+    }
+
     int test_false_loop_fixed()
     {
         wolvrix::lib::grh::Design design;
@@ -76,8 +105,6 @@ namespace
 
         makeSliceStatic(graph, a, b_low_from_a, 4, 7, "slice_a_high");
         makeConcat(graph, "concat_b", {b_high, b_low_from_a}, b);
-
-        const std::size_t valuesBefore = graph.values().size();
 
         PassManager manager;
         manager.addPass(std::make_unique<CombLoopElimPass>());
@@ -130,11 +157,6 @@ namespace
         if (!foundSummaryInfo)
         {
             return fail("Expected fixed false loop to emit an info summary diagnostic");
-        }
-
-        if (graph.values().size() <= valuesBefore)
-        {
-            return fail("Expected comb-loop-elim to split values for false loop");
         }
 
         CombLoopElimOptions verifyOptions;
@@ -242,6 +264,122 @@ namespace
         return 0;
     }
 
+    int test_false_loop_dynamic_slice_retargeted()
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g_dyn_false");
+
+        const auto ext = makeValue(graph, "ext", 1);
+        graph.bindInputPort("ext", ext);
+
+        const auto low = makeValue(graph, "low", 1);
+        const auto hi = makeValue(graph, "hi", 1);
+        const auto busView = makeValue(graph, "bus_view", 2);
+        const auto bus = makeValue(graph, "bus", 2);
+        const auto idx0 = makeConst(graph, "idx0", 32, "32'd0");
+
+        const auto notOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot,
+                                                 graph.internSymbol("not_low"));
+        graph.addOperand(notOp, low);
+        graph.addResult(notOp, hi);
+
+        makeConcat(graph, "concat_bus_view", {hi, ext}, busView);
+        const auto assignBus = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign,
+                                                     graph.internSymbol("assign_bus"));
+        graph.addOperand(assignBus, busView);
+        graph.addResult(assignBus, bus);
+
+        const auto sliceOp = makeSliceDynamic(graph, bus, idx0, low, 1, "slice_low");
+
+        PassManager manager;
+        manager.addPass(std::make_unique<CombLoopElimPass>());
+
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during dynamic false-loop run: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected dynamic false-loop case to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected dynamic false-loop case to report changes");
+        }
+
+        const auto rewritten = graph.getOperation(sliceOp);
+        if (rewritten.kind() != wolvrix::lib::grh::OperationKind::kAssign)
+        {
+            return fail("Expected dynamic slice to retarget into a direct assign");
+        }
+        if (rewritten.operands().size() != 1 || rewritten.operands()[0] != ext)
+        {
+            return fail("Expected retargeted assign to use the selected concat operand");
+        }
+        if (rewritten.attr("sliceWidth") || rewritten.attr("sliceStart") || rewritten.attr("sliceEnd"))
+        {
+            return fail("Expected retargeted assign to drop slice attributes");
+        }
+
+        bool foundRetargetInfo = false;
+        for (const auto &msg : diags.messages())
+        {
+            if (msg.passName != "comb-loop-elim" || msg.kind != PassDiagnosticKind::Info)
+            {
+                continue;
+            }
+            if (msg.message.find("retargeted-slices=") != std::string::npos)
+            {
+                foundRetargetInfo = true;
+            }
+            if (msg.message.find("resolved false loops") != std::string::npos &&
+                msg.message.find("split-values=0") == std::string::npos)
+            {
+                return fail("Expected dynamic retarget fast path to avoid generic value splitting");
+            }
+        }
+        if (!foundRetargetInfo)
+        {
+            return fail("Expected dynamic false-loop case to report retargeted slices");
+        }
+
+        CombLoopElimOptions verifyOptions;
+        verifyOptions.fixFalseLoops = false;
+        PassManager verifyManager;
+        verifyManager.addPass(std::make_unique<CombLoopElimPass>(verifyOptions));
+
+        PassDiagnostics verifyDiags;
+        PassManagerResult verifyRes{};
+        try
+        {
+            verifyRes = verifyManager.run(design, verifyDiags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during dynamic verify run: ") + ex.what());
+        }
+        if (!verifyRes.success || verifyDiags.hasError())
+        {
+            return fail("Expected dynamic verify run to succeed");
+        }
+        for (const auto &msg : verifyDiags.messages())
+        {
+            if (msg.passName == "comb-loop-elim" &&
+                msg.message.find("comb loop detected") != std::string::npos)
+            {
+                return fail("Expected no comb-loop warnings after dynamic slice retarget");
+            }
+        }
+
+        return 0;
+    }
+
 } // namespace
 
 int main()
@@ -251,6 +389,10 @@ int main()
         return rc;
     }
     if (int rc = test_true_loop_reported(); rc != 0)
+    {
+        return rc;
+    }
+    if (int rc = test_false_loop_dynamic_slice_retargeted(); rc != 0)
     {
         return rc;
     }

@@ -60,6 +60,45 @@ namespace
         }
     }
 
+    wolvrix::lib::grh::ValueId makeSliceStatic(wolvrix::lib::grh::Graph &graph,
+                                               const std::string &valueName,
+                                               const std::string &opName,
+                                               wolvrix::lib::grh::ValueId base,
+                                               int64_t low,
+                                               int64_t high)
+    {
+        const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
+        const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+        const int32_t width = static_cast<int32_t>(high - low + 1);
+        const wolvrix::lib::grh::ValueId val = graph.createValue(valueSym, width, false);
+        const wolvrix::lib::grh::OperationId op =
+            graph.createOperation(wolvrix::lib::grh::OperationKind::kSliceStatic, opSym);
+        graph.addOperand(op, base);
+        graph.addResult(op, val);
+        graph.setAttr(op, "sliceStart", low);
+        graph.setAttr(op, "sliceEnd", high);
+        return val;
+    }
+
+    wolvrix::lib::grh::ValueId makeConcat(wolvrix::lib::grh::Graph &graph,
+                                          const std::string &valueName,
+                                          const std::string &opName,
+                                          const std::vector<wolvrix::lib::grh::ValueId> &operands,
+                                          int32_t width)
+    {
+        const wolvrix::lib::grh::SymbolId valueSym = graph.internSymbol(valueName);
+        const wolvrix::lib::grh::SymbolId opSym = graph.internSymbol(opName);
+        const wolvrix::lib::grh::ValueId val = graph.createValue(valueSym, width, false);
+        const wolvrix::lib::grh::OperationId op =
+            graph.createOperation(wolvrix::lib::grh::OperationKind::kConcat, opSym);
+        for (const auto operand : operands)
+        {
+            graph.addOperand(op, operand);
+        }
+        graph.addResult(op, val);
+        return val;
+    }
+
 } // namespace
 
 int main()
@@ -227,6 +266,325 @@ int main()
         if (!diags.hasError())
         {
             return fail("Expected diagnostics for missing attribute");
+        }
+    }
+
+    // Case 4: simplify removes identity static slice without introducing extra structure
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g4");
+        const wolvrix::lib::grh::SymbolId inSym = graph.internSymbol("in");
+        const wolvrix::lib::grh::ValueId in = graph.createValue(inSym, 8, false);
+        graph.bindInputPort("in", in);
+        const wolvrix::lib::grh::ValueId slice =
+            makeSliceStatic(graph, "_val_slice", "slice0", in, 0, 7);
+        graph.bindOutputPort("out", slice);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during identity slice simplify: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected identity slice simplify to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected identity slice simplify to change graph");
+        }
+        if (graph.findOperation("slice0").valid())
+        {
+            return fail("Identity kSliceStatic should be removed");
+        }
+        if (graph.outputPortValue("out") != in)
+        {
+            return fail("Output should be rebound directly to slice base");
+        }
+    }
+
+    // Case 5: simplify combines nested static slices without creating new feedback structure
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g5");
+        const wolvrix::lib::grh::SymbolId inSym = graph.internSymbol("in");
+        const wolvrix::lib::grh::ValueId in = graph.createValue(inSym, 16, false);
+        graph.bindInputPort("in", in);
+        const wolvrix::lib::grh::ValueId inner =
+            makeSliceStatic(graph, "_val_inner", "inner_slice", in, 4, 11);
+        const wolvrix::lib::grh::ValueId outer =
+            makeSliceStatic(graph, "_val_outer", "outer_slice", inner, 2, 5);
+        graph.bindOutputPort("out", outer);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during nested slice simplify: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected nested slice simplify to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected nested slice simplify to change graph");
+        }
+        if (graph.findOperation("inner_slice").valid())
+        {
+            return fail("Inner kSliceStatic should become dead after retargeting outer slice");
+        }
+        const wolvrix::lib::grh::OperationId outerOpId = graph.findOperation("outer_slice");
+        if (!outerOpId.valid())
+        {
+            return fail("Outer kSliceStatic should remain after combination");
+        }
+        const wolvrix::lib::grh::Operation outerOp = graph.getOperation(outerOpId);
+        if (outerOp.operands().size() != 1 || outerOp.operands()[0] != in)
+        {
+            return fail("Outer kSliceStatic should be retargeted to original base");
+        }
+        auto startAttr = outerOp.attr("sliceStart");
+        auto endAttr = outerOp.attr("sliceEnd");
+        if (!startAttr || !endAttr)
+        {
+            return fail("Combined outer kSliceStatic should keep slice attributes");
+        }
+        const auto *start = std::get_if<int64_t>(&*startAttr);
+        const auto *end = std::get_if<int64_t>(&*endAttr);
+        if (!start || !end || *start != 6 || *end != 9)
+        {
+            return fail("Nested kSliceStatic should combine to slice [9:6]");
+        }
+    }
+
+    // Case 6: simplify retargets a slice into a single concat operand instead of keeping the full concat path
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g6");
+        const wolvrix::lib::grh::SymbolId hiSym = graph.internSymbol("hi");
+        const wolvrix::lib::grh::SymbolId midSym = graph.internSymbol("mid");
+        const wolvrix::lib::grh::SymbolId loSym = graph.internSymbol("lo");
+        const wolvrix::lib::grh::ValueId hi = graph.createValue(hiSym, 4, false);
+        const wolvrix::lib::grh::ValueId mid = graph.createValue(midSym, 8, false);
+        const wolvrix::lib::grh::ValueId lo = graph.createValue(loSym, 4, false);
+        graph.bindInputPort("hi", hi);
+        graph.bindInputPort("mid", mid);
+        graph.bindInputPort("lo", lo);
+        const wolvrix::lib::grh::ValueId concat =
+            makeConcat(graph, "_val_concat", "concat0", {hi, mid, lo}, 16);
+        const wolvrix::lib::grh::ValueId slice =
+            makeSliceStatic(graph, "_val_slice", "slice0", concat, 6, 9);
+        graph.bindOutputPort("out", slice);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during concat slice retarget: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected concat slice retarget to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected concat slice retarget to change graph");
+        }
+        const wolvrix::lib::grh::OperationId sliceOpId = graph.findOperation("slice0");
+        if (!sliceOpId.valid())
+        {
+            return fail("Retargeted kSliceStatic should remain when selecting a sub-range of one operand");
+        }
+        const wolvrix::lib::grh::Operation sliceOp = graph.getOperation(sliceOpId);
+        if (sliceOp.operands().size() != 1 || sliceOp.operands()[0] != mid)
+        {
+            return fail("Retargeted kSliceStatic should use the matching concat operand as base");
+        }
+        const auto startAttr = sliceOp.attr("sliceStart");
+        const auto endAttr = sliceOp.attr("sliceEnd");
+        const auto *start = startAttr ? std::get_if<int64_t>(&*startAttr) : nullptr;
+        const auto *end = endAttr ? std::get_if<int64_t>(&*endAttr) : nullptr;
+        if (!start || !end || *start != 2 || *end != 5)
+        {
+            return fail("Retargeted kSliceStatic should translate the slice to operand-local coordinates");
+        }
+    }
+
+    // Case 7: simplify must not retarget a slice into a concat operand that depends on the slice itself
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g7");
+        const wolvrix::lib::grh::SymbolId hiSym = graph.internSymbol("hi");
+        const wolvrix::lib::grh::ValueId hi = graph.createValue(hiSym, 4, false);
+        graph.bindInputPort("hi", hi);
+        const wolvrix::lib::grh::ValueId low =
+            graph.createValue(graph.internSymbol("_val_low"), 4, false);
+        const wolvrix::lib::grh::ValueId concat =
+            makeConcat(graph, "_val_concat", "concat0", {hi, low}, 8);
+        const wolvrix::lib::grh::OperationId lowOp =
+            graph.createOperation(wolvrix::lib::grh::OperationKind::kSliceStatic, graph.internSymbol("slice0"));
+        graph.addOperand(lowOp, concat);
+        graph.addResult(lowOp, low);
+        graph.setAttr(lowOp, "sliceStart", int64_t{0});
+        graph.setAttr(lowOp, "sliceEnd", int64_t{3});
+        graph.bindOutputPort("out", low);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during pseudo-loop guard case: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected pseudo-loop guard case to succeed");
+        }
+        const wolvrix::lib::grh::Operation guardedSlice = graph.getOperation(lowOp);
+        if (guardedSlice.operands().size() != 1 || guardedSlice.operands()[0] != concat)
+        {
+            return fail("Slice should keep its original concat base when retargeting would create a pseudo-loop");
+        }
+        const auto startAttr = guardedSlice.attr("sliceStart");
+        const auto endAttr = guardedSlice.attr("sliceEnd");
+        const auto *start = startAttr ? std::get_if<int64_t>(&*startAttr) : nullptr;
+        const auto *end = endAttr ? std::get_if<int64_t>(&*endAttr) : nullptr;
+        if (!start || !end || *start != 0 || *end != 3)
+        {
+            return fail("Pseudo-loop guard case should keep the original slice range");
+        }
+    }
+
+    // Case 8: simplify flattens a single-use nested concat into its outer concat
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g8");
+        const auto hi = graph.createValue(graph.internSymbol("hi"), 4, false);
+        const auto a = graph.createValue(graph.internSymbol("a"), 3, false);
+        const auto b = graph.createValue(graph.internSymbol("b"), 5, false);
+        const auto lo = graph.createValue(graph.internSymbol("lo"), 2, false);
+        graph.bindInputPort("hi", hi);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("lo", lo);
+
+        const auto inner = makeConcat(graph, "_val_inner", "inner_concat", {a, b}, 8);
+        const auto outer = makeConcat(graph, "_val_outer", "outer_concat", {hi, inner, lo}, 14);
+        graph.bindOutputPort("out", outer);
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during nested concat flatten: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected nested concat flatten to succeed");
+        }
+        if (!res.changed)
+        {
+            return fail("Expected nested concat flatten to change graph");
+        }
+        if (graph.findOperation("inner_concat").valid())
+        {
+            return fail("Inner concat should become dead after flattening");
+        }
+        const auto outerOpId = graph.findOperation("outer_concat");
+        if (!outerOpId.valid())
+        {
+            return fail("Outer concat should remain after flattening");
+        }
+        const auto outerOp = graph.getOperation(outerOpId);
+        if (outerOp.operands().size() != 4)
+        {
+            return fail("Flattened outer concat should have four operands");
+        }
+        if (outerOp.operands()[0] != hi || outerOp.operands()[1] != a ||
+            outerOp.operands()[2] != b || outerOp.operands()[3] != lo)
+        {
+            return fail("Flattened outer concat should preserve operand order");
+        }
+    }
+
+    // Case 9: simplify must not flatten a nested concat if one inner operand depends on the outer concat result
+    {
+        wolvrix::lib::grh::Design design;
+        wolvrix::lib::grh::Graph &graph = design.createGraph("g9");
+        const auto top = graph.createValue(graph.internSymbol("top"), 4, false);
+        const auto hi = graph.createValue(graph.internSymbol("hi"), 4, false);
+        const auto low = graph.createValue(graph.internSymbol("_val_low"), 4, false);
+        graph.bindInputPort("top", top);
+        graph.bindInputPort("hi", hi);
+
+        const auto inner = makeConcat(graph, "_val_inner", "inner_concat", {hi, low}, 8);
+        const auto outer = makeConcat(graph, "_val_outer", "outer_concat", {top, inner}, 12);
+        graph.bindOutputPort("out", outer);
+
+        const auto lowOp =
+            graph.createOperation(wolvrix::lib::grh::OperationKind::kSliceStatic, graph.internSymbol("slice_low"));
+        graph.addOperand(lowOp, outer);
+        graph.addResult(lowOp, low);
+        graph.setAttr(lowOp, "sliceStart", int64_t{0});
+        graph.setAttr(lowOp, "sliceEnd", int64_t{3});
+
+        PassManager manager;
+        manager.addPass(std::make_unique<SimplifyPass>());
+        PassDiagnostics diags;
+        PassManagerResult res{};
+        try
+        {
+            res = manager.run(design, diags);
+        }
+        catch (const std::exception &ex)
+        {
+            return fail(std::string("Exception during nested concat pseudo-loop guard: ") + ex.what());
+        }
+        if (!res.success || diags.hasError())
+        {
+            return fail("Expected nested concat pseudo-loop guard case to succeed");
+        }
+        const auto innerOpId = graph.findOperation("inner_concat");
+        const auto outerOpId = graph.findOperation("outer_concat");
+        if (!innerOpId.valid() || !outerOpId.valid())
+        {
+            return fail("Pseudo-loop guard case should keep both concat operations");
+        }
+        const auto outerOp = graph.getOperation(outerOpId);
+        if (outerOp.operands().size() != 2 || outerOp.operands()[0] != top || outerOp.operands()[1] != inner)
+        {
+            return fail("Outer concat should keep the nested concat operand when flattening would expose self-dependence");
         }
     }
 
