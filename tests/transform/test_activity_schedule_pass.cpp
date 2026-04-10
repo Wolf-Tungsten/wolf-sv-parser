@@ -388,7 +388,24 @@ int main()
             }
         }
 
-        if ((*opToSupernode)[andOp.index - 1] == (*opToSupernode)[xorOp.index - 1])
+        std::optional<std::size_t> andCluster;
+        std::optional<std::size_t> xorCluster;
+        for (std::size_t i = 0; i < supernodeToOps->size(); ++i)
+        {
+            for (const auto opId : (*supernodeToOps)[i])
+            {
+                const auto symbol = std::string(graph.getOperation(opId).symbolText());
+                if (symbol == "use_and")
+                {
+                    andCluster = i;
+                }
+                if (symbol == "use_xor")
+                {
+                    xorCluster = i;
+                }
+            }
+        }
+        if (!andCluster || !xorCluster || *andCluster == *xorCluster)
         {
             return fail("Expected replicated consumers to stay in separate supernodes");
         }

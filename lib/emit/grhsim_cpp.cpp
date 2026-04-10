@@ -2308,18 +2308,34 @@ namespace wolvrix::lib::emit
             return false;
         }
 
+        std::string castWordsExprForValue(const Graph &graph,
+                                          ValueId value,
+                                          const std::string &expr,
+                                          int32_t destWidth)
+        {
+            const int32_t srcWidth = graph.valueWidth(value);
+            if (graph.valueType(value) == ValueType::Logic &&
+                isWideLogicValue(graph, value) &&
+                srcWidth == destWidth)
+            {
+                return expr;
+            }
+
+            std::ostringstream out;
+            out << "grhsim_cast_words<" << logicWordCount(destWidth) << ">("
+                << expr << ", "
+                << srcWidth << ", "
+                << destWidth << ", "
+                << boolLiteral(graph.valueSigned(value)) << ")";
+            return out.str();
+        }
+
         std::string wordsExprForValue(const Graph &graph,
                                       const EmitModel &model,
                                       ValueId value,
                                       int32_t destWidth)
         {
-            std::ostringstream out;
-            out << "grhsim_cast_words<" << logicWordCount(destWidth) << ">("
-                << valueRef(model, value) << ", "
-                << graph.valueWidth(value) << ", "
-                << destWidth << ", "
-                << boolLiteral(graph.valueSigned(value)) << ")";
-            return out.str();
+            return castWordsExprForValue(graph, value, valueRef(model, value), destWidth);
         }
 
         void emitLogicAssignFromWordsExpr(std::ostream &stream,
@@ -2390,10 +2406,250 @@ namespace wolvrix::lib::emit
             stream << "        }\n";
         }
 
+        bool concatAllOperandsAreOneBit(const Graph &graph, const Operation &op)
+        {
+            if (op.operands().empty())
+            {
+                return false;
+            }
+            for (ValueId operand : op.operands())
+            {
+                if (graph.valueWidth(operand) != 1)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool concatAllOperandsAreScalarLogic(const Graph &graph, const Operation &op)
+        {
+            if (op.kind() != OperationKind::kConcat || op.operands().empty())
+            {
+                return false;
+            }
+            for (ValueId operand : op.operands())
+            {
+                if (!isScalarLogicValue(graph, operand))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        std::optional<int32_t> concatUniformOperandWidth(const Graph &graph, const Operation &op)
+        {
+            if (op.operands().empty())
+            {
+                return std::nullopt;
+            }
+            const int32_t width = graph.valueWidth(op.operands().front());
+            for (ValueId operand : op.operands())
+            {
+                if (graph.valueWidth(operand) != width)
+                {
+                    return std::nullopt;
+                }
+            }
+            return width;
+        }
+
+        bool preferLoopedScalarConcatEmit(const Graph &graph, const Operation &op)
+        {
+            return concatAllOperandsAreScalarLogic(graph, op) && op.operands().size() >= 4;
+        }
+
+        std::string scalarBitPackExpr(const std::vector<std::string> &operands)
+        {
+            return "grhsim_pack_bits_u64(" + joinStrings(operands, ", ") + ")";
+        }
+
+        std::string scalarConcatValueArrayExpr(const std::vector<std::string> &operands)
+        {
+            std::vector<std::string> items;
+            items.reserve(operands.size());
+            for (const auto &operand : operands)
+            {
+                items.push_back("static_cast<std::uint64_t>(" + operand + ")");
+            }
+            return "std::array<std::uint64_t, " + std::to_string(operands.size()) + ">{" +
+                   joinStrings(items, ", ") + "}";
+        }
+
+        std::string scalarConcatWidthArrayExpr(const Graph &graph, const Operation &op)
+        {
+            std::vector<std::string> items;
+            items.reserve(op.operands().size());
+            for (ValueId operand : op.operands())
+            {
+                items.push_back(std::to_string(graph.valueWidth(operand)));
+            }
+            return "std::array<std::size_t, " + std::to_string(op.operands().size()) + ">{" +
+                   joinStrings(items, ", ") + "}";
+        }
+
+        std::string scalarConcatLoopExpr(const Graph &graph,
+                                         const Operation &op,
+                                         const std::vector<std::string> &operands,
+                                         bool wideResult)
+        {
+            const std::size_t operandCount = operands.size();
+            const std::string valuesExpr = scalarConcatValueArrayExpr(operands);
+            const auto uniformWidth = concatUniformOperandWidth(graph, op);
+            const int32_t resultWidth =
+                op.results().empty() ? 0 : graph.valueWidth(op.results().front());
+            if (wideResult)
+            {
+                const std::size_t resultWords = logicWordCount(resultWidth);
+                if (uniformWidth)
+                {
+                    return "grhsim_concat_uniform_scalars_words<" + std::to_string(resultWords) + ", " +
+                           std::to_string(operandCount) + ">(" + valuesExpr + ", " +
+                           std::to_string(*uniformWidth) + ", " + std::to_string(resultWidth) + ")";
+                }
+                return "grhsim_concat_scalars_words<" + std::to_string(resultWords) + ", " +
+                       std::to_string(operandCount) + ">(" + valuesExpr + ", " +
+                       scalarConcatWidthArrayExpr(graph, op) + ", " + std::to_string(resultWidth) + ")";
+            }
+            if (uniformWidth)
+            {
+                return "grhsim_concat_uniform_scalars_u64<" + std::to_string(operandCount) + ">(" + valuesExpr +
+                       ", " + std::to_string(*uniformWidth) + ", " + std::to_string(resultWidth) + ")";
+            }
+            return "grhsim_concat_scalars_u64<" + std::to_string(operandCount) + ">(" + valuesExpr + ", " +
+                   scalarConcatWidthArrayExpr(graph, op) + ", " + std::to_string(resultWidth) + ")";
+        }
+
+        struct ScalarConcatPrefixCacheKey
+        {
+            ValueId lhs;
+            int32_t lhsWidth = 0;
+            int32_t rhsWidth = 0;
+
+            friend bool operator==(const ScalarConcatPrefixCacheKey &lhsKey,
+                                   const ScalarConcatPrefixCacheKey &rhsKey) noexcept
+            {
+                return lhsKey.lhs == rhsKey.lhs &&
+                       lhsKey.lhsWidth == rhsKey.lhsWidth &&
+                       lhsKey.rhsWidth == rhsKey.rhsWidth;
+            }
+        };
+
+        struct ScalarConcatPrefixCacheKeyHash
+        {
+            std::size_t operator()(const ScalarConcatPrefixCacheKey &key) const noexcept
+            {
+                std::size_t seed = ValueIdHash{}(key.lhs);
+                seed = seed * 1315423911u + static_cast<std::size_t>(key.lhsWidth);
+                seed = seed * 1315423911u + static_cast<std::size_t>(key.rhsWidth);
+                return seed;
+            }
+        };
+
+        struct ScalarConcatPrefixCacheDecl
+        {
+            ScalarConcatPrefixCacheKey key;
+            int32_t totalWidth = 0;
+            std::size_t firstUseIndex = 0;
+            std::size_t useCount = 0;
+            std::string tempName;
+        };
+
+        bool scalarConcatPrefixCacheable(const Graph &graph, const Operation &op)
+        {
+            if (op.kind() != OperationKind::kConcat ||
+                op.results().empty() ||
+                op.operands().size() != 2 ||
+                opNeedsWordLogicEmit(graph, op))
+            {
+                return false;
+            }
+            const ValueId resultValue = op.results().front();
+            if (graph.valueType(resultValue) != ValueType::Logic || isWideLogicValue(graph, resultValue))
+            {
+                return false;
+            }
+            return graph.valueWidth(resultValue) <= 64;
+        }
+
+        std::vector<ScalarConcatPrefixCacheDecl> collectScalarConcatPrefixCaches(
+            const Graph &graph,
+            const std::vector<OperationId> &opIds)
+        {
+            std::unordered_map<ScalarConcatPrefixCacheKey, ScalarConcatPrefixCacheDecl, ScalarConcatPrefixCacheKeyHash>
+                declsByKey;
+            for (std::size_t opIndex = 0; opIndex < opIds.size(); ++opIndex)
+            {
+                const Operation op = graph.getOperation(opIds[opIndex]);
+                if (!scalarConcatPrefixCacheable(graph, op))
+                {
+                    continue;
+                }
+                const auto operands = op.operands();
+                const ScalarConcatPrefixCacheKey key{
+                    .lhs = operands[0],
+                    .lhsWidth = graph.valueWidth(operands[0]),
+                    .rhsWidth = graph.valueWidth(operands[1]),
+                };
+                auto [it, inserted] = declsByKey.emplace(
+                    key,
+                    ScalarConcatPrefixCacheDecl{
+                        .key = key,
+                        .totalWidth = graph.valueWidth(op.results().front()),
+                        .firstUseIndex = opIndex,
+                        .useCount = 0,
+                        .tempName = {},
+                    });
+                if (inserted)
+                {
+                    it->second.firstUseIndex = opIndex;
+                }
+                it->second.useCount += 1;
+            }
+
+            std::vector<ScalarConcatPrefixCacheDecl> decls;
+            decls.reserve(declsByKey.size());
+            for (auto &[key, decl] : declsByKey)
+            {
+                if (decl.useCount >= 4)
+                {
+                    decls.push_back(decl);
+                }
+            }
+            std::sort(decls.begin(),
+                      decls.end(),
+                      [](const ScalarConcatPrefixCacheDecl &lhs, const ScalarConcatPrefixCacheDecl &rhs) {
+                          if (lhs.firstUseIndex != rhs.firstUseIndex)
+                          {
+                              return lhs.firstUseIndex < rhs.firstUseIndex;
+                          }
+                          const std::size_t lhsIdHash = ValueIdHash{}(lhs.key.lhs);
+                          const std::size_t rhsIdHash = ValueIdHash{}(rhs.key.lhs);
+                          if (lhsIdHash != rhsIdHash)
+                          {
+                              return lhsIdHash < rhsIdHash;
+                          }
+                          if (lhs.key.lhsWidth != rhs.key.lhsWidth)
+                          {
+                              return lhs.key.lhsWidth < rhs.key.lhsWidth;
+                          }
+                          return lhs.key.rhsWidth < rhs.key.rhsWidth;
+                      });
+            for (std::size_t i = 0; i < decls.size(); ++i)
+            {
+                decls[i].tempName = "catp_" + std::to_string(i);
+            }
+            return decls;
+        }
+
         ScalarLogicExpr scalarAssignmentExpr(OperationKind kind,
                                              const std::vector<std::string> &operands,
                                              const Operation &op,
-                                             const Graph &graph);
+                                             const Graph &graph,
+                                             const std::unordered_map<ScalarConcatPrefixCacheKey,
+                                                                      std::string,
+                                                                      ScalarConcatPrefixCacheKeyHash> *concatPrefixTemps = nullptr);
 
         bool emitWordLogicOperation(std::ostream &stream,
                                     const Graph &graph,
@@ -2649,6 +2905,21 @@ namespace wolvrix::lib::emit
             }
             case OperationKind::kConcat:
             {
+                if (preferLoopedScalarConcatEmit(graph, op))
+                {
+                    std::vector<std::string> operandExprs;
+                    operandExprs.reserve(operands.size());
+                    for (ValueId operand : operands)
+                    {
+                        operandExprs.push_back(valueRef(model, operand));
+                    }
+                    emitLogicAssignFromWordsExpr(stream,
+                                                 graph,
+                                                 model,
+                                                 resultValue,
+                                                 scalarConcatLoopExpr(graph, op, operandExprs, true));
+                    return true;
+                }
                 stream << "        {\n";
                 stream << "            " << wordsArrayTypeForWidth(resultWidth) << " next_words{};\n";
                 stream << "            std::size_t concat_cursor = " << resultWidth << ";\n";
@@ -2713,6 +2984,15 @@ namespace wolvrix::lib::emit
             case OperationKind::kSliceStatic:
             {
                 const auto sliceStart = getAttribute<int64_t>(op, "sliceStart").value_or(0);
+                if (!isWideLogicValue(graph, resultValue) && resultWidth == 1)
+                {
+                    emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
+                                                "grhsim_get_bit_words(" +
+                                                    wordsExprForValue(graph, model, operands[0],
+                                                                      graph.valueWidth(operands[0])) +
+                                                    ", " + std::to_string(sliceStart) + ")");
+                    return true;
+                }
                 std::ostringstream out;
                 out << "grhsim_slice_words<" << resultWords << ">("
                     << wordsExprForValue(graph, model, operands[0], graph.valueWidth(operands[0])) << ", "
@@ -2755,20 +3035,6 @@ namespace wolvrix::lib::emit
             }
         }
 
-        std::string eventWordsCastExpr(const std::string &expr,
-                                       int32_t srcWidth,
-                                       int32_t destWidth,
-                                       bool isSigned)
-        {
-            std::ostringstream out;
-            out << "grhsim_cast_words<" << logicWordCount(destWidth) << ">("
-                << expr << ", "
-                << srcWidth << ", "
-                << destWidth << ", "
-                << boolLiteral(isSigned) << ")";
-            return out.str();
-        }
-
         std::string eventLogicExprFromWordsExpr(const Graph &graph,
                                                 ValueId resultValue,
                                                 const std::string &wordsExpr)
@@ -2795,7 +3061,7 @@ namespace wolvrix::lib::emit
             auto operandWords = [&](std::size_t index, int32_t width) -> std::string
             {
                 const ValueId value = operands[index];
-                return eventWordsCastExpr(operandExprs[index], graph.valueWidth(value), width, graph.valueSigned(value));
+                return castWordsExprForValue(graph, value, operandExprs[index], width);
             };
             auto compareWidth = [&]() -> int32_t
             {
@@ -2971,6 +3237,15 @@ namespace wolvrix::lib::emit
             }
             case OperationKind::kConcat:
             {
+                if (preferLoopedScalarConcatEmit(graph, op))
+                {
+                    return eventLogicExprFromWordsExpr(graph, resultValue,
+                                                       scalarConcatLoopExpr(graph, op, operandExprs, true));
+                }
+                if (resultWidth <= 64 && concatAllOperandsAreOneBit(graph, op))
+                {
+                    return logicBoolExpr(scalarBitPackExpr(operandExprs));
+                }
                 std::ostringstream out;
                 out << "([&]() -> " << wordsArrayTypeForWidth(resultWidth) << " { ";
                 out << wordsArrayTypeForWidth(resultWidth) << " next_words{}; ";
@@ -3002,6 +3277,12 @@ namespace wolvrix::lib::emit
             case OperationKind::kSliceStatic:
             {
                 const auto sliceStart = getAttribute<int64_t>(op, "sliceStart").value_or(0);
+                if (!isWideLogicValue(graph, resultValue) && resultWidth == 1)
+                {
+                    return logicBoolExpr("grhsim_get_bit_words(" +
+                                         operandWords(0, graph.valueWidth(operands[0])) + ", " +
+                                         std::to_string(sliceStart) + ")");
+                }
                 std::ostringstream out;
                 out << "grhsim_slice_words<" << resultWords << ">("
                     << operandWords(0, graph.valueWidth(operands[0])) << ", "
@@ -3454,7 +3735,10 @@ namespace wolvrix::lib::emit
         ScalarLogicExpr scalarAssignmentExpr(OperationKind kind,
                                              const std::vector<std::string> &operands,
                                              const Operation &op,
-                                             const Graph &graph)
+                                             const Graph &graph,
+                                             const std::unordered_map<ScalarConcatPrefixCacheKey,
+                                                                      std::string,
+                                                                      ScalarConcatPrefixCacheKeyHash> *concatPrefixTemps)
         {
             const auto resultWidth =
                 op.results().empty() ? 64 : static_cast<std::size_t>(graph.valueWidth(op.results().front()));
@@ -3593,6 +3877,38 @@ namespace wolvrix::lib::emit
                 return ScalarLogicExpr{"((" + operands[0] + ") ? (" + operandExpr(1, resultWidth) + ") : (" + operandExpr(2, resultWidth) + "))", true};
             case OperationKind::kConcat:
             {
+                if (preferLoopedScalarConcatEmit(graph, op))
+                {
+                    return ScalarLogicExpr{scalarConcatLoopExpr(graph, op, operands, false), true};
+                }
+                if (resultWidth <= 64 && concatAllOperandsAreOneBit(graph, op))
+                {
+                    return ScalarLogicExpr{scalarBitPackExpr(operands), true};
+                }
+                if (op.operands().size() == 2)
+                {
+                    const int32_t lhsWidth = graph.valueWidth(op.operands()[0]);
+                    const int32_t rhsWidth = graph.valueWidth(op.operands()[1]);
+                    if (concatPrefixTemps != nullptr)
+                    {
+                        const ScalarConcatPrefixCacheKey key{
+                            .lhs = op.operands()[0],
+                            .lhsWidth = lhsWidth,
+                            .rhsWidth = rhsWidth,
+                        };
+                        if (auto it = concatPrefixTemps->find(key); it != concatPrefixTemps->end())
+                        {
+                            return ScalarLogicExpr{
+                                "grhsim_cat_rhs<" + std::to_string(resultWidth) + ", " +
+                                    std::to_string(rhsWidth) + ">(" + it->second + ", " + operands[1] + ")",
+                                true};
+                        }
+                    }
+                    return ScalarLogicExpr{
+                        "grhsim_cat<" + std::to_string(lhsWidth) + ", " + std::to_string(rhsWidth) + ">(" +
+                            operands[0] + ", " + operands[1] + ")",
+                        true};
+                }
                 if (operands.empty())
                 {
                     return ScalarLogicExpr{};
@@ -3807,8 +4123,27 @@ namespace wolvrix::lib::emit
                     stream << "    }\n";
                     stream << "    grhsim_clear_bit(supernode_active_curr_, active_word_count_, " << supernodeId << ");\n";
                     stream << "    {\n";
+                    const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
+                        collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
+                    std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
+                        concatPrefixTemps;
+                    for (const auto &decl : concatPrefixCacheDecls)
+                    {
+                        concatPrefixTemps.emplace(decl.key, decl.tempName);
+                    }
+                    std::size_t opIndex = 0;
+                    std::size_t nextConcatPrefixDecl = 0;
                     for (const auto opId : schedule.supernodeToOps[supernodeId])
                     {
+                        while (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
+                               concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == opIndex)
+                        {
+                            const auto &decl = concatPrefixCacheDecls[nextConcatPrefixDecl];
+                            stream << "        const auto " << decl.tempName << " = grhsim_cat_prefix<"
+                                   << decl.key.lhsWidth << ", " << decl.key.rhsWidth << ">("
+                                   << valueRef(model, decl.key.lhs) << ");\n";
+                            ++nextConcatPrefixDecl;
+                        }
                         const Operation op = graph.getOperation(opId);
                         const auto operands = op.operands();
                         stream << "        // op " << op.symbolText() << "\n";
@@ -4156,7 +4491,8 @@ namespace wolvrix::lib::emit
                         {
                             operandExprs.push_back(valueRef(model, operand));
                         }
-                        const ScalarLogicExpr rhs = scalarAssignmentExpr(op.kind(), operandExprs, op, graph);
+                        const ScalarLogicExpr rhs =
+                            scalarAssignmentExpr(op.kind(), operandExprs, op, graph, &concatPrefixTemps);
                         if (rhs.expr.empty())
                         {
                             return emitError("unsupported scalar expression emit", std::string(op.symbolText()));
@@ -4422,6 +4758,7 @@ namespace wolvrix::lib::emit
                     default:
                         return emitError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
                     }
+                        ++opIndex;
                 }
                 stream << "    }\n";
                 stream << "supernode_" << supernodeId << "_end:\n";
@@ -4600,6 +4937,76 @@ namespace wolvrix::lib::emit
             *stream << "    const std::uint64_t rhsBits = grhsim_trunc_u64(rhs, rhsWidth);\n";
             *stream << "    if (rhsWidth >= 64) return rhsBits;\n";
             *stream << "    return grhsim_trunc_u64((lhsBits << rhsWidth) | rhsBits, lhsWidth + rhsWidth);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t LhsWidth, std::size_t RhsWidth, typename LhsT, typename RhsT>\n";
+            *stream << "inline std::uint64_t grhsim_cat(LhsT lhs, RhsT rhs)\n{\n";
+            *stream << "    return grhsim_concat_u64(static_cast<std::uint64_t>(lhs), LhsWidth,\n";
+            *stream << "                             static_cast<std::uint64_t>(rhs), RhsWidth);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t LhsWidth, std::size_t RhsWidth, typename LhsT>\n";
+            *stream << "inline std::uint64_t grhsim_cat_prefix(LhsT lhs)\n{\n";
+            *stream << "    const std::uint64_t lhsBits = grhsim_trunc_u64(static_cast<std::uint64_t>(lhs), LhsWidth);\n";
+            *stream << "    if constexpr (RhsWidth >= 64) {\n";
+            *stream << "        return 0;\n";
+            *stream << "    }\n";
+            *stream << "    return grhsim_trunc_u64(lhsBits << RhsWidth, LhsWidth + RhsWidth);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t TotalWidth, std::size_t RhsWidth, typename RhsT>\n";
+            *stream << "inline std::uint64_t grhsim_cat_rhs(std::uint64_t prefix, RhsT rhs)\n{\n";
+            *stream << "    return grhsim_trunc_u64(prefix | grhsim_trunc_u64(static_cast<std::uint64_t>(rhs), RhsWidth), TotalWidth);\n";
+            *stream << "}\n\n";
+            *stream << "template <typename... Bits>\n";
+            *stream << "inline std::uint64_t grhsim_pack_bits_u64(Bits... bits)\n{\n";
+            *stream << "    std::uint64_t out = 0;\n";
+            *stream << "    ((out = (out << 1u) | (static_cast<std::uint64_t>(bits) & UINT64_C(1))), ...);\n";
+            *stream << "    return out;\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Count>\n";
+            *stream << "inline std::uint64_t grhsim_concat_scalars_u64(const std::array<std::uint64_t, Count> &values,\n";
+            *stream << "                                               const std::array<std::size_t, Count> &widths,\n";
+            *stream << "                                               std::size_t totalWidth)\n{\n";
+            *stream << "    std::uint64_t out = 0;\n";
+            *stream << "    std::size_t cursor = totalWidth;\n";
+            *stream << "    for (std::size_t i = 0; i < Count; ++i) {\n";
+            *stream << "        const std::size_t width = widths[i];\n";
+            *stream << "        if (width == 0) {\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        if (width > cursor) {\n";
+            *stream << "            cursor = 0;\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        cursor -= width;\n";
+            *stream << "        if (cursor >= 64u) {\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        const std::uint64_t bits = grhsim_trunc_u64(values[i], width);\n";
+            *stream << "        out |= (cursor == 0 ? bits : (bits << cursor));\n";
+            *stream << "    }\n";
+            *stream << "    return grhsim_trunc_u64(out, totalWidth);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Count>\n";
+            *stream << "inline std::uint64_t grhsim_concat_uniform_scalars_u64(const std::array<std::uint64_t, Count> &values,\n";
+            *stream << "                                                       std::size_t elemWidth,\n";
+            *stream << "                                                       std::size_t totalWidth)\n{\n";
+            *stream << "    std::uint64_t out = 0;\n";
+            *stream << "    std::size_t cursor = totalWidth;\n";
+            *stream << "    for (std::size_t i = 0; i < Count; ++i) {\n";
+            *stream << "        if (elemWidth == 0) {\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        if (elemWidth > cursor) {\n";
+            *stream << "            cursor = 0;\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        cursor -= elemWidth;\n";
+            *stream << "        if (cursor >= 64u) {\n";
+            *stream << "            continue;\n";
+            *stream << "        }\n";
+            *stream << "        const std::uint64_t bits = grhsim_trunc_u64(values[i], elemWidth);\n";
+            *stream << "        out |= (cursor == 0 ? bits : (bits << cursor));\n";
+            *stream << "    }\n";
+            *stream << "    return grhsim_trunc_u64(out, totalWidth);\n";
             *stream << "}\n\n";
             *stream << "inline std::uint64_t grhsim_replicate_u64(std::uint64_t value, std::size_t elemWidth, std::size_t rep)\n{\n";
             *stream << "    if (elemWidth == 0 || rep == 0) return 0;\n";
@@ -4994,6 +5401,73 @@ inline void grhsim_insert_words(std::array<std::uint64_t, DestN> &dest,
             dest[destWord + i + 1u] |= (word >> (64u - bitShift));
         }
     }
+}
+
+template <std::size_t DestN>
+inline void grhsim_insert_scalar_words(std::array<std::uint64_t, DestN> &dest,
+                                       std::size_t destLsb,
+                                       std::uint64_t src,
+                                       std::size_t srcWidth)
+{
+    if (srcWidth == 0 || DestN == 0) {
+        return;
+    }
+    grhsim_clear_range_words(dest, destLsb, srcWidth);
+    const std::size_t destWord = destLsb / 64u;
+    if (destWord >= DestN) {
+        return;
+    }
+    const std::size_t bitShift = destLsb & 63u;
+    const std::uint64_t bits = grhsim_trunc_u64(src, srcWidth);
+    dest[destWord] |= (bitShift == 0 ? bits : (bits << bitShift));
+    if (bitShift != 0 && destWord + 1u < DestN && srcWidth + bitShift > 64u) {
+        dest[destWord + 1u] |= (bits >> (64u - bitShift));
+    }
+}
+
+template <std::size_t DestN, std::size_t Count>
+inline std::array<std::uint64_t, DestN> grhsim_concat_scalars_words(const std::array<std::uint64_t, Count> &values,
+                                                                    const std::array<std::size_t, Count> &widths,
+                                                                    std::size_t totalWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    std::size_t cursor = totalWidth;
+    for (std::size_t i = 0; i < Count; ++i) {
+        const std::size_t width = widths[i];
+        if (width == 0) {
+            continue;
+        }
+        if (width > cursor) {
+            cursor = 0;
+            continue;
+        }
+        cursor -= width;
+        grhsim_insert_scalar_words(out, cursor, values[i], width);
+    }
+    grhsim_trunc_words(out, totalWidth);
+    return out;
+}
+
+template <std::size_t DestN, std::size_t Count>
+inline std::array<std::uint64_t, DestN> grhsim_concat_uniform_scalars_words(const std::array<std::uint64_t, Count> &values,
+                                                                            std::size_t elemWidth,
+                                                                            std::size_t totalWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    std::size_t cursor = totalWidth;
+    for (std::size_t i = 0; i < Count; ++i) {
+        if (elemWidth == 0) {
+            continue;
+        }
+        if (elemWidth > cursor) {
+            cursor = 0;
+            continue;
+        }
+        cursor -= elemWidth;
+        grhsim_insert_scalar_words(out, cursor, values[i], elemWidth);
+    }
+    grhsim_trunc_words(out, totalWidth);
+    return out;
 }
 
 template <std::size_t DestN, std::size_t SrcN>

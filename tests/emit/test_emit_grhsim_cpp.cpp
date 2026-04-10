@@ -197,6 +197,30 @@ namespace
         graph.addResult(add, sum);
         graph.bindOutputPort("y", sum);
 
+        ValueId smallConcatLoopY = makeLogicValue(graph, "small_concat_loop_y", 8);
+        OperationId smallConcatLoop =
+            graph.createOperation(OperationKind::kConcat, graph.internSymbol("small_concat_loop_op"));
+        graph.addOperand(smallConcatLoop, en);
+        graph.addOperand(smallConcatLoop, clk);
+        graph.addOperand(smallConcatLoop, en);
+        graph.addOperand(smallConcatLoop, clk);
+        graph.addOperand(smallConcatLoop, en);
+        graph.addOperand(smallConcatLoop, clk);
+        graph.addOperand(smallConcatLoop, en);
+        graph.addOperand(smallConcatLoop, clk);
+        graph.addResult(smallConcatLoop, smallConcatLoopY);
+        graph.bindOutputPort("small_concat_loop_y", smallConcatLoopY);
+
+        ValueId wideConcatLoopY = makeLogicValue(graph, "wide_concat_loop_y", 72);
+        OperationId wideConcatLoop =
+            graph.createOperation(OperationKind::kConcat, graph.internSymbol("wide_concat_loop_op"));
+        for (int i = 0; i < 9; ++i)
+        {
+            graph.addOperand(wideConcatLoop, sum);
+        }
+        graph.addResult(wideConcatLoop, wideConcatLoopY);
+        graph.bindOutputPort("wide_concat_loop_y", wideConcatLoopY);
+
         ValueId padSeenY = makeLogicValue(graph, "pad_seen_y", 8);
         OperationId padSeenAdd = graph.createOperation(OperationKind::kAdd, graph.internSymbol("pad_seen_add"));
         graph.addOperand(padSeenAdd, padIn);
@@ -1495,6 +1519,11 @@ int main()
     {
         return fail("Missing runtime helper header");
     }
+    if (runtime.find("grhsim_concat_uniform_scalars_u64") == std::string::npos ||
+        runtime.find("grhsim_concat_uniform_scalars_words") == std::string::npos)
+    {
+        return fail("Missing scalar concat loop helpers in runtime");
+    }
     if (header.find("std::uint8_t y = ") == std::string::npos)
     {
         return fail("Missing public output field declaration");
@@ -1512,6 +1541,11 @@ int main()
         state.find("grhsim_merge_words_masked") == std::string::npos)
     {
         return fail("Missing wide runtime helper usage");
+    }
+    if (sched.find("grhsim_concat_uniform_scalars_u64<8>") == std::string::npos ||
+        sched.find("grhsim_concat_uniform_scalars_words<2, 9>") == std::string::npos)
+    {
+        return fail("Missing looped scalar concat helper usage");
     }
     if (sched.find("grhsim_add_words") == std::string::npos ||
         sched.find("grhsim_mul_words") == std::string::npos ||
