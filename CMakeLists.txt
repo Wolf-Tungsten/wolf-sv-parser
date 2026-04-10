@@ -59,7 +59,7 @@ if (WOLVRIX_ENABLE_MT_KAHYPAR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/m
             set(KAHYPAR_DOWNLOAD_TBB ON)
         endif()
         if (NOT DEFINED KAHYPAR_DISABLE_HWLOC)
-            set(KAHYPAR_DISABLE_HWLOC ON)
+            set(KAHYPAR_DISABLE_HWLOC OFF)
         endif()
         add_subdirectory(external/mt-kahypar EXCLUDE_FROM_ALL)
     endblock()

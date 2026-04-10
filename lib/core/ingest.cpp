@@ -9831,6 +9831,88 @@ public:
                                       width, location);
     }
 
+    ExprNodeId resizeValueToWidth(ExprNodeId value, int32_t targetWidth,
+                                  bool signExtend, slang::SourceLocation location)
+    {
+        if (value == kInvalidPlanIndex || targetWidth <= 0)
+        {
+            return value;
+        }
+        int32_t sourceWidth = 0;
+        if (value < lowering_.values.size())
+        {
+            sourceWidth = lowering_.values[value].widthHint;
+        }
+        if (sourceWidth == targetWidth)
+        {
+            return value;
+        }
+        if (sourceWidth <= 0)
+        {
+            ExprNode castNode;
+            castNode.kind = ExprNodeKind::Operation;
+            castNode.op = wolvrix::lib::grh::OperationKind::kAssign;
+            castNode.operands = {value};
+            castNode.location = location;
+            castNode.tempSymbol = makeTempSymbol();
+            castNode.widthHint = targetWidth;
+            castNode.isSigned = signExtend;
+            if (value < lowering_.values.size())
+            {
+                castNode.valueType = lowering_.values[value].valueType;
+            }
+            return addNode(std::move(castNode));
+        }
+        if (targetWidth < sourceWidth)
+        {
+            ExprNodeId zeroIndex = addConstantLiteral("0", location);
+            return makeSliceDynamic(value, zeroIndex, targetWidth, location);
+        }
+        const int32_t padWidth = targetWidth - sourceWidth;
+        ExprNodeId pad = kInvalidPlanIndex;
+        if (signExtend && sourceWidth > 0)
+        {
+            ExprNodeId signIndex =
+                addConstantLiteral(std::to_string(sourceWidth - 1), location);
+            ExprNodeId signBit = makeSliceDynamic(value, signIndex, 1, location);
+            ExprNode countNode;
+            countNode.kind = ExprNodeKind::Constant;
+            countNode.literal = std::to_string(padWidth);
+            countNode.location = location;
+            countNode.widthHint = 32;
+            ExprNodeId countId = addNode(std::move(countNode));
+            ExprNode repNode;
+            repNode.kind = ExprNodeKind::Operation;
+            repNode.op = wolvrix::lib::grh::OperationKind::kReplicate;
+            repNode.operands = {countId, signBit};
+            repNode.location = location;
+            repNode.tempSymbol = makeTempSymbol();
+            repNode.widthHint = padWidth;
+            pad = addNode(std::move(repNode));
+        }
+        else
+        {
+            ExprNode padNode;
+            padNode.kind = ExprNodeKind::Constant;
+            padNode.literal = std::to_string(padWidth) + "'b0";
+            padNode.location = location;
+            padNode.widthHint = padWidth;
+            pad = addNode(std::move(padNode));
+        }
+        if (pad == kInvalidPlanIndex)
+        {
+            return value;
+        }
+        ExprNode concatNode;
+        concatNode.kind = ExprNodeKind::Operation;
+        concatNode.op = wolvrix::lib::grh::OperationKind::kConcat;
+        concatNode.operands = {pad, value};
+        concatNode.location = location;
+        concatNode.tempSymbol = makeTempSymbol();
+        concatNode.widthHint = targetWidth;
+        return addNode(std::move(concatNode));
+    }
+
 private:
     PlanSymbolId makeTempSymbol()
     {
@@ -10928,6 +11010,19 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
             entry.target.valid() && entry.target.index < typeBySymbol.size()
                 ? typeBySymbol[entry.target.index]
                 : nullptr;
+        const bool baseIsSigned = baseType ? baseType->isSigned() : false;
+        const int32_t baseWidthHint =
+            baseWidth > 0
+                ? static_cast<int32_t>(std::min<int64_t>(
+                      baseWidth, std::numeric_limits<int32_t>::max()))
+                : 0;
+        auto normalizeWriteBackValue = [&](ExprNodeId value, slang::SourceLocation location) {
+            if (value == kInvalidPlanIndex || baseWidthHint <= 0)
+            {
+                return value;
+            }
+            return builder.resizeValueToWidth(value, baseWidthHint, baseIsSigned, location);
+        };
         bool fullWidthStaticSlice = false;
         if (!group.writes.empty() && baseWidth > 0)
         {
@@ -11136,6 +11231,11 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
 
         if (directConcatValue != kInvalidPlanIndex && allGuardsTrue)
         {
+            directConcatValue = normalizeWriteBackValue(directConcatValue, entry.location);
+            if (directConcatValue == kInvalidPlanIndex)
+            {
+                continue;
+            }
             entry.updateCond =
                 builder.ensureGuardExpr(kInvalidPlanIndex, entry.location);
             entry.nextValue = directConcatValue;
@@ -11190,6 +11290,12 @@ WriteBackPlan WriteBackPass::lower(ModulePlan& plan, LoweringPlan& lowering)
         }
 
         if (updateCond == kInvalidPlanIndex || nextValue == kInvalidPlanIndex)
+        {
+            continue;
+        }
+
+        nextValue = normalizeWriteBackValue(nextValue, entry.location);
+        if (nextValue == kInvalidPlanIndex)
         {
             continue;
         }

@@ -387,7 +387,7 @@ namespace wolvrix::lib::emit
                 parsed = parsed.resize(static_cast<slang::bitwidth_t>(graph.valueWidth(resultValue)));
                 if (parsed.hasUnknown())
                 {
-                    return std::nullopt;
+                    parsed.flattenUnknowns();
                 }
                 if (!isWideLogicValue(graph, resultValue))
                 {
@@ -474,7 +474,7 @@ namespace wolvrix::lib::emit
             slang::SVInt sized = value.resize(static_cast<slang::bitwidth_t>(width));
             if (sized.hasUnknown())
             {
-                return std::nullopt;
+                sized.flattenUnknowns();
             }
             if (!isWideLogicWidth(width))
             {
