@@ -3,6 +3,7 @@
 #include "core/toposort.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -289,6 +290,41 @@ namespace wolvrix::lib::transform
             std::size_t clonedOps = 0;
             std::size_t erasedOps = 0;
         };
+
+        struct ReplicationPerfStats
+        {
+            std::size_t scannedOps = 0;
+            std::size_t candidateOps = 0;
+            std::size_t userEdgesVisited = 0;
+            std::size_t targetBuckets = 0;
+            std::uint64_t collectObservableMs = 0;
+            std::uint64_t buildSymbolMapMs = 0;
+            std::uint64_t scanAndCloneMs = 0;
+        };
+
+        struct FinalMaterializePerfStats
+        {
+            std::uint64_t rebuildOpDataMs = 0;
+            std::uint64_t mapLiveOpsMs = 0;
+            std::uint64_t collectLiveClustersMs = 0;
+            std::uint64_t buildSupernodeMapsMs = 0;
+            std::uint64_t buildDagMs = 0;
+            std::uint64_t buildValueFanoutMs = 0;
+            std::uint64_t buildStateReadSetsMs = 0;
+            std::uint64_t finalTopoMs = 0;
+        };
+
+        constexpr std::size_t kCoarsenSiblingTailLargeClusterThreshold = 100000;
+        constexpr std::size_t kCoarsenSiblingTailMinClusterDelta = 8;
+        constexpr std::size_t kCoarsenSiblingTailMaxConsecutiveIters = 2;
+
+        std::uint64_t elapsedMs(const std::chrono::steady_clock::time_point &start) noexcept
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start)
+                    .count());
+        }
 
         struct DisjointSet
         {
@@ -1226,6 +1262,7 @@ namespace wolvrix::lib::transform
                                  std::size_t maxCost,
                                  std::size_t maxTargets,
                                  ReplicationStats &stats,
+                                 ReplicationPerfStats *perf,
                                  std::string &error)
         {
             if (partition.clusters.empty() || maxTargets == 0)
@@ -1233,12 +1270,27 @@ namespace wolvrix::lib::transform
                 return false;
             }
 
+            const auto observableStart = std::chrono::steady_clock::now();
             const auto observableValues = collectObservableBoundaryValues(graph);
+            if (perf)
+            {
+                perf->collectObservableMs = elapsedMs(observableStart);
+            }
+            const auto symbolMapStart = std::chrono::steady_clock::now();
             auto symbolToSupernode = buildSymbolToSupernodeMap(partition);
+            if (perf)
+            {
+                perf->buildSymbolMapMs = elapsedMs(symbolMapStart);
+            }
             bool changed = false;
+            const auto scanStart = std::chrono::steady_clock::now();
 
             for (std::size_t revPos = opData.topoSymbols.size(); revPos > 0; --revPos)
             {
+                if (perf)
+                {
+                    ++perf->scannedOps;
+                }
                 const auto opSym = opData.topoSymbols[revPos - 1];
                 const auto ownerIt = symbolToSupernode.find(opSym);
                 if (ownerIt == symbolToSupernode.end())
@@ -1277,6 +1329,10 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
+                if (perf)
+                {
+                    ++perf->candidateOps;
+                }
 
                 const auto result = op->results().front();
                 std::unordered_map<uint32_t, std::vector<wolvrix::lib::grh::ValueUser>> usersByTarget;
@@ -1295,6 +1351,10 @@ namespace wolvrix::lib::transform
                 }
                 for (const auto user : resultUsers)
                 {
+                    if (perf)
+                    {
+                        ++perf->userEdgesVisited;
+                    }
                     const auto userSym = graph.operationSymbol(user.operation);
                     const auto userIt = symbolToSupernode.find(userSym);
                     if (userIt == symbolToSupernode.end())
@@ -1313,6 +1373,10 @@ namespace wolvrix::lib::transform
                 if (usersByTarget.empty() || usersByTarget.size() > maxTargets)
                 {
                     continue;
+                }
+                if (perf)
+                {
+                    perf->targetBuckets += usersByTarget.size();
                 }
 
                 std::optional<wolvrix::lib::grh::Value> resultInfo;
@@ -1399,6 +1463,11 @@ namespace wolvrix::lib::transform
                 }
             }
 
+            if (perf)
+            {
+                perf->scanAndCloneMs = elapsedMs(scanStart);
+            }
+
             return changed;
         }
 
@@ -1407,14 +1476,21 @@ namespace wolvrix::lib::transform
                                        ActivityOpData &finalOpData,
                                        ActivityScheduleBuild &build,
                                        std::vector<uint32_t> &supernodeOfOp,
+                                       FinalMaterializePerfStats *perf,
                                        std::string &error)
         {
+            const auto rebuildOpDataStart = std::chrono::steady_clock::now();
             finalOpData = buildActivityOpData(graph, error);
+            if (perf)
+            {
+                perf->rebuildOpDataMs = elapsedMs(rebuildOpDataStart);
+            }
             if (!error.empty())
             {
                 return false;
             }
 
+            const auto mapLiveOpsStart = std::chrono::steady_clock::now();
             std::unordered_map<wolvrix::lib::grh::SymbolId, std::pair<wolvrix::lib::grh::OperationId, uint32_t>,
                                ActivityScheduleSymbolIdHash>
                 liveOpsBySymbol;
@@ -1424,6 +1500,10 @@ namespace wolvrix::lib::transform
                 liveOpsBySymbol.emplace(finalOpData.topoSymbols[topoPos],
                                         std::make_pair(finalOpData.topoOps[topoPos], static_cast<uint32_t>(topoPos)));
             }
+            if (perf)
+            {
+                perf->mapLiveOpsMs = elapsedMs(mapLiveOpsStart);
+            }
 
             struct LiveCluster
             {
@@ -1431,6 +1511,7 @@ namespace wolvrix::lib::transform
                 std::vector<uint32_t> topoPositions;
             };
 
+            const auto collectLiveClustersStart = std::chrono::steady_clock::now();
             std::vector<LiveCluster> liveClusters;
             liveClusters.reserve(partition.clusters.size());
             for (const auto &cluster : partition.clusters)
@@ -1459,7 +1540,12 @@ namespace wolvrix::lib::transform
 
             std::sort(liveClusters.begin(), liveClusters.end(),
                       [](const auto &lhs, const auto &rhs) { return lhs.minTopoPos < rhs.minTopoPos; });
+            if (perf)
+            {
+                perf->collectLiveClustersMs = elapsedMs(collectLiveClustersStart);
+            }
 
+            const auto buildSupernodeMapsStart = std::chrono::steady_clock::now();
             build = ActivityScheduleBuild{};
             build.supernodeToOps.resize(liveClusters.size());
             build.opToSupernode.assign(finalOpData.maxOpIndex, kInvalidActivitySupernodeId);
@@ -1480,7 +1566,12 @@ namespace wolvrix::lib::transform
                     supernodeOfOp[opId.index] = static_cast<uint32_t>(supernodeId);
                 }
             }
+            if (perf)
+            {
+                perf->buildSupernodeMapsMs = elapsedMs(buildSupernodeMapsStart);
+            }
 
+            const auto buildDagStart = std::chrono::steady_clock::now();
             std::unordered_set<uint64_t> seenDagEdges;
             seenDagEdges.reserve(finalOpData.topoEdges.size());
             for (const auto &[fromPos, toPos] : finalOpData.topoEdges)
@@ -1505,6 +1596,12 @@ namespace wolvrix::lib::transform
             {
                 std::sort(succs.begin(), succs.end());
             }
+            if (perf)
+            {
+                perf->buildDagMs = elapsedMs(buildDagStart);
+            }
+
+            const auto buildValueFanoutStart = std::chrono::steady_clock::now();
             for (wolvrix::lib::grh::OperationId toOpId : finalOpData.topoOps)
             {
                 const wolvrix::lib::grh::Operation toOp = graph.getOperation(toOpId);
@@ -1534,7 +1631,12 @@ namespace wolvrix::lib::transform
                 std::sort(succs.begin(), succs.end());
                 succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
             }
+            if (perf)
+            {
+                perf->buildValueFanoutMs = elapsedMs(buildValueFanoutStart);
+            }
 
+            const auto buildStateReadSetsStart = std::chrono::steady_clock::now();
             for (const auto opId : graph.operations())
             {
                 const auto op = graph.getOperation(opId);
@@ -1564,7 +1666,12 @@ namespace wolvrix::lib::transform
                 std::sort(supernodes.begin(), supernodes.end());
                 supernodes.erase(std::unique(supernodes.begin(), supernodes.end()), supernodes.end());
             }
+            if (perf)
+            {
+                perf->buildStateReadSetsMs = elapsedMs(buildStateReadSetsStart);
+            }
 
+            const auto finalTopoStart = std::chrono::steady_clock::now();
             wolvrix::lib::toposort::TopoDag<uint32_t> finalTopoDag;
             finalTopoDag.reserveNodes(build.supernodeToOps.size());
             for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
@@ -1592,6 +1699,10 @@ namespace wolvrix::lib::transform
                 error = std::string("activity-schedule final topo failed: ") + ex.what();
                 return false;
             }
+            if (perf)
+            {
+                perf->finalTopoMs = elapsedMs(finalTopoStart);
+            }
             return true;
         }
 
@@ -1616,6 +1727,7 @@ namespace wolvrix::lib::transform
     PassResult ActivitySchedulePass::run()
     {
         PassResult result;
+        const auto totalStart = std::chrono::steady_clock::now();
         if (options_.path.empty())
         {
             error("activity-schedule requires -path");
@@ -1694,9 +1806,11 @@ namespace wolvrix::lib::transform
             graphChanged = true;
         }
 
+        const auto seedBuildStart = std::chrono::steady_clock::now();
         graph->freeze();
         std::string buildError;
         const ActivityOpData opData = buildActivityOpData(*graph, buildError);
+        const std::uint64_t buildOpDataMs = elapsedMs(seedBuildStart);
         if (!buildError.empty())
         {
             error(*graph, buildError);
@@ -1704,58 +1818,128 @@ namespace wolvrix::lib::transform
             return result;
         }
 
+        const auto seedPartitionStart = std::chrono::steady_clock::now();
         WorkingPartition partition = makeSeedPartition(opData);
         partition = canonicalizePartition(partition, opData);
+        const std::uint64_t seedPartitionMs = elapsedMs(seedPartitionStart);
         const std::size_t seedSupernodeCount = partition.clusters.size();
 
+        std::uint64_t coarsenMs = 0;
+        std::size_t coarsenIterations = 0;
         if (!partition.clusters.empty() && options_.enableCoarsen)
         {
+            const auto coarsenStart = std::chrono::steady_clock::now();
+            std::size_t siblingTailIterations = 0;
             bool changed = true;
             while (changed)
             {
+                ++coarsenIterations;
                 changed = false;
+                const auto iterStart = std::chrono::steady_clock::now();
+                const std::size_t clustersBeforeIter = partition.clusters.size();
+                bool out1Changed = false;
+                bool in1Changed = false;
+                bool siblingChanged = false;
+                bool forwardChanged = false;
                 if (options_.enableChainMerge)
                 {
-                    changed = tryMergeOut1(partition, opData, options_.supernodeMaxSize) || changed;
-                    changed = tryMergeIn1(partition, opData, options_.supernodeMaxSize) || changed;
+                    out1Changed = tryMergeOut1(partition, opData, options_.supernodeMaxSize);
+                    in1Changed = tryMergeIn1(partition, opData, options_.supernodeMaxSize);
+                    changed = out1Changed || in1Changed || changed;
                 }
                 if (options_.enableSiblingMerge)
                 {
-                    changed = tryMergeSiblings(partition, opData, options_.supernodeMaxSize) || changed;
+                    siblingChanged = tryMergeSiblings(partition, opData, options_.supernodeMaxSize);
+                    changed = siblingChanged || changed;
                 }
                 if (options_.enableForwardMerge)
                 {
-                    changed = tryMergeForwarders(partition, opData, options_.supernodeMaxSize) || changed;
+                    forwardChanged = tryMergeForwarders(partition, opData, options_.supernodeMaxSize);
+                    changed = forwardChanged || changed;
+                }
+                const std::size_t clustersAfterIter = partition.clusters.size();
+                const std::size_t clusterDelta =
+                    clustersBeforeIter >= clustersAfterIter ? (clustersBeforeIter - clustersAfterIter) : 0;
+                logInfo("activity-schedule timing: coarsen_iter=" + std::to_string(coarsenIterations) +
+                        " clusters=" + std::to_string(partition.clusters.size()) +
+                        " cluster_delta=" + std::to_string(clusterDelta) +
+                        " changed=" + (changed ? std::string("true") : std::string("false")) +
+                        " out1=" + (out1Changed ? std::string("1") : std::string("0")) +
+                        " in1=" + (in1Changed ? std::string("1") : std::string("0")) +
+                        " siblings=" + (siblingChanged ? std::string("1") : std::string("0")) +
+                        " forward=" + (forwardChanged ? std::string("1") : std::string("0")) +
+                        " elapsed_ms=" + std::to_string(elapsedMs(iterStart)));
+
+                const bool siblingOnlyTail =
+                    siblingChanged &&
+                    !out1Changed &&
+                    !in1Changed &&
+                    !forwardChanged &&
+                    clustersBeforeIter >= kCoarsenSiblingTailLargeClusterThreshold &&
+                    clusterDelta <= kCoarsenSiblingTailMinClusterDelta;
+                if (siblingOnlyTail)
+                {
+                    ++siblingTailIterations;
+                }
+                else
+                {
+                    siblingTailIterations = 0;
+                }
+                if (siblingTailIterations >= kCoarsenSiblingTailMaxConsecutiveIters)
+                {
+                    logInfo("activity-schedule timing: coarsen_tail_stop clusters=" +
+                            std::to_string(partition.clusters.size()) +
+                            " sibling_tail_iters=" + std::to_string(siblingTailIterations) +
+                            " cluster_delta=" + std::to_string(clusterDelta) +
+                            " threshold=" + std::to_string(kCoarsenSiblingTailMinClusterDelta));
+                    break;
                 }
             }
+            coarsenMs = elapsedMs(coarsenStart);
         }
 
+        const auto dpPrepStart = std::chrono::steady_clock::now();
         partition = canonicalizePartition(partition, opData);
         const std::size_t coarseSupernodeCount = partition.clusters.size();
         ClusterView coarseView = buildClusterView(partition, opData);
+        const std::uint64_t dpPrepMs = elapsedMs(dpPrepStart);
+        const auto dpStart = std::chrono::steady_clock::now();
         std::vector<std::vector<uint32_t>> segments = buildDpSegments(coarseView, options_.supernodeMaxSize);
+        const std::uint64_t dpMs = elapsedMs(dpStart);
         const std::size_t dpSupernodeCount = segments.size();
+        std::uint64_t refineMs = 0;
         if (options_.enableRefine)
         {
+            const auto refineStart = std::chrono::steady_clock::now();
             segments = refineSegments(coarseView, std::move(segments), options_.supernodeMaxSize, options_.refineMaxIter);
+            refineMs = elapsedMs(refineStart);
         }
+        const auto materializeSegmentsStart = std::chrono::steady_clock::now();
         partition = materializeSegments(coarseView, segments);
         partition = canonicalizePartition(partition, opData);
+        const std::uint64_t materializeSegmentsMs = elapsedMs(materializeSegmentsStart);
 
+        const auto symbolPartitionStart = std::chrono::steady_clock::now();
         SymbolPartition symbolPartition = buildSymbolPartition(partition, opData);
+        const std::uint64_t symbolPartitionMs = elapsedMs(symbolPartitionStart);
         ReplicationStats replicationStats;
+        ReplicationPerfStats replicationPerf;
+        std::uint64_t replicationMs = 0;
         if (options_.enableReplication)
         {
+            const auto replicationStart = std::chrono::steady_clock::now();
             if (runReplicationPhase(*graph,
                                     symbolPartition,
                                     opData,
                                     options_.replicationMaxCost,
                                     options_.replicationMaxTargets,
                                     replicationStats,
+                                    &replicationPerf,
                                     buildError))
             {
                 graphChanged = true;
             }
+            replicationMs = elapsedMs(replicationStart);
             if (!buildError.empty())
             {
                 error(*graph, buildError);
@@ -1764,30 +1948,88 @@ namespace wolvrix::lib::transform
             }
         }
 
+        const auto freezeAfterReplicationStart = std::chrono::steady_clock::now();
         graph->freeze();
+        const std::uint64_t freezeAfterReplicationMs = elapsedMs(freezeAfterReplicationStart);
 
         ActivityScheduleBuild build;
         ActivityOpData finalOpData;
         std::vector<uint32_t> supernodeOfOp;
-        if (!materializeFinalPartition(*graph, symbolPartition, finalOpData, build, supernodeOfOp, buildError))
+        FinalMaterializePerfStats finalPerf;
+        const auto finalMaterializeStart = std::chrono::steady_clock::now();
+        if (!materializeFinalPartition(*graph, symbolPartition, finalOpData, build, supernodeOfOp, &finalPerf, buildError))
         {
             error(*graph, buildError);
             result.failed = true;
             return result;
         }
+        const std::uint64_t finalMaterializeMs = elapsedMs(finalMaterializeStart);
 
         const std::string keyPrefix = options_.path + ".activity_schedule.";
+        const auto exportStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "supernode_to_ops",
                         build.supernodeToOps,
                         "activity-schedule.supernode-to-ops");
+        const std::uint64_t exportSupernodeToOpsMs = elapsedMs(exportStart);
+        const auto exportOpToSupernodeStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "op_to_supernode",
                         build.opToSupernode,
                         "activity-schedule.op-to-supernode");
+        const std::uint64_t exportOpToSupernodeMs = elapsedMs(exportOpToSupernodeStart);
+        const auto exportValueFanoutStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
+        const std::uint64_t exportValueFanoutMs = elapsedMs(exportValueFanoutStart);
+        const auto exportTopoOrderStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "topo_order", build.topoOrder, "activity-schedule.topo-order");
+        const std::uint64_t exportTopoOrderMs = elapsedMs(exportTopoOrderStart);
+        const auto exportStateReadStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "state_read_supernodes",
                         build.stateReadSupernodes,
                         "activity-schedule.state-read-supernodes");
+        const std::uint64_t exportStateReadMs = elapsedMs(exportStateReadStart);
+        const std::uint64_t exportTotalMs = elapsedMs(exportStart);
+
+        logInfo("activity-schedule timing(ms): build_op_data=" + std::to_string(buildOpDataMs) +
+                " seed_partition=" + std::to_string(seedPartitionMs) +
+                " coarsen=" + std::to_string(coarsenMs) +
+                " dp_prep=" + std::to_string(dpPrepMs) +
+                " dp=" + std::to_string(dpMs) +
+                " refine=" + std::to_string(refineMs) +
+                " materialize_segments=" + std::to_string(materializeSegmentsMs) +
+                " symbol_partition=" + std::to_string(symbolPartitionMs) +
+                " replication=" + std::to_string(replicationMs) +
+                " freeze_after_replication=" + std::to_string(freezeAfterReplicationMs) +
+                " final_materialize=" + std::to_string(finalMaterializeMs) +
+                " export_session=" + std::to_string(exportTotalMs) +
+                " total=" + std::to_string(elapsedMs(totalStart)));
+        logInfo("activity-schedule timing detail: coarsen_iters=" + std::to_string(coarsenIterations) +
+                " topo_edges=" + std::to_string(opData.topoEdges.size()) +
+                " final_topo_edges=" + std::to_string(finalOpData.topoEdges.size()) +
+                " graph_ops=" + std::to_string(graph->operations().size()) +
+                " graph_values=" + std::to_string(graph->values().size()));
+        logInfo("activity-schedule timing replication(ms): collect_observable=" +
+                std::to_string(replicationPerf.collectObservableMs) +
+                " build_symbol_map=" + std::to_string(replicationPerf.buildSymbolMapMs) +
+                " scan_and_clone=" + std::to_string(replicationPerf.scanAndCloneMs) +
+                " scanned_ops=" + std::to_string(replicationPerf.scannedOps) +
+                " candidate_ops=" + std::to_string(replicationPerf.candidateOps) +
+                " user_edges_visited=" + std::to_string(replicationPerf.userEdgesVisited) +
+                " target_buckets=" + std::to_string(replicationPerf.targetBuckets));
+        logInfo("activity-schedule timing final_materialize(ms): rebuild_op_data=" +
+                std::to_string(finalPerf.rebuildOpDataMs) +
+                " map_live_ops=" + std::to_string(finalPerf.mapLiveOpsMs) +
+                " collect_live_clusters=" + std::to_string(finalPerf.collectLiveClustersMs) +
+                " build_supernode_maps=" + std::to_string(finalPerf.buildSupernodeMapsMs) +
+                " build_dag=" + std::to_string(finalPerf.buildDagMs) +
+                " build_value_fanout=" + std::to_string(finalPerf.buildValueFanoutMs) +
+                " build_state_read_sets=" + std::to_string(finalPerf.buildStateReadSetsMs) +
+                " final_topo=" + std::to_string(finalPerf.finalTopoMs));
+        logInfo("activity-schedule timing export(ms): supernode_to_ops=" +
+                std::to_string(exportSupernodeToOpsMs) +
+                " op_to_supernode=" + std::to_string(exportOpToSupernodeMs) +
+                " value_fanout=" + std::to_string(exportValueFanoutMs) +
+                " topo_order=" + std::to_string(exportTopoOrderMs) +
+                " state_read_supernodes=" + std::to_string(exportStateReadMs));
 
         std::ostringstream summary;
         summary << "activity-schedule: path=" << options_.path

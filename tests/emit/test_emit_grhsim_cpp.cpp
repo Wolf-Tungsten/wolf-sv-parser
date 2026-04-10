@@ -1119,10 +1119,12 @@ namespace
 
         ValueId clk = makeLogicValue(graph, "clk", 1);
         ValueId data = makeLogicValue(graph, "data", 8);
+        ValueId cond8 = makeLogicValue(graph, "cond8", 8);
         ValueId handle = makeLogicValue(graph, "file_handle", 32);
         ValueId fileError = makeLogicValue(graph, "file_error", 32);
         graph.bindInputPort("clk", clk);
         graph.bindInputPort("data", data);
+        graph.bindInputPort("cond8", cond8);
         graph.bindOutputPort("data_out", data);
         graph.bindOutputPort("file_error", fileError);
 
@@ -1138,6 +1140,7 @@ namespace
         ValueId fmtWrite = addConstant(graph, "const_fmt_write", "fmt_write", 0, "\"fw=%0d\"", ValueType::String);
         ValueId fmtFdisplay = addConstant(graph, "const_fmt_fdisplay", "fmt_fdisplay", 0, "\"|fd=%0d\"", ValueType::String);
         ValueId fmtFinal = addConstant(graph, "const_fmt_final", "fmt_final", 0, "\"final=%0d\"", ValueType::String);
+        ValueId fmtCond = addConstant(graph, "const_fmt_cond", "fmt_cond", 0, "\"cond=%0d\"", ValueType::String);
         ValueId strArg = addConstant(graph, "const_str_arg", "str_arg", 0, "\"ok\"", ValueType::String);
         ValueId realArg = addConstant(graph, "const_real_arg", "real_arg", 0, "3.25", ValueType::Real);
         ValueId dumpfileName = addConstant(graph, "const_dumpfile_name", "dumpfile_name", 0, "\"waves.out\"",
@@ -1175,11 +1178,12 @@ namespace
                            std::string_view procKind,
                            bool hasTiming,
                            const std::vector<ValueId> &events = {},
-                           const std::vector<std::string> &eventEdges = {})
+                           const std::vector<std::string> &eventEdges = {},
+                           ValueId callCond = ValueId{})
         {
             OperationId op = graph.createOperation(OperationKind::kSystemTask,
                                                    graph.internSymbol(std::string(symbolName)));
-            graph.addOperand(op, one);
+            graph.addOperand(op, callCond.valid() ? callCond : one);
             for (ValueId arg : args)
             {
                 graph.addOperand(op, arg);
@@ -1207,6 +1211,7 @@ namespace
         addTask("task_dumpfile", "dumpfile", {dumpfileName}, "initial", false);
         addTask("task_dumpvars", "dumpvars", {}, "initial", false);
         addTask("task_fwrite", "fwrite", {handle, fmtWrite, data}, "initial", false);
+        addTask("task_conditional_display", "display", {fmtCond, data}, "always_ff", false, {clk}, {"posedge"}, cond8);
         addTask("task_final", "display", {fmtFinal, data}, "final", false);
         addTask("task_final_fdisplay", "fdisplay", {handle, fmtFdisplay, data}, "final", false);
 
@@ -1308,7 +1313,7 @@ namespace
         ValueId textY = makeStringValue(graph, "text_y");
         OperationId mixCall = graph.createOperation(OperationKind::kDpicCall,
                                                     graph.internSymbol("dpi_mix_call"));
-        graph.addOperand(mixCall, one);
+        graph.addOperand(mixCall, a);
         graph.addOperand(mixCall, label);
         graph.addOperand(mixCall, realIn);
         graph.addOperand(mixCall, wide);
@@ -1361,7 +1366,7 @@ namespace
         ValueId wideY = makeLogicValue(graph, "wide_y", 130);
         OperationId wideCall = graph.createOperation(OperationKind::kDpicCall,
                                                      graph.internSymbol("dpi_wide_call"));
-        graph.addOperand(wideCall, one);
+        graph.addOperand(wideCall, wide);
         graph.addOperand(wideCall, wide);
         graph.addOperand(wideCall, clk);
         graph.addResult(wideCall, wideY);
@@ -2377,6 +2382,15 @@ int main()
         {
             return fail("system-task artifacts missing");
         }
+        std::string systemTaskSchedText;
+        for (const auto &schedPath : systemTaskSchedFiles)
+        {
+            systemTaskSchedText += readFile(schedPath);
+        }
+        if (systemTaskSchedText.find("(cond8) != 0") == std::string::npos)
+        {
+            return fail("system-task multi-bit condition should emit scalar truthiness check");
+        }
         const std::filesystem::path systemTaskHarnessPath = systemTaskDir / "grhsim_top_harness.cpp";
         {
             std::ofstream harness(systemTaskHarnessPath);
@@ -2393,6 +2407,7 @@ int main()
             harness << "        GrhSIM_top sim;\n";
             harness << "        sim.init();\n";
             harness << "        sim.clk = false;\n";
+            harness << "        sim.cond8 = static_cast<std::uint8_t>(0);\n";
             harness << "        sim.data = static_cast<std::uint8_t>(42);\n";
             harness << "        sim.eval();\n";
             harness << "        if (sim.dumpfile_path() != std::string(\"waves.out\")) return 1;\n";
@@ -2402,6 +2417,11 @@ int main()
             harness << "        sim.eval();\n";
             harness << "        if (sim.data_out != static_cast<std::uint8_t>(42)) return 4;\n";
             harness << "        if (sim.file_error != static_cast<std::uint32_t>(0)) return 5;\n";
+            harness << "        sim.clk = false;\n";
+            harness << "        sim.eval();\n";
+            harness << "        sim.cond8 = static_cast<std::uint8_t>(2);\n";
+            harness << "        sim.clk = true;\n";
+            harness << "        sim.eval();\n";
             harness << "    }\n";
             harness << "    return 0;\n";
             harness << "}\n";
@@ -2466,6 +2486,10 @@ int main()
         if (systemTaskLog.find("final=42") == std::string::npos)
         {
             return fail("system-task final output missing");
+        }
+        if (countSubstring(systemTaskLog, "cond=42") != 1)
+        {
+            return fail("system-task multi-bit conditional display should trigger exactly once");
         }
         if (systemTaskFileText != "fw=42|fd=42\n")
         {
@@ -2579,6 +2603,19 @@ int main()
         if (dpiSchedFiles.empty())
         {
             return fail("dpi schedule files missing");
+        }
+        std::string dpiSchedText;
+        for (const auto &schedPath : dpiSchedFiles)
+        {
+            dpiSchedText += readFile(schedPath);
+        }
+        if (dpiSchedText.find("(a) != 0") == std::string::npos)
+        {
+            return fail("dpi scalar multi-bit condition should emit scalar truthiness check");
+        }
+        if (dpiSchedText.find("grhsim_any_bits_words(wide, 130)") == std::string::npos)
+        {
+            return fail("dpi wide multi-bit condition should emit word truthiness check");
         }
         const std::filesystem::path dpiHarnessPath = dpiDir / "grhsim_top_harness.cpp";
         {

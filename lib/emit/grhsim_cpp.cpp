@@ -268,6 +268,12 @@ namespace wolvrix::lib::emit
                    isWideLogicWidth(graph.valueWidth(value));
         }
 
+        bool isValidLogicConditionValue(const Graph &graph, ValueId value) noexcept
+        {
+            return graph.valueType(value) == ValueType::Logic &&
+                   graph.valueWidth(value) >= 1;
+        }
+
         std::string logicCppType(int32_t width)
         {
             if (width <= 1)
@@ -1090,9 +1096,9 @@ namespace wolvrix::lib::emit
                 error = "kRegisterWritePort missing operands: " + opName;
                 return false;
             }
-            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            if (!isValidLogicConditionValue(graph, operands[0]))
             {
-                error = "kRegisterWritePort updateCond must be 1-bit logic: " + opName;
+                error = "kRegisterWritePort updateCond must be logic: " + opName;
                 return false;
             }
             if (graph.valueType(operands[1]) != ValueType::Logic || graph.valueWidth(operands[1]) != state.width)
@@ -1146,9 +1152,9 @@ namespace wolvrix::lib::emit
                 error = "kMemoryWritePort missing operands: " + opName;
                 return false;
             }
-            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            if (!isValidLogicConditionValue(graph, operands[0]))
             {
-                error = "kMemoryWritePort updateCond must be 1-bit logic: " + opName;
+                error = "kMemoryWritePort updateCond must be logic: " + opName;
                 return false;
             }
             if (graph.valueType(operands[1]) != ValueType::Logic || graph.valueWidth(operands[1]) <= 0)
@@ -1206,9 +1212,9 @@ namespace wolvrix::lib::emit
                 error = "kSystemTask missing callCond operand: " + opName;
                 return false;
             }
-            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            if (!isValidLogicConditionValue(graph, operands[0]))
             {
-                error = "kSystemTask callCond must be 1-bit logic: " + opName;
+                error = "kSystemTask callCond must be logic: " + opName;
                 return false;
             }
             auto name = getAttribute<std::string>(op, "name");
@@ -1498,9 +1504,9 @@ namespace wolvrix::lib::emit
                 error = "kDpicCall missing callCond operand: " + opName;
                 return false;
             }
-            if (graph.valueType(operands[0]) != ValueType::Logic || graph.valueWidth(operands[0]) != 1)
+            if (!isValidLogicConditionValue(graph, operands[0]))
             {
-                error = "kDpicCall callCond must be 1-bit logic: " + opName;
+                error = "kDpicCall callCond must be logic: " + opName;
                 return false;
             }
 
@@ -2115,6 +2121,16 @@ namespace wolvrix::lib::emit
                 return it->second;
             }
             return "/*missing_value_ref*/";
+        }
+
+        std::string truthyLogicValueExpr(const Graph &graph, const EmitModel &model, ValueId value)
+        {
+            const std::string ref = valueRef(model, value);
+            if (isWideLogicValue(graph, value))
+            {
+                return "grhsim_any_bits_words(" + ref + ", " + std::to_string(graph.valueWidth(value)) + ")";
+            }
+            return "(" + ref + ") != 0";
         }
 
         std::string boolLiteral(bool value)
@@ -4535,7 +4551,8 @@ namespace wolvrix::lib::emit
                             return emitError("write metadata missing", std::string(op.symbolText()));
                         }
                         const WriteDecl &write = writeIt->second;
-                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
+                        const std::string condExpr =
+                            operands.empty() ? "true" : truthyLogicValueExpr(graph, model, operands[0]);
                         const auto eventExpr = exactEventExpr(graph, model, opId, op);
                         if (!eventExpr)
                         {
@@ -4582,7 +4599,7 @@ namespace wolvrix::lib::emit
                         {
                             break;
                         }
-                        const std::string condExpr = valueRef(model, operands[0]);
+                        const std::string condExpr = truthyLogicValueExpr(graph, model, operands[0]);
                         const auto name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
                         const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
                         const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
@@ -4639,7 +4656,8 @@ namespace wolvrix::lib::emit
                             return emitError("kDpicCall target import not found", *targetImport);
                         }
                         const DpiImportDecl &decl = importIt->second;
-                        const std::string condExpr = operands.empty() ? "true" : valueRef(model, operands[0]);
+                        const std::string condExpr =
+                            operands.empty() ? "true" : truthyLogicValueExpr(graph, model, operands[0]);
                         const auto eventExpr = exactEventExpr(graph, model, opId, op);
                         if (!eventExpr)
                         {
@@ -7454,7 +7472,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
                     const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
                     const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
-                    *stream << "    if (" << valueRef(model, operands[0]) << ") {\n";
+                    *stream << "    if (" << truthyLogicValueExpr(graph, model, operands[0]) << ") {\n";
                     if (argEnd <= 1)
                     {
                         *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
