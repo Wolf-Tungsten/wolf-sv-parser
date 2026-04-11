@@ -1028,21 +1028,23 @@ namespace wolvrix::lib::emit
             OperationId opId;
             StateDecl::Kind kind = StateDecl::Kind::Register;
             std::string symbol;
-            std::string pendingValidField;
-            std::string pendingDataField;
-            std::string pendingMaskField;
-            std::string pendingAddrField;
-            std::size_t emitIndex = 0;
-            std::size_t registerWriteGroupIndex = kInvalidIndex;
+            std::string shadowTouchedField;
+            std::string shadowDataField;
+            std::string shadowMaskField;
+            std::string shadowAddrField;
+            std::size_t shadowIndex = kInvalidIndex;
             MemoryMaskMode memoryMaskMode = MemoryMaskMode::kDynamic;
             MemoryAddrMode memoryAddrMode = MemoryAddrMode::kGeneric;
             std::size_t memoryRowMask = 0;
         };
 
-        struct RegisterWriteGroup
+        struct StateShadowDecl
         {
+            StateDecl::Kind kind = StateDecl::Kind::Register;
             std::string symbol;
-            std::vector<std::size_t> writeIndices;
+            std::string touchedField;
+            std::string dataField;
+            std::size_t emitIndex = kInvalidIndex;
         };
 
         struct DpiImportDecl
@@ -1063,7 +1065,6 @@ namespace wolvrix::lib::emit
         {
             std::vector<ValueId> values;
             std::vector<std::string> edges;
-            std::string seenInEvalFieldName;
             std::string completedFieldName;
         };
 
@@ -1078,17 +1079,20 @@ namespace wolvrix::lib::emit
             std::unordered_map<std::string, StateDecl> stateBySymbol;
             std::unordered_map<std::string, std::vector<uint32_t>> stateHeadSupernodesBySymbol;
             std::unordered_map<OperationId, WriteDecl, OperationIdHash> writeByOp;
+            std::unordered_map<std::string, StateShadowDecl> stateShadowBySymbol;
             std::unordered_map<OperationId, EventSampleDecl, OperationIdHash> eventSamplesByOp;
-            std::unordered_map<ValueId, std::string, ValueIdHash> prevEventFieldByValue;
+            std::unordered_map<ValueId, std::string, ValueIdHash> eventEdgeFieldByValue;
             std::unordered_map<std::string, DpiImportDecl> dpiImportBySymbol;
             std::vector<WriteDecl> writes;
-            std::vector<RegisterWriteGroup> registerWriteGroups;
+            std::vector<StateShadowDecl> stateShadows;
             std::vector<DpiImportDecl> dpiImports;
-            std::vector<ValueId> eventSampleValueOrder;
+            std::vector<ValueId> allEventValues;
+            std::vector<ValueId> inputEventValues;
             std::vector<std::string> eventFieldDecls;
             std::vector<std::string> stateOrder;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
+            std::vector<std::string> shadowFieldDecls;
             std::vector<std::string> writeFieldDecls;
             std::vector<std::string> dpiDecls;
             std::vector<std::string> publicPortDecls;
@@ -1127,6 +1131,31 @@ namespace wolvrix::lib::emit
         {
             const auto it = model.boundaryFanoutByValue.find(resultValue);
             return it != model.boundaryFanoutByValue.end() && !it->second.empty();
+        }
+
+        bool isEventValue(const EmitModel &model, ValueId value)
+        {
+            return model.eventEdgeFieldByValue.find(value) != model.eventEdgeFieldByValue.end();
+        }
+
+        bool valueNeedsTrackedChange(const EmitModel &model, ValueId resultValue)
+        {
+            return valueNeedsChangeDetect(model, resultValue) || isEventValue(model, resultValue);
+        }
+
+        void emitChangedValueEffects(std::ostream &stream,
+                                     const EmitModel &model,
+                                     ValueId resultValue,
+                                     std::string_view oldExpr,
+                                     std::string_view newExpr,
+                                     std::string_view indent)
+        {
+            if (const auto eventIt = model.eventEdgeFieldByValue.find(resultValue);
+                eventIt != model.eventEdgeFieldByValue.end())
+            {
+                stream << indent << eventIt->second << " = grhsim_classify_edge(" << oldExpr << ", " << newExpr << ");\n";
+            }
+            emitChangedValuePropagation(stream, model, resultValue, indent);
         }
 
         bool isMaterializedValue(const EmitModel &model, ValueId value)
@@ -1559,17 +1588,21 @@ namespace wolvrix::lib::emit
             return logicCppType(static_cast<int32_t>(effectiveWidth));
         }
 
-        std::string dpiCppType(std::string_view typeName,
-                               int64_t width,
-                               bool isSigned,
-                               bool isOutputRef)
+        std::string dpiDeclArgCppType(std::string_view typeName,
+                                      int64_t width,
+                                      bool isSigned,
+                                      std::string_view direction)
         {
             const std::string baseType = dpiBaseCppType(typeName, width, isSigned);
-            if (isOutputRef)
+            if (direction == "output" || direction == "inout")
             {
-                return baseType + " &";
+                return baseType + " *";
             }
-            if (dpiTypeIsString(typeName) || dpiEffectiveWidth(typeName, width) > 64)
+            if (dpiTypeIsString(typeName))
+            {
+                return "const char *";
+            }
+            if (dpiEffectiveWidth(typeName, width) > 64)
             {
                 return "const " + baseType + " &";
             }
@@ -1634,11 +1667,15 @@ namespace wolvrix::lib::emit
                                  bool isSigned)
         {
             const std::string ref = valueRef(model, value);
+            if (dpiTypeIsString(typeName))
+            {
+                return ref + ".c_str()";
+            }
             if (dpiTypeIsShortReal(typeName))
             {
                 return "static_cast<float>(" + ref + ")";
             }
-            if (dpiTypeIsReal(typeName) || dpiTypeIsString(typeName))
+            if (dpiTypeIsReal(typeName))
             {
                 return ref;
             }
@@ -1937,7 +1974,7 @@ namespace wolvrix::lib::emit
                         state.rowCount = *row;
                         const std::string elemType = logicCppType(state.width);
                         state.cppType = "std::vector<" + elemType + ">";
-                        state.fieldName = "state_mem_" + sanitizeIdentifier(state.symbol);
+                        state.fieldName = "state_mem_" + sanitizeIdentifier(state.symbol) + "_" + std::to_string(opId.index);
                         if (!buildMemoryInitRowExprs(op, state.width, state.rowCount, state.memoryInitRowExprs, error))
                         {
                             return false;
@@ -1956,7 +1993,7 @@ namespace wolvrix::lib::emit
                         const std::string cppType = logicCppType(state.width);
                         state.cppType = cppType;
                         state.fieldName = (state.kind == StateDecl::Kind::Register ? "state_reg_" : "state_latch_") +
-                                          sanitizeIdentifier(state.symbol);
+                                          sanitizeIdentifier(state.symbol) + "_" + std::to_string(opId.index);
                         if (auto initValue = getAttribute<std::string>(op, "initValue"))
                         {
                             if (*initValue == "$random")
@@ -2059,6 +2096,29 @@ namespace wolvrix::lib::emit
                     op.kind() == OperationKind::kLatchWritePort ||
                     op.kind() == OperationKind::kMemoryWritePort)
                 {
+                    auto registerStateShadow = [&](const std::string &stateSymbol, StateDecl::Kind kind) -> StateShadowDecl & {
+                        auto existing = model.stateShadowBySymbol.find(stateSymbol);
+                        if (existing != model.stateShadowBySymbol.end())
+                        {
+                            return existing->second;
+                        }
+                        const StateDecl &shadowState = model.stateBySymbol.at(stateSymbol);
+                        StateShadowDecl shadow;
+                        shadow.kind = kind;
+                        shadow.symbol = stateSymbol;
+                        shadow.emitIndex = model.stateShadows.size();
+                        const std::string base = "state_shadow_" + shadowState.fieldName;
+                        shadow.touchedField = base + "_touched";
+                        shadow.dataField = base;
+                        model.shadowFieldDecls.push_back("    bool " + shadow.touchedField + " = false;");
+                        model.shadowFieldDecls.push_back("    " + shadowState.cppType + " " + shadow.dataField + " = " +
+                                                         defaultInitExprForLogicWidth(shadowState.width) + ";");
+                        model.stateShadows.push_back(shadow);
+                        auto [it, inserted] = model.stateShadowBySymbol.emplace(stateSymbol, std::move(shadow));
+                        (void)inserted;
+                        return it->second;
+                    };
+
                     WriteDecl write;
                     write.opId = opId;
                     write.kind = op.kind() == OperationKind::kRegisterWritePort
@@ -2132,45 +2192,39 @@ namespace wolvrix::lib::emit
                             }
                         }
                     }
-                    const std::string base = "pending_" + opDebugName(graph, opId) + "_" + std::to_string(opId.index);
-                    write.pendingValidField = base + "_valid";
-                    write.pendingDataField = base + "_data";
-                    write.pendingMaskField = base + "_mask";
-                    write.pendingAddrField = base + "_addr";
-                    write.emitIndex = model.writes.size();
+                    if (write.kind == StateDecl::Kind::Register || write.kind == StateDecl::Kind::Latch)
+                    {
+                        StateShadowDecl &shadow = registerStateShadow(write.symbol, write.kind);
+                        write.shadowTouchedField = shadow.touchedField;
+                        write.shadowDataField = shadow.dataField;
+                        write.shadowIndex = shadow.emitIndex;
+                    }
+                    else
+                    {
+                        const std::string base =
+                            "state_shadow_" + opDebugName(graph, opId) + "_" + std::to_string(opId.index);
+                        write.shadowTouchedField = base + "_touched";
+                        write.shadowDataField = base + "_data";
+                        write.shadowMaskField = base + "_mask";
+                        write.shadowAddrField = base + "_addr";
+                        write.shadowIndex = model.writes.size();
+                    }
                     model.writeByOp.emplace(opId, write);
                     model.writes.push_back(write);
 
-                    model.writeFieldDecls.push_back("    bool " + write.pendingValidField + " = false;");
                     if (write.kind == StateDecl::Kind::Memory)
                     {
-                        model.writeFieldDecls.push_back("    std::size_t " + write.pendingAddrField + " = 0;");
+                        model.writeFieldDecls.push_back("    bool " + write.shadowTouchedField + " = false;");
+                        model.writeFieldDecls.push_back("    std::size_t " + write.shadowAddrField + " = 0;");
+                        model.writeFieldDecls.push_back("    " + logicCppType(state.width) + " " + write.shadowDataField + " = " +
+                                                        defaultInitExprForLogicWidth(state.width) + ";");
+                        if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+                        {
+                            model.writeFieldDecls.push_back("    " + logicCppType(state.width) + " " + write.shadowMaskField + " = " +
+                                                            defaultInitExprForLogicWidth(state.width) + ";");
+                        }
                     }
-                    const std::string fieldType = write.kind == StateDecl::Kind::Memory ? logicCppType(state.width) : state.cppType;
-                    const std::string initExpr = defaultInitExprForLogicWidth(state.width);
-                    model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingDataField + " = " + initExpr + ";");
-                    model.writeFieldDecls.push_back("    " + fieldType + " " + write.pendingMaskField + " = " + initExpr + ";");
                 }
-            }
-
-            std::unordered_map<std::string, std::size_t> registerWriteGroupIndex;
-            for (std::size_t writeIndex = 0; writeIndex < model.writes.size(); ++writeIndex)
-            {
-                const WriteDecl &write = model.writes[writeIndex];
-                if (write.kind != StateDecl::Kind::Register)
-                {
-                    continue;
-                }
-                auto [it, inserted] = registerWriteGroupIndex.emplace(write.symbol, model.registerWriteGroups.size());
-                if (inserted)
-                {
-                    RegisterWriteGroup group;
-                    group.symbol = write.symbol;
-                    model.registerWriteGroups.push_back(std::move(group));
-                }
-                model.writes[writeIndex].registerWriteGroupIndex = it->second;
-                model.writeByOp.insert_or_assign(model.writes[writeIndex].opId, model.writes[writeIndex]);
-                model.registerWriteGroups[it->second].writeIndices.push_back(writeIndex);
             }
 
             auto registerEventSamples = [&](OperationId opId, const Operation &op) {
@@ -2186,20 +2240,21 @@ namespace wolvrix::lib::emit
                 {
                     const ValueId value = samples.values[i];
                     markValueMaterialized(value);
-                    if (model.prevEventFieldByValue.find(value) != model.prevEventFieldByValue.end())
+                    if (model.eventEdgeFieldByValue.find(value) != model.eventEdgeFieldByValue.end())
                     {
                         continue;
                     }
                     const std::string fieldName =
-                        "prev_evt_" + valueDebugName(graph, value) + "_" + std::to_string(value.index);
-                    model.prevEventFieldByValue.emplace(value, fieldName);
-                    model.eventSampleValueOrder.push_back(value);
-                    model.eventFieldDecls.push_back("    " + cppTypeForValue(graph, value) + " " + fieldName + " = " +
-                                                    defaultInitExpr(graph, value) + ";");
+                        "evt_edge_" + valueDebugName(graph, value) + "_" + std::to_string(value.index);
+                    model.eventEdgeFieldByValue.emplace(value, fieldName);
+                    model.allEventValues.push_back(value);
+                    if (model.inputFieldByValue.find(value) != model.inputFieldByValue.end())
+                    {
+                        model.inputEventValues.push_back(value);
+                    }
+                    model.eventFieldDecls.push_back("    grhsim_event_edge_kind " + fieldName +
+                                                    " = grhsim_event_edge_kind::none;");
                 }
-                samples.seenInEvalFieldName =
-                    "seen_evt_" + opDebugName(graph, opId) + "_" + std::to_string(opId.index);
-                model.eventFieldDecls.push_back("    bool " + samples.seenInEvalFieldName + " = false;");
                 if (op.kind() == OperationKind::kSystemTask && systemTaskRunsOnceAfterTimedTrigger(op))
                 {
                     samples.completedFieldName =
@@ -2294,10 +2349,10 @@ namespace wolvrix::lib::emit
                 for (std::size_t i = 0; i < argCount; ++i)
                 {
                     const std::string argType =
-                        dpiCppType(i < decl.argsType.size() ? std::string_view(decl.argsType[i]) : std::string_view("logic"),
-                                   i < decl.argsWidth.size() ? decl.argsWidth[i] : 64,
-                                   i < decl.argsSigned.size() ? decl.argsSigned[i] : false,
-                                   decl.argsDirection[i] == "output" || decl.argsDirection[i] == "inout");
+                        dpiDeclArgCppType(i < decl.argsType.size() ? std::string_view(decl.argsType[i]) : std::string_view("logic"),
+                                          i < decl.argsWidth.size() ? decl.argsWidth[i] : 64,
+                                          i < decl.argsSigned.size() ? decl.argsSigned[i] : false,
+                                          decl.argsDirection[i]);
                     const std::string &direction = decl.argsDirection[i];
                     (void)direction;
                     args.push_back(argType + " " + sanitizeIdentifier(i < decl.argsName.size() ? decl.argsName[i] : ("arg" + std::to_string(i))));
@@ -2563,7 +2618,7 @@ namespace wolvrix::lib::emit
             const std::string lhs = valueRef(model, resultValue);
             const int32_t resultWidth = graph.valueWidth(resultValue);
             const bool materialized = isMaterializedValue(model, resultValue);
-            const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+            const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
             if (!materialized)
             {
                 if (isWideLogicValue(graph, resultValue))
@@ -2601,8 +2656,8 @@ namespace wolvrix::lib::emit
                 if (needChangeDetect)
                 {
                     stream << "            if (" << lhs << " != next_value) {\n";
+                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                     stream << "                " << lhs << " = next_value;\n";
-                    emitChangedValuePropagation(stream, model, resultValue, "                ");
                     stream << "            }\n";
                 }
                 else
@@ -2626,15 +2681,15 @@ namespace wolvrix::lib::emit
                        << ">(" << boolExpr << ");\n";
                 return;
             }
-            const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+            const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
             stream << "        {\n";
             stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
                    << ">(" << boolExpr << ");\n";
             if (needChangeDetect)
             {
                 stream << "            if (" << lhs << " != next_value) {\n";
+                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                 stream << "                " << lhs << " = next_value;\n";
-                emitChangedValuePropagation(stream, model, resultValue, "                ");
                 stream << "            }\n";
             }
             else
@@ -4202,82 +4257,39 @@ namespace wolvrix::lib::emit
             for (std::size_t i = 0; i < samples.values.size(); ++i)
             {
                 const ValueId value = samples.values[i];
-                const std::string current = valueRef(model, value);
-                const std::string &prevField = model.prevEventFieldByValue.at(value);
+                const std::string &edgeField = model.eventEdgeFieldByValue.at(value);
                 const std::string &edge = samples.edges[i];
                 if (edge.empty())
                 {
-                    parts.push_back("((" + current + ") != (" + prevField + "))");
-                    continue;
-                }
-                if (isWideLogicValue(graph, value))
-                {
-                    if (edge == "posedge")
-                    {
-                        parts.push_back("grhsim_event_posedge_words(" + current + ", " + prevField + ", " +
-                                        std::to_string(graph.valueWidth(value)) + ")");
-                    }
-                    else if (edge == "negedge")
-                    {
-                        parts.push_back("grhsim_event_negedge_words(" + current + ", " + prevField + ", " +
-                                        std::to_string(graph.valueWidth(value)) + ")");
-                    }
-                    else
-                    {
-                        parts.push_back("(grhsim_compare_unsigned_words(" + current + ", " + prevField + ") != 0)");
-                    }
+                    parts.push_back("(" + edgeField + " != grhsim_event_edge_kind::none)");
                 }
                 else if (edge == "posedge")
                 {
-                    parts.push_back("grhsim_event_posedge(" + current + ", " + prevField + ")");
+                    parts.push_back("(" + edgeField + " == grhsim_event_edge_kind::posedge)");
                 }
                 else if (edge == "negedge")
                 {
-                    parts.push_back("grhsim_event_negedge(" + current + ", " + prevField + ")");
+                    parts.push_back("(" + edgeField + " == grhsim_event_edge_kind::negedge)");
                 }
                 else
                 {
-                    parts.push_back("((" + current + ") != (" + prevField + "))");
+                    parts.push_back("(" + edgeField + " != grhsim_event_edge_kind::none)");
                 }
             }
             if (parts.empty())
             {
                 return std::string("true");
             }
-            return "((!" + samples.seenInEvalFieldName + ") && (" + joinStrings(parts, " || ") + "))";
+            return "(" + joinStrings(parts, " || ") + ")";
         }
 
-        void emitMarkEventSamplesSeen(std::ostream &stream,
-                                      const EmitModel &model,
-                                      OperationId opId,
-                                      std::string_view indent)
+        void emitClearAllEventEdges(std::ostream &stream,
+                                    const EmitModel &model,
+                                    std::string_view indent)
         {
-            const auto it = model.eventSamplesByOp.find(opId);
-            if (it == model.eventSamplesByOp.end())
+            for (ValueId value : model.allEventValues)
             {
-                return;
-            }
-            stream << indent << it->second.seenInEvalFieldName << " = true;\n";
-        }
-
-        void emitResetSeenEventSamples(std::ostream &stream,
-                                       const EmitModel &model,
-                                       std::string_view indent)
-        {
-            for (const auto &[opId, samples] : model.eventSamplesByOp)
-            {
-                (void)opId;
-                stream << indent << samples.seenInEvalFieldName << " = false;\n";
-            }
-        }
-
-        void emitRefreshAllEventSamples(std::ostream &stream,
-                                        const EmitModel &model,
-                                        std::string_view indent)
-        {
-            for (ValueId value : model.eventSampleValueOrder)
-            {
-                stream << indent << model.prevEventFieldByValue.at(value) << " = " << valueRef(model, value) << ";\n";
+                stream << indent << model.eventEdgeFieldByValue.at(value) << " = grhsim_event_edge_kind::none;\n";
             }
         }
 
@@ -4332,6 +4344,14 @@ namespace wolvrix::lib::emit
             stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
             stream << "#include <cstdlib>\n";
             stream << "#include <iostream>\n\n";
+            for (const auto &decl : model.dpiDecls)
+            {
+                stream << decl << '\n';
+            }
+            if (!model.dpiDecls.empty())
+            {
+                stream << '\n';
+            }
             stream << "void " << className << "::eval_batch_" << batch.index << "()\n{\n";
             stream << "    // Batch " << batch.index << ": evaluate a contiguous supernode range in topo order.\n";
             const std::vector<BatchWordSegment> wordSegments = buildBatchWordSegments(batch.supernodeIds);
@@ -4393,7 +4413,7 @@ namespace wolvrix::lib::emit
                         }
                         const std::string lhs = valueRef(model, resultValue);
                         const bool materialized = isMaterializedValue(model, resultValue);
-                        const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+                        const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
                             if (graph.valueType(resultValue) == ValueType::Logic)
@@ -4442,8 +4462,8 @@ namespace wolvrix::lib::emit
                                 if (needChangeDetect)
                                 {
                                     stream << "            if (" << lhs << " != next_value) {\n";
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                                     stream << "                " << lhs << " = next_value;\n";
-                                    emitChangedValuePropagation(stream, model, resultValue, "                ");
                                     stream << "            }\n";
                                 }
                                 else
@@ -4460,8 +4480,8 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "            if (" << lhs << " != next_value) {\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                                 stream << "                " << lhs << " = next_value;\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                ");
                                 stream << "            }\n";
                             }
                             else
@@ -4492,7 +4512,7 @@ namespace wolvrix::lib::emit
                         const std::string lhs = valueRef(model, op.results().front());
                         const ValueId resultValue = op.results().front();
                         const bool materialized = isMaterializedValue(model, resultValue);
-                        const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+                        const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
                             stream << "        const auto " << lhs << " = " << stateIt->second.fieldName << ";\n";
@@ -4517,8 +4537,8 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "        if (" << lhs << " != " << stateIt->second.fieldName << ") {\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, stateIt->second.fieldName, "            ");
                                 stream << "            " << lhs << " = " << stateIt->second.fieldName << ";\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "            ");
                                 stream << "        }\n";
                             }
                             else
@@ -4548,7 +4568,7 @@ namespace wolvrix::lib::emit
                         const std::string lhs = valueRef(model, op.results().front());
                         const ValueId resultValue = op.results().front();
                         const bool materialized = isMaterializedValue(model, resultValue);
-                        const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+                        const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
                             stream << "        const auto " << lhs << " = [&]() -> " << cppTypeForValue(graph, resultValue)
@@ -4603,8 +4623,13 @@ namespace wolvrix::lib::emit
                             {
                                 stream << "                if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
                                        << ") {\n";
+                                emitChangedValueEffects(stream,
+                                                        model,
+                                                        resultValue,
+                                                        lhs,
+                                                        defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())),
+                                                        "                    ");
                                 stream << "                    " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                    ");
                                 stream << "                }\n";
                             }
                             else
@@ -4616,8 +4641,8 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "                if (" << lhs << " != next_value) {\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                    ");
                                 stream << "                    " << lhs << " = next_value;\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                    ");
                                 stream << "                }\n";
                             }
                             else
@@ -4715,8 +4740,8 @@ namespace wolvrix::lib::emit
                                        << pathExpr << ", " << modeExpr << "), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "            if (" << lhs << " != next_value) {\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                                 stream << "                " << lhs << " = next_value;\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                ");
                                 stream << "            }\n";
                                 stream << "        }\n";
                                 break;
@@ -4741,8 +4766,8 @@ namespace wolvrix::lib::emit
                                        << systemTaskArgExpr(graph, model, operands[0]) << "))), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "            if (" << lhs << " != next_value) {\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                                 stream << "                " << lhs << " = next_value;\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                ");
                                 stream << "            }\n";
                                 stream << "        }\n";
                                 break;
@@ -4771,7 +4796,7 @@ namespace wolvrix::lib::emit
                         }
                         const std::string lhs = valueRef(model, resultValue);
                         const bool materialized = isMaterializedValue(model, resultValue);
-                        const bool needChangeDetect = valueNeedsChangeDetect(model, resultValue);
+                        const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
                             stream << "        const auto " << lhs << " = static_cast<" << cppTypeForValue(graph, resultValue)
@@ -4802,8 +4827,8 @@ namespace wolvrix::lib::emit
                         if (needChangeDetect)
                         {
                             stream << "            if (" << lhs << " != next_value) {\n";
+                            emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
                             stream << "                " << lhs << " = next_value;\n";
-                            emitChangedValuePropagation(stream, model, resultValue, "                ");
                             stream << "            }\n";
                         }
                         else
@@ -4830,7 +4855,7 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
-                        stream << "        // Stage a state update here; commit_state_updates() applies it after all scheduled supernodes finish.\n";
+                        stream << "        // Update the next-state shadow here; commit_state_updates() applies it after all scheduled supernodes finish.\n";
                         stream << "        if ((" << condExpr << ") && (" << *eventExpr << ")) {\n";
                         if (write.kind == StateDecl::Kind::Memory)
                         {
@@ -4841,28 +4866,47 @@ namespace wolvrix::lib::emit
                             }
                             else
                             {
-                                stream << "            " << write.pendingAddrField << " = "
+                                stream << "            " << write.shadowAddrField << " = "
                                        << memoryWriteRowExpr(graph, model, write, operands[1], state) << ";\n";
-                                stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[2]) << ";\n";
+                                stream << "            " << write.shadowDataField << " = " << valueRef(model, operands[2]) << ";\n";
                                 if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
                                 {
-                                    stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[3]) << ";\n";
+                                    stream << "            " << write.shadowMaskField << " = " << valueRef(model, operands[3]) << ";\n";
                                 }
-                                stream << "            " << write.pendingValidField << " = true;\n";
+                                stream << "            " << write.shadowTouchedField << " = true;\n";
                                 stream << "            grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
-                                       << write.emitIndex << "u);\n";
+                                       << write.shadowIndex << "u);\n";
                             }
                         }
                         else
                         {
-                            stream << "            " << write.pendingDataField << " = " << valueRef(model, operands[1]) << ";\n";
-                            stream << "            " << write.pendingMaskField << " = " << valueRef(model, operands[2]) << ";\n";
-                            stream << "            " << write.pendingValidField << " = true;\n";
-                            stream << "            grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
-                                   << write.emitIndex << "u);\n";
+                            const StateDecl &state = model.stateBySymbol.at(write.symbol);
+                            const std::string shadowBaseExpr =
+                                write.shadowTouchedField + " ? " + write.shadowDataField + " : " + state.fieldName;
+                            stream << "            const auto state_shadow_base = " << shadowBaseExpr << ";\n";
+                            if (isWideLogicWidth(state.width))
+                            {
+                                stream << "            " << write.shadowDataField << " = grhsim_merge_words_masked(state_shadow_base, "
+                                       << valueRef(model, operands[1]) << ", " << valueRef(model, operands[2]) << ", "
+                                       << state.width << ");\n";
+                            }
+                            else
+                            {
+                                stream << "            " << write.shadowDataField << " = static_cast<" << state.cppType << ">((state_shadow_base & ~"
+                                       << valueRef(model, operands[2]) << ") | (" << valueRef(model, operands[1]) << " & "
+                                       << valueRef(model, operands[2]) << "));\n";
+                            }
+                            if (write.kind == StateDecl::Kind::Register)
+                            {
+                                stream << "            if (" << write.shadowTouchedField << ") {\n";
+                                stream << "                register_write_conflict_ = true;\n";
+                                stream << "            }\n";
+                            }
+                            stream << "            " << write.shadowTouchedField << " = true;\n";
+                            stream << "            grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, "
+                                   << write.shadowIndex << "u);\n";
                         }
                         stream << "        }\n";
-                        emitMarkEventSamplesSeen(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kSystemTask:
@@ -4918,7 +4962,6 @@ namespace wolvrix::lib::emit
                             stream << "            " << sampleIt->second.completedFieldName << " = true;\n";
                         }
                         stream << "        }\n";
-                        emitMarkEventSamplesSeen(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kDpicCall:
@@ -4981,7 +5024,7 @@ namespace wolvrix::lib::emit
                                 stream << "            "
                                        << dpiBaseCppType(argType, argWidth, argSigned)
                                        << " " << tempName << "{};\n";
-                                deferredArgs.push_back(tempName);
+                                deferredArgs.push_back("&" + tempName);
                             }
                             else
                             {
@@ -4995,8 +5038,13 @@ namespace wolvrix::lib::emit
                             stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
                                    << "(" << joinStrings(deferredArgs, ", ") << ");\n";
                             stream << "            if (" << valueRef(model, returnValue) << " != dpi_ret) {\n";
+                            emitChangedValueEffects(stream,
+                                                    model,
+                                                    returnValue,
+                                                    valueRef(model, returnValue),
+                                                    "dpi_ret",
+                                                    "                ");
                             stream << "                " << valueRef(model, returnValue) << " = dpi_ret;\n";
-                            emitChangedValuePropagation(stream, model, returnValue, "                ");
                             stream << "            }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
@@ -5014,8 +5062,8 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         valueRef(model, resultValue);
                                     stream << "            if (" << lhs << " != " << tempName << ") {\n";
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ");
                                     stream << "                " << lhs << " = " << tempName << ";\n";
-                                    emitChangedValuePropagation(stream, model, resultValue, "                ");
                                     stream << "            }\n";
                                 }
                             }
@@ -5039,14 +5087,13 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         valueRef(model, resultValue);
                                     stream << "            if (" << lhs << " != " << tempName << ") {\n";
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ");
                                     stream << "                " << lhs << " = " << tempName << ";\n";
-                                    emitChangedValuePropagation(stream, model, resultValue, "                ");
                                     stream << "            }\n";
                                 }
                             }
                         }
                         stream << "        }\n";
-                        emitMarkEventSamplesSeen(stream, model, opId, "        ");
                         break;
                     }
                     case OperationKind::kRegister:
@@ -5167,6 +5214,253 @@ namespace wolvrix::lib::emit
         }
         const std::filesystem::path makefilePath = outDir / "Makefile";
         const std::uint64_t maxOutputFileBytes = effectiveMaxOutputFileBytes(options);
+
+        struct InitChunkSpec
+        {
+            enum class Kind
+            {
+                kPublicInputs,
+                kPublicOutputs,
+                kValues,
+                kRandomSeed,
+                kStates,
+                kStateShadows,
+                kWrites,
+                kPrevInputs,
+                kEventEdges,
+                kEvalState,
+                kRuntimeState,
+            };
+
+            Kind kind = Kind::kEvalState;
+            std::string methodName;
+            std::vector<ValueId> values;
+            std::vector<std::string> stateSymbols;
+            std::vector<std::size_t> indices;
+        };
+
+        constexpr std::size_t kStateInitChunkTargetBytes = 8u * 1024u * 1024u;
+        std::vector<InitChunkSpec> initChunks;
+        std::size_t nextInitChunkIndex = 0;
+
+        auto makeInitChunk = [&](InitChunkSpec::Kind kind) -> InitChunkSpec
+        {
+            InitChunkSpec chunk;
+            chunk.kind = kind;
+            chunk.methodName = "init_chunk_" + std::to_string(nextInitChunkIndex++);
+            return chunk;
+        };
+
+        auto addFixedInitChunk = [&](InitChunkSpec::Kind kind)
+        {
+            initChunks.push_back(makeInitChunk(kind));
+        };
+
+        auto estimateValueInitBytes = [&](ValueId valueId) -> std::size_t
+        {
+            const auto it = model.valueFieldByValue.find(valueId);
+            if (it == model.valueFieldByValue.end())
+            {
+                return 0;
+            }
+            return std::max<std::size_t>(96, it->second.size() + defaultInitExpr(graph, valueId).size() + 32);
+        };
+
+        auto estimateStateInitBytes = [&](const std::string &stateSymbol) -> std::size_t
+        {
+            const StateDecl &state = model.stateBySymbol.at(stateSymbol);
+            std::size_t bytes = std::max<std::size_t>(128, state.fieldName.size() + 64);
+            if (state.kind == StateDecl::Kind::Memory)
+            {
+                bytes += 96;
+                for (const auto &rowExpr : state.memoryInitRowExprs)
+                {
+                    if (!rowExpr.has_value())
+                    {
+                        continue;
+                    }
+                    bytes += rowExpr->expr.size() + 32;
+                }
+            }
+            else if (state.initExpr)
+            {
+                bytes += state.initExpr->expr.size() + 24;
+            }
+            return bytes;
+        };
+
+        auto estimateStateShadowInitBytes = [&](std::size_t shadowIndex) -> std::size_t
+        {
+            const StateShadowDecl &shadow = model.stateShadows[shadowIndex];
+            const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
+            return std::max<std::size_t>(
+                96, shadow.touchedField.size() + shadow.dataField.size() + state.cppType.size() + 48);
+        };
+
+        auto estimateWriteInitBytes = [&](std::size_t writeIndex) -> std::size_t
+        {
+            const WriteDecl &write = model.writes[writeIndex];
+            std::size_t bytes = std::max<std::size_t>(
+                96, write.shadowTouchedField.size() + write.shadowAddrField.size() + write.shadowDataField.size() + 48);
+            if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+            {
+                bytes += write.shadowMaskField.size() + 24;
+            }
+            return bytes;
+        };
+
+        auto estimatePrevInputBytes = [&](ValueId valueId) -> std::size_t
+        {
+            return std::max<std::size_t>(
+                64, model.prevInputFieldByValue.at(valueId).size() + model.inputFieldByValue.at(valueId).size() + 24);
+        };
+
+        auto estimateEventEdgeBytes = [&](ValueId valueId) -> std::size_t
+        {
+            return std::max<std::size_t>(48, model.eventEdgeFieldByValue.at(valueId).size() + 24);
+        };
+
+        auto addValueChunks = [&](InitChunkSpec::Kind kind, const std::vector<ValueId> &items, const auto &estimateBytes)
+        {
+            if (items.empty())
+            {
+                return;
+            }
+            InitChunkSpec chunk = makeInitChunk(kind);
+            std::size_t chunkBytes = 0;
+            for (ValueId item : items)
+            {
+                const std::size_t itemBytes = estimateBytes(item);
+                if (!chunk.values.empty() && chunkBytes + itemBytes > kStateInitChunkTargetBytes)
+                {
+                    initChunks.push_back(std::move(chunk));
+                    chunk = makeInitChunk(kind);
+                    chunkBytes = 0;
+                }
+                chunk.values.push_back(item);
+                chunkBytes += itemBytes;
+            }
+            initChunks.push_back(std::move(chunk));
+        };
+
+        auto addStateChunks = [&](const std::vector<std::string> &items)
+        {
+            if (items.empty())
+            {
+                return;
+            }
+            InitChunkSpec chunk = makeInitChunk(InitChunkSpec::Kind::kStates);
+            std::size_t chunkBytes = 0;
+            for (const std::string &item : items)
+            {
+                const std::size_t itemBytes = estimateStateInitBytes(item);
+                if (!chunk.stateSymbols.empty() && chunkBytes + itemBytes > kStateInitChunkTargetBytes)
+                {
+                    initChunks.push_back(std::move(chunk));
+                    chunk = makeInitChunk(InitChunkSpec::Kind::kStates);
+                    chunkBytes = 0;
+                }
+                chunk.stateSymbols.push_back(item);
+                chunkBytes += itemBytes;
+            }
+            initChunks.push_back(std::move(chunk));
+        };
+
+        auto addIndexChunks = [&](InitChunkSpec::Kind kind,
+                                  const std::vector<std::size_t> &items,
+                                  const auto &estimateBytes)
+        {
+            if (items.empty())
+            {
+                return;
+            }
+            InitChunkSpec chunk = makeInitChunk(kind);
+            std::size_t chunkBytes = 0;
+            for (std::size_t item : items)
+            {
+                const std::size_t itemBytes = estimateBytes(item);
+                if (!chunk.indices.empty() && chunkBytes + itemBytes > kStateInitChunkTargetBytes)
+                {
+                    initChunks.push_back(std::move(chunk));
+                    chunk = makeInitChunk(kind);
+                    chunkBytes = 0;
+                }
+                chunk.indices.push_back(item);
+                chunkBytes += itemBytes;
+            }
+            initChunks.push_back(std::move(chunk));
+        };
+
+        std::vector<ValueId> materializedValues;
+        materializedValues.reserve(graph.values().size());
+        for (ValueId valueId : graph.values())
+        {
+            if (!isMaterializedValue(model, valueId))
+            {
+                continue;
+            }
+            if (model.valueFieldByValue.find(valueId) == model.valueFieldByValue.end())
+            {
+                continue;
+            }
+            materializedValues.push_back(valueId);
+        }
+
+        std::vector<std::size_t> memoryWriteIndices;
+        memoryWriteIndices.reserve(model.writes.size());
+        for (std::size_t writeIndex = 0; writeIndex < model.writes.size(); ++writeIndex)
+        {
+            if (model.writes[writeIndex].kind == StateDecl::Kind::Memory)
+            {
+                memoryWriteIndices.push_back(writeIndex);
+            }
+        }
+
+        std::vector<ValueId> prevInputValues;
+        prevInputValues.reserve(graph.inputPorts().size() + graph.inoutPorts().size());
+        for (const auto &port : graph.inputPorts())
+        {
+            prevInputValues.push_back(port.value);
+        }
+        for (const auto &port : graph.inoutPorts())
+        {
+            prevInputValues.push_back(port.in);
+        }
+
+        std::vector<std::size_t> stateShadowIndices;
+        stateShadowIndices.reserve(model.stateShadows.size());
+        for (std::size_t shadowIndex = 0; shadowIndex < model.stateShadows.size(); ++shadowIndex)
+        {
+            stateShadowIndices.push_back(shadowIndex);
+        }
+
+        if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
+        {
+            addFixedInitChunk(InitChunkSpec::Kind::kPublicInputs);
+        }
+        if (!graph.outputPorts().empty())
+        {
+            addFixedInitChunk(InitChunkSpec::Kind::kPublicOutputs);
+        }
+        addValueChunks(InitChunkSpec::Kind::kValues, materializedValues, estimateValueInitBytes);
+        addFixedInitChunk(InitChunkSpec::Kind::kRandomSeed);
+        addStateChunks(model.stateOrder);
+        addIndexChunks(InitChunkSpec::Kind::kStateShadows, stateShadowIndices, estimateStateShadowInitBytes);
+        addIndexChunks(InitChunkSpec::Kind::kWrites, memoryWriteIndices, estimateWriteInitBytes);
+        addValueChunks(InitChunkSpec::Kind::kPrevInputs, prevInputValues, estimatePrevInputBytes);
+        addValueChunks(InitChunkSpec::Kind::kEventEdges, model.allEventValues, estimateEventEdgeBytes);
+        addFixedInitChunk(InitChunkSpec::Kind::kEvalState);
+        if (model.needsSystemTaskRuntime)
+        {
+            addFixedInitChunk(InitChunkSpec::Kind::kRuntimeState);
+        }
+
+        std::vector<std::filesystem::path> stateInitPaths;
+        stateInitPaths.reserve(initChunks.size());
+        for (std::size_t chunkIndex = 0; chunkIndex < initChunks.size(); ++chunkIndex)
+        {
+            stateInitPaths.push_back(outDir / (prefix + "_state_init_" + std::to_string(chunkIndex) + ".cpp"));
+        }
 
         {
             if (auto error = ensureOutputDirectory(runtimePath))
@@ -5398,6 +5692,19 @@ namespace wolvrix::lib::emit
             *stream << "}\n\n";
             *stream << "inline bool grhsim_reduce_xnor_u64(std::uint64_t value, std::size_t width)\n{\n";
             *stream << "    return !grhsim_reduce_xor_u64(value, width);\n";
+            *stream << "}\n\n";
+            *stream << "enum class grhsim_event_edge_kind : std::uint8_t {\n";
+            *stream << "    none,\n";
+            *stream << "    posedge,\n";
+            *stream << "    negedge,\n";
+            *stream << "};\n\n";
+            *stream << "template <typename PrevT, typename CurrT>\n";
+            *stream << "inline grhsim_event_edge_kind grhsim_classify_edge(PrevT prev, CurrT curr)\n{\n";
+            *stream << "    const bool prevBool = prev != 0;\n";
+            *stream << "    const bool currBool = curr != 0;\n";
+            *stream << "    if (!prevBool && currBool) return grhsim_event_edge_kind::posedge;\n";
+            *stream << "    if (prevBool && !currBool) return grhsim_event_edge_kind::negedge;\n";
+            *stream << "    return grhsim_event_edge_kind::none;\n";
             *stream << "}\n\n";
             *stream << "inline bool grhsim_event_posedge(std::uint64_t curr, std::uint64_t prev)\n{\n";
             *stream << "    return curr != 0 && prev == 0;\n";
@@ -7024,19 +7331,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
             *stream << "#include \"" << runtimePath.filename().string() << "\"\n\n";
-            for (const auto &decl : model.dpiDecls)
-            {
-                *stream << decl << '\n';
-            }
-            if (!model.dpiDecls.empty())
-            {
-                *stream << '\n';
-            }
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
             *stream << "    static constexpr std::size_t kSupernodeWordCount = (kSupernodeCount + 63u) / 64u;\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
+            *stream << "    static constexpr std::size_t kStateShadowCount = " << model.stateShadows.size() << ";\n";
             *stream << "    static constexpr std::size_t kWriteCount = " << model.writes.size() << ";\n";
             *stream << "\n";
             *stream << "    " << className << "();\n";
@@ -7062,6 +7362,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
                 *stream << "    void eval_batch_" << batchIndex << "();\n";
+            }
+            for (const auto &chunk : initChunks)
+            {
+                *stream << "    void " << chunk.methodName << "();\n";
             }
             if (model.needsSystemTaskRuntime)
             {
@@ -7126,6 +7430,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "    std::array<std::uint64_t, kSupernodeWordCount> supernode_active_curr_{};\n";
             *stream << "    std::size_t active_word_count_ = 0;\n";
+            if (!model.stateShadows.empty())
+            {
+                *stream << "    std::array<std::uint32_t, kStateShadowCount> touched_state_shadow_indices_{};\n";
+                *stream << "    std::array<std::uint8_t, kStateShadowCount> touched_state_shadow_flags_{};\n";
+                *stream << "    std::size_t touched_state_shadow_count_ = 0;\n";
+            }
             if (!model.writes.empty())
             {
                 *stream << "    std::array<std::uint32_t, kWriteCount> touched_write_indices_{};\n";
@@ -7154,6 +7464,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << decl << '\n';
             }
             if (!model.stateFieldDecls.empty())
+            {
+                *stream << '\n';
+            }
+            for (const auto &decl : model.shadowFieldDecls)
+            {
+                *stream << decl << '\n';
+            }
+            if (!model.shadowFieldDecls.empty())
             {
                 *stream << '\n';
             }
@@ -7192,54 +7510,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
-            bool emittedInitNamespace = false;
-            for (const std::string &stateSymbol : model.stateOrder)
-            {
-                const StateDecl &state = model.stateBySymbol.at(stateSymbol);
-                if (state.kind != StateDecl::Kind::Memory || state.memoryInitRowExprs.empty())
-                {
-                    continue;
-                }
-                std::vector<std::size_t> initRows;
-                initRows.reserve(state.memoryInitRowExprs.size());
-                for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
-                {
-                    if (state.memoryInitRowExprs[row].has_value() && !state.memoryInitRowExprs[row]->requiresRuntime)
-                    {
-                        initRows.push_back(row);
-                    }
-                }
-                if (initRows.empty())
-                {
-                    continue;
-                }
-                if (!emittedInitNamespace)
-                {
-                    *stream << "namespace {\n";
-                    emittedInitNamespace = true;
-                }
-                const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
-                *stream << "constexpr std::size_t " << base << "_rows[] = {";
-                for (std::size_t i = 0; i < initRows.size(); ++i)
-                {
-                    if (i != 0)
-                    {
-                        *stream << ", ";
-                    }
-                    *stream << initRows[i];
-                }
-                *stream << "};\n";
-                *stream << "constexpr " << logicCppType(state.width) << " " << base << "_data[] = {\n";
-                for (std::size_t row : initRows)
-                {
-                    *stream << "    " << state.memoryInitRowExprs[row]->expr << ",\n";
-                }
-                *stream << "};\n\n";
-            }
-            if (emittedInitNamespace)
-            {
-                *stream << "} // namespace\n\n";
-            }
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
             *stream << "}\n\n";
@@ -7250,170 +7520,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "}\n\n";
             *stream << "void " << className << "::init()\n{\n";
-            *stream << "    // Initialize public input ports and previous-eval baselines.\n";
-            for (const auto &port : graph.inputPorts())
+            for (const auto &chunk : initChunks)
             {
-                *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
-            }
-            for (const auto &port : graph.inoutPorts())
-            {
-                const std::string name = sanitizeIdentifier(port.name);
-                *stream << "    " << name << ".in = " << defaultInitExpr(graph, port.in) << ";\n";
-                *stream << "    " << name << ".out = " << defaultInitExpr(graph, port.out) << ";\n";
-                *stream << "    " << name << ".oe = " << defaultInitExpr(graph, port.oe) << ";\n";
-            }
-            if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
-            {
-                *stream << '\n';
-            }
-            *stream << "    // Initialize public outputs.\n";
-            for (const auto &port : graph.outputPorts())
-            {
-                *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value) << ";\n";
-            }
-            if (!graph.outputPorts().empty() || !graph.inoutPorts().empty())
-            {
-                *stream << '\n';
-            }
-            *stream << "    // Initialize combinational value storage.\n";
-            for (ValueId valueId : graph.values())
-            {
-                if (!isMaterializedValue(model, valueId))
-                {
-                    continue;
-                }
-                auto it = model.valueFieldByValue.find(valueId);
-                if (it == model.valueFieldByValue.end())
-                {
-                    continue;
-                }
-                *stream << "    " << it->second << " = " << defaultInitExpr(graph, valueId) << ";\n";
-            }
-            if (!graph.values().empty())
-            {
-                *stream << '\n';
-            }
-            *stream << "    random_state_ = random_seed_;\n";
-            if (!model.stateOrder.empty())
-            {
-                *stream << "    // Initialize persistent state objects.\n";
-            }
-            for (const std::string &stateSymbol : model.stateOrder)
-            {
-                const StateDecl &state = model.stateBySymbol.at(stateSymbol);
-                if (state.kind == StateDecl::Kind::Memory)
-                {
-                    *stream << "    " << state.fieldName << ".assign(" << state.rowCount << ", "
-                            << logicCppType(state.width) << "{});\n";
-                    std::size_t initCount = 0;
-                    for (const auto &rowExpr : state.memoryInitRowExprs)
-                    {
-                        if (rowExpr.has_value() && !rowExpr->requiresRuntime)
-                        {
-                            ++initCount;
-                        }
-                    }
-                    if (initCount != 0)
-                    {
-                        const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
-                        *stream << "    for (std::size_t i = 0; i < " << initCount << "; ++i) {\n";
-                        *stream << "        " << state.fieldName << "[" << base << "_rows[i]] = " << base << "_data[i];\n";
-                        *stream << "    }\n";
-                    }
-                    for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
-                    {
-                        if (!state.memoryInitRowExprs[row].has_value() || !state.memoryInitRowExprs[row]->requiresRuntime)
-                        {
-                            continue;
-                        }
-                        *stream << "    " << state.fieldName << "[" << row << "] = "
-                                << state.memoryInitRowExprs[row]->expr << ";\n";
-                    }
-                }
-                else if (state.initExpr)
-                {
-                    *stream << "    " << state.fieldName << " = " << state.initExpr->expr << ";\n";
-                }
-            }
-            if (!model.stateOrder.empty())
-            {
-                *stream << '\n';
-            }
-            if (!model.writes.empty())
-            {
-                *stream << "    // Clear staged write slots.\n";
-            }
-            for (const auto &write : model.writes)
-            {
-                const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
-                *stream << "    " << write.pendingValidField << " = false;\n";
-                if (state.kind == StateDecl::Kind::Memory)
-                {
-                    *stream << "    " << write.pendingAddrField << " = 0;\n";
-                }
-                *stream << "    " << write.pendingDataField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
-                *stream << "    " << write.pendingMaskField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
-            }
-            if (!model.writes.empty())
-            {
-                *stream << '\n';
-            }
-            if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
-            {
-                *stream << "    // Establish previous-cycle baselines used by input change and event-edge detection.\n";
-            }
-            for (const auto &port : graph.inputPorts())
-            {
-                *stream << "    " << model.prevInputFieldByValue.at(port.value) << " = " << sanitizeIdentifier(port.name) << ";\n";
-            }
-            for (const auto &port : graph.inoutPorts())
-            {
-                *stream << "    " << model.prevInputFieldByValue.at(port.in) << " = " << sanitizeIdentifier(port.name) << ".in;\n";
-            }
-            if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
-            {
-                *stream << '\n';
-            }
-            if (!model.eventSamplesByOp.empty())
-            {
-                *stream << "    // Establish previous-sample baselines for event-sensitive ops.\n";
-            }
-            std::unordered_map<ValueId, std::optional<std::string>, ValueIdHash> eventInitCache;
-            std::unordered_map<ValueId, std::size_t, ValueIdHash> eventInitCostCache;
-            std::size_t eventInitTotalOps = 0;
-            for (ValueId value : model.eventSampleValueOrder)
-            {
-                auto expr = pureExprForValue(graph, model, value, eventInitCache, eventInitCostCache, eventInitTotalOps);
-                *stream << "    " << model.prevEventFieldByValue.at(value) << " = " << (expr ? *expr : valueRef(model, value))
-                        << ";\n";
-            }
-            if (!model.eventSamplesByOp.empty())
-            {
-                *stream << '\n';
-            }
-            *stream << "    // Reset per-eval scheduling state.\n";
-            *stream << "    supernode_active_curr_.fill(UINT64_C(0));\n";
-            *stream << "    active_word_count_ = 0;\n";
-            if (!model.writes.empty())
-            {
-                *stream << "    touched_write_indices_.fill(0);\n";
-                *stream << "    touched_write_flags_.fill(0);\n";
-                *stream << "    touched_write_count_ = 0;\n";
-            }
-            *stream << "    first_eval_ = true;\n";
-            *stream << "    register_write_conflict_ = false;\n";
-            if (model.needsSystemTaskRuntime)
-            {
-                *stream << "    finalized_ = false;\n";
-                *stream << "    finish_requested_ = false;\n";
-                *stream << "    stop_requested_ = false;\n";
-                *stream << "    fatal_requested_ = false;\n";
-                *stream << "    system_exit_code_ = 0;\n";
-                *stream << "    dumpfile_path_.clear();\n";
-                *stream << "    dumpvars_enabled_ = false;\n";
-                *stream << "    next_file_handle_ = UINT64_C(3);\n";
-                *stream << "    file_handles_.clear();\n";
-                *stream << "    deferred_system_task_texts_.clear();\n";
+                *stream << "    " << chunk.methodName << "();\n";
             }
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
@@ -7825,27 +7934,55 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::exit(exitCode);\n";
                 *stream << "}\n\n";
             }
+            auto emitCommitStateShadowBody = [&](const StateShadowDecl &shadow, std::string_view indent)
+            {
+                const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
+                *stream << indent << "bool state_changed = false;\n";
+                if (isWideLogicWidth(state.width))
+                {
+                    *stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", " << shadow.dataField
+                            << ", " << state.width << ")) {\n";
+                    *stream << indent << "    state_changed = true;\n";
+                    *stream << indent << "}\n";
+                }
+                else
+                {
+                    *stream << indent << "if (" << state.fieldName << " != " << shadow.dataField << ") {\n";
+                    *stream << indent << "    " << state.fieldName << " = " << shadow.dataField << ";\n";
+                    *stream << indent << "    state_changed = true;\n";
+                    *stream << indent << "}\n";
+                }
+                *stream << indent << "if (state_changed) {\n";
+                const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
+                if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
+                {
+                    emitBitMaskSetStatements(
+                        *stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                }
+                *stream << indent << "}\n";
+                *stream << indent << shadow.touchedField << " = false;\n";
+            };
             auto emitCommitWriteBody = [&](const WriteDecl &write, std::string_view indent)
             {
                 const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
                 *stream << indent << "bool state_changed = false;\n";
                 if (state.kind == StateDecl::Kind::Memory)
                 {
-                    *stream << indent << "const std::size_t row = " << write.pendingAddrField << ";\n";
+                    *stream << indent << "const std::size_t row = " << write.shadowAddrField << ";\n";
                     *stream << indent << "if (row < " << state.rowCount << ") {\n";
                     if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                     {
                         if (isWideLogicWidth(state.width))
                         {
                             *stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
-                                    << write.pendingDataField << ", " << state.width << ")) {\n";
+                                    << write.shadowDataField << ", " << state.width << ")) {\n";
                             *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                         else
                         {
                             *stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
                                     << "), " << state.width << "));\n";
                             *stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
                             *stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
@@ -7858,18 +7995,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         if (isWideLogicWidth(state.width))
                         {
                             *stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
-                                    << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ")) {\n";
+                                    << write.shadowDataField << ", " << write.shadowMaskField << ", " << state.width << ")) {\n";
                             *stream << indent << "        state_changed = true;\n";
                             *stream << indent << "    }\n";
                         }
                         else
                         {
                             *stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingMaskField
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowMaskField
                                     << "), " << state.width << "));\n";
                             *stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
                                     << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.pendingDataField
+                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
                                     << "), " << state.width << ")) & mask));\n";
                             *stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
                             *stream << indent << "        " << state.fieldName << "[row] = merged;\n";
@@ -7879,27 +8016,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     }
                     *stream << indent << "}\n";
                 }
-                else
-                {
-                    if (isWideLogicWidth(state.width))
-                    {
-                        *stream << indent << "const auto merged = grhsim_merge_words_masked(" << state.fieldName << ", "
-                                << write.pendingDataField << ", " << write.pendingMaskField << ", " << state.width << ");\n";
-                        *stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", merged, " << state.width << ")) {\n";
-                        *stream << indent << "    state_changed = true;\n";
-                        *stream << indent << "}\n";
-                    }
-                    else
-                    {
-                        *stream << indent << "const auto merged = static_cast<" << state.cppType << ">((" << state.fieldName
-                                << " & ~" << write.pendingMaskField << ") | (" << write.pendingDataField
-                                << " & " << write.pendingMaskField << "));\n";
-                        *stream << indent << "if (" << state.fieldName << " != merged) {\n";
-                        *stream << indent << "    " << state.fieldName << " = merged;\n";
-                        *stream << indent << "    state_changed = true;\n";
-                        *stream << indent << "}\n";
-                    }
-                }
                 *stream << indent << "if (state_changed) {\n";
                 const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
@@ -7908,13 +8024,29 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         *stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
                 }
                 *stream << indent << "}\n";
-                *stream << indent << write.pendingValidField << " = false;\n";
+                *stream << indent << write.shadowTouchedField << " = false;\n";
             };
             *stream << "void " << className << "::commit_state_updates()\n{\n";
-            *stream << "    // Apply staged state writes after the scheduled combinational phase completes.\n";
-            for (const auto &group : model.registerWriteGroups)
+            *stream << "    // Apply touched next-state shadows after the scheduled combinational phase completes.\n";
+            if (!model.stateShadows.empty())
             {
-                *stream << "    bool saw_write_group_" << sanitizeIdentifier(group.symbol) << " = false;\n";
+                *stream << "    for (std::size_t touchedIndex = 0; touchedIndex < touched_state_shadow_count_; ++touchedIndex) {\n";
+                *stream << "        const std::uint32_t shadowIndex = touched_state_shadow_indices_[touchedIndex];\n";
+                *stream << "        touched_state_shadow_flags_[shadowIndex] = 0;\n";
+                *stream << "        switch (shadowIndex) {\n";
+                for (const auto &shadow : model.stateShadows)
+                {
+                    *stream << "        case " << shadow.emitIndex << "u:\n";
+                    *stream << "            if (" << shadow.touchedField << ") {\n";
+                    emitCommitStateShadowBody(shadow, "                ");
+                    *stream << "            }\n";
+                    *stream << "            break;\n";
+                }
+                *stream << "        default:\n";
+                *stream << "            break;\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    touched_state_shadow_count_ = 0;\n";
             }
             if (!model.writes.empty())
             {
@@ -7924,17 +8056,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        switch (writeIndex) {\n";
                 for (const auto &write : model.writes)
                 {
-                    *stream << "        case " << write.emitIndex << "u:\n";
-                    if (write.registerWriteGroupIndex != kInvalidIndex)
+                    if (write.kind != StateDecl::Kind::Memory)
                     {
-                        const std::string groupName =
-                            sanitizeIdentifier(model.registerWriteGroups[write.registerWriteGroupIndex].symbol);
-                        *stream << "            if (saw_write_group_" << groupName << ") {\n";
-                        *stream << "                register_write_conflict_ = true;\n";
-                        *stream << "            }\n";
-                        *stream << "            saw_write_group_" << groupName << " = true;\n";
+                        continue;
                     }
-                    *stream << "            if (" << write.pendingValidField << ") {\n";
+                    *stream << "        case " << write.shadowIndex << "u:\n";
+                    *stream << "            if (" << write.shadowTouchedField << ") {\n";
                     emitCommitWriteBody(write, "                ");
                     *stream << "            }\n";
                     *stream << "            break;\n";
@@ -7968,6 +8095,264 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
         }
 
+        for (std::size_t chunkIndex = 0; chunkIndex < initChunks.size(); ++chunkIndex)
+        {
+            const auto &chunk = initChunks[chunkIndex];
+            const std::filesystem::path &chunkPath = stateInitPaths[chunkIndex];
+            if (auto error = ensureOutputDirectory(chunkPath))
+            {
+                reportError(*error, graph.symbol());
+                result.success = false;
+                return result;
+            }
+            auto stream = std::make_unique<LimitedOutputStream>(chunkPath, maxOutputFileBytes);
+            if (!stream->isOpen())
+            {
+                result.success = false;
+                return result;
+            }
+            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+
+            if (chunk.kind == InitChunkSpec::Kind::kStates)
+            {
+                bool emittedInitNamespace = false;
+                for (const std::string &stateSymbol : chunk.stateSymbols)
+                {
+                    const StateDecl &state = model.stateBySymbol.at(stateSymbol);
+                    if (state.kind != StateDecl::Kind::Memory || state.memoryInitRowExprs.empty())
+                    {
+                        continue;
+                    }
+                    std::vector<std::size_t> initRows;
+                    initRows.reserve(state.memoryInitRowExprs.size());
+                    for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
+                    {
+                        if (state.memoryInitRowExprs[row].has_value() && !state.memoryInitRowExprs[row]->requiresRuntime)
+                        {
+                            initRows.push_back(row);
+                        }
+                    }
+                    if (initRows.empty())
+                    {
+                        continue;
+                    }
+                    if (!emittedInitNamespace)
+                    {
+                        *stream << "namespace {\n";
+                        emittedInitNamespace = true;
+                    }
+                    const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
+                    *stream << "constexpr std::size_t " << base << "_rows[] = {";
+                    for (std::size_t i = 0; i < initRows.size(); ++i)
+                    {
+                        if (i != 0)
+                        {
+                            *stream << ", ";
+                        }
+                        *stream << initRows[i];
+                    }
+                    *stream << "};\n";
+                    *stream << "constexpr " << logicCppType(state.width) << " " << base << "_data[] = {\n";
+                    for (std::size_t row : initRows)
+                    {
+                        *stream << "    " << state.memoryInitRowExprs[row]->expr << ",\n";
+                    }
+                    *stream << "};\n\n";
+                }
+                if (emittedInitNamespace)
+                {
+                    *stream << "} // namespace\n\n";
+                }
+            }
+
+            *stream << "void " << className << "::" << chunk.methodName << "()\n{\n";
+            switch (chunk.kind)
+            {
+            case InitChunkSpec::Kind::kPublicInputs:
+                *stream << "    // Initialize public input ports and inout baselines.\n";
+                for (const auto &port : graph.inputPorts())
+                {
+                    *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value)
+                            << ";\n";
+                }
+                for (const auto &port : graph.inoutPorts())
+                {
+                    const std::string name = sanitizeIdentifier(port.name);
+                    *stream << "    " << name << ".in = " << defaultInitExpr(graph, port.in) << ";\n";
+                    *stream << "    " << name << ".out = " << defaultInitExpr(graph, port.out) << ";\n";
+                    *stream << "    " << name << ".oe = " << defaultInitExpr(graph, port.oe) << ";\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kPublicOutputs:
+                *stream << "    // Initialize public outputs.\n";
+                for (const auto &port : graph.outputPorts())
+                {
+                    *stream << "    " << sanitizeIdentifier(port.name) << " = " << defaultInitExpr(graph, port.value)
+                            << ";\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kValues:
+                *stream << "    // Initialize combinational value storage.\n";
+                for (ValueId valueId : chunk.values)
+                {
+                    *stream << "    " << model.valueFieldByValue.at(valueId) << " = " << defaultInitExpr(graph, valueId)
+                            << ";\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kRandomSeed:
+                *stream << "    random_state_ = random_seed_;\n";
+                break;
+            case InitChunkSpec::Kind::kStates:
+                if (!chunk.stateSymbols.empty())
+                {
+                    *stream << "    // Initialize persistent state objects.\n";
+                }
+                for (const std::string &stateSymbol : chunk.stateSymbols)
+                {
+                    const StateDecl &state = model.stateBySymbol.at(stateSymbol);
+                    if (state.kind == StateDecl::Kind::Memory)
+                    {
+                        *stream << "    " << state.fieldName << ".assign(" << state.rowCount << ", "
+                                << logicCppType(state.width) << "{});\n";
+                        std::size_t initCount = 0;
+                        for (const auto &rowExpr : state.memoryInitRowExprs)
+                        {
+                            if (rowExpr.has_value() && !rowExpr->requiresRuntime)
+                            {
+                                ++initCount;
+                            }
+                        }
+                        if (initCount != 0)
+                        {
+                            const std::string base = "k_mem_init_" + sanitizeIdentifier(stateSymbol);
+                            *stream << "    for (std::size_t i = 0; i < " << initCount << "; ++i) {\n";
+                            *stream << "        " << state.fieldName << "[" << base << "_rows[i]] = " << base
+                                    << "_data[i];\n";
+                            *stream << "    }\n";
+                        }
+                        for (std::size_t row = 0; row < state.memoryInitRowExprs.size(); ++row)
+                        {
+                            if (!state.memoryInitRowExprs[row].has_value() || !state.memoryInitRowExprs[row]->requiresRuntime)
+                            {
+                                continue;
+                            }
+                            *stream << "    " << state.fieldName << "[" << row << "] = "
+                                    << state.memoryInitRowExprs[row]->expr << ";\n";
+                        }
+                    }
+                    else if (state.initExpr)
+                    {
+                        *stream << "    " << state.fieldName << " = " << state.initExpr->expr << ";\n";
+                    }
+                }
+                break;
+            case InitChunkSpec::Kind::kStateShadows:
+                *stream << "    // Clear register/latch next-state shadows.\n";
+                for (std::size_t shadowIndex : chunk.indices)
+                {
+                    const StateShadowDecl &shadow = model.stateShadows[shadowIndex];
+                    const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
+                    *stream << "    " << shadow.touchedField << " = false;\n";
+                    *stream << "    " << shadow.dataField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kWrites:
+                *stream << "    // Clear memory next-state shadows.\n";
+                for (std::size_t writeIndex : chunk.indices)
+                {
+                    const WriteDecl &write = model.writes[writeIndex];
+                    const StateDecl &state = model.stateBySymbol.at(write.symbol);
+                    *stream << "    " << write.shadowTouchedField << " = false;\n";
+                    *stream << "    " << write.shadowAddrField << " = 0;\n";
+                    *stream << "    " << write.shadowDataField << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
+                    if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+                    {
+                        *stream << "    " << write.shadowMaskField << " = " << defaultInitExprForLogicWidth(state.width)
+                                << ";\n";
+                    }
+                }
+                break;
+            case InitChunkSpec::Kind::kPrevInputs:
+                *stream << "    // Establish previous-cycle baselines used by input change and event-edge detection.\n";
+                for (ValueId valueId : chunk.values)
+                {
+                    bool emitted = false;
+                    for (const auto &port : graph.inputPorts())
+                    {
+                        if (port.value != valueId)
+                        {
+                            continue;
+                        }
+                        *stream << "    " << model.prevInputFieldByValue.at(valueId) << " = "
+                                << sanitizeIdentifier(port.name) << ";\n";
+                        emitted = true;
+                        break;
+                    }
+                    if (emitted)
+                    {
+                        continue;
+                    }
+                    for (const auto &port : graph.inoutPorts())
+                    {
+                        if (port.in != valueId)
+                        {
+                            continue;
+                        }
+                        *stream << "    " << model.prevInputFieldByValue.at(valueId) << " = "
+                                << sanitizeIdentifier(port.name) << ".in;\n";
+                        break;
+                    }
+                }
+                break;
+            case InitChunkSpec::Kind::kEventEdges:
+                *stream << "    // Clear shared event-edge slots.\n";
+                for (ValueId valueId : chunk.values)
+                {
+                    *stream << "    " << model.eventEdgeFieldByValue.at(valueId) << " = grhsim_event_edge_kind::none;\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kEvalState:
+                *stream << "    // Reset per-eval scheduling state.\n";
+                *stream << "    supernode_active_curr_.fill(UINT64_C(0));\n";
+                *stream << "    active_word_count_ = 0;\n";
+                if (!model.stateShadows.empty())
+                {
+                    *stream << "    touched_state_shadow_indices_.fill(0);\n";
+                    *stream << "    touched_state_shadow_flags_.fill(0);\n";
+                    *stream << "    touched_state_shadow_count_ = 0;\n";
+                }
+                if (!model.writes.empty())
+                {
+                    *stream << "    touched_write_indices_.fill(0);\n";
+                    *stream << "    touched_write_flags_.fill(0);\n";
+                    *stream << "    touched_write_count_ = 0;\n";
+                }
+                *stream << "    first_eval_ = true;\n";
+                *stream << "    register_write_conflict_ = false;\n";
+                break;
+            case InitChunkSpec::Kind::kRuntimeState:
+                *stream << "    finalized_ = false;\n";
+                *stream << "    finish_requested_ = false;\n";
+                *stream << "    stop_requested_ = false;\n";
+                *stream << "    fatal_requested_ = false;\n";
+                *stream << "    system_exit_code_ = 0;\n";
+                *stream << "    dumpfile_path_.clear();\n";
+                *stream << "    dumpvars_enabled_ = false;\n";
+                *stream << "    next_file_handle_ = UINT64_C(3);\n";
+                *stream << "    file_handles_.clear();\n";
+                *stream << "    deferred_system_task_texts_.clear();\n";
+                break;
+            }
+            *stream << "}\n";
+
+            if (auto error = finalizeOutputFile(*stream, chunkPath))
+            {
+                reportError(*error, chunkPath.string());
+                result.success = false;
+                return result;
+            }
+        }
+
         {
             if (auto error = ensureOutputDirectory(evalPath))
             {
@@ -7986,11 +8371,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
             *stream << "    register_write_conflict_ = false;\n";
-            if (!model.eventSamplesByOp.empty())
-            {
-                *stream << "    // Event-sensitive ops share previous-sample baselines but still fire at most once per eval.\n";
-                emitResetSeenEventSamples(*stream, model, "    ");
-            }
             *stream << "    if (initial_eval) {\n";
             *stream << "        for (auto &word : supernode_active_curr_) {\n";
             *stream << "            word = ~UINT64_C(0);\n";
@@ -8029,6 +8409,16 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 emitBitMaskSetStatements(*stream, "supernode_active_curr_", "active_word_count_", supernodes, "        ");
                 *stream << "    }\n";
             }
+            if (!model.inputEventValues.empty())
+            {
+                *stream << "\n";
+                *stream << "    // Seed shared event edges for direct input event values.\n";
+                for (ValueId value : model.inputEventValues)
+                {
+                    *stream << "    " << model.eventEdgeFieldByValue.at(value) << " = grhsim_classify_edge("
+                            << model.prevInputFieldByValue.at(value) << ", " << model.inputFieldByValue.at(value) << ");\n";
+                }
+            }
             *stream << '\n';
             *stream << "    while (active_word_count_ != 0) {\n";
             *stream << "        // Propagate current activity through scheduled supernodes.\n";
@@ -8038,16 +8428,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
             *stream << "        commit_state_updates();\n";
+            if (!model.allEventValues.empty())
+            {
+                *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
+                emitClearAllEventEdges(*stream, model, "        ");
+            }
             *stream << "    }\n";
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    flush_deferred_system_task_texts();\n";
-            }
-            if (!model.eventSamplesByOp.empty())
-            {
-                *stream << "    // Publish shared previous-sample baselines for the next eval.\n";
-                emitRefreshAllEventSamples(*stream, model, "    ");
-                *stream << '\n';
             }
             *stream << "    // Refresh public outputs after the final visible state of this eval is known.\n";
             *stream << "    refresh_outputs();\n\n";
@@ -8159,6 +8548,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "CXXFLAGS ?= -std=c++20 -O3\n";
             *stream << "LIB := lib" << prefix << ".a\n";
             *stream << "SRCS := " << statePath.filename().string() << ' ' << evalPath.filename().string();
+            for (const auto &stateInitPath : stateInitPaths)
+            {
+                *stream << ' ' << stateInitPath.filename().string();
+            }
             for (const auto &schedPath : schedPaths)
             {
                 *stream << ' ' << schedPath.filename().string();
@@ -8186,6 +8579,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             statePath.string(),
             evalPath.string(),
         };
+        for (const auto &stateInitPath : stateInitPaths)
+        {
+            result.artifacts.push_back(stateInitPath.string());
+        }
         for (const auto &schedPath : schedPaths)
         {
             result.artifacts.push_back(schedPath.string());

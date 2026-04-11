@@ -36,6 +36,16 @@ namespace
         return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
 
+    std::string readFiles(const std::vector<std::filesystem::path> &paths)
+    {
+        std::string out;
+        for (const auto &path : paths)
+        {
+            out += readFile(path);
+        }
+        return out;
+    }
+
     std::size_t countSubstring(std::string_view text, std::string_view needle)
     {
         if (needle.empty())
@@ -1495,9 +1505,9 @@ int main()
         {
             return fail("EmitGrhSimCpp reported diagnostics errors");
         }
-        if (result.artifacts.size() < 7)
+        if (result.artifacts.size() < 8)
         {
-            return fail("EmitGrhSimCpp should report split schedule artifacts");
+            return fail("EmitGrhSimCpp should report split state/schedule artifacts");
         }
 
         const std::filesystem::path headerPath = outDir / "grhsim_top.hpp";
@@ -1505,23 +1515,21 @@ int main()
         const std::filesystem::path statePath = outDir / "grhsim_top_state.cpp";
         const std::filesystem::path evalPath = outDir / "grhsim_top_eval.cpp";
         const std::filesystem::path makefilePath = outDir / "Makefile";
+        const std::vector<std::filesystem::path> stateFiles = collectSchedFiles(outDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> schedFiles = collectSchedFiles(outDir, "grhsim_top_sched_");
         if (!std::filesystem::exists(headerPath) || !std::filesystem::exists(runtimePath) || !std::filesystem::exists(statePath) ||
-            !std::filesystem::exists(evalPath) || !std::filesystem::exists(makefilePath) || schedFiles.size() < 2)
+            !std::filesystem::exists(evalPath) || !std::filesystem::exists(makefilePath) || stateFiles.size() < 2 ||
+            schedFiles.size() < 2)
         {
-            return fail("Expected generated grhsim split schedule artifacts to exist");
+            return fail("Expected generated grhsim split state/schedule artifacts to exist");
         }
 
         const std::string header = readFile(headerPath);
         const std::string runtime = readFile(runtimePath);
-        const std::string state = readFile(statePath);
+        const std::string state = readFiles(stateFiles);
         const std::string eval = readFile(evalPath);
         const std::string makefile = readFile(makefilePath);
-        std::string sched;
-        for (const auto &path : schedFiles)
-        {
-            sched += readFile(path);
-        }
+        const std::string sched = readFiles(schedFiles);
 
     if (header.find("class GrhSIM_top") == std::string::npos)
     {
@@ -1570,7 +1578,8 @@ int main()
         return fail("Missing wide output field declaration");
     }
     if (sched.find("grhsim_assign_words") == std::string::npos ||
-        state.find("grhsim_merge_words_masked") == std::string::npos)
+        (sched.find("grhsim_merge_words_masked") == std::string::npos &&
+         state.find("grhsim_merge_words_masked") == std::string::npos))
     {
         return fail("Missing wide runtime helper usage");
     }
@@ -1653,14 +1662,15 @@ int main()
     {
         return fail("Missing random seed plumbing in state init");
     }
-    if (header.find("extern \"C\" void trace_sum") == std::string::npos)
+    if (sched.find("extern \"C\" void trace_sum") == std::string::npos)
     {
         return fail("Missing DPI import declaration");
     }
     if (makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos ||
+        makefile.find("grhsim_top_state_init_0.cpp") == std::string::npos ||
         makefile.find("grhsim_top_sched_1.cpp") == std::string::npos)
     {
-        return fail("Missing split Makefile skeleton");
+        return fail("Missing split state/schedule Makefile skeleton");
     }
 
         const std::string buildCmd = "make -C " + outDir.string();
@@ -2121,9 +2131,12 @@ int main()
 
         const std::filesystem::path harnessExe = outDir / "grhsim_top_harness";
         std::string compileHarnessCmd =
-            "c++ -std=c++20 -O2 -I" + outDir.string() +
-            " " + (outDir / "grhsim_top_state.cpp").string() +
-            " " + (outDir / "grhsim_top_eval.cpp").string();
+            "c++ -std=c++20 -O2 -I" + outDir.string();
+        for (const auto &stateFile : stateFiles)
+        {
+            compileHarnessCmd += " " + stateFile.string();
+        }
+        compileHarnessCmd += " " + (outDir / "grhsim_top_eval.cpp").string();
         for (const auto &schedPath : schedFiles)
         {
             compileHarnessCmd += " " + schedPath.string();
@@ -2161,9 +2174,10 @@ int main()
         const std::filesystem::path regWriteHeaderPath = regWriteDir / "grhsim_top.hpp";
         const std::filesystem::path regWriteStatePath = regWriteDir / "grhsim_top_state.cpp";
         const std::filesystem::path regWriteEvalPath = regWriteDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> regWriteStateFiles = collectSchedFiles(regWriteDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> regWriteSchedFiles = collectSchedFiles(regWriteDir, "grhsim_top_sched_");
         if (!std::filesystem::exists(regWriteHeaderPath) || !std::filesystem::exists(regWriteStatePath) ||
-            !std::filesystem::exists(regWriteEvalPath) || regWriteSchedFiles.empty())
+            !std::filesystem::exists(regWriteEvalPath) || regWriteStateFiles.empty() || regWriteSchedFiles.empty())
         {
             return fail("register-write interaction artifacts missing");
         }
@@ -2172,14 +2186,19 @@ int main()
             return fail("Missing register write conflict getter emission");
         }
         const std::string regWriteHeaderText = readFile(regWriteHeaderPath);
-        const std::string regWriteStateText = readFile(regWriteStatePath);
-        if (countSubstring(regWriteStateText, "prev_evt_clk_") != 1)
+        const std::string regWriteStateText = readFiles(regWriteStateFiles);
+        if (countSubstring(regWriteHeaderText, "evt_edge_clk_") != 1)
         {
-            return fail("register-write interaction should share one previous-event clock sample across clk users");
+            return fail("register-write interaction should share one event-edge slot across clk users");
         }
-        if (countSubstring(regWriteHeaderText, "seen_evt_conflict_write_") != 2)
+        if (regWriteHeaderText.find("state_shadow_") == std::string::npos)
         {
-            return fail("register-write interaction should keep per-op event-seen guards for repeated eval visits");
+            return fail("register-write interaction should emit shared state-shadow fields");
+        }
+        if (regWriteHeaderText.find("seen_evt_") != std::string::npos ||
+            regWriteStateText.find("prev_evt_") != std::string::npos)
+        {
+            return fail("register-write interaction should no longer emit prev/seen event state");
         }
 
         const std::filesystem::path regWriteHarnessPath = regWriteDir / "grhsim_top_harness.cpp";
@@ -2235,10 +2254,12 @@ int main()
         }
 
         const std::filesystem::path regWriteHarnessExe = regWriteDir / "grhsim_top_harness";
-        std::string regWriteCompileCmd =
-            "c++ -std=c++20 -O2 -I" + regWriteDir.string() +
-            " " + regWriteStatePath.string() +
-            " " + regWriteEvalPath.string();
+        std::string regWriteCompileCmd = "c++ -std=c++20 -O2 -I" + regWriteDir.string();
+        for (const auto &stateFile : regWriteStateFiles)
+        {
+            regWriteCompileCmd += " " + stateFile.string();
+        }
+        regWriteCompileCmd += " " + regWriteEvalPath.string();
         for (const auto &schedPath : regWriteSchedFiles)
         {
             regWriteCompileCmd += " " + schedPath.string();
@@ -2267,18 +2288,16 @@ int main()
             return fail("local-temp emit failed");
         }
         const std::string localTempHeaderText = readFile(localTempDir / "grhsim_top.hpp");
-        const std::string localTempStateText = readFile(localTempDir / "grhsim_top_state.cpp");
-        std::string localTempSchedText;
+        const std::vector<std::filesystem::path> localTempStateFiles =
+            collectSchedFiles(localTempDir, "grhsim_top_state");
+        const std::string localTempStateText = readFiles(localTempStateFiles);
         const std::vector<std::filesystem::path> localTempSchedFiles =
             collectSchedFiles(localTempDir, "grhsim_top_sched_");
-        if (localTempSchedFiles.empty())
+        if (localTempStateFiles.empty() || localTempSchedFiles.empty())
         {
-            return fail("local-temp schedule files missing");
+            return fail("local-temp state/schedule files missing");
         }
-        for (const auto &schedPath : localTempSchedFiles)
-        {
-            localTempSchedText += readFile(schedPath);
-        }
+        const std::string localTempSchedText = readFiles(localTempSchedFiles);
         if (localTempHeaderText.find("val_sum_tmp_") != std::string::npos ||
             localTempStateText.find("val_sum_tmp_") != std::string::npos)
         {
@@ -2313,10 +2332,12 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path localTempHarnessExe = localTempDir / "grhsim_top_harness";
-        std::string localTempCompileCmd =
-            "c++ -std=c++20 -O2 -I" + localTempDir.string() +
-            " " + (localTempDir / "grhsim_top_state.cpp").string() +
-            " " + (localTempDir / "grhsim_top_eval.cpp").string();
+        std::string localTempCompileCmd = "c++ -std=c++20 -O2 -I" + localTempDir.string();
+        for (const auto &stateFile : localTempStateFiles)
+        {
+            localTempCompileCmd += " " + stateFile.string();
+        }
+        localTempCompileCmd += " " + (localTempDir / "grhsim_top_eval.cpp").string();
         for (const auto &schedPath : localTempSchedFiles)
         {
             localTempCompileCmd += " " + schedPath.string();
@@ -2356,40 +2377,38 @@ int main()
         }
         const std::filesystem::path gatedStatePath = gatedDir / "grhsim_top_state.cpp";
         const std::filesystem::path gatedEvalPath = gatedDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> gatedStateFiles = collectSchedFiles(gatedDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> gatedSchedFiles =
             collectSchedFiles(gatedDir, "grhsim_top_sched_");
-        if (gatedSchedFiles.empty())
+        if (gatedStateFiles.empty() || gatedSchedFiles.empty())
         {
-            return fail("gated-clock schedule files missing");
+            return fail("gated-clock state/schedule files missing");
         }
-        std::string gatedSchedText;
-        for (const auto &schedPath : gatedSchedFiles)
-        {
-            gatedSchedText += readFile(schedPath);
-        }
-        const std::string gatedStateText = readFile(gatedStatePath);
+        const std::string gatedSchedText = readFiles(gatedSchedFiles);
+        const std::string gatedStateText = readFiles(gatedStateFiles);
         const std::string gatedEvalText = readFile(gatedEvalPath);
-        if (countSubstring(gatedStateText, "prev_evt_gated_clk_") != 1)
+        const std::string gatedHeaderText = readFile(gatedDir / "grhsim_top.hpp");
+        if (countSubstring(gatedHeaderText, "evt_edge_gated_clk_") != 1)
         {
-            return fail("gated-clock emit should share one previous-event baseline per gated clock value");
+            return fail("gated-clock emit should share one event-edge slot per gated clock value");
         }
-        if (gatedSchedText.find("seen_evt_gated_write") == std::string::npos ||
-            gatedSchedText.find("seen_evt_gated_aux_write") == std::string::npos)
+        if (gatedSchedText.find("grhsim_event_edge_kind::posedge") == std::string::npos)
         {
-            return fail("gated-clock exact event logic should keep per-op event-seen guards");
+            return fail("gated-clock exact event logic should consume shared event-edge enums");
         }
         if (gatedEvalText.find("while (active_word_count_ != 0)") == std::string::npos)
         {
             return fail("gated-clock eval should iterate until the activity schedule reaches a fixed point");
         }
-        if (gatedEvalText.find("seen_evt_gated_write") == std::string::npos ||
-            gatedEvalText.find("prev_evt_gated_clk_") == std::string::npos)
+        if (gatedEvalText.find("grhsim_classify_edge(") == std::string::npos ||
+            gatedEvalText.find("evt_edge_gated_clk_") == std::string::npos)
         {
-            return fail("gated-clock eval should reset per-op seen guards and refresh shared baselines");
+            return fail("gated-clock eval should seed and clear shared event-edge state");
         }
-        if (gatedSchedText.find("grhsim_event_posedge(") == std::string::npos)
+        if (gatedSchedText.find("seen_evt_") != std::string::npos ||
+            gatedEvalText.find("prev_evt_") != std::string::npos)
         {
-            return fail("gated-clock exact event logic should use the current settled event signal");
+            return fail("gated-clock emit should not keep the old prev/seen event state");
         }
         const std::filesystem::path gatedHarnessPath = gatedDir / "grhsim_top_harness.cpp";
         {
@@ -2466,10 +2485,12 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path gatedHarnessExe = gatedDir / "grhsim_top_harness";
-        std::string gatedCompileCmd =
-            "c++ -std=c++20 -O2 -I" + gatedDir.string() +
-            " " + gatedStatePath.string() +
-            " " + gatedEvalPath.string();
+        std::string gatedCompileCmd = "c++ -std=c++20 -O2 -I" + gatedDir.string();
+        for (const auto &stateFile : gatedStateFiles)
+        {
+            gatedCompileCmd += " " + stateFile.string();
+        }
+        gatedCompileCmd += " " + gatedEvalPath.string();
         for (const auto &schedPath : gatedSchedFiles)
         {
             gatedCompileCmd += " " + schedPath.string();
@@ -2501,18 +2522,16 @@ int main()
         const std::filesystem::path systemTaskHeaderPath = systemTaskDir / "grhsim_top.hpp";
         const std::filesystem::path systemTaskStatePath = systemTaskDir / "grhsim_top_state.cpp";
         const std::filesystem::path systemTaskEvalPath = systemTaskDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> systemTaskStateFiles =
+            collectSchedFiles(systemTaskDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> systemTaskSchedFiles =
             collectSchedFiles(systemTaskDir, "grhsim_top_sched_");
         if (!std::filesystem::exists(systemTaskHeaderPath) || !std::filesystem::exists(systemTaskStatePath) ||
-            !std::filesystem::exists(systemTaskEvalPath) || systemTaskSchedFiles.empty())
+            !std::filesystem::exists(systemTaskEvalPath) || systemTaskStateFiles.empty() || systemTaskSchedFiles.empty())
         {
             return fail("system-task artifacts missing");
         }
-        std::string systemTaskSchedText;
-        for (const auto &schedPath : systemTaskSchedFiles)
-        {
-            systemTaskSchedText += readFile(schedPath);
-        }
+        const std::string systemTaskSchedText = readFiles(systemTaskSchedFiles);
         if (systemTaskSchedText.find("(cond8) != 0") == std::string::npos)
         {
             return fail("system-task multi-bit condition should emit scalar truthiness check");
@@ -2554,10 +2573,12 @@ int main()
         }
 
         const std::filesystem::path systemTaskHarnessExe = systemTaskDir / "grhsim_top_harness";
-        std::string systemTaskCompileCmd =
-            "c++ -std=c++20 -O2 -I" + systemTaskDir.string() +
-            " " + systemTaskStatePath.string() +
-            " " + systemTaskEvalPath.string();
+        std::string systemTaskCompileCmd = "c++ -std=c++20 -O2 -I" + systemTaskDir.string();
+        for (const auto &stateFile : systemTaskStateFiles)
+        {
+            systemTaskCompileCmd += " " + stateFile.string();
+        }
+        systemTaskCompileCmd += " " + systemTaskEvalPath.string();
         for (const auto &schedPath : systemTaskSchedFiles)
         {
             systemTaskCompileCmd += " " + schedPath.string();
@@ -2647,6 +2668,7 @@ int main()
             }
             const std::filesystem::path termStatePath = termDir / "grhsim_top_state.cpp";
             const std::filesystem::path termEvalPath = termDir / "grhsim_top_eval.cpp";
+            const std::vector<std::filesystem::path> termStateFiles = collectSchedFiles(termDir, "grhsim_top_state");
             const std::vector<std::filesystem::path> termSchedFiles =
                 collectSchedFiles(termDir, "grhsim_top_sched_");
             const std::filesystem::path termHarnessPath = termDir / "grhsim_top_harness.cpp";
@@ -2668,10 +2690,12 @@ int main()
                 harness << "}\n";
             }
             const std::filesystem::path termHarnessExe = termDir / "grhsim_top_harness";
-            std::string termCompileCmd =
-                "c++ -std=c++20 -O2 -I" + termDir.string() +
-                " " + termStatePath.string() +
-                " " + termEvalPath.string();
+            std::string termCompileCmd = "c++ -std=c++20 -O2 -I" + termDir.string();
+            for (const auto &stateFile : termStateFiles)
+            {
+                termCompileCmd += " " + stateFile.string();
+            }
+            termCompileCmd += " " + termEvalPath.string();
             for (const auto &schedPath : termSchedFiles)
             {
                 termCompileCmd += " " + schedPath.string();
@@ -2713,27 +2737,22 @@ int main()
         {
             return fail("dpi emit failed");
         }
-        const std::string dpiHeaderText = readFile(dpiDir / "grhsim_top.hpp");
-        if (dpiHeaderText.find("extern \"C\" std::int32_t dpi_mix") == std::string::npos ||
-            dpiHeaderText.find("const std::array<std::uint64_t, 3> & wide") == std::string::npos ||
-            dpiHeaderText.find("const std::string & label") == std::string::npos ||
-            dpiHeaderText.find("std::int16_t & sum") == std::string::npos ||
-            dpiHeaderText.find("std::string & text") == std::string::npos)
-        {
-            return fail("dpi header declaration mismatch");
-        }
         const std::filesystem::path dpiStatePath = dpiDir / "grhsim_top_state.cpp";
         const std::filesystem::path dpiEvalPath = dpiDir / "grhsim_top_eval.cpp";
+        const std::vector<std::filesystem::path> dpiStateFiles = collectSchedFiles(dpiDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> dpiSchedFiles =
             collectSchedFiles(dpiDir, "grhsim_top_sched_");
-        if (dpiSchedFiles.empty())
+        if (dpiStateFiles.empty() || dpiSchedFiles.empty())
         {
-            return fail("dpi schedule files missing");
+            return fail("dpi state/schedule files missing");
         }
-        std::string dpiSchedText;
-        for (const auto &schedPath : dpiSchedFiles)
+        const std::string dpiSchedText = readFiles(dpiSchedFiles);
+        if (dpiSchedText.find("extern \"C\" std::int32_t dpi_mix") == std::string::npos ||
+            dpiSchedText.find("const char * label") == std::string::npos ||
+            dpiSchedText.find("std::int16_t * sum") == std::string::npos ||
+            dpiSchedText.find("std::string * text") == std::string::npos)
         {
-            dpiSchedText += readFile(schedPath);
+            return fail("dpi schedule declaration mismatch");
         }
         if (dpiSchedText.find("(a) != 0") == std::string::npos)
         {
@@ -2760,27 +2779,27 @@ int main()
             harness << "extern \"C\" std::int32_t dpi_mix(std::int8_t a,\n";
             harness << "                                 const std::array<std::uint64_t, 3> &wide,\n";
             harness << "                                 double r,\n";
-            harness << "                                 const std::string &label,\n";
-            harness << "                                 std::int16_t &sum,\n";
-            harness << "                                 std::string &text)\n";
+            harness << "                                 const char *label,\n";
+            harness << "                                 std::int16_t *sum,\n";
+            harness << "                                 std::string *text)\n";
             harness << "{\n";
             harness << "    ++g_mix_calls;\n";
-            harness << "    sum = static_cast<std::int16_t>(static_cast<int>(a) + static_cast<int>(wide[0] & UINT64_C(0xFF)) + static_cast<int>(r * 4.0));\n";
-            harness << "    text = label + \":\" + std::to_string(static_cast<int>(sum));\n";
-            harness << "    return static_cast<std::int32_t>(-2 * static_cast<std::int32_t>(sum));\n";
+            harness << "    *sum = static_cast<std::int16_t>(static_cast<int>(a) + static_cast<int>(wide[0] & UINT64_C(0xFF)) + static_cast<int>(r * 4.0));\n";
+            harness << "    *text = std::string(label) + \":\" + std::to_string(static_cast<int>(*sum));\n";
+            harness << "    return static_cast<std::int32_t>(-2 * static_cast<std::int32_t>(*sum));\n";
             harness << "}\n\n";
-            harness << "extern \"C\" void dpi_pack(std::uint8_t a, std::uint8_t &mirror)\n";
+            harness << "extern \"C\" void dpi_pack(std::uint8_t a, std::uint8_t *mirror)\n";
             harness << "{\n";
             harness << "    ++g_pack_calls;\n";
-            harness << "    mirror = static_cast<std::uint8_t>(a ^ UINT8_C(0x5A));\n";
+            harness << "    *mirror = static_cast<std::uint8_t>(a ^ UINT8_C(0x5A));\n";
             harness << "}\n\n";
             harness << "extern \"C\" void dpi_wide_echo(const std::array<std::uint64_t, 3> &wide,\n";
-            harness << "                               std::array<std::uint64_t, 3> &out)\n";
+            harness << "                               std::array<std::uint64_t, 3> *out)\n";
             harness << "{\n";
             harness << "    ++g_wide_calls;\n";
-            harness << "    out = wide;\n";
-            harness << "    out[0] ^= UINT64_C(0xFF);\n";
-            harness << "    out[2] ^= UINT64_C(0x1);\n";
+            harness << "    *out = wide;\n";
+            harness << "    (*out)[0] ^= UINT64_C(0xFF);\n";
+            harness << "    (*out)[2] ^= UINT64_C(0x1);\n";
             harness << "}\n\n";
             harness << "int main()\n";
             harness << "{\n";
@@ -2824,10 +2843,12 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path dpiHarnessExe = dpiDir / "grhsim_top_harness";
-        std::string dpiCompileCmd =
-            "c++ -std=c++20 -O2 -I" + dpiDir.string() +
-            " " + dpiStatePath.string() +
-            " " + dpiEvalPath.string();
+        std::string dpiCompileCmd = "c++ -std=c++20 -O2 -I" + dpiDir.string();
+        for (const auto &stateFile : dpiStateFiles)
+        {
+            dpiCompileCmd += " " + stateFile.string();
+        }
+        dpiCompileCmd += " " + dpiEvalPath.string();
         for (const auto &schedPath : dpiSchedFiles)
         {
             dpiCompileCmd += " " + schedPath.string();
