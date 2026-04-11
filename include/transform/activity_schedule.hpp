@@ -16,7 +16,7 @@ namespace wolvrix::lib::transform
     struct ActivityScheduleOptions
     {
         std::string path;
-        std::size_t supernodeMaxSize = 64;
+        std::size_t supernodeMaxSize = 72;
         bool enableCoarsen = true;
         bool enableChainMerge = true;
         bool enableSiblingMerge = true;

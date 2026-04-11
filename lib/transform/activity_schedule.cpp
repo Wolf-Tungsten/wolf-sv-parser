@@ -211,17 +211,10 @@ namespace wolvrix::lib::transform
 
         bool isSideEffectBoundaryKind(wolvrix::lib::grh::OperationKind kind) noexcept
         {
-            switch (kind)
-            {
-            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
-            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-            case wolvrix::lib::grh::OperationKind::kSystemTask:
-            case wolvrix::lib::grh::OperationKind::kDpicCall:
-                return true;
-            default:
-                return false;
-            }
+            (void)kind;
+            // GrhSIM side effects are controlled by the emitted event / commit semantics rather
+            // than by hard schedule boundaries, so activity-schedule does not isolate any op here.
+            return false;
         }
 
         bool isPartitionableOpKind(wolvrix::lib::grh::OperationKind kind) noexcept
@@ -912,7 +905,7 @@ namespace wolvrix::lib::transform
 
                     const int newCost = bestCost[begin] + cutCost;
                     if (newCost < bestCost[end] ||
-                        (newCost == bestCost[end] && (backtrace[end] < 0 || static_cast<int>(begin) > backtrace[end])))
+                        (newCost == bestCost[end] && (backtrace[end] < 0 || static_cast<int>(begin) < backtrace[end])))
                     {
                         bestCost[end] = newCost;
                         backtrace[end] = static_cast<int>(begin);

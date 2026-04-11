@@ -382,6 +382,78 @@ namespace wolvrix::lib::emit
             return std::nullopt;
         }
 
+        bool isGeneratedArtifactName(std::string_view name,
+                                     std::string_view prefix,
+                                     std::string_view archiveName) noexcept
+        {
+            const std::string prefixText(prefix);
+            return name == prefixText + ".hpp" ||
+                   name == prefixText + "_runtime.hpp" ||
+                   name == prefixText + "_state.cpp" ||
+                   name == prefixText + "_state.o" ||
+                   name == prefixText + "_eval.cpp" ||
+                   name == prefixText + "_eval.o" ||
+                   name == archiveName ||
+                   name.rfind(prefixText + "_state_", 0) == 0 ||
+                   name.rfind(prefixText + "_sched_", 0) == 0;
+        }
+
+        std::optional<std::string> removeStaleGeneratedArtifacts(const std::filesystem::path &dir,
+                                                                 std::string_view prefix)
+        {
+            std::error_code ec;
+            if (!std::filesystem::exists(dir, ec))
+            {
+                return std::nullopt;
+            }
+            if (ec)
+            {
+                return "failed to inspect output directory: " + dir.string() + ": " + ec.message();
+            }
+            if (!std::filesystem::is_directory(dir, ec))
+            {
+                if (ec)
+                {
+                    return "failed to inspect output directory: " + dir.string() + ": " + ec.message();
+                }
+                return "output path is not a directory: " + dir.string();
+            }
+
+            const std::string archiveName = "lib" + std::string(prefix) + ".a";
+            for (const auto &entry : std::filesystem::directory_iterator(dir, ec))
+            {
+                if (ec)
+                {
+                    return "failed to list output directory: " + dir.string() + ": " + ec.message();
+                }
+
+                std::error_code entryEc;
+                if (!entry.is_regular_file(entryEc))
+                {
+                    if (entryEc)
+                    {
+                        return "failed to inspect output file: " + entry.path().string() + ": " + entryEc.message();
+                    }
+                    continue;
+                }
+
+                const std::string name = entry.path().filename().string();
+                if (!isGeneratedArtifactName(name, prefix, archiveName))
+                {
+                    continue;
+                }
+
+                std::error_code removeEc;
+                std::filesystem::remove(entry.path(), removeEc);
+                if (removeEc)
+                {
+                    return "failed to remove stale generated artifact: " + entry.path().string() + ": " + removeEc.message();
+                }
+            }
+
+            return std::nullopt;
+        }
+
         bool isScalarLogicValue(const Graph &graph, ValueId value) noexcept
         {
             return graph.valueType(value) == ValueType::Logic &&
@@ -1490,6 +1562,10 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
+        std::string stableSystemTaskArgExpr(const Graph &graph,
+                                            const EmitModel &model,
+                                            ValueId value);
+
         std::string dpiLoweredTypeName(std::string_view typeName)
         {
             std::string lowered;
@@ -2280,6 +2356,25 @@ namespace wolvrix::lib::emit
                     break;
                 }
             }
+            for (OperationId opId : graph.operations())
+            {
+                const Operation op = graph.getOperation(opId);
+                if (op.kind() != OperationKind::kSystemTask || !systemTaskIsFinal(op))
+                {
+                    continue;
+                }
+                const auto operands = op.operands();
+                const std::size_t eventCount =
+                    getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
+                const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
+                for (std::size_t i = 0; i < argEnd; ++i)
+                {
+                    if (graph.valueType(operands[i]) == ValueType::Logic)
+                    {
+                        markValueMaterialized(operands[i]);
+                    }
+                }
+            }
             for (ValueId valueId : graph.values())
             {
                 if (valueId.index == 0 || valueId.index > schedule.valueFanout.size())
@@ -2378,6 +2473,34 @@ namespace wolvrix::lib::emit
             return "/*missing_value_ref*/";
         }
 
+        std::optional<std::string> stableValueExpr(const Graph &graph, const EmitModel &model, ValueId value)
+        {
+            const OperationId defOpId = graph.valueDef(value);
+            if (defOpId.valid())
+            {
+                const Operation defOp = graph.getOperation(defOpId);
+                if (defOp.kind() == OperationKind::kConstant)
+                {
+                    if (auto expr = constantExpr(graph, defOp, value))
+                    {
+                        return expr;
+                    }
+                }
+            }
+            if (auto it = model.inputFieldByValue.find(value); it != model.inputFieldByValue.end())
+            {
+                return it->second;
+            }
+            if (graph.valueType(value) != ValueType::Logic || model.materializedValues.contains(value))
+            {
+                if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
+                {
+                    return it->second;
+                }
+            }
+            return std::nullopt;
+        }
+
         std::string truthyLogicValueExpr(const Graph &graph, const EmitModel &model, ValueId value)
         {
             const std::string ref = valueRef(model, value);
@@ -2386,6 +2509,49 @@ namespace wolvrix::lib::emit
                 return "grhsim_any_bits_words(" + ref + ", " + std::to_string(graph.valueWidth(value)) + ")";
             }
             return "(" + ref + ") != 0";
+        }
+
+        std::string stableTruthyLogicValueExpr(const Graph &graph, const EmitModel &model, ValueId value)
+        {
+            const std::string ref =
+                stableValueExpr(graph, model, value).value_or(std::string("/*missing_stable_truthy_value*/"));
+            if (isWideLogicValue(graph, value))
+            {
+                return "grhsim_any_bits_words(" + ref + ", " + std::to_string(graph.valueWidth(value)) + ")";
+            }
+            return "(" + ref + ") != 0";
+        }
+
+        std::string stableSystemTaskArgExpr(const Graph &graph,
+                                            const EmitModel &model,
+                                            ValueId value)
+        {
+            const std::string ref =
+                stableValueExpr(graph, model, value).value_or(std::string("/*missing_stable_system_task_arg*/"));
+            const std::string signedText = graph.valueSigned(value) ? "true" : "false";
+            switch (graph.valueType(value))
+            {
+            case ValueType::String:
+                return "grhsim_make_task_arg(" + ref + ")";
+            case ValueType::Real:
+                return "grhsim_make_task_arg(static_cast<double>(" + ref + "))";
+            case ValueType::Logic:
+            default:
+                break;
+            }
+            if (isWideLogicValue(graph, value))
+            {
+                std::ostringstream out;
+                out << "grhsim_make_task_arg(" << ref << ", "
+                    << graph.valueWidth(value) << ", "
+                    << signedText << ")";
+                return out.str();
+            }
+            std::ostringstream out;
+            out << "grhsim_make_task_arg(static_cast<std::uint64_t>(" << ref << "), "
+                << graph.valueWidth(value) << ", "
+                << signedText << ")";
+            return out.str();
         }
 
         std::string boolLiteral(bool value)
@@ -4431,7 +4597,8 @@ namespace wolvrix::lib::emit
                             }
                             else
                             {
-                                stream << "        const auto " << lhs << " = " << *expr << ";\n";
+                                stream << "        const " << cppTypeForValue(graph, resultValue) << ' '
+                                       << lhs << " = " << *expr << ";\n";
                             }
                             break;
                         }
@@ -5202,6 +5369,12 @@ namespace wolvrix::lib::emit
         const std::string normalizedTop = sanitizeIdentifier(graph.symbol());
         const std::string className = "GrhSIM_" + normalizedTop;
         const std::string prefix = "grhsim_" + normalizedTop;
+        if (auto error = removeStaleGeneratedArtifacts(outDir, prefix))
+        {
+            reportError(*error, outDir.string());
+            result.success = false;
+            return result;
+        }
         const std::filesystem::path headerPath = outDir / (prefix + ".hpp");
         const std::filesystem::path runtimePath = outDir / (prefix + "_runtime.hpp");
         const std::filesystem::path statePath = outDir / (prefix + "_state.cpp");
@@ -5460,6 +5633,125 @@ namespace wolvrix::lib::emit
         for (std::size_t chunkIndex = 0; chunkIndex < initChunks.size(); ++chunkIndex)
         {
             stateInitPaths.push_back(outDir / (prefix + "_state_init_" + std::to_string(chunkIndex) + ".cpp"));
+        }
+
+        struct CommitChunkSpec
+        {
+            std::string methodName;
+            std::vector<std::size_t> indices;
+            std::uint32_t maxDispatchIndex = 0;
+        };
+
+        constexpr std::size_t kStateCommitChunkTargetBytes = 8u * 1024u * 1024u;
+
+        auto estimateStateShadowCommitBytes = [&](std::size_t shadowIndex) -> std::size_t
+        {
+            const StateShadowDecl &shadow = model.stateShadows[shadowIndex];
+            const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
+            std::size_t bytes = 192 + shadow.touchedField.size() + shadow.dataField.size() + state.fieldName.size();
+            if (isWideLogicWidth(state.width))
+            {
+                bytes += 96;
+            }
+            else
+            {
+                bytes += state.cppType.size() + 96;
+            }
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
+            if (headIt != model.stateHeadSupernodesBySymbol.end())
+            {
+                bytes += headIt->second.size() * 48;
+            }
+            return bytes;
+        };
+
+        auto estimateWriteCommitBytes = [&](std::size_t writeIndex) -> std::size_t
+        {
+            const WriteDecl &write = model.writes[writeIndex];
+            const StateDecl &state = model.stateBySymbol.at(write.symbol);
+            std::size_t bytes = 256 + write.shadowTouchedField.size() + write.shadowAddrField.size() +
+                                write.shadowDataField.size() + state.fieldName.size();
+            if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+            {
+                bytes += write.shadowMaskField.size() + 64;
+            }
+            if (isWideLogicWidth(state.width))
+            {
+                bytes += 128;
+            }
+            else
+            {
+                bytes += state.cppType.size() + 128;
+            }
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
+            if (headIt != model.stateHeadSupernodesBySymbol.end())
+            {
+                bytes += headIt->second.size() * 48;
+            }
+            return bytes;
+        };
+
+        std::vector<CommitChunkSpec> stateShadowCommitChunks;
+        std::vector<CommitChunkSpec> writeCommitChunks;
+        std::size_t nextStateShadowCommitChunkIndex = 0;
+        std::size_t nextWriteCommitChunkIndex = 0;
+
+        auto addCommitChunks = [&](const std::vector<std::size_t> &items,
+                                   const auto &estimateBytes,
+                                   const auto &dispatchIndexOf,
+                                   const std::string &methodPrefix,
+                                   std::vector<CommitChunkSpec> &outChunks,
+                                   std::size_t &nextChunkIndex)
+        {
+            if (items.empty())
+            {
+                return;
+            }
+            CommitChunkSpec chunk;
+            chunk.methodName = methodPrefix + std::to_string(nextChunkIndex++);
+            std::size_t chunkBytes = 0;
+            for (std::size_t item : items)
+            {
+                const std::size_t itemBytes = estimateBytes(item);
+                if (!chunk.indices.empty() && chunkBytes + itemBytes > kStateCommitChunkTargetBytes)
+                {
+                    chunk.maxDispatchIndex = dispatchIndexOf(chunk.indices.back());
+                    outChunks.push_back(std::move(chunk));
+                    chunk = CommitChunkSpec{};
+                    chunk.methodName = methodPrefix + std::to_string(nextChunkIndex++);
+                    chunkBytes = 0;
+                }
+                chunk.indices.push_back(item);
+                chunkBytes += itemBytes;
+            }
+            chunk.maxDispatchIndex = dispatchIndexOf(chunk.indices.back());
+            outChunks.push_back(std::move(chunk));
+        };
+
+        addCommitChunks(stateShadowIndices,
+                        estimateStateShadowCommitBytes,
+                        [&](std::size_t shadowIndex) -> std::uint32_t
+                        { return static_cast<std::uint32_t>(model.stateShadows[shadowIndex].emitIndex); },
+                        "commit_state_shadow_chunk_",
+                        stateShadowCommitChunks,
+                        nextStateShadowCommitChunkIndex);
+        addCommitChunks(memoryWriteIndices,
+                        estimateWriteCommitBytes,
+                        [&](std::size_t writeIndex) -> std::uint32_t
+                        { return static_cast<std::uint32_t>(model.writes[writeIndex].shadowIndex); },
+                        "commit_write_chunk_",
+                        writeCommitChunks,
+                        nextWriteCommitChunkIndex);
+
+        std::vector<std::filesystem::path> stateCommitPaths;
+        stateCommitPaths.reserve(stateShadowCommitChunks.size() + writeCommitChunks.size());
+        for (std::size_t chunkIndex = 0; chunkIndex < stateShadowCommitChunks.size(); ++chunkIndex)
+        {
+            stateCommitPaths.push_back(outDir / (prefix + "_state_commit_shadow_" + std::to_string(chunkIndex) + ".cpp"));
+        }
+        for (std::size_t chunkIndex = 0; chunkIndex < writeCommitChunks.size(); ++chunkIndex)
+        {
+            stateCommitPaths.push_back(outDir / (prefix + "_state_commit_write_" + std::to_string(chunkIndex) + ".cpp"));
         }
 
         {
@@ -7367,6 +7659,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    void " << chunk.methodName << "();\n";
             }
+            for (const auto &chunk : stateShadowCommitChunks)
+            {
+                *stream << "    void " << chunk.methodName << "(std::uint32_t shadowIndex);\n";
+            }
+            for (const auto &chunk : writeCommitChunks)
+            {
+                *stream << "    void " << chunk.methodName << "(std::uint32_t writeIndex);\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    struct PendingSystemTaskText {\n";
@@ -7495,6 +7795,103 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
         }
+
+        auto emitCommitStateShadowBody = [&](LimitedOutputStream &stream,
+                                            const StateShadowDecl &shadow,
+                                            std::string_view indent)
+        {
+            const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
+            stream << indent << "bool state_changed = false;\n";
+            if (isWideLogicWidth(state.width))
+            {
+                stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", " << shadow.dataField << ", "
+                       << state.width << ")) {\n";
+                stream << indent << "    state_changed = true;\n";
+                stream << indent << "}\n";
+            }
+            else
+            {
+                stream << indent << "if (" << state.fieldName << " != " << shadow.dataField << ") {\n";
+                stream << indent << "    " << state.fieldName << " = " << shadow.dataField << ";\n";
+                stream << indent << "    state_changed = true;\n";
+                stream << indent << "}\n";
+            }
+            stream << indent << "if (state_changed) {\n";
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
+            if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
+            {
+                emitBitMaskSetStatements(
+                    stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+            }
+            stream << indent << "}\n";
+            stream << indent << shadow.touchedField << " = false;\n";
+        };
+
+        auto emitCommitWriteBody = [&](LimitedOutputStream &stream, const WriteDecl &write, std::string_view indent)
+        {
+            const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
+            stream << indent << "bool state_changed = false;\n";
+            if (state.kind == StateDecl::Kind::Memory)
+            {
+                stream << indent << "const std::size_t row = " << write.shadowAddrField << ";\n";
+                stream << indent << "if (row < " << state.rowCount << ") {\n";
+                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
+                {
+                    if (isWideLogicWidth(state.width))
+                    {
+                        stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
+                               << write.shadowDataField << ", " << state.width << ")) {\n";
+                        stream << indent << "        state_changed = true;\n";
+                        stream << indent << "    }\n";
+                    }
+                    else
+                    {
+                        stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField << "), "
+                               << state.width << "));\n";
+                        stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
+                        stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
+                        stream << indent << "        state_changed = true;\n";
+                        stream << indent << "    }\n";
+                    }
+                }
+                else
+                {
+                    if (isWideLogicWidth(state.width))
+                    {
+                        stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
+                               << write.shadowDataField << ", " << write.shadowMaskField << ", " << state.width
+                               << ")) {\n";
+                        stream << indent << "        state_changed = true;\n";
+                        stream << indent << "    }\n";
+                    }
+                    else
+                    {
+                        stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowMaskField << "), "
+                               << state.width << "));\n";
+                        stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
+                               << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField << "), "
+                               << state.width << ")) & mask));\n";
+                        stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
+                        stream << indent << "        " << state.fieldName << "[row] = merged;\n";
+                        stream << indent << "        state_changed = true;\n";
+                        stream << indent << "    }\n";
+                    }
+                }
+                stream << indent << "}\n";
+            }
+            stream << indent << "if (state_changed) {\n";
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
+            if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
+            {
+                emitBitMaskSetStatements(
+                    stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+            }
+            stream << indent << "}\n";
+            stream << indent << write.shadowTouchedField << " = false;\n";
+        };
 
         {
             if (auto error = ensureOutputDirectory(statePath))
@@ -7897,7 +8294,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const std::size_t eventCount = getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
                     const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
                     const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
-                    *stream << "    if (" << truthyLogicValueExpr(graph, model, operands[0]) << ") {\n";
+                    *stream << "    if (" << stableTruthyLogicValueExpr(graph, model, operands[0]) << ") {\n";
                     if (argEnd <= 1)
                     {
                         *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
@@ -7911,7 +8308,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                             {
                                 *stream << ", ";
                             }
-                            *stream << systemTaskArgExpr(graph, model, operands[i]);
+                            *stream << stableSystemTaskArgExpr(graph, model, operands[i]);
                         }
                         *stream << "});\n";
                     }
@@ -7934,97 +8331,101 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::exit(exitCode);\n";
                 *stream << "}\n\n";
             }
-            auto emitCommitStateShadowBody = [&](const StateShadowDecl &shadow, std::string_view indent)
+            auto emitCommitStateShadowBody = [&](LimitedOutputStream &stream,
+                                                const StateShadowDecl &shadow,
+                                                std::string_view indent)
             {
                 const StateDecl &state = model.stateBySymbol.at(shadow.symbol);
-                *stream << indent << "bool state_changed = false;\n";
+                stream << indent << "bool state_changed = false;\n";
                 if (isWideLogicWidth(state.width))
                 {
-                    *stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", " << shadow.dataField
-                            << ", " << state.width << ")) {\n";
-                    *stream << indent << "    state_changed = true;\n";
-                    *stream << indent << "}\n";
+                    stream << indent << "if (grhsim_assign_words(" << state.fieldName << ", " << shadow.dataField
+                           << ", " << state.width << ")) {\n";
+                    stream << indent << "    state_changed = true;\n";
+                    stream << indent << "}\n";
                 }
                 else
                 {
-                    *stream << indent << "if (" << state.fieldName << " != " << shadow.dataField << ") {\n";
-                    *stream << indent << "    " << state.fieldName << " = " << shadow.dataField << ";\n";
-                    *stream << indent << "    state_changed = true;\n";
-                    *stream << indent << "}\n";
+                    stream << indent << "if (" << state.fieldName << " != " << shadow.dataField << ") {\n";
+                    stream << indent << "    " << state.fieldName << " = " << shadow.dataField << ";\n";
+                    stream << indent << "    state_changed = true;\n";
+                    stream << indent << "}\n";
                 }
-                *stream << indent << "if (state_changed) {\n";
+                stream << indent << "if (state_changed) {\n";
                 const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
                     emitBitMaskSetStatements(
-                        *stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                        stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
                 }
-                *stream << indent << "}\n";
-                *stream << indent << shadow.touchedField << " = false;\n";
+                stream << indent << "}\n";
+                stream << indent << shadow.touchedField << " = false;\n";
             };
-            auto emitCommitWriteBody = [&](const WriteDecl &write, std::string_view indent)
+            auto emitCommitWriteBody = [&](LimitedOutputStream &stream, const WriteDecl &write, std::string_view indent)
             {
                 const StateDecl &state = model.stateBySymbol.find(write.symbol)->second;
-                *stream << indent << "bool state_changed = false;\n";
+                stream << indent << "bool state_changed = false;\n";
                 if (state.kind == StateDecl::Kind::Memory)
                 {
-                    *stream << indent << "const std::size_t row = " << write.shadowAddrField << ";\n";
-                    *stream << indent << "if (row < " << state.rowCount << ") {\n";
+                    stream << indent << "const std::size_t row = " << write.shadowAddrField << ";\n";
+                    stream << indent << "if (row < " << state.rowCount << ") {\n";
                     if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                     {
                         if (isWideLogicWidth(state.width))
                         {
-                            *stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
-                                    << write.shadowDataField << ", " << state.width << ")) {\n";
-                            *stream << indent << "        state_changed = true;\n";
-                            *stream << indent << "    }\n";
+                            stream << indent << "    if (grhsim_assign_words(" << state.fieldName << "[row], "
+                                   << write.shadowDataField << ", " << state.width << ")) {\n";
+                            stream << indent << "        state_changed = true;\n";
+                            stream << indent << "    }\n";
                         }
                         else
                         {
-                            *stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
-                                    << "), " << state.width << "));\n";
-                            *stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
-                            *stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
-                            *stream << indent << "        state_changed = true;\n";
-                            *stream << indent << "    }\n";
+                            stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
+                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
+                                   << "), " << state.width << "));\n";
+                            stream << indent << "    if (" << state.fieldName << "[row] != next_value) {\n";
+                            stream << indent << "        " << state.fieldName << "[row] = next_value;\n";
+                            stream << indent << "        state_changed = true;\n";
+                            stream << indent << "    }\n";
                         }
                     }
                     else
                     {
                         if (isWideLogicWidth(state.width))
                         {
-                            *stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
-                                    << write.shadowDataField << ", " << write.shadowMaskField << ", " << state.width << ")) {\n";
-                            *stream << indent << "        state_changed = true;\n";
-                            *stream << indent << "    }\n";
+                            stream << indent << "    if (grhsim_apply_masked_words_inplace(" << state.fieldName << "[row], "
+                                   << write.shadowDataField << ", " << write.shadowMaskField << ", " << state.width
+                                   << ")) {\n";
+                            stream << indent << "        state_changed = true;\n";
+                            stream << indent << "    }\n";
                         }
                         else
                         {
-                            *stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowMaskField
-                                    << "), " << state.width << "));\n";
-                            *stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
-                                    << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
-                                    << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
-                                    << "), " << state.width << ")) & mask));\n";
-                            *stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
-                            *stream << indent << "        " << state.fieldName << "[row] = merged;\n";
-                            *stream << indent << "        state_changed = true;\n";
-                            *stream << indent << "    }\n";
+                            stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
+                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowMaskField
+                                   << "), " << state.width << "));\n";
+                            stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
+                                   << ">((" << state.fieldName << "[row] & ~mask) | (static_cast<"
+                                   << logicCppType(state.width)
+                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << write.shadowDataField
+                                   << "), " << state.width << ")) & mask));\n";
+                            stream << indent << "    if (" << state.fieldName << "[row] != merged) {\n";
+                            stream << indent << "        " << state.fieldName << "[row] = merged;\n";
+                            stream << indent << "        state_changed = true;\n";
+                            stream << indent << "    }\n";
                         }
                     }
-                    *stream << indent << "}\n";
+                    stream << indent << "}\n";
                 }
-                *stream << indent << "if (state_changed) {\n";
+                stream << indent << "if (state_changed) {\n";
                 const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
                     emitBitMaskSetStatements(
-                        *stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                        stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
                 }
-                *stream << indent << "}\n";
-                *stream << indent << write.shadowTouchedField << " = false;\n";
+                stream << indent << "}\n";
+                stream << indent << write.shadowTouchedField << " = false;\n";
             };
             *stream << "void " << className << "::commit_state_updates()\n{\n";
             *stream << "    // Apply touched next-state shadows after the scheduled combinational phase completes.\n";
@@ -8033,18 +8434,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::size_t touchedIndex = 0; touchedIndex < touched_state_shadow_count_; ++touchedIndex) {\n";
                 *stream << "        const std::uint32_t shadowIndex = touched_state_shadow_indices_[touchedIndex];\n";
                 *stream << "        touched_state_shadow_flags_[shadowIndex] = 0;\n";
-                *stream << "        switch (shadowIndex) {\n";
-                for (const auto &shadow : model.stateShadows)
+                for (std::size_t chunkIndex = 0; chunkIndex < stateShadowCommitChunks.size(); ++chunkIndex)
                 {
-                    *stream << "        case " << shadow.emitIndex << "u:\n";
-                    *stream << "            if (" << shadow.touchedField << ") {\n";
-                    emitCommitStateShadowBody(shadow, "                ");
-                    *stream << "            }\n";
-                    *stream << "            break;\n";
+                    const auto &chunk = stateShadowCommitChunks[chunkIndex];
+                    *stream << (chunkIndex == 0 ? "        if " : "        else if ") << "(shadowIndex <= UINT32_C("
+                            << chunk.maxDispatchIndex << ")) {\n";
+                    *stream << "            " << chunk.methodName << "(shadowIndex);\n";
+                    *stream << "        }\n";
                 }
-                *stream << "        default:\n";
-                *stream << "            break;\n";
-                *stream << "        }\n";
                 *stream << "    }\n";
                 *stream << "    touched_state_shadow_count_ = 0;\n";
             }
@@ -8053,22 +8450,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::size_t touchedIndex = 0; touchedIndex < touched_write_count_; ++touchedIndex) {\n";
                 *stream << "        const std::uint32_t writeIndex = touched_write_indices_[touchedIndex];\n";
                 *stream << "        touched_write_flags_[writeIndex] = 0;\n";
-                *stream << "        switch (writeIndex) {\n";
-                for (const auto &write : model.writes)
+                for (std::size_t chunkIndex = 0; chunkIndex < writeCommitChunks.size(); ++chunkIndex)
                 {
-                    if (write.kind != StateDecl::Kind::Memory)
-                    {
-                        continue;
-                    }
-                    *stream << "        case " << write.shadowIndex << "u:\n";
-                    *stream << "            if (" << write.shadowTouchedField << ") {\n";
-                    emitCommitWriteBody(write, "                ");
-                    *stream << "            }\n";
-                    *stream << "            break;\n";
+                    const auto &chunk = writeCommitChunks[chunkIndex];
+                    *stream << (chunkIndex == 0 ? "        if " : "        else if ") << "(writeIndex <= UINT32_C("
+                            << chunk.maxDispatchIndex << ")) {\n";
+                    *stream << "            " << chunk.methodName << "(writeIndex);\n";
+                    *stream << "        }\n";
                 }
-                *stream << "        default:\n";
-                *stream << "            break;\n";
-                *stream << "        }\n";
                 *stream << "    }\n";
                 *stream << "    touched_write_count_ = 0;\n";
             }
@@ -8353,6 +8742,85 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
         }
 
+        std::size_t stateCommitPathIndex = 0;
+        for (const auto &chunk : stateShadowCommitChunks)
+        {
+            const std::filesystem::path &chunkPath = stateCommitPaths[stateCommitPathIndex++];
+            if (auto error = ensureOutputDirectory(chunkPath))
+            {
+                reportError(*error, graph.symbol());
+                result.success = false;
+                return result;
+            }
+            auto stream = std::make_unique<LimitedOutputStream>(chunkPath, maxOutputFileBytes);
+            if (!stream->isOpen())
+            {
+                result.success = false;
+                return result;
+            }
+            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t shadowIndex)\n{\n";
+            *stream << "    switch (shadowIndex) {\n";
+            for (std::size_t shadowIndex : chunk.indices)
+            {
+                const auto &shadow = model.stateShadows[shadowIndex];
+                *stream << "    case " << shadow.emitIndex << "u:\n";
+                *stream << "        if (" << shadow.touchedField << ") {\n";
+                emitCommitStateShadowBody(*stream, shadow, "            ");
+                *stream << "        }\n";
+                *stream << "        break;\n";
+            }
+            *stream << "    default:\n";
+            *stream << "        break;\n";
+            *stream << "    }\n";
+            *stream << "}\n";
+            if (auto error = finalizeOutputFile(*stream, chunkPath))
+            {
+                reportError(*error, chunkPath.string());
+                result.success = false;
+                return result;
+            }
+        }
+
+        for (const auto &chunk : writeCommitChunks)
+        {
+            const std::filesystem::path &chunkPath = stateCommitPaths[stateCommitPathIndex++];
+            if (auto error = ensureOutputDirectory(chunkPath))
+            {
+                reportError(*error, graph.symbol());
+                result.success = false;
+                return result;
+            }
+            auto stream = std::make_unique<LimitedOutputStream>(chunkPath, maxOutputFileBytes);
+            if (!stream->isOpen())
+            {
+                result.success = false;
+                return result;
+            }
+            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t writeIndex)\n{\n";
+            *stream << "    switch (writeIndex) {\n";
+            for (std::size_t writeIndex : chunk.indices)
+            {
+                const auto &write = model.writes[writeIndex];
+                *stream << "    case " << write.shadowIndex << "u:\n";
+                *stream << "        if (" << write.shadowTouchedField << ") {\n";
+                emitCommitWriteBody(*stream, write, "            ");
+                *stream << "        }\n";
+                *stream << "        break;\n";
+            }
+            *stream << "    default:\n";
+            *stream << "        break;\n";
+            *stream << "    }\n";
+            *stream << "}\n";
+            if (auto error = finalizeOutputFile(*stream, chunkPath))
+            {
+                reportError(*error, chunkPath.string());
+                result.success = false;
+                return result;
+            }
+        }
+
         {
             if (auto error = ensureOutputDirectory(evalPath))
             {
@@ -8552,6 +9020,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << ' ' << stateInitPath.filename().string();
             }
+            for (const auto &stateCommitPath : stateCommitPaths)
+            {
+                *stream << ' ' << stateCommitPath.filename().string();
+            }
             for (const auto &schedPath : schedPaths)
             {
                 *stream << ' ' << schedPath.filename().string();
@@ -8582,6 +9054,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
         for (const auto &stateInitPath : stateInitPaths)
         {
             result.artifacts.push_back(stateInitPath.string());
+        }
+        for (const auto &stateCommitPath : stateCommitPaths)
+        {
+            result.artifacts.push_back(stateCommitPath.string());
         }
         for (const auto &schedPath : schedPaths)
         {

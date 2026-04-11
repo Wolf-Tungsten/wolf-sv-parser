@@ -1577,7 +1577,8 @@ int main()
     {
         return fail("Missing wide output field declaration");
     }
-    if (sched.find("grhsim_assign_words") == std::string::npos ||
+    if ((sched.find("grhsim_assign_words") == std::string::npos &&
+         state.find("grhsim_assign_words") == std::string::npos) ||
         (sched.find("grhsim_merge_words_masked") == std::string::npos &&
          state.find("grhsim_merge_words_masked") == std::string::npos))
     {

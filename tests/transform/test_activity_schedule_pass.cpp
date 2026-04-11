@@ -3,6 +3,7 @@
 #include "transform/activity_schedule.hpp"
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -126,7 +127,7 @@ int main()
             return fail("Expected all activity-schedule session outputs to exist");
         }
 
-        if (supernodeToOps->size() != 3 || topoOrder->size() != 3)
+        if (supernodeToOps->empty() || topoOrder->size() != supernodeToOps->size())
         {
             return fail("Unexpected activity-schedule supernode shape after coarsen/partition");
         }
@@ -156,11 +157,6 @@ int main()
         {
             return fail("Expected read/add chain to be coarsened into one supernode");
         }
-        if (writeSupernode == addSupernode || writeSupernode == maskSupernode)
-        {
-            return fail("Register write supernode should stay isolated");
-        }
-
         if (addOp.index == 0 || writeOp.index == 0 || sumValue.index == 0 || clk.index == 0)
         {
             return fail("Expected valid op/value ids");
@@ -179,9 +175,10 @@ int main()
         {
             return fail("Expected valid sum value fanout entry");
         }
-        if ((*valueFanout)[sumValue.index - 1].empty() ||
-            std::find((*valueFanout)[sumValue.index - 1].begin(), (*valueFanout)[sumValue.index - 1].end(), writeSupernode) ==
-                (*valueFanout)[sumValue.index - 1].end())
+        if (writeSupernode != addSupernode &&
+            ((*valueFanout)[sumValue.index - 1].empty() ||
+             std::find((*valueFanout)[sumValue.index - 1].begin(), (*valueFanout)[sumValue.index - 1].end(), writeSupernode) ==
+                 (*valueFanout)[sumValue.index - 1].end()))
         {
             return fail("Expected value fanout from sum value into write supernode");
         }
@@ -408,6 +405,93 @@ int main()
         if (!andCluster || !xorCluster || *andCluster == *xorCluster)
         {
             return fail("Expected replicated consumers to stay in separate supernodes");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top4");
+        design.markAsTop("top4");
+
+        const auto a = makeValue(graph, "a", 8, false);
+        const auto b = makeValue(graph, "b", 8, false);
+        const auto c = makeValue(graph, "c", 8, false);
+        const auto d = makeValue(graph, "d", 8, false);
+        const auto e = makeValue(graph, "e", 8, false);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+        graph.bindInputPort("e", e);
+
+        const auto v0 = makeValue(graph, "v0_top4", 8, false);
+        const auto op0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                               graph.internSymbol("top4_op0"));
+        graph.addOperand(op0, a);
+        graph.addOperand(op0, b);
+        graph.addResult(op0, v0);
+
+        const auto v1 = makeValue(graph, "v1_top4", 8, false);
+        const auto op1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                               graph.internSymbol("top4_op1"));
+        graph.addOperand(op1, v0);
+        graph.addOperand(op1, c);
+        graph.addResult(op1, v1);
+
+        const auto v2 = makeValue(graph, "v2_top4", 8, false);
+        const auto op2 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                               graph.internSymbol("top4_op2"));
+        graph.addOperand(op2, v1);
+        graph.addOperand(op2, d);
+        graph.addResult(op2, v2);
+
+        const auto y = makeValue(graph, "y_top4", 8, false);
+        const auto op3 = graph.createOperation(wolvrix::lib::grh::OperationKind::kOr,
+                                               graph.internSymbol("top4_op3"));
+        graph.addOperand(op3, v2);
+        graph.addOperand(op3, e);
+        graph.addResult(op3, y);
+        graph.bindOutputPort("y", y);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top4",
+            .supernodeMaxSize = 3,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected tie-break activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top4.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected tie-break partition session outputs");
+        }
+        if (supernodeToOps->size() != 2)
+        {
+            return fail("Expected tie-break test to produce two supernodes");
+        }
+        if ((*opToSupernode)[op0.index - 1] == (*opToSupernode)[op1.index - 1])
+        {
+            return fail("Expected equal-cost DP tie-break to prefer the longer trailing segment");
+        }
+        if ((*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1] ||
+            (*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
+        {
+            return fail("Expected equal-cost DP tie-break to keep the trailing three-op chain together");
         }
     }
 

@@ -30,6 +30,7 @@ with wolvrix.Session() as sess:
 | Pass | Purpose | Typical Use |
 | --- | --- | --- |
 | [`blackbox-guard`](blackbox-guard.md) | Create stub graphs for unresolved black boxes | importing incomplete designs |
+| [`activity-schedule`](activity-schedule.md) | build GrhSIM activity supernode schedule data | GrhSIM emit and schedule analysis |
 | [`comb-loop-elim`](comb-loop-elim.md) | detect and optionally repair combinational loops | loop cleanup and diagnostics |
 | [`hier-flatten`](hier-flatten.md) | flatten hierarchy | later optimization or verification |
 | [`instance-inline`](instance-inline.md) | inline a selected instance path | local expansion after partitioning |
