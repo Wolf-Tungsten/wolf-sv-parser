@@ -973,6 +973,33 @@ namespace
         return design;
     }
 
+    Design buildLocalTempDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId a = makeLogicValue(graph, "a", 8);
+        ValueId b = makeLogicValue(graph, "b", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        ValueId sumTmp = makeLogicValue(graph, "sum_tmp", 8);
+        OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol("sum_tmp_add"));
+        graph.addOperand(add, a);
+        graph.addOperand(add, b);
+        graph.addResult(add, sumTmp);
+
+        ValueId y = makeLogicValue(graph, "y", 8);
+        OperationId xorr = graph.createOperation(OperationKind::kXor, graph.internSymbol("y_xor"));
+        graph.addOperand(xorr, sumTmp);
+        graph.addOperand(xorr, b);
+        graph.addResult(xorr, y);
+        graph.bindOutputPort("y", y);
+
+        return design;
+    }
+
     Design buildInvalidRegisterWriteDesign()
     {
         Design design;
@@ -2144,6 +2171,16 @@ int main()
         {
             return fail("Missing register write conflict getter emission");
         }
+        const std::string regWriteHeaderText = readFile(regWriteHeaderPath);
+        const std::string regWriteStateText = readFile(regWriteStatePath);
+        if (countSubstring(regWriteStateText, "prev_evt_clk_") != 1)
+        {
+            return fail("register-write interaction should share one previous-event clock sample across clk users");
+        }
+        if (countSubstring(regWriteHeaderText, "seen_evt_conflict_write_") != 2)
+        {
+            return fail("register-write interaction should keep per-op event-seen guards for repeated eval visits");
+        }
 
         const std::filesystem::path regWriteHarnessPath = regWriteDir / "grhsim_top_harness.cpp";
         {
@@ -2216,6 +2253,84 @@ int main()
             return fail("register-write harness failed to run");
         }
 
+        const std::filesystem::path localTempDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_local_temp";
+        std::filesystem::remove_all(localTempDir);
+        Design localTempDesign = buildLocalTempDesign();
+        EmitDiagnostics localTempDiag;
+        EmitResult localTempResult;
+        if (!emitWithActivitySchedule(localTempDesign, localTempDir, localTempDiag, localTempResult))
+        {
+            return fail("local-temp activity-schedule pass failed");
+        }
+        if (!localTempResult.success || localTempDiag.hasError())
+        {
+            return fail("local-temp emit failed");
+        }
+        const std::string localTempHeaderText = readFile(localTempDir / "grhsim_top.hpp");
+        const std::string localTempStateText = readFile(localTempDir / "grhsim_top_state.cpp");
+        std::string localTempSchedText;
+        const std::vector<std::filesystem::path> localTempSchedFiles =
+            collectSchedFiles(localTempDir, "grhsim_top_sched_");
+        if (localTempSchedFiles.empty())
+        {
+            return fail("local-temp schedule files missing");
+        }
+        for (const auto &schedPath : localTempSchedFiles)
+        {
+            localTempSchedText += readFile(schedPath);
+        }
+        if (localTempHeaderText.find("val_sum_tmp_") != std::string::npos ||
+            localTempStateText.find("val_sum_tmp_") != std::string::npos)
+        {
+            return fail("same-supernode temporary value should not be materialized into grhsim state");
+        }
+        if (localTempSchedText.find("const auto val_sum_tmp_") == std::string::npos)
+        {
+            return fail("same-supernode temporary value should be emitted as a local temporary");
+        }
+        const std::filesystem::path localTempHarnessPath = localTempDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(localTempHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create local-temp harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(5);\n";
+            harness << "    sim.b = static_cast<std::uint8_t>(3);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.y != static_cast<std::uint8_t>((5 + 3) ^ 3)) return 1;\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(10);\n";
+            harness << "    sim.b = static_cast<std::uint8_t>(12);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (sim.y != static_cast<std::uint8_t>((10 + 12) ^ 12)) return 2;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::filesystem::path localTempHarnessExe = localTempDir / "grhsim_top_harness";
+        std::string localTempCompileCmd =
+            "c++ -std=c++20 -O2 -I" + localTempDir.string() +
+            " " + (localTempDir / "grhsim_top_state.cpp").string() +
+            " " + (localTempDir / "grhsim_top_eval.cpp").string();
+        for (const auto &schedPath : localTempSchedFiles)
+        {
+            localTempCompileCmd += " " + schedPath.string();
+        }
+        localTempCompileCmd += " " + localTempHarnessPath.string() + " -o " + localTempHarnessExe.string();
+        if (std::system(localTempCompileCmd.c_str()) != 0)
+        {
+            return fail("local-temp harness failed to compile");
+        }
+        if (std::system(localTempHarnessExe.string().c_str()) != 0)
+        {
+            return fail("local-temp harness failed to run");
+        }
+
         const std::filesystem::path gatedDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_gated_clock";
         std::filesystem::remove_all(gatedDir);
         Design gatedDesign = buildGatedClockDesign();
@@ -2252,14 +2367,25 @@ int main()
         {
             gatedSchedText += readFile(schedPath);
         }
+        const std::string gatedStateText = readFile(gatedStatePath);
         const std::string gatedEvalText = readFile(gatedEvalPath);
-        if (gatedSchedText.find("prev_evt_gated_write") == std::string::npos)
+        if (countSubstring(gatedStateText, "prev_evt_gated_clk_") != 1)
         {
-            return fail("gated-clock exact event logic should keep per-op previous event samples");
+            return fail("gated-clock emit should share one previous-event baseline per gated clock value");
+        }
+        if (gatedSchedText.find("seen_evt_gated_write") == std::string::npos ||
+            gatedSchedText.find("seen_evt_gated_aux_write") == std::string::npos)
+        {
+            return fail("gated-clock exact event logic should keep per-op event-seen guards");
         }
         if (gatedEvalText.find("while (active_word_count_ != 0)") == std::string::npos)
         {
             return fail("gated-clock eval should iterate until the activity schedule reaches a fixed point");
+        }
+        if (gatedEvalText.find("seen_evt_gated_write") == std::string::npos ||
+            gatedEvalText.find("prev_evt_gated_clk_") == std::string::npos)
+        {
+            return fail("gated-clock eval should reset per-op seen guards and refresh shared baselines");
         }
         if (gatedSchedText.find("grhsim_event_posedge(") == std::string::npos)
         {
@@ -2742,6 +2868,35 @@ int main()
         if (invalidResult.success || !invalidDiag.hasError())
         {
             return fail("invalid register-write emit should fail validation");
+        }
+
+        const std::filesystem::path limitDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_size_limit";
+        std::filesystem::remove_all(limitDir);
+        std::filesystem::create_directories(limitDir);
+        Design limitDesign = buildDesign(wideMemInitPath.string());
+        SessionStore limitSession;
+        if (!runActivitySchedule(limitDesign, limitSession))
+        {
+            return fail("size-limit activity-schedule pass failed");
+        }
+        EmitOptions limitOptions;
+        limitOptions.outputDir = limitDir.string();
+        limitOptions.session = &limitSession;
+        limitOptions.sessionPathPrefix = std::string("top");
+        limitOptions.attributes["sched_batch_max_ops"] = "8";
+        limitOptions.attributes["sched_batch_max_estimated_lines"] = "96";
+        limitOptions.attributes["emit_parallelism"] = "2";
+        limitOptions.maxOutputFileBytes = 256;
+        EmitDiagnostics limitDiag;
+        EmitGrhSimCpp limitEmitter(&limitDiag);
+        EmitResult limitResult = limitEmitter.emit(limitDesign, limitOptions);
+        if (limitResult.success || !limitDiag.hasError())
+        {
+            return fail("grhsim emit should fail when a generated cpp artifact exceeds the byte limit");
+        }
+        if (!std::filesystem::exists(limitDir / "grhsim_top_runtime.hpp"))
+        {
+            return fail("size-limited grhsim emit should keep the oversized partial artifact for inspection");
         }
 
         return 0;

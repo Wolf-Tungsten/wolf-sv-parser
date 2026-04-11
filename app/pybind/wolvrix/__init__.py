@@ -288,15 +288,20 @@ class Session:
         design: str,
         output: str,
         top: list[str] | None = None,
+        max_cpp_file_bytes: int | None = None,
         **named_args,
     ) -> list[dict]:
         self._ensure_open()
+        if max_cpp_file_bytes is not None:
+            named_args = dict(named_args)
+            named_args["max_cpp_file_bytes"] = max_cpp_file_bytes
         _compile_emit_grhsim_cpp_kwargs(named_args)
         success, diagnostics = _native.session_emit_grhsim_cpp(
             self._capsule,
             design=design,
             output=output,
             top=top or [],
+            max_cpp_file_bytes=max_cpp_file_bytes,
         )
         return self._complete_action(
             "emit_grhsim_cpp",
@@ -515,6 +520,10 @@ def _compile_emit_verilator_repcut_package_kwargs(named: dict[str, Any]) -> None
 
 def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
     local = dict(named)
+    max_cpp_file_bytes = local.pop("max_cpp_file_bytes", None)
+    if max_cpp_file_bytes is not None:
+        if not isinstance(max_cpp_file_bytes, int) or max_cpp_file_bytes < 0:
+            raise ValueError("emit_grhsim_cpp max_cpp_file_bytes must be a non-negative integer")
     _ensure_no_extra_named("emit_grhsim_cpp", local)
 
 

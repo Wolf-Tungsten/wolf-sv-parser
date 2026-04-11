@@ -5,6 +5,7 @@
 #include "core/grh.hpp"
 #include "core/transform.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -39,6 +40,7 @@ namespace wolvrix::lib::emit
         std::map<std::string, std::string, std::less<>> attributes;
         bool traceUnderscoreValues = false;
         bool splitModules = false;
+        std::uint64_t maxOutputFileBytes = UINT64_C(4) * UINT64_C(1024) * UINT64_C(1024) * UINT64_C(1024);
         wolvrix::lib::transform::SessionStore *session = nullptr;
         std::optional<std::string> sessionPathPrefix;
     };

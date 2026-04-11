@@ -141,9 +141,10 @@ namespace wolvrix::app::pybind
         const char *designKey = nullptr;
         const char *output = nullptr;
         PyObject *topListObj = Py_None;
-        static const char *kwlist[] = {"session", "design", "output", "top", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|O", const_cast<char **>(kwlist),
-                                         &sessionObj, &designKey, &output, &topListObj))
+        PyObject *maxCppFileBytesObj = Py_None;
+        static const char *kwlist[] = {"session", "design", "output", "top", "max_cpp_file_bytes", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OO", const_cast<char **>(kwlist),
+                                         &sessionObj, &designKey, &output, &topListObj, &maxCppFileBytesObj))
         {
             return nullptr;
         }
@@ -183,6 +184,16 @@ namespace wolvrix::app::pybind
         if (options.topOverrides.size() == 1)
         {
             options.sessionPathPrefix = options.topOverrides.front();
+        }
+        if (maxCppFileBytesObj != Py_None)
+        {
+            const unsigned long long parsed = PyLong_AsUnsignedLongLong(maxCppFileBytesObj);
+            if (PyErr_Occurred())
+            {
+                PyErr_SetString(PyExc_ValueError, "max_cpp_file_bytes must be a non-negative integer");
+                return nullptr;
+            }
+            options.maxOutputFileBytes = static_cast<std::uint64_t>(parsed);
         }
 
         const auto result = emitter.emit(*design, options);
