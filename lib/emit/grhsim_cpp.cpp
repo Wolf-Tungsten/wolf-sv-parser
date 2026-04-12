@@ -141,34 +141,49 @@ namespace wolvrix::lib::emit
         }
 
         constexpr std::size_t kInvalidIndex = static_cast<std::size_t>(-1);
+        constexpr std::size_t kActivationTableThreshold = 32;
 
         std::size_t bitWordCount(std::size_t bitCount) noexcept
         {
             return (bitCount + 63u) / 64u;
         }
 
-        std::map<std::size_t, std::uint64_t> buildBitWordMasks(const std::vector<uint32_t> &indices)
-        {
-            std::map<std::size_t, std::uint64_t> masks;
-            for (uint32_t index : indices)
-            {
-                const std::size_t word = static_cast<std::size_t>(index) >> 6;
-                const std::size_t bit = static_cast<std::size_t>(index) & 63u;
-                masks[word] |= (UINT64_C(1) << bit);
-            }
-            return masks;
-        }
-
-        void emitBitMaskSetStatements(std::ostream &stream,
-                                      std::string_view bitsExpr,
-                                      std::string_view activeWordCountExpr,
+        void emitActivationStatements(std::ostream &stream,
+                                      std::string_view activeExpr,
+                                      std::string_view activeCountExpr,
                                       const std::vector<uint32_t> &indices,
                                       std::string_view indent)
         {
-            for (const auto &[word, mask] : buildBitWordMasks(indices))
+            if (indices.empty())
             {
-                stream << indent << "grhsim_set_word_mask(" << bitsExpr << ", " << activeWordCountExpr << ", " << word
-                       << ", UINT64_C(" << mask << "));\n";
+                return;
+            }
+            if (indices.size() >= kActivationTableThreshold)
+            {
+                stream << indent << "{\n";
+                stream << indent << "    static constexpr std::uint32_t kActivationIndices[] = {";
+                for (std::size_t i = 0; i < indices.size(); ++i)
+                {
+                    if ((i % 16u) == 0u)
+                    {
+                        stream << "\n" << indent << "        ";
+                    }
+                    stream << indices[i] << "u";
+                    if (i + 1u != indices.size())
+                    {
+                        stream << ", ";
+                    }
+                }
+                stream << "\n" << indent << "    };\n";
+                stream << indent << "    grhsim_activate_supernodes(" << activeExpr << ", " << activeCountExpr
+                       << ", kActivationIndices, " << indices.size() << "u);\n";
+                stream << indent << "}\n";
+                return;
+            }
+            for (uint32_t index : indices)
+            {
+                stream << indent << "grhsim_activate_supernode(" << activeExpr << ", " << activeCountExpr << ", "
+                       << index << ");\n";
             }
         }
 
@@ -1036,13 +1051,6 @@ namespace wolvrix::lib::emit
             std::vector<uint32_t> supernodeIds;
         };
 
-        struct BatchWordSegment
-        {
-            std::size_t wordIndex = 0;
-            std::uint64_t wordMask = 0;
-            std::vector<uint32_t> supernodeIds;
-        };
-
         enum class ValueSlotScalarKind
         {
             kBool,
@@ -1539,10 +1547,7 @@ namespace wolvrix::lib::emit
             {
                 return;
             }
-            for (uint32_t succ : it->second)
-            {
-                stream << indent << "grhsim_set_bit(supernode_active_curr_, active_word_count_, " << succ << ");\n";
-            }
+            emitActivationStatements(stream, "supernode_active_curr_", "active_count_", it->second, indent);
         }
 
         std::string renderScalarLogicExpr(const Graph &graph, ValueId resultValue, const ScalarLogicExpr &rhs)
@@ -3428,39 +3433,6 @@ namespace wolvrix::lib::emit
                     model.valueStorageClassByValue.insert_or_assign(valueId, storageClass);
                 }
             }
-        }
-
-        std::vector<BatchWordSegment> buildBatchWordSegments(const std::vector<uint32_t> &supernodeIds)
-        {
-            std::vector<BatchWordSegment> segments;
-            BatchWordSegment current;
-            bool hasCurrent = false;
-            auto flushCurrent = [&]() {
-                if (!hasCurrent || current.supernodeIds.empty())
-                {
-                    return;
-                }
-                segments.push_back(std::move(current));
-                current = BatchWordSegment{};
-                hasCurrent = false;
-            };
-
-            for (uint32_t supernodeId : supernodeIds)
-            {
-                const std::size_t wordIndex = static_cast<std::size_t>(supernodeId) >> 6;
-                const std::uint64_t bitMask = UINT64_C(1) << (static_cast<std::size_t>(supernodeId) & 63u);
-                if (!hasCurrent || current.wordIndex != wordIndex)
-                {
-                    flushCurrent();
-                    current.wordIndex = wordIndex;
-                    current.wordMask = 0;
-                    hasCurrent = true;
-                }
-                current.wordMask |= bitMask;
-                current.supernodeIds.push_back(supernodeId);
-            }
-            flushCurrent();
-            return segments;
         }
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
@@ -5394,50 +5366,40 @@ namespace wolvrix::lib::emit
             }
             stream << "void " << className << "::eval_batch_" << batch.index << "(EvalScratchFrame &eval_frame)\n{\n";
             stream << "    // Batch " << batch.index << ": evaluate a contiguous supernode range in topo order.\n";
-            const std::vector<BatchWordSegment> wordSegments = buildBatchWordSegments(batch.supernodeIds);
-            for (std::size_t segmentIndex = 0; segmentIndex < wordSegments.size(); ++segmentIndex)
+            for (uint32_t supernodeId : batch.supernodeIds)
             {
-                const BatchWordSegment &segment = wordSegments[segmentIndex];
                 stream << "\n";
-                stream << "    // Word segment " << segmentIndex << ": skip this contiguous topo slice when none of its activity bits are set.\n";
-                stream << "    if ((supernode_active_curr_[" << segment.wordIndex << "] & UINT64_C("
-                       << segment.wordMask << ")) == 0) {\n";
-                stream << "        goto word_segment_" << segmentIndex << "_end;\n";
+                stream << "    // Supernode " << supernodeId << ": run when its activity flag is set.\n";
+                stream << "    if (!grhsim_is_supernode_active(supernode_active_curr_, " << supernodeId << ")) {\n";
+                stream << "        goto supernode_" << supernodeId << "_end;\n";
                 stream << "    }\n";
-                for (uint32_t supernodeId : segment.supernodeIds)
+                stream << "    grhsim_deactivate_supernode(supernode_active_curr_, active_count_, " << supernodeId << ");\n";
+                stream << "    {\n";
+                const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
+                    collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
+                std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
+                    concatPrefixTemps;
+                for (const auto &decl : concatPrefixCacheDecls)
                 {
-                    stream << "    // Supernode " << supernodeId << ": run when its activity bit is set.\n";
-                    stream << "    if ((supernode_active_curr_[" << (supernodeId >> 6) << "] & UINT64_C("
-                       << (UINT64_C(1) << (supernodeId & 63u)) << ")) == 0) {\n";
-                    stream << "        goto supernode_" << supernodeId << "_end;\n";
-                    stream << "    }\n";
-                    stream << "    grhsim_clear_bit(supernode_active_curr_, active_word_count_, " << supernodeId << ");\n";
-                    stream << "    {\n";
-                    const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
-                        collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
-                    std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
-                        concatPrefixTemps;
-                    for (const auto &decl : concatPrefixCacheDecls)
+                    concatPrefixTemps.emplace(decl.key, decl.tempName);
+                }
+                std::size_t opIndex = 0;
+                std::size_t nextConcatPrefixDecl = 0;
+                for (const auto opId : schedule.supernodeToOps[supernodeId])
+                {
+                    while (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
+                           concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == opIndex)
                     {
-                        concatPrefixTemps.emplace(decl.key, decl.tempName);
+                        const auto &decl = concatPrefixCacheDecls[nextConcatPrefixDecl];
+                        stream << "        const auto " << decl.tempName << " = grhsim_cat_prefix("
+                               << valueRef(model, decl.key.lhs) << ", " << decl.key.lhsWidth << ", "
+                               << decl.key.rhsWidth << ");\n";
+                        ++nextConcatPrefixDecl;
                     }
-                    std::size_t opIndex = 0;
-                    std::size_t nextConcatPrefixDecl = 0;
-                    for (const auto opId : schedule.supernodeToOps[supernodeId])
-                    {
-                        while (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
-                               concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == opIndex)
-                        {
-                            const auto &decl = concatPrefixCacheDecls[nextConcatPrefixDecl];
-                            stream << "        const auto " << decl.tempName << " = grhsim_cat_prefix("
-                                   << valueRef(model, decl.key.lhs) << ", " << decl.key.lhsWidth << ", "
-                                   << decl.key.rhsWidth << ");\n";
-                            ++nextConcatPrefixDecl;
-                        }
-                        const Operation op = graph.getOperation(opId);
-                        const auto operands = op.operands();
-                        stream << "        // op " << op.symbolText() << "\n";
-                        switch (op.kind())
+                    const Operation op = graph.getOperation(opId);
+                    const auto operands = op.operands();
+                    stream << "        // op " << op.symbolText() << "\n";
+                    switch (op.kind())
                         {
                     case OperationKind::kConstant:
                     {
@@ -6153,12 +6115,10 @@ namespace wolvrix::lib::emit
                     default:
                         return emitError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
                     }
-                        ++opIndex;
+                    ++opIndex;
                 }
                 stream << "    }\n";
                 stream << "supernode_" << supernodeId << "_end:\n";
-                }
-                stream << "word_segment_" << segmentIndex << "_end:\n";
             }
             stream << "    return;\n";
             stream << "}\n";
@@ -8506,35 +8466,36 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
 }
 
 )CPP";
-            *stream << "template <typename BitWords>\n";
-            *stream << "inline void grhsim_set_word_mask(BitWords &bits,\n";
-            *stream << "                                std::size_t &activeWordCount,\n";
-            *stream << "                                std::size_t wordIndex,\n";
-            *stream << "                                std::uint64_t mask)\n{\n";
-            *stream << "    const std::uint64_t oldWord = bits[wordIndex];\n";
-            *stream << "    const std::uint64_t newWord = oldWord | mask;\n";
-            *stream << "    bits[wordIndex] = newWord;\n";
-            *stream << "    if (oldWord == UINT64_C(0) && newWord != UINT64_C(0)) {\n";
-            *stream << "        ++activeWordCount;\n";
+            *stream << "template <typename ActiveFlags>\n";
+            *stream << "inline void grhsim_activate_supernode(ActiveFlags &activeFlags,\n";
+            *stream << "                                      std::size_t &activeCount,\n";
+            *stream << "                                      std::size_t index)\n{\n";
+            *stream << "    if (activeFlags[index] == 0) {\n";
+            *stream << "        activeFlags[index] = 1;\n";
+            *stream << "        ++activeCount;\n";
             *stream << "    }\n";
             *stream << "}\n\n";
-            *stream << "template <typename BitWords>\n";
-            *stream << "inline void grhsim_set_bit(BitWords &bits, std::size_t &activeWordCount, std::size_t index)\n{\n";
-            *stream << "    grhsim_set_word_mask(bits, activeWordCount, index >> 6, UINT64_C(1) << (index & 63u));\n";
-            *stream << "}\n\n";
-            *stream << "template <typename BitWords>\n";
-            *stream << "inline void grhsim_clear_bit(BitWords &bits, std::size_t &activeWordCount, std::size_t index)\n{\n";
-            *stream << "    const std::size_t wordIndex = index >> 6;\n";
-            *stream << "    const std::uint64_t oldWord = bits[wordIndex];\n";
-            *stream << "    const std::uint64_t newWord = oldWord & ~(UINT64_C(1) << (index & 63u));\n";
-            *stream << "    bits[wordIndex] = newWord;\n";
-            *stream << "    if (oldWord != UINT64_C(0) && newWord == UINT64_C(0)) {\n";
-            *stream << "        --activeWordCount;\n";
+            *stream << "template <typename ActiveFlags>\n";
+            *stream << "inline void grhsim_deactivate_supernode(ActiveFlags &activeFlags,\n";
+            *stream << "                                        std::size_t &activeCount,\n";
+            *stream << "                                        std::size_t index)\n{\n";
+            *stream << "    if (activeFlags[index] != 0) {\n";
+            *stream << "        activeFlags[index] = 0;\n";
+            *stream << "        --activeCount;\n";
             *stream << "    }\n";
             *stream << "}\n\n";
-            *stream << "template <typename BitWords>\n";
-            *stream << "inline bool grhsim_test_bit(const BitWords &bits, std::size_t index)\n{\n";
-            *stream << "    return (bits[index >> 6] & (UINT64_C(1) << (index & 63u))) != 0;\n";
+            *stream << "template <typename ActiveFlags>\n";
+            *stream << "inline bool grhsim_is_supernode_active(const ActiveFlags &activeFlags, std::size_t index)\n{\n";
+            *stream << "    return activeFlags[index] != 0;\n";
+            *stream << "}\n\n";
+            *stream << "template <typename ActiveFlags>\n";
+            *stream << "inline void grhsim_activate_supernodes(ActiveFlags &activeFlags,\n";
+            *stream << "                                       std::size_t &activeCount,\n";
+            *stream << "                                       const std::uint32_t *indices,\n";
+            *stream << "                                       std::size_t count)\n{\n";
+            *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
+            *stream << "        grhsim_activate_supernode(activeFlags, activeCount, indices[i]);\n";
+            *stream << "    }\n";
             *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline void grhsim_mark_pending_write(std::array<std::uint32_t, N> &touchedIndices,\n";
@@ -9057,7 +9018,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
-            *stream << "    static constexpr std::size_t kSupernodeWordCount = (kSupernodeCount + 63u) / 64u;\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
             *stream << "    static constexpr std::size_t kStateShadowCount = " << model.stateShadows.size() << ";\n";
             *stream << "    static constexpr std::size_t kWriteCount = " << model.writes.size() << ";\n";
@@ -9183,8 +9143,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::unordered_map<std::uint64_t, FileHandleEntry> file_handles_;\n";
                 *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
             }
-            *stream << "    std::array<std::uint64_t, kSupernodeWordCount> supernode_active_curr_{};\n";
-            *stream << "    std::size_t active_word_count_ = 0;\n";
+            *stream << "    std::array<std::uint8_t, kSupernodeCount> supernode_active_curr_{};\n";
+            *stream << "    std::size_t active_count_ = 0;\n";
             if (!model.stateShadows.empty())
             {
                 *stream << "    std::array<std::uint32_t, kStateShadowCount> touched_state_shadow_indices_{};\n";
@@ -9404,8 +9364,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
             if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
             {
-                emitBitMaskSetStatements(
-                    stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                emitActivationStatements(
+                    stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
             }
             stream << indent << "}\n";
             stream << indent << shadowTouchedRef << " = 0;\n";
@@ -9475,8 +9435,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
             if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
             {
-                emitBitMaskSetStatements(
-                    stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                emitActivationStatements(
+                    stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
             }
             stream << indent << "}\n";
             stream << indent << writeTouchedRef << " = 0;\n";
@@ -9961,8 +9921,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
-                    emitBitMaskSetStatements(
-                        stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                    emitActivationStatements(
+                        stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
                 }
                 stream << indent << "}\n";
                 stream << indent << shadowTouchedRef << " = 0;\n";
@@ -10032,8 +9992,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
-                    emitBitMaskSetStatements(
-                        stream, "supernode_active_curr_", "active_word_count_", headIt->second, std::string(indent) + "    ");
+                    emitActivationStatements(
+                        stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
                 }
                 stream << indent << "}\n";
                 stream << indent << writeTouchedRef << " = 0;\n";
@@ -10419,8 +10379,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 break;
             case InitChunkSpec::Kind::kEvalState:
                 *stream << "    // Reset per-eval scheduling state.\n";
-                *stream << "    supernode_active_curr_.fill(UINT64_C(0));\n";
-                *stream << "    active_word_count_ = 0;\n";
+                *stream << "    supernode_active_curr_.fill(0);\n";
+                *stream << "    active_count_ = 0;\n";
                 if (!model.stateShadows.empty())
                 {
                     *stream << "    touched_state_shadow_indices_.fill(0);\n";
@@ -10580,15 +10540,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "    register_write_conflict_ = false;\n";
             *stream << "    if (initial_eval) {\n";
-            *stream << "        for (auto &word : supernode_active_curr_) {\n";
-            *stream << "            word = ~UINT64_C(0);\n";
-            *stream << "        }\n";
-            *stream << "        active_word_count_ = kSupernodeWordCount;\n";
-            if (!schedule.supernodeToOps.empty() && (schedule.supernodeToOps.size() & 63u) != 0)
-            {
-                const std::uint64_t tailMask = (UINT64_C(1) << (schedule.supernodeToOps.size() & 63u)) - 1u;
-                *stream << "        supernode_active_curr_[kSupernodeWordCount - 1] &= UINT64_C(" << tailMask << ");\n";
-            }
+                *stream << "        supernode_active_curr_.fill(1);\n";
+                *stream << "        active_count_ = kSupernodeCount;\n";
             *stream << "    }\n";
             std::map<std::vector<uint32_t>, std::vector<std::string>> inputSeedGroups;
             for (const auto &port : graph.inputPorts())
@@ -10614,7 +10567,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             for (const auto &[supernodes, conditions] : inputSeedGroups)
             {
                 *stream << "    if (!initial_eval && (" << joinStrings(conditions, " || ") << ")) {\n";
-                emitBitMaskSetStatements(*stream, "supernode_active_curr_", "active_word_count_", supernodes, "        ");
+                emitActivationStatements(*stream, "supernode_active_curr_", "active_count_", supernodes, "        ");
                 *stream << "    }\n";
             }
             if (!model.inputEventValues.empty())
@@ -10632,13 +10585,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "                                  ((eval_id % trace_eval_interval_) == 0);\n";
             *stream << "    if (trace_this_eval) {\n";
             *stream << "        std::fprintf(stderr,\n";
-            *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_words=%zu\\n\",\n";
+            *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_supernodes=%zu\\n\",\n";
             *stream << "                     static_cast<unsigned long long>(eval_id),\n";
             *stream << "                     initial_eval ? 1 : 0,\n";
-            *stream << "                     active_word_count_);\n";
+            *stream << "                     active_count_);\n";
             *stream << "        std::fflush(stderr);\n";
             *stream << "    }\n";
-            *stream << "    while (active_word_count_ != 0) {\n";
+            *stream << "    while (active_count_ != 0) {\n";
             *stream << "        ++fixed_point_round_count;\n";
             *stream << "        // Propagate current activity through scheduled supernodes.\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
