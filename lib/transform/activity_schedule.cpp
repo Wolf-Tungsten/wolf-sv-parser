@@ -1118,6 +1118,103 @@ namespace wolvrix::lib::transform
             return out;
         }
 
+        SymbolPartition splitOversizedSymbolClusters(const wolvrix::lib::grh::Graph &graph,
+                                                     const SymbolPartition &partition,
+                                                     std::size_t maxSize,
+                                                     std::size_t &oversizedClusterCount,
+                                                     std::size_t &addedClusterCount,
+                                                     std::string &error)
+        {
+            oversizedClusterCount = 0;
+            addedClusterCount = 0;
+            if (maxSize == 0 || partition.clusters.empty())
+            {
+                return partition;
+            }
+
+            ActivityOpData postReplicationOpData = buildActivityOpData(graph, error);
+            if (!error.empty())
+            {
+                return partition;
+            }
+
+            std::unordered_map<wolvrix::lib::grh::SymbolId, uint32_t, ActivityScheduleSymbolIdHash> topoPosBySymbol;
+            topoPosBySymbol.reserve(postReplicationOpData.topoSymbols.size());
+            for (std::size_t topoPos = 0; topoPos < postReplicationOpData.topoSymbols.size(); ++topoPos)
+            {
+                topoPosBySymbol.emplace(postReplicationOpData.topoSymbols[topoPos], static_cast<uint32_t>(topoPos));
+            }
+
+            SymbolPartition out;
+            out.clusters.reserve(partition.clusters.size());
+            out.fixedBoundary.reserve(partition.fixedBoundary.size());
+
+            std::vector<std::pair<uint32_t, wolvrix::lib::grh::SymbolId>> liveSymbols;
+            for (std::size_t clusterId = 0; clusterId < partition.clusters.size(); ++clusterId)
+            {
+                liveSymbols.clear();
+                liveSymbols.reserve(partition.clusters[clusterId].size());
+                for (const auto symbol : partition.clusters[clusterId])
+                {
+                    const auto topoIt = topoPosBySymbol.find(symbol);
+                    if (topoIt == topoPosBySymbol.end())
+                    {
+                        continue;
+                    }
+                    liveSymbols.emplace_back(topoIt->second, symbol);
+                }
+                if (liveSymbols.empty())
+                {
+                    continue;
+                }
+
+                std::sort(liveSymbols.begin(), liveSymbols.end(),
+                          [](const auto &lhs, const auto &rhs)
+                          {
+                              if (lhs.first != rhs.first)
+                              {
+                                  return lhs.first < rhs.first;
+                              }
+                              return lhs.second.value < rhs.second.value;
+                          });
+                liveSymbols.erase(std::unique(liveSymbols.begin(), liveSymbols.end(),
+                                              [](const auto &lhs, const auto &rhs)
+                                              {
+                                                  return lhs.second == rhs.second;
+                                              }),
+                                  liveSymbols.end());
+
+                if (liveSymbols.size() <= maxSize)
+                {
+                    auto &symbols = out.clusters.emplace_back();
+                    symbols.reserve(liveSymbols.size());
+                    for (const auto &[_, symbol] : liveSymbols)
+                    {
+                        symbols.push_back(symbol);
+                    }
+                    out.fixedBoundary.push_back(clusterId < partition.fixedBoundary.size() ? partition.fixedBoundary[clusterId] : 0U);
+                    continue;
+                }
+
+                ++oversizedClusterCount;
+                const std::size_t producedChunks = (liveSymbols.size() + maxSize - 1) / maxSize;
+                addedClusterCount += producedChunks > 0 ? (producedChunks - 1) : 0;
+                for (std::size_t begin = 0; begin < liveSymbols.size(); begin += maxSize)
+                {
+                    const std::size_t end = std::min(begin + maxSize, liveSymbols.size());
+                    auto &symbols = out.clusters.emplace_back();
+                    symbols.reserve(end - begin);
+                    for (std::size_t index = begin; index < end; ++index)
+                    {
+                        symbols.push_back(liveSymbols[index].second);
+                    }
+                    out.fixedBoundary.push_back(clusterId < partition.fixedBoundary.size() ? partition.fixedBoundary[clusterId] : 0U);
+                }
+            }
+
+            return out;
+        }
+
         bool isReplicationCandidateKind(wolvrix::lib::grh::OperationKind kind) noexcept
         {
             switch (kind)
@@ -1918,6 +2015,9 @@ namespace wolvrix::lib::transform
         ReplicationStats replicationStats;
         ReplicationPerfStats replicationPerf;
         std::uint64_t replicationMs = 0;
+        std::uint64_t postReplicationSplitMs = 0;
+        std::size_t postReplicationOversizedClusters = 0;
+        std::size_t postReplicationAddedClusters = 0;
         if (options_.enableReplication)
         {
             const auto replicationStart = std::chrono::steady_clock::now();
@@ -1939,6 +2039,29 @@ namespace wolvrix::lib::transform
                 result.failed = true;
                 return result;
             }
+        }
+
+        const auto postReplicationSplitStart = std::chrono::steady_clock::now();
+        symbolPartition = splitOversizedSymbolClusters(*graph,
+                                                       symbolPartition,
+                                                       options_.supernodeMaxSize,
+                                                       postReplicationOversizedClusters,
+                                                       postReplicationAddedClusters,
+                                                       buildError);
+        postReplicationSplitMs = elapsedMs(postReplicationSplitStart);
+        if (!buildError.empty())
+        {
+            error(*graph, buildError);
+            result.failed = true;
+            return result;
+        }
+        if (postReplicationOversizedClusters != 0)
+        {
+            logInfo("activity-schedule replication split: oversized_clusters=" +
+                    std::to_string(postReplicationOversizedClusters) +
+                    " added_clusters=" + std::to_string(postReplicationAddedClusters) +
+                    " max_size=" + std::to_string(options_.supernodeMaxSize) +
+                    " elapsed_ms=" + std::to_string(postReplicationSplitMs));
         }
 
         const auto freezeAfterReplicationStart = std::chrono::steady_clock::now();
@@ -1991,6 +2114,7 @@ namespace wolvrix::lib::transform
                 " materialize_segments=" + std::to_string(materializeSegmentsMs) +
                 " symbol_partition=" + std::to_string(symbolPartitionMs) +
                 " replication=" + std::to_string(replicationMs) +
+                " split_oversized=" + std::to_string(postReplicationSplitMs) +
                 " freeze_after_replication=" + std::to_string(freezeAfterReplicationMs) +
                 " final_materialize=" + std::to_string(finalMaterializeMs) +
                 " export_session=" + std::to_string(exportTotalMs) +
@@ -2034,6 +2158,8 @@ namespace wolvrix::lib::transform
                 << " eligible_ops=" << finalOpData.topoOps.size()
                 << " replication_cloned=" << replicationStats.clonedOps
                 << " replication_erased=" << replicationStats.erasedOps
+                << " replication_split_oversized=" << postReplicationOversizedClusters
+                << " replication_split_added=" << postReplicationAddedClusters
                 << " state_read_sets=" << build.stateReadSupernodes.size()
                 << " graph_changed=" << (graphChanged ? "true" : "false");
         logInfo(summary.str());

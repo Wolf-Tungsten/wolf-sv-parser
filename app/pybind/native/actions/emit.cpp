@@ -142,9 +142,27 @@ namespace wolvrix::app::pybind
         const char *output = nullptr;
         PyObject *topListObj = Py_None;
         PyObject *maxCppFileBytesObj = Py_None;
-        static const char *kwlist[] = {"session", "design", "output", "top", "max_cpp_file_bytes", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OO", const_cast<char **>(kwlist),
-                                         &sessionObj, &designKey, &output, &topListObj, &maxCppFileBytesObj))
+        PyObject *schedBatchMaxOpsObj = Py_None;
+        PyObject *schedBatchMaxEstimatedLinesObj = Py_None;
+        PyObject *emitParallelismObj = Py_None;
+        static const char *kwlist[] = {"session",
+                                       "design",
+                                       "output",
+                                       "top",
+                                       "max_cpp_file_bytes",
+                                       "sched_batch_max_ops",
+                                       "sched_batch_max_estimated_lines",
+                                       "emit_parallelism",
+                                       nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOO", const_cast<char **>(kwlist),
+                                         &sessionObj,
+                                         &designKey,
+                                         &output,
+                                         &topListObj,
+                                         &maxCppFileBytesObj,
+                                         &schedBatchMaxOpsObj,
+                                         &schedBatchMaxEstimatedLinesObj,
+                                         &emitParallelismObj))
         {
             return nullptr;
         }
@@ -194,6 +212,37 @@ namespace wolvrix::app::pybind
                 return nullptr;
             }
             options.maxOutputFileBytes = static_cast<std::uint64_t>(parsed);
+        }
+        if (schedBatchMaxOpsObj != Py_None)
+        {
+            const unsigned long long parsed = PyLong_AsUnsignedLongLong(schedBatchMaxOpsObj);
+            if (PyErr_Occurred())
+            {
+                PyErr_SetString(PyExc_ValueError, "sched_batch_max_ops must be a non-negative integer");
+                return nullptr;
+            }
+            options.attributes["sched_batch_max_ops"] = std::to_string(parsed);
+        }
+        if (schedBatchMaxEstimatedLinesObj != Py_None)
+        {
+            const unsigned long long parsed = PyLong_AsUnsignedLongLong(schedBatchMaxEstimatedLinesObj);
+            if (PyErr_Occurred())
+            {
+                PyErr_SetString(PyExc_ValueError,
+                                "sched_batch_max_estimated_lines must be a non-negative integer");
+                return nullptr;
+            }
+            options.attributes["sched_batch_max_estimated_lines"] = std::to_string(parsed);
+        }
+        if (emitParallelismObj != Py_None)
+        {
+            const unsigned long long parsed = PyLong_AsUnsignedLongLong(emitParallelismObj);
+            if (PyErr_Occurred())
+            {
+                PyErr_SetString(PyExc_ValueError, "emit_parallelism must be a non-negative integer");
+                return nullptr;
+            }
+            options.attributes["emit_parallelism"] = std::to_string(parsed);
         }
 
         const auto result = emitter.emit(*design, options);

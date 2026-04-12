@@ -289,12 +289,23 @@ class Session:
         output: str,
         top: list[str] | None = None,
         max_cpp_file_bytes: int | None = None,
+        sched_batch_max_ops: int | None = None,
+        sched_batch_max_estimated_lines: int | None = None,
+        emit_parallelism: int | None = None,
         **named_args,
     ) -> list[dict]:
         self._ensure_open()
-        if max_cpp_file_bytes is not None:
+        if (max_cpp_file_bytes is not None or sched_batch_max_ops is not None or
+                sched_batch_max_estimated_lines is not None or emit_parallelism is not None):
             named_args = dict(named_args)
+        if max_cpp_file_bytes is not None:
             named_args["max_cpp_file_bytes"] = max_cpp_file_bytes
+        if sched_batch_max_ops is not None:
+            named_args["sched_batch_max_ops"] = sched_batch_max_ops
+        if sched_batch_max_estimated_lines is not None:
+            named_args["sched_batch_max_estimated_lines"] = sched_batch_max_estimated_lines
+        if emit_parallelism is not None:
+            named_args["emit_parallelism"] = emit_parallelism
         _compile_emit_grhsim_cpp_kwargs(named_args)
         success, diagnostics = _native.session_emit_grhsim_cpp(
             self._capsule,
@@ -302,6 +313,9 @@ class Session:
             output=output,
             top=top or [],
             max_cpp_file_bytes=max_cpp_file_bytes,
+            sched_batch_max_ops=sched_batch_max_ops,
+            sched_batch_max_estimated_lines=sched_batch_max_estimated_lines,
+            emit_parallelism=emit_parallelism,
         )
         return self._complete_action(
             "emit_grhsim_cpp",
@@ -524,6 +538,18 @@ def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
     if max_cpp_file_bytes is not None:
         if not isinstance(max_cpp_file_bytes, int) or max_cpp_file_bytes < 0:
             raise ValueError("emit_grhsim_cpp max_cpp_file_bytes must be a non-negative integer")
+    sched_batch_max_ops = local.pop("sched_batch_max_ops", None)
+    if sched_batch_max_ops is not None:
+        if not isinstance(sched_batch_max_ops, int) or sched_batch_max_ops < 0:
+            raise ValueError("emit_grhsim_cpp sched_batch_max_ops must be a non-negative integer")
+    sched_batch_max_estimated_lines = local.pop("sched_batch_max_estimated_lines", None)
+    if sched_batch_max_estimated_lines is not None:
+        if not isinstance(sched_batch_max_estimated_lines, int) or sched_batch_max_estimated_lines < 0:
+            raise ValueError("emit_grhsim_cpp sched_batch_max_estimated_lines must be a non-negative integer")
+    emit_parallelism = local.pop("emit_parallelism", None)
+    if emit_parallelism is not None:
+        if not isinstance(emit_parallelism, int) or emit_parallelism < 0:
+            raise ValueError("emit_grhsim_cpp emit_parallelism must be a non-negative integer")
     _ensure_no_extra_named("emit_grhsim_cpp", local)
 
 
