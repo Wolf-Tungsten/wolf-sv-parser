@@ -312,10 +312,7 @@ class Session:
             design=design,
             output=output,
             top=top or [],
-            max_cpp_file_bytes=max_cpp_file_bytes,
-            sched_batch_max_ops=sched_batch_max_ops,
-            sched_batch_max_estimated_lines=sched_batch_max_estimated_lines,
-            emit_parallelism=emit_parallelism,
+            **named_args,
         )
         return self._complete_action(
             "emit_grhsim_cpp",
@@ -550,6 +547,12 @@ def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
     if emit_parallelism is not None:
         if not isinstance(emit_parallelism, int) or emit_parallelism < 0:
             raise ValueError("emit_grhsim_cpp emit_parallelism must be a non-negative integer")
+    waveform = local.pop("waveform", None)
+    if waveform is not None:
+        if not isinstance(waveform, str):
+            raise ValueError("emit_grhsim_cpp waveform must be a string")
+        if waveform not in {"off", "declared-symbols"}:
+            raise ValueError("emit_grhsim_cpp waveform must be one of: off, declared-symbols")
     _ensure_no_extra_named("emit_grhsim_cpp", local)
 
 

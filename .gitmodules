@@ -4,3 +4,6 @@
 [submodule "external/mt-kahypar"]
 	path = external/mt-kahypar
 	url = https://github.com/kahypar/mt-kahypar.git
+[submodule "external/libfst"]
+	path = external/libfst
+	url = https://github.com/gtkwave/libfst.git

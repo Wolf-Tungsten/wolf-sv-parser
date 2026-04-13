@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.26)
-project(wolvrix VERSION 0.1.0 LANGUAGES CXX)
+project(wolvrix VERSION 0.1.0 LANGUAGES C CXX)
 
 find_package(Git QUIET)
 set(WOLVRIX_GIT_SHA "unknown")
@@ -74,6 +74,35 @@ else()
     message(WARNING "Vendored MtKaHyPar not available; repcut mt-kahypar backend will be unavailable")
 endif()
 
+option(WOLVRIX_ENABLE_LIBFST "Enable vendored libfst integration" ON)
+set(WOLVRIX_HAVE_LIBFST 0)
+if (WOLVRIX_ENABLE_LIBFST AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/libfst/src/fstapi.c")
+    find_package(ZLIB REQUIRED)
+    add_library(wolvrix-libfst STATIC
+        external/libfst/src/fastlz.c
+        external/libfst/src/fstapi.c
+        external/libfst/src/lz4.c
+    )
+    target_include_directories(wolvrix-libfst
+        PUBLIC
+            external/libfst/src
+    )
+    target_compile_definitions(wolvrix-libfst
+        PRIVATE
+            _GNU_SOURCE
+    )
+    target_link_libraries(wolvrix-libfst
+        PUBLIC
+            ZLIB::ZLIB
+    )
+    set(WOLVRIX_HAVE_LIBFST 1)
+    message(STATUS "libfst enabled from vendored source")
+elseif (NOT WOLVRIX_ENABLE_LIBFST)
+    message(STATUS "libfst disabled by WOLVRIX_ENABLE_LIBFST=OFF")
+else()
+    message(WARNING "Vendored libfst not available; grhsim waveform emission will be unavailable")
+endif()
+
 # Libraries
 set(WOLVRIX_LIB_SOURCES
     lib/core/diagnostics.cpp
@@ -128,9 +157,19 @@ if (WOLVRIX_HAVE_MT_KAHYPAR)
     )
 endif()
 
+if (WOLVRIX_HAVE_LIBFST)
+    target_link_libraries(wolvrix-lib
+        PRIVATE
+            wolvrix-libfst
+    )
+endif()
+
 target_compile_definitions(wolvrix-lib
     PUBLIC
         WOLVRIX_HAVE_MT_KAHYPAR=${WOLVRIX_HAVE_MT_KAHYPAR}
+        WOLVRIX_HAVE_LIBFST=${WOLVRIX_HAVE_LIBFST}
+    PRIVATE
+        WOLVRIX_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 set_target_properties(wolvrix-lib PROPERTIES
     BUILD_RPATH "$ORIGIN"

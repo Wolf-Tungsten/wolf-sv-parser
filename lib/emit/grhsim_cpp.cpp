@@ -258,6 +258,26 @@ namespace wolvrix::lib::emit
             }
         }
 
+        enum class WaveformMode
+        {
+            kOff,
+            kDeclaredSymbols,
+        };
+
+        WaveformMode parseWaveformMode(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("waveform");
+            if (it == options.attributes.end() || it->second.empty() || it->second == "off")
+            {
+                return WaveformMode::kOff;
+            }
+            if (it->second == "declared-symbols")
+            {
+                return WaveformMode::kDeclaredSymbols;
+            }
+            return WaveformMode::kOff;
+        }
+
         std::uint64_t effectiveMaxOutputFileBytes(const EmitOptions &options) noexcept
         {
             return options.maxOutputFileBytes == 0 ? std::numeric_limits<std::uint64_t>::max()
@@ -1176,38 +1196,22 @@ namespace wolvrix::lib::emit
             std::size_t index = 0;
         };
 
-        enum class ValueStorageClass
+        struct WaveformSignalDecl
         {
-            kLocalScratch,
-            kBatchScratch,
-            kEvalScratch,
-            kObjectState,
-        };
+            enum class SourceKind
+            {
+                kValue,
+                kState,
+            };
 
-        enum class EvalScalarSlotKind
-        {
-            kBool,
-            kU8,
-            kU16,
-            kU32,
-            kU64,
-            kI8,
-            kI16,
-            kI32,
-            kI64,
-            kCount,
-        };
-
-        struct EvalScalarSlotRef
-        {
-            EvalScalarSlotKind kind = EvalScalarSlotKind::kBool;
-            std::size_t index = 0;
-        };
-
-        struct EvalWideSlotRef
-        {
-            std::size_t wordCount = 0;
-            std::size_t index = 0;
+            SourceKind sourceKind = SourceKind::kValue;
+            std::string symbol;
+            std::string escapedSymbol;
+            ValueType type = ValueType::Logic;
+            int32_t width = 0;
+            bool isSigned = false;
+            ValueId value{};
+            std::string stateSymbol;
         };
 
         struct EmitModel
@@ -1220,9 +1224,6 @@ namespace wolvrix::lib::emit
             std::unordered_map<ValueId, std::size_t, ValueIdHash> valueRealSlotByValue;
             std::unordered_map<ValueId, std::size_t, ValueIdHash> valueStringSlotByValue;
             std::unordered_set<ValueId, ValueIdHash> materializedValues;
-            std::unordered_map<ValueId, ValueStorageClass, ValueIdHash> valueStorageClassByValue;
-            std::unordered_map<ValueId, EvalScalarSlotRef, ValueIdHash> evalScalarSlotByValue;
-            std::unordered_map<ValueId, EvalWideSlotRef, ValueIdHash> evalWideSlotByValue;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> inputHeadSupernodesByValue;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> boundaryFanoutByValue;
             std::unordered_map<std::string, StateDecl> stateBySymbol;
@@ -1238,6 +1239,7 @@ namespace wolvrix::lib::emit
             std::vector<ValueId> allEventValues;
             std::vector<ValueId> inputEventValues;
             std::vector<std::string> eventFieldDecls;
+            std::vector<WaveformSignalDecl> waveformSignals;
             std::vector<std::string> stateOrder;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
@@ -1264,89 +1266,14 @@ namespace wolvrix::lib::emit
             std::map<std::size_t, std::size_t> memoryWriteDataWideSlotCountsByWords;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteMaskScalarSlotCounts{};
             std::map<std::size_t, std::size_t> memoryWriteMaskWideSlotCountsByWords;
-            std::array<std::size_t, static_cast<std::size_t>(EvalScalarSlotKind::kCount)> evalScalarSlotCounts{};
-            std::map<std::size_t, std::size_t> evalWideSlotCountsByWords;
             bool needsSystemTaskRuntime = false;
+            bool emitWaveform = false;
         };
-
-        int valueStorageClassRank(ValueStorageClass storageClass) noexcept
-        {
-            switch (storageClass)
-            {
-            case ValueStorageClass::kLocalScratch:
-                return 0;
-            case ValueStorageClass::kBatchScratch:
-                return 1;
-            case ValueStorageClass::kEvalScratch:
-                return 2;
-            case ValueStorageClass::kObjectState:
-                return 3;
-            }
-            return 0;
-        }
-
-        ValueStorageClass valueStorageClassFor(const EmitModel &model, ValueId value) noexcept
-        {
-            if (auto it = model.valueStorageClassByValue.find(value); it != model.valueStorageClassByValue.end())
-            {
-                return it->second;
-            }
-            return ValueStorageClass::kLocalScratch;
-        }
-
-        bool valueHasObjectStateStorage(const EmitModel &model, ValueId value) noexcept
-        {
-            return valueStorageClassFor(model, value) == ValueStorageClass::kObjectState;
-        }
-
-        bool valueHasEvalScratchStorage(const EmitModel &model, ValueId value) noexcept
-        {
-            return valueStorageClassFor(model, value) == ValueStorageClass::kEvalScratch;
-        }
 
         bool isStoredValue(const EmitModel &model, ValueId value) noexcept
         {
             return model.inputFieldByValue.find(value) != model.inputFieldByValue.end() ||
                    model.materializedValues.find(value) != model.materializedValues.end();
-        }
-
-        EvalScalarSlotKind evalScalarSlotKindForValue(const Graph &graph, ValueId value)
-        {
-            const int32_t width = graph.valueWidth(value);
-            const bool isSigned = graph.valueSigned(value);
-            if (width <= 1)
-            {
-                return EvalScalarSlotKind::kBool;
-            }
-            if (isSigned)
-            {
-                if (width <= 8)
-                {
-                    return EvalScalarSlotKind::kI8;
-                }
-                if (width <= 16)
-                {
-                    return EvalScalarSlotKind::kI16;
-                }
-                if (width <= 32)
-                {
-                    return EvalScalarSlotKind::kI32;
-                }
-                return EvalScalarSlotKind::kI64;
-            }
-            if (width <= 8)
-            {
-                return EvalScalarSlotKind::kU8;
-            }
-            if (width <= 16)
-            {
-                return EvalScalarSlotKind::kU16;
-            }
-            if (width <= 32)
-            {
-                return EvalScalarSlotKind::kU32;
-            }
-            return EvalScalarSlotKind::kU64;
         }
 
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width)
@@ -1474,67 +1401,6 @@ namespace wolvrix::lib::emit
                 return stateLogicWideSlotFieldName(state.wordCount) + "[" + std::to_string(state.slotIndex) + "]";
             }
             return stateLogicScalarSlotFieldName(state.scalarKind) + "[" + std::to_string(state.slotIndex) + "]";
-        }
-
-        std::string evalScalarSlotFieldName(EvalScalarSlotKind kind)
-        {
-            switch (kind)
-            {
-            case EvalScalarSlotKind::kBool:
-                return "bool_values";
-            case EvalScalarSlotKind::kU8:
-                return "u8_values";
-            case EvalScalarSlotKind::kU16:
-                return "u16_values";
-            case EvalScalarSlotKind::kU32:
-                return "u32_values";
-            case EvalScalarSlotKind::kU64:
-                return "u64_values";
-            case EvalScalarSlotKind::kI8:
-                return "i8_values";
-            case EvalScalarSlotKind::kI16:
-                return "i16_values";
-            case EvalScalarSlotKind::kI32:
-                return "i32_values";
-            case EvalScalarSlotKind::kI64:
-                return "i64_values";
-            case EvalScalarSlotKind::kCount:
-                break;
-            }
-            return "unknown_values";
-        }
-
-        std::string evalScalarSlotElementType(EvalScalarSlotKind kind)
-        {
-            switch (kind)
-            {
-            case EvalScalarSlotKind::kBool:
-                return "std::uint8_t";
-            case EvalScalarSlotKind::kU8:
-                return "std::uint8_t";
-            case EvalScalarSlotKind::kU16:
-                return "std::uint16_t";
-            case EvalScalarSlotKind::kU32:
-                return "std::uint32_t";
-            case EvalScalarSlotKind::kU64:
-                return "std::uint64_t";
-            case EvalScalarSlotKind::kI8:
-                return "std::int8_t";
-            case EvalScalarSlotKind::kI16:
-                return "std::int16_t";
-            case EvalScalarSlotKind::kI32:
-                return "std::int32_t";
-            case EvalScalarSlotKind::kI64:
-                return "std::int64_t";
-            case EvalScalarSlotKind::kCount:
-                break;
-            }
-            return "std::uint64_t";
-        }
-
-        std::string evalWideSlotFieldName(std::size_t wordCount)
-        {
-            return "logic_words_" + std::to_string(wordCount);
         }
 
         void emitChangedValuePropagation(std::ostream &stream,
@@ -2335,33 +2201,6 @@ namespace wolvrix::lib::emit
                     model.publicPortDecls.push_back("    " + typeName + " " + apiStem + " = " + initExpr + ";");
                 };
 
-            auto assignValueStorageClass = [&](ValueId valueId, ValueStorageClass storageClass) {
-                if (model.inputFieldByValue.find(valueId) != model.inputFieldByValue.end())
-                {
-                    return;
-                }
-                model.materializedValues.insert(valueId);
-                auto it = model.valueStorageClassByValue.find(valueId);
-                if (it == model.valueStorageClassByValue.end() ||
-                    valueStorageClassRank(storageClass) > valueStorageClassRank(it->second))
-                {
-                    model.valueStorageClassByValue.insert_or_assign(valueId, storageClass);
-                }
-            };
-
-            auto markValueObjectState = [&](ValueId valueId) {
-                assignValueStorageClass(valueId, ValueStorageClass::kObjectState);
-            };
-
-            auto markValueForCurrentEval = [&](ValueId valueId) {
-                if (graph.valueType(valueId) == ValueType::Logic)
-                {
-                    assignValueStorageClass(valueId, ValueStorageClass::kEvalScratch);
-                    return;
-                }
-                assignValueStorageClass(valueId, ValueStorageClass::kObjectState);
-            };
-
             for (const auto &port : graph.inputPorts())
             {
                 const std::string name = sanitizeIdentifier(port.name);
@@ -2372,7 +2211,6 @@ namespace wolvrix::lib::emit
             {
                 const std::string name = sanitizeIdentifier(port.name);
                 registerReadableEndpoint(port.value, "out_" + name, name, true);
-                markValueObjectState(port.value);
             }
 
             for (const auto &port : graph.inoutPorts())
@@ -2389,8 +2227,6 @@ namespace wolvrix::lib::emit
                                                 "        " + outType + " out = " + defaultInitExpr(graph, port.out) + ";\n"
                                                 "        " + oeType + " oe = " + defaultInitExpr(graph, port.oe) + ";\n"
                                                 "    } " + name + ";");
-                markValueObjectState(port.out);
-                markValueObjectState(port.oe);
             }
 
             for (ValueId valueId : graph.values())
@@ -2404,14 +2240,7 @@ namespace wolvrix::lib::emit
                 // scheduled ops can still reference them.
                 if (!graph.valueDef(valueId).valid())
                 {
-                    if (graph.valueType(valueId) == ValueType::Logic)
-                    {
-                        markValueForCurrentEval(valueId);
-                    }
-                    else
-                    {
-                        markValueObjectState(valueId);
-                    }
+                    model.materializedValues.insert(valueId);
                 }
             }
 
@@ -2558,23 +2387,12 @@ namespace wolvrix::lib::emit
                     const std::string name = getAttribute<std::string>(op, "name").value_or(std::string());
                     if (name == "fopen" || name == "ferror")
                     {
-                        for (ValueId resultValue : op.results())
-                        {
-                            markValueForCurrentEval(resultValue);
-                        }
-                    }
-                    if (name == "fopen" || name == "ferror")
-                    {
                         model.needsSystemTaskRuntime = true;
                     }
                     continue;
                 }
                 if (op.kind() == OperationKind::kDpicCall)
                 {
-                    for (ValueId resultValue : op.results())
-                    {
-                        markValueForCurrentEval(resultValue);
-                    }
                     if (!validateDpicCall(graph, op, model, error))
                     {
                         return false;
@@ -2740,7 +2558,6 @@ namespace wolvrix::lib::emit
                 for (std::size_t i = 0; i < samples.values.size(); ++i)
                 {
                     const ValueId value = samples.values[i];
-                    markValueForCurrentEval(value);
                     if (model.eventEdgeFieldByValue.find(value) != model.eventEdgeFieldByValue.end())
                     {
                         continue;
@@ -2779,116 +2596,6 @@ namespace wolvrix::lib::emit
                     break;
                 }
             }
-            for (OperationId opId : graph.operations())
-            {
-                const Operation op = graph.getOperation(opId);
-                if (op.kind() != OperationKind::kSystemTask || !systemTaskIsFinal(op))
-                {
-                    continue;
-                }
-                const auto operands = op.operands();
-                const std::size_t eventCount =
-                    getAttribute<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{}).size();
-                const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
-                for (std::size_t i = 0; i < argEnd; ++i)
-                {
-                    markValueObjectState(operands[i]);
-                }
-            }
-            std::unordered_map<OperationId, std::size_t, OperationIdHash> batchByOp;
-            batchByOp.reserve(graph.operations().size());
-            std::unordered_set<std::size_t> statefulBatches;
-            statefulBatches.reserve(scheduleBatches.size());
-            for (const ScheduleBatch &batch : scheduleBatches)
-            {
-                for (uint32_t supernodeId : batch.supernodeIds)
-                {
-                    if (supernodeId >= schedule.supernodeToOps.size())
-                    {
-                        continue;
-                    }
-                    for (OperationId opId : schedule.supernodeToOps[supernodeId])
-                    {
-                        batchByOp.emplace(opId, batch.index);
-                        const Operation op = graph.getOperation(opId);
-                        switch (op.kind())
-                        {
-                        case OperationKind::kRegisterWritePort:
-                        case OperationKind::kLatchWritePort:
-                        case OperationKind::kMemoryWritePort:
-                        case OperationKind::kSystemTask:
-                        case OperationKind::kDpicCall:
-                            statefulBatches.insert(batch.index);
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                }
-            }
-
-            auto reachesStatefulBatch = [&](ValueId valueId) {
-                for (const auto &user : graph.getValue(valueId).users())
-                {
-                    const auto userIt = batchByOp.find(user.operation);
-                    if (userIt != batchByOp.end() && statefulBatches.contains(userIt->second))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-            for (ValueId valueId : graph.values())
-            {
-                if (model.inputFieldByValue.contains(valueId))
-                {
-                    continue;
-                }
-                const OperationId defOpId = graph.valueDef(valueId);
-                if (!defOpId.valid())
-                {
-                    continue;
-                }
-                const auto defIt = batchByOp.find(defOpId);
-                if (defIt == batchByOp.end())
-                {
-                    continue;
-                }
-                const std::size_t defBatch = defIt->second;
-                bool crossesBatchBoundary = false;
-                bool valueReachesStatefulBatch = false;
-                for (const auto &user : graph.getValue(valueId).users())
-                {
-                    const auto userIt = batchByOp.find(user.operation);
-                    if (userIt != batchByOp.end() && userIt->second != defBatch)
-                    {
-                        crossesBatchBoundary = true;
-                        if (statefulBatches.contains(userIt->second))
-                        {
-                            valueReachesStatefulBatch = true;
-                            break;
-                        }
-                    }
-                }
-                if (!crossesBatchBoundary)
-                {
-                    continue;
-                }
-
-                model.materializedValues.insert(valueId);
-                const ValueStorageClass storageClass =
-                    (graph.valueType(valueId) == ValueType::Logic && !isWideLogicValue(graph, valueId) &&
-                     !valueReachesStatefulBatch)
-                        ? ValueStorageClass::kEvalScratch
-                        : ValueStorageClass::kObjectState;
-                auto storageIt = model.valueStorageClassByValue.find(valueId);
-                if (storageIt == model.valueStorageClassByValue.end() ||
-                    valueStorageClassRank(storageClass) > valueStorageClassRank(storageIt->second))
-                {
-                    model.valueStorageClassByValue.insert_or_assign(valueId, storageClass);
-                }
-            }
             for (ValueId valueId : graph.values())
             {
                 if (valueId.index == 0 || valueId.index > schedule.valueFanout.size())
@@ -2898,14 +2605,7 @@ namespace wolvrix::lib::emit
                 const auto &succs = schedule.valueFanout[valueId.index - 1];
                 if (!succs.empty())
                 {
-                    if (reachesStatefulBatch(valueId))
-                    {
-                        markValueObjectState(valueId);
-                    }
-                    else
-                    {
-                        markValueForCurrentEval(valueId);
-                    }
+                    model.materializedValues.insert(valueId);
                     model.boundaryFanoutByValue.emplace(valueId, succs);
                 }
             }
@@ -2917,7 +2617,6 @@ namespace wolvrix::lib::emit
                     continue;
                 }
                 model.materializedValues.insert(valueId);
-                model.valueStorageClassByValue.insert_or_assign(valueId, ValueStorageClass::kObjectState);
                 switch (graph.valueType(valueId))
                 {
                 case ValueType::Real:
@@ -2949,7 +2648,8 @@ namespace wolvrix::lib::emit
                     else
                     {
                         const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                        const std::size_t slotIndex = model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                        const std::size_t slotIndex =
+                            model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
                         model.valueScalarSlotByValue.emplace(
                             valueId, ValueScalarSlotRef{.kind = slotKind, .index = slotIndex});
                         model.valueFieldByValue.emplace(
@@ -3037,24 +2737,189 @@ namespace wolvrix::lib::emit
             {
                 return "value_string_slots_[" + std::to_string(it->second) + "]";
             }
-            if (valueHasEvalScratchStorage(model, value))
-            {
-                if (auto slotIt = model.evalScalarSlotByValue.find(value); slotIt != model.evalScalarSlotByValue.end())
-                {
-                    return "eval_frame." + evalScalarSlotFieldName(slotIt->second.kind) + "[" +
-                           std::to_string(slotIt->second.index) + "]";
-                }
-                if (auto wideIt = model.evalWideSlotByValue.find(value); wideIt != model.evalWideSlotByValue.end())
-                {
-                    return "eval_frame." + evalWideSlotFieldName(wideIt->second.wordCount) + "[" +
-                           std::to_string(wideIt->second.index) + "]";
-                }
-            }
             if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
             {
                 return it->second;
             }
             return "/*missing_value_ref*/";
+        }
+
+        bool collectDeclaredSymbolWaveformSignals(const Graph &graph,
+                                                  const EmitModel &model,
+                                                  std::vector<WaveformSignalDecl> &outSignals)
+        {
+            outSignals.clear();
+            std::unordered_set<std::string> seenSymbols;
+            seenSymbols.reserve(graph.declaredSymbols().size());
+
+            for (const auto sym : graph.declaredSymbols())
+            {
+                const std::string symbol(graph.symbolText(sym));
+                if (symbol.empty() || !seenSymbols.insert(symbol).second)
+                {
+                    continue;
+                }
+
+                if (const ValueId valueId = graph.findValue(sym); valueId.valid())
+                {
+                    const std::string ref = valueRef(model, valueId);
+                    if (ref == "/*missing_value_ref*/")
+                    {
+                        continue;
+                    }
+                    WaveformSignalDecl signal;
+                    signal.sourceKind = WaveformSignalDecl::SourceKind::kValue;
+                    signal.symbol = symbol;
+                    signal.escapedSymbol = escapeCppString(symbol);
+                    signal.type = graph.valueType(valueId);
+                    signal.width = graph.valueWidth(valueId);
+                    signal.isSigned = graph.valueSigned(valueId);
+                    signal.value = valueId;
+                    outSignals.push_back(std::move(signal));
+                    continue;
+                }
+
+                auto stateIt = model.stateBySymbol.find(symbol);
+                if (stateIt == model.stateBySymbol.end())
+                {
+                    continue;
+                }
+                const StateDecl &state = stateIt->second;
+                if (state.kind == StateDecl::Kind::Memory)
+                {
+                    continue;
+                }
+                WaveformSignalDecl signal;
+                signal.sourceKind = WaveformSignalDecl::SourceKind::kState;
+                signal.symbol = symbol;
+                signal.escapedSymbol = escapeCppString(symbol);
+                signal.type = ValueType::Logic;
+                signal.width = state.width;
+                signal.isSigned = state.isSigned;
+                signal.stateSymbol = state.symbol;
+                outSignals.push_back(std::move(signal));
+            }
+
+            return true;
+        }
+
+        std::pair<std::size_t, std::size_t> waveformSignalRangeForBatch(std::size_t signalCount,
+                                                                         std::size_t batchCount,
+                                                                         std::size_t batchIndex) noexcept
+        {
+            if (signalCount == 0 || batchCount == 0 || batchIndex >= batchCount)
+            {
+                return {0, 0};
+            }
+            const std::size_t begin = (signalCount * batchIndex) / batchCount;
+            const std::size_t end = (signalCount * (batchIndex + 1)) / batchCount;
+            return {begin, end};
+        }
+
+        void emitWaveformSignalWrite(std::ostream &stream,
+                                     const EmitModel &model,
+                                     const WaveformSignalDecl &signal,
+                                     std::size_t signalIndex,
+                                     std::string_view indent)
+        {
+            std::string expr;
+            if (signal.sourceKind == WaveformSignalDecl::SourceKind::kState)
+            {
+                expr = stateRef(model.stateBySymbol.at(signal.stateSymbol));
+            }
+            else
+            {
+                expr = valueRef(model, signal.value);
+            }
+
+            switch (signal.type)
+            {
+            case ValueType::Real:
+                stream << indent << "waveform_writer_->emit_real(waveform_handles_[" << signalIndex << "], " << expr
+                       << ");\n";
+                break;
+            case ValueType::String:
+                stream << indent << "waveform_writer_->emit_string(waveform_handles_[" << signalIndex << "], " << expr
+                       << ");\n";
+                break;
+            case ValueType::Logic:
+            default:
+                if (isWideLogicWidth(signal.width))
+                {
+                    stream << indent << "waveform_writer_->emit_logic_words(waveform_handles_[" << signalIndex << "], "
+                           << (signal.width <= 0 ? 1 : signal.width) << "u, " << expr << ");\n";
+                }
+                else
+                {
+                    stream << indent << "waveform_writer_->emit_logic_u64(waveform_handles_[" << signalIndex << "], "
+                           << (signal.width <= 0 ? 1 : signal.width) << "u, static_cast<std::uint64_t>(" << expr
+                           << "));\n";
+                }
+                break;
+            }
+        }
+
+        void emitWaveformSignalRegistrationBatch(std::ostream &stream,
+                                                 std::span<const WaveformSignalDecl> signals,
+                                                 std::string_view indent)
+        {
+            if (signals.empty())
+            {
+                return;
+            }
+
+            stream << indent << "enum class waveform_signal_kind : std::uint8_t {\n";
+            stream << indent << "    logic,\n";
+            stream << indent << "    real,\n";
+            stream << indent << "    string,\n";
+            stream << indent << "};\n";
+            stream << indent << "struct waveform_signal_decl {\n";
+            stream << indent << "    const char *name;\n";
+            stream << indent << "    std::uint32_t width;\n";
+            stream << indent << "    waveform_signal_kind kind;\n";
+            stream << indent << "};\n";
+            stream << indent << "static constexpr waveform_signal_decl kWaveformSignals[] = {";
+            for (std::size_t i = 0; i < signals.size(); ++i)
+            {
+                const auto &signal = signals[i];
+                if ((i % 4u) == 0u)
+                {
+                    stream << "\n" << indent << "    ";
+                }
+                stream << "{\"" << signal.escapedSymbol << "\", " << (signal.width <= 0 ? 1 : signal.width) << "u, ";
+                switch (signal.type)
+                {
+                case ValueType::Real:
+                    stream << "waveform_signal_kind::real}";
+                    break;
+                case ValueType::String:
+                    stream << "waveform_signal_kind::string}";
+                    break;
+                case ValueType::Logic:
+                default:
+                    stream << "waveform_signal_kind::logic}";
+                    break;
+                }
+                if (i + 1u != signals.size())
+                {
+                    stream << ", ";
+                }
+            }
+            stream << "\n" << indent << "};\n";
+            stream << indent << "for (const auto &signal : kWaveformSignals) {\n";
+            stream << indent << "    switch (signal.kind) {\n";
+            stream << indent << "    case waveform_signal_kind::real:\n";
+            stream << indent << "        waveform_handles_.push_back(writer.register_real(signal.name));\n";
+            stream << indent << "        break;\n";
+            stream << indent << "    case waveform_signal_kind::string:\n";
+            stream << indent << "        waveform_handles_.push_back(writer.register_string(signal.name));\n";
+            stream << indent << "        break;\n";
+            stream << indent << "    case waveform_signal_kind::logic:\n";
+            stream << indent << "    default:\n";
+            stream << indent << "        waveform_handles_.push_back(writer.register_logic(signal.name, signal.width));\n";
+            stream << indent << "        break;\n";
+            stream << indent << "    }\n";
+            stream << indent << "}\n";
         }
 
         std::string stateShadowTouchedRef(const StateShadowDecl &shadow)
@@ -3120,12 +2985,9 @@ namespace wolvrix::lib::emit
             {
                 return it->second;
             }
-            if (graph.valueType(value) != ValueType::Logic || valueHasObjectStateStorage(model, value))
+            if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
             {
-                if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
-                {
-                    return it->second;
-                }
+                return it->second;
             }
             return std::nullopt;
         }
@@ -3346,95 +3208,6 @@ namespace wolvrix::lib::emit
             return batches;
         }
 
-        void materializeCrossBatchValues(const Graph &graph,
-                                         const ScheduleRefs &schedule,
-                                         const std::vector<ScheduleBatch> &scheduleBatches,
-                                         EmitModel &model)
-        {
-            std::unordered_map<OperationId, std::size_t, OperationIdHash> batchByOp;
-            batchByOp.reserve(graph.operations().size());
-            std::unordered_set<std::size_t> statefulBatches;
-            statefulBatches.reserve(scheduleBatches.size());
-            for (const ScheduleBatch &batch : scheduleBatches)
-            {
-                for (uint32_t supernodeId : batch.supernodeIds)
-                {
-                    if (supernodeId >= schedule.supernodeToOps.size())
-                    {
-                        continue;
-                    }
-                    for (OperationId opId : schedule.supernodeToOps[supernodeId])
-                    {
-                        batchByOp.emplace(opId, batch.index);
-                        const Operation op = graph.getOperation(opId);
-                        switch (op.kind())
-                        {
-                        case OperationKind::kRegisterWritePort:
-                        case OperationKind::kLatchWritePort:
-                        case OperationKind::kMemoryWritePort:
-                        case OperationKind::kSystemTask:
-                        case OperationKind::kDpicCall:
-                            statefulBatches.insert(batch.index);
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                }
-            }
-
-            for (ValueId valueId : graph.values())
-            {
-                if (model.inputFieldByValue.contains(valueId))
-                {
-                    continue;
-                }
-                const OperationId defOpId = graph.valueDef(valueId);
-                if (!defOpId.valid())
-                {
-                    continue;
-                }
-                const auto defIt = batchByOp.find(defOpId);
-                if (defIt == batchByOp.end())
-                {
-                    continue;
-                }
-                const std::size_t defBatch = defIt->second;
-                bool crossesBatchBoundary = false;
-                bool reachesStatefulBatch = false;
-                for (const auto &user : graph.getValue(valueId).users())
-                {
-                    const auto userIt = batchByOp.find(user.operation);
-                    if (userIt != batchByOp.end() && userIt->second != defBatch)
-                    {
-                        crossesBatchBoundary = true;
-                        if (statefulBatches.contains(userIt->second))
-                        {
-                            reachesStatefulBatch = true;
-                            break;
-                        }
-                    }
-                }
-                if (!crossesBatchBoundary)
-                {
-                    continue;
-                }
-
-                model.materializedValues.insert(valueId);
-                const ValueStorageClass storageClass =
-                    (graph.valueType(valueId) == ValueType::Logic && !isWideLogicValue(graph, valueId) &&
-                     !reachesStatefulBatch)
-                        ? ValueStorageClass::kEvalScratch
-                        : ValueStorageClass::kObjectState;
-                auto storageIt = model.valueStorageClassByValue.find(valueId);
-                if (storageIt == model.valueStorageClassByValue.end() ||
-                    valueStorageClassRank(storageClass) > valueStorageClassRank(storageIt->second))
-                {
-                    model.valueStorageClassByValue.insert_or_assign(valueId, storageClass);
-                }
-            }
-        }
-
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
         {
             for (ValueId value : op.operands())
@@ -3511,7 +3284,7 @@ namespace wolvrix::lib::emit
         {
             std::ostringstream body;
             body << "const auto value = " << valueExpr << "; ";
-            body << helperName << "(value.data(), value.size(), " << resultWidth << ", out.data(), out.size()); ";
+            body << "out = " << helperName << "(value, " << resultWidth << "); ";
             return wordsArrayLambdaExprForWidth(resultWidth, body.str());
         }
 
@@ -3523,8 +3296,7 @@ namespace wolvrix::lib::emit
             std::ostringstream body;
             body << "const auto lhs = " << lhsExpr << "; ";
             body << "const auto rhs = " << rhsExpr << "; ";
-            body << helperName << "(lhs.data(), lhs.size(), rhs.data(), rhs.size(), " << resultWidth
-                 << ", out.data(), out.size()); ";
+            body << "out = " << helperName << "(lhs, rhs, " << resultWidth << "); ";
             return wordsArrayLambdaExprForWidth(resultWidth, body.str());
         }
 
@@ -3535,8 +3307,8 @@ namespace wolvrix::lib::emit
         {
             std::ostringstream body;
             body << "const auto value = " << valueExpr << "; ";
-            body << helperName << "(value.data(), value.size(), grhsim_index_words(" << shiftExpr << ", "
-                 << resultWidth << "), " << resultWidth << ", out.data(), out.size()); ";
+            body << "out = " << helperName << "(value, grhsim_index_words(" << shiftExpr << ", "
+                 << resultWidth << "), " << resultWidth << "); ";
             return wordsArrayLambdaExprForWidth(resultWidth, body.str());
         }
 
@@ -5332,6 +5104,7 @@ namespace wolvrix::lib::emit
                                                       const EmitModel &model,
                                                       const ScheduleRefs &schedule,
                                                       const ScheduleBatch &batch,
+                                                      std::size_t waveformBatchCount,
                                                       std::uint64_t maxOutputFileBytes)
         {
             if (auto error = ensureOutputDirectory(schedPath))
@@ -5364,7 +5137,7 @@ namespace wolvrix::lib::emit
             {
                 stream << '\n';
             }
-            stream << "void " << className << "::eval_batch_" << batch.index << "(EvalScratchFrame &eval_frame)\n{\n";
+            stream << "void " << className << "::eval_batch_" << batch.index << "()\n{\n";
             stream << "    // Batch " << batch.index << ": evaluate a contiguous supernode range in topo order.\n";
             for (uint32_t supernodeId : batch.supernodeIds)
             {
@@ -6122,6 +5895,28 @@ namespace wolvrix::lib::emit
             }
             stream << "    return;\n";
             stream << "}\n";
+            if (model.emitWaveform)
+            {
+                const auto [waveformBegin, waveformEnd] =
+                    waveformSignalRangeForBatch(model.waveformSignals.size(), waveformBatchCount, batch.index);
+                if (waveformBegin < waveformEnd)
+                {
+                    stream << "\nvoid " << className << "::register_waveform_batch_" << batch.index
+                           << "(grhsim_fst_writer &writer)\n{\n";
+                    emitWaveformSignalRegistrationBatch(
+                        stream,
+                        std::span<const WaveformSignalDecl>(
+                            model.waveformSignals.data() + waveformBegin, waveformEnd - waveformBegin),
+                        "    ");
+                    stream << "}\n";
+                    stream << "\nvoid " << className << "::dump_waveform_batch_" << batch.index << "()\n{\n";
+                    for (std::size_t signalIndex = waveformBegin; signalIndex < waveformEnd; ++signalIndex)
+                    {
+                        emitWaveformSignalWrite(stream, model, model.waveformSignals[signalIndex], signalIndex, "    ");
+                    }
+                    stream << "}\n";
+                }
+            }
             if (auto error = finalizeOutputFile(stream, schedPath))
             {
                 return *error + ": " + schedPath.string();
@@ -6180,6 +5975,16 @@ namespace wolvrix::lib::emit
 
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
+        const WaveformMode waveformMode = parseWaveformMode(options);
+
+#if !WOLVRIX_HAVE_LIBFST
+        if (waveformMode != WaveformMode::kOff)
+        {
+            reportError("waveform emission requested, but wolvrix was built without libfst support");
+            result.success = false;
+            return result;
+        }
+#endif
 
         const std::vector<ScheduleBatch> scheduleBatches =
             buildScheduleBatches(graph, schedule, schedBatchMaxOps, schedBatchMaxEstimatedLines);
@@ -6191,6 +5996,11 @@ namespace wolvrix::lib::emit
             reportError(buildError, graph.symbol());
             result.success = false;
             return result;
+        }
+        model.emitWaveform = waveformMode != WaveformMode::kOff;
+        if (waveformMode == WaveformMode::kDeclaredSymbols)
+        {
+            collectDeclaredSymbolWaveformSignals(graph, model, model.waveformSignals);
         }
         for (OperationId opId : graph.operations())
         {
@@ -6229,6 +6039,7 @@ namespace wolvrix::lib::emit
         }
         const std::filesystem::path makefilePath = outDir / "Makefile";
         const std::uint64_t maxOutputFileBytes = effectiveMaxOutputFileBytes(options);
+        const std::filesystem::path libfstSrcDir = std::filesystem::path(WOLVRIX_SOURCE_DIR) / "external/libfst/src";
 
         struct InitChunkSpec
         {
@@ -6616,6 +6427,85 @@ namespace wolvrix::lib::emit
             *stream << "#include <limits>\n";
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "#include <ctime>\n";
+                *stream << "#include <string_view>\n";
+                *stream << "#include \"fstapi.h\"\n\n";
+                *stream << "class grhsim_fst_writer {\n";
+                *stream << "public:\n";
+                *stream << "    grhsim_fst_writer() = default;\n";
+                *stream << "    ~grhsim_fst_writer() { close(); }\n";
+                *stream << "    grhsim_fst_writer(const grhsim_fst_writer &) = delete;\n";
+                *stream << "    grhsim_fst_writer &operator=(const grhsim_fst_writer &) = delete;\n";
+                *stream << "    [[nodiscard]] bool open(const std::string &path, std::string_view topName)\n";
+                *stream << "    {\n";
+                *stream << "        close();\n";
+                *stream << "        ctx_ = fstWriterCreate(path.c_str(), 1);\n";
+                *stream << "        if (ctx_ == nullptr) {\n";
+                *stream << "            return false;\n";
+                *stream << "        }\n";
+                *stream << "        fstWriterSetPackType(ctx_, FST_WR_PT_ZLIB);\n";
+                *stream << "        fstWriterSetFileType(ctx_, FST_FT_VERILOG);\n";
+                *stream << "        fstWriterSetTimescale(ctx_, -9);\n";
+                *stream << "        fstWriterSetVersion(ctx_, \"wolvrix grhsim\");\n";
+                *stream << "        std::time_t now = std::time(nullptr);\n";
+                *stream << "        if (const char *date = std::ctime(&now)) {\n";
+                *stream << "            fstWriterSetDate(ctx_, date);\n";
+                *stream << "        }\n";
+                *stream << "        const std::string scope(topName.empty() ? std::string(\"top\") : std::string(topName));\n";
+                *stream << "        fstWriterSetScope(ctx_, FST_ST_VCD_MODULE, scope.c_str(), nullptr);\n";
+                *stream << "        scope_open_ = true;\n";
+                *stream << "        return true;\n";
+                *stream << "    }\n";
+                *stream << "    void close()\n";
+                *stream << "    {\n";
+                *stream << "        if (ctx_ == nullptr) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        if (scope_open_) {\n";
+                *stream << "            fstWriterSetUpscope(ctx_);\n";
+                *stream << "            scope_open_ = false;\n";
+                *stream << "        }\n";
+                *stream << "        fstWriterClose(ctx_);\n";
+                *stream << "        ctx_ = nullptr;\n";
+                *stream << "    }\n";
+                *stream << "    [[nodiscard]] bool is_open() const noexcept { return ctx_ != nullptr; }\n";
+                *stream << "    [[nodiscard]] fstHandle register_logic(std::string_view name, std::uint32_t width)\n";
+                *stream << "    {\n";
+                *stream << "        return fstWriterCreateVar(ctx_, FST_VT_SV_LOGIC, FST_VD_IMPLICIT, width == 0 ? 1u : width, std::string(name).c_str(), 0);\n";
+                *stream << "    }\n";
+                *stream << "    [[nodiscard]] fstHandle register_real(std::string_view name)\n";
+                *stream << "    {\n";
+                *stream << "        return fstWriterCreateVar(ctx_, FST_VT_VCD_REAL, FST_VD_IMPLICIT, 64u, std::string(name).c_str(), 0);\n";
+                *stream << "    }\n";
+                *stream << "    [[nodiscard]] fstHandle register_string(std::string_view name)\n";
+                *stream << "    {\n";
+                *stream << "        return fstWriterCreateVar(ctx_, FST_VT_GEN_STRING, FST_VD_IMPLICIT, 0u, std::string(name).c_str(), 0);\n";
+                *stream << "    }\n";
+                *stream << "    void emit_time(std::uint64_t time) { fstWriterEmitTimeChange(ctx_, time); }\n";
+                *stream << "    void emit_logic_u64(fstHandle handle, std::uint32_t width, std::uint64_t value)\n";
+                *stream << "    {\n";
+                *stream << "        fstWriterEmitValueChange64(ctx_, handle, width == 0 ? 1u : width, value);\n";
+                *stream << "    }\n";
+                *stream << "    template <std::size_t N>\n";
+                *stream << "    void emit_logic_words(fstHandle handle, std::uint32_t width, const std::array<std::uint64_t, N> &value)\n";
+                *stream << "    {\n";
+                *stream << "        fstWriterEmitValueChangeVec64(ctx_, handle, width == 0 ? 1u : width, value.data());\n";
+                *stream << "    }\n";
+                *stream << "    void emit_real(fstHandle handle, double value)\n";
+                *stream << "    {\n";
+                *stream << "        fstWriterEmitValueChange(ctx_, handle, &value);\n";
+                *stream << "    }\n";
+                *stream << "    void emit_string(fstHandle handle, const std::string &value)\n";
+                *stream << "    {\n";
+                *stream << "        fstWriterEmitVariableLengthValueChange(ctx_, handle, value.data(), static_cast<std::uint32_t>(value.size()));\n";
+                *stream << "    }\n";
+                *stream << "private:\n";
+                *stream << "    fstWriterContext *ctx_ = nullptr;\n";
+                *stream << "    bool scope_open_ = false;\n";
+                *stream << "};\n\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "#include <fstream>\n";
@@ -9012,6 +8902,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <array>\n";
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdint>\n";
+            if (model.emitWaveform)
+            {
+                *stream << "#include <memory>\n";
+                *stream << "#include <utility>\n";
+            }
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
             *stream << "#include \"" << runtimePath.filename().string() << "\"\n\n";
@@ -9027,6 +8922,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    void configure_waveform(bool enabled, std::string path = {});\n";
+                *stream << "    void set_waveform_enabled(bool enabled);\n";
+                *stream << "    [[nodiscard]] bool waveform_enabled() const;\n";
+                *stream << "    void set_waveform_path(std::string path);\n";
+                *stream << "    [[nodiscard]] const std::string &waveform_path() const;\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    [[nodiscard]] bool finish_requested() const;\n";
@@ -9042,30 +8945,23 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << decl << '\n';
             }
             *stream << "\nprivate:\n";
-            *stream << "    struct EvalScratchFrame {\n";
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(EvalScalarSlotKind::kCount); ++kindIndex)
-            {
-                const auto kind = static_cast<EvalScalarSlotKind>(kindIndex);
-                if (model.evalScalarSlotCounts[kindIndex] == 0)
-                {
-                    continue;
-                }
-                *stream << "        std::vector<" << evalScalarSlotElementType(kind) << "> "
-                        << evalScalarSlotFieldName(kind) << ";\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.evalWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                *stream << "        std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << evalWideSlotFieldName(wordCount) << ";\n";
-            }
-            *stream << "    };\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                *stream << "    void eval_batch_" << batchIndex << "(EvalScratchFrame &eval_frame);\n";
+                *stream << "    void eval_batch_" << batchIndex << "();\n";
+            }
+            if (model.emitWaveform)
+            {
+                for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+                {
+                    const auto [waveformBegin, waveformEnd] =
+                        waveformSignalRangeForBatch(model.waveformSignals.size(), scheduleBatches.size(), batchIndex);
+                    if (waveformBegin < waveformEnd)
+                    {
+                        *stream << "    void register_waveform_batch_" << batchIndex
+                                << "(grhsim_fst_writer &writer);\n";
+                        *stream << "    void dump_waveform_batch_" << batchIndex << "();\n";
+                    }
+                }
             }
             for (const auto &chunk : initChunks)
             {
@@ -9096,7 +8992,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    };\n";
             }
             *stream << "    void commit_state_updates();\n";
-            *stream << "    void refresh_outputs(const EvalScratchFrame &eval_frame);\n\n";
+            *stream << "    void refresh_outputs();\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    void ensure_waveform_open();\n";
+                *stream << "    void dump_waveform(std::uint64_t time);\n\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    static bool parse_file_open_mode(std::string_view mode,\n";
@@ -9131,6 +9032,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    bool waveform_enabled_ = false;\n";
+                *stream << "    std::string waveform_path_ = \"" << escapeCppString(prefix + ".fst") << "\";\n";
+                *stream << "    std::unique_ptr<grhsim_fst_writer> waveform_writer_;\n";
+                *stream << "    std::vector<std::uint32_t> waveform_handles_;\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    bool finish_requested_ = false;\n";
@@ -9474,12 +9382,27 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    }\n";
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    if (waveform_writer_) {\n";
+                *stream << "        waveform_writer_->close();\n";
+                *stream << "        waveform_writer_.reset();\n";
+                *stream << "    }\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    finalize();\n";
             }
             *stream << "}\n\n";
             *stream << "void " << className << "::init()\n{\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    if (waveform_writer_) {\n";
+                *stream << "        waveform_writer_->close();\n";
+                *stream << "        waveform_writer_.reset();\n";
+                *stream << "    }\n";
+                *stream << "    waveform_handles_.clear();\n";
+            }
             for (const auto &chunk : initChunks)
             {
                 *stream << "    " << chunk.methodName << "();\n";
@@ -9491,6 +9414,74 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
             *stream << "}\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "void " << className << "::configure_waveform(bool enabled, std::string path)\n{\n";
+                *stream << "    if (!path.empty()) {\n";
+                *stream << "        set_waveform_path(std::move(path));\n";
+                *stream << "    }\n";
+                *stream << "    set_waveform_enabled(enabled);\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::set_waveform_enabled(bool enabled)\n{\n";
+                *stream << "    waveform_enabled_ = enabled;\n";
+                *stream << "    if (!waveform_enabled_ && waveform_writer_) {\n";
+                *stream << "        waveform_writer_->close();\n";
+                *stream << "        waveform_writer_.reset();\n";
+                *stream << "        waveform_handles_.clear();\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "bool " << className << "::waveform_enabled() const\n{\n";
+                *stream << "    return waveform_enabled_;\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::set_waveform_path(std::string path)\n{\n";
+                *stream << "    waveform_path_ = std::move(path);\n";
+                *stream << "    if (waveform_writer_) {\n";
+                *stream << "        waveform_writer_->close();\n";
+                *stream << "        waveform_writer_.reset();\n";
+                *stream << "        waveform_handles_.clear();\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "const std::string &" << className << "::waveform_path() const\n{\n";
+                *stream << "    return waveform_path_;\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::ensure_waveform_open()\n{\n";
+                *stream << "    if (!waveform_enabled_ || waveform_path_.empty() || waveform_writer_) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    auto writer = std::make_unique<grhsim_fst_writer>();\n";
+                *stream << "    if (!writer->open(waveform_path_, \"" << escapeCppString(graph.symbol()) << "\")) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    waveform_handles_.clear();\n";
+                *stream << "    waveform_handles_.reserve(" << model.waveformSignals.size() << ");\n";
+                for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+                {
+                    const auto [waveformBegin, waveformEnd] =
+                        waveformSignalRangeForBatch(model.waveformSignals.size(), scheduleBatches.size(), batchIndex);
+                    if (waveformBegin < waveformEnd)
+                    {
+                        *stream << "    register_waveform_batch_" << batchIndex << "(*writer);\n";
+                    }
+                }
+                *stream << "    waveform_writer_ = std::move(writer);\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::dump_waveform(std::uint64_t time)\n{\n";
+                *stream << "    ensure_waveform_open();\n";
+                *stream << "    if (!waveform_writer_) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    waveform_writer_->emit_time(time);\n";
+                for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+                {
+                    const auto [waveformBegin, waveformEnd] =
+                        waveformSignalRangeForBatch(model.waveformSignals.size(), scheduleBatches.size(), batchIndex);
+                    if (waveformBegin < waveformEnd)
+                    {
+                        *stream << "    dump_waveform_batch_" << batchIndex << "();\n";
+                    }
+                }
+                *stream << "}\n\n";
+            }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "bool " << className << "::parse_file_open_mode(std::string_view mode,\n";
@@ -10033,7 +10024,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    touched_write_count_ = 0;\n";
             }
             *stream << "}\n\n";
-            *stream << "void " << className << "::refresh_outputs(const EvalScratchFrame &eval_frame)\n{\n";
+            *stream << "void " << className << "::refresh_outputs()\n{\n";
             *stream << "    // Publish the latest value fields to the public outputs.\n";
             for (const auto &port : graph.outputPorts())
             {
@@ -10516,28 +10507,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
             *stream << "    const std::uint64_t eval_id = ++eval_invocation_count_;\n";
-            *stream << "    EvalScratchFrame eval_frame{};\n";
             *stream << "    std::uint64_t fixed_point_round_count = UINT64_C(0);\n";
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(EvalScalarSlotKind::kCount); ++kindIndex)
-            {
-                const std::size_t slotCount = model.evalScalarSlotCounts[kindIndex];
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                const auto kind = static_cast<EvalScalarSlotKind>(kindIndex);
-                *stream << "    eval_frame." << evalScalarSlotFieldName(kind) << ".assign(" << slotCount << ", "
-                        << evalScalarSlotElementType(kind) << "{});\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.evalWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                *stream << "    eval_frame." << evalWideSlotFieldName(wordCount) << ".assign(" << slotCount
-                        << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
-            }
             *stream << "    register_write_conflict_ = false;\n";
             *stream << "    if (initial_eval) {\n";
                 *stream << "        supernode_active_curr_.fill(1);\n";
@@ -10596,7 +10566,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "        // Propagate current activity through scheduled supernodes.\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                *stream << "        eval_batch_" << batchIndex << "(eval_frame);\n";
+                *stream << "        eval_batch_" << batchIndex << "();\n";
             }
             *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
             *stream << "        commit_state_updates();\n";
@@ -10619,7 +10589,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    flush_deferred_system_task_texts();\n";
             }
             *stream << "    // Refresh public outputs after the final visible state of this eval is known.\n";
-            *stream << "    refresh_outputs(eval_frame);\n\n";
+            *stream << "    refresh_outputs();\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "    dump_waveform(eval_id);\n\n";
+            }
             *stream << "    // Publish current inputs as the previous-eval baseline for the next call.\n";
             for (const auto &port : graph.inputPorts())
             {
@@ -10652,6 +10626,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                                                     model,
                                                     schedule,
                                                     scheduleBatches[batchIndex],
+                                                    scheduleBatches.size(),
                                                     maxOutputFileBytes))
                 {
                     reportError(*error, graph.symbol());
@@ -10685,6 +10660,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                                                                        model,
                                                                        schedule,
                                                                        scheduleBatches[batchIndex],
+                                                                       scheduleBatches.size(),
                                                                        maxOutputFileBytes);
                                          }),
                 });
@@ -10723,9 +10699,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "CXX ?= c++\n";
+            if (model.emitWaveform)
+            {
+                *stream << "CC ?= cc\n";
+            }
             *stream << "AR ?= ar\n";
             *stream << "ARFLAGS ?= rcs\n";
             *stream << "CXXFLAGS ?= -std=c++20 -O3\n";
+            if (model.emitWaveform)
+            {
+                *stream << "CFLAGS ?= -O3 -D_GNU_SOURCE\n";
+                *stream << "LIBFST_SRC_DIR := " << libfstSrcDir.string() << "\n";
+            }
             *stream << "LIB := lib" << prefix << ".a\n";
             *stream << "SRCS := " << statePath.filename().string() << ' ' << evalPath.filename().string();
             for (const auto &stateInitPath : stateInitPaths)
@@ -10742,13 +10727,42 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "\n";
             *stream << "OBJS := $(SRCS:.cpp=.o)\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "FST_SRCS := $(LIBFST_SRC_DIR)/fstapi.c $(LIBFST_SRC_DIR)/fastlz.c $(LIBFST_SRC_DIR)/lz4.c\n";
+                *stream << "FST_OBJS := fstapi.o fastlz.o lz4.o\n\n";
+            }
             *stream << "all: $(LIB)\n\n";
-            *stream << "$(LIB): $(OBJS)\n";
-            *stream << "\t$(AR) $(ARFLAGS) $@ $(OBJS)\n\n";
+            *stream << "$(LIB): $(OBJS)";
+            if (model.emitWaveform)
+            {
+                *stream << " $(FST_OBJS)";
+            }
+            *stream << "\n";
+            *stream << "\t$(AR) $(ARFLAGS) $@ $^\n\n";
             *stream << "%.o: %.cpp\n";
-            *stream << "\t$(CXX) $(CXXFLAGS) -I. -c $< -o $@\n\n";
+            *stream << "\t$(CXX) $(CXXFLAGS)";
+            if (model.emitWaveform)
+            {
+                *stream << " -I$(LIBFST_SRC_DIR)";
+            }
+            *stream << " -I. -c $< -o $@\n\n";
+            if (model.emitWaveform)
+            {
+                *stream << "fstapi.o: $(LIBFST_SRC_DIR)/fstapi.c\n";
+                *stream << "\t$(CC) $(CFLAGS) -I$(LIBFST_SRC_DIR) -c $< -o $@\n\n";
+                *stream << "fastlz.o: $(LIBFST_SRC_DIR)/fastlz.c\n";
+                *stream << "\t$(CC) $(CFLAGS) -I$(LIBFST_SRC_DIR) -c $< -o $@\n\n";
+                *stream << "lz4.o: $(LIBFST_SRC_DIR)/lz4.c\n";
+                *stream << "\t$(CC) $(CFLAGS) -I$(LIBFST_SRC_DIR) -c $< -o $@\n\n";
+            }
             *stream << "clean:\n";
-            *stream << "\t$(RM) $(OBJS) $(LIB)\n";
+            *stream << "\t$(RM) $(OBJS)";
+            if (model.emitWaveform)
+            {
+                *stream << " $(FST_OBJS)";
+            }
+            *stream << " $(LIB)\n";
             if (auto error = finalizeOutputFile(*stream, makefilePath))
             {
                 reportError(*error, makefilePath.string());

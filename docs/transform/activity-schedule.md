@@ -372,6 +372,12 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_SUPERNODE_MAX_SIZE=1024
 - 行数降到约 `16.5%`
 - `val__` 成员/引用数量降到约 `0.24%`
 
+后续在继续定位 `grhsim-cpp` 运行语义问题时，这套 `ValueStorageClass` / `EvalScratchFrame` 分层又被整体撤回了。当前实现重新回到更直接的模型：
+
+- 所有非输入 value 统一分配到持久 `value_*_slots_`
+- `eval_batch_*()` / `refresh_outputs()` 不再传 `eval_frame`
+- 先消除 emitter 自身的分类分叉，再单独排查 `grhsim-cpp` 的调度与执行语义
+
 ### 完整 `emu` 编译结果
 
 这轮在 XiangShan difftest 目录下完成了完整 `emu` 构建：
@@ -620,3 +626,171 @@ make -C testcase/xiangshan/difftest emu \
 - `make run_hdlbits_grhsim DUT=117 SKIP_PY_INSTALL=1` 通过
 
 做到这一步后，`grhsim-cpp` 的“超大头文件”问题基本已经被结构性解决。
+
+## 2026-04-13：单线程 `grhsim` / XiangShan coremark 早期失败排查
+
+本节只记录单线程 `grhsim` 的排查结果，与 `repcut` 无关。
+
+### 当前稳定复现点
+
+直接运行当前增量链接后的 `emu`：
+
+```bash
+cd /workspace/gaoruihao-dev-gpu/wolvrix-playground
+./build/xs/grhsim/grhsim-compile/emu \
+  -i ./testcase/xiangshan/ready-to-run/coremark-2-iteration.bin \
+  --diff ./testcase/xiangshan/ready-to-run/riscv64-nemu-interpreter-so \
+  -b 0 -e 0
+```
+
+稳定复现结果：
+
+- `instrCnt = 2`
+- `cycleCnt = 662`
+- 首先命中的断言包括：
+  - [MEFreeList.sv](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/rtl/rtl/MEFreeList.sv:2026)
+  - [StdFreeList.sv](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/rtl/rtl/StdFreeList.sv:1381)
+  - [StdFreeList_1.sv](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/rtl/rtl/StdFreeList_1.sv:652)
+
+这三个断言里，当前最先拿到有效运行时证据的是 `MEFreeList.sv:2026`。
+
+### 参考波形对拍结论
+
+参考波形文件：
+
+- [tmp/xs_wolf_20260413_165458.fst](/workspace/gaoruihao-dev-gpu/wolvrix-playground/tmp/xs_wolf_20260413_165458.fst)
+
+波形工具验证可用：
+
+- [fst_tree.py](/workspace/gaoruihao-dev-gpu/wolvrix-playground/tools/fst_tools/fst_tree.py)
+- [fst_cycle_trace.py](/workspace/gaoruihao-dev-gpu/wolvrix-playground/tools/fst_tools/fst_cycle_trace.py)
+
+在参考波形中，`intFreeList` 就是 RTL 中 `MEFreeList intFreeList (...)` 的实例。抽取 `cycle 656..662` 后，得到：
+
+- `headPtrOH[223:0]` 在 `cycle 657..662` 一直是 bit `2`
+- `headPtr_flag = 0`
+- `headPtr_value = 2`
+- `debugArchHeadPtr_flag = 0`
+- `debugArchHeadPtr_value = 1`
+- `debugArchHeadPtr_REG_flag = 0`
+- `debugArchHeadPtr_REG_value = 1`
+- `freeRegCntReg = 0xdd`
+- `io_doAllocate = 1`
+- `io_allocateReq_0..7 = 0,0,0,0,0,0,0,0`
+
+也就是说，参考侧在失败窗口内的行为非常稳定：
+
+- `headPtrOH` 明确是 bit `2`
+- `headPtr_value` 也明确是 `2`
+
+### `grhsim-cpp` 插桩结果
+
+为了避免 `make xs_wolf_grhsim_emu` 重跑 emit 覆盖手工修改，当前排查采用：
+
+- 直接修改生成文件：
+  - [grhsim_SimTop_sched_1470.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_1470.cpp)
+  - [grhsim_SimTop_sched_4336.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_4336.cpp)
+  - [grhsim_SimTop_sched_4475.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_4475.cpp)
+- 只增量重编命中的 `sched_*.o`
+- 直接运行现成的 [emu](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim-compile/emu)
+
+在 `MEFreeList.sv:2026` 断言前拿到的第一条有效插桩是：
+
+```text
+[grhsim-assert] eval=1431 file=build/xs/rtl/rtl/MEFreeList.sv line=2026 clock=1 reset=0 cond=1 headptr_neq=1 lhs_words=[0x4,0x0,0x0,0x0] rhs_words=[0x400000000,0x0,0x0,0x0] stop_cond=1
+```
+
+它对应的事实是：
+
+- `lhs_words = 0x4`，也就是 bit `2`
+- `rhs_words = 0x400000000`，也就是 bit `34`
+
+### 当前有效结论
+
+把参考波形和 `grhsim` 插桩对在一起后，可以得到当前最强结论：
+
+- `grhsim` 在 `MEFreeList.sv:2026` 比较的左侧 one-hot，和参考波形是一致的
+  - 都是 bit `2`
+- `grhsim` 在同一比较的右侧 one-hot，已经偏成 bit `34`
+  - 这与参考波形明显不一致
+
+因此当前问题已经明确收敛为：
+
+- 不是“参考值不确定”
+- 不是“最后断言自己算错了”
+- 而是 `MEFreeList.sv:2026` 比较参与项中的一侧 one-hot cone，在 `grhsim-cpp` 运行时已经偏离到 bit `34`
+
+### 说明
+
+这一节已经移除此前的推测性判断，只保留当前由运行时对拍直接支持的结论。原因很简单：
+
+- `sv -> sv` 路径已证明正常
+- `post_stats` 和 `xs_wolf.json` 中同类编码可以成功 `read_json -> emit_sv`
+- 当前最强证据来自运行时对拍：
+  - 参考波形右值对应 bit `2`
+  - `grhsim` 断言现场右值已经偏到 bit `34`
+
+### 后续排查方向
+
+当前最值得继续追的是：
+
+- `MEFreeList.sv:2026` 比较右侧 `rhs_words=[0x400000000,...]` 的生成链
+- 为什么这条 one-hot cone 在 `grhsim-cpp` 运行时会跑到 bit `34`
+- 同时继续利用参考波形做逐周期比对，并沿比较右侧 one-hot 的生成链继续收敛
+
+### 2026-04-13 追加：`rhs` 上游同拍瞬时错写链
+
+继续沿 `rhs` 上游做生成文件插桩后，已经把这次单线程 `grhsim` 早期失败收敛到一条明确的“同拍瞬时错写”链上。
+
+这轮新增插桩主要加在：
+
+- [grhsim_SimTop_sched_2425.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_2425.cpp)
+- [grhsim_SimTop_sched_1571.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_1571.cpp)
+- [grhsim_SimTop_sched_226.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_226.cpp)
+- [grhsim_SimTop_sched_5835.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop_sched_5835.cpp)
+
+关键事实：
+
+- `redirectGen$s1_redirect_valid_reg_last_REG` 的本地 mux 链在坏窗口里并不是“稳定算成 1”
+- 相反，`sched_2425` 在同一个 `eval` 内会被重复触发
+- 在 `eval=1423`，同一拍里先后出现了两次不同结果：
+  - 第一轮：`src5198672=1`，于是 `_op_4801683` 算出 `next1693210=1`
+  - 第一轮同时触发 `_op_4801686`，在 `posedge` 上把这个瞬时 `1` 写进 `state_shadow_bool_slots_[35953]`
+  - 第二轮：`src5198672` 已经回到 `0`，`_op_4801683` 也回到 `0`
+- 但第二轮已经不能再覆盖第一轮写入，因为对应 `event_edge` 只在第一次命中 `posedge`
+
+这解释了为什么：
+
+- `eval=1424/1425` 时
+  - `value_bool_slots_[1693210]` 已经回到 `0`
+  - 但 `value_bool_slots_[1693161] / state_logic_bool_slots_[36960]` 仍然变成了 `1`
+
+沿 `rhs` 继续往上追，当前已经确认这条瞬时 `1` 的传播链为：
+
+1. `state_logic_bool_slots_[42939]`
+2. `value_bool_slots_[626213]`
+3. `value_bool_slots_[6879360]`
+4. `value_bool_slots_[5403883]`
+5. `value_bool_slots_[5198672]`
+6. `value_bool_slots_[5022462]`
+7. `value_bool_slots_[1693210]`
+8. `state_logic_bool_slots_[36960]`
+
+其中本轮已经排除的分支：
+
+- `value_bool_slots_[5536218] -> value_bool_slots_[5403876]`
+  - 在坏窗口里始终是 `0`
+- `value_bool_slots_[5687895]`
+  - 在坏窗口里始终是 `1`
+
+因此当前新的最强收敛点是：
+
+- 真正造成瞬时 `1` 的不是 `5403876` 支路
+- 而是 `6879360` 在同拍内先出现 `1`、随后又回到 `0`
+- `6879360` 又只是 `value_bool_slots_[626213]` 的边界复制
+- `626213` 则来自 `state_logic_bool_slots_[42939]`
+
+也就是说，当前最值得继续追的源头已经不再是 `redirectGen` 本地组合 mux 本身，而是：
+
+- 谁在更上游先把 `state_logic_bool_slots_[42939]` 错写成了 `1`
+- 以及为什么这次错写会在同一个 `eval` 内先传播到 `6879360`，再被后续计算改回，但已经来不及撤销 `posedge` 写入

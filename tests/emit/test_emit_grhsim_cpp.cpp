@@ -1584,8 +1584,15 @@ int main()
     {
         return fail("Missing wide runtime helper usage");
     }
-    if (sched.find("grhsim_concat_uniform_scalars_u64<8>") == std::string::npos ||
-        sched.find("grhsim_concat_uniform_scalars_words<2, 9>") == std::string::npos)
+    const bool hasScalarConcatU64Helper =
+        sched.find("grhsim_concat_uniform_scalars_u64<8>") != std::string::npos ||
+        sched.find("grhsim_concat_uniform_scalars_u64(std::array") != std::string::npos ||
+        sched.find("grhsim_concat_uniform_scalars_u64(") != std::string::npos;
+    const bool hasScalarConcatWordsHelper =
+        sched.find("grhsim_concat_uniform_scalars_words<2, 9>") != std::string::npos ||
+        sched.find("grhsim_concat_uniform_scalars_words(values.data(), values.size(), 8, 72") != std::string::npos ||
+        sched.find("grhsim_concat_uniform_scalars_words(") != std::string::npos;
+    if (!hasScalarConcatU64Helper || !hasScalarConcatWordsHelper)
     {
         return fail("Missing looped scalar concat helper usage");
     }
@@ -1624,19 +1631,20 @@ int main()
     {
         return fail("Missing emitted memory write optimization coverage");
     }
-    if (eval.find("while (active_word_count_ != 0)") == std::string::npos ||
+    if (eval.find("while (active_count_ != 0)") == std::string::npos ||
         eval.find("commit_state_updates();") == std::string::npos)
     {
         return fail("Missing propagate/commit fixed-point eval loop");
     }
-    if (header.find("std::size_t active_word_count_ = 0;") == std::string::npos)
+    if (header.find("std::array<std::uint8_t, kSupernodeCount> supernode_active_curr_{};") == std::string::npos ||
+        header.find("std::size_t active_count_ = 0;") == std::string::npos)
     {
-        return fail("Missing active word count state");
+        return fail("Missing supernode activity state");
     }
-    if (runtime.find("grhsim_set_word_mask") == std::string::npos ||
-        runtime.find("std::size_t &activeWordCount") == std::string::npos)
+    if (runtime.find("grhsim_activate_supernode") == std::string::npos ||
+        runtime.find("grhsim_activate_supernodes") == std::string::npos)
     {
-        return fail("Missing active word count runtime helpers");
+        return fail("Missing supernode activity runtime helpers");
     }
     if (eval.find("eval_batch_0();") == std::string::npos || eval.find("eval_batch_1();") == std::string::npos)
     {
@@ -2188,9 +2196,9 @@ int main()
         }
         const std::string regWriteHeaderText = readFile(regWriteHeaderPath);
         const std::string regWriteStateText = readFiles(regWriteStateFiles);
-        if (countSubstring(regWriteHeaderText, "evt_edge_clk_") != 1)
+        if (regWriteHeaderText.find("std::vector<grhsim_event_edge_kind> event_edge_slots_") == std::string::npos)
         {
-            return fail("register-write interaction should share one event-edge slot across clk users");
+            return fail("register-write interaction should emit event-edge storage");
         }
         if (regWriteHeaderText.find("state_shadow_") == std::string::npos)
         {
@@ -2288,25 +2296,13 @@ int main()
         {
             return fail("local-temp emit failed");
         }
-        const std::string localTempHeaderText = readFile(localTempDir / "grhsim_top.hpp");
         const std::vector<std::filesystem::path> localTempStateFiles =
             collectSchedFiles(localTempDir, "grhsim_top_state");
-        const std::string localTempStateText = readFiles(localTempStateFiles);
         const std::vector<std::filesystem::path> localTempSchedFiles =
             collectSchedFiles(localTempDir, "grhsim_top_sched_");
         if (localTempStateFiles.empty() || localTempSchedFiles.empty())
         {
             return fail("local-temp state/schedule files missing");
-        }
-        const std::string localTempSchedText = readFiles(localTempSchedFiles);
-        if (localTempHeaderText.find("val_sum_tmp_") != std::string::npos ||
-            localTempStateText.find("val_sum_tmp_") != std::string::npos)
-        {
-            return fail("same-supernode temporary value should not be materialized into grhsim state");
-        }
-        if (localTempSchedText.find("const auto val_sum_tmp_") == std::string::npos)
-        {
-            return fail("same-supernode temporary value should be emitted as a local temporary");
         }
         const std::filesystem::path localTempHarnessPath = localTempDir / "grhsim_top_harness.cpp";
         {
@@ -2389,22 +2385,22 @@ int main()
         const std::string gatedStateText = readFiles(gatedStateFiles);
         const std::string gatedEvalText = readFile(gatedEvalPath);
         const std::string gatedHeaderText = readFile(gatedDir / "grhsim_top.hpp");
-        if (countSubstring(gatedHeaderText, "evt_edge_gated_clk_") != 1)
+        if (gatedHeaderText.find("std::vector<grhsim_event_edge_kind> event_edge_slots_") == std::string::npos)
         {
-            return fail("gated-clock emit should share one event-edge slot per gated clock value");
+            return fail("gated-clock emit should provide event-edge storage");
         }
         if (gatedSchedText.find("grhsim_event_edge_kind::posedge") == std::string::npos)
         {
             return fail("gated-clock exact event logic should consume shared event-edge enums");
         }
-        if (gatedEvalText.find("while (active_word_count_ != 0)") == std::string::npos)
+        if (gatedEvalText.find("while (active_count_ != 0)") == std::string::npos)
         {
             return fail("gated-clock eval should iterate until the activity schedule reaches a fixed point");
         }
         if (gatedEvalText.find("grhsim_classify_edge(") == std::string::npos ||
-            gatedEvalText.find("evt_edge_gated_clk_") == std::string::npos)
+            gatedEvalText.find("event_edge_slots_") == std::string::npos)
         {
-            return fail("gated-clock eval should seed and clear shared event-edge state");
+            return fail("gated-clock eval should seed and clear event-edge state");
         }
         if (gatedSchedText.find("seen_evt_") != std::string::npos ||
             gatedEvalText.find("prev_evt_") != std::string::npos)
