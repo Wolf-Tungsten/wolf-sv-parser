@@ -114,6 +114,27 @@ namespace wolvrix::lib::emit
             return out;
         }
 
+        std::string sanitizeCommentText(std::string_view text)
+        {
+            std::string out;
+            out.reserve(text.size());
+            for (unsigned char ch : text)
+            {
+                switch (ch)
+                {
+                case '\n':
+                case '\r':
+                case '\t':
+                    out.push_back(' ');
+                    break;
+                default:
+                    out.push_back(static_cast<char>(ch));
+                    break;
+                }
+            }
+            return out;
+        }
+
         std::string joinStrings(const std::vector<std::string> &items, std::string_view sep)
         {
             std::ostringstream out;
@@ -424,6 +445,7 @@ namespace wolvrix::lib::emit
             const std::string prefixText(prefix);
             return name == prefixText + ".hpp" ||
                    name == prefixText + "_runtime.hpp" ||
+                   name == prefixText + "_declared_value_index.txt" ||
                    name == prefixText + "_state.cpp" ||
                    name == prefixText + "_state.o" ||
                    name == prefixText + "_eval.cpp" ||
@@ -2744,6 +2766,410 @@ namespace wolvrix::lib::emit
             return "/*missing_value_ref*/";
         }
 
+        std::string valueDebugText(const Graph &graph, const EmitModel &model, ValueId value)
+        {
+            const Value info = graph.getValue(value);
+            std::ostringstream out;
+            out << "value ";
+            if (!info.symbolText().empty())
+            {
+                out << sanitizeCommentText(info.symbolText());
+            }
+            else
+            {
+                out << "<unnamed>";
+            }
+            out << " -> " << valueRef(model, value);
+            out << " [value_id=" << value.index << ":" << value.generation << "]";
+            return out.str();
+        }
+
+        void emitValueAssignmentComment(std::ostream &stream,
+                                        const Graph &graph,
+                                        const EmitModel &model,
+                                        ValueId value,
+                                        std::string_view indent)
+        {
+            stream << indent << "// " << valueDebugText(graph, model, value) << "\n";
+        }
+
+        std::string formatSrcLocText(const std::optional<wolvrix::lib::grh::SrcLoc> &srcLoc)
+        {
+            if (!srcLoc)
+            {
+                return "<none>";
+            }
+
+            std::ostringstream out;
+            if (!srcLoc->file.empty())
+            {
+                out << srcLoc->file;
+            }
+            else
+            {
+                out << "<unknown-file>";
+            }
+            if (srcLoc->line != 0)
+            {
+                out << ":" << srcLoc->line;
+                if (srcLoc->column != 0)
+                {
+                    out << ":" << srcLoc->column;
+                }
+            }
+            if (!srcLoc->origin.empty())
+            {
+                out << " origin=" << srcLoc->origin;
+            }
+            if (!srcLoc->pass.empty())
+            {
+                out << " pass=" << srcLoc->pass;
+            }
+            if (!srcLoc->note.empty())
+            {
+                out << " note=" << sanitizeCommentText(srcLoc->note);
+            }
+            return out.str();
+        }
+
+        std::string formatValueIdText(ValueId value)
+        {
+            std::ostringstream out;
+            out << value.index << ":" << value.generation;
+            return out.str();
+        }
+
+        std::string formatOperationIdText(OperationId op)
+        {
+            std::ostringstream out;
+            out << op.index << ":" << op.generation;
+            return out.str();
+        }
+
+        std::string valueSymbolOrUnnamed(const Graph &graph, ValueId value)
+        {
+            const std::string_view symbol = graph.symbolText(graph.valueSymbol(value));
+            if (!symbol.empty())
+            {
+                return std::string(symbol);
+            }
+            return "<unnamed>";
+        }
+
+        std::string opSymbolOrUnnamed(const Graph &graph, OperationId opId)
+        {
+            const Operation op = graph.getOperation(opId);
+            if (!op.symbolText().empty())
+            {
+                return std::string(op.symbolText());
+            }
+            return "<unnamed-op>";
+        }
+
+        bool isReadRootOpKind(OperationKind kind) noexcept
+        {
+            return kind == OperationKind::kRegisterReadPort ||
+                   kind == OperationKind::kLatchReadPort ||
+                   kind == OperationKind::kMemoryReadPort;
+        }
+
+        std::string readRootText(const Graph &graph, const Operation &op)
+        {
+            std::ostringstream out;
+            switch (op.kind())
+            {
+            case OperationKind::kRegisterReadPort:
+                out << "read.register";
+                if (auto regSymbol = getAttribute<std::string>(op, "regSymbol"))
+                {
+                    out << " state=" << *regSymbol;
+                }
+                break;
+            case OperationKind::kLatchReadPort:
+                out << "read.latch";
+                if (auto latchSymbol = getAttribute<std::string>(op, "latchSymbol"))
+                {
+                    out << " state=" << *latchSymbol;
+                }
+                break;
+            case OperationKind::kMemoryReadPort:
+                out << "read.memory";
+                if (auto memSymbol = getAttribute<std::string>(op, "memSymbol"))
+                {
+                    out << " state=" << *memSymbol;
+                }
+                break;
+            default:
+                out << "op kind=" << toString(op.kind());
+                break;
+            }
+            out << " op=" << opSymbolOrUnnamed(graph, op.id());
+            out << " op_id=" << formatOperationIdText(op.id());
+            return out.str();
+        }
+
+        std::string dependencyOperandText(const Graph &graph, const EmitModel &model, ValueId operand)
+        {
+            std::ostringstream out;
+            out << valueSymbolOrUnnamed(graph, operand);
+            out << " value_id=" << formatValueIdText(operand);
+            if (model.inputFieldByValue.contains(operand))
+            {
+                out << " kind=input";
+                return out.str();
+            }
+
+            const OperationId defOpId = graph.valueDef(operand);
+            if (!defOpId.valid())
+            {
+                out << " kind=nodef";
+                return out.str();
+            }
+
+            const Operation defOp = graph.getOperation(defOpId);
+            if (isReadRootOpKind(defOp.kind()))
+            {
+                out << " kind=" << readRootText(graph, defOp);
+                return out.str();
+            }
+
+            out << " kind=internal";
+            out << " def_kind=" << toString(defOp.kind());
+            out << " def_op=" << opSymbolOrUnnamed(graph, defOpId);
+            out << " def_op_id=" << formatOperationIdText(defOpId);
+            return out.str();
+        }
+
+        using DependencyRootCache = std::unordered_map<ValueId, std::vector<std::string>, ValueIdHash>;
+
+        std::vector<std::string> collectCombinationalRootsForValue(const Graph &graph,
+                                                                   const EmitModel &model,
+                                                                   ValueId value,
+                                                                   DependencyRootCache &cache,
+                                                                   std::unordered_set<ValueId, ValueIdHash> &visiting)
+        {
+            if (const auto it = cache.find(value); it != cache.end())
+            {
+                return it->second;
+            }
+
+            std::vector<std::string> roots;
+            if (!visiting.insert(value).second)
+            {
+                return roots;
+            }
+
+            if (model.inputFieldByValue.contains(value))
+            {
+                roots.push_back("input " + valueSymbolOrUnnamed(graph, value) + " value_id=" + formatValueIdText(value));
+            }
+            else
+            {
+                const OperationId defOpId = graph.valueDef(value);
+                if (defOpId.valid())
+                {
+                    const Operation defOp = graph.getOperation(defOpId);
+                    if (isReadRootOpKind(defOp.kind()))
+                    {
+                        roots.push_back(readRootText(graph, defOp));
+                    }
+                    else if (defOp.kind() != OperationKind::kConstant)
+                    {
+                        for (const ValueId operand : defOp.operands())
+                        {
+                            std::vector<std::string> operandRoots =
+                                collectCombinationalRootsForValue(graph, model, operand, cache, visiting);
+                            roots.insert(roots.end(), operandRoots.begin(), operandRoots.end());
+                        }
+                    }
+                }
+            }
+
+            visiting.erase(value);
+            sortUniqueVector(roots);
+            cache.emplace(value, roots);
+            return roots;
+        }
+
+        bool emitDeclaredValueIndexFile(const Graph &graph,
+                                        const EmitModel &model,
+                                        const ScheduleRefs &schedule,
+                                        const std::vector<ScheduleBatch> &scheduleBatches,
+                                        const std::vector<std::filesystem::path> &schedPaths,
+                                        const std::filesystem::path &indexPath,
+                                        std::string &error)
+        {
+            std::unordered_map<OperationId, uint32_t, OperationIdHash> supernodeByOp;
+            supernodeByOp.reserve(graph.operations().size());
+            for (uint32_t supernodeId = 0; supernodeId < schedule.supernodeToOps.size(); ++supernodeId)
+            {
+                for (OperationId opId : schedule.supernodeToOps[supernodeId])
+                {
+                    supernodeByOp.emplace(opId, supernodeId);
+                }
+            }
+
+            std::vector<std::size_t> batchBySupernode(schedule.supernodeToOps.size(), kInvalidIndex);
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                for (uint32_t supernodeId : scheduleBatches[batchIndex].supernodeIds)
+                {
+                    if (supernodeId < batchBySupernode.size())
+                    {
+                        batchBySupernode[supernodeId] = batchIndex;
+                    }
+                }
+            }
+
+            if (auto dirError = ensureOutputDirectory(indexPath))
+            {
+                error = *dirError;
+                return false;
+            }
+
+            std::ofstream stream(indexPath, std::ios::out | std::ios::trunc);
+            if (!stream.is_open())
+            {
+                error = "failed to open output file";
+                return false;
+            }
+
+            stream << "# grhsim declared value index\n";
+            stream << "# graph=" << graph.symbol() << "\n";
+            stream << "# schedule_supernodes=" << schedule.supernodeToOps.size() << "\n";
+            stream << "# schedule_batches=" << scheduleBatches.size() << "\n";
+
+            std::unordered_set<std::string> seenSymbols;
+            seenSymbols.reserve(graph.declaredSymbols().size());
+            DependencyRootCache rootCache;
+            rootCache.reserve(graph.values().size());
+
+            std::size_t emittedValueCount = 0;
+            std::size_t skippedDeclaredNonValueCount = 0;
+            for (const auto sym : graph.declaredSymbols())
+            {
+                const std::string symbol(graph.symbolText(sym));
+                if (symbol.empty() || !seenSymbols.insert(symbol).second)
+                {
+                    continue;
+                }
+
+                const ValueId valueId = graph.findValue(sym);
+                if (!valueId.valid())
+                {
+                    ++skippedDeclaredNonValueCount;
+                    continue;
+                }
+
+                const Value value = graph.getValue(valueId);
+                const OperationId defOpId = graph.valueDef(valueId);
+                const bool hasDefOp = defOpId.valid();
+
+                std::string valueRefText = valueRef(model, valueId);
+                uint32_t supernodeId = 0;
+                bool hasSupernode = false;
+                std::size_t batchIndex = kInvalidIndex;
+                std::string schedFileName = "<none>";
+                if (hasDefOp)
+                {
+                    if (const auto it = supernodeByOp.find(defOpId); it != supernodeByOp.end())
+                    {
+                        hasSupernode = true;
+                        supernodeId = it->second;
+                        if (supernodeId < batchBySupernode.size())
+                        {
+                            batchIndex = batchBySupernode[supernodeId];
+                            if (batchIndex != kInvalidIndex && batchIndex < schedPaths.size())
+                            {
+                                schedFileName = schedPaths[batchIndex].filename().string();
+                            }
+                        }
+                    }
+                }
+
+                std::vector<std::string> directOperands;
+                if (hasDefOp)
+                {
+                    const Operation defOp = graph.getOperation(defOpId);
+                    directOperands.reserve(defOp.operands().size());
+                    for (ValueId operand : defOp.operands())
+                    {
+                        directOperands.push_back(dependencyOperandText(graph, model, operand));
+                    }
+                }
+
+                std::unordered_set<ValueId, ValueIdHash> visiting;
+                std::vector<std::string> combRoots =
+                    collectCombinationalRootsForValue(graph, model, valueId, rootCache, visiting);
+
+                stream << "\n";
+                stream << "symbol=" << symbol << "\n";
+                stream << "value_id=" << formatValueIdText(valueId) << "\n";
+                stream << "value_ref=" << valueRefText << "\n";
+                stream << "value_type=" << toString(value.type()) << "\n";
+                stream << "value_width=" << value.width() << "\n";
+                stream << "value_signed=" << (value.isSigned() ? 1 : 0) << "\n";
+                stream << "value_src_loc=" << formatSrcLocText(value.srcLoc()) << "\n";
+                stream << "value_is_input=" << (model.inputFieldByValue.contains(valueId) ? 1 : 0) << "\n";
+
+                if (hasDefOp)
+                {
+                    const Operation defOp = graph.getOperation(defOpId);
+                    stream << "def_op=" << opSymbolOrUnnamed(graph, defOpId) << "\n";
+                    stream << "def_op_id=" << formatOperationIdText(defOpId) << "\n";
+                    stream << "def_kind=" << toString(defOp.kind()) << "\n";
+                    stream << "def_src_loc=" << formatSrcLocText(defOp.srcLoc()) << "\n";
+                }
+                else
+                {
+                    stream << "def_op=<none>\n";
+                    stream << "def_op_id=<none>\n";
+                    stream << "def_kind=<none>\n";
+                    stream << "def_src_loc=<none>\n";
+                }
+
+                if (hasSupernode)
+                {
+                    stream << "supernode=" << supernodeId << "\n";
+                    stream << "sched_batch=" << batchIndex << "\n";
+                    stream << "sched_cpp=" << schedFileName << "\n";
+                }
+                else
+                {
+                    stream << "supernode=<none>\n";
+                    stream << "sched_batch=<none>\n";
+                    stream << "sched_cpp=<none>\n";
+                }
+
+                stream << "direct_operand_count=" << directOperands.size() << "\n";
+                for (std::size_t i = 0; i < directOperands.size(); ++i)
+                {
+                    stream << "direct_operand[" << i << "]=" << directOperands[i] << "\n";
+                }
+
+                stream << "comb_root_count=" << combRoots.size() << "\n";
+                for (std::size_t i = 0; i < combRoots.size(); ++i)
+                {
+                    stream << "comb_root[" << i << "]=" << combRoots[i] << "\n";
+                }
+                stream << "---\n";
+                ++emittedValueCount;
+            }
+
+            stream << "\n";
+            stream << "# emitted_declared_values=" << emittedValueCount << "\n";
+            stream << "# skipped_declared_non_value_symbols=" << skippedDeclaredNonValueCount << "\n";
+
+            stream.flush();
+            stream.close();
+            if (!stream)
+            {
+                error = "failed to write output file";
+                return false;
+            }
+            return true;
+        }
+
         bool collectDeclaredSymbolWaveformSignals(const Graph &graph,
                                                   const EmitModel &model,
                                                   std::vector<WaveformSignalDecl> &outSignals)
@@ -3355,6 +3781,7 @@ namespace wolvrix::lib::emit
             const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
             if (!materialized)
             {
+                emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                 if (isWideLogicValue(graph, resultValue))
                 {
                     stream << "        const auto " << lhs << " = " << wordsExpr << ";\n";
@@ -3368,6 +3795,7 @@ namespace wolvrix::lib::emit
                 }
                 return;
             }
+            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
             stream << "        {\n";
             stream << "            const auto next_words = " << wordsExpr << ";\n";
             if (isWideLogicValue(graph, resultValue))
@@ -3411,11 +3839,13 @@ namespace wolvrix::lib::emit
             const std::string lhs = valueRef(model, resultValue);
             if (!isMaterializedValue(model, resultValue))
             {
+                emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                 stream << "        const auto " << lhs << " = static_cast<" << cppTypeForValue(graph, resultValue)
                        << ">(" << boolExpr << ");\n";
                 return;
             }
             const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
+            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
             stream << "        {\n";
             stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
                    << ">(" << boolExpr << ");\n";
@@ -5191,6 +5621,7 @@ namespace wolvrix::lib::emit
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
+                            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                             if (graph.valueType(resultValue) == ValueType::Logic)
                             {
                                 if (isWideLogicValue(graph, resultValue))
@@ -5211,6 +5642,7 @@ namespace wolvrix::lib::emit
                             }
                             break;
                         }
+                        emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         if (graph.valueType(resultValue) == ValueType::Logic)
                         {
                             if (isWideLogicValue(graph, resultValue))
@@ -5292,9 +5724,11 @@ namespace wolvrix::lib::emit
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
+                            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                             stream << "        const auto " << lhs << " = " << stateExpr << ";\n";
                             break;
                         }
+                        emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         if (isWideLogicValue(graph, op.results().front()))
                         {
                             if (needChangeDetect)
@@ -5349,6 +5783,7 @@ namespace wolvrix::lib::emit
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
+                            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                             stream << "        const auto " << lhs << " = [&]() -> " << cppTypeForValue(graph, resultValue)
                                    << " {\n";
                             stream << "            const std::size_t row = grhsim_index_words(" << valueRef(model, operands[0])
@@ -5360,6 +5795,7 @@ namespace wolvrix::lib::emit
                             stream << "        }();\n";
                             break;
                         }
+                        emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         stream << "        {\n";
                         stream << "            const std::size_t row = grhsim_index_words(" << valueRef(model, operands[0])
                                << ", " << state.rowCount << ");\n";
@@ -5512,6 +5948,7 @@ namespace wolvrix::lib::emit
                                 {
                                     procGuard = "first_eval_";
                                 }
+                                emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                                 stream << "        if (" << procGuard << ") {\n";
                                 stream << "            const auto next_value = static_cast<"
                                        << cppTypeForValue(graph, resultValue) << ">(grhsim_trunc_u64(open_file_handle("
@@ -5537,6 +5974,7 @@ namespace wolvrix::lib::emit
                                                      std::string(op.symbolText()));
                                 }
                                 const std::string lhs = valueRef(model, resultValue);
+                                emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                                 stream << "        {\n";
                                 stream << "            const auto next_value = static_cast<"
                                        << cppTypeForValue(graph, resultValue)
@@ -5577,6 +6015,7 @@ namespace wolvrix::lib::emit
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
                         {
+                            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                             stream << "        const auto " << lhs << " = static_cast<" << cppTypeForValue(graph, resultValue)
                                    << ">(";
                             if (rhs.alreadyBoundedToResultWidth)
@@ -5590,6 +6029,7 @@ namespace wolvrix::lib::emit
                             stream << ");\n";
                             break;
                         }
+                        emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         stream << "        {\n";
                         stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
                                << ">(";
@@ -6029,6 +6469,7 @@ namespace wolvrix::lib::emit
         }
         const std::filesystem::path headerPath = outDir / (prefix + ".hpp");
         const std::filesystem::path runtimePath = outDir / (prefix + "_runtime.hpp");
+        const std::filesystem::path declaredValueIndexPath = outDir / (prefix + "_declared_value_index.txt");
         const std::filesystem::path statePath = outDir / (prefix + "_state.cpp");
         const std::filesystem::path evalPath = outDir / (prefix + "_eval.cpp");
         std::vector<std::filesystem::path> schedPaths;
@@ -7097,8 +7538,7 @@ inline int grhsim_compare_signed_words(const std::uint64_t *lhs,
     if (lhsNeg != rhsNeg) {
         return lhsNeg ? -1 : 1;
     }
-    const int cmp = grhsim_compare_unsigned_words(lhs, lhsWords, rhs, rhsWords);
-    return lhsNeg ? -cmp : cmp;
+    return grhsim_compare_unsigned_words(lhs, lhsWords, rhs, rhsWords);
 }
 
 inline bool grhsim_reduce_and_words(const std::uint64_t *value,
@@ -7928,8 +8368,7 @@ inline int grhsim_compare_signed_words(const std::array<std::uint64_t, N> &lhs,
     if (lhsNeg != rhsNeg) {
         return lhsNeg ? -1 : 1;
     }
-    const int cmp = grhsim_compare_unsigned_words(lhs, rhs);
-    return lhsNeg ? -cmp : cmp;
+    return grhsim_compare_unsigned_words(lhs, rhs);
 }
 
 template <std::size_t N>
@@ -10543,7 +10982,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             if (!model.inputEventValues.empty())
             {
                 *stream << "\n";
-                *stream << "    // Seed shared event edges for direct input event values.\n";
+                *stream << "    // Update shared event edges for direct input event values.\n";
                 for (ValueId value : model.inputEventValues)
                 {
                     *stream << "    " << model.eventEdgeFieldByValue.at(value) << " = grhsim_classify_edge("
@@ -10771,9 +11210,21 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
         }
 
+        {
+            std::string indexError;
+            if (!emitDeclaredValueIndexFile(
+                    graph, model, schedule, scheduleBatches, schedPaths, declaredValueIndexPath, indexError))
+            {
+                reportError(indexError, declaredValueIndexPath.string());
+                result.success = false;
+                return result;
+            }
+        }
+
         result.artifacts = {
             headerPath.string(),
             runtimePath.string(),
+            declaredValueIndexPath.string(),
             statePath.string(),
             evalPath.string(),
         };

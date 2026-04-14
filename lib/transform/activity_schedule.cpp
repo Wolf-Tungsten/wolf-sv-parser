@@ -1355,6 +1355,18 @@ namespace wolvrix::lib::transform
                                  ReplicationPerfStats *perf,
                                  std::string &error)
         {
+            (void)graph;
+            (void)partition;
+            (void)opData;
+            (void)maxCost;
+            (void)maxTargets;
+            (void)stats;
+            (void)perf;
+            (void)error;
+            // Temporary A/B for XiangShan miscompare debugging: keep DP/split/materialize intact
+            // and completely disable replication so we can isolate whether clone+rewire is the root cause.
+            return false;
+
             if (partition.clusters.empty() || maxTargets == 0)
             {
                 return false;
@@ -1516,6 +1528,23 @@ namespace wolvrix::lib::transform
                     {
                         try
                         {
+                            const auto userOp = graph.getOperation(user.operation);
+                            const auto userOperands = userOp.operands();
+                            if (user.operandIndex >= userOperands.size() || userOperands[user.operandIndex] != result)
+                            {
+                                std::ostringstream oss;
+                                oss << "activity-schedule replication detected stale user edge: source="
+                                    << describeOp(graph, opId) << " result=" << result.index
+                                    << " targetSupernode=" << targetSupernode
+                                    << " user=" << describeOp(graph, user.operation)
+                                    << " operandIndex=" << user.operandIndex;
+                                if (user.operandIndex < userOperands.size())
+                                {
+                                    oss << " currentOperand=" << userOperands[user.operandIndex].index;
+                                }
+                                error = oss.str();
+                                return false;
+                            }
                             graph.replaceOperand(user.operation, user.operandIndex, cloneResult);
                         }
                         catch (const std::exception &ex)
