@@ -55,6 +55,32 @@ namespace wolvrix::lib::transform
             return std::nullopt;
         }
 
+        bool opHasReturnedEffectValue(const wolvrix::lib::grh::Operation &op)
+        {
+            if (!getAttrValue<bool>(op, "hasReturn").value_or(false))
+            {
+                return false;
+            }
+            return op.kind() == wolvrix::lib::grh::OperationKind::kDpicCall ||
+                   op.kind() == wolvrix::lib::grh::OperationKind::kSystemTask;
+        }
+
+        bool isTailSinkOp(const wolvrix::lib::grh::Operation &op)
+        {
+            switch (op.kind())
+            {
+            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
+            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                return true;
+            case wolvrix::lib::grh::OperationKind::kSystemTask:
+            case wolvrix::lib::grh::OperationKind::kDpicCall:
+                return !opHasReturnedEffectValue(op);
+            default:
+                return false;
+            }
+        }
+
         std::string describeOp(const wolvrix::lib::grh::Graph &graph,
                                wolvrix::lib::grh::OperationId opId)
         {
@@ -472,17 +498,60 @@ namespace wolvrix::lib::transform
             return data;
         }
 
-        WorkingPartition makeSeedPartition(const ActivityOpData &opData)
+        WorkingPartition makeSeedPartition(const ActivityOpData &opData,
+                                           const std::vector<uint8_t> *includeTopoPos = nullptr)
         {
             WorkingPartition partition;
             partition.clusters.reserve(opData.topoOps.size());
             partition.fixedBoundary.reserve(opData.topoOps.size());
             for (std::size_t pos = 0; pos < opData.topoOps.size(); ++pos)
             {
+                if (includeTopoPos != nullptr &&
+                    (pos >= includeTopoPos->size() || (*includeTopoPos)[pos] == 0))
+                {
+                    continue;
+                }
                 partition.clusters.push_back(std::vector<uint32_t>{static_cast<uint32_t>(pos)});
                 partition.fixedBoundary.push_back(isSideEffectBoundaryKind(opData.topoKinds[pos]) ? 1U : 0U);
             }
             return partition;
+        }
+
+        std::vector<uint32_t> collectTailSinkTopoPositions(const wolvrix::lib::grh::Graph &graph,
+                                                           const ActivityOpData &opData)
+        {
+            std::vector<uint32_t> sinks;
+            sinks.reserve(opData.topoOps.size());
+            for (std::size_t topoPos = 0; topoPos < opData.topoOps.size(); ++topoPos)
+            {
+                if (isTailSinkOp(graph.getOperation(opData.topoOps[topoPos])))
+                {
+                    sinks.push_back(static_cast<uint32_t>(topoPos));
+                }
+            }
+            return sinks;
+        }
+
+        void appendTailSinkClusters(WorkingPartition &partition,
+                                    const std::vector<uint32_t> &sinkTopoPositions,
+                                    std::size_t maxSize)
+        {
+            if (sinkTopoPositions.empty())
+            {
+                return;
+            }
+            const std::size_t chunkSize = maxSize == 0 ? sinkTopoPositions.size() : maxSize;
+            for (std::size_t begin = 0; begin < sinkTopoPositions.size(); begin += chunkSize)
+            {
+                const std::size_t end = std::min(begin + chunkSize, sinkTopoPositions.size());
+                auto &cluster = partition.clusters.emplace_back();
+                cluster.reserve(end - begin);
+                for (std::size_t index = begin; index < end; ++index)
+                {
+                    cluster.push_back(sinkTopoPositions[index]);
+                }
+                partition.fixedBoundary.push_back(0);
+            }
         }
 
         ClusterView buildClusterView(const WorkingPartition &partition, const ActivityOpData &opData)
@@ -1627,6 +1696,7 @@ namespace wolvrix::lib::transform
             struct LiveCluster
             {
                 uint32_t minTopoPos = kInvalidActivitySupernodeId;
+                bool sinkOnly = true;
                 std::vector<uint32_t> topoPositions;
             };
 
@@ -1646,6 +1716,7 @@ namespace wolvrix::lib::transform
                     }
                     live.topoPositions.push_back(it->second.second);
                     live.minTopoPos = std::min(live.minTopoPos, it->second.second);
+                    live.sinkOnly = static_cast<bool>(live.sinkOnly && isTailSinkOp(graph.getOperation(it->second.first)));
                 }
                 if (live.topoPositions.empty())
                 {
@@ -1658,7 +1729,14 @@ namespace wolvrix::lib::transform
             }
 
             std::sort(liveClusters.begin(), liveClusters.end(),
-                      [](const auto &lhs, const auto &rhs) { return lhs.minTopoPos < rhs.minTopoPos; });
+                      [](const auto &lhs, const auto &rhs)
+                      {
+                          if (lhs.sinkOnly != rhs.sinkOnly)
+                          {
+                              return !lhs.sinkOnly && rhs.sinkOnly;
+                          }
+                          return lhs.minTopoPos < rhs.minTopoPos;
+                      });
             if (perf)
             {
                 perf->collectLiveClustersMs = elapsedMs(collectLiveClustersStart);
@@ -1937,8 +2015,18 @@ namespace wolvrix::lib::transform
             return result;
         }
 
+        const std::vector<uint32_t> tailSinkTopoPositions = collectTailSinkTopoPositions(*graph, opData);
+        std::vector<uint8_t> nonSinkTopoMask(opData.topoOps.size(), 1U);
+        for (const auto topoPos : tailSinkTopoPositions)
+        {
+            if (topoPos < nonSinkTopoMask.size())
+            {
+                nonSinkTopoMask[topoPos] = 0U;
+            }
+        }
+
         const auto seedPartitionStart = std::chrono::steady_clock::now();
-        WorkingPartition partition = makeSeedPartition(opData);
+        WorkingPartition partition = makeSeedPartition(opData, &nonSinkTopoMask);
         partition = canonicalizePartition(partition, opData);
         const std::uint64_t seedPartitionMs = elapsedMs(seedPartitionStart);
         const std::size_t seedSupernodeCount = partition.clusters.size();
@@ -2036,6 +2124,7 @@ namespace wolvrix::lib::transform
         const auto materializeSegmentsStart = std::chrono::steady_clock::now();
         partition = materializeSegments(coarseView, segments);
         partition = canonicalizePartition(partition, opData);
+        appendTailSinkClusters(partition, tailSinkTopoPositions, options_.supernodeMaxSize);
         const std::uint64_t materializeSegmentsMs = elapsedMs(materializeSegmentsStart);
 
         const auto symbolPartitionStart = std::chrono::steady_clock::now();

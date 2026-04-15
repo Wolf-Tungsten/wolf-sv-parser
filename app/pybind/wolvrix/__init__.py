@@ -292,11 +292,13 @@ class Session:
         sched_batch_max_ops: int | None = None,
         sched_batch_max_estimated_lines: int | None = None,
         emit_parallelism: int | None = None,
+        perf: str | None = None,
         **named_args,
     ) -> list[dict]:
         self._ensure_open()
         if (max_cpp_file_bytes is not None or sched_batch_max_ops is not None or
-                sched_batch_max_estimated_lines is not None or emit_parallelism is not None):
+                sched_batch_max_estimated_lines is not None or emit_parallelism is not None or
+                perf is not None):
             named_args = dict(named_args)
         if max_cpp_file_bytes is not None:
             named_args["max_cpp_file_bytes"] = max_cpp_file_bytes
@@ -306,6 +308,8 @@ class Session:
             named_args["sched_batch_max_estimated_lines"] = sched_batch_max_estimated_lines
         if emit_parallelism is not None:
             named_args["emit_parallelism"] = emit_parallelism
+        if perf is not None:
+            named_args["perf"] = perf
         _compile_emit_grhsim_cpp_kwargs(named_args)
         success, diagnostics = _native.session_emit_grhsim_cpp(
             self._capsule,
@@ -553,6 +557,12 @@ def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
             raise ValueError("emit_grhsim_cpp waveform must be a string")
         if waveform not in {"off", "declared-symbols"}:
             raise ValueError("emit_grhsim_cpp waveform must be one of: off, declared-symbols")
+    perf = local.pop("perf", None)
+    if perf is not None:
+        if not isinstance(perf, str):
+            raise ValueError("emit_grhsim_cpp perf must be a string")
+        if perf not in {"off", "eval"}:
+            raise ValueError("emit_grhsim_cpp perf must be one of: off, eval")
     _ensure_no_extra_named("emit_grhsim_cpp", local)
 
 

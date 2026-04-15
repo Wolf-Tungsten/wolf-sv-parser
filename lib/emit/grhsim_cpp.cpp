@@ -163,48 +163,138 @@ namespace wolvrix::lib::emit
 
         constexpr std::size_t kInvalidIndex = static_cast<std::size_t>(-1);
         constexpr std::size_t kActivationTableThreshold = 32;
+        constexpr std::size_t kActiveFlagBitsPerWord = 8;
+
+        struct ActiveMaskEntry
+        {
+            std::size_t wordIndex = 0;
+            std::uint8_t mask = 0;
+        };
 
         std::size_t bitWordCount(std::size_t bitCount) noexcept
         {
             return (bitCount + 63u) / 64u;
         }
 
+        std::vector<ActiveMaskEntry> buildActiveMaskEntries(const std::vector<uint32_t> &indices)
+        {
+            std::map<std::size_t, std::uint8_t> masksByWord;
+            for (uint32_t index : indices)
+            {
+                const std::size_t wordIndex = static_cast<std::size_t>(index) / kActiveFlagBitsPerWord;
+                const std::uint8_t mask =
+                    static_cast<std::uint8_t>(UINT8_C(1) << (static_cast<std::size_t>(index) % kActiveFlagBitsPerWord));
+                masksByWord[wordIndex] = static_cast<std::uint8_t>(masksByWord[wordIndex] | mask);
+            }
+            std::vector<ActiveMaskEntry> entries;
+            entries.reserve(masksByWord.size());
+            for (const auto &[wordIndex, mask] : masksByWord)
+            {
+                entries.push_back(ActiveMaskEntry{.wordIndex = wordIndex, .mask = mask});
+            }
+            return entries;
+        }
+
+        struct ActivationEmitContext
+        {
+            std::size_t currentWordIndex = 0;
+            std::size_t currentActiveId = kInvalidIndex;
+            std::string_view localActiveExpr;
+        };
+
         void emitActivationStatements(std::ostream &stream,
                                       std::string_view activeExpr,
                                       std::string_view activeCountExpr,
                                       const std::vector<uint32_t> &indices,
-                                      std::string_view indent)
+                                      std::string_view indent,
+                                      const struct ActivationEmitContext *context = nullptr,
+                                      const std::vector<std::size_t> *activeIdBySupernode = nullptr)
         {
+            (void)activeCountExpr;
+            (void)activeIdBySupernode;
             if (indices.empty())
             {
                 return;
             }
-            if (indices.size() >= kActivationTableThreshold)
+            std::vector<uint32_t> localIndices;
+            std::vector<uint32_t> globalIndices;
+            if (context != nullptr && !context->localActiveExpr.empty())
+            {
+                localIndices.reserve(indices.size());
+                globalIndices.reserve(indices.size());
+                for (uint32_t activeId : indices)
+                {
+                    const std::size_t targetWordIndex =
+                        static_cast<std::size_t>(activeId) / kActiveFlagBitsPerWord;
+                    if (targetWordIndex == context->currentWordIndex &&
+                        context->currentActiveId != kInvalidIndex &&
+                        static_cast<std::size_t>(activeId) > context->currentActiveId)
+                    {
+                        localIndices.push_back(activeId);
+                    }
+                    else
+                    {
+                        globalIndices.push_back(activeId);
+                    }
+                }
+            }
+            else
+            {
+                globalIndices = indices;
+            }
+
+            if (!localIndices.empty())
+            {
+                std::uint8_t localMask = UINT8_C(0);
+                for (uint32_t index : localIndices)
+                {
+                    localMask = static_cast<std::uint8_t>(
+                        localMask |
+                        (UINT8_C(1) << (static_cast<std::size_t>(index) % kActiveFlagBitsPerWord)));
+                }
+                stream << indent << "{\n";
+                stream << indent << "    " << context->localActiveExpr << " |= UINT8_C("
+                       << static_cast<unsigned>(localMask) << ");\n";
+                stream << indent << "}\n";
+            }
+
+            const std::vector<ActiveMaskEntry> entries = buildActiveMaskEntries(globalIndices);
+            if (entries.empty())
+            {
+                return;
+            }
+            if (entries.size() >= kActivationTableThreshold)
             {
                 stream << indent << "{\n";
-                stream << indent << "    static constexpr std::uint32_t kActivationIndices[] = {";
-                for (std::size_t i = 0; i < indices.size(); ++i)
+                stream << indent << "    static constexpr grhsim_active_mask_entry kActivationMasks[] = {";
+                for (std::size_t i = 0; i < entries.size(); ++i)
                 {
-                    if ((i % 16u) == 0u)
+                    if ((i % 8u) == 0u)
                     {
                         stream << "\n" << indent << "        ";
                     }
-                    stream << indices[i] << "u";
-                    if (i + 1u != indices.size())
+                    stream << "{"
+                           << entries[i].wordIndex << "u, UINT8_C(" << static_cast<unsigned>(entries[i].mask) << ")}";
+                    if (i + 1u != entries.size())
                     {
                         stream << ", ";
                     }
                 }
                 stream << "\n" << indent << "    };\n";
-                stream << indent << "    grhsim_activate_supernodes(" << activeExpr << ", " << activeCountExpr
-                       << ", kActivationIndices, " << indices.size() << "u);\n";
+                stream << indent << "    for (const auto &entry : kActivationMasks) {\n";
+                stream << indent << "        const auto old_word = " << activeExpr << "[entry.word_index];\n";
+                stream << indent << "        " << activeExpr << "[entry.word_index] |= entry.mask;\n";
+                stream << indent << "    }\n";
                 stream << indent << "}\n";
                 return;
             }
-            for (uint32_t index : indices)
+            for (const auto &entry : entries)
             {
-                stream << indent << "grhsim_activate_supernode(" << activeExpr << ", " << activeCountExpr << ", "
-                       << index << ");\n";
+                stream << indent << "{\n";
+                stream << indent << "    const auto old_word = " << activeExpr << "[" << entry.wordIndex << "u];\n";
+                stream << indent << "    " << activeExpr << "[" << entry.wordIndex << "u] |= UINT8_C("
+                       << static_cast<unsigned>(entry.mask) << ");\n";
+                stream << indent << "}\n";
             }
         }
 
@@ -213,7 +303,8 @@ namespace wolvrix::lib::emit
         void emitChangedValuePropagation(std::ostream &stream,
                                          const EmitModel &model,
                                          ValueId resultValue,
-                                         std::string_view indent);
+                                         std::string_view indent,
+                                         const ActivationEmitContext *context = nullptr);
 
         struct ScalarLogicExpr
         {
@@ -285,6 +376,12 @@ namespace wolvrix::lib::emit
             kDeclaredSymbols,
         };
 
+        enum class PerfMode
+        {
+            kOff,
+            kEval,
+        };
+
         WaveformMode parseWaveformMode(const EmitOptions &options)
         {
             auto it = options.attributes.find("waveform");
@@ -297,6 +394,20 @@ namespace wolvrix::lib::emit
                 return WaveformMode::kDeclaredSymbols;
             }
             return WaveformMode::kOff;
+        }
+
+        PerfMode parsePerfMode(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("perf");
+            if (it == options.attributes.end() || it->second.empty() || it->second == "off")
+            {
+                return PerfMode::kOff;
+            }
+            if (it->second == "eval")
+            {
+                return PerfMode::kEval;
+            }
+            return PerfMode::kOff;
         }
 
         std::uint64_t effectiveMaxOutputFileBytes(const EmitOptions &options) noexcept
@@ -1090,6 +1201,7 @@ namespace wolvrix::lib::emit
             std::size_t index = 0;
             std::size_t estimatedLines = 0;
             std::size_t opCount = 0;
+            std::size_t activeFlagWordIndex = 0;
             std::vector<uint32_t> supernodeIds;
         };
 
@@ -1248,6 +1360,7 @@ namespace wolvrix::lib::emit
             std::unordered_set<ValueId, ValueIdHash> materializedValues;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> inputHeadSupernodesByValue;
             std::unordered_map<ValueId, std::vector<uint32_t>, ValueIdHash> boundaryFanoutByValue;
+            std::vector<std::size_t> activeIdBySupernode;
             std::unordered_map<std::string, StateDecl> stateBySymbol;
             std::unordered_map<std::string, std::vector<uint32_t>> stateHeadSupernodesBySymbol;
             std::unordered_map<OperationId, WriteDecl, OperationIdHash> writeByOp;
@@ -1289,6 +1402,7 @@ namespace wolvrix::lib::emit
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteMaskScalarSlotCounts{};
             std::map<std::size_t, std::size_t> memoryWriteMaskWideSlotCountsByWords;
             bool needsSystemTaskRuntime = false;
+            bool emitPerf = false;
             bool emitWaveform = false;
         };
 
@@ -1428,14 +1542,21 @@ namespace wolvrix::lib::emit
         void emitChangedValuePropagation(std::ostream &stream,
                                          const EmitModel &model,
                                          ValueId resultValue,
-                                         std::string_view indent)
+                                         std::string_view indent,
+                                         const ActivationEmitContext *context)
         {
             const auto it = model.boundaryFanoutByValue.find(resultValue);
             if (it == model.boundaryFanoutByValue.end())
             {
                 return;
             }
-            emitActivationStatements(stream, "supernode_active_curr_", "active_count_", it->second, indent);
+            emitActivationStatements(
+                stream,
+                "supernode_active_curr_",
+                "active_count_",
+                it->second,
+                indent,
+                context);
         }
 
         std::string renderScalarLogicExpr(const Graph &graph, ValueId resultValue, const ScalarLogicExpr &rhs)
@@ -1470,14 +1591,15 @@ namespace wolvrix::lib::emit
                                      ValueId resultValue,
                                      std::string_view oldExpr,
                                      std::string_view newExpr,
-                                     std::string_view indent)
+                                     std::string_view indent,
+                                     const ActivationEmitContext *context = nullptr)
         {
             if (const auto eventIt = model.eventEdgeFieldByValue.find(resultValue);
                 eventIt != model.eventEdgeFieldByValue.end())
             {
                 stream << indent << eventIt->second << " = grhsim_classify_edge(" << oldExpr << ", " << newExpr << ");\n";
             }
-            emitChangedValuePropagation(stream, model, resultValue, indent);
+            emitChangedValuePropagation(stream, model, resultValue, indent, context);
         }
 
         bool isMaterializedValue(const EmitModel &model, ValueId value)
@@ -2618,6 +2740,16 @@ namespace wolvrix::lib::emit
                     break;
                 }
             }
+            model.activeIdBySupernode.assign(schedule.supernodeToOps.size(), kInvalidIndex);
+            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
+            {
+                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
+                if (supernodeId < model.activeIdBySupernode.size())
+                {
+                    model.activeIdBySupernode[supernodeId] = topoIndex;
+                }
+            }
+
             for (ValueId valueId : graph.values())
             {
                 if (valueId.index == 0 || valueId.index > schedule.valueFanout.size())
@@ -2627,8 +2759,22 @@ namespace wolvrix::lib::emit
                 const auto &succs = schedule.valueFanout[valueId.index - 1];
                 if (!succs.empty())
                 {
-                    model.materializedValues.insert(valueId);
-                    model.boundaryFanoutByValue.emplace(valueId, succs);
+                    std::vector<uint32_t> activeIds;
+                    activeIds.reserve(succs.size());
+                    for (uint32_t supernodeId : succs)
+                    {
+                        if (supernodeId < model.activeIdBySupernode.size() &&
+                            model.activeIdBySupernode[supernodeId] != kInvalidIndex)
+                        {
+                            activeIds.push_back(static_cast<uint32_t>(model.activeIdBySupernode[supernodeId]));
+                        }
+                    }
+                    sortUniqueVector(activeIds);
+                    if (!activeIds.empty())
+                    {
+                        model.materializedValues.insert(valueId);
+                        model.boundaryFanoutByValue.emplace(valueId, std::move(activeIds));
+                    }
                 }
             }
 
@@ -2685,7 +2831,14 @@ namespace wolvrix::lib::emit
             for (const auto &[stateSymbol, supernodes] : schedule.stateReadSupernodes)
             {
                 auto &dst = model.stateHeadSupernodesBySymbol[stateSymbol];
-                dst.insert(dst.end(), supernodes.begin(), supernodes.end());
+                for (uint32_t supernodeId : supernodes)
+                {
+                    if (supernodeId < model.activeIdBySupernode.size() &&
+                        model.activeIdBySupernode[supernodeId] != kInvalidIndex)
+                    {
+                        dst.push_back(static_cast<uint32_t>(model.activeIdBySupernode[supernodeId]));
+                    }
+                }
             }
 
             for (uint32_t supernodeId = 0; supernodeId < schedule.supernodeToOps.size(); ++supernodeId)
@@ -2697,7 +2850,12 @@ namespace wolvrix::lib::emit
                     {
                         if (model.inputFieldByValue.find(operand) != model.inputFieldByValue.end())
                         {
-                            model.inputHeadSupernodesByValue[operand].push_back(supernodeId);
+                            if (supernodeId < model.activeIdBySupernode.size() &&
+                                model.activeIdBySupernode[supernodeId] != kInvalidIndex)
+                            {
+                                model.inputHeadSupernodesByValue[operand].push_back(
+                                    static_cast<uint32_t>(model.activeIdBySupernode[supernodeId]));
+                            }
                         }
                     }
                 }
@@ -3591,6 +3749,8 @@ namespace wolvrix::lib::emit
                                                         std::size_t batchMaxOps,
                                                         std::size_t batchMaxEstimatedLines)
         {
+            (void)batchMaxOps;
+            (void)batchMaxEstimatedLines;
             std::vector<ScheduleBatch> batches;
             ScheduleBatch current;
             auto flushCurrent = [&]()
@@ -3604,23 +3764,22 @@ namespace wolvrix::lib::emit
                 current = ScheduleBatch{};
             };
 
-            for (uint32_t supernodeId : schedule.topoOrder)
+            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
             {
+                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
+                const std::size_t activeWordIndex =
+                    topoIndex / kActiveFlagBitsPerWord;
                 const std::size_t supernodeOps =
                     supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
                 const std::size_t supernodeLines =
                     estimateSupernodeEmitLines(graph, schedule.valueFanout, schedule.supernodeToOps, supernodeId);
-                const bool hitOpBudget =
-                    batchMaxOps != 0 &&
-                    !current.supernodeIds.empty() &&
-                    current.opCount + supernodeOps > batchMaxOps;
-                const bool hitLineBudget =
-                    batchMaxEstimatedLines != 0 &&
-                    !current.supernodeIds.empty() &&
-                    current.estimatedLines + supernodeLines > batchMaxEstimatedLines;
-                if (hitOpBudget || hitLineBudget)
+                if (!current.supernodeIds.empty() && current.activeFlagWordIndex != activeWordIndex)
                 {
                     flushCurrent();
+                }
+                if (current.supernodeIds.empty())
+                {
+                    current.activeFlagWordIndex = activeWordIndex;
                 }
                 current.supernodeIds.push_back(supernodeId);
                 current.opCount += supernodeOps;
@@ -5567,16 +5726,27 @@ namespace wolvrix::lib::emit
             {
                 stream << '\n';
             }
-            stream << "void " << className << "::eval_batch_" << batch.index << "()\n{\n";
-            stream << "    // Batch " << batch.index << ": evaluate a contiguous supernode range in topo order.\n";
+            stream << "void " << className << "::eval_batch_" << batch.index << "(std::uint8_t &activeWordFlags)\n{\n";
+            stream << "    // Batch " << batch.index
+                   << ": evaluate active supernodes selected from one activity-flag word.\n";
             for (uint32_t supernodeId : batch.supernodeIds)
             {
+                const std::size_t activeId =
+                    supernodeId < model.activeIdBySupernode.size() ? model.activeIdBySupernode[supernodeId] : kInvalidIndex;
+                const ActivationEmitContext activationContext{
+                    .currentWordIndex = batch.activeFlagWordIndex,
+                    .currentActiveId = activeId,
+                    .localActiveExpr = "activeWordFlags"};
+                const std::uint8_t supernodeMask =
+                    static_cast<std::uint8_t>(UINT8_C(1) << (activeId % kActiveFlagBitsPerWord));
                 stream << "\n";
                 stream << "    // Supernode " << supernodeId << ": run when its activity flag is set.\n";
-                stream << "    if (!grhsim_is_supernode_active(supernode_active_curr_, " << supernodeId << ")) {\n";
+                stream << "    if ((activeWordFlags & UINT8_C(" << static_cast<unsigned>(supernodeMask) << ")) == 0) {\n";
                 stream << "        goto supernode_" << supernodeId << "_end;\n";
                 stream << "    }\n";
-                stream << "    grhsim_deactivate_supernode(supernode_active_curr_, active_count_, " << supernodeId << ");\n";
+                stream << "    activeWordFlags = static_cast<std::uint8_t>(\n";
+                stream << "        activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
+                       << static_cast<unsigned>(supernodeMask) << ")));\n";
                 stream << "    {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
@@ -5653,7 +5823,7 @@ namespace wolvrix::lib::emit
                                 {
                                     stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
                                            << graph.valueWidth(resultValue) << ")) {\n";
-                                    emitChangedValuePropagation(stream, model, resultValue, "                ");
+                                    emitChangedValuePropagation(stream, model, resultValue, "                ", &activationContext);
                                     stream << "            }\n";
                                 }
                                 else
@@ -5670,7 +5840,7 @@ namespace wolvrix::lib::emit
                                 if (needChangeDetect)
                                 {
                                     stream << "            if (" << lhs << " != next_value) {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                                     stream << "                " << lhs << " = next_value;\n";
                                     stream << "            }\n";
                                 }
@@ -5688,7 +5858,7 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "            if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                                 stream << "                " << lhs << " = next_value;\n";
                                 stream << "            }\n";
                             }
@@ -5735,7 +5905,7 @@ namespace wolvrix::lib::emit
                             {
                                 stream << "        if (grhsim_assign_words(" << lhs << ", " << stateExpr << ", "
                                        << graph.valueWidth(op.results().front()) << ")) {\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "            ");
+                                emitChangedValuePropagation(stream, model, resultValue, "            ", &activationContext);
                                 stream << "        }\n";
                             }
                             else
@@ -5748,7 +5918,7 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "        if (" << lhs << " != " << stateExpr << ") {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, stateExpr, "            ");
+                                emitChangedValueEffects(stream, model, resultValue, lhs, stateExpr, "            ", &activationContext);
                                 stream << "            " << lhs << " = " << stateExpr << ";\n";
                                 stream << "        }\n";
                             }
@@ -5807,7 +5977,7 @@ namespace wolvrix::lib::emit
                                 stream << "                if (grhsim_assign_words(" << lhs << ", "
                                        << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ", "
                                        << graph.valueWidth(op.results().front()) << ")) {\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                    ");
+                                emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
                                 stream << "                }\n";
                             }
                             else
@@ -5821,7 +5991,7 @@ namespace wolvrix::lib::emit
                             {
                                 stream << "                if (grhsim_assign_words(" << lhs << ", next_value, "
                                        << graph.valueWidth(op.results().front()) << ")) {\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "                    ");
+                                emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
                                 stream << "                }\n";
                             }
                             else
@@ -5842,7 +6012,8 @@ namespace wolvrix::lib::emit
                                                         resultValue,
                                                         lhs,
                                                         defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())),
-                                                        "                    ");
+                                                        "                    ",
+                                                        &activationContext);
                                 stream << "                    " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
                                 stream << "                }\n";
                             }
@@ -5855,7 +6026,7 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "                if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                    ");
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                    ", &activationContext);
                                 stream << "                    " << lhs << " = next_value;\n";
                                 stream << "                }\n";
                             }
@@ -5955,7 +6126,7 @@ namespace wolvrix::lib::emit
                                        << pathExpr << ", " << modeExpr << "), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "            if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                                 stream << "                " << lhs << " = next_value;\n";
                                 stream << "            }\n";
                                 stream << "        }\n";
@@ -5982,7 +6153,7 @@ namespace wolvrix::lib::emit
                                        << systemTaskArgExpr(graph, model, operands[0]) << "))), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "            if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                                 stream << "                " << lhs << " = next_value;\n";
                                 stream << "            }\n";
                                 stream << "        }\n";
@@ -6045,7 +6216,7 @@ namespace wolvrix::lib::emit
                         if (needChangeDetect)
                         {
                             stream << "            if (" << lhs << " != next_value) {\n";
-                            emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                            emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                             stream << "                " << lhs << " = next_value;\n";
                             stream << "            }\n";
                         }
@@ -6267,7 +6438,8 @@ namespace wolvrix::lib::emit
                                                     returnValue,
                                                     valueRef(model, returnValue),
                                                     "dpi_ret",
-                                                    "                ");
+                                                    "                ",
+                                                    &activationContext);
                             stream << "                " << valueRef(model, returnValue) << " = dpi_ret;\n";
                             stream << "            }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
@@ -6286,7 +6458,7 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         valueRef(model, resultValue);
                                     stream << "            if (" << lhs << " != " << tempName << ") {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ");
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
                                     stream << "                " << lhs << " = " << tempName << ";\n";
                                     stream << "            }\n";
                                 }
@@ -6311,7 +6483,7 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         valueRef(model, resultValue);
                                     stream << "            if (" << lhs << " != " << tempName << ") {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ");
+                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
                                     stream << "                " << lhs << " = " << tempName << ";\n";
                                     stream << "            }\n";
                                 }
@@ -6416,6 +6588,7 @@ namespace wolvrix::lib::emit
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
+        const PerfMode perfMode = parsePerfMode(options);
 
 #if !WOLVRIX_HAVE_LIBFST
         if (waveformMode != WaveformMode::kOff)
@@ -6438,6 +6611,7 @@ namespace wolvrix::lib::emit
             return result;
         }
         model.emitWaveform = waveformMode != WaveformMode::kOff;
+        model.emitPerf = perfMode != PerfMode::kOff;
         if (waveformMode == WaveformMode::kDeclaredSymbols)
         {
             collectDeclaredSymbolWaveformSignals(graph, model, model.waveformSignals);
@@ -8795,36 +8969,20 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
 }
 
 )CPP";
-            *stream << "template <typename ActiveFlags>\n";
-            *stream << "inline void grhsim_activate_supernode(ActiveFlags &activeFlags,\n";
-            *stream << "                                      std::size_t &activeCount,\n";
-            *stream << "                                      std::size_t index)\n{\n";
-            *stream << "    if (activeFlags[index] == 0) {\n";
-            *stream << "        activeFlags[index] = 1;\n";
-            *stream << "        ++activeCount;\n";
-            *stream << "    }\n";
+            *stream << "struct grhsim_active_mask_entry\n{\n";
+            *stream << "    std::uint32_t word_index;\n";
+            *stream << "    std::uint8_t mask;\n";
+            *stream << "};\n\n";
+            *stream << "inline std::uint8_t grhsim_popcount_u8(std::uint8_t value)\n{\n";
+            *stream << "    return static_cast<std::uint8_t>(__builtin_popcount(static_cast<unsigned>(value)));\n";
             *stream << "}\n\n";
             *stream << "template <typename ActiveFlags>\n";
-            *stream << "inline void grhsim_deactivate_supernode(ActiveFlags &activeFlags,\n";
-            *stream << "                                        std::size_t &activeCount,\n";
-            *stream << "                                        std::size_t index)\n{\n";
-            *stream << "    if (activeFlags[index] != 0) {\n";
-            *stream << "        activeFlags[index] = 0;\n";
-            *stream << "        --activeCount;\n";
+            *stream << "inline std::size_t grhsim_count_active_supernodes(const ActiveFlags &activeFlags)\n{\n";
+            *stream << "    std::size_t total = 0;\n";
+            *stream << "    for (const auto word : activeFlags) {\n";
+            *stream << "        total += static_cast<std::size_t>(grhsim_popcount_u8(word));\n";
             *stream << "    }\n";
-            *stream << "}\n\n";
-            *stream << "template <typename ActiveFlags>\n";
-            *stream << "inline bool grhsim_is_supernode_active(const ActiveFlags &activeFlags, std::size_t index)\n{\n";
-            *stream << "    return activeFlags[index] != 0;\n";
-            *stream << "}\n\n";
-            *stream << "template <typename ActiveFlags>\n";
-            *stream << "inline void grhsim_activate_supernodes(ActiveFlags &activeFlags,\n";
-            *stream << "                                       std::size_t &activeCount,\n";
-            *stream << "                                       const std::uint32_t *indices,\n";
-            *stream << "                                       std::size_t count)\n{\n";
-            *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
-            *stream << "        grhsim_activate_supernode(activeFlags, activeCount, indices[i]);\n";
-            *stream << "    }\n";
+            *stream << "    return total;\n";
             *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline void grhsim_mark_pending_write(std::array<std::uint32_t, N> &touchedIndices,\n";
@@ -9352,6 +9510,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
+            *stream << "    static constexpr std::size_t kActiveFlagWordCount = "
+                    << ((schedule.supernodeToOps.size() + kActiveFlagBitsPerWord - 1u) / kActiveFlagBitsPerWord) << ";\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
             *stream << "    static constexpr std::size_t kStateShadowCount = " << model.stateShadows.size() << ";\n";
             *stream << "    static constexpr std::size_t kWriteCount = " << model.writes.size() << ";\n";
@@ -9386,7 +9546,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "\nprivate:\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                *stream << "    void eval_batch_" << batchIndex << "();\n";
+                *stream << "    void eval_batch_" << batchIndex << "(std::uint8_t &activeWordFlags);\n";
             }
             if (model.emitWaveform)
             {
@@ -9408,11 +9568,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             for (const auto &chunk : stateShadowCommitChunks)
             {
-                *stream << "    void " << chunk.methodName << "(std::uint32_t shadowIndex);\n";
+                *stream << "    void " << chunk.methodName << "(std::uint32_t shadowIndex, bool &activatedReaders);\n";
             }
             for (const auto &chunk : writeCommitChunks)
             {
-                *stream << "    void " << chunk.methodName << "(std::uint32_t writeIndex);\n";
+                *stream << "    void " << chunk.methodName << "(std::uint32_t writeIndex, bool &activatedReaders);\n";
             }
             if (model.needsSystemTaskRuntime)
             {
@@ -9430,7 +9590,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        int errorCode = 0;\n";
                 *stream << "    };\n";
             }
-            *stream << "    void commit_state_updates();\n";
+            *stream << "    [[nodiscard]] bool commit_state_updates();\n";
             *stream << "    void refresh_outputs();\n\n";
             if (model.emitWaveform)
             {
@@ -9465,9 +9625,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    bool finalized_ = false;\n";
             }
-            *stream << "    bool trace_eval_enabled_ = false;\n";
-            *stream << "    std::uint64_t trace_eval_interval_ = UINT64_C(1);\n";
-            *stream << "    std::uint64_t eval_invocation_count_ = UINT64_C(0);\n";
+            if (model.emitPerf)
+            {
+                *stream << "    bool trace_eval_enabled_ = false;\n";
+                *stream << "    std::uint64_t trace_eval_interval_ = UINT64_C(1);\n";
+            }
+            if (model.emitPerf || model.emitWaveform)
+            {
+                *stream << "    std::uint64_t eval_invocation_count_ = UINT64_C(0);\n";
+            }
             *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
@@ -9490,8 +9656,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::unordered_map<std::uint64_t, FileHandleEntry> file_handles_;\n";
                 *stream << "    std::vector<PendingSystemTaskText> deferred_system_task_texts_;\n";
             }
-            *stream << "    std::array<std::uint8_t, kSupernodeCount> supernode_active_curr_{};\n";
-            *stream << "    std::size_t active_count_ = 0;\n";
+            *stream << "    std::array<std::uint8_t, kActiveFlagWordCount> supernode_active_curr_{};\n";
             if (!model.stateShadows.empty())
             {
                 *stream << "    std::array<std::uint32_t, kStateShadowCount> touched_state_shadow_indices_{};\n";
@@ -9711,8 +9876,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
             if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
             {
+                stream << indent << "    activatedReaders = true;\n";
                 emitActivationStatements(
-                    stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
+                    stream,
+                    "supernode_active_curr_",
+                    "active_count_",
+                    headIt->second,
+                    std::string(indent) + "    ");
             }
             stream << indent << "}\n";
             stream << indent << shadowTouchedRef << " = 0;\n";
@@ -9782,8 +9952,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
             if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
             {
+                stream << indent << "    activatedReaders = true;\n";
                 emitActivationStatements(
-                    stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
+                    stream,
+                    "supernode_active_curr_",
+                    "active_count_",
+                    headIt->second,
+                    std::string(indent) + "    ");
             }
             stream << indent << "}\n";
             stream << indent << writeTouchedRef << " = 0;\n";
@@ -9806,19 +9981,22 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <cstdio>\n\n";
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
-            *stream << "    if (const char *traceEvalEvery = std::getenv(\"GRHSIM_TRACE_EVAL_EVERY\");\n";
-            *stream << "        traceEvalEvery != nullptr && traceEvalEvery[0] != '\\0') {\n";
-            *stream << "        char *end = nullptr;\n";
-            *stream << "        const unsigned long long parsed = std::strtoull(traceEvalEvery, &end, 10);\n";
-            *stream << "        if (end != traceEvalEvery && parsed != 0) {\n";
-            *stream << "            trace_eval_enabled_ = true;\n";
-            *stream << "            trace_eval_interval_ = static_cast<std::uint64_t>(parsed);\n";
-            *stream << "        }\n";
-            *stream << "    }\n";
-            *stream << "    if (const char *traceEval = std::getenv(\"GRHSIM_TRACE_EVAL\");\n";
-            *stream << "        traceEval != nullptr && traceEval[0] != '\\0' && traceEval[0] != '0') {\n";
-            *stream << "        trace_eval_enabled_ = true;\n";
-            *stream << "    }\n";
+            if (model.emitPerf)
+            {
+                *stream << "    if (const char *traceEvalEvery = std::getenv(\"GRHSIM_TRACE_EVAL_EVERY\");\n";
+                *stream << "        traceEvalEvery != nullptr && traceEvalEvery[0] != '\\0') {\n";
+                *stream << "        char *end = nullptr;\n";
+                *stream << "        const unsigned long long parsed = std::strtoull(traceEvalEvery, &end, 10);\n";
+                *stream << "        if (end != traceEvalEvery && parsed != 0) {\n";
+                *stream << "            trace_eval_enabled_ = true;\n";
+                *stream << "            trace_eval_interval_ = static_cast<std::uint64_t>(parsed);\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    if (const char *traceEval = std::getenv(\"GRHSIM_TRACE_EVAL\");\n";
+                *stream << "        traceEval != nullptr && traceEval[0] != '\\0' && traceEval[0] != '0') {\n";
+                *stream << "        trace_eval_enabled_ = true;\n";
+                *stream << "    }\n";
+            }
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
             if (model.emitWaveform)
@@ -10352,7 +10530,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
                     emitActivationStatements(
-                        stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
+                        stream,
+                        "supernode_active_curr_",
+                        "active_count_",
+                        headIt->second,
+                        std::string(indent) + "    ");
                 }
                 stream << indent << "}\n";
                 stream << indent << shadowTouchedRef << " = 0;\n";
@@ -10423,13 +10605,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
                 {
                     emitActivationStatements(
-                        stream, "supernode_active_curr_", "active_count_", headIt->second, std::string(indent) + "    ");
+                        stream,
+                        "supernode_active_curr_",
+                        "active_count_",
+                        headIt->second,
+                        std::string(indent) + "    ");
                 }
                 stream << indent << "}\n";
                 stream << indent << writeTouchedRef << " = 0;\n";
             };
-            *stream << "void " << className << "::commit_state_updates()\n{\n";
+            *stream << "bool " << className << "::commit_state_updates()\n{\n";
             *stream << "    // Apply touched next-state shadows after the scheduled combinational phase completes.\n";
+            *stream << "    bool activatedReaders = false;\n";
             if (!model.stateShadows.empty())
             {
                 *stream << "    for (std::size_t touchedIndex = 0; touchedIndex < touched_state_shadow_count_; ++touchedIndex) {\n";
@@ -10440,7 +10627,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const auto &chunk = stateShadowCommitChunks[chunkIndex];
                     *stream << (chunkIndex == 0 ? "        if " : "        else if ") << "(shadowIndex <= UINT32_C("
                             << chunk.maxDispatchIndex << ")) {\n";
-                    *stream << "            " << chunk.methodName << "(shadowIndex);\n";
+                    *stream << "            " << chunk.methodName << "(shadowIndex, activatedReaders);\n";
                     *stream << "        }\n";
                 }
                 *stream << "    }\n";
@@ -10456,12 +10643,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const auto &chunk = writeCommitChunks[chunkIndex];
                     *stream << (chunkIndex == 0 ? "        if " : "        else if ") << "(writeIndex <= UINT32_C("
                             << chunk.maxDispatchIndex << ")) {\n";
-                    *stream << "            " << chunk.methodName << "(writeIndex);\n";
+                    *stream << "            " << chunk.methodName << "(writeIndex, activatedReaders);\n";
                     *stream << "        }\n";
                 }
                 *stream << "    }\n";
                 *stream << "    touched_write_count_ = 0;\n";
             }
+            *stream << "    return activatedReaders;\n";
             *stream << "}\n\n";
             *stream << "void " << className << "::refresh_outputs()\n{\n";
             *stream << "    // Publish the latest value fields to the public outputs.\n";
@@ -10501,7 +10689,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 result.success = false;
                 return result;
             }
-            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            *stream << "#include \"" << headerPath.filename().string() << "\"\n";
+            *stream << "#include <chrono>\n\n";
 
             if (chunk.kind == InitChunkSpec::Kind::kStates)
             {
@@ -10810,7 +10999,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             case InitChunkSpec::Kind::kEvalState:
                 *stream << "    // Reset per-eval scheduling state.\n";
                 *stream << "    supernode_active_curr_.fill(0);\n";
-                *stream << "    active_count_ = 0;\n";
                 if (!model.stateShadows.empty())
                 {
                     *stream << "    touched_state_shadow_indices_.fill(0);\n";
@@ -10866,7 +11054,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
-            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t shadowIndex)\n{\n";
+            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t shadowIndex, bool &activatedReaders)\n{\n";
             *stream << "    switch (shadowIndex) {\n";
             for (std::size_t shadowIndex : chunk.indices)
             {
@@ -10905,7 +11093,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
-            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t writeIndex)\n{\n";
+            *stream << "void " << className << "::" << chunk.methodName << "(std::uint32_t writeIndex, bool &activatedReaders)\n{\n";
             *stream << "    switch (writeIndex) {\n";
             for (std::size_t writeIndex : chunk.indices)
             {
@@ -10941,16 +11129,89 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 result.success = false;
                 return result;
             }
-            *stream << "#include \"" << headerPath.filename().string() << "\"\n\n";
+            const std::size_t activeFlagWordCount =
+                (schedule.supernodeToOps.size() + kActiveFlagBitsPerWord - 1u) / kActiveFlagBitsPerWord;
+            std::vector<std::vector<std::size_t>> batchIndicesByActiveWord(activeFlagWordCount);
+            for (const auto &batch : scheduleBatches)
+            {
+                if (batch.activeFlagWordIndex < batchIndicesByActiveWord.size())
+                {
+                    batchIndicesByActiveWord[batch.activeFlagWordIndex].push_back(batch.index);
+                }
+            }
+            std::vector<std::size_t> activeWordBatchOffsets;
+            activeWordBatchOffsets.reserve(activeFlagWordCount + 1u);
+            activeWordBatchOffsets.push_back(0u);
+            std::vector<std::size_t> activeWordBatchIndices;
+            activeWordBatchIndices.reserve(scheduleBatches.size());
+            for (const auto &batchIndices : batchIndicesByActiveWord)
+            {
+                activeWordBatchIndices.insert(
+                    activeWordBatchIndices.end(), batchIndices.begin(), batchIndices.end());
+                activeWordBatchOffsets.push_back(activeWordBatchIndices.size());
+            }
+            *stream << "#include \"" << headerPath.filename().string() << "\"\n";
+            if (model.emitPerf)
+            {
+                *stream << "#include <chrono>\n";
+            }
+            *stream << "\n";
             *stream << "void " << className << "::eval()\n{\n";
+            *stream << "    using BatchEvalFn = void (" << className << "::*)(std::uint8_t &activeWordFlags);\n";
+            *stream << "    static constexpr BatchEvalFn kBatchEvalFns[] = {\n";
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                *stream << "        &" << className << "::eval_batch_" << batchIndex;
+                if (batchIndex + 1 != scheduleBatches.size())
+                {
+                    *stream << ",";
+                }
+                *stream << "\n";
+            }
+            *stream << "    };\n";
+            *stream << "    static constexpr std::size_t kActiveWordBatchOffsets[] = {\n";
+            for (std::size_t offsetIndex = 0; offsetIndex < activeWordBatchOffsets.size(); ++offsetIndex)
+            {
+                *stream << "        " << activeWordBatchOffsets[offsetIndex] << "u";
+                if (offsetIndex + 1 != activeWordBatchOffsets.size())
+                {
+                    *stream << ",";
+                }
+                *stream << "\n";
+            }
+            *stream << "    };\n";
+            *stream << "    static constexpr std::size_t kActiveWordBatchIndices[] = {\n";
+            for (std::size_t entryIndex = 0; entryIndex < activeWordBatchIndices.size(); ++entryIndex)
+            {
+                *stream << "        " << activeWordBatchIndices[entryIndex] << "u";
+                if (entryIndex + 1 != activeWordBatchIndices.size())
+                {
+                    *stream << ",";
+                }
+                *stream << "\n";
+            }
+            *stream << "    };\n";
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
-            *stream << "    const std::uint64_t eval_id = ++eval_invocation_count_;\n";
-            *stream << "    std::uint64_t fixed_point_round_count = UINT64_C(0);\n";
+            if (model.emitPerf || model.emitWaveform)
+            {
+                *stream << "    const std::uint64_t eval_id = ++eval_invocation_count_;\n";
+            }
+            if (model.emitPerf)
+            {
+                *stream << "    std::uint64_t fixed_point_round_count = UINT64_C(0);\n";
+            }
+            *stream << "    bool pending_eval_round = initial_eval;\n";
             *stream << "    register_write_conflict_ = false;\n";
             *stream << "    if (initial_eval) {\n";
-                *stream << "        supernode_active_curr_.fill(1);\n";
-                *stream << "        active_count_ = kSupernodeCount;\n";
+                *stream << "        supernode_active_curr_.fill(UINT8_C(0xFF));\n";
+                if ((schedule.supernodeToOps.size() % kActiveFlagBitsPerWord) != 0u)
+                {
+                    const std::uint8_t lastMask = static_cast<std::uint8_t>(
+                        (UINT8_C(1) << (schedule.supernodeToOps.size() % kActiveFlagBitsPerWord)) - UINT8_C(1));
+                    *stream << "        supernode_active_curr_[kActiveFlagWordCount - 1] = UINT8_C("
+                            << static_cast<unsigned>(lastMask) << ");\n";
+                }
             *stream << "    }\n";
             std::map<std::vector<uint32_t>, std::vector<std::string>> inputSeedGroups;
             for (const auto &port : graph.inputPorts())
@@ -10976,7 +11237,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             for (const auto &[supernodes, conditions] : inputSeedGroups)
             {
                 *stream << "    if (!initial_eval && (" << joinStrings(conditions, " || ") << ")) {\n";
-                emitActivationStatements(*stream, "supernode_active_curr_", "active_count_", supernodes, "        ");
+                *stream << "        pending_eval_round = true;\n";
+                emitActivationStatements(
+                    *stream,
+                    "supernode_active_curr_",
+                    "active_count_",
+                    supernodes,
+                    "        ");
                 *stream << "    }\n";
             }
             if (!model.inputEventValues.empty())
@@ -10990,39 +11257,180 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 }
             }
             *stream << '\n';
-            *stream << "    const bool trace_this_eval = trace_eval_enabled_ && (trace_eval_interval_ != 0) &&\n";
-            *stream << "                                  ((eval_id % trace_eval_interval_) == 0);\n";
-            *stream << "    if (trace_this_eval) {\n";
-            *stream << "        std::fprintf(stderr,\n";
-            *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_supernodes=%zu\\n\",\n";
-            *stream << "                     static_cast<unsigned long long>(eval_id),\n";
-            *stream << "                     initial_eval ? 1 : 0,\n";
-            *stream << "                     active_count_);\n";
-            *stream << "        std::fflush(stderr);\n";
-            *stream << "    }\n";
-            *stream << "    while (active_count_ != 0) {\n";
-            *stream << "        ++fixed_point_round_count;\n";
-            *stream << "        // Propagate current activity through scheduled supernodes.\n";
-            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            if (model.emitPerf)
             {
-                *stream << "        eval_batch_" << batchIndex << "();\n";
+                *stream << "    const bool trace_this_eval = trace_eval_enabled_ && (trace_eval_interval_ != 0) &&\n";
+                *stream << "                                  ((eval_id % trace_eval_interval_) == 0);\n";
+                *stream << "    const auto trace_eval_begin_time =\n";
+                *stream << "        trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
+                *stream << "    std::size_t total_checked_batches = 0;\n";
+                *stream << "    std::size_t total_skipped_batches = 0;\n";
+                *stream << "    std::size_t total_executed_batches = 0;\n";
+                *stream << "    std::size_t total_checked_flag_words = 0;\n";
+                *stream << "    std::size_t peak_active_supernodes = trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
+                *stream << "    std::uint64_t total_batch_us = UINT64_C(0);\n";
+                *stream << "    std::uint64_t total_commit_us = UINT64_C(0);\n";
+                *stream << "    std::uint64_t total_event_clear_us = UINT64_C(0);\n";
+                *stream << "    if (trace_this_eval) {\n";
+                *stream << "        std::fprintf(stderr,\n";
+                *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_supernodes=%zu\\n\",\n";
+                *stream << "                     static_cast<unsigned long long>(eval_id),\n";
+                *stream << "                     initial_eval ? 1 : 0,\n";
+                *stream << "                     peak_active_supernodes);\n";
+                *stream << "        std::fflush(stderr);\n";
+                *stream << "    }\n";
+                *stream << "    while (pending_eval_round) {\n";
+                *stream << "        ++fixed_point_round_count;\n";
+                *stream << "        pending_eval_round = false;\n";
+                *stream << "        const auto round_begin_time =\n";
+                *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
+                *stream << "        const std::size_t round_active_in =\n";
+                *stream << "            trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
+                *stream << "        std::size_t round_checked_batches = 0;\n";
+                *stream << "        std::size_t round_skipped_batches = 0;\n";
+                *stream << "        std::size_t round_executed_batches = 0;\n";
+                *stream << "        std::size_t round_checked_flag_words = 0;\n";
+                *stream << "        std::uint64_t round_batch_us = UINT64_C(0);\n";
+                *stream << "        std::uint64_t round_commit_us = UINT64_C(0);\n";
+                *stream << "        std::uint64_t round_event_clear_us = UINT64_C(0);\n";
+                *stream << "        if (peak_active_supernodes < round_active_in) {\n";
+                *stream << "            peak_active_supernodes = round_active_in;\n";
+                *stream << "        }\n";
+                *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
+                *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
+                *stream << "            ++round_checked_batches;\n";
+                *stream << "            ++round_checked_flag_words;\n";
+                *stream << "            std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];\n";
+                *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
+                *stream << "                ++round_skipped_batches;\n";
+                *stream << "                continue;\n";
+                *stream << "            }\n";
+                *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
+                *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
+                *stream << "                 batchOffset < kActiveWordBatchOffsets[activeWordIndex + 1];\n";
+                *stream << "                 ++batchOffset) {\n";
+                *stream << "                const std::size_t batchIndex = kActiveWordBatchIndices[batchOffset];\n";
+                *stream << "                ++round_executed_batches;\n";
+                *stream << "                if (trace_this_eval) {\n";
+                *stream << "                    const auto batch_begin_time = std::chrono::steady_clock::now();\n";
+                *stream << "                    (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
+                *stream << "                    round_batch_us += static_cast<std::uint64_t>(\n";
+                *stream << "                        std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                *stream << "                            std::chrono::steady_clock::now() - batch_begin_time)\n";
+                *stream << "                            .count());\n";
+                *stream << "                } else {\n";
+                *stream << "                    (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
+                *stream << "                }\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
+                *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
+                *stream << "        bool commit_activated_readers = false;\n";
+                *stream << "        if (trace_this_eval) {\n";
+                *stream << "            const auto commit_begin_time = std::chrono::steady_clock::now();\n";
+                *stream << "            commit_activated_readers = commit_state_updates();\n";
+                *stream << "            round_commit_us += static_cast<std::uint64_t>(\n";
+                *stream << "                std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                *stream << "                    std::chrono::steady_clock::now() - commit_begin_time)\n";
+                *stream << "                    .count());\n";
+                *stream << "        } else {\n";
+                *stream << "            commit_activated_readers = commit_state_updates();\n";
+                *stream << "        }\n";
+                *stream << "        pending_eval_round = commit_activated_readers;\n";
+                if (!model.allEventValues.empty())
+                {
+                    *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
+                    *stream << "        const auto event_clear_begin_time =\n";
+                    *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
+                    emitClearAllEventEdges(*stream, model, "        ");
+                    *stream << "        if (trace_this_eval) {\n";
+                    *stream << "            round_event_clear_us += static_cast<std::uint64_t>(\n";
+                    *stream << "                std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                    *stream << "                    std::chrono::steady_clock::now() - event_clear_begin_time)\n";
+                    *stream << "                    .count());\n";
+                    *stream << "        }\n";
+                }
+                *stream << "        if (trace_this_eval) {\n";
+                *stream << "            total_checked_batches += round_checked_batches;\n";
+                *stream << "            total_skipped_batches += round_skipped_batches;\n";
+                *stream << "            total_executed_batches += round_executed_batches;\n";
+                *stream << "            total_checked_flag_words += round_checked_flag_words;\n";
+                *stream << "            total_batch_us += round_batch_us;\n";
+                *stream << "            total_commit_us += round_commit_us;\n";
+                *stream << "            total_event_clear_us += round_event_clear_us;\n";
+                *stream << "            const auto round_total_us = static_cast<std::uint64_t>(\n";
+                *stream << "                std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                *stream << "                    std::chrono::steady_clock::now() - round_begin_time)\n";
+                *stream << "                    .count());\n";
+                *stream << "            const std::size_t round_active_out = grhsim_count_active_supernodes(supernode_active_curr_);\n";
+                *stream << "            if (peak_active_supernodes < round_active_out) {\n";
+                *stream << "                peak_active_supernodes = round_active_out;\n";
+                *stream << "            }\n";
+                *stream << "            std::fprintf(stderr,\n";
+                *stream << "                         \"[grhsim] eval round #%llu.%llu active_in=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu checked_flag_words=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu active_out=%zu\\n\",\n";
+                *stream << "                         static_cast<unsigned long long>(eval_id),\n";
+                *stream << "                         static_cast<unsigned long long>(fixed_point_round_count),\n";
+                *stream << "                         round_active_in,\n";
+                *stream << "                         round_checked_batches,\n";
+                *stream << "                         round_executed_batches,\n";
+                *stream << "                         round_skipped_batches,\n";
+                *stream << "                         round_checked_flag_words,\n";
+                *stream << "                         static_cast<unsigned long long>(round_batch_us),\n";
+                *stream << "                         static_cast<unsigned long long>(round_commit_us),\n";
+                *stream << "                         static_cast<unsigned long long>(round_event_clear_us),\n";
+                *stream << "                         static_cast<unsigned long long>(round_total_us),\n";
+                *stream << "                         round_active_out);\n";
+                *stream << "            std::fflush(stderr);\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    if (trace_this_eval) {\n";
+                *stream << "        const auto eval_total_us = static_cast<std::uint64_t>(\n";
+                *stream << "            std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                *stream << "                std::chrono::steady_clock::now() - trace_eval_begin_time)\n";
+                *stream << "                .count());\n";
+                *stream << "        std::fprintf(stderr,\n";
+                *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu peak_active_supernodes=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu checked_flag_words=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu write_conflict=%d\\n\",\n";
+                *stream << "                     static_cast<unsigned long long>(eval_id),\n";
+                *stream << "                     static_cast<unsigned long long>(fixed_point_round_count),\n";
+                *stream << "                     peak_active_supernodes,\n";
+                *stream << "                     total_checked_batches,\n";
+                *stream << "                     total_executed_batches,\n";
+                *stream << "                     total_skipped_batches,\n";
+                *stream << "                     total_checked_flag_words,\n";
+                *stream << "                     static_cast<unsigned long long>(total_batch_us),\n";
+                *stream << "                     static_cast<unsigned long long>(total_commit_us),\n";
+                *stream << "                     static_cast<unsigned long long>(total_event_clear_us),\n";
+                *stream << "                     static_cast<unsigned long long>(eval_total_us),\n";
+                *stream << "                     register_write_conflict_ ? 1 : 0);\n";
+                *stream << "        std::fflush(stderr);\n";
+                *stream << "    }\n";
             }
-            *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
-            *stream << "        commit_state_updates();\n";
-            if (!model.allEventValues.empty())
+            else
             {
-                *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
-                emitClearAllEventEdges(*stream, model, "        ");
+                *stream << "    while (pending_eval_round) {\n";
+                *stream << "        pending_eval_round = false;\n";
+                *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
+                *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
+                *stream << "            std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];\n";
+                *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
+                *stream << "                continue;\n";
+                *stream << "            }\n";
+                *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
+                *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
+                *stream << "                 batchOffset < kActiveWordBatchOffsets[activeWordIndex + 1];\n";
+                *stream << "                 ++batchOffset) {\n";
+                *stream << "                const std::size_t batchIndex = kActiveWordBatchIndices[batchOffset];\n";
+                *stream << "                (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
+                *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
+                *stream << "        pending_eval_round = commit_state_updates();\n";
+                if (!model.allEventValues.empty())
+                {
+                    *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
+                    emitClearAllEventEdges(*stream, model, "        ");
+                }
+                *stream << "    }\n";
             }
-            *stream << "    }\n";
-            *stream << "    if (trace_this_eval) {\n";
-            *stream << "        std::fprintf(stderr,\n";
-            *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu write_conflict=%d\\n\",\n";
-            *stream << "                     static_cast<unsigned long long>(eval_id),\n";
-            *stream << "                     static_cast<unsigned long long>(fixed_point_round_count),\n";
-            *stream << "                     register_write_conflict_ ? 1 : 0);\n";
-            *stream << "        std::fflush(stderr);\n";
-            *stream << "    }\n";
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    flush_deferred_system_task_texts();\n";

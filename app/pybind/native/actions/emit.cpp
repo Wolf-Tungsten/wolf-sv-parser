@@ -146,6 +146,7 @@ namespace wolvrix::app::pybind
         PyObject *schedBatchMaxEstimatedLinesObj = Py_None;
         PyObject *emitParallelismObj = Py_None;
         const char *waveformMode = nullptr;
+        const char *perfMode = nullptr;
         static const char *kwlist[] = {"session",
                                        "design",
                                        "output",
@@ -155,8 +156,9 @@ namespace wolvrix::app::pybind
                                        "sched_batch_max_estimated_lines",
                                        "emit_parallelism",
                                        "waveform",
+                                       "perf",
                                        nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOs", const_cast<char **>(kwlist),
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOss", const_cast<char **>(kwlist),
                                          &sessionObj,
                                          &designKey,
                                          &output,
@@ -165,7 +167,8 @@ namespace wolvrix::app::pybind
                                          &schedBatchMaxOpsObj,
                                          &schedBatchMaxEstimatedLinesObj,
                                          &emitParallelismObj,
-                                         &waveformMode))
+                                         &waveformMode,
+                                         &perfMode))
         {
             return nullptr;
         }
@@ -250,6 +253,10 @@ namespace wolvrix::app::pybind
         if (waveformMode != nullptr)
         {
             options.attributes["waveform"] = waveformMode;
+        }
+        if (perfMode != nullptr)
+        {
+            options.attributes["perf"] = perfMode;
         }
 
         const auto result = emitter.emit(*design, options);
