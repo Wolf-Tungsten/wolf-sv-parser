@@ -282,7 +282,6 @@ namespace wolvrix::lib::emit
                 }
                 stream << "\n" << indent << "    };\n";
                 stream << indent << "    for (const auto &entry : kActivationMasks) {\n";
-                stream << indent << "        const auto old_word = " << activeExpr << "[entry.word_index];\n";
                 stream << indent << "        " << activeExpr << "[entry.word_index] |= entry.mask;\n";
                 stream << indent << "    }\n";
                 stream << indent << "}\n";
@@ -291,7 +290,6 @@ namespace wolvrix::lib::emit
             for (const auto &entry : entries)
             {
                 stream << indent << "{\n";
-                stream << indent << "    const auto old_word = " << activeExpr << "[" << entry.wordIndex << "u];\n";
                 stream << indent << "    " << activeExpr << "[" << entry.wordIndex << "u] |= UINT8_C("
                        << static_cast<unsigned>(entry.mask) << ");\n";
                 stream << indent << "}\n";
@@ -311,6 +309,108 @@ namespace wolvrix::lib::emit
             std::string expr;
             bool alreadyBoundedToResultWidth = false;
         };
+
+        std::string scalarMaskExpr(std::size_t width)
+        {
+            if (width == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            if (width >= 64)
+            {
+                return "~UINT64_C(0)";
+            }
+            return "UINT64_C(" + std::to_string((UINT64_C(1) << width) - UINT64_C(1)) + ")";
+        }
+
+        std::string scalarTruncExpr(const std::string &expr, std::size_t width)
+        {
+            if (width == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            if (width >= 64)
+            {
+                return "(" + expr + ")";
+            }
+            return "((" + expr + ") & " + scalarMaskExpr(width) + ")";
+        }
+
+        std::string scalarConcatExpr(const std::string &lhs,
+                                     std::size_t lhsWidth,
+                                     const std::string &rhs,
+                                     std::size_t rhsWidth)
+        {
+            if (lhsWidth == 0)
+            {
+                return scalarTruncExpr(rhs, rhsWidth);
+            }
+            if (rhsWidth == 0)
+            {
+                return scalarTruncExpr(lhs, lhsWidth);
+            }
+            return "((" + scalarTruncExpr(lhs, lhsWidth) + " << " + std::to_string(rhsWidth) + ") | " +
+                   scalarTruncExpr(rhs, rhsWidth) + ")";
+        }
+
+        std::string scalarShiftAmountExpr(const std::string &expr)
+        {
+            return "static_cast<std::uint64_t>(" + expr + ")";
+        }
+
+        std::string scalarShlExpr(const std::string &valueExpr,
+                                  const std::string &shiftExpr,
+                                  std::size_t width)
+        {
+            if (width == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            const std::string shift = scalarShiftAmountExpr(shiftExpr);
+            return "((" + shift + " >= UINT64_C(64)) ? UINT64_C(0) : " +
+                   scalarTruncExpr("(" + scalarTruncExpr(valueExpr, width) + " << static_cast<unsigned>(" + shift + "))",
+                                   width) +
+                   ")";
+        }
+
+        std::string scalarLShrExpr(const std::string &valueExpr,
+                                   const std::string &shiftExpr,
+                                   std::size_t width)
+        {
+            if (width == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            const std::string shift = scalarShiftAmountExpr(shiftExpr);
+            return "((" + shift + " >= UINT64_C(64)) ? UINT64_C(0) : (" +
+                   scalarTruncExpr(valueExpr, width) + " >> static_cast<unsigned>(" + shift + ")))";
+        }
+
+        std::string scalarSliceDynamicExpr(const std::string &valueExpr,
+                                           std::size_t valueWidth,
+                                           const std::string &startExpr,
+                                           std::size_t sliceWidth)
+        {
+            if (sliceWidth == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            return scalarTruncExpr(scalarLShrExpr(valueExpr, startExpr, valueWidth), sliceWidth);
+        }
+
+        std::string scalarSliceArrayExpr(const std::string &valueExpr,
+                                         std::size_t valueWidth,
+                                         const std::string &indexExpr,
+                                         std::size_t sliceWidth)
+        {
+            if (sliceWidth == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            const std::string startExpr =
+                "(static_cast<std::uint64_t>(" + indexExpr + ") * UINT64_C(" + std::to_string(sliceWidth) + "))";
+            return scalarSliceDynamicExpr(valueExpr, valueWidth, startExpr, sliceWidth);
+        }
 
         std::size_t parseScheduleBatchMaxOps(const EmitOptions &options)
         {
@@ -733,6 +833,12 @@ namespace wolvrix::lib::emit
                 return sanitizeIdentifier(symbol);
             }
             return "v" + std::to_string(value.index);
+        }
+
+        std::string localValueName(const Graph &graph, ValueId value)
+        {
+            return "local_value_" + std::to_string(value.index) + "_" + std::to_string(value.generation) + "_" +
+                   valueDebugName(graph, value);
         }
 
         std::string opDebugName(const Graph &graph, OperationId op)
@@ -1353,6 +1459,7 @@ namespace wolvrix::lib::emit
             std::unordered_map<ValueId, std::string, ValueIdHash> inputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> prevInputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> valueFieldByValue;
+            std::unordered_map<ValueId, std::string, ValueIdHash> localValueNameByValue;
             std::unordered_map<ValueId, ValueScalarSlotRef, ValueIdHash> valueScalarSlotByValue;
             std::unordered_map<ValueId, ValueWideSlotRef, ValueIdHash> valueWideSlotByValue;
             std::unordered_map<ValueId, std::size_t, ValueIdHash> valueRealSlotByValue;
@@ -1565,9 +1672,8 @@ namespace wolvrix::lib::emit
             {
                 return "static_cast<" + cppTypeForValue(graph, resultValue) + ">(" + rhs.expr + ")";
             }
-            return "static_cast<" + cppTypeForValue(graph, resultValue) +
-                   ">(grhsim_trunc_u64(" + rhs.expr + ", " +
-                   std::to_string(graph.valueWidth(resultValue)) + "))";
+            return "static_cast<" + cppTypeForValue(graph, resultValue) + ">(" +
+                   scalarTruncExpr(rhs.expr, static_cast<std::size_t>(graph.valueWidth(resultValue))) + ")";
         }
 
         bool valueNeedsChangeDetect(const EmitModel &model, ValueId resultValue)
@@ -1585,6 +1691,9 @@ namespace wolvrix::lib::emit
         {
             return valueNeedsChangeDetect(model, resultValue) || isEventValue(model, resultValue);
         }
+
+        bool isMaterializedValue(const EmitModel &model, ValueId value);
+        std::string valueRef(const EmitModel &model, ValueId value);
 
         void emitChangedValueEffects(std::ostream &stream,
                                      const EmitModel &model,
@@ -2322,9 +2431,11 @@ namespace wolvrix::lib::emit
         bool buildModel(const Graph &graph,
                         const ScheduleRefs &schedule,
                         const std::vector<ScheduleBatch> &scheduleBatches,
+                        const std::unordered_set<ValueId, ValueIdHash> &waveformValueIds,
                         EmitModel &model,
                         std::string &error)
         {
+            (void)scheduleBatches;
             auto registerInputEndpoint = [&](ValueId valueId, const std::string &fieldStem, const std::string &apiStem) {
                 if (model.inputFieldByValue.find(valueId) != model.inputFieldByValue.end())
                 {
@@ -2371,21 +2482,6 @@ namespace wolvrix::lib::emit
                                                 "        " + outType + " out = " + defaultInitExpr(graph, port.out) + ";\n"
                                                 "        " + oeType + " oe = " + defaultInitExpr(graph, port.oe) + ";\n"
                                                 "    } " + name + ";");
-            }
-
-            for (ValueId valueId : graph.values())
-            {
-                if (model.inputFieldByValue.contains(valueId))
-                {
-                    continue;
-                }
-                // Some flattened XiangShan debug nets survive as internal logic values with users
-                // but without an explicit defining op. Keep them as stable storage fields so later
-                // scheduled ops can still reference them.
-                if (!graph.valueDef(valueId).valid())
-                {
-                    model.materializedValues.insert(valueId);
-                }
             }
 
             for (OperationId opId : graph.operations())
@@ -2772,10 +2868,44 @@ namespace wolvrix::lib::emit
                     sortUniqueVector(activeIds);
                     if (!activeIds.empty())
                     {
-                        model.materializedValues.insert(valueId);
                         model.boundaryFanoutByValue.emplace(valueId, std::move(activeIds));
                     }
                 }
+            }
+
+            std::unordered_set<ValueId, ValueIdHash> persistentValues;
+            persistentValues.reserve(graph.values().size());
+
+            auto markPersistent = [&](ValueId valueId) {
+                if (!valueId.valid() || model.inputFieldByValue.contains(valueId))
+                {
+                    return;
+                }
+                persistentValues.insert(valueId);
+            };
+
+            for (const auto &port : graph.outputPorts())
+            {
+                markPersistent(port.value);
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                markPersistent(port.out);
+                markPersistent(port.oe);
+            }
+            for (ValueId valueId : waveformValueIds)
+            {
+                markPersistent(valueId);
+            }
+            for (const auto &[valueId, _] : model.eventEdgeFieldByValue)
+            {
+                (void)_;
+                markPersistent(valueId);
+            }
+            for (const auto &[valueId, _] : model.boundaryFanoutByValue)
+            {
+                (void)_;
+                markPersistent(valueId);
             }
 
             for (ValueId valueId : graph.values())
@@ -2784,6 +2914,31 @@ namespace wolvrix::lib::emit
                 {
                     continue;
                 }
+
+                const OperationId defOpId = graph.valueDef(valueId);
+                if (!defOpId.valid())
+                {
+                    markPersistent(valueId);
+                }
+                if (graph.valueType(valueId) != ValueType::Logic)
+                {
+                    markPersistent(valueId);
+                }
+                if (defOpId.valid())
+                {
+                    const OperationKind defKind = graph.getOperation(defOpId).kind();
+                    if (defKind == OperationKind::kDpicCall || defKind == OperationKind::kSystemFunction)
+                    {
+                        markPersistent(valueId);
+                    }
+                }
+
+                if (!persistentValues.contains(valueId))
+                {
+                    model.localValueNameByValue.emplace(valueId, localValueName(graph, valueId));
+                    continue;
+                }
+
                 model.materializedValues.insert(valueId);
                 switch (graph.valueType(valueId))
                 {
@@ -2918,6 +3073,10 @@ namespace wolvrix::lib::emit
                 return "value_string_slots_[" + std::to_string(it->second) + "]";
             }
             if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
+            {
+                return it->second;
+            }
+            if (auto it = model.localValueNameByValue.find(value); it != model.localValueNameByValue.end())
             {
                 return it->second;
             }
@@ -3385,6 +3544,31 @@ namespace wolvrix::lib::emit
             }
 
             return true;
+        }
+
+        std::unordered_set<ValueId, ValueIdHash> collectDeclaredSymbolWaveformValueIds(const Graph &graph)
+        {
+            std::unordered_set<ValueId, ValueIdHash> valueIds;
+            valueIds.reserve(graph.declaredSymbols().size());
+            std::unordered_set<std::string> seenSymbols;
+            seenSymbols.reserve(graph.declaredSymbols().size());
+
+            for (const auto sym : graph.declaredSymbols())
+            {
+                const std::string symbol(graph.symbolText(sym));
+                if (symbol.empty() || !seenSymbols.insert(symbol).second)
+                {
+                    continue;
+                }
+                const ValueId valueId = graph.findValue(sym);
+                if (!valueId.valid())
+                {
+                    continue;
+                }
+                valueIds.insert(valueId);
+            }
+
+            return valueIds;
         }
 
         std::pair<std::size_t, std::size_t> waveformSignalRangeForBatch(std::size_t signalCount,
@@ -4103,7 +4287,8 @@ namespace wolvrix::lib::emit
         std::string scalarBitPackExpr(const std::vector<std::string> &operands)
         {
             const std::string valuesExpr = scalarConcatValueArrayExpr(operands);
-            return "grhsim_pack_bits_u64(" + valuesExpr + ".data(), " + valuesExpr + ".size())";
+            return "([&]() -> std::uint64_t { const auto bits = " + valuesExpr +
+                   "; return grhsim_pack_bits_u64(bits.data(), bits.size()); }())";
         }
 
         std::string scalarConcatLoopExpr(const Graph &graph,
@@ -4178,19 +4363,10 @@ namespace wolvrix::lib::emit
 
         bool scalarConcatPrefixCacheable(const Graph &graph, const Operation &op)
         {
-            if (op.kind() != OperationKind::kConcat ||
-                op.results().empty() ||
-                op.operands().size() != 2 ||
-                opNeedsWordLogicEmit(graph, op))
-            {
-                return false;
-            }
-            const ValueId resultValue = op.results().front();
-            if (graph.valueType(resultValue) != ValueType::Logic || isWideLogicValue(graph, resultValue))
-            {
-                return false;
-            }
-            return graph.valueWidth(resultValue) <= 64;
+            (void)graph;
+            (void)op;
+            // <=64-bit scalar concat is emitted as direct bitwise code now.
+            return false;
         }
 
         std::vector<ScalarConcatPrefixCacheDecl> collectScalarConcatPrefixCaches(
@@ -4641,8 +4817,10 @@ namespace wolvrix::lib::emit
                 return wordsExpr;
             }
             std::ostringstream out;
-            out << "static_cast<" << cppTypeForValue(graph, resultValue) << ">(grhsim_trunc_u64(("
-                << wordsExpr << ")[0], " << graph.valueWidth(resultValue) << "))";
+            out << "static_cast<" << cppTypeForValue(graph, resultValue) << ">("
+                << scalarTruncExpr("(" + wordsExpr + ")[0]",
+                                   static_cast<std::size_t>(graph.valueWidth(resultValue)))
+                << ")";
             return out.str();
         }
 
@@ -5504,9 +5682,13 @@ namespace wolvrix::lib::emit
             case OperationKind::kReduceXnor:
                 return ScalarLogicExpr{"grhsim_reduce_xnor_u64(" + operands[0] + ", " + std::to_string(graph.valueWidth(op.operands()[0])) + ")", true};
             case OperationKind::kShl:
-                return ScalarLogicExpr{"grhsim_shl_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")", true};
+                return ScalarLogicExpr{
+                    scalarShlExpr(operandExpr(0, resultWidth), operands[1], static_cast<std::size_t>(resultWidth)),
+                    true};
             case OperationKind::kLShr:
-                return ScalarLogicExpr{"grhsim_lshr_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")", true};
+                return ScalarLogicExpr{
+                    scalarLShrExpr(operandExpr(0, resultWidth), operands[1], static_cast<std::size_t>(resultWidth)),
+                    true};
             case OperationKind::kAShr:
                 return ScalarLogicExpr{"grhsim_ashr_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")", true};
             case OperationKind::kMux:
@@ -5520,6 +5702,22 @@ namespace wolvrix::lib::emit
                 if (resultWidth <= 64 && concatAllOperandsAreOneBit(graph, op))
                 {
                     return ScalarLogicExpr{scalarBitPackExpr(operands), true};
+                }
+                if (resultWidth <= 64)
+                {
+                    if (operands.empty())
+                    {
+                        return ScalarLogicExpr{};
+                    }
+                    std::string expr = scalarTruncExpr(operands[0], static_cast<std::size_t>(graph.valueWidth(op.operands()[0])));
+                    std::size_t accumWidth = static_cast<std::size_t>(graph.valueWidth(op.operands()[0]));
+                    for (std::size_t i = 1; i < operands.size(); ++i)
+                    {
+                        const std::size_t rhsWidth = static_cast<std::size_t>(graph.valueWidth(op.operands()[i]));
+                        expr = scalarConcatExpr(expr, accumWidth, operands[i], rhsWidth);
+                        accumWidth += rhsWidth;
+                    }
+                    return ScalarLogicExpr{expr, true};
                 }
                 if (op.operands().size() == 2)
                 {
@@ -5582,9 +5780,12 @@ namespace wolvrix::lib::emit
             case OperationKind::kSliceDynamic:
             {
                 const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth").value_or(1);
-                return ScalarLogicExpr{"grhsim_slice_dynamic_u64(" + operands[0] + ", " + operands[1] + ", " +
-                                           std::to_string(sliceWidth) + ")",
-                                       true};
+                return ScalarLogicExpr{
+                    scalarSliceDynamicExpr(operands[0],
+                                           static_cast<std::size_t>(graph.valueWidth(op.operands()[0])),
+                                           operands[1],
+                                           static_cast<std::size_t>(sliceWidth)),
+                    true};
             }
             case OperationKind::kSliceArray:
             {
@@ -5593,9 +5794,12 @@ namespace wolvrix::lib::emit
                 {
                     return ScalarLogicExpr{};
                 }
-                return ScalarLogicExpr{"grhsim_slice_dynamic_u64(" + operands[0] + ", ((" + operands[1] + ") * " +
-                                           std::to_string(*sliceWidth) + "), " + std::to_string(*sliceWidth) + ")",
-                                       true};
+                return ScalarLogicExpr{
+                    scalarSliceArrayExpr(operands[0],
+                                         static_cast<std::size_t>(graph.valueWidth(op.operands()[0])),
+                                         operands[1],
+                                         static_cast<std::size_t>(*sliceWidth)),
+                    true};
             }
             case OperationKind::kSystemFunction:
             {
@@ -5654,6 +5858,215 @@ namespace wolvrix::lib::emit
                 return std::string("true");
             }
             return "(" + joinStrings(parts, " || ") + ")";
+        }
+
+        std::string memoryWriteRowExpr(const Graph &graph,
+                                       const EmitModel &model,
+                                       const WriteDecl &write,
+                                       ValueId addrValue,
+                                       const StateDecl &state);
+
+        bool isWritePortKind(OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case OperationKind::kRegisterWritePort:
+            case OperationKind::kLatchWritePort:
+            case OperationKind::kMemoryWritePort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        std::string scalarStateWriteHelperName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "apply_scalar_state_write_bool";
+            case ValueSlotScalarKind::kU8:
+                return "apply_scalar_state_write_u8";
+            case ValueSlotScalarKind::kU16:
+                return "apply_scalar_state_write_u16";
+            case ValueSlotScalarKind::kU32:
+                return "apply_scalar_state_write_u32";
+            case ValueSlotScalarKind::kU64:
+                return "apply_scalar_state_write_u64";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "apply_scalar_state_write_u64";
+        }
+
+        struct WritePortGuardKey
+        {
+            std::string condExpr;
+            std::string eventExpr;
+
+            bool operator==(const WritePortGuardKey &) const = default;
+        };
+
+        std::optional<WritePortGuardKey> writePortGuardKey(const Graph &graph,
+                                                           const EmitModel &model,
+                                                           OperationId opId,
+                                                           const Operation &op)
+        {
+            const auto operands = op.operands();
+            const std::string condExpr =
+                operands.empty() ? "true" : truthyLogicValueExpr(graph, model, operands[0]);
+            const auto eventExpr = exactEventExpr(graph, model, opId, op);
+            if (!eventExpr)
+            {
+                return std::nullopt;
+            }
+            return WritePortGuardKey{
+                .condExpr = condExpr,
+                .eventExpr = *eventExpr,
+            };
+        }
+
+        bool isCompressibleScalarStateWrite(const EmitModel &model, OperationId opId)
+        {
+            const auto writeIt = model.writeByOp.find(opId);
+            if (writeIt == model.writeByOp.end())
+            {
+                return false;
+            }
+            const WriteDecl &write = writeIt->second;
+            if (write.kind == StateDecl::Kind::Memory)
+            {
+                return false;
+            }
+            const auto stateIt = model.stateBySymbol.find(write.symbol);
+            if (stateIt == model.stateBySymbol.end())
+            {
+                return false;
+            }
+            return !isWideLogicWidth(stateIt->second.width);
+        }
+
+        std::optional<std::string> emitCompressedScalarStateWriteCall(std::ostream &stream,
+                                                                      const Graph &graph,
+                                                                      const EmitModel &model,
+                                                                      OperationId opId,
+                                                                      const Operation &op,
+                                                                      std::string_view indent)
+        {
+            const auto writeIt = model.writeByOp.find(opId);
+            if (writeIt == model.writeByOp.end())
+            {
+                return std::string("write metadata missing: ") + std::string(op.symbolText());
+            }
+            const WriteDecl &write = writeIt->second;
+            const auto stateIt = model.stateBySymbol.find(write.symbol);
+            if (stateIt == model.stateBySymbol.end())
+            {
+                return std::string("write state missing: ") + write.symbol;
+            }
+            const StateDecl &state = stateIt->second;
+            if (write.kind == StateDecl::Kind::Memory || isWideLogicWidth(state.width))
+            {
+                return std::string("write is not compressible scalar state write: ") + std::string(op.symbolText());
+            }
+            const auto operands = op.operands();
+            if (operands.size() < 3)
+            {
+                return std::string("scalar state write missing operands: ") + std::string(op.symbolText());
+            }
+            const StateShadowDecl &shadow = model.stateShadows[write.shadowIndex];
+            stream << indent << "// op " << op.symbolText() << "\n";
+            stream << indent << scalarStateWriteHelperName(write.shadowScalarKind) << "("
+                   << truthyLogicValueExpr(graph, model, operands[0]) << ", "
+                   << (write.kind == StateDecl::Kind::Register ? "true" : "false") << ", "
+                   << stateShadowTouchedRef(shadow) << ", "
+                   << stateShadowDataRef(shadow, state) << ", "
+                   << stateRef(state) << ", "
+                   << valueRef(model, operands[1]) << ", "
+                   << valueRef(model, operands[2]) << ", "
+                   << write.shadowIndex << "u);\n";
+            return std::nullopt;
+        }
+
+        std::optional<std::string> emitWritePortBody(std::ostream &stream,
+                                                     const Graph &graph,
+                                                     const EmitModel &model,
+                                                     OperationId opId,
+                                                     const Operation &op,
+                                                     std::string_view indent)
+        {
+            const auto writeIt = model.writeByOp.find(opId);
+            if (writeIt == model.writeByOp.end())
+            {
+                return std::string("write metadata missing: ") + std::string(op.symbolText());
+            }
+            const WriteDecl &write = writeIt->second;
+            const auto operands = op.operands();
+            stream << indent << "// op " << op.symbolText() << "\n";
+            stream << indent
+                   << "// Update the next-state shadow here; commit_state_updates() applies it after all scheduled supernodes finish.\n";
+            const std::string innerIndent = std::string(indent) + "    ";
+            stream << indent << "{\n";
+            if (write.kind == StateDecl::Kind::Memory)
+            {
+                const StateDecl &state = model.stateBySymbol.at(write.symbol);
+                const std::string writeTouchedRef = memoryWriteTouchedRef(write);
+                const std::string writeAddrRef = memoryWriteAddrRef(write);
+                const std::string writeDataRef = memoryWriteDataRef(write, state);
+                const std::string writeMaskRef = memoryWriteMaskRef(write, state);
+                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
+                {
+                    stream << innerIndent << "// constant zero mask: no memory update\n";
+                }
+                else
+                {
+                    stream << innerIndent << writeAddrRef << " = "
+                           << memoryWriteRowExpr(graph, model, write, operands[1], state) << ";\n";
+                    stream << innerIndent << writeDataRef << " = " << valueRef(model, operands[2]) << ";\n";
+                    if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
+                    {
+                        stream << innerIndent << writeMaskRef << " = " << valueRef(model, operands[3]) << ";\n";
+                    }
+                    stream << innerIndent << writeTouchedRef << " = 1;\n";
+                    stream << innerIndent
+                           << "grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
+                           << write.shadowIndex << "u);\n";
+                }
+            }
+            else
+            {
+                const StateDecl &state = model.stateBySymbol.at(write.symbol);
+                const std::string writeTouchedRef = stateShadowTouchedRef(model.stateShadows[write.shadowIndex]);
+                const std::string writeDataRef = stateShadowDataRef(model.stateShadows[write.shadowIndex], state);
+                const std::string shadowBaseExpr =
+                    writeTouchedRef + " ? " + writeDataRef + " : " + stateRef(state);
+                stream << innerIndent << "const auto state_shadow_base = " << shadowBaseExpr << ";\n";
+                if (isWideLogicWidth(state.width))
+                {
+                    stream << innerIndent << writeDataRef << " = grhsim_merge_words_masked(state_shadow_base, "
+                           << valueRef(model, operands[1]) << ", " << valueRef(model, operands[2]) << ", "
+                           << state.width << ");\n";
+                }
+                else
+                {
+                    stream << innerIndent << writeDataRef << " = static_cast<" << state.cppType
+                           << ">((state_shadow_base & ~" << valueRef(model, operands[2]) << ") | ("
+                           << valueRef(model, operands[1]) << " & " << valueRef(model, operands[2])
+                           << "));\n";
+                }
+                if (write.kind == StateDecl::Kind::Register)
+                {
+                    stream << innerIndent << "if (" << writeTouchedRef << ") {\n";
+                    stream << innerIndent << "    register_write_conflict_ = true;\n";
+                    stream << innerIndent << "}\n";
+                }
+                stream << innerIndent << writeTouchedRef << " = 1;\n";
+                stream << innerIndent
+                       << "grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, "
+                       << write.shadowIndex << "u);\n";
+            }
+            stream << indent << "}\n";
+            return std::nullopt;
         }
 
         void emitClearAllEventEdges(std::ostream &stream,
@@ -5758,7 +6171,8 @@ namespace wolvrix::lib::emit
                 }
                 std::size_t opIndex = 0;
                 std::size_t nextConcatPrefixDecl = 0;
-                for (const auto opId : schedule.supernodeToOps[supernodeId])
+                const auto &supernodeOps = schedule.supernodeToOps[supernodeId];
+                while (opIndex < supernodeOps.size())
                 {
                     while (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
                            concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == opIndex)
@@ -5769,11 +6183,120 @@ namespace wolvrix::lib::emit
                                << decl.key.rhsWidth << ");\n";
                         ++nextConcatPrefixDecl;
                     }
+                    const auto opId = supernodeOps[opIndex];
                     const Operation op = graph.getOperation(opId);
+                    if (isWritePortKind(op.kind()))
+                    {
+                        const auto eventExpr = exactEventExpr(graph, model, opId, op);
+                        if (!eventExpr)
+                        {
+                            return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
+                        }
+                        if (isCompressibleScalarStateWrite(model, opId))
+                        {
+                            std::size_t runEnd = opIndex + 1;
+                            while (runEnd < supernodeOps.size())
+                            {
+                                if (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
+                                    concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == runEnd)
+                                {
+                                    break;
+                                }
+                                const Operation nextOp = graph.getOperation(supernodeOps[runEnd]);
+                                if (!isWritePortKind(nextOp.kind()) ||
+                                    !isCompressibleScalarStateWrite(model, supernodeOps[runEnd]))
+                                {
+                                    break;
+                                }
+                                const auto nextEventExpr =
+                                    exactEventExpr(graph, model, supernodeOps[runEnd], nextOp);
+                                if (!nextEventExpr)
+                                {
+                                    return emitError("unsupported exact event expression emit",
+                                                     std::string(nextOp.symbolText()));
+                                }
+                                if (*nextEventExpr != *eventExpr)
+                                {
+                                    break;
+                                }
+                                ++runEnd;
+                            }
+                            if (*eventExpr != "true")
+                            {
+                                stream << "        if (" << *eventExpr << ") {\n";
+                            }
+                            for (std::size_t runIndex = opIndex; runIndex < runEnd; ++runIndex)
+                            {
+                                const auto runOpId = supernodeOps[runIndex];
+                                const Operation runOp = graph.getOperation(runOpId);
+                                if (auto error =
+                                        emitCompressedScalarStateWriteCall(stream,
+                                                                           graph,
+                                                                           model,
+                                                                           runOpId,
+                                                                           runOp,
+                                                                           *eventExpr != "true" ? "            "
+                                                                                                : "        "))
+                                {
+                                    return emitError(*error, std::string(runOp.symbolText()));
+                                }
+                            }
+                            if (*eventExpr != "true")
+                            {
+                                stream << "        }\n";
+                            }
+                            opIndex = runEnd;
+                            continue;
+                        }
+                        const auto guardKey = writePortGuardKey(graph, model, opId, op);
+                        if (!guardKey)
+                        {
+                            return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
+                        }
+                        std::size_t runEnd = opIndex + 1;
+                        while (runEnd < supernodeOps.size())
+                        {
+                            if (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
+                                concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == runEnd)
+                            {
+                                break;
+                            }
+                            const Operation nextOp = graph.getOperation(supernodeOps[runEnd]);
+                            if (!isWritePortKind(nextOp.kind()))
+                            {
+                                break;
+                            }
+                            const auto nextGuardKey =
+                                writePortGuardKey(graph, model, supernodeOps[runEnd], nextOp);
+                            if (!nextGuardKey)
+                            {
+                                return emitError("unsupported exact event expression emit",
+                                                 std::string(nextOp.symbolText()));
+                            }
+                            if (!(*nextGuardKey == *guardKey))
+                            {
+                                break;
+                            }
+                            ++runEnd;
+                        }
+                        stream << "        if ((" << guardKey->condExpr << ") && (" << guardKey->eventExpr << ")) {\n";
+                        for (std::size_t runIndex = opIndex; runIndex < runEnd; ++runIndex)
+                        {
+                            const auto runOpId = supernodeOps[runIndex];
+                            const Operation runOp = graph.getOperation(runOpId);
+                            if (auto error = emitWritePortBody(stream, graph, model, runOpId, runOp, "            "))
+                            {
+                                return emitError(*error, std::string(runOp.symbolText()));
+                            }
+                        }
+                        stream << "        }\n";
+                        opIndex = runEnd;
+                        continue;
+                    }
                     const auto operands = op.operands();
                     stream << "        // op " << op.symbolText() << "\n";
                     switch (op.kind())
-                        {
+                    {
                     case OperationKind::kConstant:
                     {
                         if (op.results().empty())
@@ -5854,9 +6377,9 @@ namespace wolvrix::lib::emit
                         else
                         {
                             stream << "        {\n";
-                            stream << "            const auto next_value = " << *expr << ";\n";
                             if (needChangeDetect)
                             {
+                                stream << "            const auto next_value = " << *expr << ";\n";
                                 stream << "            if (" << lhs << " != next_value) {\n";
                                 emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
                                 stream << "                " << lhs << " = next_value;\n";
@@ -6216,90 +6739,13 @@ namespace wolvrix::lib::emit
                         if (needChangeDetect)
                         {
                             stream << "            if (" << lhs << " != next_value) {\n";
-                            emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
-                            stream << "                " << lhs << " = next_value;\n";
+                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
+                                stream << "                " << lhs << " = next_value;\n";
                             stream << "            }\n";
                         }
                         else
                         {
                             stream << "            " << lhs << " = next_value;\n";
-                        }
-                        stream << "        }\n";
-                        break;
-                    }
-                    case OperationKind::kRegisterWritePort:
-                    case OperationKind::kLatchWritePort:
-                    case OperationKind::kMemoryWritePort:
-                    {
-                        const auto writeIt = model.writeByOp.find(opId);
-                        if (writeIt == model.writeByOp.end())
-                        {
-                            return emitError("write metadata missing", std::string(op.symbolText()));
-                        }
-                        const WriteDecl &write = writeIt->second;
-                        const std::string condExpr =
-                            operands.empty() ? "true" : truthyLogicValueExpr(graph, model, operands[0]);
-                        const auto eventExpr = exactEventExpr(graph, model, opId, op);
-                        if (!eventExpr)
-                        {
-                            return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
-                        }
-                        stream << "        // Update the next-state shadow here; commit_state_updates() applies it after all scheduled supernodes finish.\n";
-                        stream << "        if ((" << condExpr << ") && (" << *eventExpr << ")) {\n";
-                        if (write.kind == StateDecl::Kind::Memory)
-                        {
-                            const StateDecl &state = model.stateBySymbol.at(write.symbol);
-                            const std::string writeTouchedRef = memoryWriteTouchedRef(write);
-                            const std::string writeAddrRef = memoryWriteAddrRef(write);
-                            const std::string writeDataRef = memoryWriteDataRef(write, state);
-                            const std::string writeMaskRef = memoryWriteMaskRef(write, state);
-                            if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
-                            {
-                                stream << "            // constant zero mask: no memory update\n";
-                            }
-                            else
-                            {
-                                stream << "            " << writeAddrRef << " = "
-                                       << memoryWriteRowExpr(graph, model, write, operands[1], state) << ";\n";
-                                stream << "            " << writeDataRef << " = " << valueRef(model, operands[2]) << ";\n";
-                                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kDynamic)
-                                {
-                                    stream << "            " << writeMaskRef << " = " << valueRef(model, operands[3]) << ";\n";
-                                }
-                                stream << "            " << writeTouchedRef << " = 1;\n";
-                                stream << "            grhsim_mark_pending_write(touched_write_indices_, touched_write_flags_, touched_write_count_, "
-                                       << write.shadowIndex << "u);\n";
-                            }
-                        }
-                        else
-                        {
-                            const StateDecl &state = model.stateBySymbol.at(write.symbol);
-                            const std::string writeTouchedRef = stateShadowTouchedRef(model.stateShadows[write.shadowIndex]);
-                            const std::string writeDataRef = stateShadowDataRef(model.stateShadows[write.shadowIndex], state);
-                            const std::string shadowBaseExpr =
-                                writeTouchedRef + " ? " + writeDataRef + " : " + stateRef(state);
-                            stream << "            const auto state_shadow_base = " << shadowBaseExpr << ";\n";
-                            if (isWideLogicWidth(state.width))
-                            {
-                                stream << "            " << writeDataRef << " = grhsim_merge_words_masked(state_shadow_base, "
-                                       << valueRef(model, operands[1]) << ", " << valueRef(model, operands[2]) << ", "
-                                       << state.width << ");\n";
-                            }
-                            else
-                            {
-                                stream << "            " << writeDataRef << " = static_cast<" << state.cppType << ">((state_shadow_base & ~"
-                                       << valueRef(model, operands[2]) << ") | (" << valueRef(model, operands[1]) << " & "
-                                       << valueRef(model, operands[2]) << "));\n";
-                            }
-                            if (write.kind == StateDecl::Kind::Register)
-                            {
-                                stream << "            if (" << writeTouchedRef << ") {\n";
-                                stream << "                register_write_conflict_ = true;\n";
-                                stream << "            }\n";
-                            }
-                            stream << "            " << writeTouchedRef << " = 1;\n";
-                            stream << "            grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, "
-                                   << write.shadowIndex << "u);\n";
                         }
                         stream << "        }\n";
                         break;
@@ -6589,6 +7035,9 @@ namespace wolvrix::lib::emit
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
         const PerfMode perfMode = parsePerfMode(options);
+        const std::unordered_set<ValueId, ValueIdHash> waveformValueIds =
+            waveformMode == WaveformMode::kDeclaredSymbols ? collectDeclaredSymbolWaveformValueIds(graph)
+                                                           : std::unordered_set<ValueId, ValueIdHash>{};
 
 #if !WOLVRIX_HAVE_LIBFST
         if (waveformMode != WaveformMode::kOff)
@@ -6604,7 +7053,7 @@ namespace wolvrix::lib::emit
 
         EmitModel model;
         std::string buildError;
-        if (!buildModel(graph, schedule, scheduleBatches, model, buildError))
+        if (!buildModel(graph, schedule, scheduleBatches, waveformValueIds, model, buildError))
         {
             reportError(buildError, graph.symbol());
             result.success = false;
@@ -9592,6 +10041,49 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "    [[nodiscard]] bool commit_state_updates();\n";
             *stream << "    void refresh_outputs();\n\n";
+            if (!model.stateShadows.empty())
+            {
+                *stream << "    void apply_scalar_state_write_bool(bool cond,\n";
+                *stream << "                                      bool detectConflict,\n";
+                *stream << "                                      std::uint8_t &shadowTouched,\n";
+                *stream << "                                      std::uint8_t &shadowData,\n";
+                *stream << "                                      const std::uint8_t &stateData,\n";
+                *stream << "                                      std::uint8_t nextValue,\n";
+                *stream << "                                      std::uint8_t mask,\n";
+                *stream << "                                      std::uint32_t shadowIndex);\n";
+                *stream << "    void apply_scalar_state_write_u8(bool cond,\n";
+                *stream << "                                    bool detectConflict,\n";
+                *stream << "                                    std::uint8_t &shadowTouched,\n";
+                *stream << "                                    std::uint8_t &shadowData,\n";
+                *stream << "                                    const std::uint8_t &stateData,\n";
+                *stream << "                                    std::uint8_t nextValue,\n";
+                *stream << "                                    std::uint8_t mask,\n";
+                *stream << "                                    std::uint32_t shadowIndex);\n";
+                *stream << "    void apply_scalar_state_write_u16(bool cond,\n";
+                *stream << "                                     bool detectConflict,\n";
+                *stream << "                                     std::uint8_t &shadowTouched,\n";
+                *stream << "                                     std::uint16_t &shadowData,\n";
+                *stream << "                                     const std::uint16_t &stateData,\n";
+                *stream << "                                     std::uint16_t nextValue,\n";
+                *stream << "                                     std::uint16_t mask,\n";
+                *stream << "                                     std::uint32_t shadowIndex);\n";
+                *stream << "    void apply_scalar_state_write_u32(bool cond,\n";
+                *stream << "                                     bool detectConflict,\n";
+                *stream << "                                     std::uint8_t &shadowTouched,\n";
+                *stream << "                                     std::uint32_t &shadowData,\n";
+                *stream << "                                     const std::uint32_t &stateData,\n";
+                *stream << "                                     std::uint32_t nextValue,\n";
+                *stream << "                                     std::uint32_t mask,\n";
+                *stream << "                                     std::uint32_t shadowIndex);\n";
+                *stream << "    void apply_scalar_state_write_u64(bool cond,\n";
+                *stream << "                                     bool detectConflict,\n";
+                *stream << "                                     std::uint8_t &shadowTouched,\n";
+                *stream << "                                     std::uint64_t &shadowData,\n";
+                *stream << "                                     const std::uint64_t &stateData,\n";
+                *stream << "                                     std::uint64_t nextValue,\n";
+                *stream << "                                     std::uint64_t mask,\n";
+                *stream << "                                     std::uint32_t shadowIndex);\n\n";
+            }
             if (model.emitWaveform)
             {
                 *stream << "    void ensure_waveform_open();\n";
@@ -10031,6 +10523,113 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
             *stream << "}\n\n";
+            if (!model.stateShadows.empty())
+            {
+                *stream << "void " << className
+                        << "::apply_scalar_state_write_bool(bool cond,\n"
+                        << "                                       bool detectConflict,\n"
+                        << "                                       std::uint8_t &shadowTouched,\n"
+                        << "                                       std::uint8_t &shadowData,\n"
+                        << "                                       const std::uint8_t &stateData,\n"
+                        << "                                       std::uint8_t nextValue,\n"
+                        << "                                       std::uint8_t mask,\n"
+                        << "                                       std::uint32_t shadowIndex)\n{\n";
+                *stream << "    if (!cond) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    shadowData = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (detectConflict && shadowTouched) {\n";
+                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    }\n";
+                *stream << "    shadowTouched = 1;\n";
+                *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "}\n\n";
+
+                *stream << "void " << className
+                        << "::apply_scalar_state_write_u8(bool cond,\n"
+                        << "                                     bool detectConflict,\n"
+                        << "                                     std::uint8_t &shadowTouched,\n"
+                        << "                                     std::uint8_t &shadowData,\n"
+                        << "                                     const std::uint8_t &stateData,\n"
+                        << "                                     std::uint8_t nextValue,\n"
+                        << "                                     std::uint8_t mask,\n"
+                        << "                                     std::uint32_t shadowIndex)\n{\n";
+                *stream << "    if (!cond) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    shadowData = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (detectConflict && shadowTouched) {\n";
+                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    }\n";
+                *stream << "    shadowTouched = 1;\n";
+                *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "}\n\n";
+
+                *stream << "void " << className
+                        << "::apply_scalar_state_write_u16(bool cond,\n"
+                        << "                                      bool detectConflict,\n"
+                        << "                                      std::uint8_t &shadowTouched,\n"
+                        << "                                      std::uint16_t &shadowData,\n"
+                        << "                                      const std::uint16_t &stateData,\n"
+                        << "                                      std::uint16_t nextValue,\n"
+                        << "                                      std::uint16_t mask,\n"
+                        << "                                      std::uint32_t shadowIndex)\n{\n";
+                *stream << "    if (!cond) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    shadowData = static_cast<std::uint16_t>((state_shadow_base & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (detectConflict && shadowTouched) {\n";
+                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    }\n";
+                *stream << "    shadowTouched = 1;\n";
+                *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "}\n\n";
+
+                *stream << "void " << className
+                        << "::apply_scalar_state_write_u32(bool cond,\n"
+                        << "                                      bool detectConflict,\n"
+                        << "                                      std::uint8_t &shadowTouched,\n"
+                        << "                                      std::uint32_t &shadowData,\n"
+                        << "                                      const std::uint32_t &stateData,\n"
+                        << "                                      std::uint32_t nextValue,\n"
+                        << "                                      std::uint32_t mask,\n"
+                        << "                                      std::uint32_t shadowIndex)\n{\n";
+                *stream << "    if (!cond) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    shadowData = static_cast<std::uint32_t>((state_shadow_base & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (detectConflict && shadowTouched) {\n";
+                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    }\n";
+                *stream << "    shadowTouched = 1;\n";
+                *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "}\n\n";
+
+                *stream << "void " << className
+                        << "::apply_scalar_state_write_u64(bool cond,\n"
+                        << "                                      bool detectConflict,\n"
+                        << "                                      std::uint8_t &shadowTouched,\n"
+                        << "                                      std::uint64_t &shadowData,\n"
+                        << "                                      const std::uint64_t &stateData,\n"
+                        << "                                      std::uint64_t nextValue,\n"
+                        << "                                      std::uint64_t mask,\n"
+                        << "                                      std::uint32_t shadowIndex)\n{\n";
+                *stream << "    if (!cond) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    shadowData = static_cast<std::uint64_t>((state_shadow_base & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (detectConflict && shadowTouched) {\n";
+                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    }\n";
+                *stream << "    shadowTouched = 1;\n";
+                *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "}\n\n";
+            }
             if (model.emitWaveform)
             {
                 *stream << "void " << className << "::configure_waveform(bool enabled, std::string path)\n{\n";
