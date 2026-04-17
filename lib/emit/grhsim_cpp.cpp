@@ -1519,6 +1519,64 @@ namespace wolvrix::lib::emit
                    model.materializedValues.find(value) != model.materializedValues.end();
         }
 
+        bool emitMaterializedConstantInit(std::ostream &stream,
+                                          const Graph &graph,
+                                          const EmitModel &model,
+                                          ValueId valueId,
+                                          std::string_view indent,
+                                          std::string &error)
+        {
+            if (!model.materializedValues.contains(valueId))
+            {
+                return true;
+            }
+            const OperationId defOpId = graph.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return true;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() != OperationKind::kConstant)
+            {
+                return true;
+            }
+
+            const auto expr = constantExpr(graph, defOp, valueId);
+            if (!expr)
+            {
+                error = "unsupported constant emit";
+                return false;
+            }
+
+            const auto valueFieldIt = model.valueFieldByValue.find(valueId);
+            if (valueFieldIt == model.valueFieldByValue.end())
+            {
+                error = "materialized constant missing storage slot";
+                return false;
+            }
+            const std::string &lhs = valueFieldIt->second;
+            switch (graph.valueType(valueId))
+            {
+            case ValueType::Logic:
+                if (isWideLogicValue(graph, valueId))
+                {
+                    stream << indent << lhs << " = " << *expr << ";\n";
+                }
+                else
+                {
+                    stream << indent << lhs << " = static_cast<" << cppTypeForValue(graph, valueId)
+                           << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), "
+                           << graph.valueWidth(valueId) << "));\n";
+                }
+                break;
+            case ValueType::Real:
+            case ValueType::String:
+                stream << indent << lhs << " = " << *expr << ";\n";
+                break;
+            }
+            return true;
+        }
+
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width)
         {
             if (width <= 1)
@@ -6335,62 +6393,10 @@ namespace wolvrix::lib::emit
                             }
                             break;
                         }
+                        (void)lhs;
+                        (void)needChangeDetect;
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                        if (graph.valueType(resultValue) == ValueType::Logic)
-                        {
-                            if (isWideLogicValue(graph, resultValue))
-                            {
-                                stream << "        {\n";
-                                stream << "            const auto next_value = " << *expr << ";\n";
-                                if (needChangeDetect)
-                                {
-                                    stream << "            if (grhsim_assign_words(" << lhs << ", next_value, "
-                                           << graph.valueWidth(resultValue) << ")) {\n";
-                                    emitChangedValuePropagation(stream, model, resultValue, "                ", &activationContext);
-                                    stream << "            }\n";
-                                }
-                                else
-                                {
-                                    stream << "            " << lhs << " = next_value;\n";
-                                }
-                                stream << "        }\n";
-                            }
-                            else
-                            {
-                                stream << "        {\n";
-                                stream << "            const auto next_value = static_cast<" << cppTypeForValue(graph, resultValue)
-                                       << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << *expr << "), " << graph.valueWidth(resultValue) << "));\n";
-                                if (needChangeDetect)
-                                {
-                                    stream << "            if (" << lhs << " != next_value) {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
-                                    stream << "                " << lhs << " = next_value;\n";
-                                    stream << "            }\n";
-                                }
-                                else
-                                {
-                                    stream << "            " << lhs << " = next_value;\n";
-                                }
-                                stream << "        }\n";
-                            }
-                        }
-                        else
-                        {
-                            stream << "        {\n";
-                            if (needChangeDetect)
-                            {
-                                stream << "            const auto next_value = " << *expr << ";\n";
-                                stream << "            if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
-                                stream << "                " << lhs << " = next_value;\n";
-                                stream << "            }\n";
-                            }
-                            else
-                            {
-                                stream << "            " << lhs << " = next_value;\n";
-                            }
-                            stream << "        }\n";
-                        }
+                        stream << "        // materialized constant is initialized once in init(); no runtime update needed.\n";
                         break;
                     }
                     case OperationKind::kRegisterReadPort:
@@ -7112,6 +7118,7 @@ namespace wolvrix::lib::emit
                 kPublicInputs,
                 kPublicOutputs,
                 kValues,
+                kConstantValues,
                 kRandomSeed,
                 kStateStorage,
                 kStates,
@@ -7156,6 +7163,25 @@ namespace wolvrix::lib::emit
                 return 0;
             }
             return std::max<std::size_t>(96, it->second.size() + defaultInitExpr(graph, valueId).size() + 32);
+        };
+
+        auto estimateConstantValueInitBytes = [&](ValueId valueId) -> std::size_t
+        {
+            const auto it = model.valueFieldByValue.find(valueId);
+            if (it == model.valueFieldByValue.end())
+            {
+                return 0;
+            }
+            std::size_t exprBytes = 64;
+            const OperationId defOpId = graph.valueDef(valueId);
+            if (defOpId.valid())
+            {
+                if (const auto expr = constantExpr(graph, graph.getOperation(defOpId), valueId))
+                {
+                    exprBytes = expr->size();
+                }
+            }
+            return std::max<std::size_t>(128, it->second.size() + exprBytes + 48);
         };
 
         auto estimateStateInitBytes = [&](const std::string &stateSymbol) -> std::size_t
@@ -7314,6 +7340,22 @@ namespace wolvrix::lib::emit
             stateShadowIndices.push_back(shadowIndex);
         }
 
+        std::vector<ValueId> materializedConstantValues;
+        materializedConstantValues.reserve(model.materializedValues.size());
+        for (ValueId valueId : graph.values())
+        {
+            if (!model.materializedValues.contains(valueId))
+            {
+                continue;
+            }
+            const OperationId defOpId = graph.valueDef(valueId);
+            if (!defOpId.valid() || graph.getOperation(defOpId).kind() != OperationKind::kConstant)
+            {
+                continue;
+            }
+            materializedConstantValues.push_back(valueId);
+        }
+
         if (!graph.inputPorts().empty() || !graph.inoutPorts().empty())
         {
             addFixedInitChunk(InitChunkSpec::Kind::kPublicInputs);
@@ -7326,6 +7368,9 @@ namespace wolvrix::lib::emit
         {
             addValueChunks(InitChunkSpec::Kind::kValues, {}, estimateValueInitBytes);
         }
+        addValueChunks(InitChunkSpec::Kind::kConstantValues,
+                       materializedConstantValues,
+                       estimateConstantValueInitBytes);
         addFixedInitChunk(InitChunkSpec::Kind::kRandomSeed);
         addFixedInitChunk(InitChunkSpec::Kind::kStateStorage);
         addStateChunks(model.stateOrder);
@@ -11399,6 +11444,22 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 if (model.valueStringSlotCount != 0)
                 {
                     *stream << "    value_string_slots_.assign(" << model.valueStringSlotCount << ", std::string{});\n";
+                }
+                break;
+            case InitChunkSpec::Kind::kConstantValues:
+                if (!chunk.values.empty())
+                {
+                    *stream << "    // Seed materialized constants once; they do not need runtime change detection.\n";
+                }
+                for (ValueId valueId : chunk.values)
+                {
+                    std::string initError;
+                    if (!emitMaterializedConstantInit(*stream, graph, model, valueId, "    ", initError))
+                    {
+                        reportError(initError, std::string(graph.symbolText(graph.valueSymbol(valueId))));
+                        result.success = false;
+                        return result;
+                    }
                 }
                 break;
             case InitChunkSpec::Kind::kRandomSeed:
