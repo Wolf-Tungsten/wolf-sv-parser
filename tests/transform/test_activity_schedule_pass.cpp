@@ -2,6 +2,7 @@
 #include "core/transform.hpp"
 #include "transform/activity_schedule.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -41,6 +42,22 @@ namespace
                                          bool isSigned = false)
     {
         return graph.createValue(graph.internSymbol(name), width, isSigned);
+    }
+
+    std::size_t supernodeSizeForOp(const ActivityScheduleSupernodeToOps &supernodeToOps,
+                                   const ActivityScheduleOpToSupernode &opToSupernode,
+                                   wolvrix::lib::grh::OperationId opId)
+    {
+        if (opId.index == 0 || opId.index > opToSupernode.size())
+        {
+            return 0;
+        }
+        const uint32_t supernodeId = opToSupernode[opId.index - 1];
+        if (supernodeId == kInvalidActivitySupernodeId || supernodeId >= supernodeToOps.size())
+        {
+            return 0;
+        }
+        return supernodeToOps[supernodeId].size();
     }
 
 } // namespace
@@ -96,7 +113,8 @@ int main()
         SessionStore session;
         PassManager manager;
         manager.options().session = &session;
-        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{.path = "top"}));
+        manager.addPass(std::make_unique<ActivitySchedulePass>(
+            ActivityScheduleOptions{.path = "top", .enableReplication = false}));
 
         PassDiagnostics diags;
         const PassManagerResult runResult = manager.run(design, diags);
@@ -492,6 +510,691 @@ int main()
             (*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
         {
             return fail("Expected equal-cost DP tie-break to keep the trailing three-op chain together");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top5");
+        design.markAsTop("top5");
+
+        const auto clk = makeValue(graph, "clk_top5", 1, false);
+        const auto en0 = makeValue(graph, "en0_top5", 1, false);
+        const auto en1 = makeValue(graph, "en1_top5", 1, false);
+        const auto en2 = makeValue(graph, "en2_top5", 1, false);
+        const auto mask0 = makeValue(graph, "mask0_top5", 8, false);
+        const auto mask1 = makeValue(graph, "mask1_top5", 8, false);
+        const auto mask2 = makeValue(graph, "mask2_top5", 8, false);
+        const auto d0 = makeValue(graph, "d0_top5", 8, false);
+        const auto d1 = makeValue(graph, "d1_top5", 8, false);
+        const auto d2 = makeValue(graph, "d2_top5", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en0", en0);
+        graph.bindInputPort("en1", en1);
+        graph.bindInputPort("en2", en2);
+        graph.bindInputPort("mask0", mask0);
+        graph.bindInputPort("mask1", mask1);
+        graph.bindInputPort("mask2", mask2);
+        graph.bindInputPort("d0", d0);
+        graph.bindInputPort("d1", d1);
+        graph.bindInputPort("d2", d2);
+
+        const auto reg0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                graph.internSymbol("q0_top5"));
+        const auto reg1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                graph.internSymbol("q1_top5"));
+        const auto reg2 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                graph.internSymbol("q2_top5"));
+        graph.setAttr(reg0, "width", static_cast<int64_t>(8));
+        graph.setAttr(reg0, "isSigned", false);
+        graph.setAttr(reg1, "width", static_cast<int64_t>(8));
+        graph.setAttr(reg1, "isSigned", false);
+        graph.setAttr(reg2, "width", static_cast<int64_t>(8));
+        graph.setAttr(reg2, "isSigned", false);
+
+        const auto write0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                  graph.internSymbol("q0_write_top5"));
+        graph.addOperand(write0, en0);
+        graph.addOperand(write0, d0);
+        graph.addOperand(write0, mask0);
+        graph.addOperand(write0, clk);
+        graph.setAttr(write0, "regSymbol", std::string("q0_top5"));
+        graph.setAttr(write0, "eventEdge", std::vector<std::string>{"posedge"});
+
+        const auto write1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                  graph.internSymbol("q1_write_top5"));
+        graph.addOperand(write1, en1);
+        graph.addOperand(write1, d1);
+        graph.addOperand(write1, mask1);
+        graph.addOperand(write1, clk);
+        graph.setAttr(write1, "regSymbol", std::string("q1_top5"));
+        graph.setAttr(write1, "eventEdge", std::vector<std::string>{"posedge"});
+
+        const auto write2 = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                  graph.internSymbol("q2_write_top5"));
+        graph.addOperand(write2, en2);
+        graph.addOperand(write2, d2);
+        graph.addOperand(write2, mask2);
+        graph.addOperand(write2, clk);
+        graph.setAttr(write2, "regSymbol", std::string("q2_top5"));
+        graph.setAttr(write2, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top5",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 3,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected sink-supernode activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top5.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected sink-supernode session outputs");
+        }
+        if (supernodeToOps->size() != 1 || supernodeToOps->front().size() != 3)
+        {
+            return fail("Expected sink ops to coarsen into one oversized sink supernode");
+        }
+        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, write0) <= 1)
+        {
+            return fail("Expected sink supernode to exceed normal supernode-max-size");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top6");
+        design.markAsTop("top6");
+
+        const auto clk = makeValue(graph, "clk_top6", 1, false);
+        const auto en = makeValue(graph, "en_top6", 1, false);
+        const auto mask = makeValue(graph, "mask_top6", 8, false);
+        const auto a = makeValue(graph, "a_top6", 8, false);
+        const auto b = makeValue(graph, "b_top6", 8, false);
+        const auto c = makeValue(graph, "c_top6", 8, false);
+        const auto d = makeValue(graph, "d_top6", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top6"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto v0 = makeValue(graph, "v0_top6", 8, false);
+        const auto op0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                               graph.internSymbol("op0_top6"));
+        graph.addOperand(op0, a);
+        graph.addOperand(op0, b);
+        graph.addResult(op0, v0);
+
+        const auto v1 = makeValue(graph, "v1_top6", 8, false);
+        const auto op1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                               graph.internSymbol("op1_top6"));
+        graph.addOperand(op1, v0);
+        graph.addOperand(op1, c);
+        graph.addResult(op1, v1);
+
+        const auto v2 = makeValue(graph, "v2_top6", 8, false);
+        const auto op2 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                               graph.internSymbol("op2_top6"));
+        graph.addOperand(op2, v1);
+        graph.addOperand(op2, d);
+        graph.addResult(op2, v2);
+
+        const auto write = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                 graph.internSymbol("q_write_top6"));
+        graph.addOperand(write, en);
+        graph.addOperand(write, v2);
+        graph.addOperand(write, mask);
+        graph.addOperand(write, clk);
+        graph.setAttr(write, "regSymbol", std::string("q_top6"));
+        graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top6",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 1,
+            .maxDomSinkSupernodeOp = 3,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected dom-sink absorb activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top6.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected dom-sink session outputs");
+        }
+        if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1] ||
+            (*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1])
+        {
+            return fail("Expected dom-sink chain to be absorbed into one dom-sink supernode");
+        }
+        if ((*opToSupernode)[op2.index - 1] == (*opToSupernode)[write.index - 1])
+        {
+            return fail("Expected sink op to remain separate from dom-sink supernode");
+        }
+        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, op2) != 3)
+        {
+            return fail("Expected dom-sink supernode to keep the full three-op exclusive chain");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top7");
+        design.markAsTop("top7");
+
+        const auto clk = makeValue(graph, "clk_top7", 1, false);
+        const auto en = makeValue(graph, "en_top7", 1, false);
+        const auto mask = makeValue(graph, "mask_top7", 8, false);
+        const auto a = makeValue(graph, "a_top7", 8, false);
+        const auto b = makeValue(graph, "b_top7", 8, false);
+        const auto c = makeValue(graph, "c_top7", 8, false);
+        const auto d = makeValue(graph, "d_top7", 8, false);
+        const auto e = makeValue(graph, "e_top7", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+        graph.bindInputPort("e", e);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top7"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto shared = makeValue(graph, "shared_top7", 8, false);
+        const auto sharedOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                    graph.internSymbol("shared_top7_op"));
+        graph.addOperand(sharedOp, a);
+        graph.addOperand(sharedOp, b);
+        graph.addResult(sharedOp, shared);
+
+        const auto sinkData = makeValue(graph, "sink_data_top7", 8, false);
+        const auto domOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                 graph.internSymbol("dom_top7_op"));
+        graph.addOperand(domOp, shared);
+        graph.addOperand(domOp, c);
+        graph.addResult(domOp, sinkData);
+
+        const auto sideValue = makeValue(graph, "side_top7", 8, false);
+        const auto sideOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                  graph.internSymbol("side_top7_op"));
+        graph.addOperand(sideOp, shared);
+        graph.addOperand(sideOp, d);
+        graph.addResult(sideOp, sideValue);
+
+        const auto y = makeValue(graph, "y_top7", 8, false);
+        const auto outOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kOr,
+                                                 graph.internSymbol("out_top7_op"));
+        graph.addOperand(outOp, sideValue);
+        graph.addOperand(outOp, e);
+        graph.addResult(outOp, y);
+        graph.bindOutputPort("y", y);
+
+        const auto write = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                 graph.internSymbol("q_write_top7"));
+        graph.addOperand(write, en);
+        graph.addOperand(write, sinkData);
+        graph.addOperand(write, mask);
+        graph.addOperand(write, clk);
+        graph.setAttr(write, "regSymbol", std::string("q_top7"));
+        graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top7",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 1,
+            .maxDomSinkSupernodeOp = 3,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected shared-predecessor dom-sink activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top7.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected shared-predecessor session outputs");
+        }
+        if ((*opToSupernode)[sharedOp.index - 1] == (*opToSupernode)[domOp.index - 1])
+        {
+            return fail("Expected shared predecessor to stay outside the dom-sink supernode");
+        }
+        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, domOp) != 1)
+        {
+            return fail("Expected dom-sink supernode to keep only the seed when predecessor is shared");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top8");
+        design.markAsTop("top8");
+
+        const auto clk = makeValue(graph, "clk_top8", 1, false);
+        const auto en = makeValue(graph, "en_top8", 1, false);
+        const auto mask = makeValue(graph, "mask_top8", 8, false);
+        const auto a = makeValue(graph, "a_top8", 8, false);
+        const auto b = makeValue(graph, "b_top8", 8, false);
+        const auto c = makeValue(graph, "c_top8", 8, false);
+        const auto d = makeValue(graph, "d_top8", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top8"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto preValue = makeValue(graph, "pre_top8", 8, false);
+        const auto preOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                 graph.internSymbol("pre_top8_op"));
+        graph.addOperand(preOp, a);
+        graph.addOperand(preOp, b);
+        graph.addResult(preOp, preValue);
+
+        const auto domValue = makeValue(graph, "dom_top8", 8, false);
+        const auto domOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                 graph.internSymbol("dom_top8_op"));
+        graph.addOperand(domOp, preValue);
+        graph.addOperand(domOp, c);
+        graph.addResult(domOp, domValue);
+
+        const auto tailValue = makeValue(graph, "tail_top8", 8, false);
+        const auto tailOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                  graph.internSymbol("tail_top8_op"));
+        graph.addOperand(tailOp, domValue);
+        graph.addOperand(tailOp, d);
+        graph.addResult(tailOp, tailValue);
+        graph.bindOutputPort("y", tailValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top8"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, domValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top8"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top8",
+            .supernodeMaxSize = 2,
+            .maxSinkSupernodeOp = 1,
+            .maxDomSinkSupernodeOp = 1,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected dom-sink residual-successor pattern to avoid quotient cycles");
+        }
+
+        const std::string keyPrefix = "top8.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        const auto *topoOrder =
+            getSessionValue<ActivityScheduleTopoOrder>(session, keyPrefix + "topo_order");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr || topoOrder == nullptr)
+        {
+            return fail("Expected cycle-regression session outputs");
+        }
+        if (topoOrder->size() != supernodeToOps->size())
+        {
+            return fail("Expected final topo order to cover every cycle-regression supernode");
+        }
+        if ((*opToSupernode)[preOp.index - 1] == kInvalidActivitySupernodeId ||
+            (*opToSupernode)[domOp.index - 1] == kInvalidActivitySupernodeId ||
+            (*opToSupernode)[tailOp.index - 1] == kInvalidActivitySupernodeId ||
+            (*opToSupernode)[writeOp.index - 1] == kInvalidActivitySupernodeId)
+        {
+            return fail("Expected cycle-regression ops to map to valid supernodes");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top9");
+        design.markAsTop("top9");
+
+        const auto clk = makeValue(graph, "clk_top9", 1, false);
+        const auto en = makeValue(graph, "en_top9", 1, false);
+        const auto mask = makeValue(graph, "mask_top9", 8, false);
+        const auto a = makeValue(graph, "a_top9", 8, false);
+        const auto b = makeValue(graph, "b_top9", 8, false);
+        const auto c = makeValue(graph, "c_top9", 8, false);
+        const auto d = makeValue(graph, "d_top9", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top9"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto preValue = makeValue(graph, "pre_top9", 8, false);
+        const auto preOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                 graph.internSymbol("pre_top9_op"));
+        graph.addOperand(preOp, a);
+        graph.addOperand(preOp, b);
+        graph.addResult(preOp, preValue);
+
+        const auto seedValue = makeValue(graph, "seed_top9", 8, false);
+        const auto seedOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                  graph.internSymbol("seed_top9_op"));
+        graph.addOperand(seedOp, preValue);
+        graph.addOperand(seedOp, c);
+        graph.addResult(seedOp, seedValue);
+
+        const auto residualValue = makeValue(graph, "residual_top9", 8, false);
+        const auto residualOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                      graph.internSymbol("residual_top9_op"));
+        graph.addOperand(residualOp, seedValue);
+        graph.addOperand(residualOp, d);
+        graph.addResult(residualOp, residualValue);
+        graph.bindOutputPort("y", residualValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top9"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, seedValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top9"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top9",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 1,
+            .maxDomSinkSupernodeOp = 3,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected mixed-user dom-sink seed pattern to stay out of dom-sink partition");
+        }
+
+        const std::string keyPrefix = "top9.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected mixed-user dom-sink session outputs");
+        }
+        if ((*opToSupernode)[preOp.index - 1] == (*opToSupernode)[seedOp.index - 1])
+        {
+            return fail("Expected non-pure dom-sink seed to stay separate from its exclusive predecessor");
+        }
+        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, seedOp) != 1)
+        {
+            return fail("Expected non-pure dom-sink seed to remain a singleton before normal coarsen");
+        }
+        if ((*opToSupernode)[seedOp.index - 1] == (*opToSupernode)[writeOp.index - 1])
+        {
+            return fail("Expected sink op to remain separate from non-pure dom-sink seed");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top10");
+        design.markAsTop("top10");
+
+        const auto clk = makeValue(graph, "clk_top10", 1, false);
+        const auto en = makeValue(graph, "en_top10", 1, false);
+        const auto mask = makeValue(graph, "mask_top10", 8, false);
+        const auto a = makeValue(graph, "a_top10", 8, false);
+        const auto b = makeValue(graph, "b_top10", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top10"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto dpiOut = makeValue(graph, "dpi_out_top10", 8, false);
+        const auto dpiOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kDpicCall,
+                                                 graph.internSymbol("dpi_top10"));
+        graph.addOperand(dpiOp, en);
+        graph.addOperand(dpiOp, a);
+        graph.setAttr(dpiOp, "hasReturn", false);
+        graph.addResult(dpiOp, dpiOut);
+
+        const auto assignValue = makeValue(graph, "assign_top10", 8, false);
+        const auto assignOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAssign,
+                                                    graph.internSymbol("assign_top10_op"));
+        graph.addOperand(assignOp, dpiOut);
+        graph.addResult(assignOp, assignValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top10"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, assignValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top10"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        const auto residualValue = makeValue(graph, "residual_top10", 8, false);
+        const auto residualOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                      graph.internSymbol("residual_top10_op"));
+        graph.addOperand(residualOp, dpiOut);
+        graph.addOperand(residualOp, b);
+        graph.addResult(residualOp, residualValue);
+        graph.bindOutputPort("y", residualValue);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top10",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 8,
+            .maxDomSinkSupernodeOp = 8,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected no-return dpi with output result to stay out of sink partition");
+        }
+
+        const std::string keyPrefix = "top10.activity_schedule.";
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (opToSupernode == nullptr)
+        {
+            return fail("Expected no-return dpi session outputs");
+        }
+        if ((*opToSupernode)[dpiOp.index - 1] == (*opToSupernode)[writeOp.index - 1])
+        {
+            return fail("Expected no-return dpi with result to avoid sink-supernode classification");
+        }
+        if ((*opToSupernode)[assignOp.index - 1] == (*opToSupernode)[writeOp.index - 1])
+        {
+            return fail("Expected downstream assign to avoid sink-supernode classification");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top11");
+        design.markAsTop("top11");
+
+        const auto clk = makeValue(graph, "clk_top11", 1, false);
+        const auto en = makeValue(graph, "en_top11", 1, false);
+        const auto mask = makeValue(graph, "mask_top11", 8, false);
+        const auto a = makeValue(graph, "a_top11", 8, false);
+        const auto b = makeValue(graph, "b_top11", 8, false);
+        const auto c = makeValue(graph, "c_top11", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top11"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto sharedValue = makeValue(graph, "shared_top11", 8, false);
+        const auto sharedOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                    graph.internSymbol("shared_top11_op"));
+        graph.addOperand(sharedOp, a);
+        graph.addOperand(sharedOp, b);
+        graph.addResult(sharedOp, sharedValue);
+
+        const auto midValue = makeValue(graph, "mid_top11", 8, false);
+        const auto midOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                 graph.internSymbol("mid_top11_op"));
+        graph.addOperand(midOp, sharedValue);
+        graph.addOperand(midOp, c);
+        graph.addResult(midOp, midValue);
+
+        const auto seedValue = makeValue(graph, "seed_top11", 8, false);
+        const auto seedOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                  graph.internSymbol("seed_top11_op"));
+        graph.addOperand(seedOp, midValue);
+        graph.addOperand(seedOp, sharedValue);
+        graph.addResult(seedOp, seedValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top11"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, seedValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top11"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top11",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 1,
+            .maxDomSinkSupernodeOp = 8,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected shared predecessor to stay out of dom-sink cluster");
+        }
+
+        const std::string keyPrefix = "top11.activity_schedule.";
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (opToSupernode == nullptr)
+        {
+            return fail("Expected shared-predecessor dom-sink session outputs");
+        }
+        if ((*opToSupernode)[midOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
+        {
+            return fail("Expected single-user predecessor to join dom-sink cluster");
+        }
+        if ((*opToSupernode)[sharedOp.index - 1] == (*opToSupernode)[seedOp.index - 1])
+        {
+            return fail("Expected shared predecessor to remain outside dom-sink cluster");
         }
     }
 

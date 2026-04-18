@@ -17,13 +17,15 @@ namespace wolvrix::lib::transform
     {
         std::string path;
         std::size_t supernodeMaxSize = 72;
+        std::size_t maxSinkSupernodeOp = 4096;
+        std::size_t maxDomSinkSupernodeOp = 4096;
         bool enableCoarsen = true;
         bool enableChainMerge = true;
         bool enableSiblingMerge = true;
         bool enableForwardMerge = true;
         bool enableRefine = true;
         std::size_t refineMaxIter = 4;
-        bool enableReplication = true;
+        bool enableReplication = false;
         std::size_t replicationMaxCost = 2;
         std::size_t replicationMaxTargets = 8;
         std::string costModel = "edge-cut";

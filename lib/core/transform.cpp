@@ -640,6 +640,46 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
+                else if (arg == "-max-sink-supernode-op")
+                {
+                    if (!parseSizeArg("-max-sink-supernode-op", options.maxSinkSupernodeOp))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-max-sink-supernode-op="))
+                {
+                    try
+                    {
+                        options.maxSinkSupernodeOp = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-max-sink-supernode-op=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-sink-supernode-op value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-max-dom-sink-supernode-op")
+                {
+                    if (!parseSizeArg("-max-dom-sink-supernode-op", options.maxDomSinkSupernodeOp))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-max-dom-sink-supernode-op="))
+                {
+                    try
+                    {
+                        options.maxDomSinkSupernodeOp = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-max-dom-sink-supernode-op=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-dom-sink-supernode-op value";
+                        return nullptr;
+                    }
+                }
                 else if (arg == "-enable-coarsen")
                 {
                     if (!parseBoolArg("-enable-coarsen", options.enableCoarsen))
