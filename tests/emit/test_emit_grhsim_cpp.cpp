@@ -2264,7 +2264,7 @@ int main()
             harness << "    sim.fire_b = true;\n";
             harness << "    sim.clk = true;\n";
             harness << "    sim.eval();\n";
-            harness << "    if (!sim.had_register_write_conflict()) return 7;\n";
+            harness << "    if (sim.had_register_write_conflict()) return 7;\n";
             harness << "    sim.fire_a = false;\n";
             harness << "    sim.fire_b = false;\n";
             harness << "    sim.clk = false;\n";

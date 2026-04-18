@@ -5965,6 +5965,31 @@ namespace wolvrix::lib::emit
             bool operator==(const WritePortGuardKey &) const = default;
         };
 
+        struct TableCompressibleScalarStateWriteDesc
+        {
+            ValueSlotScalarKind kind = ValueSlotScalarKind::kBool;
+            std::uint32_t condIndex = 0;
+            std::uint32_t touchedIndex = 0;
+            std::uint32_t shadowDataIndex = 0;
+            std::uint32_t stateDataIndex = 0;
+            std::uint32_t nextIndex = 0;
+            std::uint32_t maskIndex = 0;
+            std::uint32_t shadowIndex = 0;
+        };
+
+        struct ScalarStateWriteRangeStep
+        {
+            std::int32_t cond = 0;
+            std::int32_t touched = 0;
+            std::int32_t shadowData = 0;
+            std::int32_t stateData = 0;
+            std::int32_t next = 0;
+            std::int32_t mask = 0;
+            std::int32_t shadow = 0;
+
+            bool operator==(const ScalarStateWriteRangeStep &) const = default;
+        };
+
         std::optional<WritePortGuardKey> writePortGuardKey(const Graph &graph,
                                                            const EmitModel &model,
                                                            OperationId opId,
@@ -6004,6 +6029,171 @@ namespace wolvrix::lib::emit
             return !isWideLogicWidth(stateIt->second.width);
         }
 
+        std::optional<TableCompressibleScalarStateWriteDesc>
+        buildTableCompressibleScalarStateWriteDesc(const Graph &graph,
+                                                  const EmitModel &model,
+                                                  OperationId opId,
+                                                  const Operation &op)
+        {
+            if (!isCompressibleScalarStateWrite(model, opId))
+            {
+                return std::nullopt;
+            }
+            const auto writeIt = model.writeByOp.find(opId);
+            if (writeIt == model.writeByOp.end())
+            {
+                return std::nullopt;
+            }
+            const WriteDecl &write = writeIt->second;
+            if (write.kind == StateDecl::Kind::Memory)
+            {
+                return std::nullopt;
+            }
+            const auto stateIt = model.stateBySymbol.find(write.symbol);
+            if (stateIt == model.stateBySymbol.end())
+            {
+                return std::nullopt;
+            }
+            const StateDecl &state = stateIt->second;
+            if (state.scalarKind != write.shadowScalarKind || state.slotIndex == kInvalidIndex)
+            {
+                return std::nullopt;
+            }
+            const auto operands = op.operands();
+            if (operands.size() < 3 || graph.valueWidth(operands[0]) != 1)
+            {
+                return std::nullopt;
+            }
+            const auto condIt = model.valueScalarSlotByValue.find(operands[0]);
+            if (condIt == model.valueScalarSlotByValue.end() ||
+                condIt->second.kind != ValueSlotScalarKind::kBool)
+            {
+                return std::nullopt;
+            }
+            const auto nextIt = model.valueScalarSlotByValue.find(operands[1]);
+            const auto maskIt = model.valueScalarSlotByValue.find(operands[2]);
+            if (nextIt == model.valueScalarSlotByValue.end() ||
+                maskIt == model.valueScalarSlotByValue.end() ||
+                nextIt->second.kind != write.shadowScalarKind ||
+                maskIt->second.kind != write.shadowScalarKind)
+            {
+                return std::nullopt;
+            }
+            const StateShadowDecl &shadow = model.stateShadows[write.shadowIndex];
+            if (shadow.scalarKind != write.shadowScalarKind)
+            {
+                return std::nullopt;
+            }
+            return TableCompressibleScalarStateWriteDesc{
+                .kind = write.shadowScalarKind,
+                .condIndex = static_cast<std::uint32_t>(condIt->second.index),
+                .touchedIndex = static_cast<std::uint32_t>(shadow.touchedIndex),
+                .shadowDataIndex = static_cast<std::uint32_t>(shadow.dataIndex),
+                .stateDataIndex = static_cast<std::uint32_t>(state.slotIndex),
+                .nextIndex = static_cast<std::uint32_t>(nextIt->second.index),
+                .maskIndex = static_cast<std::uint32_t>(maskIt->second.index),
+                .shadowIndex = static_cast<std::uint32_t>(write.shadowIndex),
+            };
+        }
+
+        ScalarStateWriteRangeStep scalarStateWriteRangeStep(const TableCompressibleScalarStateWriteDesc &lhs,
+                                                            const TableCompressibleScalarStateWriteDesc &rhs)
+        {
+            return ScalarStateWriteRangeStep{
+                .cond = static_cast<std::int32_t>(rhs.condIndex) - static_cast<std::int32_t>(lhs.condIndex),
+                .touched = static_cast<std::int32_t>(rhs.touchedIndex) - static_cast<std::int32_t>(lhs.touchedIndex),
+                .shadowData =
+                    static_cast<std::int32_t>(rhs.shadowDataIndex) - static_cast<std::int32_t>(lhs.shadowDataIndex),
+                .stateData =
+                    static_cast<std::int32_t>(rhs.stateDataIndex) - static_cast<std::int32_t>(lhs.stateDataIndex),
+                .next = static_cast<std::int32_t>(rhs.nextIndex) - static_cast<std::int32_t>(lhs.nextIndex),
+                .mask = static_cast<std::int32_t>(rhs.maskIndex) - static_cast<std::int32_t>(lhs.maskIndex),
+                .shadow = static_cast<std::int32_t>(rhs.shadowIndex) - static_cast<std::int32_t>(lhs.shadowIndex),
+            };
+        }
+
+        std::string scalarStateWriteRangeDescTypeName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "scalar_state_write_bool_range_desc";
+            case ValueSlotScalarKind::kU8:
+                return "scalar_state_write_u8_range_desc";
+            case ValueSlotScalarKind::kU16:
+                return "scalar_state_write_u16_range_desc";
+            case ValueSlotScalarKind::kU32:
+                return "scalar_state_write_u32_range_desc";
+            case ValueSlotScalarKind::kU64:
+                return "scalar_state_write_u64_range_desc";
+            }
+            return "scalar_state_write_u64_range_desc";
+        }
+
+        std::string scalarStateWriteRangeHelperName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "apply_scalar_state_write_bool_range";
+            case ValueSlotScalarKind::kU8:
+                return "apply_scalar_state_write_u8_range";
+            case ValueSlotScalarKind::kU16:
+                return "apply_scalar_state_write_u16_range";
+            case ValueSlotScalarKind::kU32:
+                return "apply_scalar_state_write_u32_range";
+            case ValueSlotScalarKind::kU64:
+                return "apply_scalar_state_write_u64_range";
+            }
+            return "apply_scalar_state_write_u64_range";
+        }
+
+        bool modelUsesScalarStateWriteKind(const EmitModel &model, ValueSlotScalarKind kind)
+        {
+            const auto boolSlots =
+                model.valueScalarSlotCounts[static_cast<std::size_t>(ValueSlotScalarKind::kBool)];
+            if (boolSlots == 0)
+            {
+                return false;
+            }
+            if (kind != ValueSlotScalarKind::kBool &&
+                model.valueScalarSlotCounts[static_cast<std::size_t>(kind)] == 0)
+            {
+                return false;
+            }
+            return std::any_of(model.writes.begin(), model.writes.end(), [&](const WriteDecl &write) {
+                return write.kind != StateDecl::Kind::Memory && write.shadowScalarKind == kind;
+            });
+        }
+
+        void emitScalarStateWriteRangeDesc(std::ostream &stream,
+                                           const TableCompressibleScalarStateWriteDesc &first,
+                                           const ScalarStateWriteRangeStep &step,
+                                           std::size_t count,
+                                           std::string_view indent,
+                                           std::string_view descName)
+        {
+            stream << indent << "static constexpr " << scalarStateWriteRangeDescTypeName(first.kind) << " " << descName
+                   << "{\n";
+            stream << indent << "    " << count << "u,\n";
+            stream << indent << "    " << first.condIndex << "u,\n";
+            stream << indent << "    " << step.cond << ",\n";
+            stream << indent << "    " << first.touchedIndex << "u,\n";
+            stream << indent << "    " << step.touched << ",\n";
+            stream << indent << "    " << first.shadowDataIndex << "u,\n";
+            stream << indent << "    " << step.shadowData << ",\n";
+            stream << indent << "    " << first.stateDataIndex << "u,\n";
+            stream << indent << "    " << step.stateData << ",\n";
+            stream << indent << "    " << first.nextIndex << "u,\n";
+            stream << indent << "    " << step.next << ",\n";
+            stream << indent << "    " << first.maskIndex << "u,\n";
+            stream << indent << "    " << step.mask << ",\n";
+            stream << indent << "    " << first.shadowIndex << "u,\n";
+            stream << indent << "    " << step.shadow << ",\n";
+            stream << indent << "};\n";
+            stream << indent << scalarStateWriteRangeHelperName(first.kind) << "(" << descName << ");\n";
+        }
+
         std::optional<std::string> emitCompressedScalarStateWriteCall(std::ostream &stream,
                                                                       const Graph &graph,
                                                                       const EmitModel &model,
@@ -6036,7 +6226,6 @@ namespace wolvrix::lib::emit
             stream << indent << "// op " << op.symbolText() << "\n";
             stream << indent << scalarStateWriteHelperName(write.shadowScalarKind) << "("
                    << truthyLogicValueExpr(graph, model, operands[0]) << ", "
-                   << (write.kind == StateDecl::Kind::Register ? "true" : "false") << ", "
                    << stateShadowTouchedRef(shadow) << ", "
                    << stateShadowDataRef(shadow, state) << ", "
                    << stateRef(state) << ", "
@@ -6111,12 +6300,6 @@ namespace wolvrix::lib::emit
                            << ">((state_shadow_base & ~" << valueRef(model, operands[2]) << ") | ("
                            << valueRef(model, operands[1]) << " & " << valueRef(model, operands[2])
                            << "));\n";
-                }
-                if (write.kind == StateDecl::Kind::Register)
-                {
-                    stream << innerIndent << "if (" << writeTouchedRef << ") {\n";
-                    stream << innerIndent << "    register_write_conflict_ = true;\n";
-                    stream << innerIndent << "}\n";
                 }
                 stream << innerIndent << writeTouchedRef << " = 1;\n";
                 stream << innerIndent
@@ -6252,6 +6435,17 @@ namespace wolvrix::lib::emit
                         }
                         if (isCompressibleScalarStateWrite(model, opId))
                         {
+                            std::vector<TableCompressibleScalarStateWriteDesc> tableRunDescs;
+                            tableRunDescs.reserve(16);
+                            std::vector<OperationId> tableRunOpIds;
+                            tableRunOpIds.reserve(16);
+                            const auto firstTableDesc =
+                                buildTableCompressibleScalarStateWriteDesc(graph, model, opId, op);
+                            if (firstTableDesc)
+                            {
+                                tableRunDescs.push_back(*firstTableDesc);
+                                tableRunOpIds.push_back(opId);
+                            }
                             std::size_t runEnd = opIndex + 1;
                             while (runEnd < supernodeOps.size())
                             {
@@ -6277,7 +6471,80 @@ namespace wolvrix::lib::emit
                                 {
                                     break;
                                 }
+                                if (firstTableDesc)
+                                {
+                                    const auto nextTableDesc = buildTableCompressibleScalarStateWriteDesc(
+                                        graph, model, supernodeOps[runEnd], nextOp);
+                                    if (!nextTableDesc || nextTableDesc->kind != firstTableDesc->kind)
+                                    {
+                                        break;
+                                    }
+                                    tableRunDescs.push_back(*nextTableDesc);
+                                    tableRunOpIds.push_back(supernodeOps[runEnd]);
+                                }
                                 ++runEnd;
+                            }
+                            if (tableRunDescs.size() >= 4)
+                            {
+                                if (*eventExpr != "true")
+                                {
+                                    stream << "        if (" << *eventExpr << ") {\n";
+                                }
+                                std::size_t rangeStart = 0;
+                                while (rangeStart < tableRunDescs.size())
+                                {
+                                    std::size_t rangeEnd = rangeStart + 1;
+                                    if (rangeStart + 1 < tableRunDescs.size())
+                                    {
+                                        const auto step = scalarStateWriteRangeStep(tableRunDescs[rangeStart],
+                                                                                    tableRunDescs[rangeStart + 1]);
+                                        rangeEnd = rangeStart + 2;
+                                        while (rangeEnd < tableRunDescs.size() &&
+                                               scalarStateWriteRangeStep(tableRunDescs[rangeEnd - 1],
+                                                                         tableRunDescs[rangeEnd]) == step)
+                                        {
+                                            ++rangeEnd;
+                                        }
+                                        if (rangeEnd - rangeStart >= 4)
+                                        {
+                                            stream << (*eventExpr != "true" ? "            " : "        ")
+                                                   << "// compressed scalar state writes: "
+                                                   << (rangeEnd - rangeStart) << " ops\n";
+                                            const std::string descName =
+                                                "kScalarStateWriteRange_" + std::to_string(batch.index) + "_" +
+                                                std::to_string(supernodeId) + "_" + std::to_string(opIndex + rangeStart);
+                                            emitScalarStateWriteRangeDesc(stream,
+                                                                          tableRunDescs[rangeStart],
+                                                                          step,
+                                                                          rangeEnd - rangeStart,
+                                                                          *eventExpr != "true" ? "            "
+                                                                                               : "        ",
+                                                                          descName);
+                                            rangeStart = rangeEnd;
+                                            continue;
+                                        }
+                                    }
+                                    const auto runOpId = tableRunOpIds[rangeStart];
+                                    const Operation runOp = graph.getOperation(runOpId);
+                                    if (auto error =
+                                            emitCompressedScalarStateWriteCall(stream,
+                                                                               graph,
+                                                                               model,
+                                                                               runOpId,
+                                                                               runOp,
+                                                                               *eventExpr != "true" ? "            "
+                                                                                                    : "        "))
+                                    {
+                                        return emitError(*error, std::string(runOp.symbolText()));
+                                    }
+                                    ++rangeStart;
+                                }
+                                if (*eventExpr != "true")
+                                {
+                                    stream << "        }\n";
+                                }
+                                opIndex = runEnd;
+                                continue;
                             }
                             if (*eventExpr != "true")
                             {
@@ -9478,6 +9745,14 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    }\n";
             *stream << "    return total;\n";
             *stream << "}\n\n";
+            *stream << "template <typename ActiveFlags>\n";
+            *stream << "inline std::size_t grhsim_count_nonzero_active_words(const ActiveFlags &activeFlags)\n{\n";
+            *stream << "    std::size_t total = 0;\n";
+            *stream << "    for (const auto word : activeFlags) {\n";
+            *stream << "        total += word == UINT8_C(0) ? 0u : 1u;\n";
+            *stream << "    }\n";
+            *stream << "    return total;\n";
+            *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline void grhsim_mark_pending_write(std::array<std::uint32_t, N> &touchedIndices,\n";
             *stream << "                                      std::array<std::uint8_t, N> &touchedFlags,\n";
@@ -10088,46 +10363,106 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    void refresh_outputs();\n\n";
             if (!model.stateShadows.empty())
             {
+                const bool useBoolRange = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kBool);
+                const bool useU8Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU8);
+                const bool useU16Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU16);
+                const bool useU32Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU32);
+                const bool useU64Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU64);
+                if (useBoolRange || useU8Range || useU16Range || useU32Range || useU64Range)
+                {
+                    *stream << "    struct scalar_state_write_range_desc_base {\n";
+                    *stream << "        std::uint32_t count = 0;\n";
+                    *stream << "        std::uint32_t condBase = 0;\n";
+                    *stream << "        std::int32_t condStep = 0;\n";
+                    *stream << "        std::uint32_t touchedBase = 0;\n";
+                    *stream << "        std::int32_t touchedStep = 0;\n";
+                    *stream << "        std::uint32_t shadowDataBase = 0;\n";
+                    *stream << "        std::int32_t shadowDataStep = 0;\n";
+                    *stream << "        std::uint32_t stateDataBase = 0;\n";
+                    *stream << "        std::int32_t stateDataStep = 0;\n";
+                    *stream << "        std::uint32_t nextBase = 0;\n";
+                    *stream << "        std::int32_t nextStep = 0;\n";
+                    *stream << "        std::uint32_t maskBase = 0;\n";
+                    *stream << "        std::int32_t maskStep = 0;\n";
+                    *stream << "        std::uint32_t shadowBase = 0;\n";
+                    *stream << "        std::int32_t shadowStep = 0;\n";
+                    *stream << "    };\n";
+                }
+                if (useBoolRange)
+                {
+                    *stream << "    using scalar_state_write_bool_range_desc = scalar_state_write_range_desc_base;\n";
+                }
+                if (useU8Range)
+                {
+                    *stream << "    using scalar_state_write_u8_range_desc = scalar_state_write_range_desc_base;\n";
+                }
+                if (useU16Range)
+                {
+                    *stream << "    using scalar_state_write_u16_range_desc = scalar_state_write_range_desc_base;\n";
+                }
+                if (useU32Range)
+                {
+                    *stream << "    using scalar_state_write_u32_range_desc = scalar_state_write_range_desc_base;\n";
+                }
+                if (useU64Range)
+                {
+                    *stream << "    using scalar_state_write_u64_range_desc = scalar_state_write_range_desc_base;\n";
+                }
                 *stream << "    void apply_scalar_state_write_bool(bool cond,\n";
-                *stream << "                                      bool detectConflict,\n";
                 *stream << "                                      std::uint8_t &shadowTouched,\n";
                 *stream << "                                      std::uint8_t &shadowData,\n";
                 *stream << "                                      const std::uint8_t &stateData,\n";
                 *stream << "                                      std::uint8_t nextValue,\n";
                 *stream << "                                      std::uint8_t mask,\n";
                 *stream << "                                      std::uint32_t shadowIndex);\n";
+                if (useBoolRange)
+                {
+                    *stream << "    void apply_scalar_state_write_bool_range(const scalar_state_write_bool_range_desc &desc);\n";
+                }
                 *stream << "    void apply_scalar_state_write_u8(bool cond,\n";
-                *stream << "                                    bool detectConflict,\n";
                 *stream << "                                    std::uint8_t &shadowTouched,\n";
                 *stream << "                                    std::uint8_t &shadowData,\n";
                 *stream << "                                    const std::uint8_t &stateData,\n";
                 *stream << "                                    std::uint8_t nextValue,\n";
                 *stream << "                                    std::uint8_t mask,\n";
                 *stream << "                                    std::uint32_t shadowIndex);\n";
+                if (useU8Range)
+                {
+                    *stream << "    void apply_scalar_state_write_u8_range(const scalar_state_write_u8_range_desc &desc);\n";
+                }
                 *stream << "    void apply_scalar_state_write_u16(bool cond,\n";
-                *stream << "                                     bool detectConflict,\n";
                 *stream << "                                     std::uint8_t &shadowTouched,\n";
                 *stream << "                                     std::uint16_t &shadowData,\n";
                 *stream << "                                     const std::uint16_t &stateData,\n";
                 *stream << "                                     std::uint16_t nextValue,\n";
                 *stream << "                                     std::uint16_t mask,\n";
                 *stream << "                                     std::uint32_t shadowIndex);\n";
+                if (useU16Range)
+                {
+                    *stream << "    void apply_scalar_state_write_u16_range(const scalar_state_write_u16_range_desc &desc);\n";
+                }
                 *stream << "    void apply_scalar_state_write_u32(bool cond,\n";
-                *stream << "                                     bool detectConflict,\n";
                 *stream << "                                     std::uint8_t &shadowTouched,\n";
                 *stream << "                                     std::uint32_t &shadowData,\n";
                 *stream << "                                     const std::uint32_t &stateData,\n";
                 *stream << "                                     std::uint32_t nextValue,\n";
                 *stream << "                                     std::uint32_t mask,\n";
                 *stream << "                                     std::uint32_t shadowIndex);\n";
+                if (useU32Range)
+                {
+                    *stream << "    void apply_scalar_state_write_u32_range(const scalar_state_write_u32_range_desc &desc);\n";
+                }
                 *stream << "    void apply_scalar_state_write_u64(bool cond,\n";
-                *stream << "                                     bool detectConflict,\n";
                 *stream << "                                     std::uint8_t &shadowTouched,\n";
                 *stream << "                                     std::uint64_t &shadowData,\n";
                 *stream << "                                     const std::uint64_t &stateData,\n";
                 *stream << "                                     std::uint64_t nextValue,\n";
                 *stream << "                                     std::uint64_t mask,\n";
                 *stream << "                                     std::uint32_t shadowIndex);\n\n";
+                if (useU64Range)
+                {
+                    *stream << "    void apply_scalar_state_write_u64_range(const scalar_state_write_u64_range_desc &desc);\n\n";
+                }
             }
             if (model.emitWaveform)
             {
@@ -10570,9 +10905,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "}\n\n";
             if (!model.stateShadows.empty())
             {
+                const bool useBoolRange = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kBool);
+                const bool useU8Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU8);
+                const bool useU16Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU16);
+                const bool useU32Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU32);
+                const bool useU64Range = modelUsesScalarStateWriteKind(model, ValueSlotScalarKind::kU64);
                 *stream << "void " << className
                         << "::apply_scalar_state_write_bool(bool cond,\n"
-                        << "                                       bool detectConflict,\n"
                         << "                                       std::uint8_t &shadowTouched,\n"
                         << "                                       std::uint8_t &shadowData,\n"
                         << "                                       const std::uint8_t &stateData,\n"
@@ -10582,18 +10921,50 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!cond) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
-                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
-                *stream << "    shadowData = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
-                *stream << "    if (detectConflict && shadowTouched) {\n";
-                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    if ((mask & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    const auto next_bit = static_cast<std::uint8_t>(nextValue & UINT8_C(1));\n";
+                *stream << "    if (next_bit == state_shadow_base) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    shadowData = next_bit;\n";
                 *stream << "    shadowTouched = 1;\n";
                 *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
                 *stream << "}\n\n";
+                if (useBoolRange)
+                {
+                    *stream << "void " << className
+                            << "::apply_scalar_state_write_bool_range(const scalar_state_write_bool_range_desc &desc)\n{\n";
+                    *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
+                    *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
+                    *stream << "                                                      static_cast<std::int64_t>(desc.condStep) * offset);\n";
+                    *stream << "        const auto touchedIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.touchedBase) +\n";
+                    *stream << "                                                         static_cast<std::int64_t>(desc.touchedStep) * offset);\n";
+                    *stream << "        const auto shadowDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowDataBase) +\n";
+                    *stream << "                                                            static_cast<std::int64_t>(desc.shadowDataStep) * offset);\n";
+                    *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
+                    *stream << "                                                           static_cast<std::int64_t>(desc.stateDataStep) * offset);\n";
+                    *stream << "        const auto nextIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.nextBase) +\n";
+                    *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
+                    *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
+                    *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
+                    *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
+                    *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
+                    *stream << "        apply_scalar_state_write_bool((value_bool_slots_[condIndex]) != 0,\n";
+                    *stream << "                                      state_shadow_touched_slots_[touchedIndex],\n";
+                    *stream << "                                      state_shadow_bool_slots_[shadowDataIndex],\n";
+                    *stream << "                                      state_logic_bool_slots_[stateDataIndex],\n";
+                    *stream << "                                      value_bool_slots_[nextIndex],\n";
+                    *stream << "                                      value_bool_slots_[maskIndex],\n";
+                    *stream << "                                      shadowIndex);\n";
+                    *stream << "    }\n";
+                    *stream << "}\n\n";
+                }
 
                 *stream << "void " << className
                         << "::apply_scalar_state_write_u8(bool cond,\n"
-                        << "                                     bool detectConflict,\n"
                         << "                                     std::uint8_t &shadowTouched,\n"
                         << "                                     std::uint8_t &shadowData,\n"
                         << "                                     const std::uint8_t &stateData,\n"
@@ -10603,18 +10974,70 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!cond) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
-                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
-                *stream << "    shadowData = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
-                *stream << "    if (detectConflict && shadowTouched) {\n";
-                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    if (mask == UINT8_C(0)) {\n";
+                *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    if (mask == UINT8_MAX) {\n";
+                *stream << "        if (nextValue == state_shadow_base) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        shadowData = nextValue;\n";
+                *stream << "        shadowTouched = 1;\n";
+                *stream << "        grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if ((mask & static_cast<std::uint8_t>(mask - UINT8_C(1))) == UINT8_C(0)) {\n";
+                *stream << "        const auto next_bits = static_cast<std::uint8_t>(nextValue & mask);\n";
+                *stream << "        const auto base_bits = static_cast<std::uint8_t>(state_shadow_base & mask);\n";
+                *stream << "        if (next_bits == base_bits) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        shadowData = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | next_bits);\n";
+                *stream << "        shadowTouched = 1;\n";
+                *stream << "        grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto merged = static_cast<std::uint8_t>((state_shadow_base & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (merged == state_shadow_base) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    shadowData = merged;\n";
                 *stream << "    shadowTouched = 1;\n";
                 *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
                 *stream << "}\n\n";
+                if (useU8Range)
+                {
+                    *stream << "void " << className
+                            << "::apply_scalar_state_write_u8_range(const scalar_state_write_u8_range_desc &desc)\n{\n";
+                *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
+                *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.condStep) * offset);\n";
+                *stream << "        const auto touchedIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.touchedBase) +\n";
+                *stream << "                                                         static_cast<std::int64_t>(desc.touchedStep) * offset);\n";
+                *stream << "        const auto shadowDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowDataBase) +\n";
+                *stream << "                                                            static_cast<std::int64_t>(desc.shadowDataStep) * offset);\n";
+                *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
+                *stream << "                                                           static_cast<std::int64_t>(desc.stateDataStep) * offset);\n";
+                *stream << "        const auto nextIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.nextBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
+                *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
+                *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
+                *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
+                *stream << "        apply_scalar_state_write_u8((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "                                    state_shadow_touched_slots_[touchedIndex],\n";
+                *stream << "                                    state_shadow_u8_slots_[shadowDataIndex],\n";
+                *stream << "                                    state_logic_u8_slots_[stateDataIndex],\n";
+                *stream << "                                    value_u8_slots_[nextIndex],\n";
+                *stream << "                                    value_u8_slots_[maskIndex],\n";
+                *stream << "                                    shadowIndex);\n";
+                *stream << "    }\n";
+                    *stream << "}\n\n";
+                }
 
                 *stream << "void " << className
                         << "::apply_scalar_state_write_u16(bool cond,\n"
-                        << "                                      bool detectConflict,\n"
                         << "                                      std::uint8_t &shadowTouched,\n"
                         << "                                      std::uint16_t &shadowData,\n"
                         << "                                      const std::uint16_t &stateData,\n"
@@ -10624,18 +11047,59 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!cond) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
-                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
-                *stream << "    shadowData = static_cast<std::uint16_t>((state_shadow_base & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
-                *stream << "    if (detectConflict && shadowTouched) {\n";
-                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    if (mask == UINT16_C(0)) {\n";
+                *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    if (mask == UINT16_MAX) {\n";
+                *stream << "        if (nextValue == state_shadow_base) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        shadowData = nextValue;\n";
+                *stream << "        shadowTouched = 1;\n";
+                *stream << "        grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto merged = static_cast<std::uint16_t>((state_shadow_base & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (merged == state_shadow_base) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    shadowData = merged;\n";
                 *stream << "    shadowTouched = 1;\n";
                 *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
                 *stream << "}\n\n";
+                if (useU16Range)
+                {
+                    *stream << "void " << className
+                            << "::apply_scalar_state_write_u16_range(const scalar_state_write_u16_range_desc &desc)\n{\n";
+                *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
+                *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.condStep) * offset);\n";
+                *stream << "        const auto touchedIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.touchedBase) +\n";
+                *stream << "                                                         static_cast<std::int64_t>(desc.touchedStep) * offset);\n";
+                *stream << "        const auto shadowDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowDataBase) +\n";
+                *stream << "                                                            static_cast<std::int64_t>(desc.shadowDataStep) * offset);\n";
+                *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
+                *stream << "                                                           static_cast<std::int64_t>(desc.stateDataStep) * offset);\n";
+                *stream << "        const auto nextIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.nextBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
+                *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
+                *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
+                *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
+                *stream << "        apply_scalar_state_write_u16((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
+                *stream << "                                     state_shadow_u16_slots_[shadowDataIndex],\n";
+                *stream << "                                     state_logic_u16_slots_[stateDataIndex],\n";
+                *stream << "                                     value_u16_slots_[nextIndex],\n";
+                *stream << "                                     value_u16_slots_[maskIndex],\n";
+                *stream << "                                     shadowIndex);\n";
+                *stream << "    }\n";
+                    *stream << "}\n\n";
+                }
 
                 *stream << "void " << className
                         << "::apply_scalar_state_write_u32(bool cond,\n"
-                        << "                                      bool detectConflict,\n"
                         << "                                      std::uint8_t &shadowTouched,\n"
                         << "                                      std::uint32_t &shadowData,\n"
                         << "                                      const std::uint32_t &stateData,\n"
@@ -10645,18 +11109,59 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!cond) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
-                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
-                *stream << "    shadowData = static_cast<std::uint32_t>((state_shadow_base & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
-                *stream << "    if (detectConflict && shadowTouched) {\n";
-                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    if (mask == UINT32_C(0)) {\n";
+                *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    if (mask == UINT32_MAX) {\n";
+                *stream << "        if (nextValue == state_shadow_base) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        shadowData = nextValue;\n";
+                *stream << "        shadowTouched = 1;\n";
+                *stream << "        grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto merged = static_cast<std::uint32_t>((state_shadow_base & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (merged == state_shadow_base) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    shadowData = merged;\n";
                 *stream << "    shadowTouched = 1;\n";
                 *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
                 *stream << "}\n\n";
+                if (useU32Range)
+                {
+                    *stream << "void " << className
+                            << "::apply_scalar_state_write_u32_range(const scalar_state_write_u32_range_desc &desc)\n{\n";
+                *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
+                *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.condStep) * offset);\n";
+                *stream << "        const auto touchedIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.touchedBase) +\n";
+                *stream << "                                                         static_cast<std::int64_t>(desc.touchedStep) * offset);\n";
+                *stream << "        const auto shadowDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowDataBase) +\n";
+                *stream << "                                                            static_cast<std::int64_t>(desc.shadowDataStep) * offset);\n";
+                *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
+                *stream << "                                                           static_cast<std::int64_t>(desc.stateDataStep) * offset);\n";
+                *stream << "        const auto nextIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.nextBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
+                *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
+                *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
+                *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
+                *stream << "        apply_scalar_state_write_u32((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
+                *stream << "                                     state_shadow_u32_slots_[shadowDataIndex],\n";
+                *stream << "                                     state_logic_u32_slots_[stateDataIndex],\n";
+                *stream << "                                     value_u32_slots_[nextIndex],\n";
+                *stream << "                                     value_u32_slots_[maskIndex],\n";
+                *stream << "                                     shadowIndex);\n";
+                *stream << "    }\n";
+                    *stream << "}\n\n";
+                }
 
                 *stream << "void " << className
                         << "::apply_scalar_state_write_u64(bool cond,\n"
-                        << "                                      bool detectConflict,\n"
                         << "                                      std::uint8_t &shadowTouched,\n"
                         << "                                      std::uint64_t &shadowData,\n"
                         << "                                      const std::uint64_t &stateData,\n"
@@ -10666,14 +11171,56 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!cond) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
-                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
-                *stream << "    shadowData = static_cast<std::uint64_t>((state_shadow_base & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
-                *stream << "    if (detectConflict && shadowTouched) {\n";
-                *stream << "        register_write_conflict_ = true;\n";
+                *stream << "    if (mask == UINT64_C(0)) {\n";
+                *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const auto state_shadow_base = shadowTouched ? shadowData : stateData;\n";
+                *stream << "    if (mask == UINT64_MAX) {\n";
+                *stream << "        if (nextValue == state_shadow_base) {\n";
+                *stream << "            return;\n";
+                *stream << "        }\n";
+                *stream << "        shadowData = nextValue;\n";
+                *stream << "        shadowTouched = 1;\n";
+                *stream << "        grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    const auto merged = static_cast<std::uint64_t>((state_shadow_base & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
+                *stream << "    if (merged == state_shadow_base) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    shadowData = merged;\n";
                 *stream << "    shadowTouched = 1;\n";
                 *stream << "    grhsim_mark_pending_write(touched_state_shadow_indices_, touched_state_shadow_flags_, touched_state_shadow_count_, shadowIndex);\n";
                 *stream << "}\n\n";
+                if (useU64Range)
+                {
+                    *stream << "void " << className
+                            << "::apply_scalar_state_write_u64_range(const scalar_state_write_u64_range_desc &desc)\n{\n";
+                *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
+                *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.condStep) * offset);\n";
+                *stream << "        const auto touchedIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.touchedBase) +\n";
+                *stream << "                                                         static_cast<std::int64_t>(desc.touchedStep) * offset);\n";
+                *stream << "        const auto shadowDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowDataBase) +\n";
+                *stream << "                                                            static_cast<std::int64_t>(desc.shadowDataStep) * offset);\n";
+                *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
+                *stream << "                                                           static_cast<std::int64_t>(desc.stateDataStep) * offset);\n";
+                *stream << "        const auto nextIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.nextBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
+                *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
+                *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
+                *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
+                *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
+                *stream << "        apply_scalar_state_write_u64((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
+                *stream << "                                     state_shadow_u64_slots_[shadowDataIndex],\n";
+                *stream << "                                     state_logic_u64_slots_[stateDataIndex],\n";
+                *stream << "                                     value_u64_slots_[nextIndex],\n";
+                *stream << "                                     value_u64_slots_[maskIndex],\n";
+                *stream << "                                     shadowIndex);\n";
+                *stream << "    }\n";
+                    *stream << "}\n\n";
+                }
             }
             if (model.emitWaveform)
             {
@@ -11897,13 +12444,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             for (const auto &[supernodes, conditions] : inputSeedGroups)
             {
                 *stream << "    if (!initial_eval && (" << joinStrings(conditions, " || ") << ")) {\n";
-                *stream << "        pending_eval_round = true;\n";
                 emitActivationStatements(
                     *stream,
                     "supernode_active_curr_",
                     "active_count_",
                     supernodes,
                     "        ");
+                *stream << "        pending_eval_round = true;\n";
                 *stream << "    }\n";
             }
             if (!model.inputEventValues.empty())
@@ -11926,17 +12473,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    std::size_t total_checked_batches = 0;\n";
                 *stream << "    std::size_t total_skipped_batches = 0;\n";
                 *stream << "    std::size_t total_executed_batches = 0;\n";
+                *stream << "    std::size_t total_executed_supernodes = 0;\n";
                 *stream << "    std::size_t total_checked_flag_words = 0;\n";
+                *stream << "    std::size_t total_nonzero_active_words = 0;\n";
                 *stream << "    std::size_t peak_active_supernodes = trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
+                *stream << "    std::size_t peak_active_words = trace_this_eval ? grhsim_count_nonzero_active_words(supernode_active_curr_) : 0;\n";
+                *stream << "    std::size_t total_touched_state_shadows = 0;\n";
+                *stream << "    std::size_t total_touched_writes = 0;\n";
+                *stream << "    std::size_t total_commit_activated_rounds = 0;\n";
                 *stream << "    std::uint64_t total_batch_us = UINT64_C(0);\n";
                 *stream << "    std::uint64_t total_commit_us = UINT64_C(0);\n";
                 *stream << "    std::uint64_t total_event_clear_us = UINT64_C(0);\n";
                 *stream << "    if (trace_this_eval) {\n";
                 *stream << "        std::fprintf(stderr,\n";
-                *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_supernodes=%zu\\n\",\n";
+                *stream << "                     \"[grhsim] eval begin #%llu initial=%d seeded_active_supernodes=%zu seeded_active_words=%zu\\n\",\n";
                 *stream << "                     static_cast<unsigned long long>(eval_id),\n";
                 *stream << "                     initial_eval ? 1 : 0,\n";
-                *stream << "                     peak_active_supernodes);\n";
+                *stream << "                     peak_active_supernodes,\n";
+                *stream << "                     peak_active_words);\n";
                 *stream << "        std::fflush(stderr);\n";
                 *stream << "    }\n";
                 *stream << "    while (pending_eval_round) {\n";
@@ -11946,15 +12500,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
                 *stream << "        const std::size_t round_active_in =\n";
                 *stream << "            trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
+                *stream << "        const std::size_t round_active_words_in =\n";
+                *stream << "            trace_this_eval ? grhsim_count_nonzero_active_words(supernode_active_curr_) : 0;\n";
                 *stream << "        std::size_t round_checked_batches = 0;\n";
                 *stream << "        std::size_t round_skipped_batches = 0;\n";
                 *stream << "        std::size_t round_executed_batches = 0;\n";
+                *stream << "        std::size_t round_executed_supernodes = 0;\n";
                 *stream << "        std::size_t round_checked_flag_words = 0;\n";
+                *stream << "        std::size_t round_nonzero_active_words = 0;\n";
+                *stream << "        std::size_t round_touched_state_shadows = 0;\n";
+                *stream << "        std::size_t round_touched_writes = 0;\n";
                 *stream << "        std::uint64_t round_batch_us = UINT64_C(0);\n";
                 *stream << "        std::uint64_t round_commit_us = UINT64_C(0);\n";
                 *stream << "        std::uint64_t round_event_clear_us = UINT64_C(0);\n";
                 *stream << "        if (peak_active_supernodes < round_active_in) {\n";
                 *stream << "            peak_active_supernodes = round_active_in;\n";
+                *stream << "        }\n";
+                *stream << "        if (peak_active_words < round_active_words_in) {\n";
+                *stream << "            peak_active_words = round_active_words_in;\n";
                 *stream << "        }\n";
                 *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
@@ -11966,6 +12529,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                continue;\n";
                 *stream << "            }\n";
                 *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
+                *stream << "            ++round_nonzero_active_words;\n";
+                *stream << "            round_executed_supernodes +=\n";
+                *stream << "                static_cast<std::size_t>(grhsim_popcount_u8(activeWordFlags));\n";
                 *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
                 *stream << "                 batchOffset < kActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
@@ -11985,6 +12551,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        }\n";
                 *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
                 *stream << "        bool commit_activated_readers = false;\n";
+                *stream << "        if (trace_this_eval) {\n";
+                if (!model.stateShadows.empty())
+                {
+                    *stream << "            round_touched_state_shadows = touched_state_shadow_count_;\n";
+                }
+                else
+                {
+                    *stream << "            round_touched_state_shadows = 0;\n";
+                }
+                if (!model.writes.empty())
+                {
+                    *stream << "            round_touched_writes = touched_write_count_;\n";
+                }
+                else
+                {
+                    *stream << "            round_touched_writes = 0;\n";
+                }
+                *stream << "        }\n";
                 *stream << "        if (trace_this_eval) {\n";
                 *stream << "            const auto commit_begin_time = std::chrono::steady_clock::now();\n";
                 *stream << "            commit_activated_readers = commit_state_updates();\n";
@@ -12013,7 +12597,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            total_checked_batches += round_checked_batches;\n";
                 *stream << "            total_skipped_batches += round_skipped_batches;\n";
                 *stream << "            total_executed_batches += round_executed_batches;\n";
+                *stream << "            total_executed_supernodes += round_executed_supernodes;\n";
                 *stream << "            total_checked_flag_words += round_checked_flag_words;\n";
+                *stream << "            total_nonzero_active_words += round_nonzero_active_words;\n";
+                *stream << "            total_touched_state_shadows += round_touched_state_shadows;\n";
+                *stream << "            total_touched_writes += round_touched_writes;\n";
+                *stream << "            total_commit_activated_rounds += commit_activated_readers ? 1u : 0u;\n";
                 *stream << "            total_batch_us += round_batch_us;\n";
                 *stream << "            total_commit_us += round_commit_us;\n";
                 *stream << "            total_event_clear_us += round_event_clear_us;\n";
@@ -12022,23 +12611,35 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                    std::chrono::steady_clock::now() - round_begin_time)\n";
                 *stream << "                    .count());\n";
                 *stream << "            const std::size_t round_active_out = grhsim_count_active_supernodes(supernode_active_curr_);\n";
+                *stream << "            const std::size_t round_active_words_out =\n";
+                *stream << "                grhsim_count_nonzero_active_words(supernode_active_curr_);\n";
                 *stream << "            if (peak_active_supernodes < round_active_out) {\n";
                 *stream << "                peak_active_supernodes = round_active_out;\n";
                 *stream << "            }\n";
+                *stream << "            if (peak_active_words < round_active_words_out) {\n";
+                *stream << "                peak_active_words = round_active_words_out;\n";
+                *stream << "            }\n";
                 *stream << "            std::fprintf(stderr,\n";
-                *stream << "                         \"[grhsim] eval round #%llu.%llu active_in=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu checked_flag_words=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu active_out=%zu\\n\",\n";
+                *stream << "                         \"[grhsim] eval round #%llu.%llu active_in=%zu active_words_in=%zu checked_batches=%zu executed_batches=%zu executed_supernodes=%zu skipped_batches=%zu checked_flag_words=%zu nonzero_active_words=%zu touched_shadows=%zu touched_writes=%zu commit_activated=%d batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu active_out=%zu active_words_out=%zu\\n\",\n";
                 *stream << "                         static_cast<unsigned long long>(eval_id),\n";
                 *stream << "                         static_cast<unsigned long long>(fixed_point_round_count),\n";
                 *stream << "                         round_active_in,\n";
+                *stream << "                         round_active_words_in,\n";
                 *stream << "                         round_checked_batches,\n";
                 *stream << "                         round_executed_batches,\n";
+                *stream << "                         round_executed_supernodes,\n";
                 *stream << "                         round_skipped_batches,\n";
                 *stream << "                         round_checked_flag_words,\n";
+                *stream << "                         round_nonzero_active_words,\n";
+                *stream << "                         round_touched_state_shadows,\n";
+                *stream << "                         round_touched_writes,\n";
+                *stream << "                         commit_activated_readers ? 1 : 0,\n";
                 *stream << "                         static_cast<unsigned long long>(round_batch_us),\n";
                 *stream << "                         static_cast<unsigned long long>(round_commit_us),\n";
                 *stream << "                         static_cast<unsigned long long>(round_event_clear_us),\n";
                 *stream << "                         static_cast<unsigned long long>(round_total_us),\n";
-                *stream << "                         round_active_out);\n";
+                *stream << "                         round_active_out,\n";
+                *stream << "                         round_active_words_out);\n";
                 *stream << "            std::fflush(stderr);\n";
                 *stream << "        }\n";
                 *stream << "    }\n";
@@ -12048,14 +12649,20 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                std::chrono::steady_clock::now() - trace_eval_begin_time)\n";
                 *stream << "                .count());\n";
                 *stream << "        std::fprintf(stderr,\n";
-                *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu peak_active_supernodes=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu checked_flag_words=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu write_conflict=%d\\n\",\n";
+                *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu peak_active_supernodes=%zu peak_active_words=%zu checked_batches=%zu executed_batches=%zu executed_supernodes=%zu skipped_batches=%zu checked_flag_words=%zu nonzero_active_words=%zu touched_shadows=%zu touched_writes=%zu commit_activated_rounds=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu write_conflict=%d\\n\",\n";
                 *stream << "                     static_cast<unsigned long long>(eval_id),\n";
                 *stream << "                     static_cast<unsigned long long>(fixed_point_round_count),\n";
                 *stream << "                     peak_active_supernodes,\n";
+                *stream << "                     peak_active_words,\n";
                 *stream << "                     total_checked_batches,\n";
                 *stream << "                     total_executed_batches,\n";
+                *stream << "                     total_executed_supernodes,\n";
                 *stream << "                     total_skipped_batches,\n";
                 *stream << "                     total_checked_flag_words,\n";
+                *stream << "                     total_nonzero_active_words,\n";
+                *stream << "                     total_touched_state_shadows,\n";
+                *stream << "                     total_touched_writes,\n";
+                *stream << "                     total_commit_activated_rounds,\n";
                 *stream << "                     static_cast<unsigned long long>(total_batch_us),\n";
                 *stream << "                     static_cast<unsigned long long>(total_commit_us),\n";
                 *stream << "                     static_cast<unsigned long long>(total_event_clear_us),\n";
