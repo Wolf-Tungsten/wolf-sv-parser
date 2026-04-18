@@ -6156,6 +6156,14 @@ namespace wolvrix::lib::emit
             {
                 return false;
             }
+            const auto stateSlots =
+                model.stateLogicScalarSlotCounts[static_cast<std::size_t>(kind)];
+            const auto shadowSlots =
+                model.stateShadowScalarSlotCounts[static_cast<std::size_t>(kind)];
+            if (stateSlots == 0 || shadowSlots == 0)
+            {
+                return false;
+            }
             if (kind != ValueSlotScalarKind::kBool &&
                 model.valueScalarSlotCounts[static_cast<std::size_t>(kind)] == 0)
             {
@@ -10318,6 +10326,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
+            *stream << "    static constexpr std::size_t kActiveFlagBitsPerWord = "
+                    << kActiveFlagBitsPerWord << ";\n";
             *stream << "    static constexpr std::size_t kActiveFlagWordCount = "
                     << ((schedule.supernodeToOps.size() + kActiveFlagBitsPerWord - 1u) / kActiveFlagBitsPerWord) << ";\n";
             *stream << "    static constexpr std::size_t kBatchCount = " << scheduleBatches.size() << ";\n";
@@ -11005,6 +11015,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "}\n\n";
                 if (useBoolRange)
                 {
+                    const std::string shadowField =
+                        scalarLogicSlotFieldName("state_shadow_", ValueSlotScalarKind::kBool);
+                    const std::string stateField =
+                        stateLogicScalarSlotFieldName(ValueSlotScalarKind::kBool);
                     *stream << "void " << className
                             << "::apply_scalar_state_write_bool_range(const scalar_state_write_bool_range_desc &desc)\n{\n";
                     *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
@@ -11024,8 +11038,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
                     *stream << "        apply_scalar_state_write_bool((value_bool_slots_[condIndex]) != 0,\n";
                     *stream << "                                      state_shadow_touched_slots_[touchedIndex],\n";
-                    *stream << "                                      state_shadow_bool_slots_[shadowDataIndex],\n";
-                    *stream << "                                      state_logic_bool_slots_[stateDataIndex],\n";
+                    *stream << "                                      " << shadowField << "[shadowDataIndex],\n";
+                    *stream << "                                      " << stateField << "[stateDataIndex],\n";
                     *stream << "                                      value_bool_slots_[nextIndex],\n";
                     *stream << "                                      value_bool_slots_[maskIndex],\n";
                     *stream << "                                      shadowIndex);\n";

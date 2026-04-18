@@ -267,28 +267,25 @@ int main()
         {
             return fail("Expected bounded partition session outputs");
         }
-        if (supernodeToOps->size() != 2)
+        if (supernodeToOps->size() != 1)
         {
-            return fail("Expected DP partition to produce two supernodes under max-size=2");
+            return fail("Expected output tail chain to become one tail supernode");
         }
-        for (const auto &ops : *supernodeToOps)
+        if (supernodeToOps->front().size() != 4)
         {
-            if (ops.size() > 2)
-            {
-                return fail("DP partition violated supernode-max-size");
-            }
+            return fail("Expected tail supernode to absorb the full four-op output chain");
         }
         if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
         {
-            return fail("Expected leading chain ops to share one supernode");
+            return fail("Expected leading output-tail ops to share one supernode");
         }
         if ((*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
         {
-            return fail("Expected trailing chain ops to share one supernode");
+            return fail("Expected trailing output-tail ops to share one supernode");
         }
-        if ((*opToSupernode)[op1.index - 1] == (*opToSupernode)[op2.index - 1])
+        if ((*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1])
         {
-            return fail("Expected cut between the two bounded supernodes");
+            return fail("Expected output-tail middle ops to remain in the same tail supernode");
         }
     }
 
@@ -498,18 +495,18 @@ int main()
         {
             return fail("Expected tie-break partition session outputs");
         }
-        if (supernodeToOps->size() != 2)
+        if (supernodeToOps->size() != 1)
         {
-            return fail("Expected tie-break test to produce two supernodes");
+            return fail("Expected pure output tail chain to collapse into one tail supernode");
         }
-        if ((*opToSupernode)[op0.index - 1] == (*opToSupernode)[op1.index - 1])
+        if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
         {
-            return fail("Expected equal-cost DP tie-break to prefer the longer trailing segment");
+            return fail("Expected output-tail head ops to share the same tail supernode");
         }
         if ((*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1] ||
             (*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
         {
-            return fail("Expected equal-cost DP tie-break to keep the trailing three-op chain together");
+            return fail("Expected output-tail trailing ops to stay in the same tail supernode");
         }
     }
 
@@ -679,7 +676,6 @@ int main()
             .path = "top6",
             .supernodeMaxSize = 1,
             .maxSinkSupernodeOp = 1,
-            .maxDomSinkSupernodeOp = 3,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -689,7 +685,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected dom-sink absorb activity-schedule pass to succeed");
+            return fail("Expected tail absorb activity-schedule pass to succeed");
         }
 
         const std::string keyPrefix = "top6.activity_schedule.";
@@ -699,20 +695,20 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected dom-sink session outputs");
+            return fail("Expected tail-partition session outputs");
         }
         if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1] ||
             (*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1])
         {
-            return fail("Expected dom-sink chain to be absorbed into one dom-sink supernode");
+            return fail("Expected sink-fed tail chain to be absorbed into one tail supernode");
         }
         if ((*opToSupernode)[op2.index - 1] == (*opToSupernode)[write.index - 1])
         {
-            return fail("Expected sink op to remain separate from dom-sink supernode");
+            return fail("Expected sink op to remain separate from tail supernode");
         }
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, op2) != 3)
         {
-            return fail("Expected dom-sink supernode to keep the full three-op exclusive chain");
+            return fail("Expected tail supernode to ignore normal size limits and keep the full chain");
         }
     }
 
@@ -788,7 +784,6 @@ int main()
             .path = "top7",
             .supernodeMaxSize = 1,
             .maxSinkSupernodeOp = 1,
-            .maxDomSinkSupernodeOp = 3,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -798,7 +793,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected shared-predecessor dom-sink activity-schedule pass to succeed");
+            return fail("Expected shared-predecessor tail activity-schedule pass to succeed");
         }
 
         const std::string keyPrefix = "top7.activity_schedule.";
@@ -808,15 +803,15 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected shared-predecessor session outputs");
+            return fail("Expected shared-predecessor tail session outputs");
         }
         if ((*opToSupernode)[sharedOp.index - 1] == (*opToSupernode)[domOp.index - 1])
         {
-            return fail("Expected shared predecessor to stay outside the dom-sink supernode");
+            return fail("Expected shared predecessor to stay outside the sink-fed tail supernode");
         }
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, domOp) != 1)
         {
-            return fail("Expected dom-sink supernode to keep only the seed when predecessor is shared");
+            return fail("Expected sink-fed tail supernode to keep only the seed when predecessor is shared");
         }
     }
 
@@ -883,7 +878,6 @@ int main()
             .path = "top8",
             .supernodeMaxSize = 2,
             .maxSinkSupernodeOp = 1,
-            .maxDomSinkSupernodeOp = 1,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -893,7 +887,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected dom-sink residual-successor pattern to avoid quotient cycles");
+            return fail("Expected tail residual-successor pattern to avoid quotient cycles");
         }
 
         const std::string keyPrefix = "top8.activity_schedule.";
@@ -917,6 +911,15 @@ int main()
             (*opToSupernode)[writeOp.index - 1] == kInvalidActivitySupernodeId)
         {
             return fail("Expected cycle-regression ops to map to valid supernodes");
+        }
+        if ((*opToSupernode)[preOp.index - 1] != (*opToSupernode)[domOp.index - 1])
+        {
+            return fail("Expected shared sink/output predecessor seed to absorb its exclusive predecessor");
+        }
+        if ((*opToSupernode)[domOp.index - 1] == (*opToSupernode)[tailOp.index - 1] ||
+            (*opToSupernode)[domOp.index - 1] == (*opToSupernode)[writeOp.index - 1])
+        {
+            return fail("Expected shared sink/output seed to remain separate from both consumers");
         }
     }
 
@@ -983,7 +986,6 @@ int main()
             .path = "top9",
             .supernodeMaxSize = 1,
             .maxSinkSupernodeOp = 1,
-            .maxDomSinkSupernodeOp = 3,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -993,7 +995,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected mixed-user dom-sink seed pattern to stay out of dom-sink partition");
+            return fail("Expected mixed-user tail seed pattern to create a new shared seed");
         }
 
         const std::string keyPrefix = "top9.activity_schedule.";
@@ -1003,19 +1005,19 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected mixed-user dom-sink session outputs");
+            return fail("Expected mixed-user tail session outputs");
         }
-        if ((*opToSupernode)[preOp.index - 1] == (*opToSupernode)[seedOp.index - 1])
+        if ((*opToSupernode)[preOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected non-pure dom-sink seed to stay separate from its exclusive predecessor");
+            return fail("Expected shared sink/output seed to absorb its exclusive predecessor");
         }
-        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, seedOp) != 1)
+        if ((*opToSupernode)[seedOp.index - 1] == (*opToSupernode)[residualOp.index - 1])
         {
-            return fail("Expected non-pure dom-sink seed to remain a singleton before normal coarsen");
+            return fail("Expected shared sink/output seed to remain separate from the output tail consumer");
         }
         if ((*opToSupernode)[seedOp.index - 1] == (*opToSupernode)[writeOp.index - 1])
         {
-            return fail("Expected sink op to remain separate from non-pure dom-sink seed");
+            return fail("Expected sink op to remain separate from shared sink/output seed");
         }
     }
 
@@ -1078,7 +1080,6 @@ int main()
             .path = "top10",
             .supernodeMaxSize = 1,
             .maxSinkSupernodeOp = 8,
-            .maxDomSinkSupernodeOp = 8,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -1168,7 +1169,6 @@ int main()
             .path = "top11",
             .supernodeMaxSize = 1,
             .maxSinkSupernodeOp = 1,
-            .maxDomSinkSupernodeOp = 8,
             .enableCoarsen = false,
             .enableRefine = false,
             .enableReplication = false,
@@ -1178,7 +1178,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected shared predecessor to stay out of dom-sink cluster");
+            return fail("Expected shared predecessor to merge once all users collapse into one tail cluster");
         }
 
         const std::string keyPrefix = "top11.activity_schedule.";
@@ -1186,15 +1186,15 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (opToSupernode == nullptr)
         {
-            return fail("Expected shared-predecessor dom-sink session outputs");
+            return fail("Expected shared-predecessor tail session outputs");
         }
         if ((*opToSupernode)[midOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected single-user predecessor to join dom-sink cluster");
+            return fail("Expected single-user predecessor to join sink-fed tail cluster");
         }
-        if ((*opToSupernode)[sharedOp.index - 1] == (*opToSupernode)[seedOp.index - 1])
+        if ((*opToSupernode)[sharedOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected shared predecessor to remain outside dom-sink cluster");
+            return fail("Expected predecessor shared only inside one tail supernode to be absorbed");
         }
     }
 

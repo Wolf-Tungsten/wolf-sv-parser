@@ -8,6 +8,8 @@
 
 - 为缺失 symbol 的可分区 op 补内部 symbol
 - 冻结 graph
+- 先构造 `sink-supernode`
+- 再做一轮从 residual 尾部反向传播的 `tail-supernode` 激进合并
 - 构建 seed partition
 - 做 coarsen
 - 做基于 `supernode-max-size` 的 DP 分段和可选 refine
@@ -34,6 +36,7 @@
 | --- | --- | --- |
 | `-path` | 无 | 目标 graph / 实例路径，必填 |
 | `-supernode-max-size` | `72` | DP 分段和 coarsen 的 cluster member 上限 |
+| `-max-sink-supernode-op` | `4096` | `sink-supernode` 的 topo chunk 上限 |
 | `-enable-coarsen` | `true` | 是否执行 coarsen |
 | `-enable-chain-merge` | `true` | 是否启用 out1 / in1 chain merge |
 | `-enable-sibling-merge` | `true` | 是否启用 sibling merge |
@@ -57,6 +60,22 @@
 
 这些 key 的写入位置见 [activity_schedule.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/wolvrix/lib/transform/activity_schedule.cpp)。
 
+## 当前 special partition 语义
+
+截至 `2026-04-19`，`activity-schedule` 的 special partition 分两步：
+
+1. 先把 `sink op` 按 topo 顺序切成 `sink-supernode`
+2. 再把不在 `sink-supernode` 中的 residual op 按 reverse topo 扫描，构造 `tail-supernode`
+
+这里的 `tail-supernode` 语义是：
+
+- 如果某个 residual op 只服务一个已存在的 `tail-supernode`，则并入该 `tail-supernode`
+- 如果某个 residual op 没有 residual supernode 后继，或者同时服务多个 supernode，则它自己成为新的 seed
+- 这里的“多个 supernode”既包括多个 `tail-supernode`，也包括 `tail-supernode + sink-supernode`，或者多个 `sink-supernode`
+- graph output / 观察端口等非 op consumer 不计入 supernode consumer 集合
+
+这一步不再使用 `sink-dom` 概念，也不再按“只服务某一个 op”做局部吸收；判定粒度已经提升为“只服务某一个 supernode”。
+
 ## `supernode-max-size` 的真实含义
 
 这个参数不是：
@@ -71,15 +90,15 @@
 - 在 coarsen 合并时，限制 merged cluster 的 member 数
 - 在 DP 分段时，限制 segment 的 member 总数
 - refine 也沿用同一个 member 上限
-- 截至 `2026-04-12`，replication 之后如果某个 symbol cluster 膨胀超过该上限，`activity-schedule` 会按最终 topo 顺序把它重新切回不超过 `supernode-max-size` 的连续 chunk
 
 也就是说，它限制的是 activity-schedule 内部 partition member count，而不是“最终想要多少个 supernode”。
 
 补充说明：
 
-- 在引入 replication 后置拆分之前，`supernode-max-size` 不能限制 replication 之后的最终 supernode op 数，因此可能出现 `supernode-max-size=72`、但 emit 出单个 `53k op` supernode 的情况
-- 引入 replication 后置拆分之后，最终 supernode 的 live op 数也会被重新压回这个上限附近
-- 但这仍然不等价于 emit 后文件大小上限；如果某些 op 自身的 C++ 展开非常大，仍可能生成很大的 `sched_*.cpp`
+- 它不限制 `sink-supernode`
+- 它也不限制 `tail-supernode`
+- 因此最终 `supernode_to_ops[i].size()` 可能明显大于 `supernode-max-size`
+- 这仍然不等价于 emit 后文件大小上限；如果某些 op 自身的 C++ 展开非常大，仍可能生成很大的 `sched_*.cpp`
 
 ## 当前边界语义
 
