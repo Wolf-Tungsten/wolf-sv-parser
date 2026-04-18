@@ -9753,6 +9753,46 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    }\n";
             *stream << "    return total;\n";
             *stream << "}\n\n";
+            *stream << "template <typename Sample>\n";
+            *stream << "inline Sample grhsim_percentile_sample(std::vector<Sample> samples, std::size_t num, std::size_t den)\n{\n";
+            *stream << "    if (samples.empty() || den == 0) {\n";
+            *stream << "        return Sample{};\n";
+            *stream << "    }\n";
+            *stream << "    std::sort(samples.begin(), samples.end());\n";
+            *stream << "    const std::size_t idx = ((samples.size() - 1u) * num) / den;\n";
+            *stream << "    return samples[idx];\n";
+            *stream << "}\n\n";
+            *stream << "template <typename Sample>\n";
+            *stream << "inline void grhsim_print_sample_summary(std::FILE *fp,\n";
+            *stream << "                                       const char *label,\n";
+            *stream << "                                       const std::vector<Sample> &samples)\n{\n";
+            *stream << "    if (samples.empty()) {\n";
+            *stream << "        std::fprintf(fp, \"[grhsim-activity] %s samples=0\\n\", label);\n";
+            *stream << "        return;\n";
+            *stream << "    }\n";
+            *stream << "    Sample minValue = samples.front();\n";
+            *stream << "    Sample maxValue = samples.front();\n";
+            *stream << "    long double total = 0.0;\n";
+            *stream << "    for (const Sample sample : samples) {\n";
+            *stream << "        if (sample < minValue) {\n";
+            *stream << "            minValue = sample;\n";
+            *stream << "        }\n";
+            *stream << "        if (sample > maxValue) {\n";
+            *stream << "            maxValue = sample;\n";
+            *stream << "        }\n";
+            *stream << "        total += static_cast<long double>(sample);\n";
+            *stream << "    }\n";
+            *stream << "    std::fprintf(fp,\n";
+            *stream << "                 \"[grhsim-activity] %s samples=%zu avg=%.2Lf min=%llu p50=%llu p90=%llu p99=%llu max=%llu\\n\",\n";
+            *stream << "                 label,\n";
+            *stream << "                 samples.size(),\n";
+            *stream << "                 total / static_cast<long double>(samples.size()),\n";
+            *stream << "                 static_cast<unsigned long long>(minValue),\n";
+            *stream << "                 static_cast<unsigned long long>(grhsim_percentile_sample(samples, 50u, 100u)),\n";
+            *stream << "                 static_cast<unsigned long long>(grhsim_percentile_sample(samples, 90u, 100u)),\n";
+            *stream << "                 static_cast<unsigned long long>(grhsim_percentile_sample(samples, 99u, 100u)),\n";
+            *stream << "                 static_cast<unsigned long long>(maxValue));\n";
+            *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline void grhsim_mark_pending_write(std::array<std::uint32_t, N> &touchedIndices,\n";
             *stream << "                                      std::array<std::uint8_t, N> &touchedFlags,\n";
@@ -10269,10 +10309,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdint>\n";
             if (model.emitWaveform)
-            {
-                *stream << "#include <memory>\n";
-                *stream << "#include <utility>\n";
-            }
+            *stream << "#include <algorithm>\n";
+            *stream << "#include <memory>\n";
+            *stream << "#include <utility>\n";
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
             *stream << "#include \"" << runtimePath.filename().string() << "\"\n\n";
@@ -10289,6 +10328,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    ~" << className << "();\n";
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
+            *stream << "    void clear_activity_profile();\n";
+            *stream << "    void dump_activity_profile() const;\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
             if (model.emitWaveform)
             {
@@ -10493,6 +10534,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                               bool deferred);\n\n";
             }
             *stream << "    bool first_eval_ = true;\n";
+            *stream << "    bool activity_profile_enabled_ = false;\n";
+            *stream << "    std::uint64_t activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
+            *stream << "    std::uint64_t activity_profile_current_executed_ops_ = UINT64_C(0);\n";
+            *stream << "    std::uint64_t activity_profile_current_peak_active_supernodes_ = UINT64_C(0);\n";
+            *stream << "    std::vector<std::uint64_t> activity_profile_executed_supernodes_;\n";
+            *stream << "    std::vector<std::uint64_t> activity_profile_executed_ops_;\n";
+            *stream << "    std::vector<std::uint64_t> activity_profile_peak_active_supernodes_;\n";
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    bool finalized_ = false;\n";
@@ -10853,6 +10901,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <cstdio>\n\n";
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
+            *stream << "    if (const char *activityProfile = std::getenv(\"GRHSIM_ACTIVITY_PROFILE\");\n";
+            *stream << "        activityProfile != nullptr && activityProfile[0] != '\\0' && activityProfile[0] != '0') {\n";
+            *stream << "        activity_profile_enabled_ = true;\n";
+            *stream << "    }\n";
             if (model.emitPerf)
             {
                 *stream << "    if (const char *traceEvalEvery = std::getenv(\"GRHSIM_TRACE_EVAL_EVERY\");\n";
@@ -10871,6 +10923,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
+            *stream << "    if (activity_profile_enabled_) {\n";
+            *stream << "        dump_activity_profile();\n";
+            *stream << "    }\n";
             if (model.emitWaveform)
             {
                 *stream << "    if (waveform_writer_) {\n";
@@ -10899,6 +10954,21 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
             *stream << "    random_seed_ = seed;\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::clear_activity_profile()\n{\n";
+            *stream << "    activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
+            *stream << "    activity_profile_current_executed_ops_ = UINT64_C(0);\n";
+            *stream << "    activity_profile_current_peak_active_supernodes_ = UINT64_C(0);\n";
+            *stream << "    activity_profile_executed_supernodes_.clear();\n";
+            *stream << "    activity_profile_executed_ops_.clear();\n";
+            *stream << "    activity_profile_peak_active_supernodes_.clear();\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::dump_activity_profile() const\n{\n";
+            *stream << "    std::fprintf(stderr, \"[grhsim-activity] step_samples=%zu\\n\", activity_profile_executed_supernodes_.size());\n";
+            *stream << "    grhsim_print_sample_summary(stderr, \"executed_supernodes_per_step\", activity_profile_executed_supernodes_);\n";
+            *stream << "    grhsim_print_sample_summary(stderr, \"executed_ops_per_step\", activity_profile_executed_ops_);\n";
+            *stream << "    grhsim_print_sample_summary(stderr, \"peak_active_supernodes_per_step\", activity_profile_peak_active_supernodes_);\n";
+            *stream << "    std::fflush(stderr);\n";
             *stream << "}\n\n";
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
@@ -12398,6 +12468,27 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "\n";
             }
             *stream << "    };\n";
+            *stream << "    static constexpr std::uint16_t kSupernodeOpCounts[] = {";
+            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
+            {
+                if ((topoIndex % 16u) == 0u)
+                {
+                    *stream << "\n        ";
+                }
+                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
+                const std::size_t opCount =
+                    supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
+                *stream << "UINT16_C(" << opCount << ")";
+                if (topoIndex + 1u != schedule.topoOrder.size())
+                {
+                    *stream << ", ";
+                }
+            }
+            if (!schedule.topoOrder.empty())
+            {
+                *stream << "\n";
+            }
+            *stream << "    };\n";
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
             if (model.emitPerf || model.emitWaveform)
@@ -12464,6 +12555,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 }
             }
             *stream << '\n';
+            *stream << "    if (activity_profile_enabled_) {\n";
+            *stream << "        activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
+            *stream << "        activity_profile_current_executed_ops_ = UINT64_C(0);\n";
+            *stream << "        activity_profile_current_peak_active_supernodes_ =\n";
+            *stream << "            static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
+            *stream << "    }\n";
+            *stream << '\n';
             if (model.emitPerf)
             {
                 *stream << "    const bool trace_this_eval = trace_eval_enabled_ && (trace_eval_interval_ != 0) &&\n";
@@ -12496,6 +12594,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        ++fixed_point_round_count;\n";
                 *stream << "        pending_eval_round = false;\n";
+                *stream << "        if (activity_profile_enabled_) {\n";
+                *stream << "            const auto round_active_in_profile =\n";
+                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
+                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_in_profile) {\n";
+                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_in_profile;\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
                 *stream << "        const auto round_begin_time =\n";
                 *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
                 *stream << "        const std::size_t round_active_in =\n";
@@ -12527,6 +12632,20 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
                 *stream << "                ++round_skipped_batches;\n";
                 *stream << "                continue;\n";
+                *stream << "            }\n";
+                *stream << "            if (activity_profile_enabled_) {\n";
+                *stream << "                const auto baseActiveId = activeWordIndex * kActiveFlagBitsPerWord;\n";
+                *stream << "                std::uint8_t profileActiveFlags = activeWordFlags;\n";
+                *stream << "                activity_profile_current_executed_supernodes_ +=\n";
+                *stream << "                    static_cast<std::uint64_t>(grhsim_popcount_u8(profileActiveFlags));\n";
+                *stream << "                while (profileActiveFlags != UINT8_C(0)) {\n";
+                *stream << "                    const auto bitIndex =\n";
+                *stream << "                        static_cast<std::size_t>(__builtin_ctz(static_cast<unsigned>(profileActiveFlags)));\n";
+                *stream << "                    activity_profile_current_executed_ops_ +=\n";
+                *stream << "                        static_cast<std::uint64_t>(kSupernodeOpCounts[baseActiveId + bitIndex]);\n";
+                *stream << "                    profileActiveFlags = static_cast<std::uint8_t>(\n";
+                *stream << "                        profileActiveFlags & static_cast<std::uint8_t>(profileActiveFlags - UINT8_C(1)));\n";
+                *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
                 *stream << "            ++round_nonzero_active_words;\n";
@@ -12642,6 +12761,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                         round_active_words_out);\n";
                 *stream << "            std::fflush(stderr);\n";
                 *stream << "        }\n";
+                *stream << "        if (activity_profile_enabled_) {\n";
+                *stream << "            const auto round_active_out_profile =\n";
+                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
+                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_out_profile) {\n";
+                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_out_profile;\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
                 *stream << "    }\n";
                 *stream << "    if (trace_this_eval) {\n";
                 *stream << "        const auto eval_total_us = static_cast<std::uint64_t>(\n";
@@ -12675,11 +12801,32 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        pending_eval_round = false;\n";
+                *stream << "        if (activity_profile_enabled_) {\n";
+                *stream << "            const auto round_active_in_profile =\n";
+                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
+                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_in_profile) {\n";
+                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_in_profile;\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
                 *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
                 *stream << "            std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];\n";
                 *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
                 *stream << "                continue;\n";
+                *stream << "            }\n";
+                *stream << "            if (activity_profile_enabled_) {\n";
+                *stream << "                const auto baseActiveId = activeWordIndex * kActiveFlagBitsPerWord;\n";
+                *stream << "                std::uint8_t profileActiveFlags = activeWordFlags;\n";
+                *stream << "                activity_profile_current_executed_supernodes_ +=\n";
+                *stream << "                    static_cast<std::uint64_t>(grhsim_popcount_u8(profileActiveFlags));\n";
+                *stream << "                while (profileActiveFlags != UINT8_C(0)) {\n";
+                *stream << "                    const auto bitIndex =\n";
+                *stream << "                        static_cast<std::size_t>(__builtin_ctz(static_cast<unsigned>(profileActiveFlags)));\n";
+                *stream << "                    activity_profile_current_executed_ops_ +=\n";
+                *stream << "                        static_cast<std::uint64_t>(kSupernodeOpCounts[baseActiveId + bitIndex]);\n";
+                *stream << "                    profileActiveFlags = static_cast<std::uint8_t>(\n";
+                *stream << "                        profileActiveFlags & static_cast<std::uint8_t>(profileActiveFlags - UINT8_C(1)));\n";
+                *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
                 *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
@@ -12696,12 +12843,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
                     emitClearAllEventEdges(*stream, model, "        ");
                 }
+                *stream << "        if (activity_profile_enabled_) {\n";
+                *stream << "            const auto round_active_out_profile =\n";
+                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
+                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_out_profile) {\n";
+                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_out_profile;\n";
+                *stream << "            }\n";
+                *stream << "        }\n";
                 *stream << "    }\n";
             }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    flush_deferred_system_task_texts();\n";
             }
+            *stream << "    if (activity_profile_enabled_) {\n";
+            *stream << "        activity_profile_executed_supernodes_.push_back(activity_profile_current_executed_supernodes_);\n";
+            *stream << "        activity_profile_executed_ops_.push_back(activity_profile_current_executed_ops_);\n";
+            *stream << "        activity_profile_peak_active_supernodes_.push_back(activity_profile_current_peak_active_supernodes_);\n";
+            *stream << "    }\n";
             *stream << "    // Refresh public outputs after the final visible state of this eval is known.\n";
             *stream << "    refresh_outputs();\n\n";
             if (model.emitWaveform)

@@ -66,9 +66,68 @@ namespace wolvrix::app::pybind
             return outer;
         }
 
+        template <typename NestedVector>
+        PyObject *exportNestedUint32Vector(const wolvrix::lib::transform::SessionSlot &slot,
+                                           std::string_view key,
+                                           std::string_view view)
+        {
+            if (view != "python")
+            {
+                PyErr_Format(PyExc_ValueError,
+                             "unsupported activity-schedule export view: %s",
+                             std::string(view).c_str());
+                return nullptr;
+            }
+
+            const auto *typed =
+                dynamic_cast<const wolvrix::lib::transform::SessionSlotValue<NestedVector> *>(&slot);
+            if (!typed)
+            {
+                PyErr_Format(PyExc_TypeError,
+                             "activity-schedule session value has unexpected native type: %s",
+                             std::string(key).c_str());
+                return nullptr;
+            }
+
+            const auto &value = typed->value;
+            PyObject *outer = PyList_New(static_cast<Py_ssize_t>(value.size()));
+            if (!outer)
+            {
+                return nullptr;
+            }
+
+            for (Py_ssize_t outerIdx = 0; outerIdx < static_cast<Py_ssize_t>(value.size()); ++outerIdx)
+            {
+                const auto &innerVec = value[static_cast<std::size_t>(outerIdx)];
+                PyObject *inner = PyList_New(static_cast<Py_ssize_t>(innerVec.size()));
+                if (!inner)
+                {
+                    Py_DECREF(outer);
+                    return nullptr;
+                }
+                for (Py_ssize_t innerIdx = 0; innerIdx < static_cast<Py_ssize_t>(innerVec.size()); ++innerIdx)
+                {
+                    PyObject *item = PyLong_FromUnsignedLong(
+                        static_cast<unsigned long>(innerVec[static_cast<std::size_t>(innerIdx)]));
+                    if (!item)
+                    {
+                        Py_DECREF(inner);
+                        Py_DECREF(outer);
+                        return nullptr;
+                    }
+                    PyList_SET_ITEM(inner, innerIdx, item);
+                }
+                PyList_SET_ITEM(outer, outerIdx, inner);
+            }
+
+            return outer;
+        }
+
         const bool kActivityScheduleExporterRegistered = []() {
             registerSessionNativeExporter("activity-schedule.supernode-to-ops",
                                           exportActivityScheduleSupernodeToOps);
+            registerSessionNativeExporter("activity-schedule.dag",
+                                          exportNestedUint32Vector<wolvrix::lib::transform::ActivityScheduleDag>);
             return true;
         }();
 

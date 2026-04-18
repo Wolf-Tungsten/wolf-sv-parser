@@ -2688,6 +2688,9 @@ namespace wolvrix::lib::transform
                         build.opToSupernode,
                         "activity-schedule.op-to-supernode");
         const std::uint64_t exportOpToSupernodeMs = elapsedMs(exportOpToSupernodeStart);
+        const auto exportDagStart = std::chrono::steady_clock::now();
+        setSessionValue(keyPrefix + "dag", build.dag, "activity-schedule.dag");
+        const std::uint64_t exportDagMs = elapsedMs(exportDagStart);
         const auto exportValueFanoutStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
         const std::uint64_t exportValueFanoutMs = elapsedMs(exportValueFanoutStart);
@@ -2741,6 +2744,7 @@ namespace wolvrix::lib::transform
         logInfo("activity-schedule timing export(ms): supernode_to_ops=" +
                 std::to_string(exportSupernodeToOpsMs) +
                 " op_to_supernode=" + std::to_string(exportOpToSupernodeMs) +
+                " dag=" + std::to_string(exportDagMs) +
                 " value_fanout=" + std::to_string(exportValueFanoutMs) +
                 " topo_order=" + std::to_string(exportTopoOrderMs) +
                 " state_read_supernodes=" + std::to_string(exportStateReadMs));
