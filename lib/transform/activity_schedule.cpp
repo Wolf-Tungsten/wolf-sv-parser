@@ -369,6 +369,146 @@ namespace wolvrix::lib::transform
 
         ClusterView buildClusterView(const WorkingPartition &partition, const ActivityOpData &opData);
 
+        std::vector<uint32_t> buildTopoOrderedClusterIds(const ClusterView &view)
+        {
+            if (view.members.empty())
+            {
+                return {};
+            }
+
+            wolvrix::lib::toposort::TopoDag<uint32_t> topoDag;
+            topoDag.reserveNodes(view.members.size());
+            for (uint32_t clusterId = 0; clusterId < view.members.size(); ++clusterId)
+            {
+                topoDag.addNode(clusterId);
+            }
+            for (uint32_t clusterId = 0; clusterId < view.members.size(); ++clusterId)
+            {
+                for (const auto succ : view.succs[clusterId])
+                {
+                    topoDag.addEdge(clusterId, succ);
+                }
+            }
+
+            std::vector<uint32_t> ordered;
+            try
+            {
+                const auto layers = topoDag.toposort();
+                ordered.reserve(view.members.size());
+                for (const auto &layer : layers)
+                {
+                    std::vector<uint32_t> orderedLayer(layer.begin(), layer.end());
+                    std::sort(orderedLayer.begin(),
+                              orderedLayer.end(),
+                              [&](uint32_t lhs, uint32_t rhs)
+                              {
+                                  const uint32_t lhsMin = view.members[lhs].empty() ? kInvalidActivitySupernodeId
+                                                                                    : view.members[lhs].front();
+                                  const uint32_t rhsMin = view.members[rhs].empty() ? kInvalidActivitySupernodeId
+                                                                                    : view.members[rhs].front();
+                                  if (lhsMin != rhsMin)
+                                  {
+                                      return lhsMin < rhsMin;
+                                  }
+                                  return lhs < rhs;
+                              });
+                    ordered.insert(ordered.end(), orderedLayer.begin(), orderedLayer.end());
+                }
+            }
+            catch (const std::exception &)
+            {
+                return {};
+            }
+            if (ordered.size() != view.members.size())
+            {
+                return {};
+            }
+            return ordered;
+        }
+
+        ClusterView buildTopoOrderedClusterView(const ClusterView &view)
+        {
+            if (view.members.empty())
+            {
+                return view;
+            }
+
+            const std::vector<uint32_t> orderedClusterIds = buildTopoOrderedClusterIds(view);
+            if (orderedClusterIds.size() != view.members.size())
+            {
+                return view;
+            }
+
+            ClusterView out;
+            out.members.reserve(view.members.size());
+            out.fixedBoundary.reserve(view.fixedBoundary.size());
+            out.preds.resize(view.preds.size());
+            out.succs.resize(view.succs.size());
+            out.clusterOfTopoPos.assign(view.clusterOfTopoPos.size(), kInvalidActivitySupernodeId);
+
+            std::vector<uint32_t> newIdByOldId(view.members.size(), kInvalidActivitySupernodeId);
+            for (uint32_t newId = 0; newId < orderedClusterIds.size(); ++newId)
+            {
+                const uint32_t oldId = orderedClusterIds[newId];
+                newIdByOldId[oldId] = newId;
+                out.members.push_back(view.members[oldId]);
+                out.fixedBoundary.push_back(view.fixedBoundary[oldId]);
+                for (const auto topoPos : out.members.back())
+                {
+                    if (topoPos < out.clusterOfTopoPos.size())
+                    {
+                        out.clusterOfTopoPos[topoPos] = newId;
+                    }
+                }
+            }
+
+            for (uint32_t newId = 0; newId < orderedClusterIds.size(); ++newId)
+            {
+                const uint32_t oldId = orderedClusterIds[newId];
+                for (const auto oldPred : view.preds[oldId])
+                {
+                    if (oldPred < newIdByOldId.size() && newIdByOldId[oldPred] != kInvalidActivitySupernodeId)
+                    {
+                        out.preds[newId].push_back(newIdByOldId[oldPred]);
+                    }
+                }
+                for (const auto oldSucc : view.succs[oldId])
+                {
+                    if (oldSucc < newIdByOldId.size() && newIdByOldId[oldSucc] != kInvalidActivitySupernodeId)
+                    {
+                        out.succs[newId].push_back(newIdByOldId[oldSucc]);
+                    }
+                }
+                std::sort(out.preds[newId].begin(), out.preds[newId].end());
+                out.preds[newId].erase(std::unique(out.preds[newId].begin(), out.preds[newId].end()),
+                                       out.preds[newId].end());
+                std::sort(out.succs[newId].begin(), out.succs[newId].end());
+                out.succs[newId].erase(std::unique(out.succs[newId].begin(), out.succs[newId].end()),
+                                       out.succs[newId].end());
+            }
+
+            return out;
+        }
+
+        WorkingPartition canonicalizePartition(const WorkingPartition &partition,
+                                               const ActivityOpData &opData)
+        {
+            if (partition.clusters.empty())
+            {
+                return partition;
+            }
+
+            const ClusterView orderedView = buildTopoOrderedClusterView(buildClusterView(partition, opData));
+            WorkingPartition out;
+            out.clusters = orderedView.members;
+            out.fixedBoundary = orderedView.fixedBoundary;
+            if (out.clusters.size() != partition.clusters.size())
+            {
+                return partition;
+            }
+            return out;
+        }
+
         std::vector<uint32_t> findCyclePath(const std::vector<std::vector<uint32_t>> &dag)
         {
             std::vector<uint8_t> color(dag.size(), 0U);
@@ -779,68 +919,6 @@ namespace wolvrix::lib::transform
                 succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
             }
             return view;
-        }
-
-        WorkingPartition canonicalizePartition(const WorkingPartition &partition,
-                                               const ActivityOpData &opData)
-        {
-            if (partition.clusters.empty())
-            {
-                return partition;
-            }
-
-            const ClusterView view = buildClusterView(partition, opData);
-            wolvrix::lib::toposort::TopoDag<uint32_t> topoDag;
-            topoDag.reserveNodes(view.members.size());
-            for (uint32_t clusterId = 0; clusterId < view.members.size(); ++clusterId)
-            {
-                topoDag.addNode(clusterId);
-            }
-            for (uint32_t clusterId = 0; clusterId < view.members.size(); ++clusterId)
-            {
-                for (const auto succ : view.succs[clusterId])
-                {
-                    topoDag.addEdge(clusterId, succ);
-                }
-            }
-
-            WorkingPartition out;
-            try
-            {
-                const auto layers = topoDag.toposort();
-                for (const auto &layer : layers)
-                {
-                    std::vector<uint32_t> orderedLayer(layer.begin(), layer.end());
-                    std::sort(orderedLayer.begin(),
-                              orderedLayer.end(),
-                              [&](uint32_t lhs, uint32_t rhs)
-                              {
-                                  const uint32_t lhsMin = view.members[lhs].empty() ? kInvalidActivitySupernodeId
-                                                                                    : view.members[lhs].front();
-                                  const uint32_t rhsMin = view.members[rhs].empty() ? kInvalidActivitySupernodeId
-                                                                                    : view.members[rhs].front();
-                                  if (lhsMin != rhsMin)
-                                  {
-                                      return lhsMin < rhsMin;
-                                  }
-                                  return lhs < rhs;
-                              });
-                    for (const auto clusterId : orderedLayer)
-                    {
-                        out.clusters.push_back(view.members[clusterId]);
-                        out.fixedBoundary.push_back(view.fixedBoundary[clusterId]);
-                    }
-                }
-            }
-            catch (const std::exception &)
-            {
-                return partition;
-            }
-            if (out.clusters.size() != partition.clusters.size())
-            {
-                return partition;
-            }
-            return out;
         }
 
         void appendPartition(WorkingPartition &dst, const WorkingPartition &src)
@@ -2424,6 +2502,7 @@ namespace wolvrix::lib::transform
         TailPartitionStats tailStats;
         WorkingPartition tailPartition =
             buildTailPartition(*graph, opData, sinkPartition, &tailStats);
+        tailPartition = splitPartitionIntoContiguousTopoRuns(tailPartition);
         tailPartition = canonicalizePartition(tailPartition, opData);
         const std::uint64_t tailPartitionMs = elapsedMs(tailPartitionStart);
         const std::size_t tailCoveredOpCount =
@@ -2548,20 +2627,21 @@ namespace wolvrix::lib::transform
         }
         const std::size_t coarseSupernodeCount = partition.clusters.size();
         ClusterView coarseView = buildClusterView(partition, opData);
+        ClusterView dpView = buildTopoOrderedClusterView(coarseView);
         const std::uint64_t dpPrepMs = elapsedMs(dpPrepStart);
         const auto dpStart = std::chrono::steady_clock::now();
-        std::vector<std::vector<uint32_t>> segments = buildDpSegments(coarseView, options_.supernodeMaxSize);
+        std::vector<std::vector<uint32_t>> segments = buildDpSegments(dpView, options_.supernodeMaxSize);
         const std::uint64_t dpMs = elapsedMs(dpStart);
         const std::size_t dpSupernodeCount = segments.size();
         std::uint64_t refineMs = 0;
         if (options_.enableRefine)
         {
             const auto refineStart = std::chrono::steady_clock::now();
-            segments = refineSegments(coarseView, std::move(segments), options_.supernodeMaxSize, options_.refineMaxIter);
+            segments = refineSegments(dpView, std::move(segments), options_.supernodeMaxSize, options_.refineMaxIter);
             refineMs = elapsedMs(refineStart);
         }
         const auto materializeSegmentsStart = std::chrono::steady_clock::now();
-        partition = materializeSegments(coarseView, segments);
+        partition = materializeSegments(dpView, segments);
         partition = canonicalizePartition(partition, opData);
         if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
         {
