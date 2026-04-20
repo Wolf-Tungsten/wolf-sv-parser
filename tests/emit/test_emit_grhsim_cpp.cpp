@@ -1565,6 +1565,12 @@ int main()
     {
         return fail("Missing scalar concat loop helpers in runtime");
     }
+    if (runtime.find("using grhsim_ubitint = unsigned _BitInt") == std::string::npos ||
+        runtime.find("grhsim_words_to_ubitint") == std::string::npos ||
+        runtime.find("grhsim_ubitint_to_words") == std::string::npos)
+    {
+        return fail("Missing _BitInt runtime helpers");
+    }
     if (header.find("std::uint8_t y = ") == std::string::npos)
     {
         return fail("Missing public output field declaration");
@@ -1589,25 +1595,17 @@ int main()
         sched.find("grhsim_concat_uniform_scalars_u64<8>") != std::string::npos ||
         sched.find("grhsim_concat_uniform_scalars_u64(std::array") != std::string::npos ||
         sched.find("grhsim_concat_uniform_scalars_u64(") != std::string::npos;
-    const bool hasScalarConcatWordsHelper =
-        sched.find("grhsim_concat_uniform_scalars_words<2, 9>") != std::string::npos ||
-        sched.find("grhsim_concat_uniform_scalars_words(values.data(), values.size(), 8, 72") != std::string::npos ||
-        sched.find("grhsim_concat_uniform_scalars_words(") != std::string::npos;
-    if (!hasScalarConcatU64Helper || !hasScalarConcatWordsHelper)
+    if (!hasScalarConcatU64Helper)
     {
         return fail("Missing looped scalar concat helper usage");
     }
-    if (sched.find("grhsim_add_words") == std::string::npos ||
-        sched.find("grhsim_mul_words") == std::string::npos ||
-        sched.find("grhsim_udiv_words") == std::string::npos ||
-        sched.find("grhsim_and_words") == std::string::npos ||
-        sched.find("grhsim_compare_unsigned_words") == std::string::npos ||
-        sched.find("grhsim_reduce_or_words") == std::string::npos ||
-        sched.find("grhsim_shl_words") == std::string::npos ||
-        sched.find("grhsim_slice_words") == std::string::npos ||
-        sched.find("grhsim_insert_words") == std::string::npos)
+    if (sched.find("grhsim_words_to_ubitint") == std::string::npos ||
+        sched.find("grhsim_udiv_ubitint") == std::string::npos ||
+        sched.find("grhsim_shl_ubitint") == std::string::npos ||
+        sched.find("grhsim_slice_ubitint") == std::string::npos ||
+        sched.find("grhsim_replicate_ubitint") == std::string::npos)
     {
-        return fail("Missing emitted wide combinational helper calls");
+        return fail("Missing emitted _BitInt wide combinational helper calls");
     }
     if (sched.find("grhsim_clog2_u64") == std::string::npos ||
         sched.find("slice_array_op") == std::string::npos ||
@@ -1617,8 +1615,8 @@ int main()
     }
     if (sched.find("grhsim_cast_u64") == std::string::npos ||
         sched.find("grhsim_compare_signed_u64") == std::string::npos ||
-        sched.find("grhsim_compare_signed_words") == std::string::npos ||
-        sched.find("grhsim_sdiv_words") == std::string::npos)
+        sched.find("static_cast<grhsim_sbitint<") == std::string::npos ||
+        sched.find("grhsim_sdiv_ubitint") == std::string::npos)
     {
         return fail("Missing emitted signed combinational helper coverage");
     }
@@ -1689,14 +1687,15 @@ int main()
     {
         return fail("Missing DPI import declaration");
     }
-    if (makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos ||
+    if (makefile.find("CXX ?= clang++") == std::string::npos ||
+        makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos ||
         makefile.find("grhsim_top_state_init_0.cpp") == std::string::npos ||
         makefile.find("grhsim_top_sched_0.cpp") == std::string::npos)
     {
         return fail("Missing split state/schedule Makefile skeleton");
     }
 
-        const std::string buildCmd = "make -C " + outDir.string();
+        const std::string buildCmd = "make -C " + outDir.string() + " CXX=clang++";
         if (std::system(buildCmd.c_str()) != 0)
         {
             return fail("Generated Makefile failed to build grhsim archive");
@@ -2154,7 +2153,7 @@ int main()
 
         const std::filesystem::path harnessExe = outDir / "grhsim_top_harness";
         std::string compileHarnessCmd =
-            "c++ -std=c++20 -O2 -I" + outDir.string();
+            "clang++ -std=c++20 -O2 -I" + outDir.string();
         for (const auto &stateFile : stateFiles)
         {
             compileHarnessCmd += " " + stateFile.string();
@@ -2277,7 +2276,7 @@ int main()
         }
 
         const std::filesystem::path regWriteHarnessExe = regWriteDir / "grhsim_top_harness";
-        std::string regWriteCompileCmd = "c++ -std=c++20 -O2 -I" + regWriteDir.string();
+        std::string regWriteCompileCmd = "clang++ -std=c++20 -O2 -I" + regWriteDir.string();
         for (const auto &stateFile : regWriteStateFiles)
         {
             regWriteCompileCmd += " " + stateFile.string();
@@ -2318,6 +2317,11 @@ int main()
         {
             return fail("local-temp state/schedule files missing");
         }
+        const std::string localTempSchedText = readFiles(localTempSchedFiles);
+        if (localTempSchedText.find("local_value_") != std::string::npos)
+        {
+            return fail("single-user local values should inline instead of emitting local_value temps");
+        }
         const std::filesystem::path localTempHarnessPath = localTempDir / "grhsim_top_harness.cpp";
         {
             std::ofstream harness(localTempHarnessPath);
@@ -2343,7 +2347,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path localTempHarnessExe = localTempDir / "grhsim_top_harness";
-        std::string localTempCompileCmd = "c++ -std=c++20 -O2 -I" + localTempDir.string();
+        std::string localTempCompileCmd = "clang++ -std=c++20 -O2 -I" + localTempDir.string();
         for (const auto &stateFile : localTempStateFiles)
         {
             localTempCompileCmd += " " + stateFile.string();
@@ -2498,7 +2502,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path gatedHarnessExe = gatedDir / "grhsim_top_harness";
-        std::string gatedCompileCmd = "c++ -std=c++20 -O2 -I" + gatedDir.string();
+        std::string gatedCompileCmd = "clang++ -std=c++20 -O2 -I" + gatedDir.string();
         for (const auto &stateFile : gatedStateFiles)
         {
             gatedCompileCmd += " " + stateFile.string();
@@ -2586,7 +2590,7 @@ int main()
         }
 
         const std::filesystem::path systemTaskHarnessExe = systemTaskDir / "grhsim_top_harness";
-        std::string systemTaskCompileCmd = "c++ -std=c++20 -O2 -I" + systemTaskDir.string();
+        std::string systemTaskCompileCmd = "clang++ -std=c++20 -O2 -I" + systemTaskDir.string();
         for (const auto &stateFile : systemTaskStateFiles)
         {
             systemTaskCompileCmd += " " + stateFile.string();
@@ -2703,7 +2707,7 @@ int main()
                 harness << "}\n";
             }
             const std::filesystem::path termHarnessExe = termDir / "grhsim_top_harness";
-            std::string termCompileCmd = "c++ -std=c++20 -O2 -I" + termDir.string();
+            std::string termCompileCmd = "clang++ -std=c++20 -O2 -I" + termDir.string();
             for (const auto &stateFile : termStateFiles)
             {
                 termCompileCmd += " " + stateFile.string();
@@ -2771,9 +2775,10 @@ int main()
         {
             return fail("dpi scalar multi-bit condition should emit scalar truthiness check");
         }
-        if (dpiSchedText.find("grhsim_any_bits_words(wide, 130)") == std::string::npos)
+        if (dpiSchedText.find("grhsim_words_to_ubitint<130>(wide)") == std::string::npos ||
+            dpiSchedText.find("!= 0") == std::string::npos)
         {
-            return fail("dpi wide multi-bit condition should emit word truthiness check");
+            return fail("dpi wide multi-bit condition should emit _BitInt truthiness check");
         }
         const std::filesystem::path dpiHarnessPath = dpiDir / "grhsim_top_harness.cpp";
         {
@@ -2856,7 +2861,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path dpiHarnessExe = dpiDir / "grhsim_top_harness";
-        std::string dpiCompileCmd = "c++ -std=c++20 -O2 -I" + dpiDir.string();
+        std::string dpiCompileCmd = "clang++ -std=c++20 -O2 -I" + dpiDir.string();
         for (const auto &stateFile : dpiStateFiles)
         {
             dpiCompileCmd += " " + stateFile.string();
