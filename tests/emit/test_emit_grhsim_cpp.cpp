@@ -1565,11 +1565,11 @@ int main()
     {
         return fail("Missing scalar concat loop helpers in runtime");
     }
-    if (runtime.find("using grhsim_ubitint = unsigned _BitInt") == std::string::npos ||
-        runtime.find("grhsim_words_to_ubitint") == std::string::npos ||
-        runtime.find("grhsim_ubitint_to_words") == std::string::npos)
+    if (runtime.find("grhsim_concat_words") == std::string::npos ||
+        runtime.find("grhsim_replicate_words") == std::string::npos ||
+        runtime.find("grhsim_clog2_words") == std::string::npos)
     {
-        return fail("Missing _BitInt runtime helpers");
+        return fail("Missing pure words runtime helpers");
     }
     if (header.find("std::uint8_t y = ") == std::string::npos)
     {
@@ -1584,10 +1584,13 @@ int main()
     {
         return fail("Missing wide output field declaration");
     }
-    if ((sched.find("grhsim_assign_words") == std::string::npos &&
-         state.find("grhsim_assign_words") == std::string::npos) ||
-        (sched.find("grhsim_merge_words_masked") == std::string::npos &&
-         state.find("grhsim_merge_words_masked") == std::string::npos))
+    const bool hasWideStateCommitHelperUsage =
+        sched.find("grhsim_assign_words") != std::string::npos ||
+        state.find("grhsim_assign_words") != std::string::npos;
+    const bool hasWideStateWriteHelperUsage =
+        sched.find("grhsim_merge_words_masked") != std::string::npos ||
+        state.find("grhsim_merge_words_masked") != std::string::npos;
+    if (!hasWideStateCommitHelperUsage || !hasWideStateWriteHelperUsage)
     {
         return fail("Missing wide runtime helper usage");
     }
@@ -1599,13 +1602,12 @@ int main()
     {
         return fail("Missing looped scalar concat helper usage");
     }
-    if (sched.find("grhsim_words_to_ubitint") == std::string::npos ||
-        sched.find("grhsim_udiv_ubitint") == std::string::npos ||
-        sched.find("grhsim_shl_ubitint") == std::string::npos ||
-        sched.find("grhsim_slice_ubitint") == std::string::npos ||
-        sched.find("grhsim_replicate_ubitint") == std::string::npos)
+    if (sched.find("grhsim_udiv_words") == std::string::npos ||
+        sched.find("grhsim_shl_words") == std::string::npos ||
+        sched.find("grhsim_slice_words") == std::string::npos ||
+        sched.find("grhsim_replicate_words") == std::string::npos)
     {
-        return fail("Missing emitted _BitInt wide combinational helper calls");
+        return fail("Missing emitted pure words wide combinational helper calls");
     }
     if (sched.find("grhsim_clog2_u64") == std::string::npos ||
         sched.find("slice_array_op") == std::string::npos ||
@@ -1615,8 +1617,8 @@ int main()
     }
     if (sched.find("grhsim_cast_u64") == std::string::npos ||
         sched.find("grhsim_compare_signed_u64") == std::string::npos ||
-        sched.find("static_cast<grhsim_sbitint<") == std::string::npos ||
-        sched.find("grhsim_sdiv_ubitint") == std::string::npos)
+        sched.find("grhsim_compare_signed_words") == std::string::npos ||
+        sched.find("grhsim_sdiv_words") == std::string::npos)
     {
         return fail("Missing emitted signed combinational helper coverage");
     }
@@ -2320,7 +2322,7 @@ int main()
         const std::string localTempSchedText = readFiles(localTempSchedFiles);
         if (localTempSchedText.find("local_value_") != std::string::npos)
         {
-            return fail("single-user local values should inline instead of emitting local_value temps");
+            return fail("cheap single-user scalar locals should inline instead of emitting local_value temps");
         }
         const std::filesystem::path localTempHarnessPath = localTempDir / "grhsim_top_harness.cpp";
         {
@@ -2775,10 +2777,9 @@ int main()
         {
             return fail("dpi scalar multi-bit condition should emit scalar truthiness check");
         }
-        if (dpiSchedText.find("grhsim_words_to_ubitint<130>(wide)") == std::string::npos ||
-            dpiSchedText.find("!= 0") == std::string::npos)
+        if (dpiSchedText.find("grhsim_any_bits_words(wide, 130)") == std::string::npos)
         {
-            return fail("dpi wide multi-bit condition should emit _BitInt truthiness check");
+            return fail("dpi wide multi-bit condition should emit words truthiness check");
         }
         const std::filesystem::path dpiHarnessPath = dpiDir / "grhsim_top_harness.cpp";
         {

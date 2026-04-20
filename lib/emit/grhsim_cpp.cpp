@@ -303,11 +303,10 @@ namespace wolvrix::lib::emit
         std::string resolvedScheduleValueExpr(const EmitModel &model,
                                               ValueId value,
                                               const SupernodeLocalExprContext *context);
-        std::string bitIntExprForValue(const Graph &graph,
-                                       const EmitModel &model,
-                                       ValueId value,
-                                       int32_t destWidth,
-                                       const SupernodeLocalExprContext *context);
+        std::string castWordsExprForValue(const Graph &graph,
+                                          ValueId value,
+                                          const std::string &expr,
+                                          int32_t destWidth);
 
         void emitChangedValuePropagation(std::ostream &stream,
                                          const EmitModel &model,
@@ -791,11 +790,6 @@ namespace wolvrix::lib::emit
             std::ostringstream out;
             out << "std::array<std::uint64_t, " << logicWordCount(width) << ">";
             return out.str();
-        }
-
-        std::string wideBitIntTypeForWidth(int32_t width)
-        {
-            return "grhsim_ubitint<" + std::to_string(width) + ">";
         }
 
         std::string defaultInitExprForLogicWidth(int32_t width)
@@ -1768,6 +1762,9 @@ namespace wolvrix::lib::emit
 
         bool isMaterializedValue(const EmitModel &model, ValueId value);
         std::string valueRef(const EmitModel &model, ValueId value);
+        std::string waveformWideExprForSignal(const Graph &graph,
+                                              const EmitModel &model,
+                                              const WaveformSignalDecl &signal);
 
         void emitChangedValueEffects(std::ostream &stream,
                                      const EmitModel &model,
@@ -2101,8 +2098,8 @@ namespace wolvrix::lib::emit
             if (isWideLogicValue(graph, value))
             {
                 std::ostringstream out;
-                out << "grhsim_make_task_arg(" << bitIntExprForValue(graph, model, value, graph.valueWidth(value), context)
-                    << ", "
+                out << "grhsim_make_task_arg(" << resolvedScheduleValueExpr(model, value, context) << ", "
+                    << graph.valueWidth(value) << ", "
                     << signedText << ")";
                 return out.str();
             }
@@ -2317,13 +2314,8 @@ namespace wolvrix::lib::emit
             const int64_t effectiveWidth = dpiEffectiveWidth(typeName, width);
             if (effectiveWidth > 64)
             {
-                return "grhsim_ubitint_to_words<" + std::to_string(effectiveWidth) + ">(" +
-                       bitIntExprForValue(graph,
-                                          model,
-                                          value,
-                                          static_cast<int32_t>(effectiveWidth),
-                                          context) +
-                       ")";
+                return castWordsExprForValue(
+                    graph, value, resolvedScheduleValueExpr(model, value, context), static_cast<int32_t>(effectiveWidth));
             }
             return "static_cast<" + dpiBaseCppType(typeName, width, isSigned) + ">(" + ref + ")";
         }
@@ -3185,7 +3177,7 @@ namespace wolvrix::lib::emit
         enum class SupernodeLocalExprKind
         {
             kScalarInline,
-            kWideBitInt,
+            kWideWords,
         };
 
         struct SupernodeLocalExpr
@@ -3219,20 +3211,58 @@ namespace wolvrix::lib::emit
                                               ValueId value,
                                               const SupernodeLocalExprContext *context = nullptr)
         {
-            if (const auto *expr = findSupernodeLocalExpr(context, value);
-                expr != nullptr && expr->kind == SupernodeLocalExprKind::kScalarInline)
+            if (const auto *expr = findSupernodeLocalExpr(context, value); expr != nullptr)
             {
                 return "(" + expr->expr + ")";
             }
             return valueRef(model, value);
         }
 
+        bool isCheapScalarInlineExpr(std::string_view expr) noexcept
+        {
+            if (expr.size() > 160)
+            {
+                return false;
+            }
+            if (expr.find('?') != std::string_view::npos)
+            {
+                return false;
+            }
+            constexpr std::array<std::string_view, 8> expensivePatterns = {
+                "_words(",
+                "grhsim_udiv_",
+                "grhsim_umod_",
+                "grhsim_sdiv_",
+                "grhsim_smod_",
+                "grhsim_compare_signed_",
+                "grhsim_clog2_",
+                "grhsim_concat_loop_",
+            };
+            for (const std::string_view pattern : expensivePatterns)
+            {
+                if (expr.find(pattern) != std::string_view::npos)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         bool canInlineSingleUserLocalValue(const Graph &graph,
                                            const EmitModel &model,
-                                           ValueId value)
+                                           ValueId value,
+                                           std::string_view expr,
+                                           SupernodeLocalExprKind kind)
         {
-            return !isMaterializedValue(model, value) &&
-                   graph.getValue(value).users().size() == 1;
+            if (isMaterializedValue(model, value) || graph.getValue(value).users().size() != 1)
+            {
+                return false;
+            }
+            if (kind != SupernodeLocalExprKind::kScalarInline)
+            {
+                return false;
+            }
+            return isCheapScalarInlineExpr(expr);
         }
 
         std::string valueDebugText(const Graph &graph, const EmitModel &model, ValueId value)
@@ -3737,6 +3767,7 @@ namespace wolvrix::lib::emit
         }
 
         void emitWaveformSignalWrite(std::ostream &stream,
+                                     const Graph &graph,
                                      const EmitModel &model,
                                      const WaveformSignalDecl &signal,
                                      std::size_t signalIndex,
@@ -3767,7 +3798,8 @@ namespace wolvrix::lib::emit
                 if (isWideLogicWidth(signal.width))
                 {
                     stream << indent << "waveform_writer_->emit_logic_words(waveform_handles_[" << signalIndex << "], "
-                           << (signal.width <= 0 ? 1 : signal.width) << "u, " << expr << ");\n";
+                           << (signal.width <= 0 ? 1 : signal.width) << "u, "
+                           << waveformWideExprForSignal(graph, model, signal) << ");\n";
                 }
                 else
                 {
@@ -3912,6 +3944,18 @@ namespace wolvrix::lib::emit
             return std::nullopt;
         }
 
+        std::string waveformWideExprForSignal(const Graph &graph,
+                                              const EmitModel &model,
+                                              const WaveformSignalDecl &signal)
+        {
+            if (signal.sourceKind == WaveformSignalDecl::SourceKind::kState)
+            {
+                return stateRef(model.stateBySymbol.at(signal.stateSymbol));
+            }
+            (void)graph;
+            return valueRef(model, signal.value);
+        }
+
         std::string truthyLogicValueExpr(const Graph &graph,
                                          const EmitModel &model,
                                          ValueId value,
@@ -3919,7 +3963,8 @@ namespace wolvrix::lib::emit
         {
             if (isWideLogicValue(graph, value))
             {
-                return "(" + bitIntExprForValue(graph, model, value, graph.valueWidth(value), context) + ") != 0";
+                return "grhsim_any_bits_words(" + resolvedScheduleValueExpr(model, value, context) + ", " +
+                       std::to_string(graph.valueWidth(value)) + ")";
             }
             return "(" + resolvedScheduleValueExpr(model, value, context) + ") != 0";
         }
@@ -3982,44 +4027,6 @@ namespace wolvrix::lib::emit
             std::ostringstream out;
             out << "std::array<std::uint64_t, " << logicWordCount(width) << ">";
             return out.str();
-        }
-
-        std::string wordsArrayLambdaExprForWidth(int32_t width, const std::string &body)
-        {
-            const std::string arrayType = wordsArrayTypeForWidth(width);
-            return "([&]() -> " + arrayType + " { " + arrayType + " out{}; " + body + " return out; }())";
-        }
-
-        std::string castBitIntExpr(const std::string &expr,
-                                   int32_t srcWidth,
-                                   int32_t destWidth,
-                                   bool srcSigned)
-        {
-            std::ostringstream out;
-            out << "grhsim_cast_ubitint<" << destWidth << ", " << srcWidth << ", "
-                << (srcSigned ? "true" : "false") << ">(" << expr << ")";
-            return out.str();
-        }
-
-        std::string scalarToBitIntExpr(const std::string &expr,
-                                       int32_t srcWidth,
-                                       int32_t destWidth,
-                                       bool srcSigned)
-        {
-            std::ostringstream out;
-            out << "grhsim_scalar_to_ubitint<" << destWidth << ", " << srcWidth << ", "
-                << (srcSigned ? "true" : "false") << ">(" << expr << ")";
-            return out.str();
-        }
-
-        std::string wordsToBitIntExpr(const std::string &expr,
-                                      int32_t srcWidth,
-                                      int32_t destWidth,
-                                      bool srcSigned)
-        {
-            std::ostringstream out;
-            out << "grhsim_words_to_ubitint<" << srcWidth << ">(" << expr << ")";
-            return castBitIntExpr(out.str(), srcWidth, destWidth, srcSigned);
         }
 
         std::size_t estimateChangedValueEffectLines(const ActivityScheduleValueFanout &valueFanout,
@@ -4200,23 +4207,20 @@ namespace wolvrix::lib::emit
                 return expr;
             }
 
-            std::ostringstream body;
+            const std::size_t destWords = logicWordCount(destWidth);
             if (graph.valueType(value) == ValueType::Logic && isWideLogicValue(graph, value))
             {
-                body << "const auto src = " << expr << "; ";
-                body << "grhsim_cast_words(src.data(), src.size(), "
-                     << srcWidth << ", "
-                     << destWidth << ", "
-                     << boolLiteral(graph.valueSigned(value)) << ", out.data(), out.size()); ";
+                std::ostringstream out;
+                out << "grhsim_cast_words<" << destWords << ">(" << expr << ", "
+                    << srcWidth << ", " << destWidth << ", "
+                    << boolLiteral(graph.valueSigned(value)) << ")";
+                return out.str();
             }
-            else
-            {
-                body << "grhsim_cast_scalar_words(static_cast<std::uint64_t>(" << expr << "), "
-                     << srcWidth << ", "
-                     << destWidth << ", "
-                     << boolLiteral(graph.valueSigned(value)) << ", out.data(), out.size()); ";
-            }
-            return wordsArrayLambdaExprForWidth(destWidth, body.str());
+            std::ostringstream out;
+            out << "grhsim_cast_words<" << destWords << ">(static_cast<std::uint64_t>(" << expr << "), "
+                << srcWidth << ", " << destWidth << ", "
+                << boolLiteral(graph.valueSigned(value)) << ")";
+            return out.str();
         }
 
         std::string wordsExprForValue(const Graph &graph,
@@ -4227,76 +4231,32 @@ namespace wolvrix::lib::emit
             return castWordsExprForValue(graph, value, valueRef(model, value), destWidth);
         }
 
-        std::string bitIntExprForValue(const Graph &graph,
-                                       const EmitModel &model,
-                                       ValueId value,
-                                       int32_t destWidth,
-                                       const SupernodeLocalExprContext *context)
-        {
-            const int32_t srcWidth = graph.valueWidth(value);
-            const bool srcSigned = graph.valueSigned(value);
-            if (const auto *localExpr = findSupernodeLocalExpr(context, value);
-                localExpr != nullptr && localExpr->kind == SupernodeLocalExprKind::kWideBitInt)
-            {
-                return castBitIntExpr(localExpr->expr, srcWidth, destWidth, srcSigned);
-            }
-            const std::string expr = resolvedScheduleValueExpr(model, value, context);
-            if (graph.valueType(value) == ValueType::Logic && isWideLogicValue(graph, value))
-            {
-                return wordsToBitIntExpr(expr, srcWidth, destWidth, srcSigned);
-            }
-            return scalarToBitIntExpr(expr, srcWidth, destWidth, srcSigned);
-        }
-
-        std::string bitPatternExprForValue(const Graph &graph,
-                                           const EmitModel &model,
-                                           ValueId value,
-                                           int32_t destWidth,
-                                           const SupernodeLocalExprContext *context)
-        {
-            const int32_t srcWidth = graph.valueWidth(value);
-            if (const auto *localExpr = findSupernodeLocalExpr(context, value);
-                localExpr != nullptr && localExpr->kind == SupernodeLocalExprKind::kWideBitInt)
-            {
-                return castBitIntExpr(localExpr->expr, srcWidth, destWidth, false);
-            }
-            const std::string expr = resolvedScheduleValueExpr(model, value, context);
-            if (graph.valueType(value) == ValueType::Logic && isWideLogicValue(graph, value))
-            {
-                return wordsToBitIntExpr(expr, srcWidth, destWidth, false);
-            }
-            return scalarToBitIntExpr(expr, srcWidth, destWidth, false);
-        }
-
         std::string wordsExprForValue(const Graph &graph,
                                       const EmitModel &model,
                                       ValueId value,
                                       int32_t destWidth,
                                       const SupernodeLocalExprContext *context)
         {
-            return "grhsim_ubitint_to_words<" + std::to_string(destWidth) + ">(" +
-                   bitIntExprForValue(graph, model, value, destWidth, context) + ")";
+            return castWordsExprForValue(graph, value, resolvedScheduleValueExpr(model, value, context), destWidth);
         }
 
         std::string sliceWordsExpr(const std::string &srcExpr,
                                    const std::string &startExpr,
                                    int32_t resultWidth)
         {
-            std::ostringstream body;
-            body << "const auto src = " << srcExpr << "; ";
-            body << "grhsim_slice_words(src.data(), src.size(), " << startExpr << ", " << resultWidth
-                 << ", out.data(), out.size()); ";
-            return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+            std::ostringstream out;
+            out << "grhsim_slice_words<" << logicWordCount(resultWidth) << ">("
+                << srcExpr << ", " << startExpr << ", " << resultWidth << ")";
+            return out.str();
         }
 
         std::string unaryWordsBufferOpExpr(const std::string &valueExpr,
                                            int32_t resultWidth,
                                            std::string_view helperName)
         {
-            std::ostringstream body;
-            body << "const auto value = " << valueExpr << "; ";
-            body << "out = " << helperName << "(value, " << resultWidth << "); ";
-            return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+            std::ostringstream out;
+            out << helperName << "(" << valueExpr << ", " << resultWidth << ")";
+            return out.str();
         }
 
         std::string binaryWordsBufferOpExpr(const std::string &lhsExpr,
@@ -4304,11 +4264,9 @@ namespace wolvrix::lib::emit
                                             int32_t resultWidth,
                                             std::string_view helperName)
         {
-            std::ostringstream body;
-            body << "const auto lhs = " << lhsExpr << "; ";
-            body << "const auto rhs = " << rhsExpr << "; ";
-            body << "out = " << helperName << "(lhs, rhs, " << resultWidth << "); ";
-            return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+            std::ostringstream out;
+            out << helperName << "(" << lhsExpr << ", " << rhsExpr << ", " << resultWidth << ")";
+            return out.str();
         }
 
         std::string shiftWordsBufferOpExpr(const std::string &valueExpr,
@@ -4316,41 +4274,69 @@ namespace wolvrix::lib::emit
                                            int32_t resultWidth,
                                            std::string_view helperName)
         {
-            std::ostringstream body;
-            body << "const auto value = " << valueExpr << "; ";
-            body << "out = " << helperName << "(value, grhsim_index_words(" << shiftExpr << ", "
-                 << resultWidth << "), " << resultWidth << "); ";
-            return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+            std::ostringstream out;
+            out << helperName << "(" << valueExpr << ", " << shiftExpr << ", " << resultWidth << ")";
+            return out.str();
         }
 
         std::string unaryWordsBoolExpr(const std::string &valueExpr,
                                        int32_t width,
                                        std::string_view helperName)
         {
-            std::ostringstream out;
-            out << "([&]() -> bool { const auto value = " << valueExpr << "; return " << helperName
-                << "(value.data(), value.size(), " << width << "); }())";
-            return out.str();
+            return std::string(helperName) + "(" + valueExpr + ", " + std::to_string(width) + ")";
         }
 
         std::string binaryWordsCompareExpr(const std::string &lhsExpr,
                                            const std::string &rhsExpr,
                                            std::string_view helperName)
         {
-            std::ostringstream out;
-            out << "([&]() -> int { const auto lhs = " << lhsExpr << "; const auto rhs = " << rhsExpr
-                << "; return " << helperName << "(lhs.data(), lhs.size(), rhs.data(), rhs.size()); }())";
-            return out.str();
+            return std::string(helperName) + "(" + lhsExpr + ", " + rhsExpr + ")";
         }
 
         std::string binaryWordsSignedCompareExpr(const std::string &lhsExpr,
                                                  const std::string &rhsExpr,
                                                  int32_t width)
         {
+            return "grhsim_compare_signed_words(" + lhsExpr + ", " + rhsExpr + ", " + std::to_string(width) + ")";
+        }
+
+        std::string concatWordsExpr(const std::vector<std::string> &operandWordExprs,
+                                    const std::vector<int32_t> &operandWidths,
+                                    int32_t resultWidth)
+        {
+            if (operandWordExprs.empty())
+            {
+                return wordsArrayTypeForWidth(resultWidth) + "{}";
+            }
+            std::string expr = operandWordExprs.back();
+            int32_t accumWidth = operandWidths.back();
+            for (std::size_t i = operandWordExprs.size() - 1; i-- > 0;)
+            {
+                const int32_t operandWidth = operandWidths[i];
+                std::ostringstream out;
+                out << "grhsim_concat_words<" << logicWordCount(resultWidth) << ">("
+                    << operandWordExprs[i] << ", "
+                    << operandWidth << ", "
+                    << expr << ", "
+                    << accumWidth << ", "
+                    << (operandWidth + accumWidth) << ")";
+                expr = out.str();
+                accumWidth += operandWidth;
+            }
+            return expr;
+        }
+
+        std::string replicateWordsExpr(const std::string &valueExpr,
+                                       int32_t operandWidth,
+                                       int32_t resultWidth,
+                                       std::size_t rep)
+        {
             std::ostringstream out;
-            out << "([&]() -> int { const auto lhs = " << lhsExpr << "; const auto rhs = " << rhsExpr
-                << "; return grhsim_compare_signed_words(lhs.data(), lhs.size(), rhs.data(), rhs.size(), "
-                << width << "); }())";
+            out << "grhsim_replicate_words<" << logicWordCount(resultWidth) << ">("
+                << valueExpr << ", "
+                << operandWidth << ", "
+                << rep << ", "
+                << resultWidth << ")";
             return out.str();
         }
 
@@ -4361,7 +4347,7 @@ namespace wolvrix::lib::emit
                                           SupernodeLocalExprKind kind,
                                           SupernodeLocalExprContext *context)
         {
-            if (context == nullptr || !canInlineSingleUserLocalValue(graph, model, resultValue))
+            if (context == nullptr || !canInlineSingleUserLocalValue(graph, model, resultValue, expr, kind))
             {
                 return false;
             }
@@ -4409,10 +4395,10 @@ namespace wolvrix::lib::emit
                 }
                 else
                 {
-                    stream << "        const auto " << lhs << " = [&]() -> " << cppTypeForValue(graph, resultValue)
-                           << " { const auto next_words = " << wordsExpr
-                           << "; return static_cast<" << cppTypeForValue(graph, resultValue)
-                           << ">(grhsim_trunc_u64(next_words[0], " << resultWidth << ")); }();\n";
+                    const std::string wordsName = lhs + "_words";
+                    stream << "        const auto " << wordsName << " = " << wordsExpr << ";\n";
+                    stream << "        const auto " << lhs << " = static_cast<" << cppTypeForValue(graph, resultValue)
+                           << ">(grhsim_trunc_u64(" << wordsName << "[0], " << resultWidth << "));\n";
                 }
                 return;
             }
@@ -4451,54 +4437,27 @@ namespace wolvrix::lib::emit
             stream << "        }\n";
         }
 
-        void emitLogicAssignFromWideBitIntExpr(std::ostream &stream,
-                                              const Graph &graph,
-                                              const EmitModel &model,
-                                              ValueId resultValue,
-                                              const std::string &bitIntExpr,
-                                              SupernodeLocalExprContext *context)
+        void emitLogicAssignFromWideWordsExpr(std::ostream &stream,
+                                             const Graph &graph,
+                                             const EmitModel &model,
+                                             ValueId resultValue,
+                                             const std::string &wordsExpr,
+                                             SupernodeLocalExprContext *context)
         {
-            const std::string lhs = valueRef(model, resultValue);
-            const int32_t resultWidth = graph.valueWidth(resultValue);
-            const bool materialized = isMaterializedValue(model, resultValue);
-            const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
-            if (!materialized)
+            if (!isMaterializedValue(model, resultValue))
             {
-                if (tryRecordSupernodeInlineExpr(graph,
-                                                 model,
-                                                 resultValue,
-                                                 "(" + bitIntExpr + ")",
-                                                 SupernodeLocalExprKind::kWideBitInt,
-                                                 context))
+                const std::string lhs = valueRef(model, resultValue);
+                if (tryRecordSupernodeInlineExpr(
+                        graph, model, resultValue, "(" + wordsExpr + ")", SupernodeLocalExprKind::kWideWords, context))
                 {
                     return;
                 }
                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                stream << "        const auto " << lhs << " = " << bitIntExpr << ";\n";
-                recordSupernodeLocalExprRef(graph,
-                                            resultValue,
-                                            lhs,
-                                            SupernodeLocalExprKind::kWideBitInt,
-                                            context);
+                stream << "        const auto " << lhs << " = " << wordsExpr << ";\n";
+                recordSupernodeLocalExprRef(graph, resultValue, lhs, SupernodeLocalExprKind::kWideWords, context);
                 return;
             }
-
-            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-            stream << "        {\n";
-            stream << "            const auto next_value = " << bitIntExpr << ";\n";
-            stream << "            const auto next_words = grhsim_ubitint_to_words<" << resultWidth
-                   << ">(next_value);\n";
-            if (needChangeDetect)
-            {
-                stream << "            if (grhsim_assign_words(" << lhs << ", next_words, " << resultWidth << ")) {\n";
-                emitChangedValuePropagation(stream, model, resultValue, "                ");
-                stream << "            }\n";
-            }
-            else
-            {
-                stream << "            " << lhs << " = next_words;\n";
-            }
-            stream << "        }\n";
+            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr);
         }
 
         void emitLogicAssignFromBoolExpr(std::ostream &stream,
@@ -4675,8 +4634,7 @@ namespace wolvrix::lib::emit
         std::string scalarBitPackExpr(const std::vector<std::string> &operands)
         {
             const std::string valuesExpr = scalarConcatValueArrayExpr(operands);
-            return "([&]() -> std::uint64_t { const auto bits = " + valuesExpr +
-                   "; return grhsim_pack_bits_u64(bits.data(), bits.size()); }())";
+            return "grhsim_pack_bits_u64(" + valuesExpr + ".data(), " + valuesExpr + ".size())";
         }
 
         std::string scalarConcatLoopExpr(const Graph &graph,
@@ -4691,18 +4649,16 @@ namespace wolvrix::lib::emit
                 op.results().empty() ? 0 : graph.valueWidth(op.results().front());
             if (wideResult)
             {
-                std::ostringstream body;
-                body << "const auto values = " << valuesExpr << "; ";
                 if (uniformWidth)
                 {
-                    body << "grhsim_concat_uniform_scalars_words(values.data(), values.size(), "
-                         << *uniformWidth << ", " << resultWidth << ", out.data(), out.size()); ";
-                    return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+                    return "grhsim_concat_uniform_scalars_words<" +
+                           std::to_string(logicWordCount(resultWidth)) + ">(" +
+                           valuesExpr + ", " + std::to_string(*uniformWidth) + ", " +
+                           std::to_string(resultWidth) + ")";
                 }
-                body << "const auto widths = " << scalarConcatWidthArrayExpr(graph, op) << "; ";
-                body << "grhsim_concat_scalars_words(values.data(), widths.data(), values.size(), "
-                     << resultWidth << ", out.data(), out.size()); ";
-                return wordsArrayLambdaExprForWidth(resultWidth, body.str());
+                return "grhsim_concat_scalars_words<" + std::to_string(logicWordCount(resultWidth)) + ">(" +
+                       valuesExpr + ", " + scalarConcatWidthArrayExpr(graph, op) + ", " +
+                       std::to_string(resultWidth) + ")";
             }
             if (uniformWidth)
             {
@@ -4834,6 +4790,11 @@ namespace wolvrix::lib::emit
                                              const std::unordered_map<ScalarConcatPrefixCacheKey,
                                                                       std::string,
                                                                       ScalarConcatPrefixCacheKeyHash> *concatPrefixTemps = nullptr);
+        std::optional<std::string> eventWordLogicExprForOp(const Graph &graph,
+                                                           const EmitModel &model,
+                                                           const Operation &op,
+                                                           ValueId resultValue,
+                                                           const std::vector<std::string> &operandExprs);
 
         bool emitWordLogicOperation(std::ostream &stream,
                                     const Graph &graph,
@@ -4848,337 +4809,27 @@ namespace wolvrix::lib::emit
             }
             const auto operands = op.operands();
             const ValueId resultValue = op.results().front();
-            const int32_t resultWidth = graph.valueWidth(resultValue);
-            const std::string resultBitType = wideBitIntTypeForWidth(resultWidth);
-
-            auto operandBits = [&](std::size_t index, int32_t width) -> std::string
+            std::vector<std::string> operandExprs;
+            operandExprs.reserve(operands.size());
+            for (ValueId operand : operands)
             {
-                return bitIntExprForValue(graph, model, operands[index], width, context);
-            };
-            auto operandPattern = [&](std::size_t index, int32_t width) -> std::string
-            {
-                return bitPatternExprForValue(graph, model, operands[index], width, context);
-            };
-            auto shiftAmountExpr = [&](ValueId value, int32_t cap) -> std::string
-            {
-                if (isWideLogicValue(graph, value) ||
-                    (findSupernodeLocalExpr(context, value) != nullptr &&
-                     findSupernodeLocalExpr(context, value)->kind == SupernodeLocalExprKind::kWideBitInt))
-                {
-                    return "grhsim_index_words(" +
-                           bitPatternExprForValue(graph, model, value, graph.valueWidth(value), context) + ", " +
-                           std::to_string(cap) + ")";
-                }
-                return "grhsim_index_words(" + resolvedScheduleValueExpr(model, value, context) + ", " +
-                       std::to_string(cap) + ")";
-            };
-            auto emitBitResult = [&](const std::string &expr)
-            {
-                if (isWideLogicValue(graph, resultValue))
-                {
-                    emitLogicAssignFromWideBitIntExpr(stream, graph, model, resultValue, expr, context);
-                }
-                else
-                {
-                    emitLogicAssignFromScalarExpr(stream,
-                                                  graph,
-                                                  model,
-                                                  resultValue,
-                                                  "static_cast<std::uint64_t>(" + expr + ")",
-                                                  true,
-                                                  context);
-                }
-            };
-            auto compareWidth = [&]() -> int32_t
-            {
-                int32_t width = 1;
-                for (ValueId value : operands)
-                {
-                    width = std::max(width, graph.valueWidth(value));
-                }
-                return width;
-            };
-
-            switch (op.kind())
-            {
-            case OperationKind::kAssign:
-                emitBitResult(operandBits(0, resultWidth));
-                return true;
-            case OperationKind::kAdd:
-                emitBitResult("(" + operandBits(0, resultWidth) + " + " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kSub:
-                emitBitResult("(" + operandBits(0, resultWidth) + " - " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kMul:
-                emitBitResult("(" + operandBits(0, resultWidth) + " * " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kDiv:
-            {
-                const bool signedMode =
-                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
-                emitBitResult("grhsim_" + std::string(signedMode ? "sdiv" : "udiv") + "_ubitint<" +
-                              std::to_string(resultWidth) + ">(" +
-                              operandBits(0, resultWidth) + ", " +
-                              operandBits(1, resultWidth) + ")");
-                return true;
+                operandExprs.push_back(resolvedScheduleValueExpr(model, operand, context));
             }
-            case OperationKind::kMod:
+            const auto expr = eventWordLogicExprForOp(graph, model, op, resultValue, operandExprs);
+            if (!expr)
             {
-                const bool signedMode =
-                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
-                emitBitResult("grhsim_" + std::string(signedMode ? "smod" : "umod") + "_ubitint<" +
-                              std::to_string(resultWidth) + ">(" +
-                              operandBits(0, resultWidth) + ", " +
-                              operandBits(1, resultWidth) + ")");
-                return true;
-            }
-            case OperationKind::kAnd:
-                emitBitResult("(" + operandBits(0, resultWidth) + " & " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kOr:
-                emitBitResult("(" + operandBits(0, resultWidth) + " | " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kXor:
-                emitBitResult("(" + operandBits(0, resultWidth) + " ^ " + operandBits(1, resultWidth) + ")");
-                return true;
-            case OperationKind::kXnor:
-                emitBitResult("(~(" + operandBits(0, resultWidth) + " ^ " + operandBits(1, resultWidth) + "))");
-                return true;
-            case OperationKind::kNot:
-                emitBitResult("(~" + operandBits(0, resultWidth) + ")");
-                return true;
-            case OperationKind::kEq:
-            case OperationKind::kCaseEq:
-            case OperationKind::kWildcardEq:
-            {
-                const int32_t width = compareWidth();
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "(" + operandBits(0, width) + ") == (" + operandBits(1, width) + ")",
-                                            context);
-                return true;
-            }
-            case OperationKind::kNe:
-            case OperationKind::kCaseNe:
-            case OperationKind::kWildcardNe:
-            {
-                const int32_t width = compareWidth();
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "(" + operandBits(0, width) + ") != (" + operandBits(1, width) + ")",
-                                            context);
-                return true;
-            }
-            case OperationKind::kLt:
-            case OperationKind::kLe:
-            case OperationKind::kGt:
-            case OperationKind::kGe:
-            {
-                const int32_t width = compareWidth();
-                const bool signedMode =
-                    graph.valueSigned(operands[0]) && graph.valueSigned(operands[1]);
-                const std::string lhsExpr = signedMode
-                                                ? ("static_cast<grhsim_sbitint<" + std::to_string(width) + ">>(" +
-                                                   operandBits(0, width) + ")")
-                                                : operandBits(0, width);
-                const std::string rhsExpr = signedMode
-                                                ? ("static_cast<grhsim_sbitint<" + std::to_string(width) + ">>(" +
-                                                   operandBits(1, width) + ")")
-                                                : operandBits(1, width);
-                std::string predicate;
-                switch (op.kind())
-                {
-                case OperationKind::kLt:
-                    predicate = "(" + lhsExpr + ") < (" + rhsExpr + ")";
-                    break;
-                case OperationKind::kLe:
-                    predicate = "(" + lhsExpr + ") <= (" + rhsExpr + ")";
-                    break;
-                case OperationKind::kGt:
-                    predicate = "(" + lhsExpr + ") > (" + rhsExpr + ")";
-                    break;
-                case OperationKind::kGe:
-                    predicate = "(" + lhsExpr + ") >= (" + rhsExpr + ")";
-                    break;
-                default:
-                    break;
-                }
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue, predicate, context);
-                return true;
-            }
-            case OperationKind::kLogicAnd:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            truthyLogicValueExpr(graph, model, operands[0], context) +
-                                                " && " +
-                                                truthyLogicValueExpr(graph, model, operands[1], context),
-                                            context);
-                return true;
-            case OperationKind::kLogicOr:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            truthyLogicValueExpr(graph, model, operands[0], context) +
-                                                " || " +
-                                                truthyLogicValueExpr(graph, model, operands[1], context),
-                                            context);
-                return true;
-            case OperationKind::kLogicNot:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "!" + truthyLogicValueExpr(graph, model, operands[0], context),
-                                            context);
-                return true;
-            case OperationKind::kReduceAnd:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "grhsim_reduce_and_ubitint<" +
-                                                std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                operandPattern(0, graph.valueWidth(operands[0])) + ")",
-                                            context);
-                return true;
-            case OperationKind::kReduceNand:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "grhsim_reduce_nand_ubitint<" +
-                                                std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                operandPattern(0, graph.valueWidth(operands[0])) + ")",
-                                            context);
-                return true;
-            case OperationKind::kReduceOr:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "(" + operandPattern(0, graph.valueWidth(operands[0])) + ") != 0",
-                                            context);
-                return true;
-            case OperationKind::kReduceNor:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "(" + operandPattern(0, graph.valueWidth(operands[0])) + ") == 0",
-                                            context);
-                return true;
-            case OperationKind::kReduceXor:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "grhsim_reduce_xor_ubitint<" +
-                                                std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                operandPattern(0, graph.valueWidth(operands[0])) + ")",
-                                            context);
-                return true;
-            case OperationKind::kReduceXnor:
-                emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                            "grhsim_reduce_xnor_ubitint<" +
-                                                std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                operandPattern(0, graph.valueWidth(operands[0])) + ")",
-                                            context);
-                return true;
-            case OperationKind::kShl:
-                emitBitResult("grhsim_shl_ubitint<" + std::to_string(resultWidth) + ">(" +
-                              operandPattern(0, resultWidth) + ", " +
-                              shiftAmountExpr(operands[1], resultWidth) + ")");
-                return true;
-            case OperationKind::kLShr:
-                emitBitResult("grhsim_lshr_ubitint<" + std::to_string(resultWidth) + ">(" +
-                              operandPattern(0, resultWidth) + ", " +
-                              shiftAmountExpr(operands[1], resultWidth) + ")");
-                return true;
-            case OperationKind::kAShr:
-                emitBitResult("grhsim_ashr_ubitint<" + std::to_string(resultWidth) + ">(" +
-                              operandBits(0, resultWidth) + ", " +
-                              shiftAmountExpr(operands[1], resultWidth) + ")");
-                return true;
-            case OperationKind::kMux:
-                emitBitResult("((" + truthyLogicValueExpr(graph, model, operands[0], context) + ") ? " +
-                              operandBits(1, resultWidth) + " : " + operandBits(2, resultWidth) + ")");
-                return true;
-            case OperationKind::kConcat:
-            {
-                std::ostringstream out;
-                out << "static_cast<" << resultBitType << ">(";
-                int32_t cursor = resultWidth;
-                bool first = true;
-                for (ValueId operand : operands)
-                {
-                    const int32_t operandWidth = graph.valueWidth(operand);
-                    cursor -= operandWidth;
-                    if (!first)
-                    {
-                        out << " | ";
-                    }
-                    first = false;
-                    out << "(" << bitPatternExprForValue(graph, model, operand, resultWidth, context);
-                    if (cursor != 0)
-                    {
-                        out << " << " << cursor;
-                    }
-                    out << ")";
-                }
-                out << ")";
-                emitBitResult(out.str());
-                return true;
-            }
-            case OperationKind::kReplicate:
-            {
-                const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
-                const int32_t operandWidth = graph.valueWidth(operands[0]);
-                emitBitResult("grhsim_replicate_ubitint<" + std::to_string(resultWidth) + ", " +
-                              std::to_string(operandWidth) + ">(" +
-                              operandPattern(0, operandWidth) + ", " + std::to_string(rep) + ")");
-                return true;
-            }
-            case OperationKind::kSliceStatic:
-            {
-                const auto sliceStart = getAttribute<int64_t>(op, "sliceStart").value_or(0);
-                if (!isWideLogicValue(graph, resultValue) && resultWidth == 1)
-                {
-                    emitLogicAssignFromBoolExpr(stream, graph, model, resultValue,
-                                                "grhsim_slice_ubitint<1, " +
-                                                    std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                    operandPattern(0, graph.valueWidth(operands[0])) + ", " +
-                                                    std::to_string(sliceStart) + ") != 0",
-                                                context);
-                    return true;
-                }
-                emitBitResult("grhsim_slice_ubitint<" + std::to_string(resultWidth) + ", " +
-                              std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                              operandPattern(0, graph.valueWidth(operands[0])) + ", " +
-                              std::to_string(sliceStart) + ")");
-                return true;
-            }
-            case OperationKind::kSliceDynamic:
-                emitBitResult("grhsim_slice_ubitint<" + std::to_string(resultWidth) + ", " +
-                              std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                              operandPattern(0, graph.valueWidth(operands[0])) + ", " +
-                              shiftAmountExpr(operands[1], graph.valueWidth(operands[0])) + ")");
-                return true;
-            case OperationKind::kSliceArray:
-            {
-                const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth");
-                if (!sliceWidth)
-                {
-                    error = "kSliceArray missing sliceWidth";
-                    return false;
-                }
-                emitBitResult("grhsim_slice_ubitint<" + std::to_string(resultWidth) + ", " +
-                              std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                              operandPattern(0, graph.valueWidth(operands[0])) + ", (" +
-                              shiftAmountExpr(operands[1], graph.valueWidth(operands[0])) + " * " +
-                              std::to_string(*sliceWidth) + "))");
-                return true;
-            }
-            case OperationKind::kSystemFunction:
-            {
-                const auto name = getAttribute<std::string>(op, "name");
-                if (!name || *name != "clog2" || operands.size() != 1)
-                {
-                    error = "unsupported wide system function emit";
-                    return false;
-                }
-                emitLogicAssignFromScalarExpr(stream,
-                                              graph,
-                                              model,
-                                              resultValue,
-                                              "grhsim_clog2_ubitint<" +
-                                                  std::to_string(graph.valueWidth(operands[0])) + ">(" +
-                                                  operandPattern(0, graph.valueWidth(operands[0])) + ")",
-                                              false,
-                                              context);
-                return true;
-            }
-            default:
                 error = "unsupported wide logic emit op: " + std::string(op.symbolText());
                 return false;
             }
+            if (isWideLogicValue(graph, resultValue))
+            {
+                emitLogicAssignFromWideWordsExpr(stream, graph, model, resultValue, *expr, context);
+            }
+            else
+            {
+                emitLogicAssignFromScalarExpr(stream, graph, model, resultValue, *expr, true, context);
+            }
+            return true;
         }
 
         std::string eventLogicExprFromWordsExpr(const Graph &graph,
@@ -5205,7 +4856,6 @@ namespace wolvrix::lib::emit
         {
             const auto operands = op.operands();
             const int32_t resultWidth = graph.valueWidth(resultValue);
-            const std::size_t resultWords = logicWordCount(resultWidth);
             auto operandWords = [&](std::size_t index, int32_t width) -> std::string
             {
                 const ValueId value = operands[index];
@@ -5434,33 +5084,27 @@ namespace wolvrix::lib::emit
                 {
                     return logicBoolExpr(scalarBitPackExpr(operandExprs));
                 }
-                std::ostringstream out;
-                out << "([&]() -> " << wordsArrayTypeForWidth(resultWidth) << " { ";
-                out << wordsArrayTypeForWidth(resultWidth) << " next_words{}; ";
-                out << "std::size_t concat_cursor = " << resultWidth << "; ";
+                std::vector<std::string> concatOperandWords;
+                std::vector<int32_t> concatOperandWidths;
+                concatOperandWords.reserve(operands.size());
+                concatOperandWidths.reserve(operands.size());
                 for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
                 {
-                    const ValueId operand = operands[operandIndex];
-                    const int32_t operandWidth = graph.valueWidth(operand);
-                    out << "concat_cursor -= " << operandWidth << "; ";
-                    out << "grhsim_insert_words(next_words, concat_cursor, "
-                        << operandWords(operandIndex, operandWidth) << ", " << operandWidth << "); ";
+                    const int32_t operandWidth = graph.valueWidth(operands[operandIndex]);
+                    concatOperandWords.push_back(operandWords(operandIndex, operandWidth));
+                    concatOperandWidths.push_back(operandWidth);
                 }
-                out << "return next_words; }())";
-                return eventLogicExprFromWordsExpr(graph, resultValue, out.str());
+                return eventLogicExprFromWordsExpr(
+                    graph, resultValue, concatWordsExpr(concatOperandWords, concatOperandWidths, resultWidth));
             }
             case OperationKind::kReplicate:
             {
                 const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
                 const int32_t operandWidth = graph.valueWidth(operands[0]);
-                std::ostringstream out;
-                out << "([&]() -> " << wordsArrayTypeForWidth(resultWidth) << " { ";
-                out << wordsArrayTypeForWidth(resultWidth) << " next_words{}; ";
-                out << "for (std::size_t rep_index = 0; rep_index < " << rep << "; ++rep_index) { ";
-                out << "grhsim_insert_words(next_words, rep_index * " << operandWidth << ", "
-                    << operandWords(0, operandWidth) << ", " << operandWidth << "); ";
-                out << "} grhsim_trunc_words(next_words, " << resultWidth << "); return next_words; }())";
-                return eventLogicExprFromWordsExpr(graph, resultValue, out.str());
+                return eventLogicExprFromWordsExpr(
+                    graph,
+                    resultValue,
+                    replicateWordsExpr(operandWords(0, operandWidth), operandWidth, resultWidth, static_cast<std::size_t>(rep)));
             }
             case OperationKind::kSliceStatic:
             {
@@ -5501,6 +5145,17 @@ namespace wolvrix::lib::emit
                     sliceWordsExpr(operandWords(0, graph.valueWidth(operands[0])),
                                    "((" + operandExprs[1] + ") * " + std::to_string(*sliceWidth) + ")",
                                    resultWidth));
+            }
+            case OperationKind::kSystemFunction:
+            {
+                const auto name = getAttribute<std::string>(op, "name");
+                if (!name || *name != "clog2" || operands.size() != 1)
+                {
+                    return std::nullopt;
+                }
+                return logicBoolExpr("grhsim_clog2_words(" +
+                                     operandWords(0, graph.valueWidth(operands[0])) + ", " +
+                                     std::to_string(graph.valueWidth(operands[0])) + ")");
             }
             default:
                 break;
@@ -6619,11 +6274,11 @@ namespace wolvrix::lib::emit
                 const StateDecl &state = model.stateBySymbol.at(write.symbol);
                 const std::string writeTouchedRef = stateShadowTouchedRef(model.stateShadows[write.shadowIndex]);
                 const std::string writeDataRef = stateShadowDataRef(model.stateShadows[write.shadowIndex], state);
-                const std::string shadowBaseExpr =
-                    writeTouchedRef + " ? " + writeDataRef + " : " + stateRef(state);
-                stream << innerIndent << "const auto state_shadow_base = " << shadowBaseExpr << ";\n";
                 if (isWideLogicWidth(state.width))
                 {
+                    const std::string shadowBaseExpr =
+                        writeTouchedRef + " ? " + writeDataRef + " : " + stateRef(state);
+                    stream << innerIndent << "const auto state_shadow_base = " << shadowBaseExpr << ";\n";
                     stream << innerIndent << writeDataRef << " = grhsim_merge_words_masked(state_shadow_base, "
                            << wordsExprForValue(graph, model, operands[1], state.width, context) << ", "
                            << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
@@ -6631,6 +6286,9 @@ namespace wolvrix::lib::emit
                 }
                 else
                 {
+                    const std::string shadowBaseExpr =
+                        writeTouchedRef + " ? " + writeDataRef + " : " + stateRef(state);
+                    stream << innerIndent << "const auto state_shadow_base = " << shadowBaseExpr << ";\n";
                     stream << innerIndent << writeDataRef << " = static_cast<" << state.cppType
                            << ">((state_shadow_base & ~" << resolvedScheduleValueExpr(model, operands[2], context)
                            << ") | (" << resolvedScheduleValueExpr(model, operands[1], context) << " & "
@@ -6663,10 +6321,7 @@ namespace wolvrix::lib::emit
                                        const StateDecl &state,
                                        const SupernodeLocalExprContext *context)
         {
-            const std::string addrExpr =
-                isWideLogicValue(graph, addrValue)
-                    ? bitPatternExprForValue(graph, model, addrValue, graph.valueWidth(addrValue), context)
-                    : resolvedScheduleValueExpr(model, addrValue, context);
+            const std::string addrExpr = resolvedScheduleValueExpr(model, addrValue, context);
             switch (write.memoryAddrMode)
             {
             case WriteDecl::MemoryAddrMode::kPow2Wrap:
@@ -6985,16 +6640,12 @@ namespace wolvrix::lib::emit
                             {
                                 if (isWideLogicValue(graph, resultValue))
                                 {
-                                    emitLogicAssignFromWideBitIntExpr(
-                                        stream,
-                                        graph,
-                                        model,
-                                        resultValue,
-                                        wordsToBitIntExpr(*expr,
-                                                          graph.valueWidth(resultValue),
-                                                          graph.valueWidth(resultValue),
-                                                          graph.valueSigned(resultValue)),
-                                        &localExprContext);
+                                    emitLogicAssignFromWideWordsExpr(stream,
+                                                                     graph,
+                                                                     model,
+                                                                     resultValue,
+                                                                     *expr,
+                                                                     &localExprContext);
                                 }
                                 else
                                 {
@@ -7047,15 +6698,8 @@ namespace wolvrix::lib::emit
                         {
                             if (isWideLogicValue(graph, resultValue))
                             {
-                                emitLogicAssignFromWideBitIntExpr(stream,
-                                                                  graph,
-                                                                  model,
-                                                                  resultValue,
-                                                                  wordsToBitIntExpr(stateExpr,
-                                                                                    graph.valueWidth(resultValue),
-                                                                                    graph.valueWidth(resultValue),
-                                                                                    graph.valueSigned(resultValue)),
-                                                                  &localExprContext);
+                                emitLogicAssignFromWideWordsExpr(
+                                    stream, graph, model, resultValue, stateExpr, &localExprContext);
                             }
                             else
                             {
@@ -7072,17 +6716,7 @@ namespace wolvrix::lib::emit
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         if (isWideLogicValue(graph, op.results().front()))
                         {
-                            if (needChangeDetect)
-                            {
-                                stream << "        if (grhsim_assign_words(" << lhs << ", " << stateExpr << ", "
-                                       << graph.valueWidth(op.results().front()) << ")) {\n";
-                                emitChangedValuePropagation(stream, model, resultValue, "            ", &activationContext);
-                                stream << "        }\n";
-                            }
-                            else
-                            {
-                                stream << "        " << lhs << " = " << stateExpr << ";\n";
-                            }
+                            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, stateExpr);
                         }
                         else
                         {
@@ -7122,31 +6756,21 @@ namespace wolvrix::lib::emit
                         const ValueId resultValue = op.results().front();
                         const bool materialized = isMaterializedValue(model, resultValue);
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
-                        const std::string addrExpr =
-                            isWideLogicValue(graph, operands[0])
-                                ? bitPatternExprForValue(graph,
-                                                         model,
-                                                         operands[0],
-                                                         graph.valueWidth(operands[0]),
-                                                         &localExprContext)
-                                : resolvedScheduleValueExpr(model, operands[0], &localExprContext);
+                        const std::string addrExpr = resolvedScheduleValueExpr(model, operands[0], &localExprContext);
                         const std::string rowExpr =
                             "grhsim_index_words(" + addrExpr + ", " + std::to_string(state.rowCount) + ")";
                         if (!materialized)
                         {
                             if (isWideLogicValue(graph, resultValue))
                             {
-                                emitLogicAssignFromWideBitIntExpr(
+                                emitLogicAssignFromWideWordsExpr(
                                     stream,
                                     graph,
                                     model,
                                     resultValue,
                                     "((" + rowExpr + " >= " + std::to_string(state.rowCount) + ") ? " +
-                                        wideBitIntTypeForWidth(graph.valueWidth(resultValue)) + "{} : " +
-                                        wordsToBitIntExpr(stateExpr + "[" + rowExpr + "]",
-                                                          graph.valueWidth(resultValue),
-                                                          graph.valueWidth(resultValue),
-                                                          graph.valueSigned(resultValue)) +
+                                        wordsArrayTypeForWidth(graph.valueWidth(resultValue)) + "{} : " +
+                                        stateExpr + "[" + rowExpr + "]" +
                                         ")",
                                     &localExprContext);
                             }
@@ -7172,24 +6796,25 @@ namespace wolvrix::lib::emit
                             stream << "            if (row >= " << state.rowCount << ") {\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (grhsim_assign_words(" << lhs << ", "
-                                       << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ", "
-                                       << graph.valueWidth(op.results().front()) << ")) {\n";
+                                stream << "                if (" << lhs << " != "
+                                       << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{}) {\n";
                                 emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
+                                stream << "                    " << lhs << " = "
+                                       << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
                                 stream << "                }\n";
                             }
                             else
                             {
                                 stream << "                " << lhs << " = "
-                                       << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
+                                       << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
                             }
                             stream << "            } else {\n";
                             stream << "                const auto next_value = " << stateExpr << "[row];\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (grhsim_assign_words(" << lhs << ", next_value, "
-                                       << graph.valueWidth(op.results().front()) << ")) {\n";
+                                stream << "                if (" << lhs << " != next_value) {\n";
                                 emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
+                                stream << "                    " << lhs << " = next_value;\n";
                                 stream << "                }\n";
                             }
                             else
@@ -7610,7 +7235,7 @@ namespace wolvrix::lib::emit
                     stream << "\nvoid " << className << "::dump_waveform_batch_" << batch.index << "()\n{\n";
                     for (std::size_t signalIndex = waveformBegin; signalIndex < waveformEnd; ++signalIndex)
                     {
-                        emitWaveformSignalWrite(stream, model, model.waveformSignals[signalIndex], signalIndex, "    ");
+                        emitWaveformSignalWrite(stream, graph, model, model.waveformSignals[signalIndex], signalIndex, "    ");
                     }
                     stream << "}\n";
                 }
@@ -8170,9 +7795,6 @@ namespace wolvrix::lib::emit
             *stream << "#include <limits>\n";
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
-            *stream << "#if !defined(__clang__)\n";
-            *stream << "#error \"grhsim-cpp wide-value emit requires clang++ for _BitInt support\"\n";
-            *stream << "#endif\n\n";
             if (model.emitWaveform)
             {
                 *stream << "#include <ctime>\n";
@@ -8581,198 +8203,6 @@ namespace wolvrix::lib::emit
             *stream << "    }\n";
             *stream << "    return changed;\n";
             *stream << "}\n\n";
-            *stream << R"CPP(
-template <std::size_t Width>
-using grhsim_ubitint = unsigned _BitInt(Width);
-
-template <std::size_t Width>
-using grhsim_sbitint = signed _BitInt(Width);
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_bitint_mask()
-{
-    return ~static_cast<grhsim_ubitint<Width>>(0);
-}
-
-template <std::size_t DestWidth, std::size_t SrcWidth, bool SrcSigned>
-inline grhsim_ubitint<DestWidth> grhsim_cast_ubitint(grhsim_ubitint<SrcWidth> value)
-{
-    if constexpr (SrcSigned) {
-        return static_cast<grhsim_ubitint<DestWidth>>(static_cast<grhsim_sbitint<SrcWidth>>(value));
-    }
-    return static_cast<grhsim_ubitint<DestWidth>>(value);
-}
-
-template <std::size_t DestWidth, std::size_t SrcWidth, bool SrcSigned, typename T>
-inline grhsim_ubitint<DestWidth> grhsim_scalar_to_ubitint(T value)
-{
-    const std::uint64_t raw = grhsim_trunc_u64(static_cast<std::uint64_t>(value), SrcWidth);
-    if constexpr (SrcSigned) {
-        const std::int64_t signedValue = grhsim_sign_extend_i64(raw, SrcWidth);
-        return static_cast<grhsim_ubitint<DestWidth>>(static_cast<grhsim_sbitint<DestWidth>>(signedValue));
-    }
-    return static_cast<grhsim_ubitint<DestWidth>>(raw);
-}
-
-template <std::size_t Width, std::size_t N>
-inline grhsim_ubitint<Width> grhsim_words_to_ubitint(const std::array<std::uint64_t, N> &value)
-{
-    grhsim_ubitint<Width> out = 0;
-    for (std::size_t i = 0; i < N; ++i) {
-        const std::size_t shift = i * 64u;
-        if (shift >= Width) {
-            break;
-        }
-        out |= (static_cast<grhsim_ubitint<Width>>(value[i]) << shift);
-    }
-    return out;
-}
-
-template <std::size_t Width>
-inline std::array<std::uint64_t, (Width + 63u) / 64u> grhsim_ubitint_to_words(grhsim_ubitint<Width> value)
-{
-    std::array<std::uint64_t, (Width + 63u) / 64u> out{};
-    for (std::size_t i = 0; i < out.size(); ++i) {
-        out[i] = static_cast<std::uint64_t>(value >> (i * 64u));
-    }
-    grhsim_trunc_words(out, Width);
-    return out;
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_udiv_ubitint(grhsim_ubitint<Width> lhs,
-                                                 grhsim_ubitint<Width> rhs)
-{
-    return rhs == 0 ? static_cast<grhsim_ubitint<Width>>(0) : static_cast<grhsim_ubitint<Width>>(lhs / rhs);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_umod_ubitint(grhsim_ubitint<Width> lhs,
-                                                 grhsim_ubitint<Width> rhs)
-{
-    return rhs == 0 ? static_cast<grhsim_ubitint<Width>>(0) : static_cast<grhsim_ubitint<Width>>(lhs % rhs);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_sdiv_ubitint(grhsim_ubitint<Width> lhs,
-                                                 grhsim_ubitint<Width> rhs)
-{
-    const grhsim_sbitint<Width> signedRhs = static_cast<grhsim_sbitint<Width>>(rhs);
-    if (signedRhs == 0) {
-        return static_cast<grhsim_ubitint<Width>>(0);
-    }
-    const grhsim_sbitint<Width> signedLhs = static_cast<grhsim_sbitint<Width>>(lhs);
-    return static_cast<grhsim_ubitint<Width>>(signedLhs / signedRhs);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_smod_ubitint(grhsim_ubitint<Width> lhs,
-                                                 grhsim_ubitint<Width> rhs)
-{
-    const grhsim_sbitint<Width> signedRhs = static_cast<grhsim_sbitint<Width>>(rhs);
-    if (signedRhs == 0) {
-        return static_cast<grhsim_ubitint<Width>>(0);
-    }
-    const grhsim_sbitint<Width> signedLhs = static_cast<grhsim_sbitint<Width>>(lhs);
-    return static_cast<grhsim_ubitint<Width>>(signedLhs % signedRhs);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_shl_ubitint(grhsim_ubitint<Width> value, std::size_t amount)
-{
-    if (amount >= Width) {
-        return static_cast<grhsim_ubitint<Width>>(0);
-    }
-    return static_cast<grhsim_ubitint<Width>>(value << amount);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_lshr_ubitint(grhsim_ubitint<Width> value, std::size_t amount)
-{
-    if (amount >= Width) {
-        return static_cast<grhsim_ubitint<Width>>(0);
-    }
-    return static_cast<grhsim_ubitint<Width>>(value >> amount);
-}
-
-template <std::size_t Width>
-inline grhsim_ubitint<Width> grhsim_ashr_ubitint(grhsim_ubitint<Width> value, std::size_t amount)
-{
-    const grhsim_sbitint<Width> signedValue = static_cast<grhsim_sbitint<Width>>(value);
-    if (amount >= Width) {
-        return signedValue < 0 ? grhsim_bitint_mask<Width>() : static_cast<grhsim_ubitint<Width>>(0);
-    }
-    return static_cast<grhsim_ubitint<Width>>(signedValue >> amount);
-}
-
-template <std::size_t DestWidth, std::size_t SrcWidth>
-inline grhsim_ubitint<DestWidth> grhsim_slice_ubitint(grhsim_ubitint<SrcWidth> value, std::size_t start)
-{
-    if (start >= SrcWidth) {
-        return static_cast<grhsim_ubitint<DestWidth>>(0);
-    }
-    return static_cast<grhsim_ubitint<DestWidth>>(value >> start);
-}
-
-template <std::size_t ResultWidth, std::size_t ElemWidth>
-inline grhsim_ubitint<ResultWidth> grhsim_replicate_ubitint(grhsim_ubitint<ElemWidth> value, std::size_t rep)
-{
-    grhsim_ubitint<ResultWidth> out = 0;
-    const grhsim_ubitint<ResultWidth> elem = static_cast<grhsim_ubitint<ResultWidth>>(value);
-    for (std::size_t i = 0; i < rep; ++i) {
-        const std::size_t shift = i * ElemWidth;
-        if (shift >= ResultWidth) {
-            break;
-        }
-        out |= (elem << shift);
-    }
-    return out;
-}
-
-template <std::size_t Width>
-inline bool grhsim_reduce_and_ubitint(grhsim_ubitint<Width> value)
-{
-    return value == grhsim_bitint_mask<Width>();
-}
-
-template <std::size_t Width>
-inline bool grhsim_reduce_nand_ubitint(grhsim_ubitint<Width> value)
-{
-    return !grhsim_reduce_and_ubitint<Width>(value);
-}
-
-template <std::size_t Width>
-inline bool grhsim_reduce_xor_ubitint(grhsim_ubitint<Width> value)
-{
-    unsigned parity = 0;
-    for (std::size_t i = 0; i < Width; ++i) {
-        parity ^= static_cast<unsigned>((value >> i) & 1);
-    }
-    return (parity & 1u) != 0;
-}
-
-template <std::size_t Width>
-inline bool grhsim_reduce_xnor_ubitint(grhsim_ubitint<Width> value)
-{
-    return !grhsim_reduce_xor_ubitint<Width>(value);
-}
-
-template <std::size_t Width>
-inline std::uint64_t grhsim_clog2_ubitint(grhsim_ubitint<Width> value)
-{
-    if (value <= 1) {
-        return 0;
-    }
-    std::uint64_t result = 0;
-    value -= 1;
-    while (value != 0) {
-        value >>= 1;
-        ++result;
-    }
-    return result;
-}
-
-)CPP";
             *stream << R"CPP(
 inline void grhsim_trunc_words_buffer(std::uint64_t *value,
                                       std::size_t wordCount,
@@ -9597,6 +9027,41 @@ inline std::array<std::uint64_t, DestN> grhsim_concat_uniform_scalars_words(cons
     return out;
 }
 
+template <std::size_t DestN, std::size_t LhsN, std::size_t RhsN>
+inline std::array<std::uint64_t, DestN> grhsim_concat_words(const std::array<std::uint64_t, LhsN> &lhs,
+                                                            std::size_t lhsWidth,
+                                                            const std::array<std::uint64_t, RhsN> &rhs,
+                                                            std::size_t rhsWidth,
+                                                            std::size_t totalWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    const std::size_t boundedRhsWidth = std::min(rhsWidth, totalWidth);
+    grhsim_insert_words(out, 0, rhs, boundedRhsWidth);
+    if (boundedRhsWidth < totalWidth) {
+        grhsim_insert_words(out, boundedRhsWidth, lhs, std::min(lhsWidth, totalWidth - boundedRhsWidth));
+    }
+    grhsim_trunc_words(out, totalWidth);
+    return out;
+}
+
+template <std::size_t DestN, std::size_t SrcN>
+inline std::array<std::uint64_t, DestN> grhsim_replicate_words(const std::array<std::uint64_t, SrcN> &value,
+                                                               std::size_t elemWidth,
+                                                               std::size_t rep,
+                                                               std::size_t totalWidth)
+{
+    std::array<std::uint64_t, DestN> out{};
+    for (std::size_t i = 0; i < rep; ++i) {
+        const std::size_t offset = i * elemWidth;
+        if (offset >= totalWidth) {
+            break;
+        }
+        grhsim_insert_words(out, offset, value, std::min(elemWidth, totalWidth - offset));
+    }
+    grhsim_trunc_words(out, totalWidth);
+    return out;
+}
+
 template <std::size_t DestN, std::size_t SrcN>
 inline std::array<std::uint64_t, DestN> grhsim_slice_words(const std::array<std::uint64_t, SrcN> &src,
                                                            std::size_t start,
@@ -9633,15 +9098,6 @@ inline std::size_t grhsim_index_words(T value, std::size_t cap)
     return static_cast<std::size_t>(raw);
 }
 
-template <std::size_t Width>
-inline std::size_t grhsim_index_words(grhsim_ubitint<Width> value, std::size_t cap)
-{
-    if (value >= static_cast<grhsim_ubitint<Width>>(cap)) {
-        return cap;
-    }
-    return static_cast<std::size_t>(value);
-}
-
 template <std::size_t N>
 inline std::size_t grhsim_index_words(const std::array<std::uint64_t, N> &value, std::size_t cap)
 {
@@ -9662,12 +9118,6 @@ inline std::size_t grhsim_index_in_range_words(T value)
     return static_cast<std::size_t>(static_cast<std::uint64_t>(value));
 }
 
-template <std::size_t Width>
-inline std::size_t grhsim_index_in_range_words(grhsim_ubitint<Width> value)
-{
-    return static_cast<std::size_t>(value);
-}
-
 template <std::size_t N>
 inline std::size_t grhsim_index_in_range_words(const std::array<std::uint64_t, N> &value)
 {
@@ -9678,12 +9128,6 @@ template <typename T>
 inline std::size_t grhsim_index_pow2_words(T value, std::size_t mask)
 {
     return static_cast<std::size_t>(static_cast<std::uint64_t>(value)) & mask;
-}
-
-template <std::size_t Width>
-inline std::size_t grhsim_index_pow2_words(grhsim_ubitint<Width> value, std::size_t mask)
-{
-    return static_cast<std::size_t>(value) & mask;
 }
 
 template <std::size_t N>
@@ -10081,6 +9525,23 @@ inline std::size_t grhsim_highest_bit_words(const std::array<std::uint64_t, N> &
 }
 
 template <std::size_t N>
+inline std::uint64_t grhsim_clog2_words(const std::array<std::uint64_t, N> &value, std::size_t width)
+{
+    if (!grhsim_any_bits_words(value, width)) {
+        return 0;
+    }
+    std::array<std::uint64_t, N> one{};
+    if constexpr (N > 0) {
+        one[0] = 1;
+    }
+    const auto valueMinusOne = grhsim_sub_words(value, one, width);
+    if (!grhsim_any_bits_words(valueMinusOne, width)) {
+        return 0;
+    }
+    return static_cast<std::uint64_t>(grhsim_highest_bit_words(valueMinusOne, width) + 1u);
+}
+
+template <std::size_t N>
 inline std::array<std::uint64_t, N> grhsim_udiv_words(const std::array<std::uint64_t, N> &lhs,
                                                       const std::array<std::uint64_t, N> &rhs,
                                                       std::size_t width)
@@ -10445,12 +9906,6 @@ inline grhsim_task_arg grhsim_make_task_arg(const std::array<std::uint64_t, N> &
         arg.words[liveWords - 1u] = grhsim_trunc_u64(arg.words[liveWords - 1u], tailWidth);
     }
     return arg;
-}
-
-template <std::size_t Width>
-inline grhsim_task_arg grhsim_make_task_arg(grhsim_ubitint<Width> value, bool isSigned)
-{
-    return grhsim_make_task_arg(grhsim_ubitint_to_words<Width>(value), Width, isSigned);
 }
 
 inline grhsim_task_arg grhsim_make_task_arg(double value)
@@ -12369,8 +11824,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 stream << indent << "bool state_changed = false;\n";
                 if (isWideLogicWidth(state.width))
                 {
-                    stream << indent << "if (grhsim_assign_words(" << stateExpr << ", " << shadowDataRef
-                           << ", " << state.width << ")) {\n";
+                    stream << indent << "if (grhsim_assign_words(" << stateExpr << ", " << shadowDataRef << ", "
+                           << state.width << ")) {\n";
                     stream << indent << "    state_changed = true;\n";
                     stream << indent << "}\n";
                 }

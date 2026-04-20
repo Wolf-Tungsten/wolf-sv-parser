@@ -87,58 +87,53 @@ Largest observed logic results:
 
 ## Storage Model For Wide Values
 
-Generated XiangShan models keep scalar and wide values in different slot pools. In `build/xs/grhsim/grhsim_emit/grhsim_SimTop.hpp`:
+The current emitter uses two different wide-value storage models:
+
+- all persistent wide values, state, shadows, and pending write buffers use `std::array<std::uint64_t, N>`
+- `N = ceil(width / 64)`
+
+Representative generated storage looks like:
 
 ```cpp
-std::vector<std::uint64_t> value_u64_slots_;
-std::vector<std::array<std::uint64_t, 2>> value_words_2_slots_;
 std::vector<std::array<std::uint64_t, 3>> value_words_3_slots_;
-...
-std::vector<std::array<std::uint64_t, 512>> value_words_512_slots_;
-std::vector<std::array<std::uint64_t, 1239>> value_words_1239_slots_;
+std::vector<std::array<std::uint64_t, 4>> state_logic_words_4_slots_;
+std::vector<std::vector<std::array<std::uint64_t, 3>>> state_mem_words_3_slots_;
+std::vector<std::array<std::uint64_t, 3>> state_shadow_words_3_slots_;
+std::vector<std::array<std::uint64_t, 3>> memory_write_data_words_3_slots_;
 ```
 
-So the wide-value representation is:
+So the current rule is:
 
-- one logic value = `std::array<std::uint64_t, N>`
-- `N = ceil(width / 64)`
-- persistent storage is pooled by exact word count
-
-The largest persistent pool visible in the generated XiangShan model is `1239` words, which covers up to `1239 * 64 = 79,296` bits. The largest observed logic width `79,263` fits inside that pool.
+- wide logic always stays on fixed-size word arrays
+- wide ops are lowered directly to words helpers, without `_BitInt` conversion on the hot path
 
 ## How Wide Ops Are Lowered
 
-The main lowering entry is `emitWordLogicOperation` in `wolvrix/lib/emit/grhsim_cpp.cpp`. Wide ops are emitted as word-array expressions and helper calls.
+The main lowering entry is `emitWordLogicOperation` in `wolvrix/lib/emit/grhsim_cpp.cpp`. Wide ops are emitted as direct words helper calls.
 
 Representative lowering cases:
 
 ```cpp
 case OperationKind::kAdd:
     emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
-                                 binaryWords(operands[0], operands[1], resultWidth,
-                                             "grhsim_add_words"));
+                                 binaryWordsBufferOpExpr(operandWords(0, resultWidth),
+                                                         operandWords(1, resultWidth),
+                                                         resultWidth,
+                                                         "grhsim_add_words"));
     return true;
 
 case OperationKind::kShl:
     emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
-                                 shiftWordsBufferOpExpr(unaryWords(operands[0], resultWidth),
+                                 shiftWordsBufferOpExpr(operandWords(0, resultWidth),
                                                         valueRef(model, operands[1]),
                                                         resultWidth,
                                                         "grhsim_shl_words"));
     return true;
 
 case OperationKind::kConcat:
-{
-    std::ostringstream out;
-    out << "([&]() -> " << wordsArrayTypeForWidth(resultWidth) << " { ";
-    out << wordsArrayTypeForWidth(resultWidth) << " next_words{}; ";
-    out << "std::size_t concat_cursor = " << resultWidth << "; ";
-    ...
-    out << "grhsim_insert_words(next_words, concat_cursor, "
-        << wordsExprForValue(graph, model, operand, operandWidth) << ", "
-        << operandWidth << "); ";
-    ...
-}
+    emitLogicAssignFromWordsExpr(stream, graph, model, resultValue,
+                                 concatWordsExpr(...));
+    return true;
 ```
 
 In practice, wide lowering falls into a small set of implementation patterns.
@@ -387,43 +382,33 @@ The source is `64` words wide (`4096` bits), and the slice helper extracts the r
 
 ## Update: Current Supernode Implementation
 
-The current supernode emitter keeps the external storage model unchanged, but changes the internal temporary representation for wide logic values.
+The current supernode emitter stays on a single representation for wide values:
 
-- public fields / persistent value slots / state shadows still use `std::array<std::uint64_t, N>`
-- supernode-internal wide temporaries now use `unsigned _BitInt(N)`
-
-This split gives two benefits:
-
-- wide arithmetic / compare / shift / slice / concat lowering no longer needs generated lambda-wrapped word-array expressions
-- single-user local values can be substituted directly as expressions instead of materializing `local_value_*` temporaries
+- storage uses `std::array<std::uint64_t, N>`
+- supernode-internal wide temporaries also use `std::array<std::uint64_t, N>`
+- wide ops lower directly to pure words helpers
 
 ### Single-user inline rule
 
-Inside a supernode, if a non-materialized logic value has exactly one user, the emitter now records its expression and substitutes that expression directly at the use site.
+Inside a supernode, if a non-materialized logic value has exactly one user, the emitter records its expression and substitutes that expression directly at the use site.
 
 - single-user scalar locals inline as scalar expressions
-- single-user wide locals inline as `_BitInt(N)` expressions
-- multi-user wide locals still get a named temporary, but that temporary is now `_BitInt(N)` instead of a word-array lambda result
+- single-user wide locals inline as words helper expressions
+- multi-user wide locals still get a named temporary, but that temporary is also a words value
 
-### Array / `_BitInt` conversion boundary
+### Helper boundary
 
-Generated runtime helpers now bridge the two representations:
+The current hot-path helpers are all words-based, for example:
 
-- `grhsim_words_to_ubitint<Width>(...)`
-- `grhsim_ubitint_to_words<Width>(...)`
-- `grhsim_cast_ubitint<DestWidth, SrcWidth, Signed>(...)`
-- `grhsim_shl_ubitint<Width>(...)`
-- `grhsim_udiv_ubitint<Width>(...)`
-- `grhsim_slice_ubitint<DestWidth, SrcWidth>(...)`
+- `grhsim_cast_words<...>(...)`
+- `grhsim_add_words(...)`
+- `grhsim_shl_words(...)`
+- `grhsim_slice_words<...>(...)`
+- `grhsim_concat_words<...>(...)`
+- `grhsim_replicate_words<...>(...)`
 
-State writes, task args, and DPI wide inputs still cross the boundary through array form when they touch storage or external interfaces.
+So state writes, task args, DPI wide inputs, and supernode-local wide ops all stay on the same array representation.
 
 ### Toolchain note
 
-Because generated GrhSIM C++ now uses `_BitInt(N)`, the generated Makefile defaults to:
-
-```make
-CXX ?= clang++
-```
-
-and the GrhSIM emit tests build generated artifacts with `clang++`.
+Because generated GrhSIM C++ no longer depends on `_BitInt(N)`, the emitter no longer needs a clang-only requirement for wide-value support.
