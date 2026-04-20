@@ -1342,6 +1342,7 @@ namespace wolvrix::lib::emit
 
             Kind kind = Kind::Register;
             std::string symbol;
+            std::string fieldName;
             std::string cppType;
             int32_t width = 0;
             bool isSigned = false;
@@ -1663,6 +1664,11 @@ namespace wolvrix::lib::emit
             return wideLogicSlotFieldName("value_", wordCount);
         }
 
+        std::string fixedArrayType(std::string_view elemType, std::size_t count)
+        {
+            return "std::array<" + std::string(elemType) + ", " + std::to_string(count) + ">";
+        }
+
         std::string logicSlotRefExpr(std::string_view scalarPrefix,
                                      std::string_view widePrefix,
                                      ValueSlotScalarKind scalarKind,
@@ -1697,15 +1703,16 @@ namespace wolvrix::lib::emit
             return wideLogicSlotFieldName("state_mem_", wordCount);
         }
 
+        std::string stateMemoryFieldName(std::string_view symbol)
+        {
+            return "state_mem_" + sanitizeIdentifier(symbol) + "_";
+        }
+
         std::string stateRef(const StateDecl &state)
         {
             if (state.kind == StateDecl::Kind::Memory)
             {
-                if (isWideLogicWidth(state.width))
-                {
-                    return stateMemoryWideSlotFieldName(state.wordCount) + "[" + std::to_string(state.slotIndex) + "]";
-                }
-                return stateMemoryScalarSlotFieldName(state.scalarKind) + "[" + std::to_string(state.slotIndex) + "]";
+                return state.fieldName;
             }
             if (isWideLogicWidth(state.width))
             {
@@ -2596,6 +2603,7 @@ namespace wolvrix::lib::emit
                                      ? StateDecl::Kind::Register
                                      : (op.kind() == OperationKind::kLatch ? StateDecl::Kind::Latch : StateDecl::Kind::Memory);
                     state.symbol = std::string(op.symbolText());
+                    state.fieldName = state.kind == StateDecl::Kind::Memory ? stateMemoryFieldName(state.symbol) : "";
                     state.width = static_cast<int32_t>(*width);
                     state.isSigned = *isSigned;
                     if (state.kind == StateDecl::Kind::Memory)
@@ -2608,17 +2616,14 @@ namespace wolvrix::lib::emit
                         }
                         state.rowCount = *row;
                         const std::string elemType = logicCppType(state.width);
-                        state.cppType = "std::vector<" + elemType + ">";
+                        state.cppType = fixedArrayType(elemType, static_cast<std::size_t>(state.rowCount));
                         if (isWideLogicWidth(state.width))
                         {
                             state.wordCount = logicWordCount(state.width);
-                            state.slotIndex = model.stateMemoryWideSlotCountsByWords[state.wordCount]++;
                         }
                         else
                         {
                             state.scalarKind = valueScalarSlotKindForWidth(state.width);
-                            state.slotIndex =
-                                model.stateMemoryScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
                         }
                         if (!buildMemoryInitRowExprs(op, state.width, state.rowCount, state.memoryInitRowExprs, error))
                         {
@@ -2661,6 +2666,10 @@ namespace wolvrix::lib::emit
                                 return false;
                             }
                         }
+                    }
+                    if (state.kind == StateDecl::Kind::Memory)
+                    {
+                        model.stateFieldDecls.push_back("    " + state.cppType + " " + state.fieldName + "{};");
                     }
                     model.stateOrder.push_back(state.symbol);
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
@@ -6179,7 +6188,8 @@ namespace wolvrix::lib::emit
                                                                       const EmitModel &model,
                                                                       OperationId opId,
                                                                       const Operation &op,
-                                                                      std::string_view indent)
+                                                                      std::string_view indent,
+                                                                      const SupernodeLocalExprContext *context = nullptr)
         {
             const auto writeIt = model.writeByOp.find(opId);
             if (writeIt == model.writeByOp.end())
@@ -6205,12 +6215,12 @@ namespace wolvrix::lib::emit
             const StateShadowDecl &shadow = model.stateShadows[write.shadowIndex];
             stream << indent << "// op " << op.symbolText() << "\n";
             stream << indent << scalarStateWriteHelperName(write.shadowScalarKind) << "("
-                   << truthyLogicValueExpr(graph, model, operands[0]) << ", "
+                   << truthyLogicValueExpr(graph, model, operands[0], context) << ", "
                    << stateShadowTouchedRef(shadow) << ", "
                    << stateShadowDataRef(shadow, state) << ", "
                    << stateRef(state) << ", "
-                   << valueRef(model, operands[1]) << ", "
-                   << valueRef(model, operands[2]) << ", "
+                   << resolvedScheduleValueExpr(model, operands[1], context) << ", "
+                   << resolvedScheduleValueExpr(model, operands[2], context) << ", "
                    << write.shadowIndex << "u);\n";
             return std::nullopt;
         }
@@ -6529,7 +6539,8 @@ namespace wolvrix::lib::emit
                                                                                runOpId,
                                                                                runOp,
                                                                                *eventExpr != "true" ? "            "
-                                                                                                    : "        "))
+                                                                                                    : "        ",
+                                                                               &localExprContext))
                                     {
                                         return emitError(*error, std::string(runOp.symbolText()));
                                     }
@@ -6557,7 +6568,8 @@ namespace wolvrix::lib::emit
                                                                            runOpId,
                                                                            runOp,
                                                                            *eventExpr != "true" ? "            "
-                                                                                                : "        "))
+                                                                                                : "        ",
+                                                                           &localExprContext))
                                 {
                                     return emitError(*error, std::string(runOp.symbolText()));
                                 }
@@ -10637,7 +10649,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             if (model.eventEdgeSlotCount != 0)
             {
-                *stream << "    std::vector<grhsim_event_edge_kind> event_edge_slots_;\n";
+                *stream << "    " << fixedArrayType("grhsim_event_edge_kind", model.eventEdgeSlotCount)
+                        << " event_edge_slots_{};\n";
             }
             *stream << '\n';
             for (const auto &decl : model.inputFieldDecls)
@@ -10655,8 +10668,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<" << scalarLogicSlotCppType(kind) << "> "
-                        << valueScalarSlotFieldName(kind) << ";\n";
+                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), model.valueScalarSlotCounts[kindIndex])
+                        << " " << valueScalarSlotFieldName(kind) << "{};\n";
             }
             for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
             {
@@ -10664,16 +10677,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << valueWideSlotFieldName(wordCount) << ";\n";
+                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
+                        << valueWideSlotFieldName(wordCount) << "{};\n";
             }
             if (model.valueRealSlotCount != 0)
             {
-                *stream << "    std::vector<double> value_real_slots_;\n";
+                *stream << "    " << fixedArrayType("double", model.valueRealSlotCount) << " value_real_slots_{};\n";
             }
             if (model.valueStringSlotCount != 0)
             {
-                *stream << "    std::vector<std::string> value_string_slots_;\n";
+                *stream << "    " << fixedArrayType("std::string", model.valueStringSlotCount)
+                        << " value_string_slots_{};\n";
             }
             if (model.valueScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
                 !model.valueWideSlotCountsByWords.empty() ||
@@ -10690,8 +10704,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<" << scalarLogicSlotCppType(kind) << "> "
-                        << stateLogicScalarSlotFieldName(kind) << ";\n";
+                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), slotCount) << " "
+                        << stateLogicScalarSlotFieldName(kind) << "{};\n";
             }
             for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
             {
@@ -10699,39 +10713,27 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << stateLogicWideSlotFieldName(wordCount) << ";\n";
-            }
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-            {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::size_t slotCount = model.stateMemoryScalarSlotCounts[kindIndex];
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                *stream << "    std::vector<std::vector<" << scalarLogicSlotCppType(kind) << ">> "
-                        << stateMemoryScalarSlotFieldName(kind) << ";\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.stateMemoryWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                *stream << "    std::vector<std::vector<std::array<std::uint64_t, " << wordCount << ">>> "
-                        << stateMemoryWideSlotFieldName(wordCount) << ";\n";
+                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
+                        << stateLogicWideSlotFieldName(wordCount) << "{};\n";
             }
             if (model.stateLogicScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
                 !model.stateLogicWideSlotCountsByWords.empty() ||
-                model.stateMemoryScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
-                !model.stateMemoryWideSlotCountsByWords.empty())
+                !model.stateFieldDecls.empty())
+            {
+                *stream << '\n';
+            }
+            for (const auto &decl : model.stateFieldDecls)
+            {
+                *stream << decl << '\n';
+            }
+            if (!model.stateFieldDecls.empty())
             {
                 *stream << '\n';
             }
             if (model.stateShadowTouchedCount != 0)
             {
-                *stream << "    std::vector<std::uint8_t> state_shadow_touched_slots_;\n";
+                *stream << "    " << fixedArrayType("std::uint8_t", model.stateShadowTouchedCount)
+                        << " state_shadow_touched_slots_{};\n";
             }
             for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
             {
@@ -10741,8 +10743,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<" << scalarLogicSlotCppType(kind) << "> "
-                        << scalarLogicSlotFieldName("state_shadow_", kind) << ";\n";
+                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), slotCount) << " "
+                        << scalarLogicSlotFieldName("state_shadow_", kind) << "{};\n";
             }
             for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
             {
@@ -10750,8 +10752,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << wideLogicSlotFieldName("state_shadow_", wordCount) << ";\n";
+                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
+                        << wideLogicSlotFieldName("state_shadow_", wordCount) << "{};\n";
             }
             if (model.stateShadowTouchedCount != 0 ||
                 model.stateShadowScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
@@ -10769,8 +10771,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             if (model.memoryWriteTouchedCount != 0)
             {
-                *stream << "    std::vector<std::uint8_t> memory_write_touched_slots_;\n";
-                *stream << "    std::vector<std::size_t> memory_write_addr_slots_;\n";
+                *stream << "    " << fixedArrayType("std::uint8_t", model.memoryWriteTouchedCount)
+                        << " memory_write_touched_slots_{};\n";
+                *stream << "    " << fixedArrayType("std::size_t", model.memoryWriteAddrCount)
+                        << " memory_write_addr_slots_{};\n";
             }
             for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
             {
@@ -10778,14 +10782,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
                 if (dataCount != 0)
                 {
-                    *stream << "    std::vector<" << scalarLogicSlotCppType(kind) << "> "
-                            << scalarLogicSlotFieldName("memory_write_data_", kind) << ";\n";
+                    *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), dataCount) << " "
+                            << scalarLogicSlotFieldName("memory_write_data_", kind) << "{};\n";
                 }
                 const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
                 if (maskCount != 0)
                 {
-                    *stream << "    std::vector<" << scalarLogicSlotCppType(kind) << "> "
-                            << scalarLogicSlotFieldName("memory_write_mask_", kind) << ";\n";
+                    *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), maskCount) << " "
+                            << scalarLogicSlotFieldName("memory_write_mask_", kind) << "{};\n";
                 }
             }
             for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
@@ -10794,8 +10798,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << wideLogicSlotFieldName("memory_write_data_", wordCount) << ";\n";
+                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
+                        << wideLogicSlotFieldName("memory_write_data_", wordCount) << "{};\n";
             }
             for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
             {
@@ -10803,8 +10807,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    std::vector<std::array<std::uint64_t, " << wordCount << ">> "
-                        << wideLogicSlotFieldName("memory_write_mask_", wordCount) << ";\n";
+                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
+                        << wideLogicSlotFieldName("memory_write_mask_", wordCount) << "{};\n";
             }
             *stream << "};\n";
             if (auto error = finalizeOutputFile(*stream, headerPath))
@@ -12091,9 +12095,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << valueScalarSlotFieldName(kind) << ".assign(" << slotCount << ", "
-                            << scalarLogicSlotCppType(kind)
-                            << "{});\n";
+                    *stream << "    " << valueScalarSlotFieldName(kind) << " = {};\n";
                 }
                 for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
                 {
@@ -12101,16 +12103,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << valueWideSlotFieldName(wordCount) << ".assign(" << slotCount
-                            << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
+                    *stream << "    " << valueWideSlotFieldName(wordCount) << " = {};\n";
                 }
                 if (model.valueRealSlotCount != 0)
                 {
-                    *stream << "    value_real_slots_.assign(" << model.valueRealSlotCount << ", 0.0);\n";
+                    *stream << "    value_real_slots_ = {};\n";
                 }
                 if (model.valueStringSlotCount != 0)
                 {
-                    *stream << "    value_string_slots_.assign(" << model.valueStringSlotCount << ", std::string{});\n";
+                    *stream << "    value_string_slots_ = {};\n";
                 }
                 break;
             case InitChunkSpec::Kind::kConstantValues:
@@ -12140,30 +12141,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
                     if (slotCount != 0)
                     {
-                        *stream << "    " << stateLogicScalarSlotFieldName(kind) << ".assign(" << slotCount << ", "
-                                << scalarLogicSlotCppType(kind) << "{});\n";
-                    }
-                    const std::size_t memCount = model.stateMemoryScalarSlotCounts[kindIndex];
-                    if (memCount != 0)
-                    {
-                        *stream << "    " << stateMemoryScalarSlotFieldName(kind) << ".assign(" << memCount
-                                << ", std::vector<" << scalarLogicSlotCppType(kind) << ">{});\n";
+                        *stream << "    " << stateLogicScalarSlotFieldName(kind) << " = {};\n";
                     }
                 }
                 for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
                 {
                     if (slotCount != 0)
                     {
-                        *stream << "    " << stateLogicWideSlotFieldName(wordCount) << ".assign(" << slotCount
-                                << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
-                    }
-                }
-                for (const auto &[wordCount, slotCount] : model.stateMemoryWideSlotCountsByWords)
-                {
-                    if (slotCount != 0)
-                    {
-                        *stream << "    " << stateMemoryWideSlotFieldName(wordCount) << ".assign(" << slotCount
-                                << ", std::vector<std::array<std::uint64_t, " << wordCount << ">>{});\n";
+                        *stream << "    " << stateLogicWideSlotFieldName(wordCount) << " = {};\n";
                     }
                 }
                 break;
@@ -12178,8 +12163,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const std::string stateExpr = stateRef(state);
                     if (state.kind == StateDecl::Kind::Memory)
                     {
-                        *stream << "    " << stateExpr << ".assign(" << state.rowCount << ", "
-                                << logicCppType(state.width) << "{});\n";
+                        *stream << "    " << stateExpr << " = {};\n";
                         std::size_t initCount = 0;
                         for (const auto &rowExpr : state.memoryInitRowExprs)
                         {
@@ -12218,7 +12202,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     break;
                 }
-                *stream << "    state_shadow_touched_slots_.assign(" << model.stateShadowTouchedCount << ", 0);\n";
+                *stream << "    state_shadow_touched_slots_ = {};\n";
                 for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
                 {
                     const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
@@ -12227,8 +12211,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << scalarLogicSlotFieldName("state_shadow_", kind) << ".assign(" << slotCount
-                            << ", " << scalarLogicSlotCppType(kind) << "{});\n";
+                    *stream << "    " << scalarLogicSlotFieldName("state_shadow_", kind) << " = {};\n";
                 }
                 for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
                 {
@@ -12236,8 +12219,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << wideLogicSlotFieldName("state_shadow_", wordCount) << ".assign(" << slotCount
-                            << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
+                    *stream << "    " << wideLogicSlotFieldName("state_shadow_", wordCount) << " = {};\n";
                 }
                 break;
             case InitChunkSpec::Kind::kWrites:
@@ -12246,22 +12228,20 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     break;
                 }
-                *stream << "    memory_write_touched_slots_.assign(" << model.memoryWriteTouchedCount << ", 0);\n";
-                *stream << "    memory_write_addr_slots_.assign(" << model.memoryWriteAddrCount << ", 0);\n";
+                *stream << "    memory_write_touched_slots_ = {};\n";
+                *stream << "    memory_write_addr_slots_ = {};\n";
                 for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
                 {
                     const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
                     const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
                     if (dataCount != 0)
                     {
-                        *stream << "    " << scalarLogicSlotFieldName("memory_write_data_", kind) << ".assign(" << dataCount
-                                << ", " << scalarLogicSlotCppType(kind) << "{});\n";
+                        *stream << "    " << scalarLogicSlotFieldName("memory_write_data_", kind) << " = {};\n";
                     }
                     const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
                     if (maskCount != 0)
                     {
-                        *stream << "    " << scalarLogicSlotFieldName("memory_write_mask_", kind) << ".assign(" << maskCount
-                                << ", " << scalarLogicSlotCppType(kind) << "{});\n";
+                        *stream << "    " << scalarLogicSlotFieldName("memory_write_mask_", kind) << " = {};\n";
                     }
                 }
                 for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
@@ -12270,8 +12250,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << wideLogicSlotFieldName("memory_write_data_", wordCount) << ".assign(" << slotCount
-                            << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
+                    *stream << "    " << wideLogicSlotFieldName("memory_write_data_", wordCount) << " = {};\n";
                 }
                 for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
                 {
@@ -12279,8 +12258,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         continue;
                     }
-                    *stream << "    " << wideLogicSlotFieldName("memory_write_mask_", wordCount) << ".assign(" << slotCount
-                            << ", std::array<std::uint64_t, " << wordCount << ">{});\n";
+                    *stream << "    " << wideLogicSlotFieldName("memory_write_mask_", wordCount) << " = {};\n";
                 }
                 break;
             case InitChunkSpec::Kind::kPrevInputs:
@@ -12319,8 +12297,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    // Clear shared event-edge slots.\n";
                 if (model.eventEdgeSlotCount != 0)
                 {
-                    *stream << "    event_edge_slots_.assign(" << model.eventEdgeSlotCount
-                            << ", grhsim_event_edge_kind::none);\n";
+                    *stream << "    event_edge_slots_.fill(grhsim_event_edge_kind::none);\n";
                 }
                 break;
             case InitChunkSpec::Kind::kEvalState:

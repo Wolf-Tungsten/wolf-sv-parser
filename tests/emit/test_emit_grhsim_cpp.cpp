@@ -1649,6 +1649,21 @@ int main()
     {
         return fail("Missing supernode activity state");
     }
+    if (header.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
+    {
+        return fail("Missing static event-edge storage");
+    }
+    if (header.find("state_shadow_touched_slots_{};") == std::string::npos ||
+        header.find("memory_write_touched_slots_{};") == std::string::npos)
+    {
+        return fail("Missing static shadow/write scratch storage");
+    }
+    if (header.find("std::array<std::uint8_t, 3> state_mem_idx_mem_{};") == std::string::npos ||
+        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_mem_{};") == std::string::npos ||
+        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_masked_mem_{};") == std::string::npos)
+    {
+        return fail("Missing per-memory static storage fields");
+    }
     if (runtime.find("struct grhsim_active_mask_entry") == std::string::npos ||
         runtime.find("grhsim_popcount_u8") == std::string::npos ||
         runtime.find("grhsim_count_active_supernodes") == std::string::npos)
@@ -1684,6 +1699,17 @@ int main()
     if (state.find("random_state_ = random_seed_") == std::string::npos)
     {
         return fail("Missing random seed plumbing in state init");
+    }
+    if (state.find("event_edge_slots_.fill(grhsim_event_edge_kind::none);") == std::string::npos ||
+        state.find("state_shadow_touched_slots_ = {};") == std::string::npos ||
+        state.find("memory_write_touched_slots_ = {};") == std::string::npos ||
+        state.find("state_mem_wide_mem_ = {};") == std::string::npos)
+    {
+        return fail("Missing static storage reset emission");
+    }
+    if (state.find(".assign(") != std::string::npos)
+    {
+        return fail("Generated state init should not use vector assign for fixed storage");
     }
     if (sched.find("extern \"C\" void trace_sum") == std::string::npos)
     {
@@ -2211,13 +2237,17 @@ int main()
         }
         const std::string regWriteHeaderText = readFile(regWriteHeaderPath);
         const std::string regWriteStateText = readFiles(regWriteStateFiles);
-        if (regWriteHeaderText.find("std::vector<grhsim_event_edge_kind> event_edge_slots_") == std::string::npos)
+        if (regWriteHeaderText.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
         {
             return fail("register-write interaction should emit event-edge storage");
         }
         if (regWriteHeaderText.find("state_shadow_") == std::string::npos)
         {
             return fail("register-write interaction should emit shared state-shadow fields");
+        }
+        if (regWriteStateText.find(".assign(") != std::string::npos)
+        {
+            return fail("register-write interaction should not use vector assign for fixed storage");
         }
         if (regWriteHeaderText.find("seen_evt_") != std::string::npos ||
             regWriteStateText.find("prev_evt_") != std::string::npos)
@@ -2405,9 +2435,13 @@ int main()
         const std::string gatedStateText = readFiles(gatedStateFiles);
         const std::string gatedEvalText = readFile(gatedEvalPath);
         const std::string gatedHeaderText = readFile(gatedDir / "grhsim_top.hpp");
-        if (gatedHeaderText.find("std::vector<grhsim_event_edge_kind> event_edge_slots_") == std::string::npos)
+        if (gatedHeaderText.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
         {
             return fail("gated-clock emit should provide event-edge storage");
+        }
+        if (gatedStateText.find(".assign(") != std::string::npos)
+        {
+            return fail("gated-clock emit should not use vector assign for fixed storage");
         }
         if (gatedSchedText.find("grhsim_event_edge_kind::posedge") == std::string::npos)
         {
