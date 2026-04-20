@@ -800,6 +800,51 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
+                else if (arg == "-enable-state-read-tail-absorb")
+                {
+                    if (!parseBoolArg("-enable-state-read-tail-absorb", options.enableStateReadTailAbsorb))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-state-read-tail-absorb="))
+                {
+                    const std::string_view text =
+                        arg.substr(std::string_view("-enable-state-read-tail-absorb=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableStateReadTailAbsorb = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableStateReadTailAbsorb = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-state-read-tail-absorb value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-state-read-tail-absorb-max-targets")
+                {
+                    if (!parseSizeArg("-state-read-tail-absorb-max-targets", options.stateReadTailAbsorbMaxTargets))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-state-read-tail-absorb-max-targets="))
+                {
+                    try
+                    {
+                        options.stateReadTailAbsorbMaxTargets = static_cast<std::size_t>(std::stoull(
+                            std::string(arg.substr(std::string_view("-state-read-tail-absorb-max-targets=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -state-read-tail-absorb-max-targets value";
+                        return nullptr;
+                    }
+                }
                 else if (arg == "-enable-replication")
                 {
                     if (!parseBoolArg("-enable-replication", options.enableReplication))

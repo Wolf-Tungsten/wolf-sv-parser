@@ -1198,5 +1198,447 @@ int main()
         }
     }
 
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top12");
+        design.markAsTop("top12");
+
+        const auto a = makeValue(graph, "a_top12", 8, false);
+        const auto b = makeValue(graph, "b_top12", 8, false);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top12"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto qReadValue = makeValue(graph, "q_read_top12", 8, false);
+        const auto qReadOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                                   graph.internSymbol("q_read_top12_op"));
+        graph.addResult(qReadOp, qReadValue);
+        graph.setAttr(qReadOp, "regSymbol", std::string("q_top12"));
+
+        const auto y0 = makeValue(graph, "y0_top12", 8, false);
+        const auto use0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                graph.internSymbol("use0_top12"));
+        graph.addOperand(use0, qReadValue);
+        graph.addOperand(use0, a);
+        graph.addResult(use0, y0);
+        graph.bindOutputPort("y0", y0);
+
+        const auto y1 = makeValue(graph, "y1_top12", 8, false);
+        const auto use1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                graph.internSymbol("use1_top12"));
+        graph.addOperand(use1, qReadValue);
+        graph.addOperand(use1, b);
+        graph.addResult(use1, y1);
+        graph.bindOutputPort("y1", y1);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top12",
+            .supernodeMaxSize = 1,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableStateReadTailAbsorb = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected register read tail absorb activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top12.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        const auto *valueFanout =
+            getSessionValue<ActivityScheduleValueFanout>(session, keyPrefix + "value_fanout");
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(session, keyPrefix + "state_read_supernodes");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr || valueFanout == nullptr ||
+            stateReadSupernodes == nullptr)
+        {
+            return fail("Expected register read tail absorb session outputs");
+        }
+
+        const auto readSym = graph.lookupSymbol("q_read_top12_op");
+        if (!readSym.valid())
+        {
+            return fail("Expected original register read symbol to exist");
+        }
+        if (graph.findOperation(readSym).valid())
+        {
+            return fail("Expected original shared register read op to be removed after tail absorb");
+        }
+
+        std::size_t readCount = 0;
+        for (const auto opId : graph.operations())
+        {
+            if (graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kRegisterReadPort)
+            {
+                ++readCount;
+            }
+        }
+        if (readCount != 2)
+        {
+            return fail("Expected shared register read to be cloned into two consumer-local reads");
+        }
+        if (supernodeToOps->size() != 2)
+        {
+            return fail("Expected register read absorb to collapse the empty source supernode");
+        }
+        for (const auto &ops : *supernodeToOps)
+        {
+            if (ops.size() != 2)
+            {
+                return fail("Expected each absorbed register-read consumer supernode to contain clone plus consumer");
+            }
+        }
+        const auto use0Final = graph.findOperation("use0_top12");
+        const auto use1Final = graph.findOperation("use1_top12");
+        if (!use0Final.valid() || !use1Final.valid())
+        {
+            return fail("Expected absorbed register-read consumer symbols to remain resolvable");
+        }
+        const uint32_t use0Supernode = (*opToSupernode)[use0Final.index - 1];
+        const uint32_t use1Supernode = (*opToSupernode)[use1Final.index - 1];
+        if (use0Supernode == use1Supernode)
+        {
+            return fail("Expected absorbed register-read consumers to remain in separate supernodes");
+        }
+        const auto readersIt = stateReadSupernodes->find("q_top12");
+        if (readersIt == stateReadSupernodes->end() || readersIt->second.size() != 2)
+        {
+            return fail("Expected register state readers to map directly to both consumer supernodes");
+        }
+        if (std::find(readersIt->second.begin(), readersIt->second.end(), use0Supernode) == readersIt->second.end() ||
+            std::find(readersIt->second.begin(), readersIt->second.end(), use1Supernode) == readersIt->second.end())
+        {
+            return fail("Expected register state readers to target both absorbed consumer supernodes");
+        }
+        for (const auto &succs : *valueFanout)
+        {
+            if (!succs.empty())
+            {
+                return fail("Expected no residual cross-supernode value fanout after register read absorb");
+            }
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top13");
+        design.markAsTop("top13");
+
+        const auto a = makeValue(graph, "a_top13", 8, false);
+        const auto b = makeValue(graph, "b_top13", 8, false);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto latchDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatch,
+                                                     graph.internSymbol("q_top13"));
+        graph.setAttr(latchDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(latchDecl, "isSigned", false);
+
+        const auto qReadValue = makeValue(graph, "q_read_top13", 8, false);
+        const auto qReadOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kLatchReadPort,
+                                                   graph.internSymbol("q_read_top13_op"));
+        graph.addResult(qReadOp, qReadValue);
+        graph.setAttr(qReadOp, "latchSymbol", std::string("q_top13"));
+
+        const auto y0 = makeValue(graph, "y0_top13", 8, false);
+        const auto use0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                graph.internSymbol("use0_top13"));
+        graph.addOperand(use0, qReadValue);
+        graph.addOperand(use0, a);
+        graph.addResult(use0, y0);
+        graph.bindOutputPort("y0", y0);
+
+        const auto y1 = makeValue(graph, "y1_top13", 8, false);
+        const auto use1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                graph.internSymbol("use1_top13"));
+        graph.addOperand(use1, qReadValue);
+        graph.addOperand(use1, b);
+        graph.addResult(use1, y1);
+        graph.bindOutputPort("y1", y1);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top13",
+            .supernodeMaxSize = 1,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableStateReadTailAbsorb = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected latch read tail absorb activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top13.activity_schedule.";
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(session, keyPrefix + "state_read_supernodes");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (stateReadSupernodes == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected latch read tail absorb session outputs");
+        }
+
+        const auto readSym = graph.lookupSymbol("q_read_top13_op");
+        if (!readSym.valid())
+        {
+            return fail("Expected original latch read symbol to exist");
+        }
+        if (graph.findOperation(readSym).valid())
+        {
+            return fail("Expected original shared latch read op to be removed after tail absorb");
+        }
+
+        std::size_t readCount = 0;
+        for (const auto opId : graph.operations())
+        {
+            if (graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kLatchReadPort)
+            {
+                ++readCount;
+            }
+        }
+        if (readCount != 2)
+        {
+            return fail("Expected shared latch read to be cloned into two consumer-local reads");
+        }
+
+        const auto use0Final = graph.findOperation("use0_top13");
+        const auto use1Final = graph.findOperation("use1_top13");
+        if (!use0Final.valid() || !use1Final.valid())
+        {
+            return fail("Expected absorbed latch-read consumer symbols to remain resolvable");
+        }
+        const uint32_t use0Supernode = (*opToSupernode)[use0Final.index - 1];
+        const uint32_t use1Supernode = (*opToSupernode)[use1Final.index - 1];
+        const auto readersIt = stateReadSupernodes->find("q_top13");
+        if (readersIt == stateReadSupernodes->end() || readersIt->second.size() != 2)
+        {
+            return fail("Expected latch state readers to map directly to both consumer supernodes");
+        }
+        if (std::find(readersIt->second.begin(), readersIt->second.end(), use0Supernode) == readersIt->second.end() ||
+            std::find(readersIt->second.begin(), readersIt->second.end(), use1Supernode) == readersIt->second.end())
+        {
+            return fail("Expected latch state readers to target both absorbed consumer supernodes");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top14");
+        design.markAsTop("top14");
+
+        const auto a = makeValue(graph, "a_top14", 8, false);
+        const auto b = makeValue(graph, "b_top14", 8, false);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top14"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto qReadValue = makeValue(graph, "q_read_top14", 8, false);
+        const auto qReadOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                                   graph.internSymbol("q_read_top14_op"));
+        graph.addResult(qReadOp, qReadValue);
+        graph.setAttr(qReadOp, "regSymbol", std::string("q_top14"));
+        graph.bindOutputPort("y_raw", qReadValue);
+
+        const auto y0 = makeValue(graph, "y0_top14", 8, false);
+        const auto use0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                graph.internSymbol("use0_top14"));
+        graph.addOperand(use0, qReadValue);
+        graph.addOperand(use0, a);
+        graph.addResult(use0, y0);
+        graph.bindOutputPort("y0", y0);
+
+        const auto y1 = makeValue(graph, "y1_top14", 8, false);
+        const auto use1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                graph.internSymbol("use1_top14"));
+        graph.addOperand(use1, qReadValue);
+        graph.addOperand(use1, b);
+        graph.addResult(use1, y1);
+        graph.bindOutputPort("y1", y1);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top14",
+            .supernodeMaxSize = 1,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableStateReadTailAbsorb = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected observable register read tail absorb activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top14.activity_schedule.";
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(session, keyPrefix + "state_read_supernodes");
+        if (stateReadSupernodes == nullptr)
+        {
+            return fail("Expected observable register read session outputs");
+        }
+
+        const auto readSym = graph.lookupSymbol("q_read_top14_op");
+        if (!readSym.valid() || !graph.findOperation(readSym).valid())
+        {
+            return fail("Expected original observable register read op to remain after tail absorb");
+        }
+
+        std::size_t readCount = 0;
+        for (const auto opId : graph.operations())
+        {
+            if (graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kRegisterReadPort)
+            {
+                ++readCount;
+            }
+        }
+        if (readCount != 3)
+        {
+            return fail("Expected observable register read to keep original plus two consumer-local clones");
+        }
+
+        const auto readersIt = stateReadSupernodes->find("q_top14");
+        if (readersIt == stateReadSupernodes->end() || readersIt->second.size() != 3)
+        {
+            return fail("Expected observable register read to keep original reader plus both absorbed consumers");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top15");
+        design.markAsTop("top15");
+
+        const auto a = makeValue(graph, "a_top15", 8, false);
+        const auto b = makeValue(graph, "b_top15", 8, false);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top15"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto qReadValue = makeValue(graph, "q_read_top15", 8, false);
+        const auto qReadOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                                   graph.internSymbol("q_read_top15_op"));
+        graph.addResult(qReadOp, qReadValue);
+        graph.setAttr(qReadOp, "regSymbol", std::string("q_top15"));
+
+        const auto y0 = makeValue(graph, "y0_top15", 8, false);
+        const auto use0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                graph.internSymbol("use0_top15"));
+        graph.addOperand(use0, qReadValue);
+        graph.addOperand(use0, a);
+        graph.addResult(use0, y0);
+        graph.bindOutputPort("y0", y0);
+
+        const auto y1 = makeValue(graph, "y1_top15", 8, false);
+        const auto use1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                graph.internSymbol("use1_top15"));
+        graph.addOperand(use1, qReadValue);
+        graph.addOperand(use1, b);
+        graph.addResult(use1, y1);
+        graph.bindOutputPort("y1", y1);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top15",
+            .supernodeMaxSize = 8,
+            .enableCoarsen = true,
+            .enableRefine = false,
+            .enableStateReadTailAbsorb = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected coarse-grain register read tail absorb activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top15.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *stateReadSupernodes =
+            getSessionValue<ActivityScheduleStateReadSupernodes>(session, keyPrefix + "state_read_supernodes");
+        const auto *valueFanout =
+            getSessionValue<ActivityScheduleValueFanout>(session, keyPrefix + "value_fanout");
+        if (supernodeToOps == nullptr || stateReadSupernodes == nullptr || valueFanout == nullptr)
+        {
+            return fail("Expected coarse-grain register read tail absorb session outputs");
+        }
+
+        const auto readSym = graph.lookupSymbol("q_read_top15_op");
+        if (!readSym.valid() || !graph.findOperation(readSym).valid())
+        {
+            return fail("Expected coarse-grain absorb to keep a single original register read op");
+        }
+
+        std::size_t readCount = 0;
+        for (const auto opId : graph.operations())
+        {
+            if (graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kRegisterReadPort)
+            {
+                ++readCount;
+            }
+        }
+        if (readCount != 1)
+        {
+            return fail("Expected coarse-grain absorb target partition to avoid over-cloning register reads");
+        }
+
+        if (supernodeToOps->size() != 1 || supernodeToOps->front().size() != 3)
+        {
+            return fail("Expected coarse-grain absorb to keep one merged supernode containing read plus both consumers");
+        }
+
+        const auto readersIt = stateReadSupernodes->find("q_top15");
+        if (readersIt == stateReadSupernodes->end() || readersIt->second.size() != 1)
+        {
+            return fail("Expected coarse-grain absorb to keep one direct state-read supernode");
+        }
+
+        for (const auto &succs : *valueFanout)
+        {
+            if (!succs.empty())
+            {
+                return fail("Expected no residual cross-supernode value fanout after coarse-grain absorb");
+            }
+        }
+    }
+
     return 0;
 }

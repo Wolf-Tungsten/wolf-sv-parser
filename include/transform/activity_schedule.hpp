@@ -24,6 +24,8 @@ namespace wolvrix::lib::transform
         bool enableForwardMerge = true;
         bool enableRefine = true;
         std::size_t refineMaxIter = 4;
+        bool enableStateReadTailAbsorb = true;
+        std::size_t stateReadTailAbsorbMaxTargets = 8;
         bool enableReplication = false;
         std::size_t replicationMaxCost = 2;
         std::size_t replicationMaxTargets = 8;

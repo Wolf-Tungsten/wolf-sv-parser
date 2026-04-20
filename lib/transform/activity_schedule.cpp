@@ -367,6 +367,15 @@ namespace wolvrix::lib::transform
             std::size_t absorbedOps = 0;
         };
 
+        struct StateReadTailAbsorbStats
+        {
+            std::size_t clonedOps = 0;
+            std::size_t erasedOps = 0;
+            std::size_t keptObservableReads = 0;
+            std::size_t keptLocalReads = 0;
+            std::size_t skippedTooManyTargets = 0;
+        };
+
         ClusterView buildClusterView(const WorkingPartition &partition, const ActivityOpData &opData);
 
         std::vector<uint32_t> buildTopoOrderedClusterIds(const ClusterView &view)
@@ -1774,6 +1783,47 @@ namespace wolvrix::lib::transform
             return out;
         }
 
+        WorkingPartition rebuildWorkingPartitionFromSymbolPartition(const SymbolPartition &partition,
+                                                                   const ActivityOpData &opData)
+        {
+            WorkingPartition out;
+            out.clusters.reserve(partition.clusters.size());
+            out.fixedBoundary.reserve(partition.fixedBoundary.size());
+
+            std::unordered_map<wolvrix::lib::grh::SymbolId, uint32_t, ActivityScheduleSymbolIdHash> topoPosBySymbol;
+            topoPosBySymbol.reserve(opData.topoSymbols.size());
+            for (std::size_t topoPos = 0; topoPos < opData.topoSymbols.size(); ++topoPos)
+            {
+                topoPosBySymbol.emplace(opData.topoSymbols[topoPos], static_cast<uint32_t>(topoPos));
+            }
+
+            for (std::size_t clusterId = 0; clusterId < partition.clusters.size(); ++clusterId)
+            {
+                std::vector<uint32_t> members;
+                members.reserve(partition.clusters[clusterId].size());
+                for (const auto symbol : partition.clusters[clusterId])
+                {
+                    const auto it = topoPosBySymbol.find(symbol);
+                    if (it == topoPosBySymbol.end())
+                    {
+                        continue;
+                    }
+                    members.push_back(it->second);
+                }
+                std::sort(members.begin(), members.end());
+                members.erase(std::unique(members.begin(), members.end()), members.end());
+                if (members.empty())
+                {
+                    continue;
+                }
+                out.clusters.push_back(std::move(members));
+                out.fixedBoundary.push_back(
+                    clusterId < partition.fixedBoundary.size() ? partition.fixedBoundary[clusterId] : 0U);
+            }
+
+            return out;
+        }
+
         bool isReplicationCandidateKind(wolvrix::lib::grh::OperationKind kind) noexcept
         {
             switch (kind)
@@ -1903,6 +1953,284 @@ namespace wolvrix::lib::transform
                 }
             }
             return out;
+        }
+
+        bool isTailAbsorbableStateReadKind(wolvrix::lib::grh::OperationKind kind) noexcept
+        {
+            return kind == wolvrix::lib::grh::OperationKind::kRegisterReadPort ||
+                   kind == wolvrix::lib::grh::OperationKind::kLatchReadPort;
+        }
+
+        bool runStateReadTailAbsorbPhase(
+            wolvrix::lib::grh::Graph &graph,
+            SymbolPartition &partition,
+            std::size_t maxTargets,
+            StateReadTailAbsorbStats &stats,
+            std::string &error)
+        {
+            if (partition.clusters.empty() || maxTargets == 0)
+            {
+                return false;
+            }
+
+            const auto observableValues = collectObservableBoundaryValues(graph);
+            auto symbolToSupernode = buildSymbolToSupernodeMap(partition);
+            std::vector<wolvrix::lib::grh::OperationId> candidates;
+            candidates.reserve(graph.operations().size());
+            for (const auto opId : graph.operations())
+            {
+                const auto op = graph.getOperation(opId);
+                if (isTailAbsorbableStateReadKind(op.kind()))
+                {
+                    candidates.push_back(opId);
+                }
+            }
+
+            bool changed = false;
+            for (const auto opId : candidates)
+            {
+                const auto op = graph.getOperation(opId);
+                if (!isTailAbsorbableStateReadKind(op.kind()) || op.results().size() != 1)
+                {
+                    continue;
+                }
+
+                const auto opSym = graph.operationSymbol(opId);
+                const auto ownerIt = symbolToSupernode.find(opSym);
+                if (ownerIt == symbolToSupernode.end())
+                {
+                    continue;
+                }
+                const uint32_t ownerSupernode = ownerIt->second;
+                const auto result = op.results().front();
+
+                bool mustKeepOriginal = observableValues.find(result) != observableValues.end();
+                std::size_t localUserCount = 0;
+                std::unordered_map<uint32_t, std::vector<wolvrix::lib::grh::ValueUser>> usersByTarget;
+                std::vector<wolvrix::lib::grh::ValueUser> resultUsers;
+                try
+                {
+                    const auto valueInfo = graph.getValue(result);
+                    resultUsers.assign(valueInfo.users().begin(), valueInfo.users().end());
+                }
+                catch (const std::exception &ex)
+                {
+                    error = "activity-schedule state-read-tail-absorb getValue/users failed source=" +
+                            describeOp(graph, opId) + ": " + ex.what();
+                    return false;
+                }
+
+                for (const auto user : resultUsers)
+                {
+                    const auto userSym = graph.operationSymbol(user.operation);
+                    const auto targetIt = symbolToSupernode.find(userSym);
+                    if (targetIt == symbolToSupernode.end())
+                    {
+                        mustKeepOriginal = true;
+                        continue;
+                    }
+                    if (targetIt->second == ownerSupernode)
+                    {
+                        ++localUserCount;
+                        continue;
+                    }
+                    usersByTarget[targetIt->second].push_back(user);
+                }
+
+                if (usersByTarget.empty())
+                {
+                    if (mustKeepOriginal)
+                    {
+                        ++stats.keptObservableReads;
+                    }
+                    else if (localUserCount != 0)
+                    {
+                        ++stats.keptLocalReads;
+                    }
+                    continue;
+                }
+                if (usersByTarget.size() > maxTargets)
+                {
+                    ++stats.skippedTooManyTargets;
+                    continue;
+                }
+
+                std::optional<wolvrix::lib::grh::Value> resultInfo;
+                try
+                {
+                    resultInfo = graph.getValue(result);
+                }
+                catch (const std::exception &ex)
+                {
+                    error = "activity-schedule state-read-tail-absorb getValue(resultInfo) failed source=" +
+                            describeOp(graph, opId) + ": " + ex.what();
+                    return false;
+                }
+
+                for (const auto &[targetSupernode, users] : usersByTarget)
+                {
+                    if (users.empty())
+                    {
+                        continue;
+                    }
+
+                    const auto cloneSym = graph.makeInternalOpSym();
+                    const auto cloneOp = graph.createOperation(op.kind(), cloneSym);
+                    if (op.srcLoc())
+                    {
+                        graph.setOpSrcLoc(cloneOp, *op.srcLoc());
+                    }
+                    for (const auto &attr : op.attrs())
+                    {
+                        graph.setAttr(cloneOp, attr.key, attr.value);
+                    }
+                    for (const auto operand : op.operands())
+                    {
+                        graph.addOperand(cloneOp, operand);
+                    }
+
+                    const auto cloneResult = graph.createValue(graph.makeInternalValSym(),
+                                                               resultInfo->width(),
+                                                               resultInfo->isSigned(),
+                                                               resultInfo->type());
+                    if (resultInfo->srcLoc())
+                    {
+                        graph.setValueSrcLoc(cloneResult, *resultInfo->srcLoc());
+                    }
+                    graph.addResult(cloneOp, cloneResult);
+
+                    for (const auto user : users)
+                    {
+                        try
+                        {
+                            const auto userOp = graph.getOperation(user.operation);
+                            const auto userOperands = userOp.operands();
+                            if (user.operandIndex >= userOperands.size() || userOperands[user.operandIndex] != result)
+                            {
+                                std::ostringstream oss;
+                                oss << "activity-schedule state-read-tail-absorb detected stale user edge: source="
+                                    << describeOp(graph, opId) << " result=" << result.index
+                                    << " targetSupernode=" << targetSupernode
+                                    << " user=" << describeOp(graph, user.operation)
+                                    << " operandIndex=" << user.operandIndex;
+                                if (user.operandIndex < userOperands.size())
+                                {
+                                    oss << " currentOperand=" << userOperands[user.operandIndex].index;
+                                }
+                                error = oss.str();
+                                return false;
+                            }
+                            graph.replaceOperand(user.operation, user.operandIndex, cloneResult);
+                        }
+                        catch (const std::exception &ex)
+                        {
+                            error = "activity-schedule state-read-tail-absorb replaceOperand failed source=" +
+                                    describeOp(graph, opId) +
+                                    " targetSupernode=" + std::to_string(targetSupernode) +
+                                    " userOpIndex=" + std::to_string(user.operation.index) +
+                                    " operandIndex=" + std::to_string(user.operandIndex) +
+                                    ": " + ex.what();
+                            return false;
+                        }
+                    }
+
+                    partition.clusters[targetSupernode].push_back(cloneSym);
+                    symbolToSupernode.emplace(cloneSym, targetSupernode);
+                    ++stats.clonedOps;
+                    changed = true;
+                }
+
+                if (mustKeepOriginal)
+                {
+                    ++stats.keptObservableReads;
+                    continue;
+                }
+                if (localUserCount != 0)
+                {
+                    ++stats.keptLocalReads;
+                    continue;
+                }
+
+                if (!graph.eraseOp(opId))
+                {
+                    error = "activity-schedule state-read-tail-absorb failed to erase source op: " +
+                            describeOp(graph, opId);
+                    return false;
+                }
+                auto &ownerCluster = partition.clusters[ownerSupernode];
+                ownerCluster.erase(std::remove(ownerCluster.begin(), ownerCluster.end(), opSym),
+                                   ownerCluster.end());
+                symbolToSupernode.erase(opSym);
+                ++stats.erasedOps;
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        WorkingPartition buildStateReadTailAbsorbTargetPartition(const WorkingPartition &seedPartition,
+                                                                 const ActivityOpData &opData,
+                                                                 const ActivityScheduleOptions &options)
+        {
+            WorkingPartition partition = seedPartition;
+            if (partition.clusters.empty())
+            {
+                return partition;
+            }
+
+            if (options.enableCoarsen)
+            {
+                std::size_t tailIterations = 0;
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    const std::size_t clustersBeforeIter = partition.clusters.size();
+                    if (options.enableChainMerge)
+                    {
+                        changed = tryMergeOut1(partition, opData, options.supernodeMaxSize) || changed;
+                        changed = tryMergeIn1(partition, opData, options.supernodeMaxSize) || changed;
+                    }
+                    if (options.enableSiblingMerge)
+                    {
+                        changed = tryMergeSiblings(partition, opData, options.supernodeMaxSize) || changed;
+                    }
+                    if (options.enableForwardMerge)
+                    {
+                        changed = tryMergeForwarders(partition, opData, options.supernodeMaxSize) || changed;
+                    }
+
+                    const std::size_t clustersAfterIter = partition.clusters.size();
+                    const std::size_t clusterDelta =
+                        clustersBeforeIter >= clustersAfterIter ? (clustersBeforeIter - clustersAfterIter) : 0;
+                    const bool smallDeltaTail =
+                        clustersBeforeIter >= kCoarsenTailLargeClusterThreshold &&
+                        clusterDelta < kCoarsenTailMaxClusterDeltaExclusive;
+                    if (smallDeltaTail)
+                    {
+                        ++tailIterations;
+                    }
+                    else
+                    {
+                        tailIterations = 0;
+                    }
+                    if (tailIterations >= kCoarsenTailMaxConsecutiveIters)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            partition = canonicalizePartition(partition, opData);
+            const ClusterView coarseView = buildClusterView(partition, opData);
+            const ClusterView dpView = buildTopoOrderedClusterView(coarseView);
+            std::vector<std::vector<uint32_t>> segments = buildDpSegments(dpView, options.supernodeMaxSize);
+            if (options.enableRefine)
+            {
+                segments = refineSegments(dpView, std::move(segments), options.supernodeMaxSize, options.refineMaxIter);
+            }
+            partition = materializeSegments(dpView, segments);
+            return canonicalizePartition(partition, opData);
         }
 
         bool runReplicationPhase(wolvrix::lib::grh::Graph &graph,
@@ -2481,7 +2809,7 @@ namespace wolvrix::lib::transform
         const auto seedBuildStart = std::chrono::steady_clock::now();
         graph->freeze();
         std::string buildError;
-        const ActivityOpData opData = buildActivityOpData(*graph, buildError);
+        ActivityOpData opData = buildActivityOpData(*graph, buildError);
         const std::uint64_t buildOpDataMs = elapsedMs(seedBuildStart);
         if (!buildError.empty())
         {
@@ -2548,6 +2876,44 @@ namespace wolvrix::lib::transform
         }
         const std::uint64_t seedPartitionMs = elapsedMs(seedPartitionStart);
         const std::size_t seedSupernodeCount = partition.clusters.size();
+
+        StateReadTailAbsorbStats stateReadTailAbsorbStats;
+        std::uint64_t stateReadTailAbsorbMs = 0;
+        std::uint64_t rebuildAfterStateReadTailAbsorbMs = 0;
+        std::size_t stateReadTailAbsorbTargetSupernodes = 0;
+        if (options_.enableStateReadTailAbsorb && !partition.clusters.empty())
+        {
+            const auto absorbStart = std::chrono::steady_clock::now();
+            const WorkingPartition targetPartition =
+                buildStateReadTailAbsorbTargetPartition(partition, opData, options_);
+            stateReadTailAbsorbTargetSupernodes = targetPartition.clusters.size();
+            SymbolPartition targetSymbolPartition = buildSymbolPartition(targetPartition, opData);
+            if (runStateReadTailAbsorbPhase(*graph,
+                                            targetSymbolPartition,
+                                            options_.stateReadTailAbsorbMaxTargets,
+                                            stateReadTailAbsorbStats,
+                                            buildError))
+            {
+                graphChanged = true;
+                graph->freeze();
+                const auto rebuildStart = std::chrono::steady_clock::now();
+                opData = buildActivityOpData(*graph, buildError);
+                rebuildAfterStateReadTailAbsorbMs = elapsedMs(rebuildStart);
+                if (!buildError.empty())
+                {
+                    error(*graph, buildError);
+                    result.failed = true;
+                    return result;
+                }
+                partition = rebuildWorkingPartitionFromSymbolPartition(targetSymbolPartition, opData);
+                partition = canonicalizePartition(partition, opData);
+                if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
+                {
+                    logInfo("activity-schedule debug: post_state_read_tail_absorb_cycle " + cycle);
+                }
+            }
+            stateReadTailAbsorbMs = elapsedMs(absorbStart);
+        }
 
         std::uint64_t coarsenMs = 0;
         std::size_t coarsenIterations = 0;
@@ -2726,6 +3092,8 @@ namespace wolvrix::lib::transform
                 " sink_partition=" + std::to_string(sinkPartitionMs) +
                 " tail_partition=" + std::to_string(tailPartitionMs) +
                 " seed_partition=" + std::to_string(seedPartitionMs) +
+                " state_read_tail_absorb=" + std::to_string(stateReadTailAbsorbMs) +
+                " rebuild_after_state_read_tail_absorb=" + std::to_string(rebuildAfterStateReadTailAbsorbMs) +
                 " coarsen=" + std::to_string(coarsenMs) +
                 " dp_prep=" + std::to_string(dpPrepMs) +
                 " dp=" + std::to_string(dpMs) +
@@ -2742,6 +3110,13 @@ namespace wolvrix::lib::transform
                 " final_topo_edges=" + std::to_string(finalOpData.topoEdges.size()) +
                 " graph_ops=" + std::to_string(graph->operations().size()) +
                 " graph_values=" + std::to_string(graph->values().size()));
+        logInfo("activity-schedule timing state_read_tail_absorb: target_supernodes=" +
+                std::to_string(stateReadTailAbsorbTargetSupernodes) +
+                " cloned=" + std::to_string(stateReadTailAbsorbStats.clonedOps) +
+                " erased=" + std::to_string(stateReadTailAbsorbStats.erasedOps) +
+                " kept_observable=" + std::to_string(stateReadTailAbsorbStats.keptObservableReads) +
+                " kept_local=" + std::to_string(stateReadTailAbsorbStats.keptLocalReads) +
+                " skipped_too_many_targets=" + std::to_string(stateReadTailAbsorbStats.skippedTooManyTargets));
         logInfo("activity-schedule timing replication(ms): collect_observable=" +
                 std::to_string(replicationPerf.collectObservableMs) +
                 " build_symbol_map=" + std::to_string(replicationPerf.buildSymbolMapMs) +
@@ -2782,6 +3157,9 @@ namespace wolvrix::lib::transform
                 << " tail_absorbed_ops=" << tailStats.absorbedOps
                 << " tail_ops=" << tailCoveredOpCount
                 << " eligible_ops=" << finalOpData.topoOps.size()
+                << " state_read_tail_absorb_target_supernodes=" << stateReadTailAbsorbTargetSupernodes
+                << " state_read_tail_absorb_cloned=" << stateReadTailAbsorbStats.clonedOps
+                << " state_read_tail_absorb_erased=" << stateReadTailAbsorbStats.erasedOps
                 << " replication_cloned=" << replicationStats.clonedOps
                 << " replication_erased=" << replicationStats.erasedOps
                 << " state_read_sets=" << build.stateReadSupernodes.size()
