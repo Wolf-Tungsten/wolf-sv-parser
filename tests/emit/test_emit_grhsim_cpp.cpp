@@ -1676,7 +1676,6 @@ int main()
         eval.find("kActiveWordBatchOffsets") == std::string::npos ||
         eval.find("kActiveWordBatchIndices") == std::string::npos ||
         eval.find("for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex)") == std::string::npos ||
-        eval.find("batchStats = (this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
         eval.find("(void)(this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
         sched.find("BatchEvalStats GrhSIM_top::eval_batch_0()") == std::string::npos ||
         sched.find("stats.checkedFlagWords") == std::string::npos ||

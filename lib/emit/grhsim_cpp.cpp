@@ -456,6 +456,23 @@ namespace wolvrix::lib::emit
             }
         }
 
+        std::size_t parseScheduleBatchTargetCount(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("sched_batch_target_count");
+            if (it == options.attributes.end())
+            {
+                return 0;
+            }
+            try
+            {
+                return static_cast<std::size_t>(std::stoull(it->second));
+            }
+            catch (const std::exception &)
+            {
+                return 0;
+            }
+        }
+
         std::size_t parseEmitParallelism(const EmitOptions &options)
         {
             auto fallback = []() -> std::size_t
@@ -4144,7 +4161,8 @@ namespace wolvrix::lib::emit
         std::vector<ScheduleBatch> buildScheduleBatches(const Graph &graph,
                                                         const ScheduleRefs &schedule,
                                                         std::size_t batchMaxOps,
-                                                        std::size_t batchMaxEstimatedLines)
+                                                        std::size_t batchMaxEstimatedLines,
+                                                        std::size_t targetBatchCount)
         {
             struct ActiveWordSummary
             {
@@ -4174,6 +4192,23 @@ namespace wolvrix::lib::emit
                 word.estimatedLines += supernodeLines;
             }
 
+            std::size_t effectiveMaxOps = batchMaxOps;
+            std::size_t effectiveMaxLines = batchMaxEstimatedLines;
+            if (targetBatchCount > 0 && !activeWords.empty())
+            {
+                std::size_t totalOps = 0;
+                std::size_t totalLines = 0;
+                for (const auto &word : activeWords)
+                {
+                    totalOps += word.opCount;
+                    totalLines += word.estimatedLines;
+                }
+                const std::size_t dynamicMaxOps = totalOps / targetBatchCount;
+                const std::size_t dynamicMaxLines = totalLines / targetBatchCount;
+                effectiveMaxOps = std::max(effectiveMaxOps, dynamicMaxOps);
+                effectiveMaxLines = std::max(effectiveMaxLines, dynamicMaxLines);
+            }
+
             std::vector<ScheduleBatch> batches;
             ScheduleBatch current;
             auto flushCurrent = [&]()
@@ -4190,10 +4225,10 @@ namespace wolvrix::lib::emit
             for (const auto &word : activeWords)
             {
                 const bool exceedsMaxOps =
-                    batchMaxOps != 0u && !current.words.empty() && (current.opCount + word.opCount) > batchMaxOps;
+                    effectiveMaxOps != 0u && !current.words.empty() && (current.opCount + word.opCount) > effectiveMaxOps;
                 const bool exceedsMaxEstimatedLines =
-                    batchMaxEstimatedLines != 0u && !current.words.empty() &&
-                    (current.estimatedLines + word.estimatedLines) > batchMaxEstimatedLines;
+                    effectiveMaxLines != 0u && !current.words.empty() &&
+                    (current.estimatedLines + word.estimatedLines) > effectiveMaxLines;
                 if (exceedsMaxOps || exceedsMaxEstimatedLines)
                 {
                     flushCurrent();
@@ -7362,6 +7397,7 @@ namespace wolvrix::lib::emit
 
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
+        const std::size_t schedBatchTargetCount = parseScheduleBatchTargetCount(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
         const PerfMode perfMode = parsePerfMode(options);
         const std::unordered_set<ValueId, ValueIdHash> waveformValueIds =
@@ -7378,7 +7414,7 @@ namespace wolvrix::lib::emit
 #endif
 
         const std::vector<ScheduleBatch> scheduleBatches =
-            buildScheduleBatches(graph, schedule, schedBatchMaxOps, schedBatchMaxEstimatedLines);
+            buildScheduleBatches(graph, schedule, schedBatchMaxOps, schedBatchMaxEstimatedLines, schedBatchTargetCount);
 
         EmitModel model;
         std::string buildError;

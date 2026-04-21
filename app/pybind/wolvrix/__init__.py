@@ -291,14 +291,15 @@ class Session:
         max_cpp_file_bytes: int | None = None,
         sched_batch_max_ops: int | None = None,
         sched_batch_max_estimated_lines: int | None = None,
+        sched_batch_target_count: int | None = None,
         emit_parallelism: int | None = None,
         perf: str | None = None,
         **named_args,
     ) -> list[dict]:
         self._ensure_open()
         if (max_cpp_file_bytes is not None or sched_batch_max_ops is not None or
-                sched_batch_max_estimated_lines is not None or emit_parallelism is not None or
-                perf is not None):
+                sched_batch_max_estimated_lines is not None or sched_batch_target_count is not None or
+                emit_parallelism is not None or perf is not None):
             named_args = dict(named_args)
         if max_cpp_file_bytes is not None:
             named_args["max_cpp_file_bytes"] = max_cpp_file_bytes
@@ -306,6 +307,8 @@ class Session:
             named_args["sched_batch_max_ops"] = sched_batch_max_ops
         if sched_batch_max_estimated_lines is not None:
             named_args["sched_batch_max_estimated_lines"] = sched_batch_max_estimated_lines
+        if sched_batch_target_count is not None:
+            named_args["sched_batch_target_count"] = sched_batch_target_count
         if emit_parallelism is not None:
             named_args["emit_parallelism"] = emit_parallelism
         if perf is not None:
@@ -547,6 +550,10 @@ def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
     if sched_batch_max_estimated_lines is not None:
         if not isinstance(sched_batch_max_estimated_lines, int) or sched_batch_max_estimated_lines < 0:
             raise ValueError("emit_grhsim_cpp sched_batch_max_estimated_lines must be a non-negative integer")
+    sched_batch_target_count = local.pop("sched_batch_target_count", None)
+    if sched_batch_target_count is not None:
+        if not isinstance(sched_batch_target_count, int) or sched_batch_target_count < 0:
+            raise ValueError("emit_grhsim_cpp sched_batch_target_count must be a non-negative integer")
     emit_parallelism = local.pop("emit_parallelism", None)
     if emit_parallelism is not None:
         if not isinstance(emit_parallelism, int) or emit_parallelism < 0:

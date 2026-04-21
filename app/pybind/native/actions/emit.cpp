@@ -144,6 +144,7 @@ namespace wolvrix::app::pybind
         PyObject *maxCppFileBytesObj = Py_None;
         PyObject *schedBatchMaxOpsObj = Py_None;
         PyObject *schedBatchMaxEstimatedLinesObj = Py_None;
+        PyObject *schedBatchTargetCountObj = Py_None;
         PyObject *emitParallelismObj = Py_None;
         const char *waveformMode = nullptr;
         const char *perfMode = nullptr;
@@ -154,11 +155,12 @@ namespace wolvrix::app::pybind
                                        "max_cpp_file_bytes",
                                        "sched_batch_max_ops",
                                        "sched_batch_max_estimated_lines",
+                                       "sched_batch_target_count",
                                        "emit_parallelism",
                                        "waveform",
                                        "perf",
                                        nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOss", const_cast<char **>(kwlist),
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOOss", const_cast<char **>(kwlist),
                                          &sessionObj,
                                          &designKey,
                                          &output,
@@ -166,6 +168,7 @@ namespace wolvrix::app::pybind
                                          &maxCppFileBytesObj,
                                          &schedBatchMaxOpsObj,
                                          &schedBatchMaxEstimatedLinesObj,
+                                         &schedBatchTargetCountObj,
                                          &emitParallelismObj,
                                          &waveformMode,
                                          &perfMode))
@@ -239,6 +242,17 @@ namespace wolvrix::app::pybind
                 return nullptr;
             }
             options.attributes["sched_batch_max_estimated_lines"] = std::to_string(parsed);
+        }
+        if (schedBatchTargetCountObj != Py_None)
+        {
+            const unsigned long long parsed = PyLong_AsUnsignedLongLong(schedBatchTargetCountObj);
+            if (PyErr_Occurred())
+            {
+                PyErr_SetString(PyExc_ValueError,
+                                "sched_batch_target_count must be a non-negative integer");
+                return nullptr;
+            }
+            options.attributes["sched_batch_target_count"] = std::to_string(parsed);
         }
         if (emitParallelismObj != Py_None)
         {
