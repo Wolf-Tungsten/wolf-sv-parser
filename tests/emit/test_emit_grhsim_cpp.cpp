@@ -1536,7 +1536,8 @@ int main()
         return fail("Missing simulator class declaration");
     }
     if (header.find("kBatchCount = ") == std::string::npos ||
-        header.find("void eval_batch_0(std::uint8_t &activeWordFlags);") == std::string::npos)
+        header.find("struct BatchEvalStats") == std::string::npos ||
+        header.find("BatchEvalStats eval_batch_0();") == std::string::npos)
     {
         return fail("Missing split batch declarations");
     }
@@ -1671,11 +1672,15 @@ int main()
         return fail("Missing supernode activity runtime helpers");
     }
     if (eval.find("kBatchEvalFns") == std::string::npos ||
+        eval.find("using BatchEvalFn = BatchEvalStats") == std::string::npos ||
         eval.find("kActiveWordBatchOffsets") == std::string::npos ||
         eval.find("kActiveWordBatchIndices") == std::string::npos ||
-        eval.find("std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];") == std::string::npos ||
-        eval.find("(this->*kBatchEvalFns[batchIndex])(activeWordFlags);") == std::string::npos ||
-        eval.find("supernode_active_curr_[activeWordIndex] = UINT8_C(0);") == std::string::npos)
+        eval.find("for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex)") == std::string::npos ||
+        eval.find("batchStats = (this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
+        eval.find("(void)(this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
+        sched.find("BatchEvalStats GrhSIM_top::eval_batch_0()") == std::string::npos ||
+        sched.find("stats.checkedFlagWords") == std::string::npos ||
+        sched.find("supernode_active_curr_[") == std::string::npos)
     {
         return fail("Missing multi-batch eval dispatch");
     }

@@ -1317,7 +1317,13 @@ namespace wolvrix::lib::emit
             std::size_t index = 0;
             std::size_t estimatedLines = 0;
             std::size_t opCount = 0;
-            std::size_t activeFlagWordIndex = 0;
+            struct Word
+            {
+                std::size_t activeFlagWordIndex = 0;
+                std::vector<uint32_t> supernodeIds;
+            };
+
+            std::vector<Word> words;
             std::vector<uint32_t> supernodeIds;
         };
 
@@ -4140,13 +4146,39 @@ namespace wolvrix::lib::emit
                                                         std::size_t batchMaxOps,
                                                         std::size_t batchMaxEstimatedLines)
         {
-            (void)batchMaxOps;
-            (void)batchMaxEstimatedLines;
+            struct ActiveWordSummary
+            {
+                std::size_t activeFlagWordIndex = 0;
+                std::size_t estimatedLines = 0;
+                std::size_t opCount = 0;
+                std::vector<uint32_t> supernodeIds;
+            };
+
+            std::vector<ActiveWordSummary> activeWords;
+            activeWords.reserve((schedule.topoOrder.size() + kActiveFlagBitsPerWord - 1u) / kActiveFlagBitsPerWord);
+            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
+            {
+                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
+                const std::size_t activeWordIndex = topoIndex / kActiveFlagBitsPerWord;
+                const std::size_t supernodeOps =
+                    supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
+                const std::size_t supernodeLines =
+                    estimateSupernodeEmitLines(graph, schedule.valueFanout, schedule.supernodeToOps, supernodeId);
+                if (activeWords.empty() || activeWords.back().activeFlagWordIndex != activeWordIndex)
+                {
+                    activeWords.push_back(ActiveWordSummary{.activeFlagWordIndex = activeWordIndex});
+                }
+                auto &word = activeWords.back();
+                word.supernodeIds.push_back(supernodeId);
+                word.opCount += supernodeOps;
+                word.estimatedLines += supernodeLines;
+            }
+
             std::vector<ScheduleBatch> batches;
             ScheduleBatch current;
             auto flushCurrent = [&]()
             {
-                if (current.supernodeIds.empty())
+                if (current.words.empty())
                 {
                     return;
                 }
@@ -4155,26 +4187,23 @@ namespace wolvrix::lib::emit
                 current = ScheduleBatch{};
             };
 
-            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
+            for (const auto &word : activeWords)
             {
-                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
-                const std::size_t activeWordIndex =
-                    topoIndex / kActiveFlagBitsPerWord;
-                const std::size_t supernodeOps =
-                    supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
-                const std::size_t supernodeLines =
-                    estimateSupernodeEmitLines(graph, schedule.valueFanout, schedule.supernodeToOps, supernodeId);
-                if (!current.supernodeIds.empty() && current.activeFlagWordIndex != activeWordIndex)
+                const bool exceedsMaxOps =
+                    batchMaxOps != 0u && !current.words.empty() && (current.opCount + word.opCount) > batchMaxOps;
+                const bool exceedsMaxEstimatedLines =
+                    batchMaxEstimatedLines != 0u && !current.words.empty() &&
+                    (current.estimatedLines + word.estimatedLines) > batchMaxEstimatedLines;
+                if (exceedsMaxOps || exceedsMaxEstimatedLines)
                 {
                     flushCurrent();
                 }
-                if (current.supernodeIds.empty())
-                {
-                    current.activeFlagWordIndex = activeWordIndex;
-                }
-                current.supernodeIds.push_back(supernodeId);
-                current.opCount += supernodeOps;
-                current.estimatedLines += supernodeLines;
+                current.words.push_back(
+                    ScheduleBatch::Word{.activeFlagWordIndex = word.activeFlagWordIndex, .supernodeIds = word.supernodeIds});
+                current.supernodeIds.insert(
+                    current.supernodeIds.end(), word.supernodeIds.begin(), word.supernodeIds.end());
+                current.opCount += word.opCount;
+                current.estimatedLines += word.estimatedLines;
             }
             flushCurrent();
             if (batches.empty())
@@ -6385,28 +6414,47 @@ namespace wolvrix::lib::emit
             {
                 stream << '\n';
             }
-            stream << "void " << className << "::eval_batch_" << batch.index << "(std::uint8_t &activeWordFlags)\n{\n";
+            stream << className << "::BatchEvalStats " << className << "::eval_batch_" << batch.index << "()\n{\n";
+            stream << "    BatchEvalStats stats{};\n";
+            stream << "    stats.checkedFlagWords = " << batch.words.size() << "u;\n";
             stream << "    // Batch " << batch.index
-                   << ": evaluate active supernodes selected from one activity-flag word.\n";
-            for (uint32_t supernodeId : batch.supernodeIds)
+                   << ": evaluate active supernodes selected from a group of activity-flag words.\n";
+            for (const auto &word : batch.words)
             {
-                const std::size_t activeId =
-                    supernodeId < model.activeIdBySupernode.size() ? model.activeIdBySupernode[supernodeId] : kInvalidIndex;
-                const ActivationEmitContext activationContext{
-                    .currentWordIndex = batch.activeFlagWordIndex,
-                    .currentActiveId = activeId,
-                    .localActiveExpr = "activeWordFlags"};
-                const std::uint8_t supernodeMask =
-                    static_cast<std::uint8_t>(UINT8_C(1) << (activeId % kActiveFlagBitsPerWord));
                 stream << "\n";
-                stream << "    // Supernode " << supernodeId << ": run when its activity flag is set.\n";
-                stream << "    if ((activeWordFlags & UINT8_C(" << static_cast<unsigned>(supernodeMask) << ")) == 0) {\n";
-                stream << "        goto supernode_" << supernodeId << "_end;\n";
-                stream << "    }\n";
-                stream << "    activeWordFlags = static_cast<std::uint8_t>(\n";
-                stream << "        activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
-                       << static_cast<unsigned>(supernodeMask) << ")));\n";
                 stream << "    {\n";
+                stream << "        std::uint8_t activeWordFlags = supernode_active_curr_["
+                       << word.activeFlagWordIndex << "u];\n";
+                stream << "        if (activeWordFlags == UINT8_C(0)) {\n";
+                stream << "            goto active_word_" << word.activeFlagWordIndex << "_end;\n";
+                stream << "        }\n";
+                stream << "        supernode_active_curr_[" << word.activeFlagWordIndex << "u] = UINT8_C(0);\n";
+                stream << "        ++stats.nonzeroActiveWords;\n";
+                for (uint32_t supernodeId : word.supernodeIds)
+                {
+                    const std::size_t activeId =
+                        supernodeId < model.activeIdBySupernode.size() ? model.activeIdBySupernode[supernodeId] : kInvalidIndex;
+                    const ActivationEmitContext activationContext{
+                        .currentWordIndex = word.activeFlagWordIndex,
+                        .currentActiveId = activeId,
+                        .localActiveExpr = "activeWordFlags"};
+                    const std::uint8_t supernodeMask =
+                        static_cast<std::uint8_t>(UINT8_C(1) << (activeId % kActiveFlagBitsPerWord));
+                    stream << "\n";
+                    stream << "    // Supernode " << supernodeId << ": run when its activity flag is set.\n";
+                    stream << "    if ((activeWordFlags & UINT8_C(" << static_cast<unsigned>(supernodeMask) << ")) == 0) {\n";
+                    stream << "        goto supernode_" << supernodeId << "_end;\n";
+                    stream << "    }\n";
+                    stream << "    activeWordFlags = static_cast<std::uint8_t>(\n";
+                    stream << "        activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
+                           << static_cast<unsigned>(supernodeMask) << ")));\n";
+                    stream << "    ++stats.executedSupernodes;\n";
+                    stream << "    if (activity_profile_enabled_) {\n";
+                    stream << "        ++activity_profile_current_executed_supernodes_;\n";
+                    stream << "        activity_profile_current_executed_ops_ += UINT64_C("
+                           << schedule.supernodeToOps[supernodeId].size() << ");\n";
+                    stream << "    }\n";
+                    stream << "    {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
                 std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
@@ -7225,10 +7273,14 @@ namespace wolvrix::lib::emit
                     }
                     ++opIndex;
                 }
+                    stream << "    }\n";
+                    stream << "supernode_" << supernodeId << "_end:\n";
+                }
+                stream << "active_word_" << word.activeFlagWordIndex << "_end:\n";
+                stream << "        ;\n";
                 stream << "    }\n";
-                stream << "supernode_" << supernodeId << "_end:\n";
             }
-            stream << "    return;\n";
+            stream << "    return stats;\n";
             stream << "}\n";
             if (model.emitWaveform)
             {
@@ -10412,9 +10464,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << decl << '\n';
             }
             *stream << "\nprivate:\n";
+            *stream << "    struct BatchEvalStats {\n";
+            *stream << "        std::size_t checkedFlagWords = 0;\n";
+            *stream << "        std::size_t nonzeroActiveWords = 0;\n";
+            *stream << "        std::size_t executedSupernodes = 0;\n";
+            *stream << "    };\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
-                *stream << "    void eval_batch_" << batchIndex << "(std::uint8_t &activeWordFlags);\n";
+                *stream << "    BatchEvalStats eval_batch_" << batchIndex << "();\n";
             }
             if (model.emitWaveform)
             {
@@ -12438,9 +12495,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             std::vector<std::vector<std::size_t>> batchIndicesByActiveWord(activeFlagWordCount);
             for (const auto &batch : scheduleBatches)
             {
-                if (batch.activeFlagWordIndex < batchIndicesByActiveWord.size())
+                for (const auto &word : batch.words)
                 {
-                    batchIndicesByActiveWord[batch.activeFlagWordIndex].push_back(batch.index);
+                    if (word.activeFlagWordIndex < batchIndicesByActiveWord.size())
+                    {
+                        batchIndicesByActiveWord[word.activeFlagWordIndex].push_back(batch.index);
+                    }
                 }
             }
             std::vector<std::size_t> activeWordBatchOffsets;
@@ -12461,7 +12521,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "\n";
             *stream << "void " << className << "::eval()\n{\n";
-            *stream << "    using BatchEvalFn = void (" << className << "::*)(std::uint8_t &activeWordFlags);\n";
+            *stream << "    using BatchEvalFn = BatchEvalStats (" << className << "::*)();\n";
             *stream << "    static constexpr BatchEvalFn kBatchEvalFns[] = {\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
@@ -12492,27 +12552,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     *stream << ",";
                 }
-                *stream << "\n";
-            }
-            *stream << "    };\n";
-            *stream << "    static constexpr std::uint16_t kSupernodeOpCounts[] = {";
-            for (std::size_t topoIndex = 0; topoIndex < schedule.topoOrder.size(); ++topoIndex)
-            {
-                if ((topoIndex % 16u) == 0u)
-                {
-                    *stream << "\n        ";
-                }
-                const uint32_t supernodeId = schedule.topoOrder[topoIndex];
-                const std::size_t opCount =
-                    supernodeId < schedule.supernodeToOps.size() ? schedule.supernodeToOps[supernodeId].size() : 0;
-                *stream << "UINT16_C(" << opCount << ")";
-                if (topoIndex + 1u != schedule.topoOrder.size())
-                {
-                    *stream << ", ";
-                }
-            }
-            if (!schedule.topoOrder.empty())
-            {
                 *stream << "\n";
             }
             *stream << "    };\n";
@@ -12651,47 +12690,36 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        if (peak_active_words < round_active_words_in) {\n";
                 *stream << "            peak_active_words = round_active_words_in;\n";
                 *stream << "        }\n";
-                *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
+                *stream << "        // Scan active-flag words in order and immediately dispatch affected schedule batches.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
                 *stream << "            ++round_checked_batches;\n";
                 *stream << "            ++round_checked_flag_words;\n";
-                *stream << "            std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];\n";
-                *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
+                *stream << "            if (supernode_active_curr_[activeWordIndex] == UINT8_C(0)) {\n";
                 *stream << "                ++round_skipped_batches;\n";
                 *stream << "                continue;\n";
                 *stream << "            }\n";
-                *stream << "            if (activity_profile_enabled_) {\n";
-                *stream << "                const auto baseActiveId = activeWordIndex * kActiveFlagBitsPerWord;\n";
-                *stream << "                std::uint8_t profileActiveFlags = activeWordFlags;\n";
-                *stream << "                activity_profile_current_executed_supernodes_ +=\n";
-                *stream << "                    static_cast<std::uint64_t>(grhsim_popcount_u8(profileActiveFlags));\n";
-                *stream << "                while (profileActiveFlags != UINT8_C(0)) {\n";
-                *stream << "                    const auto bitIndex =\n";
-                *stream << "                        static_cast<std::size_t>(__builtin_ctz(static_cast<unsigned>(profileActiveFlags)));\n";
-                *stream << "                    activity_profile_current_executed_ops_ +=\n";
-                *stream << "                        static_cast<std::uint64_t>(kSupernodeOpCounts[baseActiveId + bitIndex]);\n";
-                *stream << "                    profileActiveFlags = static_cast<std::uint8_t>(\n";
-                *stream << "                        profileActiveFlags & static_cast<std::uint8_t>(profileActiveFlags - UINT8_C(1)));\n";
-                *stream << "                }\n";
-                *stream << "            }\n";
-                *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
-                *stream << "            ++round_nonzero_active_words;\n";
-                *stream << "            round_executed_supernodes +=\n";
-                *stream << "                static_cast<std::size_t>(grhsim_popcount_u8(activeWordFlags));\n";
                 *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
                 *stream << "                 batchOffset < kActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
                 *stream << "                const std::size_t batchIndex = kActiveWordBatchIndices[batchOffset];\n";
-                *stream << "                ++round_executed_batches;\n";
+                *stream << "                BatchEvalStats batchStats{};\n";
+                *stream << "                const auto batch_begin_time = trace_this_eval\n";
+                *stream << "                    ? std::chrono::steady_clock::now()\n";
+                *stream << "                    : std::chrono::steady_clock::time_point{};\n";
+                *stream << "                batchStats = (this->*kBatchEvalFns[batchIndex])();\n";
                 *stream << "                if (trace_this_eval) {\n";
-                *stream << "                    const auto batch_begin_time = std::chrono::steady_clock::now();\n";
-                *stream << "                    (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
                 *stream << "                    round_batch_us += static_cast<std::uint64_t>(\n";
                 *stream << "                        std::chrono::duration_cast<std::chrono::microseconds>(\n";
                 *stream << "                            std::chrono::steady_clock::now() - batch_begin_time)\n";
                 *stream << "                            .count());\n";
+                *stream << "                }\n";
+                *stream << "                round_checked_flag_words += batchStats.checkedFlagWords;\n";
+                *stream << "                round_nonzero_active_words += batchStats.nonzeroActiveWords;\n";
+                *stream << "                round_executed_supernodes += batchStats.executedSupernodes;\n";
+                *stream << "                if (batchStats.nonzeroActiveWords == 0u) {\n";
+                *stream << "                    ++round_skipped_batches;\n";
                 *stream << "                } else {\n";
-                *stream << "                    (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
+                *stream << "                    ++round_executed_batches;\n";
                 *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
@@ -12835,32 +12863,16 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_in_profile;\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
-                *stream << "        // Propagate current activity by scanning the active-flag words directly.\n";
+                *stream << "        // Scan active-flag words in order and immediately dispatch affected schedule batches.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
-                *stream << "            std::uint8_t activeWordFlags = supernode_active_curr_[activeWordIndex];\n";
-                *stream << "            if (activeWordFlags == UINT8_C(0)) {\n";
+                *stream << "            if (supernode_active_curr_[activeWordIndex] == UINT8_C(0)) {\n";
                 *stream << "                continue;\n";
                 *stream << "            }\n";
-                *stream << "            if (activity_profile_enabled_) {\n";
-                *stream << "                const auto baseActiveId = activeWordIndex * kActiveFlagBitsPerWord;\n";
-                *stream << "                std::uint8_t profileActiveFlags = activeWordFlags;\n";
-                *stream << "                activity_profile_current_executed_supernodes_ +=\n";
-                *stream << "                    static_cast<std::uint64_t>(grhsim_popcount_u8(profileActiveFlags));\n";
-                *stream << "                while (profileActiveFlags != UINT8_C(0)) {\n";
-                *stream << "                    const auto bitIndex =\n";
-                *stream << "                        static_cast<std::size_t>(__builtin_ctz(static_cast<unsigned>(profileActiveFlags)));\n";
-                *stream << "                    activity_profile_current_executed_ops_ +=\n";
-                *stream << "                        static_cast<std::uint64_t>(kSupernodeOpCounts[baseActiveId + bitIndex]);\n";
-                *stream << "                    profileActiveFlags = static_cast<std::uint8_t>(\n";
-                *stream << "                        profileActiveFlags & static_cast<std::uint8_t>(profileActiveFlags - UINT8_C(1)));\n";
-                *stream << "                }\n";
-                *stream << "            }\n";
-                *stream << "            supernode_active_curr_[activeWordIndex] = UINT8_C(0);\n";
                 *stream << "            for (std::size_t batchOffset = kActiveWordBatchOffsets[activeWordIndex];\n";
                 *stream << "                 batchOffset < kActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
                 *stream << "                const std::size_t batchIndex = kActiveWordBatchIndices[batchOffset];\n";
-                *stream << "                (this->*kBatchEvalFns[batchIndex])(activeWordFlags);\n";
+                *stream << "                (void)(this->*kBatchEvalFns[batchIndex])();\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
                 *stream << "        // Commit deferred state updates and reactivate readers of changed state.\n";
