@@ -6450,21 +6450,19 @@ namespace wolvrix::lib::emit
                 stream << '\n';
             }
             stream << className << "::BatchEvalStats " << className << "::eval_batch_" << batch.index << "()\n{\n";
-            stream << "    BatchEvalStats stats{};\n";
-            stream << "    stats.checkedFlagWords = " << batch.words.size() << "u;\n";
-            stream << "    // Batch " << batch.index
+            stream << "        BatchEvalStats stats{};\n";
+            stream << "        stats.checkedFlagWords = " << batch.words.size() << "u;\n";
+            stream << "        // Batch " << batch.index
                    << ": evaluate active supernodes selected from a group of activity-flag words.\n";
             for (const auto &word : batch.words)
             {
-                stream << "\n";
-                stream << "    {\n";
-                stream << "        std::uint8_t activeWordFlags = supernode_active_curr_["
+                stream << "    \n";
+                stream << "        {\n";
+                stream << "            std::uint8_t activeWordFlags = supernode_active_curr_["
                        << word.activeFlagWordIndex << "u];\n";
-                stream << "        if (activeWordFlags == UINT8_C(0)) {\n";
-                stream << "            goto active_word_" << word.activeFlagWordIndex << "_end;\n";
-                stream << "        }\n";
-                stream << "        supernode_active_curr_[" << word.activeFlagWordIndex << "u] = UINT8_C(0);\n";
-                stream << "        ++stats.nonzeroActiveWords;\n";
+                stream << "            if (unlikely(activeWordFlags != UINT8_C(0))) {\n";
+                stream << "                supernode_active_curr_[" << word.activeFlagWordIndex << "u] = UINT8_C(0);\n";
+                stream << "                ++stats.nonzeroActiveWords;\n";
                 for (uint32_t supernodeId : word.supernodeIds)
                 {
                     const std::size_t activeId =
@@ -6475,21 +6473,19 @@ namespace wolvrix::lib::emit
                         .localActiveExpr = "activeWordFlags"};
                     const std::uint8_t supernodeMask =
                         static_cast<std::uint8_t>(UINT8_C(1) << (activeId % kActiveFlagBitsPerWord));
-                    stream << "\n";
-                    stream << "    // Supernode " << supernodeId << ": run when its activity flag is set.\n";
-                    stream << "    if ((activeWordFlags & UINT8_C(" << static_cast<unsigned>(supernodeMask) << ")) == 0) {\n";
-                    stream << "        goto supernode_" << supernodeId << "_end;\n";
-                    stream << "    }\n";
-                    stream << "    activeWordFlags = static_cast<std::uint8_t>(\n";
-                    stream << "        activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
+                    stream << "    \n";
+                    stream << "        // Supernode " << supernodeId << ": run when its activity flag is set.\n";
+                    stream << "        if (unlikely(activeWordFlags & UINT8_C(" << static_cast<unsigned>(supernodeMask) << "))) {\n";
+                    stream << "        activeWordFlags = static_cast<std::uint8_t>(\n";
+                    stream << "            activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
                            << static_cast<unsigned>(supernodeMask) << ")));\n";
-                    stream << "    ++stats.executedSupernodes;\n";
-                    stream << "    if (activity_profile_enabled_) {\n";
-                    stream << "        ++activity_profile_current_executed_supernodes_;\n";
-                    stream << "        activity_profile_current_executed_ops_ += UINT64_C("
+                    stream << "        ++stats.executedSupernodes;\n";
+                    stream << "        if (activity_profile_enabled_) {\n";
+                    stream << "            ++activity_profile_current_executed_supernodes_;\n";
+                    stream << "            activity_profile_current_executed_ops_ += UINT64_C("
                            << schedule.supernodeToOps[supernodeId].size() << ");\n";
-                    stream << "    }\n";
-                    stream << "    {\n";
+                    stream << "        }\n";
+                    stream << "        {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
                 std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
@@ -6508,7 +6504,7 @@ namespace wolvrix::lib::emit
                            concatPrefixCacheDecls[nextConcatPrefixDecl].firstUseIndex == opIndex)
                     {
                         const auto &decl = concatPrefixCacheDecls[nextConcatPrefixDecl];
-                        stream << "        const auto " << decl.tempName << " = grhsim_cat_prefix("
+                        stream << "            const auto " << decl.tempName << " = grhsim_cat_prefix("
                                << valueRef(model, decl.key.lhs) << ", " << decl.key.lhsWidth << ", "
                                << decl.key.rhsWidth << ");\n";
                         ++nextConcatPrefixDecl;
@@ -6577,7 +6573,7 @@ namespace wolvrix::lib::emit
                             {
                                 if (*eventExpr != "true")
                                 {
-                                    stream << "        if (" << *eventExpr << ") {\n";
+                                    stream << "            if (" << *eventExpr << ") {\n";
                                 }
                                 std::size_t rangeStart = 0;
                                 while (rangeStart < tableRunDescs.size())
@@ -6631,14 +6627,14 @@ namespace wolvrix::lib::emit
                                 }
                                 if (*eventExpr != "true")
                                 {
-                                    stream << "        }\n";
+                                    stream << "            }\n";
                                 }
                                 opIndex = runEnd;
                                 continue;
                             }
                             if (*eventExpr != "true")
                             {
-                                stream << "        if (" << *eventExpr << ") {\n";
+                                stream << "            if (" << *eventExpr << ") {\n";
                             }
                             for (std::size_t runIndex = opIndex; runIndex < runEnd; ++runIndex)
                             {
@@ -6659,7 +6655,7 @@ namespace wolvrix::lib::emit
                             }
                             if (*eventExpr != "true")
                             {
-                                stream << "        }\n";
+                                stream << "            }\n";
                             }
                             opIndex = runEnd;
                             continue;
@@ -6695,7 +6691,7 @@ namespace wolvrix::lib::emit
                             }
                             ++runEnd;
                         }
-                        stream << "        if ((" << guardKey->condExpr << ") && (" << guardKey->eventExpr << ")) {\n";
+                        stream << "            if ((" << guardKey->condExpr << ") && (" << guardKey->eventExpr << ")) {\n";
                         for (std::size_t runIndex = opIndex; runIndex < runEnd; ++runIndex)
                         {
                             const auto runOpId = supernodeOps[runIndex];
@@ -6706,12 +6702,12 @@ namespace wolvrix::lib::emit
                                 return emitError(*error, std::string(runOp.symbolText()));
                             }
                         }
-                        stream << "        }\n";
+                        stream << "            }\n";
                         opIndex = runEnd;
                         continue;
                     }
                     const auto operands = op.operands();
-                    stream << "        // op " << op.symbolText() << "\n";
+                    stream << "            // op " << op.symbolText() << "\n";
                     switch (op.kind())
                     {
                     case OperationKind::kConstant:
@@ -6756,7 +6752,7 @@ namespace wolvrix::lib::emit
                             else
                             {
                                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                                stream << "        const " << cppTypeForValue(graph, resultValue) << ' '
+                                stream << "            const " << cppTypeForValue(graph, resultValue) << ' '
                                        << lhs << " = " << *expr << ";\n";
                             }
                             break;
@@ -6764,7 +6760,7 @@ namespace wolvrix::lib::emit
                         (void)lhs;
                         (void)needChangeDetect;
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                        stream << "        // materialized constant is initialized once in init(); no runtime update needed.\n";
+                        stream << "            // materialized constant is initialized once in init(); no runtime update needed.\n";
                         break;
                     }
                     case OperationKind::kRegisterReadPort:
@@ -6817,14 +6813,14 @@ namespace wolvrix::lib::emit
                         {
                             if (needChangeDetect)
                             {
-                                stream << "        if (" << lhs << " != " << stateExpr << ") {\n";
+                                stream << "            if (" << lhs << " != " << stateExpr << ") {\n";
                                 emitChangedValueEffects(stream, model, resultValue, lhs, stateExpr, "            ", &activationContext);
-                                stream << "            " << lhs << " = " << stateExpr << ";\n";
-                                stream << "        }\n";
+                                stream << "                " << lhs << " = " << stateExpr << ";\n";
+                                stream << "            }\n";
                             }
                             else
                             {
-                                stream << "        " << lhs << " = " << stateExpr << ";\n";
+                                stream << "            " << lhs << " = " << stateExpr << ";\n";
                             }
                         }
                         break;
@@ -6884,46 +6880,46 @@ namespace wolvrix::lib::emit
                             break;
                         }
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                        stream << "        {\n";
-                        stream << "            const std::size_t row = " << rowExpr << ";\n";
+                        stream << "            {\n";
+                        stream << "                const std::size_t row = " << rowExpr << ";\n";
                         if (isWideLogicValue(graph, op.results().front()))
                         {
-                            stream << "            if (row >= " << state.rowCount << ") {\n";
+                            stream << "                if (row >= " << state.rowCount << ") {\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (" << lhs << " != "
+                                stream << "                    if (" << lhs << " != "
                                        << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{}) {\n";
                                 emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
+                                stream << "                        " << lhs << " = "
+                                       << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
+                                stream << "                    }\n";
+                            }
+                            else
+                            {
                                 stream << "                    " << lhs << " = "
                                        << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
-                                stream << "                }\n";
                             }
-                            else
-                            {
-                                stream << "                " << lhs << " = "
-                                       << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
-                            }
-                            stream << "            } else {\n";
-                            stream << "                const auto next_value = " << stateExpr << "[row];\n";
+                            stream << "                } else {\n";
+                            stream << "                    const auto next_value = " << stateExpr << "[row];\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (" << lhs << " != next_value) {\n";
+                                stream << "                    if (" << lhs << " != next_value) {\n";
                                 emitChangedValuePropagation(stream, model, resultValue, "                    ", &activationContext);
-                                stream << "                    " << lhs << " = next_value;\n";
-                                stream << "                }\n";
+                                stream << "                        " << lhs << " = next_value;\n";
+                                stream << "                    }\n";
                             }
                             else
                             {
-                                stream << "                " << lhs << " = next_value;\n";
+                                stream << "                    " << lhs << " = next_value;\n";
                             }
-                            stream << "            }\n";
+                            stream << "                }\n";
                         }
                         else
                         {
-                            stream << "            if (row >= " << state.rowCount << ") {\n";
+                            stream << "                if (row >= " << state.rowCount << ") {\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
+                                stream << "                    if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
                                        << ") {\n";
                                 emitChangedValueEffects(stream,
                                                         model,
@@ -6932,29 +6928,29 @@ namespace wolvrix::lib::emit
                                                         defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())),
                                                         "                    ",
                                                         &activationContext);
-                                stream << "                    " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
-                                stream << "                }\n";
+                                stream << "                        " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
+                                stream << "                    }\n";
                             }
                             else
                             {
-                                stream << "                " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
+                                stream << "                    " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
                             }
-                            stream << "            } else {\n";
-                            stream << "                const auto next_value = " << stateExpr << "[row];\n";
+                            stream << "                } else {\n";
+                            stream << "                    const auto next_value = " << stateExpr << "[row];\n";
                             if (needChangeDetect)
                             {
-                                stream << "                if (" << lhs << " != next_value) {\n";
+                                stream << "                    if (" << lhs << " != next_value) {\n";
                                 emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                    ", &activationContext);
-                                stream << "                    " << lhs << " = next_value;\n";
-                                stream << "                }\n";
+                                stream << "                        " << lhs << " = next_value;\n";
+                                stream << "                    }\n";
                             }
                             else
                             {
-                                stream << "                " << lhs << " = next_value;\n";
+                                stream << "                    " << lhs << " = next_value;\n";
                             }
-                            stream << "            }\n";
+                            stream << "                }\n";
                         }
-                        stream << "        }\n";
+                        stream << "            }\n";
                         break;
                     }
                     case OperationKind::kAssign:
@@ -7039,16 +7035,16 @@ namespace wolvrix::lib::emit
                                     procGuard = "first_eval_";
                                 }
                                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                                stream << "        if (" << procGuard << ") {\n";
-                                stream << "            const auto next_value = static_cast<"
+                                stream << "            if (" << procGuard << ") {\n";
+                                stream << "                const auto next_value = static_cast<"
                                        << cppTypeForValue(graph, resultValue) << ">(grhsim_trunc_u64(open_file_handle("
                                        << pathExpr << ", " << modeExpr << "), "
                                        << graph.valueWidth(resultValue) << "));\n";
-                                stream << "            if (" << lhs << " != next_value) {\n";
+                                stream << "                if (" << lhs << " != next_value) {\n";
                                 emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
-                                stream << "                " << lhs << " = next_value;\n";
+                                stream << "                    " << lhs << " = next_value;\n";
+                                stream << "                }\n";
                                 stream << "            }\n";
-                                stream << "        }\n";
                                 break;
                             }
                             if (name == "ferror")
@@ -7065,17 +7061,17 @@ namespace wolvrix::lib::emit
                                 }
                                 const std::string lhs = valueRef(model, resultValue);
                                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                                stream << "        {\n";
-                                stream << "            const auto next_value = static_cast<"
+                                stream << "            {\n";
+                                stream << "                const auto next_value = static_cast<"
                                        << cppTypeForValue(graph, resultValue)
                                        << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(file_error_status(grhsim_task_arg_u64("
                                        << systemTaskArgExpr(graph, model, operands[0], &localExprContext) << "))), "
                                        << graph.valueWidth(resultValue) << "));\n";
-                                stream << "            if (" << lhs << " != next_value) {\n";
+                                stream << "                if (" << lhs << " != next_value) {\n";
                                 emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
-                                stream << "                " << lhs << " = next_value;\n";
+                                stream << "                    " << lhs << " = next_value;\n";
+                                stream << "                }\n";
                                 stream << "            }\n";
-                                stream << "        }\n";
                                 break;
                             }
                         }
@@ -7128,7 +7124,7 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
-                        stream << "        // System tasks are side effects. They execute in schedule order when condition and exact event both hit.\n";
+                        stream << "            // System tasks are side effects. They execute in schedule order when condition and exact event both hit.\n";
                         std::string procGuard = "true";
                         if (systemTaskRunsOnlyOnInitialEval(op))
                         {
@@ -7139,29 +7135,29 @@ namespace wolvrix::lib::emit
                         {
                             procGuard = "(" + procGuard + ") && (!" + sampleIt->second.completedFieldName + ")";
                         }
-                        stream << "        if ((" << condExpr << ") && (" << *eventExpr << ") && (" << procGuard << ")) {\n";
+                        stream << "            if ((" << condExpr << ") && (" << *eventExpr << ") && (" << procGuard << ")) {\n";
                         if (argEnd <= 1)
                         {
-                            stream << "            execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                            stream << "                execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
                         }
                         else
                         {
-                            stream << "            execute_system_task(\"" << escapeCppString(name) << "\", {";
+                            stream << "                execute_system_task(\"" << escapeCppString(name) << "\", {";
                             for (std::size_t i = 1; i < argEnd; ++i)
                             {
                                 if (i != 1)
                                 {
-                                    stream << ", ";
+                                    stream << "    , ";
                                 }
                                 stream << systemTaskArgExpr(graph, model, operands[i], &localExprContext);
                             }
-                            stream << "});\n";
+                            stream << "    });\n";
                         }
                         if (sampleIt != model.eventSamplesByOp.end() && !sampleIt->second.completedFieldName.empty())
                         {
-                            stream << "            " << sampleIt->second.completedFieldName << " = true;\n";
+                            stream << "                " << sampleIt->second.completedFieldName << " = true;\n";
                         }
-                        stream << "        }\n";
+                        stream << "            }\n";
                         break;
                     }
                     case OperationKind::kDpicCall:
@@ -7187,8 +7183,8 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
-                        stream << "        // DPIC calls may produce side effects and output values, so they stay as explicit schedule boundaries.\n";
-                        stream << "        if ((" << condExpr << ") && (" << *eventExpr << ")) {\n";
+                        stream << "            // DPIC calls may produce side effects and output values, so they stay as explicit schedule boundaries.\n";
+                        stream << "            if ((" << condExpr << ") && (" << *eventExpr << ")) {\n";
                         std::vector<std::string> deferredArgs;
                         std::size_t resultBase = hasReturn ? 1u : 0u;
                         for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
@@ -7222,7 +7218,7 @@ namespace wolvrix::lib::emit
                                     return emitError("kDpicCall missing matching output arg", formalName);
                                 }
                                 const std::string tempName = "dpi_out_" + std::to_string(i);
-                                stream << "            "
+                                stream << "                "
                                        << dpiBaseCppType(argType, argWidth, argSigned)
                                        << " " << tempName << "{};\n";
                                 deferredArgs.push_back("&" + tempName);
@@ -7236,9 +7232,9 @@ namespace wolvrix::lib::emit
                         if (hasReturn)
                         {
                             const ValueId returnValue = op.results()[0];
-                            stream << "            auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
+                            stream << "                auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
                                    << "(" << joinStrings(deferredArgs, ", ") << ");\n";
-                            stream << "            if (" << valueRef(model, returnValue) << " != dpi_ret) {\n";
+                            stream << "                if (" << valueRef(model, returnValue) << " != dpi_ret) {\n";
                             emitChangedValueEffects(stream,
                                                     model,
                                                     returnValue,
@@ -7246,8 +7242,8 @@ namespace wolvrix::lib::emit
                                                     "dpi_ret",
                                                     "                ",
                                                     &activationContext);
-                            stream << "                " << valueRef(model, returnValue) << " = dpi_ret;\n";
-                            stream << "            }\n";
+                            stream << "                    " << valueRef(model, returnValue) << " = dpi_ret;\n";
+                            stream << "                }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
                                 const std::string &direction = decl.argsDirection[i];
@@ -7263,16 +7259,16 @@ namespace wolvrix::lib::emit
                                         op.results()[resultBase + static_cast<std::size_t>(outputIndex)];
                                     const std::string lhs =
                                         valueRef(model, resultValue);
-                                    stream << "            if (" << lhs << " != " << tempName << ") {\n";
+                                    stream << "                if (" << lhs << " != " << tempName << ") {\n";
                                     emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
-                                    stream << "                " << lhs << " = " << tempName << ";\n";
-                                    stream << "            }\n";
+                                    stream << "                    " << lhs << " = " << tempName << ";\n";
+                                    stream << "                }\n";
                                 }
                             }
                         }
                         else
                         {
-                            stream << "            " << sanitizeIdentifier(decl.symbol) << "(" << joinStrings(deferredArgs, ", ") << ");\n";
+                            stream << "                " << sanitizeIdentifier(decl.symbol) << "(" << joinStrings(deferredArgs, ", ") << ");\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
                                 const std::string &direction = decl.argsDirection[i];
@@ -7288,14 +7284,14 @@ namespace wolvrix::lib::emit
                                         op.results()[resultBase + static_cast<std::size_t>(outputIndex)];
                                     const std::string lhs =
                                         valueRef(model, resultValue);
-                                    stream << "            if (" << lhs << " != " << tempName << ") {\n";
+                                    stream << "                if (" << lhs << " != " << tempName << ") {\n";
                                     emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
-                                    stream << "                " << lhs << " = " << tempName << ";\n";
-                                    stream << "            }\n";
+                                    stream << "                    " << lhs << " = " << tempName << ";\n";
+                                    stream << "                }\n";
                                 }
                             }
                         }
-                        stream << "        }\n";
+                        stream << "            }\n";
                         break;
                     }
                     case OperationKind::kRegister:
@@ -7308,14 +7304,13 @@ namespace wolvrix::lib::emit
                     }
                     ++opIndex;
                 }
-                    stream << "    }\n";
-                    stream << "supernode_" << supernodeId << "_end:\n";
+                    stream << "        }\n";
+                    stream << "        }\n";
                 }
-                stream << "active_word_" << word.activeFlagWordIndex << "_end:\n";
-                stream << "        ;\n";
-                stream << "    }\n";
+                stream << "            }\n";
+                stream << "        }\n";
             }
-            stream << "    return stats;\n";
+            stream << "        return stats;\n";
             stream << "}\n";
             if (model.emitWaveform)
             {
@@ -10449,6 +10444,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "#pragma once\n\n";
+            *stream << "#ifndef unlikely\n";
+            *stream << "#define unlikely(x) __builtin_expect(!!(x), 0)\n";
+            *stream << "#endif\n\n";
             *stream << "#include <array>\n";
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdint>\n";
