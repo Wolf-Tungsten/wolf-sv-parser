@@ -741,6 +741,7 @@ namespace wolvrix::lib::emit
             return name == prefixText + ".hpp" ||
                    name == prefixText + "_runtime.hpp" ||
                    name == prefixText + "_declared_value_index.txt" ||
+                   name == prefixText + "_packed_value_index.txt" ||
                    name == prefixText + "_state.cpp" ||
                    name == prefixText + "_state.o" ||
                    name == prefixText + "_eval.cpp" ||
@@ -1550,13 +1551,13 @@ namespace wolvrix::lib::emit
         struct ValueScalarSlotRef
         {
             ValueSlotScalarKind kind = ValueSlotScalarKind::kBool;
-            std::size_t index = 0;
+            std::size_t byteOffset = 0;
         };
 
         struct ValueWideSlotRef
         {
             std::size_t wordCount = 0;
-            std::size_t index = 0;
+            std::size_t byteOffset = 0;
         };
 
         struct WaveformSignalDecl
@@ -1619,22 +1620,37 @@ namespace wolvrix::lib::emit
             std::vector<std::string> inputFieldDecls;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> valueScalarSlotCounts{};
             std::map<std::size_t, std::size_t> valueWideSlotCountsByWords;
+            std::size_t valueLogicStorageBytes = 0;
             std::size_t valueRealSlotCount = 0;
             std::size_t valueStringSlotCount = 0;
             std::size_t eventEdgeSlotCount = 0;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> stateLogicScalarSlotCounts{};
+            std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> stateLogicScalarBaseOffsets{};
             std::map<std::size_t, std::size_t> stateLogicWideSlotCountsByWords;
+            std::map<std::size_t, std::size_t> stateLogicWideBaseOffsetsByWords;
+            std::size_t stateLogicStorageBytes = 0;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> stateMemoryScalarSlotCounts{};
             std::map<std::size_t, std::size_t> stateMemoryWideSlotCountsByWords;
             std::size_t stateShadowTouchedCount = 0;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> stateShadowScalarSlotCounts{};
             std::map<std::size_t, std::size_t> stateShadowWideSlotCountsByWords;
+            std::size_t stateShadowTouchedBaseOffset = 0;
+            std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> stateShadowScalarBaseOffsets{};
+            std::map<std::size_t, std::size_t> stateShadowWideBaseOffsetsByWords;
+            std::size_t stateShadowStorageBytes = 0;
             std::size_t memoryWriteTouchedCount = 0;
             std::size_t memoryWriteAddrCount = 0;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteDataScalarSlotCounts{};
             std::map<std::size_t, std::size_t> memoryWriteDataWideSlotCountsByWords;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteMaskScalarSlotCounts{};
             std::map<std::size_t, std::size_t> memoryWriteMaskWideSlotCountsByWords;
+            std::size_t memoryWriteTouchedBaseOffset = 0;
+            std::size_t memoryWriteAddrBaseOffset = 0;
+            std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteDataScalarBaseOffsets{};
+            std::map<std::size_t, std::size_t> memoryWriteDataWideBaseOffsetsByWords;
+            std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteMaskScalarBaseOffsets{};
+            std::map<std::size_t, std::size_t> memoryWriteMaskWideBaseOffsetsByWords;
+            std::size_t memoryWriteStorageBytes = 0;
             bool needsSystemTaskRuntime = false;
             bool emitPerf = false;
             bool emitWaveform = false;
@@ -1644,6 +1660,178 @@ namespace wolvrix::lib::emit
         {
             return model.inputFieldByValue.find(value) != model.inputFieldByValue.end() ||
                    model.materializedValues.find(value) != model.materializedValues.end();
+        }
+
+        ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width);
+        std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind);
+        std::size_t alignTo(std::size_t offset, std::size_t alignment);
+        std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view indexExpr);
+        std::string valueWideRefExpr(std::size_t wordCount, std::string_view indexExpr);
+
+        void rebuildMaterializedValueStorage(const Graph &graph,
+                                             std::span<const ValueId> orderedValues,
+                                             EmitModel &model)
+        {
+            model.valueFieldByValue.clear();
+            model.valueScalarSlotByValue.clear();
+            model.valueWideSlotByValue.clear();
+            model.valueRealSlotByValue.clear();
+            model.valueStringSlotByValue.clear();
+            model.valueScalarSlotCounts = {};
+            model.valueWideSlotCountsByWords.clear();
+            model.valueLogicStorageBytes = 0;
+            model.valueRealSlotCount = 0;
+            model.valueStringSlotCount = 0;
+
+            std::size_t valueLogicStorageBytes = 0;
+            for (ValueId valueId : orderedValues)
+            {
+                if (!model.materializedValues.contains(valueId))
+                {
+                    continue;
+                }
+                switch (graph.valueType(valueId))
+                {
+                case ValueType::Real:
+                {
+                    const std::size_t slotIndex = model.valueRealSlotCount++;
+                    model.valueRealSlotByValue.emplace(valueId, slotIndex);
+                    model.valueFieldByValue.emplace(valueId, "value_real_slots_[" + std::to_string(slotIndex) + "]");
+                    break;
+                }
+                case ValueType::String:
+                {
+                    const std::size_t slotIndex = model.valueStringSlotCount++;
+                    model.valueStringSlotByValue.emplace(valueId, slotIndex);
+                    model.valueFieldByValue.emplace(valueId, "value_string_slots_[" + std::to_string(slotIndex) + "]");
+                    break;
+                }
+                case ValueType::Logic:
+                default:
+                {
+                    if (isWideLogicValue(graph, valueId))
+                    {
+                        const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
+                        valueLogicStorageBytes = alignTo(valueLogicStorageBytes, alignof(std::uint64_t));
+                        const std::size_t byteOffset = valueLogicStorageBytes;
+                        valueLogicStorageBytes += wordCount * sizeof(std::uint64_t);
+                        model.valueWideSlotCountsByWords[wordCount]++;
+                        model.valueWideSlotByValue.emplace(
+                            valueId, ValueWideSlotRef{.wordCount = wordCount, .byteOffset = byteOffset});
+                        model.valueFieldByValue.emplace(valueId, valueWideRefExpr(wordCount, std::to_string(byteOffset)));
+                    }
+                    else
+                    {
+                        const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
+                        const std::size_t slotBytes = valueScalarSlotByteSize(slotKind);
+                        valueLogicStorageBytes = alignTo(valueLogicStorageBytes, slotBytes);
+                        const std::size_t byteOffset = valueLogicStorageBytes;
+                        valueLogicStorageBytes += slotBytes;
+                        model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                        model.valueScalarSlotByValue.emplace(
+                            valueId, ValueScalarSlotRef{.kind = slotKind, .byteOffset = byteOffset});
+                        model.valueFieldByValue.emplace(valueId, valueScalarRefExpr(slotKind, std::to_string(byteOffset)));
+                    }
+                    break;
+                }
+                }
+            }
+            model.valueLogicStorageBytes = valueLogicStorageBytes;
+        }
+
+        std::vector<ValueId> buildBatchHotValueOrder(const Graph &graph,
+                                                     const EmitModel &model,
+                                                     std::span<const ScheduleBatch> scheduleBatches,
+                                                     const ActivityScheduleSupernodeToOps &supernodeToOps)
+        {
+            struct ValueHotness
+            {
+                std::size_t firstBatch = kInvalidIndex;
+                std::size_t totalTouches = 0;
+                std::size_t graphOrder = kInvalidIndex;
+            };
+
+            std::unordered_map<ValueId, ValueHotness, ValueIdHash> hotnessByValue;
+            hotnessByValue.reserve(model.materializedValues.size());
+
+            std::size_t graphOrder = 0;
+            for (ValueId valueId : graph.values())
+            {
+                if (!model.materializedValues.contains(valueId))
+                {
+                    ++graphOrder;
+                    continue;
+                }
+                hotnessByValue.emplace(valueId,
+                                       ValueHotness{
+                                           .firstBatch = kInvalidIndex,
+                                           .totalTouches = 0,
+                                           .graphOrder = graphOrder,
+                                       });
+                ++graphOrder;
+            }
+
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                const ScheduleBatch &batch = scheduleBatches[batchIndex];
+                for (uint32_t supernodeId : batch.supernodeIds)
+                {
+                    if (supernodeId >= supernodeToOps.size())
+                    {
+                        continue;
+                    }
+                    for (const OperationId opId : supernodeToOps[supernodeId])
+                    {
+                        const Operation op = graph.getOperation(opId);
+                        auto touchValue = [&](ValueId valueId) {
+                            auto it = hotnessByValue.find(valueId);
+                            if (it == hotnessByValue.end())
+                            {
+                                return;
+                            }
+                            if (it->second.firstBatch == kInvalidIndex)
+                            {
+                                it->second.firstBatch = batchIndex;
+                            }
+                            ++it->second.totalTouches;
+                        };
+                        for (ValueId operand : op.operands())
+                        {
+                            touchValue(operand);
+                        }
+                        for (ValueId result : op.results())
+                        {
+                            touchValue(result);
+                        }
+                    }
+                }
+            }
+
+            std::vector<ValueId> orderedValues;
+            orderedValues.reserve(model.materializedValues.size());
+            for (const auto &[valueId, _] : hotnessByValue)
+            {
+                (void)_;
+                orderedValues.push_back(valueId);
+            }
+
+            std::sort(orderedValues.begin(),
+                      orderedValues.end(),
+                      [&](ValueId lhs, ValueId rhs)
+                      {
+                          const ValueHotness &lhsInfo = hotnessByValue.at(lhs);
+                          const ValueHotness &rhsInfo = hotnessByValue.at(rhs);
+                          if (lhsInfo.firstBatch != rhsInfo.firstBatch)
+                          {
+                              return lhsInfo.firstBatch < rhsInfo.firstBatch;
+                          }
+                          if (lhsInfo.totalTouches != rhsInfo.totalTouches)
+                          {
+                              return lhsInfo.totalTouches > rhsInfo.totalTouches;
+                          }
+                          return lhsInfo.graphOrder < rhsInfo.graphOrder;
+                      });
+            return orderedValues;
         }
 
         bool emitMaterializedConstantInit(std::ostream &stream,
@@ -1765,19 +1953,73 @@ namespace wolvrix::lib::emit
             return std::string(prefix) + "unknown_slots_";
         }
 
-        std::string valueScalarSlotFieldName(ValueSlotScalarKind kind)
-        {
-            return scalarLogicSlotFieldName("value_", kind);
-        }
-
         std::string wideLogicSlotFieldName(std::string_view prefix, std::size_t wordCount)
         {
             return std::string(prefix) + "words_" + std::to_string(wordCount) + "_slots_";
         }
 
-        std::string valueWideSlotFieldName(std::size_t wordCount)
+        std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind)
         {
-            return wideLogicSlotFieldName("value_", wordCount);
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+            case ValueSlotScalarKind::kU8:
+                return sizeof(std::uint8_t);
+            case ValueSlotScalarKind::kU16:
+                return sizeof(std::uint16_t);
+            case ValueSlotScalarKind::kU32:
+                return sizeof(std::uint32_t);
+            case ValueSlotScalarKind::kU64:
+                return sizeof(std::uint64_t);
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return sizeof(std::uint64_t);
+        }
+
+        std::size_t alignTo(std::size_t offset, std::size_t alignment)
+        {
+            if (alignment <= 1)
+            {
+                return offset;
+            }
+            const std::size_t mask = alignment - 1;
+            return (offset + mask) & ~mask;
+        }
+
+        std::string valueScalarRefName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "value_bool_ref";
+            case ValueSlotScalarKind::kU8:
+                return "value_u8_ref";
+            case ValueSlotScalarKind::kU16:
+                return "value_u16_ref";
+            case ValueSlotScalarKind::kU32:
+                return "value_u32_ref";
+            case ValueSlotScalarKind::kU64:
+                return "value_u64_ref";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "value_unknown_ref";
+        }
+
+        std::string valueWideRefName(std::size_t wordCount)
+        {
+            return "value_words_" + std::to_string(wordCount) + "_ref";
+        }
+
+        std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view byteOffsetExpr)
+        {
+            return valueScalarRefName(kind) + "(" + std::string(byteOffsetExpr) + ")";
+        }
+
+        std::string valueWideRefExpr(std::size_t wordCount, std::string_view byteOffsetExpr)
+        {
+            return valueWideRefName(wordCount) + "(" + std::string(byteOffsetExpr) + ")";
         }
 
         std::string fixedArrayType(std::string_view elemType, std::size_t count)
@@ -1804,9 +2046,124 @@ namespace wolvrix::lib::emit
             return scalarLogicSlotFieldName("state_logic_", kind);
         }
 
+        std::string stateLogicScalarBaseOffsetConstName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "kStateLogicBoolBaseOffset";
+            case ValueSlotScalarKind::kU8:
+                return "kStateLogicU8BaseOffset";
+            case ValueSlotScalarKind::kU16:
+                return "kStateLogicU16BaseOffset";
+            case ValueSlotScalarKind::kU32:
+                return "kStateLogicU32BaseOffset";
+            case ValueSlotScalarKind::kU64:
+                return "kStateLogicU64BaseOffset";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "kStateLogicUnknownBaseOffset";
+        }
+
         std::string stateLogicWideSlotFieldName(std::size_t wordCount)
         {
             return wideLogicSlotFieldName("state_logic_", wordCount);
+        }
+
+        std::string stateLogicWideBaseOffsetConstName(std::size_t wordCount)
+        {
+            return "kStateLogicWords" + std::to_string(wordCount) + "BaseOffset";
+        }
+
+        std::string stateShadowTouchedBaseOffsetConstName()
+        {
+            return "kStateShadowTouchedBaseOffset";
+        }
+
+        std::string stateShadowScalarBaseOffsetConstName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "kStateShadowBoolBaseOffset";
+            case ValueSlotScalarKind::kU8:
+                return "kStateShadowU8BaseOffset";
+            case ValueSlotScalarKind::kU16:
+                return "kStateShadowU16BaseOffset";
+            case ValueSlotScalarKind::kU32:
+                return "kStateShadowU32BaseOffset";
+            case ValueSlotScalarKind::kU64:
+                return "kStateShadowU64BaseOffset";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "kStateShadowUnknownBaseOffset";
+        }
+
+        std::string stateShadowWideBaseOffsetConstName(std::size_t wordCount)
+        {
+            return "kStateShadowWords" + std::to_string(wordCount) + "BaseOffset";
+        }
+
+        std::string memoryWriteTouchedBaseOffsetConstName()
+        {
+            return "kMemoryWriteTouchedBaseOffset";
+        }
+
+        std::string memoryWriteAddrBaseOffsetConstName()
+        {
+            return "kMemoryWriteAddrBaseOffset";
+        }
+
+        std::string memoryWriteDataScalarBaseOffsetConstName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "kMemoryWriteDataBoolBaseOffset";
+            case ValueSlotScalarKind::kU8:
+                return "kMemoryWriteDataU8BaseOffset";
+            case ValueSlotScalarKind::kU16:
+                return "kMemoryWriteDataU16BaseOffset";
+            case ValueSlotScalarKind::kU32:
+                return "kMemoryWriteDataU32BaseOffset";
+            case ValueSlotScalarKind::kU64:
+                return "kMemoryWriteDataU64BaseOffset";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "kMemoryWriteDataUnknownBaseOffset";
+        }
+
+        std::string memoryWriteDataWideBaseOffsetConstName(std::size_t wordCount)
+        {
+            return "kMemoryWriteDataWords" + std::to_string(wordCount) + "BaseOffset";
+        }
+
+        std::string memoryWriteMaskScalarBaseOffsetConstName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "kMemoryWriteMaskBoolBaseOffset";
+            case ValueSlotScalarKind::kU8:
+                return "kMemoryWriteMaskU8BaseOffset";
+            case ValueSlotScalarKind::kU16:
+                return "kMemoryWriteMaskU16BaseOffset";
+            case ValueSlotScalarKind::kU32:
+                return "kMemoryWriteMaskU32BaseOffset";
+            case ValueSlotScalarKind::kU64:
+                return "kMemoryWriteMaskU64BaseOffset";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "kMemoryWriteMaskUnknownBaseOffset";
+        }
+
+        std::string memoryWriteMaskWideBaseOffsetConstName(std::size_t wordCount)
+        {
+            return "kMemoryWriteMaskWords" + std::to_string(wordCount) + "BaseOffset";
         }
 
         std::string stateMemoryScalarSlotFieldName(ValueSlotScalarKind kind)
@@ -2826,6 +3183,127 @@ namespace wolvrix::lib::emit
                 }
             }
 
+            model.stateLogicScalarBaseOffsets = {};
+            model.stateLogicWideBaseOffsetsByWords.clear();
+            model.stateLogicStorageBytes = 0;
+            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+            {
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                const std::size_t slotBytes = valueScalarSlotByteSize(kind);
+                model.stateLogicStorageBytes = alignTo(model.stateLogicStorageBytes, slotBytes);
+                model.stateLogicScalarBaseOffsets[kindIndex] = model.stateLogicStorageBytes;
+                model.stateLogicStorageBytes += slotCount * slotBytes;
+            }
+            for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.stateLogicStorageBytes = alignTo(model.stateLogicStorageBytes, alignof(std::uint64_t));
+                model.stateLogicWideBaseOffsetsByWords.emplace(wordCount, model.stateLogicStorageBytes);
+                model.stateLogicStorageBytes += slotCount * wordCount * sizeof(std::uint64_t);
+            }
+
+            model.stateShadowTouchedBaseOffset = 0;
+            model.stateShadowScalarBaseOffsets = {};
+            model.stateShadowWideBaseOffsetsByWords.clear();
+            model.stateShadowStorageBytes = 0;
+            if (model.stateShadowTouchedCount != 0)
+            {
+                model.stateShadowStorageBytes = alignTo(model.stateShadowStorageBytes, alignof(std::uint8_t));
+                model.stateShadowTouchedBaseOffset = model.stateShadowStorageBytes;
+                model.stateShadowStorageBytes += model.stateShadowTouchedCount * sizeof(std::uint8_t);
+            }
+            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+            {
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                const std::size_t slotBytes = valueScalarSlotByteSize(kind);
+                model.stateShadowStorageBytes = alignTo(model.stateShadowStorageBytes, slotBytes);
+                model.stateShadowScalarBaseOffsets[kindIndex] = model.stateShadowStorageBytes;
+                model.stateShadowStorageBytes += slotCount * slotBytes;
+            }
+            for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.stateShadowStorageBytes = alignTo(model.stateShadowStorageBytes, alignof(std::uint64_t));
+                model.stateShadowWideBaseOffsetsByWords.emplace(wordCount, model.stateShadowStorageBytes);
+                model.stateShadowStorageBytes += slotCount * wordCount * sizeof(std::uint64_t);
+            }
+
+            model.memoryWriteTouchedBaseOffset = 0;
+            model.memoryWriteAddrBaseOffset = 0;
+            model.memoryWriteDataScalarBaseOffsets = {};
+            model.memoryWriteDataWideBaseOffsetsByWords.clear();
+            model.memoryWriteMaskScalarBaseOffsets = {};
+            model.memoryWriteMaskWideBaseOffsetsByWords.clear();
+            model.memoryWriteStorageBytes = 0;
+            if (model.memoryWriteTouchedCount != 0)
+            {
+                model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, alignof(std::uint8_t));
+                model.memoryWriteTouchedBaseOffset = model.memoryWriteStorageBytes;
+                model.memoryWriteStorageBytes += model.memoryWriteTouchedCount * sizeof(std::uint8_t);
+            }
+            if (model.memoryWriteAddrCount != 0)
+            {
+                model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, alignof(std::size_t));
+                model.memoryWriteAddrBaseOffset = model.memoryWriteStorageBytes;
+                model.memoryWriteStorageBytes += model.memoryWriteAddrCount * sizeof(std::size_t);
+            }
+            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+            {
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
+                if (dataCount != 0)
+                {
+                    const std::size_t slotBytes = valueScalarSlotByteSize(kind);
+                    model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, slotBytes);
+                    model.memoryWriteDataScalarBaseOffsets[kindIndex] = model.memoryWriteStorageBytes;
+                    model.memoryWriteStorageBytes += dataCount * slotBytes;
+                }
+                const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
+                if (maskCount != 0)
+                {
+                    const std::size_t slotBytes = valueScalarSlotByteSize(kind);
+                    model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, slotBytes);
+                    model.memoryWriteMaskScalarBaseOffsets[kindIndex] = model.memoryWriteStorageBytes;
+                    model.memoryWriteStorageBytes += maskCount * slotBytes;
+                }
+            }
+            for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, alignof(std::uint64_t));
+                model.memoryWriteDataWideBaseOffsetsByWords.emplace(wordCount, model.memoryWriteStorageBytes);
+                model.memoryWriteStorageBytes += slotCount * wordCount * sizeof(std::uint64_t);
+            }
+            for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.memoryWriteStorageBytes = alignTo(model.memoryWriteStorageBytes, alignof(std::uint64_t));
+                model.memoryWriteMaskWideBaseOffsetsByWords.emplace(wordCount, model.memoryWriteStorageBytes);
+                model.memoryWriteStorageBytes += slotCount * wordCount * sizeof(std::uint64_t);
+            }
+
             for (OperationId opId : graph.operations())
             {
                 const Operation op = graph.getOperation(opId);
@@ -3181,56 +3659,72 @@ namespace wolvrix::lib::emit
                         }
                     }
                 }
+            }
 
+            std::vector<ValueId> materializedValueOrder;
+            materializedValueOrder.reserve(persistentValues.size());
+            std::unordered_set<ValueId, ValueIdHash> queuedMaterializedValues;
+            queuedMaterializedValues.reserve(persistentValues.size());
+
+            auto queueMaterializedValue = [&](ValueId valueId) {
+                if (!valueId.valid() || model.inputFieldByValue.contains(valueId) || !persistentValues.contains(valueId))
+                {
+                    return;
+                }
+                if (!queuedMaterializedValues.insert(valueId).second)
+                {
+                    return;
+                }
+                materializedValueOrder.push_back(valueId);
+            };
+
+            auto queueSupernodeValues = [&](uint32_t supernodeId) {
+                if (supernodeId >= schedule.supernodeToOps.size())
+                {
+                    return;
+                }
+                for (const OperationId opId : schedule.supernodeToOps[supernodeId])
+                {
+                    const Operation op = graph.getOperation(opId);
+                    for (const ValueId operand : op.operands())
+                    {
+                        queueMaterializedValue(operand);
+                    }
+                    for (const ValueId result : op.results())
+                    {
+                        queueMaterializedValue(result);
+                    }
+                }
+            };
+
+            for (uint32_t supernodeId : model.computeSupernodeIds)
+            {
+                queueSupernodeValues(supernodeId);
+            }
+            for (uint32_t supernodeId : model.commitSupernodeIds)
+            {
+                queueSupernodeValues(supernodeId);
+            }
+
+            for (ValueId valueId : graph.values())
+            {
+                if (model.inputFieldByValue.find(valueId) != model.inputFieldByValue.end())
+                {
+                    continue;
+                }
                 if (!persistentValues.contains(valueId))
                 {
                     model.localValueNameByValue.emplace(valueId, localValueName(graph, valueId));
                     continue;
                 }
-
-                model.materializedValues.insert(valueId);
-                switch (graph.valueType(valueId))
-                {
-                case ValueType::Real:
-                {
-                    const std::size_t slotIndex = model.valueRealSlotCount++;
-                    model.valueRealSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, "value_real_slots_[" + std::to_string(slotIndex) + "]");
-                    break;
-                }
-                case ValueType::String:
-                {
-                    const std::size_t slotIndex = model.valueStringSlotCount++;
-                    model.valueStringSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, "value_string_slots_[" + std::to_string(slotIndex) + "]");
-                    break;
-                }
-                case ValueType::Logic:
-                default:
-                {
-                    if (isWideLogicValue(graph, valueId))
-                    {
-                        const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
-                        const std::size_t slotIndex = model.valueWideSlotCountsByWords[wordCount]++;
-                        model.valueWideSlotByValue.emplace(
-                            valueId, ValueWideSlotRef{.wordCount = wordCount, .index = slotIndex});
-                        model.valueFieldByValue.emplace(
-                            valueId, valueWideSlotFieldName(wordCount) + "[" + std::to_string(slotIndex) + "]");
-                    }
-                    else
-                    {
-                        const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                        const std::size_t slotIndex =
-                            model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
-                        model.valueScalarSlotByValue.emplace(
-                            valueId, ValueScalarSlotRef{.kind = slotKind, .index = slotIndex});
-                        model.valueFieldByValue.emplace(
-                            valueId, valueScalarSlotFieldName(slotKind) + "[" + std::to_string(slotIndex) + "]");
-                    }
-                    break;
-                }
-                }
+                queueMaterializedValue(valueId);
             }
+
+            for (ValueId valueId : materializedValueOrder)
+            {
+                model.materializedValues.insert(valueId);
+            }
+            rebuildMaterializedValueStorage(graph, materializedValueOrder, model);
 
             for (const auto &[stateSymbol, supernodes] : schedule.stateReadSupernodes)
             {
@@ -3307,11 +3801,11 @@ namespace wolvrix::lib::emit
             }
             if (auto it = model.valueScalarSlotByValue.find(value); it != model.valueScalarSlotByValue.end())
             {
-                return valueScalarSlotFieldName(it->second.kind) + "[" + std::to_string(it->second.index) + "]";
+                return valueScalarRefExpr(it->second.kind, std::to_string(it->second.byteOffset));
             }
             if (auto it = model.valueWideSlotByValue.find(value); it != model.valueWideSlotByValue.end())
             {
-                return valueWideSlotFieldName(it->second.wordCount) + "[" + std::to_string(it->second.index) + "]";
+                return valueWideRefExpr(it->second.wordCount, std::to_string(it->second.byteOffset));
             }
             if (auto it = model.valueRealSlotByValue.find(value); it != model.valueRealSlotByValue.end())
             {
@@ -6364,12 +6858,12 @@ namespace wolvrix::lib::emit
             }
             return TableCompressibleScalarStateWriteDesc{
                 .kind = write.shadowScalarKind,
-                .condIndex = static_cast<std::uint32_t>(condIt->second.index),
+                .condIndex = static_cast<std::uint32_t>(condIt->second.byteOffset),
                 .touchedIndex = static_cast<std::uint32_t>(shadow.touchedIndex),
                 .shadowDataIndex = static_cast<std::uint32_t>(shadow.dataIndex),
                 .stateDataIndex = static_cast<std::uint32_t>(state.slotIndex),
-                .nextIndex = static_cast<std::uint32_t>(nextIt->second.index),
-                .maskIndex = static_cast<std::uint32_t>(maskIt->second.index),
+                .nextIndex = static_cast<std::uint32_t>(nextIt->second.byteOffset),
+                .maskIndex = static_cast<std::uint32_t>(maskIt->second.byteOffset),
                 .shadowIndex = static_cast<std::uint32_t>(write.shadowIndex),
             };
         }
@@ -6436,10 +6930,10 @@ namespace wolvrix::lib::emit
             (void)graph;
             return DirectCommitScalarStateWriteDesc{
                 .kind = state.scalarKind,
-                .condIndex = static_cast<std::uint32_t>(condIt->second.index),
+                .condIndex = static_cast<std::uint32_t>(condIt->second.byteOffset),
                 .stateDataIndex = static_cast<std::uint32_t>(state.slotIndex),
-                .nextIndex = static_cast<std::uint32_t>(nextIt->second.index),
-                .maskIndex = static_cast<std::uint32_t>(maskIt->second.index),
+                .nextIndex = static_cast<std::uint32_t>(nextIt->second.byteOffset),
+                .maskIndex = static_cast<std::uint32_t>(maskIt->second.byteOffset),
                 .activationEntries = std::move(activationEntries),
             };
         }
@@ -6487,6 +6981,8 @@ namespace wolvrix::lib::emit
                 return "scalar_state_write_u32_range_desc";
             case ValueSlotScalarKind::kU64:
                 return "scalar_state_write_u64_range_desc";
+            case ValueSlotScalarKind::kCount:
+                break;
             }
             return "scalar_state_write_u64_range_desc";
         }
@@ -6505,6 +7001,8 @@ namespace wolvrix::lib::emit
                 return "apply_scalar_state_write_u32_range";
             case ValueSlotScalarKind::kU64:
                 return "apply_scalar_state_write_u64_range";
+            case ValueSlotScalarKind::kCount:
+                break;
             }
             return "apply_scalar_state_write_u64_range";
         }
@@ -6523,6 +7021,8 @@ namespace wolvrix::lib::emit
                 return "commit_scalar_state_write_u32_range_desc";
             case ValueSlotScalarKind::kU64:
                 return "commit_scalar_state_write_u64_range_desc";
+            case ValueSlotScalarKind::kCount:
+                break;
             }
             return "commit_scalar_state_write_u64_range_desc";
         }
@@ -6541,6 +7041,8 @@ namespace wolvrix::lib::emit
                 return "apply_commit_scalar_state_write_u32_range";
             case ValueSlotScalarKind::kU64:
                 return "apply_commit_scalar_state_write_u64_range";
+            case ValueSlotScalarKind::kCount:
+                break;
             }
             return "apply_commit_scalar_state_write_u64_range";
         }
@@ -6991,11 +7493,6 @@ namespace wolvrix::lib::emit
                     stream << "            activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
                            << static_cast<unsigned>(supernodeMask) << ")));\n";
                     stream << "        ++stats.executedSupernodes;\n";
-                    stream << "        if (activity_profile_enabled_) {\n";
-                    stream << "            ++activity_profile_current_executed_supernodes_;\n";
-                    stream << "            activity_profile_current_executed_ops_ += UINT64_C("
-                           << schedule.supernodeToOps[supernodeId].size() << ");\n";
-                    stream << "        }\n";
                     stream << "        {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
@@ -8095,7 +8592,6 @@ namespace wolvrix::lib::emit
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
         const std::size_t schedBatchTargetCount = parseScheduleBatchTargetCount(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
-        const PerfMode perfMode = parsePerfMode(options);
         const std::unordered_set<ValueId, ValueIdHash> waveformValueIds =
             waveformMode == WaveformMode::kDeclaredSymbols ? collectDeclaredSymbolWaveformValueIds(graph)
                                                            : std::unordered_set<ValueId, ValueIdHash>{};
@@ -8118,7 +8614,7 @@ namespace wolvrix::lib::emit
             return result;
         }
         model.emitWaveform = waveformMode != WaveformMode::kOff;
-        model.emitPerf = perfMode != PerfMode::kOff;
+        model.emitPerf = false;
         std::vector<ScheduleBatch> computeScheduleBatches =
             buildScheduleBatches(graph,
                                  model,
@@ -8153,6 +8649,12 @@ namespace wolvrix::lib::emit
         if (scheduleBatches.empty())
         {
             scheduleBatches.push_back(ScheduleBatch{.index = 0});
+        }
+        if (!model.materializedValues.empty())
+        {
+            std::vector<ValueId> batchHotValueOrder =
+                buildBatchHotValueOrder(graph, model, scheduleBatches, schedule.supernodeToOps);
+            rebuildMaterializedValueStorage(graph, batchHotValueOrder, model);
         }
         if (waveformMode == WaveformMode::kDeclaredSymbols)
         {
@@ -11163,11 +11665,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#ifndef unlikely\n";
             *stream << "#define unlikely(x) __builtin_expect(!!(x), 0)\n";
             *stream << "#endif\n\n";
+            *stream << "#include <algorithm>\n";
             *stream << "#include <array>\n";
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdint>\n";
-            if (model.emitWaveform)
-            *stream << "#include <algorithm>\n";
             *stream << "#include <memory>\n";
             *stream << "#include <utility>\n";
             *stream << "#include <string>\n";
@@ -11188,8 +11689,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    ~" << className << "();\n";
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
-            *stream << "    void clear_activity_profile();\n";
-            *stream << "    void dump_activity_profile() const;\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
             if (model.emitWaveform)
             {
@@ -11467,13 +11966,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                               bool deferred);\n\n";
             }
             *stream << "    bool first_eval_ = true;\n";
-            *stream << "    bool activity_profile_enabled_ = false;\n";
-            *stream << "    std::uint64_t activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
-            *stream << "    std::uint64_t activity_profile_current_executed_ops_ = UINT64_C(0);\n";
-            *stream << "    std::uint64_t activity_profile_current_peak_active_supernodes_ = UINT64_C(0);\n";
-            *stream << "    std::vector<std::uint64_t> activity_profile_executed_supernodes_;\n";
-            *stream << "    std::vector<std::uint64_t> activity_profile_executed_ops_;\n";
-            *stream << "    std::vector<std::uint64_t> activity_profile_peak_active_supernodes_;\n";
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    bool finalized_ = false;\n";
@@ -11518,8 +12010,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             if (model.eventEdgeSlotCount != 0)
             {
-                *stream << "    " << fixedArrayType("grhsim_event_edge_kind", model.eventEdgeSlotCount)
-                        << " event_edge_slots_{};\n";
+                *stream << "    static constexpr std::size_t kEventEdgeStorageBytes = "
+                        << (model.eventEdgeSlotCount * sizeof(std::uint8_t)) << ";\n";
+                *stream << "    alignas(std::uint8_t) "
+                        << fixedArrayType("std::byte", model.eventEdgeSlotCount * sizeof(std::uint8_t))
+                        << " event_edge_storage_{};\n";
+                *stream << "    grhsim_event_edge_kind *event_edge_slots_ = nullptr;\n";
             }
             *stream << '\n';
             for (const auto &decl : model.inputFieldDecls)
@@ -11530,15 +12026,37 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
+            *stream << "    static constexpr std::size_t kValueLogicStorageBytes = "
+                    << model.valueLogicStorageBytes << ";\n";
+            *stream << "    alignas(std::uint64_t) " << fixedArrayType("std::byte", model.valueLogicStorageBytes)
+                    << " value_logic_storage_{};\n";
+            *stream << "    template <typename T>\n";
+            *stream << "    T &value_logic_storage_ref(std::size_t byteOffset) noexcept\n";
+            *stream << "    {\n";
+            *stream << "        return *reinterpret_cast<T *>(value_logic_storage_.data() + byteOffset);\n";
+            *stream << "    }\n";
+            *stream << "    template <typename T>\n";
+            *stream << "    const T &value_logic_storage_ref(std::size_t byteOffset) const noexcept\n";
+            *stream << "    {\n";
+            *stream << "        return *reinterpret_cast<const T *>(value_logic_storage_.data() + byteOffset);\n";
+            *stream << "    }\n";
             for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
             {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
                 if (model.valueScalarSlotCounts[kindIndex] == 0)
                 {
                     continue;
                 }
-                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), model.valueScalarSlotCounts[kindIndex])
-                        << " " << valueScalarSlotFieldName(kind) << "{};\n";
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::string type = scalarLogicSlotCppType(kind);
+                const std::string refName = valueScalarRefName(kind);
+                *stream << "    " << type << " &" << refName << "(std::size_t byteOffset) noexcept\n";
+                *stream << "    {\n";
+                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
+                *stream << "    }\n";
+                *stream << "    const " << type << " &" << refName << "(std::size_t byteOffset) const noexcept\n";
+                *stream << "    {\n";
+                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
+                *stream << "    }\n";
             }
             for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
             {
@@ -11546,8 +12064,16 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     continue;
                 }
-                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
-                        << valueWideSlotFieldName(wordCount) << "{};\n";
+                const std::string type = fixedArrayType("std::uint64_t", wordCount);
+                const std::string refName = valueWideRefName(wordCount);
+                *stream << "    " << type << " &" << refName << "(std::size_t byteOffset) noexcept\n";
+                *stream << "    {\n";
+                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
+                *stream << "    }\n";
+                *stream << "    const " << type << " &" << refName << "(std::size_t byteOffset) const noexcept\n";
+                *stream << "    {\n";
+                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
+                *stream << "    }\n";
             }
             if (model.valueRealSlotCount != 0)
             {
@@ -11558,35 +12084,60 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    " << fixedArrayType("std::string", model.valueStringSlotCount)
                         << " value_string_slots_{};\n";
             }
-            if (model.valueScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
-                !model.valueWideSlotCountsByWords.empty() ||
+            if (model.valueLogicStorageBytes != 0 ||
                 model.valueRealSlotCount != 0 ||
                 model.valueStringSlotCount != 0)
             {
                 *stream << '\n';
             }
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+            if (model.stateLogicStorageBytes != 0)
             {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                if (slotCount == 0)
+                *stream << "    static constexpr std::size_t kStateLogicStorageBytes = "
+                        << model.stateLogicStorageBytes << ";\n";
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
                 {
-                    continue;
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t " << stateLogicScalarBaseOffsetConstName(kind) << " = "
+                            << model.stateLogicScalarBaseOffsets[kindIndex] << ";\n";
                 }
-                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), slotCount) << " "
-                        << stateLogicScalarSlotFieldName(kind) << "{};\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
+                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
                 {
-                    continue;
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t " << stateLogicWideBaseOffsetConstName(wordCount)
+                            << " = " << model.stateLogicWideBaseOffsetsByWords.at(wordCount) << ";\n";
                 }
-                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
-                        << stateLogicWideSlotFieldName(wordCount) << "{};\n";
+                *stream << "    alignas(std::uint64_t) "
+                        << fixedArrayType("std::byte", model.stateLogicStorageBytes) << " state_logic_storage_{};\n";
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << scalarLogicSlotCppType(kind) << " *" << stateLogicScalarSlotFieldName(kind)
+                            << " = nullptr;\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << fixedArrayType("std::uint64_t", wordCount) << " *"
+                            << stateLogicWideSlotFieldName(wordCount) << " = nullptr;\n";
+                }
             }
-            if (model.stateLogicScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
-                !model.stateLogicWideSlotCountsByWords.empty() ||
+            if (model.stateLogicStorageBytes != 0 ||
                 !model.stateFieldDecls.empty())
             {
                 *stream << '\n';
@@ -11599,34 +12150,63 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
-            if (model.stateShadowTouchedCount != 0)
+            if (model.stateShadowStorageBytes != 0)
             {
-                *stream << "    " << fixedArrayType("std::uint8_t", model.stateShadowTouchedCount)
-                        << " state_shadow_touched_slots_{};\n";
-            }
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-            {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
-                if (slotCount == 0)
+                *stream << "    static constexpr std::size_t kStateShadowStorageBytes = "
+                        << model.stateShadowStorageBytes << ";\n";
+                if (model.stateShadowTouchedCount != 0)
                 {
-                    continue;
+                    *stream << "    static constexpr std::size_t " << stateShadowTouchedBaseOffsetConstName() << " = "
+                            << model.stateShadowTouchedBaseOffset << ";\n";
                 }
-                *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), slotCount) << " "
-                        << scalarLogicSlotFieldName("state_shadow_", kind) << "{};\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
                 {
-                    continue;
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t " << stateShadowScalarBaseOffsetConstName(kind)
+                            << " = " << model.stateShadowScalarBaseOffsets[kindIndex] << ";\n";
                 }
-                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
-                        << wideLogicSlotFieldName("state_shadow_", wordCount) << "{};\n";
+                for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t " << stateShadowWideBaseOffsetConstName(wordCount)
+                            << " = " << model.stateShadowWideBaseOffsetsByWords.at(wordCount) << ";\n";
+                }
+                *stream << "    alignas(std::uint64_t) "
+                        << fixedArrayType("std::byte", model.stateShadowStorageBytes) << " state_shadow_storage_{};\n";
+                if (model.stateShadowTouchedCount != 0)
+                {
+                    *stream << "    std::uint8_t *state_shadow_touched_slots_ = nullptr;\n";
+                }
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << scalarLogicSlotCppType(kind) << " *"
+                            << scalarLogicSlotFieldName("state_shadow_", kind) << " = nullptr;\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << fixedArrayType("std::uint64_t", wordCount) << " *"
+                            << wideLogicSlotFieldName("state_shadow_", wordCount) << " = nullptr;\n";
+                }
             }
-            if (model.stateShadowTouchedCount != 0 ||
-                model.stateShadowScalarSlotCounts != std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)>{} ||
-                !model.stateShadowWideSlotCountsByWords.empty())
+            if (model.stateShadowStorageBytes != 0)
             {
                 *stream << '\n';
             }
@@ -11638,46 +12218,102 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
-            if (model.memoryWriteTouchedCount != 0)
+            if (model.memoryWriteStorageBytes != 0)
             {
-                *stream << "    " << fixedArrayType("std::uint8_t", model.memoryWriteTouchedCount)
-                        << " memory_write_touched_slots_{};\n";
-                *stream << "    " << fixedArrayType("std::size_t", model.memoryWriteAddrCount)
-                        << " memory_write_addr_slots_{};\n";
-            }
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-            {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
-                if (dataCount != 0)
+                *stream << "    static constexpr std::size_t kMemoryWriteStorageBytes = "
+                        << model.memoryWriteStorageBytes << ";\n";
+                if (model.memoryWriteTouchedCount != 0)
                 {
-                    *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), dataCount) << " "
-                            << scalarLogicSlotFieldName("memory_write_data_", kind) << "{};\n";
+                    *stream << "    static constexpr std::size_t " << memoryWriteTouchedBaseOffsetConstName() << " = "
+                            << model.memoryWriteTouchedBaseOffset << ";\n";
                 }
-                const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
-                if (maskCount != 0)
+                if (model.memoryWriteAddrCount != 0)
                 {
-                    *stream << "    " << fixedArrayType(scalarLogicSlotCppType(kind), maskCount) << " "
-                            << scalarLogicSlotFieldName("memory_write_mask_", kind) << "{};\n";
+                    *stream << "    static constexpr std::size_t " << memoryWriteAddrBaseOffsetConstName() << " = "
+                            << model.memoryWriteAddrBaseOffset << ";\n";
                 }
-            }
-            for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
                 {
-                    continue;
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
+                    if (dataCount != 0)
+                    {
+                        *stream << "    static constexpr std::size_t "
+                                << memoryWriteDataScalarBaseOffsetConstName(kind) << " = "
+                                << model.memoryWriteDataScalarBaseOffsets[kindIndex] << ";\n";
+                    }
+                    const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
+                    if (maskCount != 0)
+                    {
+                        *stream << "    static constexpr std::size_t "
+                                << memoryWriteMaskScalarBaseOffsetConstName(kind) << " = "
+                                << model.memoryWriteMaskScalarBaseOffsets[kindIndex] << ";\n";
+                    }
                 }
-                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
-                        << wideLogicSlotFieldName("memory_write_data_", wordCount) << "{};\n";
-            }
-            for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
+                for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
                 {
-                    continue;
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t "
+                            << memoryWriteDataWideBaseOffsetConstName(wordCount) << " = "
+                            << model.memoryWriteDataWideBaseOffsetsByWords.at(wordCount) << ";\n";
                 }
-                *stream << "    " << fixedArrayType(fixedArrayType("std::uint64_t", wordCount), slotCount) << " "
-                        << wideLogicSlotFieldName("memory_write_mask_", wordCount) << "{};\n";
+                for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    static constexpr std::size_t "
+                            << memoryWriteMaskWideBaseOffsetConstName(wordCount) << " = "
+                            << model.memoryWriteMaskWideBaseOffsetsByWords.at(wordCount) << ";\n";
+                }
+                *stream << "    alignas(std::uint64_t) "
+                        << fixedArrayType("std::byte", model.memoryWriteStorageBytes) << " memory_write_storage_{};\n";
+                if (model.memoryWriteTouchedCount != 0)
+                {
+                    *stream << "    std::uint8_t *memory_write_touched_slots_ = nullptr;\n";
+                }
+                if (model.memoryWriteAddrCount != 0)
+                {
+                    *stream << "    std::size_t *memory_write_addr_slots_ = nullptr;\n";
+                }
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
+                    if (dataCount != 0)
+                    {
+                        *stream << "    " << scalarLogicSlotCppType(kind) << " *"
+                                << scalarLogicSlotFieldName("memory_write_data_", kind) << " = nullptr;\n";
+                    }
+                    const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
+                    if (maskCount != 0)
+                    {
+                        *stream << "    " << scalarLogicSlotCppType(kind) << " *"
+                                << scalarLogicSlotFieldName("memory_write_mask_", kind) << " = nullptr;\n";
+                    }
+                }
+                for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << fixedArrayType("std::uint64_t", wordCount) << " *"
+                            << wideLogicSlotFieldName("memory_write_data_", wordCount) << " = nullptr;\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << fixedArrayType("std::uint64_t", wordCount) << " *"
+                            << wideLogicSlotFieldName("memory_write_mask_", wordCount) << " = nullptr;\n";
+                }
             }
             *stream << "};\n";
             if (auto error = finalizeOutputFile(*stream, headerPath))
@@ -11820,31 +12456,118 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <cstdio>\n\n";
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
-            *stream << "    if (const char *activityProfile = std::getenv(\"GRHSIM_ACTIVITY_PROFILE\");\n";
-            *stream << "        activityProfile != nullptr && activityProfile[0] != '\\0' && activityProfile[0] != '0') {\n";
-            *stream << "        activity_profile_enabled_ = true;\n";
-            *stream << "    }\n";
-            if (model.emitPerf)
+            if (model.stateLogicStorageBytes != 0)
             {
-                *stream << "    if (const char *traceEvalEvery = std::getenv(\"GRHSIM_TRACE_EVAL_EVERY\");\n";
-                *stream << "        traceEvalEvery != nullptr && traceEvalEvery[0] != '\\0') {\n";
-                *stream << "        char *end = nullptr;\n";
-                *stream << "        const unsigned long long parsed = std::strtoull(traceEvalEvery, &end, 10);\n";
-                *stream << "        if (end != traceEvalEvery && parsed != 0) {\n";
-                *stream << "            trace_eval_enabled_ = true;\n";
-                *stream << "            trace_eval_interval_ = static_cast<std::uint64_t>(parsed);\n";
-                *stream << "        }\n";
-                *stream << "    }\n";
-                *stream << "    if (const char *traceEval = std::getenv(\"GRHSIM_TRACE_EVAL\");\n";
-                *stream << "        traceEval != nullptr && traceEval[0] != '\\0' && traceEval[0] != '0') {\n";
-                *stream << "        trace_eval_enabled_ = true;\n";
-                *stream << "    }\n";
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << stateLogicScalarSlotFieldName(kind) << " = reinterpret_cast<"
+                            << scalarLogicSlotCppType(kind) << " *>(state_logic_storage_.data() + "
+                            << stateLogicScalarBaseOffsetConstName(kind) << ");\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << stateLogicWideSlotFieldName(wordCount) << " = reinterpret_cast<"
+                            << fixedArrayType("std::uint64_t", wordCount) << " *>(state_logic_storage_.data() + "
+                            << stateLogicWideBaseOffsetConstName(wordCount) << ");\n";
+                }
+            }
+            if (model.eventEdgeSlotCount != 0)
+            {
+                *stream << "    event_edge_slots_ = reinterpret_cast<grhsim_event_edge_kind *>(event_edge_storage_.data());\n";
+            }
+            if (model.stateShadowStorageBytes != 0)
+            {
+                if (model.stateShadowTouchedCount != 0)
+                {
+                    *stream << "    state_shadow_touched_slots_ = reinterpret_cast<std::uint8_t *>(state_shadow_storage_.data() + "
+                            << stateShadowTouchedBaseOffsetConstName() << ");\n";
+                }
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << scalarLogicSlotFieldName("state_shadow_", kind) << " = reinterpret_cast<"
+                            << scalarLogicSlotCppType(kind) << " *>(state_shadow_storage_.data() + "
+                            << stateShadowScalarBaseOffsetConstName(kind) << ");\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << wideLogicSlotFieldName("state_shadow_", wordCount) << " = reinterpret_cast<"
+                            << fixedArrayType("std::uint64_t", wordCount) << " *>(state_shadow_storage_.data() + "
+                            << stateShadowWideBaseOffsetConstName(wordCount) << ");\n";
+                }
+            }
+            if (model.memoryWriteStorageBytes != 0)
+            {
+                if (model.memoryWriteTouchedCount != 0)
+                {
+                    *stream << "    memory_write_touched_slots_ = reinterpret_cast<std::uint8_t *>(memory_write_storage_.data() + "
+                            << memoryWriteTouchedBaseOffsetConstName() << ");\n";
+                }
+                if (model.memoryWriteAddrCount != 0)
+                {
+                    *stream << "    memory_write_addr_slots_ = reinterpret_cast<std::size_t *>(memory_write_storage_.data() + "
+                            << memoryWriteAddrBaseOffsetConstName() << ");\n";
+                }
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
+                    if (dataCount != 0)
+                    {
+                        *stream << "    " << scalarLogicSlotFieldName("memory_write_data_", kind) << " = reinterpret_cast<"
+                                << scalarLogicSlotCppType(kind) << " *>(memory_write_storage_.data() + "
+                                << memoryWriteDataScalarBaseOffsetConstName(kind) << ");\n";
+                    }
+                    const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
+                    if (maskCount != 0)
+                    {
+                        *stream << "    " << scalarLogicSlotFieldName("memory_write_mask_", kind) << " = reinterpret_cast<"
+                                << scalarLogicSlotCppType(kind) << " *>(memory_write_storage_.data() + "
+                                << memoryWriteMaskScalarBaseOffsetConstName(kind) << ");\n";
+                    }
+                }
+                for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << wideLogicSlotFieldName("memory_write_data_", wordCount) << " = reinterpret_cast<"
+                            << fixedArrayType("std::uint64_t", wordCount) << " *>(memory_write_storage_.data() + "
+                            << memoryWriteDataWideBaseOffsetConstName(wordCount) << ");\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    " << wideLogicSlotFieldName("memory_write_mask_", wordCount) << " = reinterpret_cast<"
+                            << fixedArrayType("std::uint64_t", wordCount) << " *>(memory_write_storage_.data() + "
+                            << memoryWriteMaskWideBaseOffsetConstName(wordCount) << ");\n";
+                }
             }
             *stream << "}\n\n";
             *stream << className << "::~" << className << "()\n{\n";
-            *stream << "    if (activity_profile_enabled_) {\n";
-            *stream << "        dump_activity_profile();\n";
-            *stream << "    }\n";
             if (model.emitWaveform)
             {
                 *stream << "    if (waveform_writer_) {\n";
@@ -11873,21 +12596,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "}\n\n";
             *stream << "void " << className << "::set_random_seed(std::uint64_t seed)\n{\n";
             *stream << "    random_seed_ = seed;\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::clear_activity_profile()\n{\n";
-            *stream << "    activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
-            *stream << "    activity_profile_current_executed_ops_ = UINT64_C(0);\n";
-            *stream << "    activity_profile_current_peak_active_supernodes_ = UINT64_C(0);\n";
-            *stream << "    activity_profile_executed_supernodes_.clear();\n";
-            *stream << "    activity_profile_executed_ops_.clear();\n";
-            *stream << "    activity_profile_peak_active_supernodes_.clear();\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::dump_activity_profile() const\n{\n";
-            *stream << "    std::fprintf(stderr, \"[grhsim-activity] step_samples=%zu\\n\", activity_profile_executed_supernodes_.size());\n";
-            *stream << "    grhsim_print_sample_summary(stderr, \"executed_supernodes_per_step\", activity_profile_executed_supernodes_);\n";
-            *stream << "    grhsim_print_sample_summary(stderr, \"executed_ops_per_step\", activity_profile_executed_ops_);\n";
-            *stream << "    grhsim_print_sample_summary(stderr, \"peak_active_supernodes_per_step\", activity_profile_peak_active_supernodes_);\n";
-            *stream << "    std::fflush(stderr);\n";
             *stream << "}\n\n";
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
@@ -11950,12 +12658,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
                     *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
                     *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
-                    *stream << "        apply_scalar_state_write_bool((value_bool_slots_[condIndex]) != 0,\n";
+                    *stream << "        apply_scalar_state_write_bool(("
+                            << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                     *stream << "                                      state_shadow_touched_slots_[touchedIndex],\n";
                     *stream << "                                      " << shadowField << "[shadowDataIndex],\n";
                     *stream << "                                      " << stateField << "[stateDataIndex],\n";
-                    *stream << "                                      value_bool_slots_[nextIndex],\n";
-                    *stream << "                                      value_bool_slots_[maskIndex],\n";
+                    *stream << "                                      "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kBool, "nextIndex") << ",\n";
+                    *stream << "                                      "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kBool, "maskIndex") << ",\n";
                     *stream << "                                      shadowIndex);\n";
                     *stream << "    }\n";
                     *stream << "}\n\n";
@@ -12023,12 +12734,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
                 *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
                 *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
-                *stream << "        apply_scalar_state_write_u8((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "        apply_scalar_state_write_u8(("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                    state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                    state_shadow_u8_slots_[shadowDataIndex],\n";
                 *stream << "                                    state_logic_u8_slots_[stateDataIndex],\n";
-                *stream << "                                    value_u8_slots_[nextIndex],\n";
-                *stream << "                                    value_u8_slots_[maskIndex],\n";
+                *stream << "                                    " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "nextIndex")
+                        << ",\n";
+                *stream << "                                    " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "maskIndex")
+                        << ",\n";
                 *stream << "                                    shadowIndex);\n";
                 *stream << "    }\n";
                     *stream << "}\n\n";
@@ -12085,12 +12799,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
                 *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
                 *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
-                *stream << "        apply_scalar_state_write_u16((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "        apply_scalar_state_write_u16(("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u16_slots_[shadowDataIndex],\n";
                 *stream << "                                     state_logic_u16_slots_[stateDataIndex],\n";
-                *stream << "                                     value_u16_slots_[nextIndex],\n";
-                *stream << "                                     value_u16_slots_[maskIndex],\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU16, "nextIndex")
+                        << ",\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU16, "maskIndex")
+                        << ",\n";
                 *stream << "                                     shadowIndex);\n";
                 *stream << "    }\n";
                     *stream << "}\n\n";
@@ -12147,12 +12864,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
                 *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
                 *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
-                *stream << "        apply_scalar_state_write_u32((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "        apply_scalar_state_write_u32(("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u32_slots_[shadowDataIndex],\n";
                 *stream << "                                     state_logic_u32_slots_[stateDataIndex],\n";
-                *stream << "                                     value_u32_slots_[nextIndex],\n";
-                *stream << "                                     value_u32_slots_[maskIndex],\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU32, "nextIndex")
+                        << ",\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU32, "maskIndex")
+                        << ",\n";
                 *stream << "                                     shadowIndex);\n";
                 *stream << "    }\n";
                     *stream << "}\n\n";
@@ -12209,12 +12929,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
                 *stream << "        const auto shadowIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.shadowBase) +\n";
                 *stream << "                                                        static_cast<std::int64_t>(desc.shadowStep) * offset);\n";
-                *stream << "        apply_scalar_state_write_u64((value_bool_slots_[condIndex]) != 0,\n";
+                *stream << "        apply_scalar_state_write_u64(("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u64_slots_[shadowDataIndex],\n";
                 *stream << "                                     state_logic_u64_slots_[stateDataIndex],\n";
-                *stream << "                                     value_u64_slots_[nextIndex],\n";
-                *stream << "                                     value_u64_slots_[maskIndex],\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU64, "nextIndex")
+                        << ",\n";
+                *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU64, "maskIndex")
+                        << ",\n";
                 *stream << "                                     shadowIndex);\n";
                 *stream << "    }\n";
                     *stream << "}\n\n";
@@ -12230,18 +12953,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    bool anyStateChanged = false;\n";
                 *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
                 *stream << "        const auto &entry = entries[i];\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[entry.condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "entry.condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        switch (entry.kind) {\n";
                 if (useCommitBoolRange)
                 {
                     *stream << "        case 0u:\n";
-                    *stream << "            if ((static_cast<std::uint8_t>(value_bool_slots_[entry.maskIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                    *stream << "            if ((static_cast<std::uint8_t>("
+                            << valueScalarRefExpr(ValueSlotScalarKind::kBool, "entry.maskIndex")
+                            << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                     *stream << "                break;\n";
                     *stream << "            }\n";
                     *stream << "            {\n";
-                    *stream << "                const bool nextValue = static_cast<bool>(static_cast<std::uint8_t>(value_bool_slots_[entry.nextIndex]) & UINT8_C(1));\n";
+                    *stream << "                const bool nextValue = static_cast<bool>(static_cast<std::uint8_t>("
+                            << valueScalarRefExpr(ValueSlotScalarKind::kBool, "entry.nextIndex")
+                            << ") & UINT8_C(1));\n";
                     *stream << "                auto &stateData = state_logic_bool_slots_[entry.stateDataIndex];\n";
                     *stream << "                if (stateData != nextValue) {\n";
                     *stream << "                    stateData = nextValue;\n";
@@ -12254,10 +12983,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     *stream << "        case 1u:\n";
                     *stream << "            {\n";
-                    *stream << "                const auto mask = value_u8_slots_[entry.maskIndex];\n";
+                    *stream << "                const auto mask = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU8, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT8_C(0)) {\n";
                     *stream << "                    auto &stateData = state_logic_u8_slots_[entry.stateDataIndex];\n";
-                    *stream << "                    const auto nextValue = value_u8_slots_[entry.nextIndex];\n";
+                    *stream << "                    const auto nextValue = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU8, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT8_MAX ? nextValue\n";
                     *stream << "                        : static_cast<std::uint8_t>((stateData & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
@@ -12272,10 +13003,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     *stream << "        case 2u:\n";
                     *stream << "            {\n";
-                    *stream << "                const auto mask = value_u16_slots_[entry.maskIndex];\n";
+                    *stream << "                const auto mask = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU16, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT16_C(0)) {\n";
                     *stream << "                    auto &stateData = state_logic_u16_slots_[entry.stateDataIndex];\n";
-                    *stream << "                    const auto nextValue = value_u16_slots_[entry.nextIndex];\n";
+                    *stream << "                    const auto nextValue = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU16, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT16_MAX ? nextValue\n";
                     *stream << "                        : static_cast<std::uint16_t>((stateData & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
@@ -12290,10 +13023,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     *stream << "        case 3u:\n";
                     *stream << "            {\n";
-                    *stream << "                const auto mask = value_u32_slots_[entry.maskIndex];\n";
+                    *stream << "                const auto mask = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU32, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT32_C(0)) {\n";
                     *stream << "                    auto &stateData = state_logic_u32_slots_[entry.stateDataIndex];\n";
-                    *stream << "                    const auto nextValue = value_u32_slots_[entry.nextIndex];\n";
+                    *stream << "                    const auto nextValue = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU32, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT32_MAX ? nextValue\n";
                     *stream << "                        : static_cast<std::uint32_t>((stateData & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
@@ -12308,10 +13043,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     *stream << "        case 4u:\n";
                     *stream << "            {\n";
-                    *stream << "                const auto mask = value_u64_slots_[entry.maskIndex];\n";
+                    *stream << "                const auto mask = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU64, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT64_C(0)) {\n";
                     *stream << "                    auto &stateData = state_logic_u64_slots_[entry.stateDataIndex];\n";
-                    *stream << "                    const auto nextValue = value_u64_slots_[entry.nextIndex];\n";
+                    *stream << "                    const auto nextValue = "
+                            << valueScalarRefExpr(ValueSlotScalarKind::kU64, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT64_MAX ? nextValue\n";
                     *stream << "                        : static_cast<std::uint64_t>((stateData & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
@@ -12344,7 +13081,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
                 *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
                 *stream << "                                                     static_cast<std::int64_t>(desc.condStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
@@ -12353,11 +13092,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
                 *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[maskIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "maskIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const bool nextValue =\n";
-                *stream << "            static_cast<bool>(static_cast<std::uint8_t>(value_bool_slots_[nextIndex]) & UINT8_C(1));\n";
+                *stream << "            static_cast<bool>(static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "nextIndex")
+                        << ") & UINT8_C(1));\n";
                 *stream << "        if (state_logic_bool_slots_[stateDataIndex] == nextValue) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
@@ -12382,7 +13125,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
                 *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
                 *stream << "                                                     static_cast<std::int64_t>(desc.condStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
@@ -12391,12 +13136,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
                 *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
-                *stream << "        const auto mask = value_u8_slots_[maskIndex];\n";
+                *stream << "        const auto mask = " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "maskIndex")
+                        << ";\n";
                 *stream << "        if (mask == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        auto &stateData = state_logic_u8_slots_[stateDataIndex];\n";
-                *stream << "        const auto nextValue = value_u8_slots_[nextIndex];\n";
+                *stream << "        const auto nextValue = " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "nextIndex")
+                        << ";\n";
                 *stream << "        const auto merged = mask == UINT8_MAX ? nextValue\n";
                 *stream << "            : static_cast<std::uint8_t>((stateData & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
                 *stream << "        if (stateData == merged) {\n";
@@ -12423,7 +13170,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
                 *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
                 *stream << "                                                     static_cast<std::int64_t>(desc.condStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
@@ -12432,12 +13181,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
                 *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
-                *stream << "        const auto mask = value_u16_slots_[maskIndex];\n";
+                *stream << "        const auto mask = " << valueScalarRefExpr(ValueSlotScalarKind::kU16, "maskIndex")
+                        << ";\n";
                 *stream << "        if (mask == UINT16_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        auto &stateData = state_logic_u16_slots_[stateDataIndex];\n";
-                *stream << "        const auto nextValue = value_u16_slots_[nextIndex];\n";
+                *stream << "        const auto nextValue = "
+                        << valueScalarRefExpr(ValueSlotScalarKind::kU16, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT16_MAX ? nextValue\n";
                 *stream << "            : static_cast<std::uint16_t>((stateData & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
                 *stream << "        if (stateData == merged) {\n";
@@ -12464,7 +13215,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
                 *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
                 *stream << "                                                     static_cast<std::int64_t>(desc.condStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
@@ -12473,12 +13226,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
                 *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
-                *stream << "        const auto mask = value_u32_slots_[maskIndex];\n";
+                *stream << "        const auto mask = " << valueScalarRefExpr(ValueSlotScalarKind::kU32, "maskIndex")
+                        << ";\n";
                 *stream << "        if (mask == UINT32_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        auto &stateData = state_logic_u32_slots_[stateDataIndex];\n";
-                *stream << "        const auto nextValue = value_u32_slots_[nextIndex];\n";
+                *stream << "        const auto nextValue = "
+                        << valueScalarRefExpr(ValueSlotScalarKind::kU32, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT32_MAX ? nextValue\n";
                 *stream << "            : static_cast<std::uint32_t>((stateData & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
                 *stream << "        if (stateData == merged) {\n";
@@ -12505,7 +13260,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
                 *stream << "        const auto condIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.condBase) +\n";
                 *stream << "                                                     static_cast<std::int64_t>(desc.condStep) * offset);\n";
-                *stream << "        if ((static_cast<std::uint8_t>(value_bool_slots_[condIndex]) & UINT8_C(1)) == UINT8_C(0)) {\n";
+                *stream << "        if ((static_cast<std::uint8_t>("
+                        << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex")
+                        << ") & UINT8_C(1)) == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        const auto stateDataIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.stateDataBase) +\n";
@@ -12514,12 +13271,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                                      static_cast<std::int64_t>(desc.nextStep) * offset);\n";
                 *stream << "        const auto maskIndex = static_cast<std::uint32_t>(static_cast<std::int64_t>(desc.maskBase) +\n";
                 *stream << "                                                      static_cast<std::int64_t>(desc.maskStep) * offset);\n";
-                *stream << "        const auto mask = value_u64_slots_[maskIndex];\n";
+                *stream << "        const auto mask = " << valueScalarRefExpr(ValueSlotScalarKind::kU64, "maskIndex")
+                        << ";\n";
                 *stream << "        if (mask == UINT64_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        auto &stateData = state_logic_u64_slots_[stateDataIndex];\n";
-                *stream << "        const auto nextValue = value_u64_slots_[nextIndex];\n";
+                *stream << "        const auto nextValue = "
+                        << valueScalarRefExpr(ValueSlotScalarKind::kU64, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT64_MAX ? nextValue\n";
                 *stream << "            : static_cast<std::uint64_t>((stateData & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
                 *stream << "        if (stateData == merged) {\n";
@@ -13128,23 +13887,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 break;
             case InitChunkSpec::Kind::kValues:
                 *stream << "    // Initialize combinational value storage.\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                if (model.valueLogicStorageBytes != 0)
                 {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.valueScalarSlotCounts[kindIndex];
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << valueScalarSlotFieldName(kind) << " = {};\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << valueWideSlotFieldName(wordCount) << " = {};\n";
+                    *stream << "    value_logic_storage_.fill(std::byte{0});\n";
                 }
                 if (model.valueRealSlotCount != 0)
                 {
@@ -13176,21 +13921,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 break;
             case InitChunkSpec::Kind::kStateStorage:
                 *stream << "    // Allocate persistent state pools.\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                if (model.stateLogicStorageBytes != 0)
                 {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                    if (slotCount != 0)
-                    {
-                        *stream << "    " << stateLogicScalarSlotFieldName(kind) << " = {};\n";
-                    }
-                }
-                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-                {
-                    if (slotCount != 0)
-                    {
-                        *stream << "    " << stateLogicWideSlotFieldName(wordCount) << " = {};\n";
-                    }
+                    *stream << "    state_logic_storage_.fill(std::byte{0});\n";
                 }
                 break;
             case InitChunkSpec::Kind::kStates:
@@ -13243,24 +13976,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     break;
                 }
-                *stream << "    state_shadow_touched_slots_ = {};\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                if (model.stateShadowStorageBytes != 0)
                 {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.stateShadowScalarSlotCounts[kindIndex];
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << scalarLogicSlotFieldName("state_shadow_", kind) << " = {};\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.stateShadowWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << wideLogicSlotFieldName("state_shadow_", wordCount) << " = {};\n";
+                    *stream << "    state_shadow_storage_.fill(std::byte{0});\n";
                 }
                 break;
             case InitChunkSpec::Kind::kWrites:
@@ -13269,37 +13987,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     break;
                 }
-                *stream << "    memory_write_touched_slots_ = {};\n";
-                *stream << "    memory_write_addr_slots_ = {};\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                if (model.memoryWriteStorageBytes != 0)
                 {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t dataCount = model.memoryWriteDataScalarSlotCounts[kindIndex];
-                    if (dataCount != 0)
-                    {
-                        *stream << "    " << scalarLogicSlotFieldName("memory_write_data_", kind) << " = {};\n";
-                    }
-                    const std::size_t maskCount = model.memoryWriteMaskScalarSlotCounts[kindIndex];
-                    if (maskCount != 0)
-                    {
-                        *stream << "    " << scalarLogicSlotFieldName("memory_write_mask_", kind) << " = {};\n";
-                    }
-                }
-                for (const auto &[wordCount, slotCount] : model.memoryWriteDataWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << wideLogicSlotFieldName("memory_write_data_", wordCount) << " = {};\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.memoryWriteMaskWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << wideLogicSlotFieldName("memory_write_mask_", wordCount) << " = {};\n";
+                    *stream << "    memory_write_storage_.fill(std::byte{0});\n";
                 }
                 break;
             case InitChunkSpec::Kind::kPrevInputs:
@@ -13338,7 +14028,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    // Clear shared event-edge slots.\n";
                 if (model.eventEdgeSlotCount != 0)
                 {
-                    *stream << "    event_edge_slots_.fill(grhsim_event_edge_kind::none);\n";
+                    *stream << "    std::fill_n(event_edge_slots_, " << model.eventEdgeSlotCount
+                            << "u, grhsim_event_edge_kind::none);\n";
                 }
                 break;
             case InitChunkSpec::Kind::kEvalState:
@@ -13629,13 +14320,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 }
             }
             *stream << '\n';
-            *stream << "    if (activity_profile_enabled_) {\n";
-            *stream << "        activity_profile_current_executed_supernodes_ = UINT64_C(0);\n";
-            *stream << "        activity_profile_current_executed_ops_ = UINT64_C(0);\n";
-            *stream << "        activity_profile_current_peak_active_supernodes_ =\n";
-            *stream << "            static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
-            *stream << "    }\n";
-            *stream << '\n';
             if (model.emitPerf)
             {
                 *stream << "    const bool trace_this_eval = trace_eval_enabled_ && (trace_eval_interval_ != 0) &&\n";
@@ -13668,13 +14352,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        ++fixed_point_round_count;\n";
                 *stream << "        pending_eval_round = false;\n";
-                *stream << "        if (activity_profile_enabled_) {\n";
-                *stream << "            const auto round_active_in_profile =\n";
-                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
-                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_in_profile) {\n";
-                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_in_profile;\n";
-                *stream << "            }\n";
-                *stream << "        }\n";
                 *stream << "        const auto round_begin_time =\n";
                 *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
                 *stream << "        const std::size_t round_active_in =\n";
@@ -13827,13 +14504,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                         round_active_words_out);\n";
                 *stream << "            std::fflush(stderr);\n";
                 *stream << "        }\n";
-                *stream << "        if (activity_profile_enabled_) {\n";
-                *stream << "            const auto round_active_out_profile =\n";
-                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
-                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_out_profile) {\n";
-                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_out_profile;\n";
-                *stream << "            }\n";
-                *stream << "        }\n";
                 *stream << "    }\n";
                 *stream << "    if (trace_this_eval) {\n";
                 *stream << "        const auto eval_total_us = static_cast<std::uint64_t>(\n";
@@ -13867,13 +14537,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        pending_eval_round = false;\n";
-                *stream << "        if (activity_profile_enabled_) {\n";
-                *stream << "            const auto round_active_in_profile =\n";
-                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
-                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_in_profile) {\n";
-                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_in_profile;\n";
-                *stream << "            }\n";
-                *stream << "        }\n";
                 *stream << "        // Run compute-phase supernodes first.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
                 *stream << "            if (supernode_active_curr_[activeWordIndex] == UINT8_C(0)) {\n";
@@ -13904,24 +14567,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "        // Event edges are per-fixed-point-round signals, so clear them before the next round.\n";
                     emitClearAllEventEdges(*stream, model, "        ");
                 }
-                *stream << "        if (activity_profile_enabled_) {\n";
-                *stream << "            const auto round_active_out_profile =\n";
-                *stream << "                static_cast<std::uint64_t>(grhsim_count_active_supernodes(supernode_active_curr_));\n";
-                *stream << "            if (activity_profile_current_peak_active_supernodes_ < round_active_out_profile) {\n";
-                *stream << "                activity_profile_current_peak_active_supernodes_ = round_active_out_profile;\n";
-                *stream << "            }\n";
-                *stream << "        }\n";
                 *stream << "    }\n";
             }
             if (model.needsSystemTaskRuntime)
             {
                 *stream << "    flush_deferred_system_task_texts();\n";
             }
-            *stream << "    if (activity_profile_enabled_) {\n";
-            *stream << "        activity_profile_executed_supernodes_.push_back(activity_profile_current_executed_supernodes_);\n";
-            *stream << "        activity_profile_executed_ops_.push_back(activity_profile_current_executed_ops_);\n";
-            *stream << "        activity_profile_peak_active_supernodes_.push_back(activity_profile_current_peak_active_supernodes_);\n";
-            *stream << "    }\n";
             *stream << "    // Refresh public outputs after the final visible state of this eval is known.\n";
             *stream << "    refresh_outputs();\n\n";
             if (model.emitWaveform)

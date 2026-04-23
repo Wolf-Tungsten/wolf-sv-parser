@@ -19,6 +19,7 @@ using namespace wolvrix::lib::transform;
 
 namespace
 {
+    constexpr std::string_view kHarnessCompileFlags = "-std=c++20 -O0";
 
     int fail(const std::string &message)
     {
@@ -1786,9 +1787,10 @@ int main()
     {
         return fail("Missing supernode activity state");
     }
-    if (header.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
+    if (header.find("event_edge_storage_{};") == std::string::npos ||
+        header.find("grhsim_event_edge_kind *event_edge_slots_ = nullptr;") == std::string::npos)
     {
-        return fail("Missing static event-edge storage");
+        return fail("Missing arena-backed event-edge storage");
     }
     if (sched.find("if ((event_edge_slots_") != std::string::npos ||
         sched.find("if (((event_edge_slots_") != std::string::npos)
@@ -1852,7 +1854,7 @@ int main()
     {
         return fail("Missing random seed plumbing in state init");
     }
-    if (state.find("event_edge_slots_.fill(grhsim_event_edge_kind::none);") == std::string::npos ||
+    if (state.find("std::fill_n(event_edge_slots_, ") == std::string::npos ||
         state.find("state_shadow_touched_slots_ = {};") != std::string::npos ||
         state.find("memory_write_touched_slots_ = {};") != std::string::npos ||
         state.find("state_mem_wide_mem_ = {};") == std::string::npos)
@@ -1875,7 +1877,8 @@ int main()
         return fail("Missing split state/schedule Makefile skeleton");
     }
 
-        const std::string buildCmd = "make -C " + outDir.string() + " CXX=clang++";
+        const std::string buildCmd =
+            "make -C " + outDir.string() + " CXX=clang++ CFLAGS='" + std::string(kHarnessCompileFlags) + "'";
         if (std::system(buildCmd.c_str()) != 0)
         {
             return fail("Generated Makefile failed to build grhsim archive");
@@ -2333,7 +2336,7 @@ int main()
 
         const std::filesystem::path harnessExe = outDir / "grhsim_top_harness";
         std::string compileHarnessCmd =
-            "clang++ -std=c++20 -O2 -I" + outDir.string();
+            "clang++ " + std::string(kHarnessCompileFlags) + " -I" + outDir.string();
         for (const auto &stateFile : stateFiles)
         {
             compileHarnessCmd += " " + stateFile.string();
@@ -2389,7 +2392,8 @@ int main()
         }
         const std::string regWriteHeaderText = readFile(regWriteHeaderPath);
         const std::string regWriteStateText = readFiles(regWriteStateFiles);
-        if (regWriteHeaderText.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
+        if (regWriteHeaderText.find("event_edge_storage_{};") == std::string::npos ||
+            regWriteHeaderText.find("grhsim_event_edge_kind *event_edge_slots_ = nullptr;") == std::string::npos)
         {
             return fail("register-write interaction should emit event-edge storage");
         }
@@ -2460,7 +2464,7 @@ int main()
         }
 
         const std::filesystem::path regWriteHarnessExe = regWriteDir / "grhsim_top_harness";
-        std::string regWriteCompileCmd = "clang++ -std=c++20 -O2 -I" + regWriteDir.string();
+        std::string regWriteCompileCmd = "clang++ " + std::string(kHarnessCompileFlags) + " -I" + regWriteDir.string();
         for (const auto &stateFile : regWriteStateFiles)
         {
             regWriteCompileCmd += " " + stateFile.string();
@@ -2531,7 +2535,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path localTempHarnessExe = localTempDir / "grhsim_top_harness";
-        std::string localTempCompileCmd = "clang++ -std=c++20 -O2 -I" + localTempDir.string();
+        std::string localTempCompileCmd = "clang++ " + std::string(kHarnessCompileFlags) + " -I" + localTempDir.string();
         for (const auto &stateFile : localTempStateFiles)
         {
             localTempCompileCmd += " " + stateFile.string();
@@ -2632,7 +2636,8 @@ int main()
         const std::vector<std::filesystem::path> commitBatchSchedFiles =
             collectSchedFiles(commitBatchDir, "grhsim_top_sched_");
         const std::filesystem::path commitBatchHarnessExe = commitBatchDir / "grhsim_top_harness";
-        std::string commitBatchCompileCmd = "clang++ -std=c++20 -O2 -I" + commitBatchDir.string();
+        std::string commitBatchCompileCmd =
+            "clang++ " + std::string(kHarnessCompileFlags) + " -I" + commitBatchDir.string();
         for (const auto &stateFile : commitBatchStateFiles)
         {
             commitBatchCompileCmd += " " + stateFile.string();
@@ -2688,7 +2693,8 @@ int main()
         const std::string gatedStateText = readFiles(gatedStateFiles);
         const std::string gatedEvalText = readFile(gatedEvalPath);
         const std::string gatedHeaderText = readFile(gatedDir / "grhsim_top.hpp");
-        if (gatedHeaderText.find("std::array<grhsim_event_edge_kind, ") == std::string::npos)
+        if (gatedHeaderText.find("event_edge_storage_{};") == std::string::npos ||
+            gatedHeaderText.find("grhsim_event_edge_kind *event_edge_slots_ = nullptr;") == std::string::npos)
         {
             return fail("gated-clock emit should provide event-edge storage");
         }
@@ -2797,7 +2803,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path gatedHarnessExe = gatedDir / "grhsim_top_harness";
-        std::string gatedCompileCmd = "clang++ -std=c++20 -O2 -I" + gatedDir.string();
+        std::string gatedCompileCmd = "clang++ " + std::string(kHarnessCompileFlags) + " -I" + gatedDir.string();
         for (const auto &stateFile : gatedStateFiles)
         {
             gatedCompileCmd += " " + stateFile.string();
@@ -2885,7 +2891,8 @@ int main()
         }
 
         const std::filesystem::path systemTaskHarnessExe = systemTaskDir / "grhsim_top_harness";
-        std::string systemTaskCompileCmd = "clang++ -std=c++20 -O2 -I" + systemTaskDir.string();
+        std::string systemTaskCompileCmd =
+            "clang++ " + std::string(kHarnessCompileFlags) + " -I" + systemTaskDir.string();
         for (const auto &stateFile : systemTaskStateFiles)
         {
             systemTaskCompileCmd += " " + stateFile.string();
@@ -3002,7 +3009,7 @@ int main()
                 harness << "}\n";
             }
             const std::filesystem::path termHarnessExe = termDir / "grhsim_top_harness";
-            std::string termCompileCmd = "clang++ -std=c++20 -O2 -I" + termDir.string();
+            std::string termCompileCmd = "clang++ " + std::string(kHarnessCompileFlags) + " -I" + termDir.string();
             for (const auto &stateFile : termStateFiles)
             {
                 termCompileCmd += " " + stateFile.string();
@@ -3155,7 +3162,7 @@ int main()
             harness << "}\n";
         }
         const std::filesystem::path dpiHarnessExe = dpiDir / "grhsim_top_harness";
-        std::string dpiCompileCmd = "clang++ -std=c++20 -O2 -I" + dpiDir.string();
+        std::string dpiCompileCmd = "clang++ " + std::string(kHarnessCompileFlags) + " -I" + dpiDir.string();
         for (const auto &stateFile : dpiStateFiles)
         {
             dpiCompileCmd += " " + stateFile.string();
@@ -3259,12 +3266,12 @@ int main()
         const std::string perfHeader = readFile(perfDir / "grhsim_top.hpp");
         const std::string perfState = readFile(perfDir / "grhsim_top_state.cpp");
         const std::string perfEval = readFile(perfDir / "grhsim_top_eval.cpp");
-        if (perfHeader.find("trace_eval_enabled_") == std::string::npos ||
-            perfState.find("GRHSIM_TRACE_EVAL") == std::string::npos ||
-            perfEval.find("trace_this_eval") == std::string::npos ||
-            perfEval.find("#include <chrono>") == std::string::npos)
+        if (perfHeader.find("trace_eval_enabled_") != std::string::npos ||
+            perfState.find("GRHSIM_TRACE_EVAL") != std::string::npos ||
+            perfEval.find("trace_this_eval") != std::string::npos ||
+            perfEval.find("#include <chrono>") != std::string::npos)
         {
-            return fail("perf-enabled emit should contain eval tracing");
+            return fail("perf-enabled emit should not reintroduce eval tracing");
         }
 
         return 0;
