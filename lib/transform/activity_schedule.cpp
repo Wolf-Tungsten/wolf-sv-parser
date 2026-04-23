@@ -297,6 +297,7 @@ namespace wolvrix::lib::transform
             std::vector<wolvrix::lib::grh::OperationId> topoOps;
             std::vector<wolvrix::lib::grh::SymbolId> topoSymbols;
             std::vector<wolvrix::lib::grh::OperationKind> topoKinds;
+            std::vector<uint8_t> topoSinkOnly;
             std::vector<std::pair<uint32_t, uint32_t>> topoEdges;
             std::vector<uint32_t> topoPosByOpIndex;
             std::size_t maxOpIndex = 0;
@@ -312,6 +313,7 @@ namespace wolvrix::lib::transform
         {
             std::vector<std::vector<uint32_t>> members;
             std::vector<uint8_t> fixedBoundary;
+            std::vector<uint8_t> sinkOnly;
             std::vector<std::vector<uint32_t>> preds;
             std::vector<std::vector<uint32_t>> succs;
             std::vector<uint32_t> clusterOfTopoPos;
@@ -451,6 +453,7 @@ namespace wolvrix::lib::transform
             ClusterView out;
             out.members.reserve(view.members.size());
             out.fixedBoundary.reserve(view.fixedBoundary.size());
+            out.sinkOnly.reserve(view.sinkOnly.size());
             out.preds.resize(view.preds.size());
             out.succs.resize(view.succs.size());
             out.clusterOfTopoPos.assign(view.clusterOfTopoPos.size(), kInvalidActivitySupernodeId);
@@ -462,6 +465,7 @@ namespace wolvrix::lib::transform
                 newIdByOldId[oldId] = newId;
                 out.members.push_back(view.members[oldId]);
                 out.fixedBoundary.push_back(view.fixedBoundary[oldId]);
+                out.sinkOnly.push_back(oldId < view.sinkOnly.size() ? view.sinkOnly[oldId] : 0U);
                 for (const auto topoPos : out.members.back())
                 {
                     if (topoPos < out.clusterOfTopoPos.size())
@@ -634,8 +638,8 @@ namespace wolvrix::lib::transform
                     bool sinkOnly = true;
                     for (const auto topoPos : view.members[clusterId])
                     {
-                        if (topoPos >= opData.topoOps.size() ||
-                            !isTailSinkKind(opData.topoKinds[topoPos]))
+                        if (topoPos >= opData.topoSinkOnly.size() ||
+                            opData.topoSinkOnly[topoPos] == 0)
                         {
                             sinkOnly = false;
                             break;
@@ -798,12 +802,14 @@ namespace wolvrix::lib::transform
 
             data.topoSymbols.reserve(data.topoOps.size());
             data.topoKinds.reserve(data.topoOps.size());
+            data.topoSinkOnly.reserve(data.topoOps.size());
             for (std::size_t pos = 0; pos < data.topoOps.size(); ++pos)
             {
                 const auto opId = data.topoOps[pos];
                 data.topoPosByOpIndex[opId.index] = static_cast<uint32_t>(pos);
                 data.topoSymbols.push_back(graph.operationSymbol(opId));
                 data.topoKinds.push_back(graph.opKind(opId));
+                data.topoSinkOnly.push_back(isTailSinkOp(graph.getOperation(opId)) ? 1U : 0U);
             }
 
             data.topoEdges.reserve(opEdges.size());
@@ -883,11 +889,45 @@ namespace wolvrix::lib::transform
             return partition;
         }
 
+        bool clusterMembersAreSinkOnly(const std::vector<uint32_t> &members,
+                                       const ActivityOpData &opData) noexcept
+        {
+            if (members.empty())
+            {
+                return false;
+            }
+            for (const auto topoPos : members)
+            {
+                if (topoPos >= opData.topoSinkOnly.size() || opData.topoSinkOnly[topoPos] == 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void markSinkOnlyClustersFixedBoundary(WorkingPartition &partition,
+                                               const ActivityOpData &opData)
+        {
+            if (partition.fixedBoundary.size() < partition.clusters.size())
+            {
+                partition.fixedBoundary.resize(partition.clusters.size(), 0U);
+            }
+            for (std::size_t clusterId = 0; clusterId < partition.clusters.size(); ++clusterId)
+            {
+                if (clusterMembersAreSinkOnly(partition.clusters[clusterId], opData))
+                {
+                    partition.fixedBoundary[clusterId] = 1U;
+                }
+            }
+        }
+
         ClusterView buildClusterView(const WorkingPartition &partition, const ActivityOpData &opData)
         {
             ClusterView view;
             view.members = partition.clusters;
             view.fixedBoundary = partition.fixedBoundary;
+            view.sinkOnly.resize(view.members.size(), 0U);
             view.preds.resize(view.members.size());
             view.succs.resize(view.members.size());
             view.clusterOfTopoPos.assign(opData.topoOps.size(), kInvalidActivitySupernodeId);
@@ -897,6 +937,7 @@ namespace wolvrix::lib::transform
                 auto &members = view.members[clusterId];
                 std::sort(members.begin(), members.end());
                 members.erase(std::unique(members.begin(), members.end()), members.end());
+                view.sinkOnly[clusterId] = clusterMembersAreSinkOnly(members, opData) ? 1U : 0U;
                 for (const auto topoPos : members)
                 {
                     view.clusterOfTopoPos[topoPos] = static_cast<uint32_t>(clusterId);
@@ -1286,7 +1327,7 @@ namespace wolvrix::lib::transform
                     continue;
                 }
                 const uint32_t succId = view.succs[clusterId].front();
-                if (view.fixedBoundary[succId] != 0)
+                if (view.fixedBoundary[succId] != 0 || view.sinkOnly[clusterId] != view.sinkOnly[succId])
                 {
                     continue;
                 }
@@ -1335,7 +1376,7 @@ namespace wolvrix::lib::transform
                     continue;
                 }
                 const uint32_t predId = view.preds[clusterId].front();
-                if (view.fixedBoundary[predId] != 0)
+                if (view.fixedBoundary[predId] != 0 || view.sinkOnly[clusterId] != view.sinkOnly[predId])
                 {
                     continue;
                 }
@@ -1407,6 +1448,10 @@ namespace wolvrix::lib::transform
                     uint32_t lhs = dsu.find(anchor);
                     uint32_t rhs = dsu.find(candidate);
                     if (lhs == rhs)
+                    {
+                        continue;
+                    }
+                    if (view.sinkOnly[lhs] != view.sinkOnly[rhs])
                     {
                         continue;
                     }
@@ -1483,6 +1528,10 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
+                if (view.sinkOnly[clusterId] != view.sinkOnly[*mergeTarget])
+                {
+                    continue;
+                }
 
                 uint32_t lhs = dsu.find(clusterId);
                 uint32_t rhs = dsu.find(*mergeTarget);
@@ -1527,9 +1576,19 @@ namespace wolvrix::lib::transform
                 std::size_t accumSize = 0;
                 int cutCost = 0;
                 bool fixedSingleton = false;
+                std::optional<uint8_t> segmentSinkOnly;
                 for (std::size_t end = begin + 1; end <= count; ++end)
                 {
                     const std::size_t clusterId = end - 1;
+                    const uint8_t clusterSinkOnly = clusterId < view.sinkOnly.size() ? view.sinkOnly[clusterId] : 0U;
+                    if (!segmentSinkOnly.has_value())
+                    {
+                        segmentSinkOnly = clusterSinkOnly;
+                    }
+                    else if (*segmentSinkOnly != clusterSinkOnly)
+                    {
+                        break;
+                    }
                     if (view.fixedBoundary[clusterId] != 0)
                     {
                         if (clusterId != begin)
@@ -1685,6 +1744,8 @@ namespace wolvrix::lib::transform
                         const uint32_t clusterId = left.back();
                         const std::size_t clusterSize = view.members[clusterId].size();
                         if (view.fixedBoundary[clusterId] == 0 &&
+                            !right.empty() &&
+                            view.sinkOnly[clusterId] == view.sinkOnly[right.front()] &&
                             segmentSizes[boundary + 1] + clusterSize <= maxSize)
                         {
                             const int gain = computeMoveGain(view,
@@ -1704,6 +1765,8 @@ namespace wolvrix::lib::transform
                         const uint32_t clusterId = right.front();
                         const std::size_t clusterSize = view.members[clusterId].size();
                         if (view.fixedBoundary[clusterId] == 0 &&
+                            !left.empty() &&
+                            view.sinkOnly[clusterId] == view.sinkOnly[left.back()] &&
                             segmentSizes[boundary] + clusterSize <= maxSize)
                         {
                             const int gain = computeMoveGain(view,
@@ -2034,6 +2097,12 @@ namespace wolvrix::lib::transform
                         ++localUserCount;
                         continue;
                     }
+                    if (targetIt->second < partition.fixedBoundary.size() &&
+                        partition.fixedBoundary[targetIt->second] != 0)
+                    {
+                        mustKeepOriginal = true;
+                        continue;
+                    }
                     usersByTarget[targetIt->second].push_back(user);
                 }
 
@@ -2222,6 +2291,7 @@ namespace wolvrix::lib::transform
             }
 
             partition = canonicalizePartition(partition, opData);
+            markSinkOnlyClustersFixedBoundary(partition, opData);
             const ClusterView coarseView = buildClusterView(partition, opData);
             const ClusterView dpView = buildTopoOrderedClusterView(coarseView);
             std::vector<std::vector<uint32_t>> segments = buildDpSegments(dpView, options.supernodeMaxSize);
@@ -2230,7 +2300,9 @@ namespace wolvrix::lib::transform
                 segments = refineSegments(dpView, std::move(segments), options.supernodeMaxSize, options.refineMaxIter);
             }
             partition = materializeSegments(dpView, segments);
-            return canonicalizePartition(partition, opData);
+            partition = canonicalizePartition(partition, opData);
+            markSinkOnlyClustersFixedBoundary(partition, opData);
+            return partition;
         }
 
         bool runReplicationPhase(wolvrix::lib::grh::Graph &graph,
@@ -3009,6 +3081,7 @@ namespace wolvrix::lib::transform
         const auto materializeSegmentsStart = std::chrono::steady_clock::now();
         partition = materializeSegments(dpView, segments);
         partition = canonicalizePartition(partition, opData);
+        markSinkOnlyClustersFixedBoundary(partition, opData);
         if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
         {
             logInfo("activity-schedule debug: post_dp_partition_cycle " + cycle);

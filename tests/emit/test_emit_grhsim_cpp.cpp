@@ -1010,6 +1010,138 @@ namespace
         return design;
     }
 
+    Design buildCommitCondBatchDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId fire0 = makeLogicValue(graph, "fire0", 8);
+        ValueId fire1 = makeLogicValue(graph, "fire1", 8);
+        ValueId fire2 = makeLogicValue(graph, "fire2", 8);
+        ValueId fire3 = makeLogicValue(graph, "fire3", 8);
+        ValueId d0 = makeLogicValue(graph, "d0", 8);
+        ValueId d1 = makeLogicValue(graph, "d1", 8);
+        ValueId d2 = makeLogicValue(graph, "d2", 8);
+        ValueId d3 = makeLogicValue(graph, "d3", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("fire0", fire0);
+        graph.bindInputPort("fire1", fire1);
+        graph.bindInputPort("fire2", fire2);
+        graph.bindInputPort("fire3", fire3);
+        graph.bindInputPort("d0", d0);
+        graph.bindInputPort("d1", d1);
+        graph.bindInputPort("d2", d2);
+        graph.bindInputPort("d3", d3);
+
+        ValueId mask = addConstant(graph, "const_mask_commit_batch", "mask_commit_batch", 8, "8'hFF");
+        ValueId one = addConstant(graph, "const_one_commit_batch", "one_commit_batch", 8, "8'h01");
+        ValueId zero = addConstant(graph, "const_zero_commit_batch", "zero_commit_batch", 8, "8'h00");
+
+        auto addRegister = [&](std::string_view regName,
+                               std::string_view readName,
+                               std::string_view valueName) -> ValueId
+        {
+            OperationId reg = graph.createOperation(OperationKind::kRegister,
+                                                    graph.internSymbol(std::string(regName)));
+            graph.setAttr(reg, "width", static_cast<int64_t>(8));
+            graph.setAttr(reg, "isSigned", false);
+            graph.setAttr(reg, "initValue", std::string("8'h00"));
+
+            ValueId q = makeLogicValue(graph, valueName, 8);
+            OperationId read = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                     graph.internSymbol(std::string(readName)));
+            graph.addResult(read, q);
+            graph.setAttr(read, "regSymbol", std::string(regName));
+            return q;
+        };
+
+        ValueId q0 = addRegister("batch_reg0", "batch_reg0_read", "batch_q0");
+        ValueId q1 = addRegister("batch_reg1", "batch_reg1_read", "batch_q1");
+        ValueId q2 = addRegister("batch_reg2", "batch_reg2_read", "batch_q2");
+        ValueId q3 = addRegister("batch_reg3", "batch_reg3_read", "batch_q3");
+
+        auto addFireCond = [&](std::string_view opName,
+                               std::string_view valueName,
+                               std::string_view outputName,
+                               ValueId fire) -> ValueId
+        {
+            ValueId cond = makeLogicValue(graph, valueName, 1);
+            OperationId eq = graph.createOperation(OperationKind::kEq, graph.internSymbol(std::string(opName)));
+            graph.addOperand(eq, fire);
+            graph.addOperand(eq, one);
+            graph.addResult(eq, cond);
+            graph.bindOutputPort(std::string(outputName), cond);
+            return cond;
+        };
+
+        ValueId fireCond0 = addFireCond("batch_fire0_eq", "batch_fire_cond0", "fire_cond0", fire0);
+        ValueId fireCond1 = addFireCond("batch_fire1_eq", "batch_fire_cond1", "fire_cond1", fire1);
+        ValueId fireCond2 = addFireCond("batch_fire2_eq", "batch_fire_cond2", "fire_cond2", fire2);
+        ValueId fireCond3 = addFireCond("batch_fire3_eq", "batch_fire_cond3", "fire_cond3", fire3);
+
+        auto addNextData = [&](std::string_view opName,
+                               std::string_view valueName,
+                               std::string_view outputName,
+                               ValueId data) -> ValueId
+        {
+            ValueId nextData = makeLogicValue(graph, valueName, 8);
+            OperationId add = graph.createOperation(OperationKind::kAdd, graph.internSymbol(std::string(opName)));
+            graph.addOperand(add, data);
+            graph.addOperand(add, zero);
+            graph.addResult(add, nextData);
+            graph.bindOutputPort(std::string(outputName), nextData);
+            return nextData;
+        };
+
+        ValueId nextData0 = addNextData("batch_next0_add", "batch_next_data0", "next_data0", d0);
+        ValueId nextData1 = addNextData("batch_next1_add", "batch_next_data1", "next_data1", d1);
+        ValueId nextData2 = addNextData("batch_next2_add", "batch_next_data2", "next_data2", d2);
+        ValueId nextData3 = addNextData("batch_next3_add", "batch_next_data3", "next_data3", d3);
+
+        auto addWrite = [&](std::string_view opName,
+                            std::string_view regName,
+                            ValueId fire,
+                            ValueId data)
+        {
+            OperationId write = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                      graph.internSymbol(std::string(opName)));
+            graph.addOperand(write, fire);
+            graph.addOperand(write, data);
+            graph.addOperand(write, mask);
+            graph.addOperand(write, clk);
+            graph.setAttr(write, "regSymbol", std::string(regName));
+            graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+        };
+
+        addWrite("batch_reg0_write", "batch_reg0", fireCond0, nextData0);
+        addWrite("batch_reg1_write", "batch_reg1", fireCond1, nextData1);
+        addWrite("batch_reg2_write", "batch_reg2", fireCond2, nextData2);
+        addWrite("batch_reg3_write", "batch_reg3", fireCond3, nextData3);
+
+        ValueId sum01 = makeLogicValue(graph, "sum01", 8);
+        OperationId add01 = graph.createOperation(OperationKind::kAdd, graph.internSymbol("sum01_add"));
+        graph.addOperand(add01, q0);
+        graph.addOperand(add01, q1);
+        graph.addResult(add01, sum01);
+
+        ValueId sum23 = makeLogicValue(graph, "sum23", 8);
+        OperationId add23 = graph.createOperation(OperationKind::kAdd, graph.internSymbol("sum23_add"));
+        graph.addOperand(add23, q2);
+        graph.addOperand(add23, q3);
+        graph.addResult(add23, sum23);
+
+        ValueId y = makeLogicValue(graph, "y", 8);
+        OperationId addY = graph.createOperation(OperationKind::kAdd, graph.internSymbol("sum_y_add"));
+        graph.addOperand(addY, sum01);
+        graph.addOperand(addY, sum23);
+        graph.addResult(addY, y);
+        graph.bindOutputPort("y", y);
+
+        return design;
+    }
+
     Design buildInvalidRegisterWriteDesign()
     {
         Design design;
@@ -1628,16 +1760,20 @@ int main()
     {
         return fail("Missing emitted memory read address handling coverage");
     }
-    if (sched.find("grhsim_index_pow2_words") == std::string::npos ||
-        state.find("grhsim_apply_masked_words_inplace") == std::string::npos)
+    if (sched.find("grhsim_index_pow2_words") == std::string::npos)
     {
-        return fail("Missing emitted memory write optimization coverage");
+        return fail("Missing emitted pow2 memory write row addressing coverage");
+    }
+    if (sched.find("grhsim_apply_masked_words_inplace") == std::string::npos)
+    {
+        return fail("Missing emitted masked memory write helper usage");
     }
     if (eval.find("while (pending_eval_round)") == std::string::npos ||
-        (eval.find("commit_activated_readers = commit_state_updates();") == std::string::npos &&
-         eval.find("pending_eval_round = commit_state_updates();") == std::string::npos))
+        eval.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
+        eval.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
+        eval.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
     {
-        return fail("Missing propagate/commit fixed-point eval loop");
+        return fail("Missing compute/commit fixed-point eval loop");
     }
     if (header.find("trace_eval_enabled_") != std::string::npos ||
         state.find("GRHSIM_TRACE_EVAL") != std::string::npos ||
@@ -1654,10 +1790,20 @@ int main()
     {
         return fail("Missing static event-edge storage");
     }
-    if (header.find("state_shadow_touched_slots_{};") == std::string::npos ||
-        header.find("memory_write_touched_slots_{};") == std::string::npos)
+    if (sched.find("if ((event_edge_slots_") != std::string::npos ||
+        sched.find("if (((event_edge_slots_") != std::string::npos)
     {
-        return fail("Missing static shadow/write scratch storage");
+        return fail("Exact event predicates should not emit redundant parentheses");
+    }
+    if (header.find("state_shadow_touched_slots_{};") != std::string::npos ||
+        header.find("memory_write_touched_slots_{};") != std::string::npos)
+    {
+        return fail("Direct-commit emit should not keep shadow/write scratch storage");
+    }
+    if (header.find("commit_state_updates(") != std::string::npos ||
+        state.find("commit_state_updates(") != std::string::npos)
+    {
+        return fail("Direct-commit emit should not expose legacy commit_state_updates helpers");
     }
     if (header.find("std::array<std::uint8_t, 3> state_mem_idx_mem_{};") == std::string::npos ||
         header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_mem_{};") == std::string::npos ||
@@ -1673,8 +1819,10 @@ int main()
     }
     if (eval.find("kBatchEvalFns") == std::string::npos ||
         eval.find("using BatchEvalFn = BatchEvalStats") == std::string::npos ||
-        eval.find("kActiveWordBatchOffsets") == std::string::npos ||
-        eval.find("kActiveWordBatchIndices") == std::string::npos ||
+        eval.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
+        eval.find("kComputeActiveWordBatchIndices") == std::string::npos ||
+        eval.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
+        eval.find("kCommitActiveWordBatchIndices") == std::string::npos ||
         eval.find("for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex)") == std::string::npos ||
         eval.find("(void)(this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
         sched.find("BatchEvalStats GrhSIM_top::eval_batch_0()") == std::string::npos ||
@@ -1705,8 +1853,8 @@ int main()
         return fail("Missing random seed plumbing in state init");
     }
     if (state.find("event_edge_slots_.fill(grhsim_event_edge_kind::none);") == std::string::npos ||
-        state.find("state_shadow_touched_slots_ = {};") == std::string::npos ||
-        state.find("memory_write_touched_slots_ = {};") == std::string::npos ||
+        state.find("state_shadow_touched_slots_ = {};") != std::string::npos ||
+        state.find("memory_write_touched_slots_ = {};") != std::string::npos ||
         state.find("state_mem_wide_mem_ = {};") == std::string::npos)
     {
         return fail("Missing static storage reset emission");
@@ -2245,9 +2393,9 @@ int main()
         {
             return fail("register-write interaction should emit event-edge storage");
         }
-        if (regWriteHeaderText.find("state_shadow_") == std::string::npos)
+        if (regWriteHeaderText.find("state_shadow_") != std::string::npos)
         {
-            return fail("register-write interaction should emit shared state-shadow fields");
+            return fail("register-write interaction should not keep shared state-shadow fields");
         }
         if (regWriteStateText.find(".assign(") != std::string::npos)
         {
@@ -2403,6 +2551,107 @@ int main()
             return fail("local-temp harness failed to run");
         }
 
+        const std::filesystem::path commitBatchDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_commit_cond_batch";
+        std::filesystem::remove_all(commitBatchDir);
+        Design commitBatchDesign = buildCommitCondBatchDesign();
+        EmitDiagnostics commitBatchDiag;
+        EmitResult commitBatchResult;
+        if (!emitWithActivitySchedule(commitBatchDesign, commitBatchDir, commitBatchDiag, commitBatchResult))
+        {
+            return fail("commit-cond-batch activity-schedule pass failed");
+        }
+        if (!commitBatchResult.success || commitBatchDiag.hasError())
+        {
+            return fail("commit-cond-batch emit failed");
+        }
+        const std::string commitBatchHeader = readFile(commitBatchDir / "grhsim_top.hpp");
+        const std::string commitBatchRuntime = readFile(commitBatchDir / "grhsim_top_runtime.hpp");
+        const std::string commitBatchSched =
+            readFiles(collectSchedFiles(commitBatchDir, "grhsim_top_sched_"));
+        if (commitBatchHeader.find("std::uint32_t condIndex = 0;") == std::string::npos ||
+            commitBatchHeader.find("std::uint32_t condBase = 0;") == std::string::npos ||
+            commitBatchRuntime.find("struct grhsim_active_mask_entry") == std::string::npos)
+        {
+            return fail("commit-cond-batch should emit cond-aware commit descriptors");
+        }
+        if (countSubstring(commitBatchSched, "apply_commit_scalar_state_write_table(") != 1)
+        {
+            return fail("commit-cond-batch should merge same-event different-cond writes into one commit table");
+        }
+        if (countSubstring(commitBatchSched, "Commit writes update visible state directly") != 0)
+        {
+            return fail("commit-cond-batch should avoid expanding per-write commit bodies");
+        }
+        if (commitBatchSched.find("if ((event_edge_slots_") != std::string::npos ||
+            commitBatchSched.find("if (((event_edge_slots_") != std::string::npos)
+        {
+            return fail("commit-cond-batch should not emit redundant event parentheses");
+        }
+
+        const std::filesystem::path commitBatchHarnessPath = commitBatchDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(commitBatchHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create commit-cond-batch harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.fire0 = static_cast<std::uint8_t>(1);\n";
+            harness << "    sim.fire1 = static_cast<std::uint8_t>(0);\n";
+            harness << "    sim.fire2 = static_cast<std::uint8_t>(1);\n";
+            harness << "    sim.fire3 = static_cast<std::uint8_t>(1);\n";
+            harness << "    sim.d0 = static_cast<std::uint8_t>(1);\n";
+            harness << "    sim.d1 = static_cast<std::uint8_t>(2);\n";
+            harness << "    sim.d2 = static_cast<std::uint8_t>(4);\n";
+            harness << "    sim.d3 = static_cast<std::uint8_t>(8);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.clk = true;\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.fire0 = static_cast<std::uint8_t>(0);\n";
+            harness << "    sim.fire1 = static_cast<std::uint8_t>(1);\n";
+            harness << "    sim.fire2 = static_cast<std::uint8_t>(0);\n";
+            harness << "    sim.fire3 = static_cast<std::uint8_t>(0);\n";
+            harness << "    sim.d1 = static_cast<std::uint8_t>(16);\n";
+            harness << "    sim.eval();\n";
+            harness << "    sim.clk = true;\n";
+            harness << "    sim.eval();\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::vector<std::filesystem::path> commitBatchStateFiles =
+            collectSchedFiles(commitBatchDir, "grhsim_top_state");
+        const std::vector<std::filesystem::path> commitBatchSchedFiles =
+            collectSchedFiles(commitBatchDir, "grhsim_top_sched_");
+        const std::filesystem::path commitBatchHarnessExe = commitBatchDir / "grhsim_top_harness";
+        std::string commitBatchCompileCmd = "clang++ -std=c++20 -O2 -I" + commitBatchDir.string();
+        for (const auto &stateFile : commitBatchStateFiles)
+        {
+            commitBatchCompileCmd += " " + stateFile.string();
+        }
+        commitBatchCompileCmd += " " + (commitBatchDir / "grhsim_top_eval.cpp").string();
+        for (const auto &schedPath : commitBatchSchedFiles)
+        {
+            commitBatchCompileCmd += " " + schedPath.string();
+        }
+        commitBatchCompileCmd += " " + commitBatchHarnessPath.string() + " -o " + commitBatchHarnessExe.string();
+        if (std::system(commitBatchCompileCmd.c_str()) != 0)
+        {
+            return fail("commit-cond-batch harness failed to compile");
+        }
+        if (std::system(commitBatchHarnessExe.string().c_str()) != 0)
+        {
+            return fail("commit-cond-batch harness failed to run");
+        }
+
         const std::filesystem::path gatedDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_gated_clock";
         std::filesystem::remove_all(gatedDir);
         Design gatedDesign = buildGatedClockDesign();
@@ -2451,11 +2700,17 @@ int main()
         {
             return fail("gated-clock exact event logic should consume shared event-edge enums");
         }
-        if (gatedEvalText.find("while (pending_eval_round)") == std::string::npos ||
-            (gatedEvalText.find("commit_activated_readers = commit_state_updates();") == std::string::npos &&
-             gatedEvalText.find("pending_eval_round = commit_state_updates();") == std::string::npos))
+        if (gatedSchedText.find("if ((event_edge_slots_") != std::string::npos ||
+            gatedSchedText.find("if (((event_edge_slots_") != std::string::npos)
         {
-            return fail("gated-clock eval should iterate until the activity schedule reaches a fixed point");
+            return fail("gated-clock exact event logic should not emit redundant parentheses");
+        }
+        if (gatedEvalText.find("while (pending_eval_round)") == std::string::npos ||
+            gatedEvalText.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
+            gatedEvalText.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
+            gatedEvalText.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
+        {
+            return fail("gated-clock eval should iterate until compute/commit reaches a fixed point");
         }
         if (gatedEvalText.find("grhsim_classify_edge(") == std::string::npos ||
             gatedEvalText.find("event_edge_slots_") == std::string::npos)

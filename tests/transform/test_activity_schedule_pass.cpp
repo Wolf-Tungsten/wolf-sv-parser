@@ -60,6 +60,23 @@ namespace
         return supernodeToOps[supernodeId].size();
     }
 
+    bool isCommitPhaseOp(const wolvrix::lib::grh::Operation &op)
+    {
+        using wolvrix::lib::grh::OperationKind;
+        switch (op.kind())
+        {
+        case OperationKind::kRegisterWritePort:
+        case OperationKind::kLatchWritePort:
+        case OperationKind::kMemoryWritePort:
+            return true;
+        case OperationKind::kSystemTask:
+        case OperationKind::kDpicCall:
+            return op.results().empty();
+        default:
+            return false;
+        }
+    }
+
 } // namespace
 
 int main()
@@ -709,6 +726,116 @@ int main()
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, op2) != 3)
         {
             return fail("Expected tail supernode to ignore normal size limits and keep the full chain");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top6b");
+        design.markAsTop("top6b");
+
+        const auto clk = makeValue(graph, "clk_top6b", 1, false);
+        const auto en = makeValue(graph, "en_top6b", 1, false);
+        const auto mask = makeValue(graph, "mask_top6b", 8, false);
+        const auto a = makeValue(graph, "a_top6b", 8, false);
+        const auto b = makeValue(graph, "b_top6b", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top6b"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto qReadValue = makeValue(graph, "q_read_top6b", 8, false);
+        const auto qReadOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterReadPort,
+                                                   graph.internSymbol("q_read_op_top6b"));
+        graph.addResult(qReadOp, qReadValue);
+        graph.setAttr(qReadOp, "regSymbol", std::string("q_top6b"));
+
+        const auto sumValue = makeValue(graph, "sum_top6b", 8, false);
+        const auto addOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                 graph.internSymbol("sum_add_top6b"));
+        graph.addOperand(addOp, qReadValue);
+        graph.addOperand(addOp, a);
+        graph.addResult(addOp, sumValue);
+
+        const auto xorValue = makeValue(graph, "xor_top6b", 8, false);
+        const auto xorOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                 graph.internSymbol("xor_op_top6b"));
+        graph.addOperand(xorOp, sumValue);
+        graph.addOperand(xorOp, b);
+        graph.addResult(xorOp, xorValue);
+        graph.bindOutputPort("y", xorValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top6b"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, xorValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top6b"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top6b",
+            .supernodeMaxSize = 8,
+            .maxSinkSupernodeOp = 1,
+            .enableCoarsen = true,
+            .enableChainMerge = true,
+            .enableSiblingMerge = true,
+            .enableForwardMerge = true,
+            .enableRefine = false,
+            .enableStateReadTailAbsorb = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected pure-phase activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top6b.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected pure-phase session outputs");
+        }
+        if ((*opToSupernode)[writeOp.index - 1] == (*opToSupernode)[xorOp.index - 1])
+        {
+            return fail("Expected commit write to stay outside the compute chain supernode");
+        }
+        for (const auto &supernodeOps : *supernodeToOps)
+        {
+            bool hasCommitOp = false;
+            bool hasComputeOp = false;
+            for (const auto opId : supernodeOps)
+            {
+                const auto op = graph.getOperation(opId);
+                if (isCommitPhaseOp(op))
+                {
+                    hasCommitOp = true;
+                }
+                else
+                {
+                    hasComputeOp = true;
+                }
+            }
+            if (hasCommitOp && hasComputeOp)
+            {
+                return fail("Expected activity-schedule to emit pure compute/commit supernodes");
+            }
         }
     }
 
