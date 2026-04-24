@@ -864,28 +864,92 @@ namespace wolvrix::lib::transform
             return sinks;
         }
 
-        WorkingPartition buildChunkedPartitionFromTopoPositions(const std::vector<uint32_t> &topoPositions,
-                                                                std::size_t maxSize)
+        std::string normalizedSinkEventKey(const wolvrix::lib::grh::Operation &op)
+        {
+            const auto edges =
+                getAttrValue<std::vector<std::string>>(op, "eventEdge").value_or(std::vector<std::string>{});
+            if (edges.empty())
+            {
+                return "none";
+            }
+
+            const auto operands = op.operands();
+            std::size_t eventStart = operands.size();
+            switch (op.kind())
+            {
+            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
+            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
+                eventStart = 3;
+                break;
+            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                eventStart = 4;
+                break;
+            case wolvrix::lib::grh::OperationKind::kSystemTask:
+            case wolvrix::lib::grh::OperationKind::kDpicCall:
+                eventStart = operands.size() >= edges.size() ? operands.size() - edges.size() : operands.size();
+                break;
+            default:
+                return "opaque";
+            }
+
+            const std::size_t safeStart = std::min(eventStart, operands.size());
+            const std::size_t eventCount = std::min(edges.size(), operands.size() - safeStart);
+            if (eventCount == 0)
+            {
+                return "none";
+            }
+
+            std::vector<std::string> parts;
+            parts.reserve(eventCount);
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                std::string edge = edges[i];
+                if (edge.empty())
+                {
+                    edge = "any";
+                }
+                parts.push_back(edge + ":" + std::to_string(operands[safeStart + i].index));
+            }
+            std::sort(parts.begin(), parts.end());
+            parts.erase(std::unique(parts.begin(), parts.end()), parts.end());
+
+            std::ostringstream key;
+            key << "ev";
+            for (const auto &part : parts)
+            {
+                key << "|" << part;
+            }
+            return key.str();
+        }
+
+        WorkingPartition buildEventClusteredSinkPartition(const wolvrix::lib::grh::Graph &graph,
+                                                          const ActivityOpData &opData,
+                                                          const std::vector<uint32_t> &topoPositions,
+                                                          std::size_t maxSize)
         {
             WorkingPartition partition;
             if (topoPositions.empty())
             {
                 return partition;
             }
+
             const std::size_t chunkSize = maxSize == 0 ? topoPositions.size() : maxSize;
             partition.clusters.reserve((topoPositions.size() + chunkSize - 1) / chunkSize);
             partition.fixedBoundary.reserve(partition.clusters.capacity());
-            for (std::size_t begin = 0; begin < topoPositions.size(); begin += chunkSize)
+
+            std::string currentKey;
+            for (const uint32_t topoPos : topoPositions)
             {
-                const std::size_t end = std::min(begin + chunkSize, topoPositions.size());
-                auto &cluster = partition.clusters.emplace_back();
-                cluster.reserve(end - begin);
-                for (std::size_t index = begin; index < end; ++index)
+                const std::string key = normalizedSinkEventKey(graph.getOperation(opData.topoOps[topoPos]));
+                if (partition.clusters.empty() || partition.clusters.back().size() >= chunkSize || key != currentKey)
                 {
-                    cluster.push_back(topoPositions[index]);
+                    partition.clusters.emplace_back();
+                    partition.fixedBoundary.push_back(0U);
+                    currentKey = key;
                 }
-                partition.fixedBoundary.push_back(0);
+                partition.clusters.back().push_back(topoPos);
             }
+
             return partition;
         }
 
@@ -2892,7 +2956,8 @@ namespace wolvrix::lib::transform
 
         const auto sinkPartitionStart = std::chrono::steady_clock::now();
         const std::vector<uint32_t> sinkTopoPositions = collectSinkTopoPositions(*graph, opData);
-        WorkingPartition sinkPartition = buildChunkedPartitionFromTopoPositions(sinkTopoPositions, maxSinkSupernodeOp);
+        WorkingPartition sinkPartition =
+            buildEventClusteredSinkPartition(*graph, opData, sinkTopoPositions, maxSinkSupernodeOp);
         sinkPartition = canonicalizePartition(sinkPartition, opData);
         const std::uint64_t sinkPartitionMs = elapsedMs(sinkPartitionStart);
         std::vector<uint8_t> sinkTopoMask(opData.topoOps.size(), 0U);

@@ -254,10 +254,8 @@ namespace wolvrix::lib::emit
                         localMask |
                         (UINT8_C(1) << (static_cast<std::size_t>(index) % kActiveFlagBitsPerWord)));
                 }
-                stream << indent << "{\n";
-                stream << indent << "    " << context->localActiveExpr << " |= UINT8_C("
+                stream << indent << context->localActiveExpr << " |= UINT8_C("
                        << static_cast<unsigned>(localMask) << ");\n";
-                stream << indent << "}\n";
             }
 
             const std::vector<ActiveMaskEntry> entries = buildActiveMaskEntries(globalIndices);
@@ -291,10 +289,8 @@ namespace wolvrix::lib::emit
             }
             for (const auto &entry : entries)
             {
-                stream << indent << "{\n";
-                stream << indent << "    " << activeExpr << "[" << entry.wordIndex << "u] |= UINT8_C("
+                stream << indent << activeExpr << "[" << entry.wordIndex << "u] |= UINT8_C("
                        << static_cast<unsigned>(entry.mask) << ");\n";
-                stream << indent << "}\n";
             }
         }
 
@@ -926,6 +922,12 @@ namespace wolvrix::lib::emit
                    valueDebugName(graph, value);
         }
 
+        std::string materializedValueFieldName(const Graph &graph, ValueId value)
+        {
+            return "value_" + std::to_string(value.index) + "_" + std::to_string(value.generation) + "_" +
+                   valueDebugName(graph, value) + "_";
+        }
+
         std::string opDebugName(const Graph &graph, OperationId op)
         {
             const std::string_view symbol = graph.symbolText(graph.operationSymbol(op));
@@ -1551,13 +1553,15 @@ namespace wolvrix::lib::emit
         struct ValueScalarSlotRef
         {
             ValueSlotScalarKind kind = ValueSlotScalarKind::kBool;
-            std::size_t byteOffset = 0;
+            std::size_t slotIndex = 0;
+            std::string fieldName;
         };
 
         struct ValueWideSlotRef
         {
             std::size_t wordCount = 0;
-            std::size_t byteOffset = 0;
+            std::size_t slotIndex = 0;
+            std::string fieldName;
         };
 
         struct WaveformSignalDecl
@@ -1663,47 +1667,52 @@ namespace wolvrix::lib::emit
         }
 
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width);
+        std::string scalarLogicSlotCppType(ValueSlotScalarKind kind);
         std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind);
         std::size_t alignTo(std::size_t offset, std::size_t alignment);
-        std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view indexExpr);
-        std::string valueWideRefExpr(std::size_t wordCount, std::string_view indexExpr);
 
         void rebuildMaterializedValueStorage(const Graph &graph,
                                              std::span<const ValueId> orderedValues,
                                              EmitModel &model)
         {
             model.valueFieldByValue.clear();
+            model.valueFieldDecls.clear();
             model.valueScalarSlotByValue.clear();
             model.valueWideSlotByValue.clear();
             model.valueRealSlotByValue.clear();
             model.valueStringSlotByValue.clear();
             model.valueScalarSlotCounts = {};
             model.valueWideSlotCountsByWords.clear();
-            model.valueLogicStorageBytes = 0;
             model.valueRealSlotCount = 0;
             model.valueStringSlotCount = 0;
-
-            std::size_t valueLogicStorageBytes = 0;
             for (ValueId valueId : orderedValues)
             {
                 if (!model.materializedValues.contains(valueId))
                 {
                     continue;
                 }
+                const std::string fieldName = materializedValueFieldName(graph, valueId);
+                std::string fieldType = cppTypeForValue(graph, valueId);
+                if (graph.valueType(valueId) == ValueType::Logic && !isWideLogicValue(graph, valueId))
+                {
+                    fieldType = scalarLogicSlotCppType(valueScalarSlotKindForWidth(graph.valueWidth(valueId)));
+                }
+                model.valueFieldDecls.push_back("    " + fieldType + " " + fieldName + " = " +
+                                                defaultInitExpr(graph, valueId) + ";");
                 switch (graph.valueType(valueId))
                 {
                 case ValueType::Real:
                 {
                     const std::size_t slotIndex = model.valueRealSlotCount++;
                     model.valueRealSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, "value_real_slots_[" + std::to_string(slotIndex) + "]");
+                    model.valueFieldByValue.emplace(valueId, fieldName);
                     break;
                 }
                 case ValueType::String:
                 {
                     const std::size_t slotIndex = model.valueStringSlotCount++;
                     model.valueStringSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, "value_string_slots_[" + std::to_string(slotIndex) + "]");
+                    model.valueFieldByValue.emplace(valueId, fieldName);
                     break;
                 }
                 case ValueType::Logic:
@@ -1712,31 +1721,27 @@ namespace wolvrix::lib::emit
                     if (isWideLogicValue(graph, valueId))
                     {
                         const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
-                        valueLogicStorageBytes = alignTo(valueLogicStorageBytes, alignof(std::uint64_t));
-                        const std::size_t byteOffset = valueLogicStorageBytes;
-                        valueLogicStorageBytes += wordCount * sizeof(std::uint64_t);
-                        model.valueWideSlotCountsByWords[wordCount]++;
+                        const std::size_t slotIndex = model.valueWideSlotCountsByWords[wordCount]++;
                         model.valueWideSlotByValue.emplace(
-                            valueId, ValueWideSlotRef{.wordCount = wordCount, .byteOffset = byteOffset});
-                        model.valueFieldByValue.emplace(valueId, valueWideRefExpr(wordCount, std::to_string(byteOffset)));
+                            valueId,
+                            ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex, .fieldName = fieldName});
+                        model.valueFieldByValue.emplace(valueId, fieldName);
                     }
                     else
                     {
                         const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                        const std::size_t slotBytes = valueScalarSlotByteSize(slotKind);
-                        valueLogicStorageBytes = alignTo(valueLogicStorageBytes, slotBytes);
-                        const std::size_t byteOffset = valueLogicStorageBytes;
-                        valueLogicStorageBytes += slotBytes;
-                        model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                        const std::size_t slotIndex =
+                            model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
                         model.valueScalarSlotByValue.emplace(
-                            valueId, ValueScalarSlotRef{.kind = slotKind, .byteOffset = byteOffset});
-                        model.valueFieldByValue.emplace(valueId, valueScalarRefExpr(slotKind, std::to_string(byteOffset)));
+                            valueId,
+                            ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex, .fieldName = fieldName});
+                        model.valueFieldByValue.emplace(valueId, fieldName);
                     }
                     break;
                 }
                 }
             }
-            model.valueLogicStorageBytes = valueLogicStorageBytes;
+            model.valueLogicStorageBytes = 0;
         }
 
         std::vector<ValueId> buildBatchHotValueOrder(const Graph &graph,
@@ -1913,6 +1918,35 @@ namespace wolvrix::lib::emit
             return ValueSlotScalarKind::kU64;
         }
 
+        std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+            case ValueSlotScalarKind::kU8:
+                return sizeof(std::uint8_t);
+            case ValueSlotScalarKind::kU16:
+                return sizeof(std::uint16_t);
+            case ValueSlotScalarKind::kU32:
+                return sizeof(std::uint32_t);
+            case ValueSlotScalarKind::kU64:
+                return sizeof(std::uint64_t);
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return sizeof(std::uint64_t);
+        }
+
+        std::size_t alignTo(std::size_t offset, std::size_t alignment)
+        {
+            if (alignment <= 1)
+            {
+                return offset;
+            }
+            const std::size_t mask = alignment - 1;
+            return (offset + mask) & ~mask;
+        }
+
         std::string scalarLogicSlotCppType(ValueSlotScalarKind kind)
         {
             switch (kind)
@@ -1958,73 +1992,39 @@ namespace wolvrix::lib::emit
             return std::string(prefix) + "words_" + std::to_string(wordCount) + "_slots_";
         }
 
-        std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind)
-        {
-            switch (kind)
-            {
-            case ValueSlotScalarKind::kBool:
-            case ValueSlotScalarKind::kU8:
-                return sizeof(std::uint8_t);
-            case ValueSlotScalarKind::kU16:
-                return sizeof(std::uint16_t);
-            case ValueSlotScalarKind::kU32:
-                return sizeof(std::uint32_t);
-            case ValueSlotScalarKind::kU64:
-                return sizeof(std::uint64_t);
-            case ValueSlotScalarKind::kCount:
-                break;
-            }
-            return sizeof(std::uint64_t);
-        }
-
-        std::size_t alignTo(std::size_t offset, std::size_t alignment)
-        {
-            if (alignment <= 1)
-            {
-                return offset;
-            }
-            const std::size_t mask = alignment - 1;
-            return (offset + mask) & ~mask;
-        }
-
-        std::string valueScalarRefName(ValueSlotScalarKind kind)
-        {
-            switch (kind)
-            {
-            case ValueSlotScalarKind::kBool:
-                return "value_bool_ref";
-            case ValueSlotScalarKind::kU8:
-                return "value_u8_ref";
-            case ValueSlotScalarKind::kU16:
-                return "value_u16_ref";
-            case ValueSlotScalarKind::kU32:
-                return "value_u32_ref";
-            case ValueSlotScalarKind::kU64:
-                return "value_u64_ref";
-            case ValueSlotScalarKind::kCount:
-                break;
-            }
-            return "value_unknown_ref";
-        }
-
-        std::string valueWideRefName(std::size_t wordCount)
-        {
-            return "value_words_" + std::to_string(wordCount) + "_ref";
-        }
-
-        std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view byteOffsetExpr)
-        {
-            return valueScalarRefName(kind) + "(" + std::string(byteOffsetExpr) + ")";
-        }
-
-        std::string valueWideRefExpr(std::size_t wordCount, std::string_view byteOffsetExpr)
-        {
-            return valueWideRefName(wordCount) + "(" + std::string(byteOffsetExpr) + ")";
-        }
-
         std::string fixedArrayType(std::string_view elemType, std::size_t count)
         {
             return "std::array<" + std::string(elemType) + ", " + std::to_string(count) + ">";
+        }
+
+        std::string valueScalarSlotPtrFieldName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "value_bool_slot_ptrs_";
+            case ValueSlotScalarKind::kU8:
+                return "value_u8_slot_ptrs_";
+            case ValueSlotScalarKind::kU16:
+                return "value_u16_slot_ptrs_";
+            case ValueSlotScalarKind::kU32:
+                return "value_u32_slot_ptrs_";
+            case ValueSlotScalarKind::kU64:
+                return "value_u64_slot_ptrs_";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "value_unknown_slot_ptrs_";
+        }
+
+        std::string valueScalarIndexedRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
+        {
+            return "(*" + valueScalarSlotPtrFieldName(kind) + "[" + std::string(slotIndexExpr) + "])";
+        }
+
+        std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
+        {
+            return valueScalarIndexedRefExpr(kind, slotIndexExpr);
         }
 
         std::string logicSlotRefExpr(std::string_view scalarPrefix,
@@ -2176,22 +2176,53 @@ namespace wolvrix::lib::emit
             return wideLogicSlotFieldName("state_mem_", wordCount);
         }
 
-        std::string stateMemoryFieldName(std::string_view symbol)
+        std::string stateMemoryFieldName(std::string_view symbol, std::size_t uniqueIndex)
         {
-            return "state_mem_" + sanitizeIdentifier(symbol) + "_";
+            return "state_mem_" + sanitizeIdentifier(symbol) + "_" + std::to_string(uniqueIndex) + "_";
+        }
+
+        std::string stateStorageFieldName(StateDecl::Kind kind, std::string_view symbol, std::size_t uniqueIndex)
+        {
+            switch (kind)
+            {
+            case StateDecl::Kind::Register:
+                return "state_reg_" + sanitizeIdentifier(symbol) + "_" + std::to_string(uniqueIndex) + "_";
+            case StateDecl::Kind::Latch:
+                return "state_latch_" + sanitizeIdentifier(symbol) + "_" + std::to_string(uniqueIndex) + "_";
+            case StateDecl::Kind::Memory:
+                return stateMemoryFieldName(symbol, uniqueIndex);
+            }
+            return "state_" + sanitizeIdentifier(symbol) + "_" + std::to_string(uniqueIndex) + "_";
+        }
+
+        std::string stateLogicScalarSlotPtrFieldName(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+                return "state_logic_bool_slot_ptrs_";
+            case ValueSlotScalarKind::kU8:
+                return "state_logic_u8_slot_ptrs_";
+            case ValueSlotScalarKind::kU16:
+                return "state_logic_u16_slot_ptrs_";
+            case ValueSlotScalarKind::kU32:
+                return "state_logic_u32_slot_ptrs_";
+            case ValueSlotScalarKind::kU64:
+                return "state_logic_u64_slot_ptrs_";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "state_logic_unknown_slot_ptrs_";
+        }
+
+        std::string stateLogicScalarIndexedRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
+        {
+            return "(*" + stateLogicScalarSlotPtrFieldName(kind) + "[" + std::string(slotIndexExpr) + "])";
         }
 
         std::string stateRef(const StateDecl &state)
         {
-            if (state.kind == StateDecl::Kind::Memory)
-            {
-                return state.fieldName;
-            }
-            if (isWideLogicWidth(state.width))
-            {
-                return stateLogicWideSlotFieldName(state.wordCount) + "[" + std::to_string(state.slotIndex) + "]";
-            }
-            return stateLogicScalarSlotFieldName(state.scalarKind) + "[" + std::to_string(state.slotIndex) + "]";
+            return state.fieldName;
         }
 
         void emitChangedValuePropagation(std::ostream &stream,
@@ -3076,7 +3107,7 @@ namespace wolvrix::lib::emit
                                      ? StateDecl::Kind::Register
                                      : (op.kind() == OperationKind::kLatch ? StateDecl::Kind::Latch : StateDecl::Kind::Memory);
                     state.symbol = std::string(op.symbolText());
-                    state.fieldName = state.kind == StateDecl::Kind::Memory ? stateMemoryFieldName(state.symbol) : "";
+                    state.fieldName = stateStorageFieldName(state.kind, state.symbol, opId.index);
                     state.width = static_cast<int32_t>(*width);
                     state.isSigned = *isSigned;
                     if (state.kind == StateDecl::Kind::Memory)
@@ -3110,7 +3141,10 @@ namespace wolvrix::lib::emit
                             error = "storage width must be positive: " + state.symbol;
                             return false;
                         }
-                        const std::string cppType = logicCppType(state.width);
+                        const std::string cppType =
+                            isWideLogicWidth(state.width)
+                                ? logicCppType(state.width)
+                                : scalarLogicSlotCppType(valueScalarSlotKindForWidth(state.width));
                         state.cppType = cppType;
                         if (isWideLogicWidth(state.width))
                         {
@@ -3140,10 +3174,11 @@ namespace wolvrix::lib::emit
                             }
                         }
                     }
-                    if (state.kind == StateDecl::Kind::Memory)
-                    {
-                        model.stateFieldDecls.push_back("    " + state.cppType + " " + state.fieldName + "{};");
-                    }
+                    const std::string stateInitExpr = state.kind == StateDecl::Kind::Memory
+                                                          ? (state.cppType + "{}")
+                                                          : defaultInitExprForLogicWidth(state.width);
+                    model.stateFieldDecls.push_back("    " + state.cppType + " " + state.fieldName + " = " +
+                                                    stateInitExpr + ";");
                     model.stateOrder.push_back(state.symbol);
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
                     break;
@@ -3183,32 +3218,9 @@ namespace wolvrix::lib::emit
                 }
             }
 
+            model.stateLogicStorageBytes = 0;
             model.stateLogicScalarBaseOffsets = {};
             model.stateLogicWideBaseOffsetsByWords.clear();
-            model.stateLogicStorageBytes = 0;
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-            {
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                const std::size_t slotBytes = valueScalarSlotByteSize(kind);
-                model.stateLogicStorageBytes = alignTo(model.stateLogicStorageBytes, slotBytes);
-                model.stateLogicScalarBaseOffsets[kindIndex] = model.stateLogicStorageBytes;
-                model.stateLogicStorageBytes += slotCount * slotBytes;
-            }
-            for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                model.stateLogicStorageBytes = alignTo(model.stateLogicStorageBytes, alignof(std::uint64_t));
-                model.stateLogicWideBaseOffsetsByWords.emplace(wordCount, model.stateLogicStorageBytes);
-                model.stateLogicStorageBytes += slotCount * wordCount * sizeof(std::uint64_t);
-            }
 
             model.stateShadowTouchedBaseOffset = 0;
             model.stateShadowScalarBaseOffsets = {};
@@ -3798,22 +3810,6 @@ namespace wolvrix::lib::emit
             if (auto it = model.inputFieldByValue.find(value); it != model.inputFieldByValue.end())
             {
                 return it->second;
-            }
-            if (auto it = model.valueScalarSlotByValue.find(value); it != model.valueScalarSlotByValue.end())
-            {
-                return valueScalarRefExpr(it->second.kind, std::to_string(it->second.byteOffset));
-            }
-            if (auto it = model.valueWideSlotByValue.find(value); it != model.valueWideSlotByValue.end())
-            {
-                return valueWideRefExpr(it->second.wordCount, std::to_string(it->second.byteOffset));
-            }
-            if (auto it = model.valueRealSlotByValue.find(value); it != model.valueRealSlotByValue.end())
-            {
-                return "value_real_slots_[" + std::to_string(it->second) + "]";
-            }
-            if (auto it = model.valueStringSlotByValue.find(value); it != model.valueStringSlotByValue.end())
-            {
-                return "value_string_slots_[" + std::to_string(it->second) + "]";
             }
             if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
             {
@@ -4681,6 +4677,211 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
+        void appendWordsTailTruncation(std::ostringstream &out,
+                                       std::string_view arrayExpr,
+                                       int32_t width)
+        {
+            if (width <= 0)
+            {
+                return;
+            }
+            const std::size_t wordCount = logicWordCount(width);
+            if (wordCount == 0)
+            {
+                return;
+            }
+            const std::size_t tailWidth = static_cast<std::size_t>(width) - (wordCount - 1u) * 64u;
+            if (tailWidth >= 64u)
+            {
+                return;
+            }
+            out << arrayExpr << "[" << (wordCount - 1u) << "] &= " << scalarMaskExpr(tailWidth) << "; ";
+        }
+
+        void emitWordsTailTruncationStatements(std::ostream &stream,
+                                               std::string_view indent,
+                                               std::string_view arrayExpr,
+                                               int32_t width)
+        {
+            if (width <= 0)
+            {
+                return;
+            }
+            const std::size_t wordCount = logicWordCount(width);
+            if (wordCount == 0)
+            {
+                return;
+            }
+            const std::size_t tailWidth = static_cast<std::size_t>(width) - (wordCount - 1u) * 64u;
+            if (tailWidth >= 64u)
+            {
+                return;
+            }
+            stream << indent << arrayExpr << "[" << (wordCount - 1u) << "] &= " << scalarMaskExpr(tailWidth)
+                   << ";\n";
+        }
+
+        std::string inlineWordsLambdaExpr(int32_t resultWidth, const std::string &body)
+        {
+            const std::string arrayType = wordsArrayTypeForWidth(resultWidth);
+            std::ostringstream out;
+            out << "([&]() -> " << arrayType << " { "
+                << arrayType << " _out{}; "
+                << body
+                << "return _out; }())";
+            return out.str();
+        }
+
+        std::string castScalarWordsInlineExpr(const std::string &expr,
+                                              int32_t srcWidth,
+                                              int32_t destWidth,
+                                              bool srcSigned)
+        {
+            const std::size_t destWords = logicWordCount(destWidth);
+            std::ostringstream body;
+            body << "const std::uint64_t _src = static_cast<std::uint64_t>(" << expr << "); ";
+            if (destWords != 0)
+            {
+                body << "_out[0] = " << scalarTruncExpr("_src", static_cast<std::size_t>(srcWidth)) << "; ";
+                if (srcSigned && srcWidth > 0)
+                {
+                    const std::size_t signBit = static_cast<std::size_t>(srcWidth >= 64 ? 63 : srcWidth - 1);
+                    body << "if (((_out[0] >> " << signBit << ") & UINT64_C(1)) != 0) { ";
+                    if (srcWidth < 64)
+                    {
+                        body << "_out[0] |= ~" << scalarMaskExpr(static_cast<std::size_t>(srcWidth)) << "; ";
+                    }
+                    if (destWords > 1)
+                    {
+                        body << "for (std::size_t _i = 1; _i < " << destWords
+                             << "; ++_i) _out[_i] = ~UINT64_C(0); ";
+                    }
+                    body << "} ";
+                }
+            }
+            appendWordsTailTruncation(body, "_out", destWidth);
+            return inlineWordsLambdaExpr(destWidth, body.str());
+        }
+
+        std::string castWideWordsInlineExpr(const std::string &expr,
+                                            int32_t srcWidth,
+                                            int32_t destWidth,
+                                            bool srcSigned)
+        {
+            const std::size_t srcWords = logicWordCount(srcWidth);
+            const std::size_t destWords = logicWordCount(destWidth);
+            const std::size_t limit = std::min(srcWords, destWords);
+            std::ostringstream body;
+            body << "const auto &_src = (" << expr << "); ";
+            if (limit != 0)
+            {
+                body << "for (std::size_t _i = 0; _i < " << limit << "; ++_i) _out[_i] = _src[_i]; ";
+            }
+            if (srcSigned && srcWidth > 0)
+            {
+                const std::size_t signWord = (static_cast<std::size_t>(srcWidth) - 1u) / 64u;
+                const std::size_t signBit = (static_cast<std::size_t>(srcWidth) - 1u) & 63u;
+                if (signWord < destWords)
+                {
+                    body << "if (((_out[" << signWord << "] >> " << signBit << ") & UINT64_C(1)) != 0) { ";
+                    if (signBit != 63u)
+                    {
+                        body << "_out[" << signWord << "] |= ~" << scalarMaskExpr(signBit + 1u) << "; ";
+                    }
+                    if (signWord + 1u < destWords)
+                    {
+                        body << "for (std::size_t _i = " << (signWord + 1u) << "; _i < " << destWords
+                             << "; ++_i) _out[_i] = ~UINT64_C(0); ";
+                    }
+                    body << "} ";
+                }
+            }
+            appendWordsTailTruncation(body, "_out", destWidth);
+            return inlineWordsLambdaExpr(destWidth, body.str());
+        }
+
+        std::string addWordsInlineExpr(const std::string &lhsExpr,
+                                       const std::string &rhsExpr,
+                                       int32_t resultWidth)
+        {
+            const std::size_t wordCount = logicWordCount(resultWidth);
+            std::ostringstream body;
+            body << "const auto &_lhs = (" << lhsExpr << "); "
+                 << "const auto &_rhs = (" << rhsExpr << "); "
+                 << "unsigned __int128 _carry = 0; ";
+            for (std::size_t i = 0; i < wordCount; ++i)
+            {
+                body << "{ const unsigned __int128 _sum = "
+                     << "static_cast<unsigned __int128>(_lhs[" << i << "]) + "
+                     << "static_cast<unsigned __int128>(_rhs[" << i << "]) + _carry; "
+                     << "_out[" << i << "] = static_cast<std::uint64_t>(_sum); "
+                     << "_carry = _sum >> 64u; } ";
+            }
+            appendWordsTailTruncation(body, "_out", resultWidth);
+            return inlineWordsLambdaExpr(resultWidth, body.str());
+        }
+
+        std::string concatTwoWordsInlineExpr(const std::string &lhsExpr,
+                                             int32_t lhsWidth,
+                                             const std::string &rhsExpr,
+                                             int32_t rhsWidth,
+                                             int32_t resultWidth)
+        {
+            const std::size_t destWords = logicWordCount(resultWidth);
+            const std::size_t boundedRhsWidth =
+                std::min(static_cast<std::size_t>(std::max(rhsWidth, 0)),
+                         static_cast<std::size_t>(std::max(resultWidth, 0)));
+            const std::size_t lhsInsertWidth =
+                boundedRhsWidth >= static_cast<std::size_t>(std::max(resultWidth, 0))
+                    ? 0u
+                    : std::min(static_cast<std::size_t>(std::max(lhsWidth, 0)),
+                               static_cast<std::size_t>(std::max(resultWidth, 0)) - boundedRhsWidth);
+            const std::size_t rhsWords = boundedRhsWidth == 0 ? 0u : bitWordCount(boundedRhsWidth);
+            const std::size_t lhsWords = lhsInsertWidth == 0 ? 0u : bitWordCount(lhsInsertWidth);
+            const std::size_t lhsDestWord = boundedRhsWidth / 64u;
+            const std::size_t lhsBitShift = boundedRhsWidth & 63u;
+
+            std::ostringstream body;
+            body << "const auto &_lhs = (" << lhsExpr << "); "
+                 << "const auto &_rhs = (" << rhsExpr << "); ";
+            for (std::size_t i = 0; i < rhsWords && i < destWords; ++i)
+            {
+                const std::size_t wordWidth =
+                    (i + 1u == rhsWords) ? (boundedRhsWidth - i * 64u) : 64u;
+                const std::string wordExpr =
+                    wordWidth >= 64u ? ("_rhs[" + std::to_string(i) + "]")
+                                     : scalarTruncExpr("_rhs[" + std::to_string(i) + "]", wordWidth);
+                body << "_out[" << i << "] |= " << wordExpr << "; ";
+            }
+            for (std::size_t i = 0; i < lhsWords; ++i)
+            {
+                const std::size_t wordWidth =
+                    (i + 1u == lhsWords) ? (lhsInsertWidth - i * 64u) : 64u;
+                const std::string wordExpr =
+                    wordWidth >= 64u ? ("_lhs[" + std::to_string(i) + "]")
+                                     : scalarTruncExpr("_lhs[" + std::to_string(i) + "]", wordWidth);
+                if (lhsDestWord + i < destWords)
+                {
+                    if (lhsBitShift == 0u)
+                    {
+                        body << "_out[" << (lhsDestWord + i) << "] |= " << wordExpr << "; ";
+                    }
+                    else
+                    {
+                        body << "_out[" << (lhsDestWord + i) << "] |= (" << wordExpr << " << "
+                             << lhsBitShift << "); ";
+                    }
+                }
+                if (lhsBitShift != 0u && lhsDestWord + i + 1u < destWords)
+                {
+                    body << "_out[" << (lhsDestWord + i + 1u) << "] |= (" << wordExpr << " >> "
+                         << (64u - lhsBitShift) << "); ";
+                }
+            }
+            appendWordsTailTruncation(body, "_out", resultWidth);
+            return inlineWordsLambdaExpr(resultWidth, body.str());
+        }
+
         std::size_t estimateChangedValueEffectLines(const ActivityScheduleValueFanout &valueFanout,
                                                     ValueId resultValue) noexcept
         {
@@ -4983,17 +5184,11 @@ namespace wolvrix::lib::emit
             const std::size_t destWords = logicWordCount(destWidth);
             if (graph.valueType(value) == ValueType::Logic && isWideLogicValue(graph, value))
             {
-                std::ostringstream out;
-                out << "grhsim_cast_words<" << destWords << ">(" << expr << ", "
-                    << srcWidth << ", " << destWidth << ", "
-                    << boolLiteral(graph.valueSigned(value)) << ")";
-                return out.str();
+                (void)destWords;
+                return castWideWordsInlineExpr(expr, srcWidth, destWidth, graph.valueSigned(value));
             }
-            std::ostringstream out;
-            out << "grhsim_cast_words<" << destWords << ">(static_cast<std::uint64_t>(" << expr << "), "
-                << srcWidth << ", " << destWidth << ", "
-                << boolLiteral(graph.valueSigned(value)) << ")";
-            return out.str();
+            (void)destWords;
+            return castScalarWordsInlineExpr(expr, srcWidth, destWidth, graph.valueSigned(value));
         }
 
         std::string wordsExprForValue(const Graph &graph,
@@ -5014,13 +5209,29 @@ namespace wolvrix::lib::emit
         }
 
         std::string sliceWordsExpr(const std::string &srcExpr,
+                                   int32_t srcWidth,
                                    const std::string &startExpr,
                                    int32_t resultWidth)
         {
-            std::ostringstream out;
-            out << "grhsim_slice_words<" << logicWordCount(resultWidth) << ">("
-                << srcExpr << ", " << startExpr << ", " << resultWidth << ")";
-            return out.str();
+            const std::size_t srcWords = logicWordCount(srcWidth);
+            const std::size_t destWords = logicWordCount(resultWidth);
+            std::ostringstream body;
+            body << "const auto &_src = (" << srcExpr << "); "
+                 << "const std::size_t _start = static_cast<std::size_t>(" << startExpr << "); ";
+            if (destWords != 0)
+            {
+                body << "const std::size_t _srcWord = _start / 64u; "
+                     << "const std::size_t _bitShift = _start & 63u; "
+                     << "for (std::size_t _i = 0; _i < " << destWords << "; ++_i) { "
+                     << "const std::uint64_t _low = (_srcWord + _i < " << srcWords
+                     << ") ? _src[_srcWord + _i] : UINT64_C(0); "
+                     << "if (_bitShift == 0) { _out[_i] = _low; } else { "
+                     << "const std::uint64_t _high = (_srcWord + _i + 1u < " << srcWords
+                     << ") ? _src[_srcWord + _i + 1u] : UINT64_C(0); "
+                     << "_out[_i] = (_low >> _bitShift) | (_high << (64u - _bitShift)); } } ";
+            }
+            appendWordsTailTruncation(body, "_out", resultWidth);
+            return inlineWordsLambdaExpr(resultWidth, body.str());
         }
 
         std::string unaryWordsBufferOpExpr(const std::string &valueExpr,
@@ -5086,14 +5297,8 @@ namespace wolvrix::lib::emit
             for (std::size_t i = operandWordExprs.size() - 1; i-- > 0;)
             {
                 const int32_t operandWidth = operandWidths[i];
-                std::ostringstream out;
-                out << "grhsim_concat_words<" << logicWordCount(resultWidth) << ">("
-                    << operandWordExprs[i] << ", "
-                    << operandWidth << ", "
-                    << expr << ", "
-                    << accumWidth << ", "
-                    << (operandWidth + accumWidth) << ")";
-                expr = out.str();
+                expr = concatTwoWordsInlineExpr(
+                    operandWordExprs[i], operandWidth, expr, accumWidth, operandWidth + accumWidth);
                 accumWidth += operandWidth;
             }
             return expr;
@@ -5422,16 +5627,49 @@ namespace wolvrix::lib::emit
                 op.results().empty() ? 0 : graph.valueWidth(op.results().front());
             if (wideResult)
             {
+                std::ostringstream body;
+                body << "const auto &_values = (" << valuesExpr << "); ";
                 if (uniformWidth)
                 {
-                    return "grhsim_concat_uniform_scalars_words<" +
-                           std::to_string(logicWordCount(resultWidth)) + ">(" +
-                           valuesExpr + ", " + std::to_string(*uniformWidth) + ", " +
-                           std::to_string(resultWidth) + ")";
+                    body << "std::size_t _cursor = " << resultWidth << "; "
+                         << "for (std::size_t _i = 0; _i < " << operandCount << "; ++_i) { ";
+                    if (*uniformWidth > 0)
+                    {
+                        body << "if (" << *uniformWidth << " > _cursor) { _cursor = 0; continue; } "
+                             << "_cursor -= " << *uniformWidth << "; "
+                             << "const std::size_t _destWord = _cursor / 64u; "
+                             << "if (_destWord >= " << logicWordCount(resultWidth) << ") continue; "
+                             << "const std::size_t _bitShift = _cursor & 63u; "
+                             << "const std::uint64_t _bits = " << scalarTruncExpr("_values[_i]", *uniformWidth) << "; "
+                             << "_out[_destWord] |= (_bitShift == 0 ? _bits : (_bits << _bitShift)); "
+                             << "if (_bitShift != 0 && _destWord + 1u < " << logicWordCount(resultWidth)
+                             << " && " << *uniformWidth << " + _bitShift > 64u) "
+                             << "_out[_destWord + 1u] |= (_bits >> (64u - _bitShift)); ";
+                    }
+                    body << "} ";
+                    appendWordsTailTruncation(body, "_out", resultWidth);
+                    return inlineWordsLambdaExpr(resultWidth, body.str());
                 }
-                return "grhsim_concat_scalars_words<" + std::to_string(logicWordCount(resultWidth)) + ">(" +
-                       valuesExpr + ", " + scalarConcatWidthArrayExpr(graph, op) + ", " +
-                       std::to_string(resultWidth) + ")";
+                const std::string widthsExpr = scalarConcatWidthArrayExpr(graph, op);
+                body << "const auto &_widths = (" << widthsExpr << "); "
+                     << "std::size_t _cursor = " << resultWidth << "; "
+                     << "for (std::size_t _i = 0; _i < " << operandCount << "; ++_i) { "
+                     << "const std::size_t _width = _widths[_i]; "
+                     << "if (_width == 0) continue; "
+                     << "if (_width > _cursor) { _cursor = 0; continue; } "
+                     << "_cursor -= _width; "
+                     << "const std::size_t _destWord = _cursor / 64u; "
+                     << "if (_destWord >= " << logicWordCount(resultWidth) << ") continue; "
+                     << "const std::size_t _bitShift = _cursor & 63u; "
+                     << "const std::uint64_t _bits = (_width >= 64u) ? static_cast<std::uint64_t>(_values[_i]) : "
+                        "(_width == 0 ? UINT64_C(0) : (static_cast<std::uint64_t>(_values[_i]) & "
+                        "((UINT64_C(1) << _width) - UINT64_C(1)))); "
+                     << "_out[_destWord] |= (_bitShift == 0 ? _bits : (_bits << _bitShift)); "
+                     << "if (_bitShift != 0 && _destWord + 1u < " << logicWordCount(resultWidth)
+                     << " && _width + _bitShift > 64u) _out[_destWord + 1u] |= (_bits >> (64u - _bitShift)); "
+                     << "} ";
+                appendWordsTailTruncation(body, "_out", resultWidth);
+                return inlineWordsLambdaExpr(resultWidth, body.str());
             }
             if (uniformWidth)
             {
@@ -5441,6 +5679,189 @@ namespace wolvrix::lib::emit
             const std::string widthsExpr = scalarConcatWidthArrayExpr(graph, op);
             return "grhsim_concat_scalars_u64(" + valuesExpr + ".data(), " + widthsExpr + ".data(), " +
                    valuesExpr + ".size(), " + std::to_string(resultWidth) + ")";
+        }
+
+        bool shouldEmitDirectWideConcatFastPath(const Graph &graph,
+                                                const EmitModel &model,
+                                                const Operation &op,
+                                                ValueId resultValue)
+        {
+            if (op.kind() != OperationKind::kConcat || !isWideLogicValue(graph, resultValue))
+            {
+                return false;
+            }
+            if (isEventValue(model, resultValue))
+            {
+                return false;
+            }
+            return graph.valueWidth(resultValue) >= 96 && op.operands().size() >= 4;
+        }
+
+        void emitWideConcatInsertStatements(std::ostream &stream,
+                                            const Graph &graph,
+                                            ValueId operandValue,
+                                            const std::string &operandExpr,
+                                            std::string_view indent,
+                                            std::string_view dstName,
+                                            int32_t operandWidth,
+                                            std::size_t lsbOffset,
+                                            std::size_t operandIndex,
+                                            std::size_t tempScopeId)
+        {
+            if (operandWidth <= 0)
+            {
+                return;
+            }
+
+            const std::size_t baseWord = lsbOffset / 64u;
+            const std::size_t bitShift = lsbOffset & 63u;
+            if (isWideLogicValue(graph, operandValue))
+            {
+                const std::size_t srcWords = logicWordCount(operandWidth);
+                const std::string namePrefix =
+                    "concat_" + std::to_string(tempScopeId) + "_" + std::to_string(operandIndex);
+                const std::string srcName = namePrefix + "_src";
+                stream << indent << "const auto &" << srcName << " = " << operandExpr << ";\n";
+                for (std::size_t wordIndex = 0; wordIndex < srcWords; ++wordIndex)
+                {
+                    const std::size_t wordLsb = wordIndex * 64u;
+                    const std::size_t remainingBits = static_cast<std::size_t>(operandWidth) > wordLsb
+                                                          ? static_cast<std::size_t>(operandWidth) - wordLsb
+                                                          : 0u;
+                    if (remainingBits == 0u)
+                    {
+                        break;
+                    }
+                    const std::size_t wordWidth = std::min<std::size_t>(remainingBits, 64u);
+                    const std::string bitsName = namePrefix + "_bits_" + std::to_string(wordIndex);
+                    stream << indent << "const std::uint64_t " << bitsName << " = ";
+                    if (wordWidth >= 64u)
+                    {
+                        stream << srcName << "[" << wordIndex << "]";
+                    }
+                    else
+                    {
+                        stream << scalarTruncExpr(srcName + "[" + std::to_string(wordIndex) + "]", wordWidth);
+                    }
+                    stream << ";\n";
+                    stream << indent << dstName << "[" << (baseWord + wordIndex) << "] |= ";
+                    if (bitShift == 0u)
+                    {
+                        stream << bitsName;
+                    }
+                    else
+                    {
+                        stream << "(" << bitsName << " << " << bitShift << "u)";
+                    }
+                    stream << ";\n";
+                    if (bitShift != 0u && wordWidth + bitShift > 64u)
+                    {
+                        stream << indent << dstName << "[" << (baseWord + wordIndex + 1u) << "] |= (" << bitsName
+                               << " >> " << (64u - bitShift) << "u);\n";
+                    }
+                }
+                return;
+            }
+
+            const std::string bitsName =
+                "concat_" + std::to_string(tempScopeId) + "_" + std::to_string(operandIndex) + "_bits_0";
+            stream << indent << "const std::uint64_t " << bitsName << " = "
+                   << scalarTruncExpr("static_cast<std::uint64_t>(" + operandExpr + ")",
+                                      static_cast<std::size_t>(operandWidth))
+                   << ";\n";
+            stream << indent << dstName << "[" << baseWord << "] |= ";
+            if (bitShift == 0u)
+            {
+                stream << bitsName;
+            }
+            else
+            {
+                stream << "(" << bitsName << " << " << bitShift << "u)";
+            }
+            stream << ";\n";
+            if (bitShift != 0u && static_cast<std::size_t>(operandWidth) + bitShift > 64u)
+            {
+                stream << indent << dstName << "[" << (baseWord + 1u) << "] |= (" << bitsName << " >> "
+                       << (64u - bitShift) << "u);\n";
+            }
+        }
+
+        bool emitDirectWideConcatOperation(std::ostream &stream,
+                                           const Graph &graph,
+                                           const EmitModel &model,
+                                           const Operation &op,
+                                           SupernodeLocalExprContext *context = nullptr)
+        {
+            if (op.results().empty())
+            {
+                return true;
+            }
+            const ValueId resultValue = op.results().front();
+            if (!shouldEmitDirectWideConcatFastPath(graph, model, op, resultValue))
+            {
+                return false;
+            }
+
+            const int32_t resultWidth = graph.valueWidth(resultValue);
+            const std::size_t tempScopeId = resultValue.index;
+            const std::string lhs = valueRef(model, resultValue);
+            const bool materialized = isMaterializedValue(model, resultValue);
+            const bool needsActivation = valueNeedsChangeDetect(model, resultValue);
+            const auto operands = op.operands();
+            std::vector<std::string> operandExprs;
+            operandExprs.reserve(operands.size());
+            for (ValueId operand : operands)
+            {
+                operandExprs.push_back(resolvedScheduleValueExpr(model, operand, context));
+            }
+
+            emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
+            if (!materialized)
+            {
+                stream << "        " << wordsArrayTypeForWidth(resultWidth) << " " << lhs << "{};\n";
+            }
+            else
+            {
+                stream << "        " << lhs << " = " << wordsArrayTypeForWidth(resultWidth) << "{};\n";
+            }
+            std::size_t cursor = static_cast<std::size_t>(resultWidth);
+            for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+            {
+                const int32_t operandWidth = graph.valueWidth(operands[operandIndex]);
+                if (operandWidth <= 0)
+                {
+                    continue;
+                }
+                if (static_cast<std::size_t>(operandWidth) > cursor)
+                {
+                    cursor = 0u;
+                    continue;
+                }
+                cursor -= static_cast<std::size_t>(operandWidth);
+                emitWideConcatInsertStatements(stream,
+                                               graph,
+                                               operands[operandIndex],
+                                               operandExprs[operandIndex],
+                                               "        ",
+                                               lhs,
+                                               operandWidth,
+                                               cursor,
+                                               operandIndex,
+                                               tempScopeId);
+            }
+            emitWordsTailTruncationStatements(stream, "        ", lhs, resultWidth);
+            if (materialized)
+            {
+                if (needsActivation)
+                {
+                    emitChangedValuePropagation(stream, model, resultValue, "        ");
+                }
+            }
+            else
+            {
+                recordSupernodeLocalExprRef(graph, resultValue, lhs, SupernodeLocalExprKind::kWideWords, context);
+            }
+            return true;
         }
 
         struct ScalarConcatPrefixCacheKey
@@ -5580,6 +6001,10 @@ namespace wolvrix::lib::emit
             {
                 return true;
             }
+            if (emitDirectWideConcatOperation(stream, graph, model, op, context))
+            {
+                return true;
+            }
             const auto operands = op.operands();
             const ValueId resultValue = op.results().front();
             std::vector<std::string> operandExprs;
@@ -5653,12 +6078,11 @@ namespace wolvrix::lib::emit
             case OperationKind::kAssign:
                 return eventLogicExprFromWordsExpr(graph, resultValue, operandWords(0, resultWidth));
             case OperationKind::kAdd:
-                return eventLogicExprFromWordsExpr(
-                    graph, resultValue,
-                    binaryWordsBufferOpExpr(operandWords(0, resultWidth),
-                                            operandWords(1, resultWidth),
-                                            resultWidth,
-                                            "grhsim_add_words"));
+                return eventLogicExprFromWordsExpr(graph,
+                                                   resultValue,
+                                                   addWordsInlineExpr(operandWords(0, resultWidth),
+                                                                      operandWords(1, resultWidth),
+                                                                      resultWidth));
             case OperationKind::kSub:
                 return eventLogicExprFromWordsExpr(
                     graph, resultValue,
@@ -5892,6 +6316,7 @@ namespace wolvrix::lib::emit
                     graph,
                     resultValue,
                     sliceWordsExpr(operandWords(0, graph.valueWidth(operands[0])),
+                                   graph.valueWidth(operands[0]),
                                    std::to_string(sliceStart),
                                    resultWidth));
             }
@@ -5901,6 +6326,7 @@ namespace wolvrix::lib::emit
                     graph,
                     resultValue,
                     sliceWordsExpr(operandWords(0, graph.valueWidth(operands[0])),
+                                   graph.valueWidth(operands[0]),
                                    "grhsim_index_words(" + operandExprs[1] + ", " +
                                        std::to_string(graph.valueWidth(operands[0])) + ")",
                                    resultWidth));
@@ -5916,6 +6342,7 @@ namespace wolvrix::lib::emit
                     graph,
                     resultValue,
                     sliceWordsExpr(operandWords(0, graph.valueWidth(operands[0])),
+                                   graph.valueWidth(operands[0]),
                                    "((" + operandExprs[1] + ") * " + std::to_string(*sliceWidth) + ")",
                                    resultWidth));
             }
@@ -6095,6 +6522,83 @@ namespace wolvrix::lib::emit
             return eventExprLeafRefForValue(graph, model, value);
         }
 
+        struct MemoryRowAccessExpr
+        {
+            std::string rowExpr;
+            std::string inRangeExpr;
+            bool alwaysInRange = false;
+        };
+
+        MemoryRowAccessExpr memoryRowAccessExpr(const Graph &graph,
+                                                ValueId addrValue,
+                                                std::string_view addrExpr,
+                                                std::size_t rowCount)
+        {
+            MemoryRowAccessExpr result;
+            if (rowCount == 0)
+            {
+                result.rowExpr = "0u";
+                result.inRangeExpr = "false";
+                return result;
+            }
+
+            const int32_t addrWidth = graph.valueWidth(addrValue);
+            const std::string rowCountExpr = std::to_string(rowCount) + "u";
+            const std::string scalarAddrExpr = "static_cast<std::uint64_t>(" + std::string(addrExpr) + ")";
+            if (isPowerOfTwoU64(static_cast<std::uint64_t>(rowCount)))
+            {
+                const std::string maskExpr = std::to_string(rowCount - 1u) + "u";
+                if (isWideLogicWidth(addrWidth))
+                {
+                    result.rowExpr =
+                        "(static_cast<std::size_t>((" + std::string(addrExpr) + ")[0]) & " + maskExpr + ")";
+                }
+                else
+                {
+                    result.rowExpr = "(static_cast<std::size_t>(" + scalarAddrExpr + ") & " + maskExpr + ")";
+                }
+                result.alwaysInRange = true;
+                result.inRangeExpr = "true";
+                return result;
+            }
+
+            if (addrWidth > 0 && addrWidth < 64 &&
+                (UINT64_C(1) << static_cast<std::size_t>(addrWidth)) <= static_cast<std::uint64_t>(rowCount))
+            {
+                result.rowExpr = "static_cast<std::size_t>(" + scalarAddrExpr + ")";
+                result.alwaysInRange = true;
+                result.inRangeExpr = "true";
+                return result;
+            }
+
+            if (isWideLogicWidth(addrWidth))
+            {
+                const std::size_t wordCount = logicWordCount(addrWidth);
+                result.rowExpr = "static_cast<std::size_t>((" + std::string(addrExpr) + ")[0])";
+                std::ostringstream cond;
+                cond << "(";
+                for (std::size_t i = 1; i < wordCount; ++i)
+                {
+                    if (i != 1)
+                    {
+                        cond << " && ";
+                    }
+                    cond << "((" << addrExpr << ")[" << i << "] == UINT64_C(0))";
+                }
+                if (wordCount > 1)
+                {
+                    cond << " && ";
+                }
+                cond << "((" << addrExpr << ")[0] < " << rowCountExpr << "))";
+                result.inRangeExpr = cond.str();
+                return result;
+            }
+
+            result.rowExpr = "static_cast<std::size_t>(" + scalarAddrExpr + ")";
+            result.inRangeExpr = "(" + scalarAddrExpr + " < " + rowCountExpr + ")";
+            return result;
+        }
+
         std::optional<std::string> eventExprMaterializedBodyForValue(
             const Graph &graph,
             const EmitModel &model,
@@ -6137,13 +6641,16 @@ namespace wolvrix::lib::emit
                 {
                     return std::nullopt;
                 }
+                const MemoryRowAccessExpr rowAccess =
+                    memoryRowAccessExpr(graph, operands[0], operandExprs[0], stateIt->second.rowCount);
                 std::ostringstream out;
                 out << "([&]() -> " << cppTypeForValue(graph, value) << " { ";
-                out << "const std::size_t row = grhsim_index_words(" << operandExprs[0] << ", "
-                    << stateIt->second.rowCount << "); ";
-                out << "if (row >= " << stateIt->second.rowCount << ") return "
-                    << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
-                out << "return " << stateRef(stateIt->second) << "[row]; }())";
+                if (!rowAccess.alwaysInRange)
+                {
+                    out << "if (!" << rowAccess.inRangeExpr << ") return "
+                        << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
+                }
+                out << "return " << stateRef(stateIt->second) << "[" << rowAccess.rowExpr << "]; }())";
                 return out.str();
             }
 
@@ -6242,13 +6749,16 @@ namespace wolvrix::lib::emit
                             break;
                         }
                         cost += operandCost + 1;
+                        const MemoryRowAccessExpr rowAccess =
+                            memoryRowAccessExpr(graph, operands[0], *addrExpr, stateIt->second.rowCount);
                         std::ostringstream out;
                         out << "([&]() -> " << cppTypeForValue(graph, value) << " { ";
-                        out << "const std::size_t row = grhsim_index_words(" << *addrExpr << ", "
-                            << stateIt->second.rowCount << "); ";
-                        out << "if (row >= " << stateIt->second.rowCount << ") return "
-                            << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
-                        out << "return " << stateRef(stateIt->second) << "[row]; }())";
+                        if (!rowAccess.alwaysInRange)
+                        {
+                            out << "if (!" << rowAccess.inRangeExpr << ") return "
+                                << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
+                        }
+                        out << "return " << stateRef(stateIt->second) << "[" << rowAccess.rowExpr << "]; }())";
                         expr = out.str();
                         break;
                     }
@@ -6661,13 +7171,6 @@ namespace wolvrix::lib::emit
             return joinStrings(parts, " || ");
         }
 
-        std::string memoryWriteRowExpr(const Graph &graph,
-                                       const EmitModel &model,
-                                       const WriteDecl &write,
-                                       ValueId addrValue,
-                                       const StateDecl &state,
-                                       const SupernodeLocalExprContext *context = nullptr);
-
         bool isWritePortKind(OperationKind kind) noexcept
         {
             switch (kind)
@@ -6774,6 +7277,58 @@ namespace wolvrix::lib::emit
             };
         }
 
+        struct CommitEventClusterInfo
+        {
+            bool homogeneous = false;
+            std::string eventExpr = "true";
+        };
+
+        std::optional<CommitEventClusterInfo> analyzeCommitSupernodeEvent(const Graph &graph,
+                                                                          const EmitModel &model,
+                                                                          const ActivityScheduleSupernodeToOps &supernodeToOps,
+                                                                          uint32_t supernodeId)
+        {
+            CommitEventClusterInfo info;
+            if (supernodeId >= supernodeToOps.size())
+            {
+                info.homogeneous = true;
+                return info;
+            }
+
+            bool sawCommitOp = false;
+            for (const OperationId opId : supernodeToOps[supernodeId])
+            {
+                const Operation op = graph.getOperation(opId);
+                if (!isCommitPhaseOp(op))
+                {
+                    continue;
+                }
+                const auto eventExpr = exactEventExpr(graph, model, opId, op);
+                if (!eventExpr)
+                {
+                    return std::nullopt;
+                }
+                if (!sawCommitOp)
+                {
+                    info.eventExpr = *eventExpr;
+                    sawCommitOp = true;
+                    continue;
+                }
+                if (info.eventExpr != *eventExpr)
+                {
+                    info.homogeneous = false;
+                    return info;
+                }
+            }
+
+            info.homogeneous = true;
+            if (!sawCommitOp)
+            {
+                info.eventExpr = "true";
+            }
+            return info;
+        }
+
         bool isCompressibleScalarStateWrite(const EmitModel &model, OperationId opId)
         {
             (void)model;
@@ -6858,12 +7413,12 @@ namespace wolvrix::lib::emit
             }
             return TableCompressibleScalarStateWriteDesc{
                 .kind = write.shadowScalarKind,
-                .condIndex = static_cast<std::uint32_t>(condIt->second.byteOffset),
+                .condIndex = static_cast<std::uint32_t>(condIt->second.slotIndex),
                 .touchedIndex = static_cast<std::uint32_t>(shadow.touchedIndex),
                 .shadowDataIndex = static_cast<std::uint32_t>(shadow.dataIndex),
                 .stateDataIndex = static_cast<std::uint32_t>(state.slotIndex),
-                .nextIndex = static_cast<std::uint32_t>(nextIt->second.byteOffset),
-                .maskIndex = static_cast<std::uint32_t>(maskIt->second.byteOffset),
+                .nextIndex = static_cast<std::uint32_t>(nextIt->second.slotIndex),
+                .maskIndex = static_cast<std::uint32_t>(maskIt->second.slotIndex),
                 .shadowIndex = static_cast<std::uint32_t>(write.shadowIndex),
             };
         }
@@ -6930,10 +7485,10 @@ namespace wolvrix::lib::emit
             (void)graph;
             return DirectCommitScalarStateWriteDesc{
                 .kind = state.scalarKind,
-                .condIndex = static_cast<std::uint32_t>(condIt->second.byteOffset),
+                .condIndex = static_cast<std::uint32_t>(condIt->second.slotIndex),
                 .stateDataIndex = static_cast<std::uint32_t>(state.slotIndex),
-                .nextIndex = static_cast<std::uint32_t>(nextIt->second.byteOffset),
-                .maskIndex = static_cast<std::uint32_t>(maskIt->second.byteOffset),
+                .nextIndex = static_cast<std::uint32_t>(nextIt->second.slotIndex),
+                .maskIndex = static_cast<std::uint32_t>(maskIt->second.slotIndex),
                 .activationEntries = std::move(activationEntries),
             };
         }
@@ -7049,53 +7604,16 @@ namespace wolvrix::lib::emit
 
         bool modelUsesScalarStateWriteKind(const EmitModel &model, ValueSlotScalarKind kind)
         {
-            const auto boolSlots =
-                model.valueScalarSlotCounts[static_cast<std::size_t>(ValueSlotScalarKind::kBool)];
-            if (boolSlots == 0)
-            {
-                return false;
-            }
-            const auto stateSlots =
-                model.stateLogicScalarSlotCounts[static_cast<std::size_t>(kind)];
-            const auto shadowSlots =
-                model.stateShadowScalarSlotCounts[static_cast<std::size_t>(kind)];
-            if (stateSlots == 0 || shadowSlots == 0)
-            {
-                return false;
-            }
-            if (kind != ValueSlotScalarKind::kBool &&
-                model.valueScalarSlotCounts[static_cast<std::size_t>(kind)] == 0)
-            {
-                return false;
-            }
-            return std::any_of(model.writes.begin(), model.writes.end(), [&](const WriteDecl &write) {
-                return write.kind != StateDecl::Kind::Memory && write.shadowScalarKind == kind;
-            });
+            (void)model;
+            (void)kind;
+            return false;
         }
 
         bool modelUsesCommitScalarStateWriteKind(const EmitModel &model, ValueSlotScalarKind kind)
         {
-            if (model.stateLogicScalarSlotCounts[static_cast<std::size_t>(kind)] == 0)
-            {
-                return false;
-            }
-            if (model.valueScalarSlotCounts[static_cast<std::size_t>(kind)] == 0)
-            {
-                return false;
-            }
-            return std::any_of(model.writes.begin(), model.writes.end(), [&](const WriteDecl &write) {
-                if (write.kind == StateDecl::Kind::Memory)
-                {
-                    return false;
-                }
-                const auto stateIt = model.stateBySymbol.find(write.symbol);
-                if (stateIt == model.stateBySymbol.end())
-                {
-                    return false;
-                }
-                const StateDecl &state = stateIt->second;
-                return !isWideLogicWidth(state.width) && state.scalarKind == kind;
-            });
+            (void)model;
+            (void)kind;
+            return false;
         }
 
         void emitScalarStateWriteRangeDesc(std::ostream &stream,
@@ -7252,72 +7770,101 @@ namespace wolvrix::lib::emit
             stream << indent << "// op " << op.symbolText() << "\n";
             stream << indent << "// Commit writes update visible state directly and reactivate readers on change.\n";
             const std::string innerIndent = std::string(indent) + "    ";
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
+            const bool hasReaders = headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty();
+            auto emitReaderActivations = [&](std::string_view activationIndent)
+            {
+                if (!hasReaders)
+                {
+                    return;
+                }
+                emitActivationStatements(
+                    stream,
+                    "supernode_active_curr_",
+                    "active_count_",
+                    headIt->second,
+                    activationIndent,
+                    activationContext);
+            };
             stream << indent << "{\n";
-            stream << innerIndent << "bool state_changed = false;\n";
             if (write.kind == StateDecl::Kind::Memory)
             {
-                const std::string rowExpr = memoryWriteRowExpr(graph, model, write, operands[1], state, context);
+                const std::string addrExpr = resolvedScheduleValueExpr(model, operands[1], context);
+                const MemoryRowAccessExpr rowAccess = memoryRowAccessExpr(graph, operands[1], addrExpr, state.rowCount);
+                const std::string rowRef = stateRef(state) + "[" + rowAccess.rowExpr + "]";
                 if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
                 {
                     stream << innerIndent << "// constant zero mask: no memory update\n";
                 }
-                else
+                else if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                 {
-                    stream << innerIndent << "const std::size_t row = " << rowExpr << ";\n";
-                    stream << innerIndent << "if (row < " << state.rowCount << ") {\n";
-                    if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
+                    if (isWideLogicWidth(state.width))
                     {
-                        if (isWideLogicWidth(state.width))
+                        stream << innerIndent << "if (";
+                        if (!rowAccess.alwaysInRange)
                         {
-                            stream << innerIndent << "    if (grhsim_assign_words("
-                                   << stateRef(state) << "[row], "
-                                   << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
-                                   << state.width << ")) {\n";
-                            stream << innerIndent << "        state_changed = true;\n";
-                            stream << innerIndent << "    }\n";
+                            stream << rowAccess.inRangeExpr << " && ";
                         }
-                        else
-                        {
-                            stream << innerIndent << "    const auto next_value = static_cast<" << logicCppType(state.width)
-                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                                   << resolvedScheduleValueExpr(model, operands[2], context) << "), "
-                                   << state.width << "));\n";
-                            stream << innerIndent << "    if (" << stateRef(state) << "[row] != next_value) {\n";
-                            stream << innerIndent << "        " << stateRef(state) << "[row] = next_value;\n";
-                            stream << innerIndent << "        state_changed = true;\n";
-                            stream << innerIndent << "    }\n";
-                        }
+                        stream << "grhsim_assign_words(" << rowRef << ", "
+                               << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
+                               << state.width << ")) {\n";
+                        emitReaderActivations(innerIndent + "    ");
+                        stream << innerIndent << "}\n";
                     }
                     else
                     {
-                        if (isWideLogicWidth(state.width))
+                        stream << innerIndent << "const auto next_value = static_cast<" << logicCppType(state.width)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                               << resolvedScheduleValueExpr(model, operands[2], context) << "), "
+                               << state.width << "));\n";
+                        stream << innerIndent << "if (";
+                        if (!rowAccess.alwaysInRange)
                         {
-                            stream << innerIndent << "    if (grhsim_apply_masked_words_inplace("
-                                   << stateRef(state) << "[row], "
-                                   << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
-                                   << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
-                                   << state.width << ")) {\n";
-                            stream << innerIndent << "        state_changed = true;\n";
-                            stream << innerIndent << "    }\n";
+                            stream << rowAccess.inRangeExpr << " && ";
                         }
-                        else
-                        {
-                            stream << innerIndent << "    const auto mask = static_cast<" << logicCppType(state.width)
-                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                                   << resolvedScheduleValueExpr(model, operands[3], context) << "), "
-                                   << state.width << "));\n";
-                            stream << innerIndent << "    const auto merged = static_cast<" << logicCppType(state.width)
-                                   << ">((" << stateRef(state) << "[row] & ~mask) | (static_cast<"
-                                   << logicCppType(state.width) << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                                   << resolvedScheduleValueExpr(model, operands[2], context) << "), "
-                                   << state.width << ")) & mask));\n";
-                            stream << innerIndent << "    if (" << stateRef(state) << "[row] != merged) {\n";
-                            stream << innerIndent << "        " << stateRef(state) << "[row] = merged;\n";
-                            stream << innerIndent << "        state_changed = true;\n";
-                            stream << innerIndent << "    }\n";
-                        }
+                        stream << rowRef << " != next_value) {\n";
+                        stream << innerIndent << "    " << rowRef << " = next_value;\n";
+                        emitReaderActivations(innerIndent + "    ");
+                        stream << innerIndent << "}\n";
                     }
-                    stream << innerIndent << "}\n";
+                }
+                else
+                {
+                    if (isWideLogicWidth(state.width))
+                    {
+                        stream << innerIndent << "if (";
+                        if (!rowAccess.alwaysInRange)
+                        {
+                            stream << rowAccess.inRangeExpr << " && ";
+                        }
+                        stream << "grhsim_apply_masked_words_inplace(" << rowRef << ", "
+                               << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
+                               << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
+                               << state.width << ")) {\n";
+                        emitReaderActivations(innerIndent + "    ");
+                        stream << innerIndent << "}\n";
+                    }
+                    else
+                    {
+                        stream << innerIndent << "const auto mask = static_cast<" << logicCppType(state.width)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                               << resolvedScheduleValueExpr(model, operands[3], context) << "), "
+                               << state.width << "));\n";
+                        stream << innerIndent << "const auto merged = static_cast<" << logicCppType(state.width)
+                               << ">((" << rowRef << " & ~mask) | (static_cast<"
+                               << logicCppType(state.width) << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                               << resolvedScheduleValueExpr(model, operands[2], context) << "), "
+                               << state.width << ")) & mask));\n";
+                        stream << innerIndent << "if (";
+                        if (!rowAccess.alwaysInRange)
+                        {
+                            stream << rowAccess.inRangeExpr << " && ";
+                        }
+                        stream << rowRef << " != merged) {\n";
+                        stream << innerIndent << "    " << rowRef << " = merged;\n";
+                        emitReaderActivations(innerIndent + "    ");
+                        stream << innerIndent << "}\n";
+                    }
                 }
             }
             else
@@ -7331,7 +7878,7 @@ namespace wolvrix::lib::emit
                            << state.width << ");\n";
                     stream << innerIndent << "if (grhsim_assign_words(" << stateRef(state)
                            << ", next_value, " << state.width << ")) {\n";
-                    stream << innerIndent << "    state_changed = true;\n";
+                    emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
                 else
@@ -7343,22 +7890,9 @@ namespace wolvrix::lib::emit
                            << "));\n";
                     stream << innerIndent << "if (" << stateRef(state) << " != next_value) {\n";
                     stream << innerIndent << "    " << stateRef(state) << " = next_value;\n";
-                    stream << innerIndent << "    state_changed = true;\n";
+                    emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
-            }
-            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
-            if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
-            {
-                stream << innerIndent << "if (state_changed) {\n";
-                emitActivationStatements(
-                    stream,
-                    "supernode_active_curr_",
-                    "active_count_",
-                    headIt->second,
-                    innerIndent + "    ",
-                    activationContext);
-                stream << innerIndent << "}\n";
             }
             stream << indent << "}\n";
             return std::nullopt;
@@ -7372,27 +7906,6 @@ namespace wolvrix::lib::emit
             {
                 stream << indent << model.eventEdgeFieldByValue.at(value) << " = grhsim_event_edge_kind::none;\n";
             }
-        }
-
-        std::string memoryWriteRowExpr(const Graph &graph,
-                                       const EmitModel &model,
-                                       const WriteDecl &write,
-                                       ValueId addrValue,
-                                       const StateDecl &state,
-                                       const SupernodeLocalExprContext *context)
-        {
-            const std::string addrExpr = resolvedScheduleValueExpr(model, addrValue, context);
-            switch (write.memoryAddrMode)
-            {
-            case WriteDecl::MemoryAddrMode::kPow2Wrap:
-                return "grhsim_index_pow2_words(" + addrExpr + ", " + std::to_string(write.memoryRowMask) + ")";
-            case WriteDecl::MemoryAddrMode::kInRange:
-                return "grhsim_index_in_range_words(" + addrExpr + ")";
-            case WriteDecl::MemoryAddrMode::kGeneric:
-            default:
-                break;
-            }
-            return "grhsim_index_words(" + addrExpr + ", " + std::to_string(state.rowCount) + ")";
         }
 
         std::optional<std::string> emitSchedBatchFile(const std::filesystem::path &schedPath,
@@ -7492,7 +8005,10 @@ namespace wolvrix::lib::emit
                     stream << "        activeWordFlags = static_cast<std::uint8_t>(\n";
                     stream << "            activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
                            << static_cast<unsigned>(supernodeMask) << ")));\n";
-                    stream << "        ++stats.executedSupernodes;\n";
+                    if (model.emitPerf)
+                    {
+                        stream << "        ++stats.executedSupernodes;\n";
+                    }
                     stream << "        {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
@@ -7506,6 +8022,22 @@ namespace wolvrix::lib::emit
                 std::size_t opIndex = 0;
                 std::size_t nextConcatPrefixDecl = 0;
                 const auto &supernodeOps = schedule.supernodeToOps[supernodeId];
+                std::optional<std::string> outerCommitEventExpr;
+                if (batch.phase == ScheduleBatch::Phase::kCommit)
+                {
+                    const auto commitEventInfo =
+                        analyzeCommitSupernodeEvent(graph, model, schedule.supernodeToOps, supernodeId);
+                    if (!commitEventInfo)
+                    {
+                        return emitError("unsupported exact event expression emit for commit supernode",
+                                         std::to_string(supernodeId));
+                    }
+                    if (commitEventInfo->homogeneous && commitEventInfo->eventExpr != "true")
+                    {
+                        outerCommitEventExpr = commitEventInfo->eventExpr;
+                        stream << "            if (" << *outerCommitEventExpr << ") {\n";
+                    }
+                }
                 while (opIndex < supernodeOps.size())
                 {
                     while (nextConcatPrefixDecl < concatPrefixCacheDecls.size() &&
@@ -7533,19 +8065,12 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
+                        const bool eventHandledByOuterGuard =
+                            batch.phase == ScheduleBatch::Phase::kCommit && outerCommitEventExpr.has_value();
+                        const std::string effectiveEventExpr = eventHandledByOuterGuard ? "true" : *eventExpr;
                         if (isCompressibleScalarStateWrite(model, opId))
                         {
                             std::vector<TableCompressibleScalarStateWriteDesc> tableRunDescs;
-                            tableRunDescs.reserve(16);
-                            std::vector<OperationId> tableRunOpIds;
-                            tableRunOpIds.reserve(16);
-                            const auto firstTableDesc =
-                                buildTableCompressibleScalarStateWriteDesc(graph, model, opId, op);
-                            if (firstTableDesc)
-                            {
-                                tableRunDescs.push_back(*firstTableDesc);
-                                tableRunOpIds.push_back(opId);
-                            }
                             std::size_t runEnd = opIndex + 1;
                             while (runEnd < supernodeOps.size())
                             {
@@ -7571,85 +8096,11 @@ namespace wolvrix::lib::emit
                                 {
                                     break;
                                 }
-                                if (firstTableDesc)
-                                {
-                                    const auto nextTableDesc = buildTableCompressibleScalarStateWriteDesc(
-                                        graph, model, supernodeOps[runEnd], nextOp);
-                                    if (!nextTableDesc || nextTableDesc->kind != firstTableDesc->kind)
-                                    {
-                                        break;
-                                    }
-                                    tableRunDescs.push_back(*nextTableDesc);
-                                    tableRunOpIds.push_back(supernodeOps[runEnd]);
-                                }
                                 ++runEnd;
                             }
-                            if (tableRunDescs.size() >= 4)
+                            if (effectiveEventExpr != "true")
                             {
-                                if (*eventExpr != "true")
-                                {
-                                    stream << "            if (" << *eventExpr << ") {\n";
-                                }
-                                std::size_t rangeStart = 0;
-                                while (rangeStart < tableRunDescs.size())
-                                {
-                                    std::size_t rangeEnd = rangeStart + 1;
-                                    if (rangeStart + 1 < tableRunDescs.size())
-                                    {
-                                        const auto step = scalarStateWriteRangeStep(tableRunDescs[rangeStart],
-                                                                                    tableRunDescs[rangeStart + 1]);
-                                        rangeEnd = rangeStart + 2;
-                                        while (rangeEnd < tableRunDescs.size() &&
-                                               scalarStateWriteRangeStep(tableRunDescs[rangeEnd - 1],
-                                                                         tableRunDescs[rangeEnd]) == step)
-                                        {
-                                            ++rangeEnd;
-                                        }
-                                        if (rangeEnd - rangeStart >= 4)
-                                        {
-                                            stream << (*eventExpr != "true" ? "            " : "        ")
-                                                   << "// compressed scalar state writes: "
-                                                   << (rangeEnd - rangeStart) << " ops\n";
-                                            const std::string descName =
-                                                "kScalarStateWriteRange_" + std::to_string(batch.index) + "_" +
-                                                std::to_string(supernodeId) + "_" + std::to_string(opIndex + rangeStart);
-                                            emitScalarStateWriteRangeDesc(stream,
-                                                                          tableRunDescs[rangeStart],
-                                                                          step,
-                                                                          rangeEnd - rangeStart,
-                                                                          *eventExpr != "true" ? "            "
-                                                                                               : "        ",
-                                                                          descName);
-                                            rangeStart = rangeEnd;
-                                            continue;
-                                        }
-                                    }
-                                    const auto runOpId = tableRunOpIds[rangeStart];
-                                    const Operation runOp = graph.getOperation(runOpId);
-                                    if (auto error =
-                                            emitCompressedScalarStateWriteCall(stream,
-                                                                               graph,
-                                                                               model,
-                                                                               runOpId,
-                                                                               runOp,
-                                                                               *eventExpr != "true" ? "            "
-                                                                                                    : "        ",
-                                                                               &localExprContext))
-                                    {
-                                        return emitError(*error, std::string(runOp.symbolText()));
-                                    }
-                                    ++rangeStart;
-                                }
-                                if (*eventExpr != "true")
-                                {
-                                    stream << "            }\n";
-                                }
-                                opIndex = runEnd;
-                                continue;
-                            }
-                            if (*eventExpr != "true")
-                            {
-                                stream << "            if (" << *eventExpr << ") {\n";
+                                stream << "            if (" << effectiveEventExpr << ") {\n";
                             }
                             for (std::size_t runIndex = opIndex; runIndex < runEnd; ++runIndex)
                             {
@@ -7661,14 +8112,14 @@ namespace wolvrix::lib::emit
                                                                            model,
                                                                            runOpId,
                                                                            runOp,
-                                                                           *eventExpr != "true" ? "            "
-                                                                                                : "        ",
+                                                                           effectiveEventExpr != "true" ? "            "
+                                                                                                         : "        ",
                                                                            &localExprContext))
                                 {
                                     return emitError(*error, std::string(runOp.symbolText()));
                                 }
                             }
-                            if (*eventExpr != "true")
+                            if (effectiveEventExpr != "true")
                             {
                                 stream << "            }\n";
                             }
@@ -7703,155 +8154,58 @@ namespace wolvrix::lib::emit
                                 }
                                 ++runEnd;
                             }
-                            if (*eventExpr != "true")
+                            if (effectiveEventExpr != "true")
                             {
-                                stream << "            if (" << *eventExpr << ") {\n";
+                                stream << "            if (" << effectiveEventExpr << ") {\n";
                             }
-                            std::size_t guardedIndex = opIndex;
-                            while (guardedIndex < runEnd)
+                            for (std::size_t guardedIndex = opIndex; guardedIndex < runEnd; ++guardedIndex)
                             {
                                 const auto guardedOpId = supernodeOps[guardedIndex];
                                 const Operation guardedOp = graph.getOperation(guardedOpId);
-                                auto firstDesc =
-                                    buildDirectCommitScalarStateWriteDesc(graph, model, guardedOpId, guardedOp);
-                                if (!firstDesc)
+                                const auto guardedWriteKey =
+                                    writePortGuardKey(graph, model, guardedOpId, guardedOp, &localExprContext);
+                                if (!guardedWriteKey)
                                 {
-                                    const auto guardedWriteKey =
-                                        writePortGuardKey(graph, model, guardedOpId, guardedOp, &localExprContext);
-                                    if (!guardedWriteKey)
-                                    {
-                                        return emitError("unsupported exact event expression emit",
-                                                         std::string(guardedOp.symbolText()));
-                                    }
-                                    const bool needCondGuard = guardedWriteKey->condExpr != "true";
-                                    if (needCondGuard)
-                                    {
-                                        stream << "            if (" << guardedWriteKey->condExpr << ") {\n";
-                                    }
-                                    if (auto error =
-                                            emitWritePortBody(stream,
-                                                              graph,
-                                                              model,
-                                                              guardedOpId,
-                                                              guardedOp,
-                                                              needCondGuard ? "                " : "            ",
-                                                              &activationContext,
-                                                              &localExprContext))
-                                    {
-                                        return emitError(*error, std::string(guardedOp.symbolText()));
-                                    }
-                                    if (needCondGuard)
-                                    {
-                                        stream << "            }\n";
-                                    }
-                                    ++guardedIndex;
-                                    continue;
+                                    return emitError("unsupported exact event expression emit",
+                                                     std::string(guardedOp.symbolText()));
                                 }
-
-                                std::vector<DirectCommitScalarStateWriteDesc> tableDescs;
-                                tableDescs.push_back(*firstDesc);
-                                std::size_t tableEnd = guardedIndex + 1;
-                                while (tableEnd < runEnd)
+                                const bool needCondGuard = guardedWriteKey->condExpr != "true";
+                                if (needCondGuard)
                                 {
-                                    const auto nextOpId = supernodeOps[tableEnd];
-                                    const Operation nextOp = graph.getOperation(nextOpId);
-                                    auto nextDesc =
-                                        buildDirectCommitScalarStateWriteDesc(graph, model, nextOpId, nextOp);
-                                    if (!nextDesc || nextDesc->activationEntries != firstDesc->activationEntries)
-                                    {
-                                        break;
-                                    }
-                                    tableDescs.push_back(std::move(*nextDesc));
-                                    ++tableEnd;
+                                    stream << "            if (" << guardedWriteKey->condExpr << ") {\n";
                                 }
-
-                                if (tableDescs.size() >= 4)
+                                if (auto error =
+                                        emitWritePortBody(stream,
+                                                          graph,
+                                                          model,
+                                                          guardedOpId,
+                                                          guardedOp,
+                                                          needCondGuard ? "                " : "            ",
+                                                          &activationContext,
+                                                          &localExprContext))
                                 {
-                                    const std::string activationName =
-                                        "kCommitScalarWriteActivationMasks_" + std::to_string(batch.index) + "_" +
-                                        std::to_string(supernodeId) + "_" + std::to_string(guardedIndex);
-                                    if (!firstDesc->activationEntries.empty())
-                                    {
-                                        stream << "            static constexpr grhsim_active_mask_entry "
-                                               << activationName << "[] = {";
-                                        for (std::size_t entryIndex = 0; entryIndex < firstDesc->activationEntries.size();
-                                             ++entryIndex)
-                                        {
-                                            const auto &entry = firstDesc->activationEntries[entryIndex];
-                                            if ((entryIndex % 8u) == 0u)
-                                            {
-                                                stream << "\n            ";
-                                            }
-                                            stream << "{"
-                                                   << entry.wordIndex << "u, UINT8_C("
-                                                   << static_cast<unsigned>(entry.mask) << ")}";
-                                            if (entryIndex + 1u != firstDesc->activationEntries.size())
-                                            {
-                                                stream << ", ";
-                                            }
-                                        }
-                                        stream << "\n            };\n";
-                                    }
-                                    const std::string tableName =
-                                        "kCommitScalarWriteTable_" + std::to_string(batch.index) + "_" +
-                                        std::to_string(supernodeId) + "_" + std::to_string(guardedIndex);
-                                    emitCommitScalarStateWriteTable(stream,
-                                                                    tableDescs,
-                                                                    "            ",
-                                                                    tableName,
-                                                                    firstDesc->activationEntries.empty()
-                                                                        ? "nullptr"
-                                                                        : activationName);
+                                    return emitError(*error, std::string(guardedOp.symbolText()));
                                 }
-                                else
+                                if (needCondGuard)
                                 {
-                                    for (std::size_t tableIndex = guardedIndex; tableIndex < tableEnd; ++tableIndex)
-                                    {
-                                        const auto tableOpId = supernodeOps[tableIndex];
-                                        const Operation tableOp = graph.getOperation(tableOpId);
-                                        const auto tableWriteKey =
-                                            writePortGuardKey(graph, model, tableOpId, tableOp, &localExprContext);
-                                        if (!tableWriteKey)
-                                        {
-                                            return emitError("unsupported exact event expression emit",
-                                                             std::string(tableOp.symbolText()));
-                                        }
-                                        const bool needCondGuard = tableWriteKey->condExpr != "true";
-                                        if (needCondGuard)
-                                        {
-                                            stream << "            if (" << tableWriteKey->condExpr << ") {\n";
-                                        }
-                                        if (auto error =
-                                                emitWritePortBody(stream,
-                                                                  graph,
-                                                                  model,
-                                                                  tableOpId,
-                                                                  tableOp,
-                                                                  needCondGuard ? "                " : "            ",
-                                                                  &activationContext,
-                                                                  &localExprContext))
-                                        {
-                                            return emitError(*error, std::string(tableOp.symbolText()));
-                                        }
-                                        if (needCondGuard)
-                                        {
-                                            stream << "            }\n";
-                                        }
-                                    }
+                                    stream << "            }\n";
                                 }
-                                guardedIndex = tableEnd;
                             }
-                            if (*eventExpr != "true")
+                            if (effectiveEventExpr != "true")
                             {
                                 stream << "            }\n";
                             }
                             opIndex = runEnd;
                             continue;
                         }
-                        const auto guardKey = writePortGuardKey(graph, model, opId, op, &localExprContext);
+                        auto guardKey = writePortGuardKey(graph, model, opId, op, &localExprContext);
                         if (!guardKey)
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
+                        }
+                        if (outerCommitEventExpr.has_value())
+                        {
+                            guardKey->eventExpr = "true";
                         }
                         std::size_t runEnd = opIndex + 1;
                         while (runEnd < supernodeOps.size())
@@ -7873,7 +8227,12 @@ namespace wolvrix::lib::emit
                                 return emitError("unsupported exact event expression emit",
                                                  std::string(nextOp.symbolText()));
                             }
-                            if (!(*nextGuardKey == *guardKey))
+                            WritePortGuardKey effectiveNextGuardKey = *nextGuardKey;
+                            if (outerCommitEventExpr.has_value())
+                            {
+                                effectiveNextGuardKey.eventExpr = "true";
+                            }
+                            if (!(effectiveNextGuardKey == *guardKey))
                             {
                                 break;
                             }
@@ -8043,8 +8402,8 @@ namespace wolvrix::lib::emit
                         const bool materialized = isMaterializedValue(model, resultValue);
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         const std::string addrExpr = resolvedScheduleValueExpr(model, operands[0], &localExprContext);
-                        const std::string rowExpr =
-                            "grhsim_index_words(" + addrExpr + ", " + std::to_string(state.rowCount) + ")";
+                        const MemoryRowAccessExpr rowAccess =
+                            memoryRowAccessExpr(graph, operands[0], addrExpr, state.rowCount);
                         if (!materialized)
                         {
                             if (isWideLogicValue(graph, resultValue))
@@ -8054,10 +8413,10 @@ namespace wolvrix::lib::emit
                                     graph,
                                     model,
                                     resultValue,
-                                    "((" + rowExpr + " >= " + std::to_string(state.rowCount) + ") ? " +
-                                        wordsArrayTypeForWidth(graph.valueWidth(resultValue)) + "{} : " +
-                                        stateExpr + "[" + rowExpr + "]" +
-                                        ")",
+                                    (rowAccess.alwaysInRange
+                                         ? stateExpr + "[" + rowAccess.rowExpr + "]"
+                                         : "((" + rowAccess.inRangeExpr + ") ? " + stateExpr + "[" + rowAccess.rowExpr +
+                                               "] : " + wordsArrayTypeForWidth(graph.valueWidth(resultValue)) + "{})"),
                                     &localExprContext);
                             }
                             else
@@ -8067,8 +8426,10 @@ namespace wolvrix::lib::emit
                                     graph,
                                     model,
                                     resultValue,
-                                    "((" + rowExpr + " >= " + std::to_string(state.rowCount) + ") ? UINT64_C(0) : " +
-                                        "static_cast<std::uint64_t>(" + stateExpr + "[" + rowExpr + "]))",
+                                    (rowAccess.alwaysInRange
+                                         ? "static_cast<std::uint64_t>(" + stateExpr + "[" + rowAccess.rowExpr + "])"
+                                         : "((" + rowAccess.inRangeExpr + ") ? static_cast<std::uint64_t>(" + stateExpr +
+                                               "[" + rowAccess.rowExpr + "]) : UINT64_C(0))"),
                                     true,
                                     &localExprContext);
                             }
@@ -8076,10 +8437,16 @@ namespace wolvrix::lib::emit
                         }
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         stream << "            {\n";
-                        stream << "                const std::size_t row = " << rowExpr << ";\n";
                         if (isWideLogicValue(graph, op.results().front()))
                         {
-                            stream << "                if (row >= " << state.rowCount << ") {\n";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << "                if (!" << rowAccess.inRangeExpr << ") {\n";
+                            }
+                            else
+                            {
+                                stream << "                {\n";
+                            }
                             if (needChangeDetect)
                             {
                                 stream << "                    if (" << lhs << " != "
@@ -8094,8 +8461,18 @@ namespace wolvrix::lib::emit
                                 stream << "                    " << lhs << " = "
                                        << wordsArrayTypeForWidth(graph.valueWidth(op.results().front())) << "{};\n";
                             }
-                            stream << "                } else {\n";
-                            stream << "                    const auto next_value = " << stateExpr << "[row];\n";
+                            stream << "                }";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << " else ";
+                            }
+                            else
+                            {
+                                stream << "\n";
+                            }
+                            stream << "{\n";
+                            stream << "                    const auto next_value = " << stateExpr << "[" << rowAccess.rowExpr
+                                   << "];\n";
                             if (needChangeDetect)
                             {
                                 stream << "                    if (" << lhs << " != next_value) {\n";
@@ -8111,7 +8488,14 @@ namespace wolvrix::lib::emit
                         }
                         else
                         {
-                            stream << "                if (row >= " << state.rowCount << ") {\n";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << "                if (!" << rowAccess.inRangeExpr << ") {\n";
+                            }
+                            else
+                            {
+                                stream << "                {\n";
+                            }
                             if (needChangeDetect)
                             {
                                 stream << "                    if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
@@ -8130,8 +8514,18 @@ namespace wolvrix::lib::emit
                             {
                                 stream << "                    " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
                             }
-                            stream << "                } else {\n";
-                            stream << "                    const auto next_value = " << stateExpr << "[row];\n";
+                            stream << "                }";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << " else ";
+                            }
+                            else
+                            {
+                                stream << "\n";
+                            }
+                            stream << "{\n";
+                            stream << "                    const auto next_value = " << stateExpr << "[" << rowAccess.rowExpr
+                                   << "];\n";
                             if (needChangeDetect)
                             {
                                 stream << "                    if (" << lhs << " != next_value) {\n";
@@ -8319,6 +8713,8 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
+                        const bool eventHandledByOuterGuard =
+                            batch.phase == ScheduleBatch::Phase::kCommit && outerCommitEventExpr.has_value();
                         stream << "            // System tasks are side effects. They execute in schedule order when condition and exact event both hit.\n";
                         std::string procGuard = "true";
                         if (systemTaskRunsOnlyOnInitialEval(op))
@@ -8330,7 +8726,12 @@ namespace wolvrix::lib::emit
                         {
                             procGuard = "(" + procGuard + ") && (!" + sampleIt->second.completedFieldName + ")";
                         }
-                        stream << "            if ((" << condExpr << ") && (" << *eventExpr << ") && (" << procGuard << ")) {\n";
+                        stream << "            if ((" << condExpr << ") && ";
+                        if (!eventHandledByOuterGuard)
+                        {
+                            stream << "(" << *eventExpr << ") && ";
+                        }
+                        stream << "(" << procGuard << ")) {\n";
                         if (argEnd <= 1)
                         {
                             stream << "                execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
@@ -8378,8 +8779,15 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported exact event expression emit", std::string(op.symbolText()));
                         }
+                        const bool eventHandledByOuterGuard =
+                            batch.phase == ScheduleBatch::Phase::kCommit && outerCommitEventExpr.has_value();
                         stream << "            // DPIC calls may produce side effects and output values, so they stay as explicit schedule boundaries.\n";
-                        stream << "            if ((" << condExpr << ") && (" << *eventExpr << ")) {\n";
+                        stream << "            if ((" << condExpr << ")";
+                        if (!eventHandledByOuterGuard)
+                        {
+                            stream << " && (" << *eventExpr << ")";
+                        }
+                        stream << ") {\n";
                         std::vector<std::string> deferredArgs;
                         std::size_t resultBase = hasReturn ? 1u : 0u;
                         for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
@@ -8498,6 +8906,10 @@ namespace wolvrix::lib::emit
                         return emitError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
                     }
                     ++opIndex;
+                }
+                if (outerCommitEventExpr.has_value())
+                {
+                    stream << "            }\n";
                 }
                     stream << "        }\n";
                     stream << "        }\n";
@@ -8827,7 +9239,7 @@ namespace wolvrix::lib::emit
 
         auto addValueChunks = [&](InitChunkSpec::Kind kind, const std::vector<ValueId> &items, const auto &estimateBytes)
         {
-            if (kind == InitChunkSpec::Kind::kValues || kind == InitChunkSpec::Kind::kEventEdges)
+            if (kind == InitChunkSpec::Kind::kEventEdges)
             {
                 initChunks.push_back(makeInitChunk(kind));
                 return;
@@ -8914,6 +9326,16 @@ namespace wolvrix::lib::emit
             prevInputValues.push_back(port.in);
         }
 
+        std::vector<ValueId> valueInitValues;
+        valueInitValues.reserve(model.valueFieldByValue.size());
+        for (ValueId valueId : graph.values())
+        {
+            if (model.valueFieldByValue.contains(valueId))
+            {
+                valueInitValues.push_back(valueId);
+            }
+        }
+
         std::vector<std::size_t> stateShadowIndices;
         stateShadowIndices.reserve(model.stateShadows.size());
         for (std::size_t shadowIndex = 0; shadowIndex < model.stateShadows.size(); ++shadowIndex)
@@ -8945,9 +9367,9 @@ namespace wolvrix::lib::emit
         {
             addFixedInitChunk(InitChunkSpec::Kind::kPublicOutputs);
         }
-        if (!model.valueFieldByValue.empty())
+        if (!valueInitValues.empty())
         {
-            addValueChunks(InitChunkSpec::Kind::kValues, {}, estimateValueInitBytes);
+            addValueChunks(InitChunkSpec::Kind::kValues, valueInitValues, estimateValueInitBytes);
         }
         addValueChunks(InitChunkSpec::Kind::kConstantValues,
                        materializedConstantValues,
@@ -11716,7 +12138,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    struct BatchEvalStats {\n";
             *stream << "        std::size_t checkedFlagWords = 0;\n";
             *stream << "        std::size_t nonzeroActiveWords = 0;\n";
-            *stream << "        std::size_t executedSupernodes = 0;\n";
+            if (model.emitPerf)
+            {
+                *stream << "        std::size_t executedSupernodes = 0;\n";
+            }
             *stream << "    };\n";
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
@@ -12026,119 +12451,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
-            *stream << "    static constexpr std::size_t kValueLogicStorageBytes = "
-                    << model.valueLogicStorageBytes << ";\n";
-            *stream << "    alignas(std::uint64_t) " << fixedArrayType("std::byte", model.valueLogicStorageBytes)
-                    << " value_logic_storage_{};\n";
-            *stream << "    template <typename T>\n";
-            *stream << "    T &value_logic_storage_ref(std::size_t byteOffset) noexcept\n";
-            *stream << "    {\n";
-            *stream << "        return *reinterpret_cast<T *>(value_logic_storage_.data() + byteOffset);\n";
-            *stream << "    }\n";
-            *stream << "    template <typename T>\n";
-            *stream << "    const T &value_logic_storage_ref(std::size_t byteOffset) const noexcept\n";
-            *stream << "    {\n";
-            *stream << "        return *reinterpret_cast<const T *>(value_logic_storage_.data() + byteOffset);\n";
-            *stream << "    }\n";
-            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+            for (const auto &decl : model.valueFieldDecls)
             {
-                if (model.valueScalarSlotCounts[kindIndex] == 0)
-                {
-                    continue;
-                }
-                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                const std::string type = scalarLogicSlotCppType(kind);
-                const std::string refName = valueScalarRefName(kind);
-                *stream << "    " << type << " &" << refName << "(std::size_t byteOffset) noexcept\n";
-                *stream << "    {\n";
-                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
-                *stream << "    }\n";
-                *stream << "    const " << type << " &" << refName << "(std::size_t byteOffset) const noexcept\n";
-                *stream << "    {\n";
-                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
-                *stream << "    }\n";
+                *stream << decl << '\n';
             }
-            for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
-            {
-                if (slotCount == 0)
-                {
-                    continue;
-                }
-                const std::string type = fixedArrayType("std::uint64_t", wordCount);
-                const std::string refName = valueWideRefName(wordCount);
-                *stream << "    " << type << " &" << refName << "(std::size_t byteOffset) noexcept\n";
-                *stream << "    {\n";
-                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
-                *stream << "    }\n";
-                *stream << "    const " << type << " &" << refName << "(std::size_t byteOffset) const noexcept\n";
-                *stream << "    {\n";
-                *stream << "        return value_logic_storage_ref<" << type << ">(byteOffset);\n";
-                *stream << "    }\n";
-            }
-            if (model.valueRealSlotCount != 0)
-            {
-                *stream << "    " << fixedArrayType("double", model.valueRealSlotCount) << " value_real_slots_{};\n";
-            }
-            if (model.valueStringSlotCount != 0)
-            {
-                *stream << "    " << fixedArrayType("std::string", model.valueStringSlotCount)
-                        << " value_string_slots_{};\n";
-            }
-            if (model.valueLogicStorageBytes != 0 ||
-                model.valueRealSlotCount != 0 ||
-                model.valueStringSlotCount != 0)
-            {
-                *stream << '\n';
-            }
-            if (model.stateLogicStorageBytes != 0)
-            {
-                *stream << "    static constexpr std::size_t kStateLogicStorageBytes = "
-                        << model.stateLogicStorageBytes << ";\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-                {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    static constexpr std::size_t " << stateLogicScalarBaseOffsetConstName(kind) << " = "
-                            << model.stateLogicScalarBaseOffsets[kindIndex] << ";\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    static constexpr std::size_t " << stateLogicWideBaseOffsetConstName(wordCount)
-                            << " = " << model.stateLogicWideBaseOffsetsByWords.at(wordCount) << ";\n";
-                }
-                *stream << "    alignas(std::uint64_t) "
-                        << fixedArrayType("std::byte", model.stateLogicStorageBytes) << " state_logic_storage_{};\n";
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-                {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << scalarLogicSlotCppType(kind) << " *" << stateLogicScalarSlotFieldName(kind)
-                            << " = nullptr;\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << fixedArrayType("std::uint64_t", wordCount) << " *"
-                            << stateLogicWideSlotFieldName(wordCount) << " = nullptr;\n";
-                }
-            }
-            if (model.stateLogicStorageBytes != 0 ||
-                !model.stateFieldDecls.empty())
+            if (!model.valueFieldDecls.empty())
             {
                 *stream << '\n';
             }
@@ -12332,34 +12649,40 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const std::string shadowDataRef = stateShadowDataRef(shadow, state);
             const std::string shadowTouchedRef = stateShadowTouchedRef(shadow);
             const std::string stateExpr = stateRef(state);
-            stream << indent << "bool state_changed = false;\n";
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
+            const bool hasReaders = headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty();
             if (isWideLogicWidth(state.width))
             {
                 stream << indent << "if (grhsim_assign_words(" << stateExpr << ", " << shadowDataRef << ", "
                        << state.width << ")) {\n";
-                stream << indent << "    state_changed = true;\n";
+                if (hasReaders)
+                {
+                    stream << indent << "    activatedReaders = true;\n";
+                    emitActivationStatements(
+                        stream,
+                        "supernode_active_curr_",
+                        "active_count_",
+                        headIt->second,
+                        std::string(indent) + "    ");
+                }
                 stream << indent << "}\n";
             }
             else
             {
                 stream << indent << "if (" << stateExpr << " != " << shadowDataRef << ") {\n";
                 stream << indent << "    " << stateExpr << " = " << shadowDataRef << ";\n";
-                stream << indent << "    state_changed = true;\n";
+                if (hasReaders)
+                {
+                    stream << indent << "    activatedReaders = true;\n";
+                    emitActivationStatements(
+                        stream,
+                        "supernode_active_curr_",
+                        "active_count_",
+                        headIt->second,
+                        std::string(indent) + "    ");
+                }
                 stream << indent << "}\n";
             }
-            stream << indent << "if (state_changed) {\n";
-            const auto headIt = model.stateHeadSupernodesBySymbol.find(shadow.symbol);
-            if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
-            {
-                stream << indent << "    activatedReaders = true;\n";
-                emitActivationStatements(
-                    stream,
-                    "supernode_active_curr_",
-                    "active_count_",
-                    headIt->second,
-                    std::string(indent) + "    ");
-            }
-            stream << indent << "}\n";
             stream << indent << shadowTouchedRef << " = 0;\n";
         };
 
@@ -12371,71 +12694,93 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const std::string writeDataRef = memoryWriteDataRef(write, state);
             const std::string writeMaskRef = memoryWriteMaskRef(write, state);
             const std::string stateExpr = stateRef(state);
-            stream << indent << "bool state_changed = false;\n";
+            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
+            const bool hasReaders = headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty();
             if (state.kind == StateDecl::Kind::Memory)
             {
-                stream << indent << "const std::size_t row = " << writeAddrRef << ";\n";
-                stream << indent << "if (row < " << state.rowCount << ") {\n";
+                const std::string rowRef = stateExpr + "[" + writeAddrRef + "]";
                 if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
                 {
                     if (isWideLogicWidth(state.width))
                     {
-                        stream << indent << "    if (grhsim_assign_words(" << stateExpr << "[row], "
+                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && grhsim_assign_words(" << rowRef << ", "
                                << writeDataRef << ", " << state.width << ")) {\n";
-                        stream << indent << "        state_changed = true;\n";
-                        stream << indent << "    }\n";
+                        if (hasReaders)
+                        {
+                            stream << indent << "    activatedReaders = true;\n";
+                            emitActivationStatements(
+                                stream,
+                                "supernode_active_curr_",
+                                "active_count_",
+                                headIt->second,
+                                std::string(indent) + "    ");
+                        }
+                        stream << indent << "}\n";
                     }
                     else
                     {
-                        stream << indent << "    const auto next_value = static_cast<" << logicCppType(state.width)
+                        stream << indent << "const auto next_value = static_cast<" << logicCppType(state.width)
                                << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << writeDataRef << "), "
                                << state.width << "));\n";
-                        stream << indent << "    if (" << stateExpr << "[row] != next_value) {\n";
-                        stream << indent << "        " << stateExpr << "[row] = next_value;\n";
-                        stream << indent << "        state_changed = true;\n";
-                        stream << indent << "    }\n";
+                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && " << rowRef << " != next_value) {\n";
+                        stream << indent << "    " << rowRef << " = next_value;\n";
+                        if (hasReaders)
+                        {
+                            stream << indent << "    activatedReaders = true;\n";
+                            emitActivationStatements(
+                                stream,
+                                "supernode_active_curr_",
+                                "active_count_",
+                                headIt->second,
+                                std::string(indent) + "    ");
+                        }
+                        stream << indent << "}\n";
                     }
                 }
                 else
                 {
                     if (isWideLogicWidth(state.width))
                     {
-                        stream << indent << "    if (grhsim_apply_masked_words_inplace(" << stateExpr << "[row], "
+                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && grhsim_apply_masked_words_inplace(" << rowRef << ", "
                                << writeDataRef << ", " << writeMaskRef << ", " << state.width
                                << ")) {\n";
-                        stream << indent << "        state_changed = true;\n";
-                        stream << indent << "    }\n";
+                        if (hasReaders)
+                        {
+                            stream << indent << "    activatedReaders = true;\n";
+                            emitActivationStatements(
+                                stream,
+                                "supernode_active_curr_",
+                                "active_count_",
+                                headIt->second,
+                                std::string(indent) + "    ");
+                        }
+                        stream << indent << "}\n";
                     }
                     else
                     {
-                        stream << indent << "    const auto mask = static_cast<" << logicCppType(state.width)
+                        stream << indent << "const auto mask = static_cast<" << logicCppType(state.width)
                                << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << writeMaskRef << "), "
                                << state.width << "));\n";
-                        stream << indent << "    const auto merged = static_cast<" << logicCppType(state.width)
-                               << ">((" << stateExpr << "[row] & ~mask) | (static_cast<" << logicCppType(state.width)
+                        stream << indent << "const auto merged = static_cast<" << logicCppType(state.width)
+                               << ">((" << rowRef << " & ~mask) | (static_cast<" << logicCppType(state.width)
                                << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << writeDataRef << "), "
                                << state.width << ")) & mask));\n";
-                        stream << indent << "    if (" << stateExpr << "[row] != merged) {\n";
-                        stream << indent << "        " << stateExpr << "[row] = merged;\n";
-                        stream << indent << "        state_changed = true;\n";
-                        stream << indent << "    }\n";
+                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && " << rowRef << " != merged) {\n";
+                        stream << indent << "    " << rowRef << " = merged;\n";
+                        if (hasReaders)
+                        {
+                            stream << indent << "    activatedReaders = true;\n";
+                            emitActivationStatements(
+                                stream,
+                                "supernode_active_curr_",
+                                "active_count_",
+                                headIt->second,
+                                std::string(indent) + "    ");
+                        }
+                        stream << indent << "}\n";
                     }
                 }
-                stream << indent << "}\n";
             }
-            stream << indent << "if (state_changed) {\n";
-            const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
-            if (headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty())
-            {
-                stream << indent << "    activatedReaders = true;\n";
-                emitActivationStatements(
-                    stream,
-                    "supernode_active_curr_",
-                    "active_count_",
-                    headIt->second,
-                    std::string(indent) + "    ");
-            }
-            stream << indent << "}\n";
             stream << indent << writeTouchedRef << " = 0;\n";
         };
 
@@ -12456,31 +12801,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <cstdio>\n\n";
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
-            if (model.stateLogicStorageBytes != 0)
-            {
-                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
-                {
-                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
-                    const std::size_t slotCount = model.stateLogicScalarSlotCounts[kindIndex];
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << stateLogicScalarSlotFieldName(kind) << " = reinterpret_cast<"
-                            << scalarLogicSlotCppType(kind) << " *>(state_logic_storage_.data() + "
-                            << stateLogicScalarBaseOffsetConstName(kind) << ");\n";
-                }
-                for (const auto &[wordCount, slotCount] : model.stateLogicWideSlotCountsByWords)
-                {
-                    if (slotCount == 0)
-                    {
-                        continue;
-                    }
-                    *stream << "    " << stateLogicWideSlotFieldName(wordCount) << " = reinterpret_cast<"
-                            << fixedArrayType("std::uint64_t", wordCount) << " *>(state_logic_storage_.data() + "
-                            << stateLogicWideBaseOffsetConstName(wordCount) << ");\n";
-                }
-            }
             if (model.eventEdgeSlotCount != 0)
             {
                 *stream << "    event_edge_slots_ = reinterpret_cast<grhsim_event_edge_kind *>(event_edge_storage_.data());\n";
@@ -12639,8 +12959,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     const std::string shadowField =
                         scalarLogicSlotFieldName("state_shadow_", ValueSlotScalarKind::kBool);
-                    const std::string stateField =
-                        stateLogicScalarSlotFieldName(ValueSlotScalarKind::kBool);
                     *stream << "void " << className
                             << "::apply_scalar_state_write_bool_range(const scalar_state_write_bool_range_desc &desc)\n{\n";
                     *stream << "    for (std::uint32_t offset = 0; offset < desc.count; ++offset) {\n";
@@ -12662,7 +12980,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                             << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                     *stream << "                                      state_shadow_touched_slots_[touchedIndex],\n";
                     *stream << "                                      " << shadowField << "[shadowDataIndex],\n";
-                    *stream << "                                      " << stateField << "[stateDataIndex],\n";
+                    *stream << "                                      "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "stateDataIndex") << ",\n";
                     *stream << "                                      "
                             << valueScalarRefExpr(ValueSlotScalarKind::kBool, "nextIndex") << ",\n";
                     *stream << "                                      "
@@ -12738,7 +13057,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                    state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                    state_shadow_u8_slots_[shadowDataIndex],\n";
-                *stream << "                                    state_logic_u8_slots_[stateDataIndex],\n";
+                *stream << "                                    "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU8, "stateDataIndex") << ",\n";
                 *stream << "                                    " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "nextIndex")
                         << ",\n";
                 *stream << "                                    " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "maskIndex")
@@ -12803,7 +13123,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u16_slots_[shadowDataIndex],\n";
-                *stream << "                                     state_logic_u16_slots_[stateDataIndex],\n";
+                *stream << "                                     "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU16, "stateDataIndex") << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU16, "nextIndex")
                         << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU16, "maskIndex")
@@ -12868,7 +13189,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u32_slots_[shadowDataIndex],\n";
-                *stream << "                                     state_logic_u32_slots_[stateDataIndex],\n";
+                *stream << "                                     "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU32, "stateDataIndex") << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU32, "nextIndex")
                         << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU32, "maskIndex")
@@ -12933,7 +13255,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         << valueScalarRefExpr(ValueSlotScalarKind::kBool, "condIndex") << ") != 0,\n";
                 *stream << "                                     state_shadow_touched_slots_[touchedIndex],\n";
                 *stream << "                                     state_shadow_u64_slots_[shadowDataIndex],\n";
-                *stream << "                                     state_logic_u64_slots_[stateDataIndex],\n";
+                *stream << "                                     "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU64, "stateDataIndex") << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU64, "nextIndex")
                         << ",\n";
                 *stream << "                                     " << valueScalarRefExpr(ValueSlotScalarKind::kU64, "maskIndex")
@@ -12971,7 +13294,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                const bool nextValue = static_cast<bool>(static_cast<std::uint8_t>("
                             << valueScalarRefExpr(ValueSlotScalarKind::kBool, "entry.nextIndex")
                             << ") & UINT8_C(1));\n";
-                    *stream << "                auto &stateData = state_logic_bool_slots_[entry.stateDataIndex];\n";
+                    *stream << "                auto &stateData = "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "entry.stateDataIndex")
+                            << ";\n";
                     *stream << "                if (stateData != nextValue) {\n";
                     *stream << "                    stateData = nextValue;\n";
                     *stream << "                    anyStateChanged = true;\n";
@@ -12986,7 +13311,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                const auto mask = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU8, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT8_C(0)) {\n";
-                    *stream << "                    auto &stateData = state_logic_u8_slots_[entry.stateDataIndex];\n";
+                    *stream << "                    auto &stateData = "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU8, "entry.stateDataIndex")
+                            << ";\n";
                     *stream << "                    const auto nextValue = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU8, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT8_MAX ? nextValue\n";
@@ -13006,7 +13333,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                const auto mask = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU16, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT16_C(0)) {\n";
-                    *stream << "                    auto &stateData = state_logic_u16_slots_[entry.stateDataIndex];\n";
+                    *stream << "                    auto &stateData = "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU16, "entry.stateDataIndex")
+                            << ";\n";
                     *stream << "                    const auto nextValue = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU16, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT16_MAX ? nextValue\n";
@@ -13026,7 +13355,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                const auto mask = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU32, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT32_C(0)) {\n";
-                    *stream << "                    auto &stateData = state_logic_u32_slots_[entry.stateDataIndex];\n";
+                    *stream << "                    auto &stateData = "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU32, "entry.stateDataIndex")
+                            << ";\n";
                     *stream << "                    const auto nextValue = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU32, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT32_MAX ? nextValue\n";
@@ -13046,7 +13377,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                const auto mask = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU64, "entry.maskIndex") << ";\n";
                     *stream << "                if (mask != UINT64_C(0)) {\n";
-                    *stream << "                    auto &stateData = state_logic_u64_slots_[entry.stateDataIndex];\n";
+                    *stream << "                    auto &stateData = "
+                            << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU64, "entry.stateDataIndex")
+                            << ";\n";
                     *stream << "                    const auto nextValue = "
                             << valueScalarRefExpr(ValueSlotScalarKind::kU64, "entry.nextIndex") << ";\n";
                     *stream << "                    const auto merged = mask == UINT64_MAX ? nextValue\n";
@@ -13101,10 +13434,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            static_cast<bool>(static_cast<std::uint8_t>("
                         << valueScalarRefExpr(ValueSlotScalarKind::kBool, "nextIndex")
                         << ") & UINT8_C(1));\n";
-                *stream << "        if (state_logic_bool_slots_[stateDataIndex] == nextValue) {\n";
+                *stream << "        if (" << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "stateDataIndex")
+                        << " == nextValue) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
-                *stream << "        state_logic_bool_slots_[stateDataIndex] = nextValue;\n";
+                *stream << "        "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "stateDataIndex")
+                        << " = nextValue;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -13141,7 +13477,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        if (mask == UINT8_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
-                *stream << "        auto &stateData = state_logic_u8_slots_[stateDataIndex];\n";
+                *stream << "        auto &stateData = "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU8, "stateDataIndex") << ";\n";
                 *stream << "        const auto nextValue = " << valueScalarRefExpr(ValueSlotScalarKind::kU8, "nextIndex")
                         << ";\n";
                 *stream << "        const auto merged = mask == UINT8_MAX ? nextValue\n";
@@ -13186,7 +13523,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        if (mask == UINT16_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
-                *stream << "        auto &stateData = state_logic_u16_slots_[stateDataIndex];\n";
+                *stream << "        auto &stateData = "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU16, "stateDataIndex") << ";\n";
                 *stream << "        const auto nextValue = "
                         << valueScalarRefExpr(ValueSlotScalarKind::kU16, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT16_MAX ? nextValue\n";
@@ -13231,7 +13569,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        if (mask == UINT32_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
-                *stream << "        auto &stateData = state_logic_u32_slots_[stateDataIndex];\n";
+                *stream << "        auto &stateData = "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU32, "stateDataIndex") << ";\n";
                 *stream << "        const auto nextValue = "
                         << valueScalarRefExpr(ValueSlotScalarKind::kU32, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT32_MAX ? nextValue\n";
@@ -13276,7 +13615,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        if (mask == UINT64_C(0)) {\n";
                 *stream << "            continue;\n";
                 *stream << "        }\n";
-                *stream << "        auto &stateData = state_logic_u64_slots_[stateDataIndex];\n";
+                *stream << "        auto &stateData = "
+                        << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kU64, "stateDataIndex") << ";\n";
                 *stream << "        const auto nextValue = "
                         << valueScalarRefExpr(ValueSlotScalarKind::kU64, "nextIndex") << ";\n";
                 *stream << "        const auto merged = mask == UINT64_MAX ? nextValue\n";
@@ -13887,17 +14227,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 break;
             case InitChunkSpec::Kind::kValues:
                 *stream << "    // Initialize combinational value storage.\n";
-                if (model.valueLogicStorageBytes != 0)
+                for (ValueId valueId : chunk.values)
                 {
-                    *stream << "    value_logic_storage_.fill(std::byte{0});\n";
-                }
-                if (model.valueRealSlotCount != 0)
-                {
-                    *stream << "    value_real_slots_ = {};\n";
-                }
-                if (model.valueStringSlotCount != 0)
-                {
-                    *stream << "    value_string_slots_ = {};\n";
+                    *stream << "    " << model.valueFieldByValue.at(valueId) << " = " << defaultInitExpr(graph, valueId)
+                            << ";\n";
                 }
                 break;
             case InitChunkSpec::Kind::kConstantValues:
@@ -13921,10 +14254,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 break;
             case InitChunkSpec::Kind::kStateStorage:
                 *stream << "    // Allocate persistent state pools.\n";
-                if (model.stateLogicStorageBytes != 0)
-                {
-                    *stream << "    state_logic_storage_.fill(std::byte{0});\n";
-                }
                 break;
             case InitChunkSpec::Kind::kStates:
                 if (!chunk.stateSymbols.empty())
@@ -13967,6 +14296,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     else if (state.initExpr)
                     {
                         *stream << "    " << stateExpr << " = " << state.initExpr->expr << ";\n";
+                    }
+                    else
+                    {
+                        *stream << "    " << stateExpr << " = " << defaultInitExprForLogicWidth(state.width) << ";\n";
                     }
                 }
                 break;
@@ -14691,6 +15024,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "AR ?= ar\n";
             *stream << "ARFLAGS ?= rcs\n";
             *stream << "CXXFLAGS ?= -std=c++20 -O3\n";
+            *stream << "PCH_HEADER := " << headerPath.filename().string() << "\n";
+            *stream << "PCH_FILE := $(PCH_HEADER).pch\n";
             if (model.emitWaveform)
             {
                 *stream << "CFLAGS ?= -O3 -D_GNU_SOURCE\n";
@@ -14725,13 +15060,20 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "\n";
             *stream << "\t$(AR) $(ARFLAGS) $@ $^\n\n";
-            *stream << "%.o: %.cpp\n";
+            *stream << "$(PCH_FILE): $(PCH_HEADER)\n";
             *stream << "\t$(CXX) $(CXXFLAGS)";
             if (model.emitWaveform)
             {
                 *stream << " -I$(LIBFST_SRC_DIR)";
             }
-            *stream << " -I. -c $< -o $@\n\n";
+            *stream << " -I. -x c++-header $< -o $@\n\n";
+            *stream << "%.o: %.cpp $(PCH_FILE)\n";
+            *stream << "\t$(CXX) $(CXXFLAGS)";
+            if (model.emitWaveform)
+            {
+                *stream << " -I$(LIBFST_SRC_DIR)";
+            }
+            *stream << " -I. -include-pch $(PCH_FILE) -c $< -o $@\n\n";
             if (model.emitWaveform)
             {
                 *stream << "fstapi.o: $(LIBFST_SRC_DIR)/fstapi.c\n";
@@ -14747,7 +15089,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << " $(FST_OBJS)";
             }
-            *stream << " $(LIB)\n";
+            *stream << " $(LIB) $(PCH_FILE)\n";
             if (auto error = finalizeOutputFile(*stream, makefilePath))
             {
                 reportError(*error, makefilePath.string());

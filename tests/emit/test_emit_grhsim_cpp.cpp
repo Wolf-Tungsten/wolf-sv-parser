@@ -858,14 +858,15 @@ namespace
         return design;
     }
 
-    bool runActivitySchedule(Design &design, SessionStore &session)
+    bool runActivitySchedule(Design &design, SessionStore &session, ActivityScheduleOptions options = {})
     {
+        if (options.path.empty())
+        {
+            options.path = "top";
+        }
         PassManager manager;
         manager.options().session = &session;
-        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
-            .path = "top",
-            .enableReplication = true,
-        }));
+        manager.addPass(std::make_unique<ActivitySchedulePass>(std::move(options)));
         PassDiagnostics diags;
         PassManagerResult result = manager.run(design, diags);
         return result.success && !diags.hasError();
@@ -874,10 +875,16 @@ namespace
     bool emitWithActivitySchedule(Design &design,
                                   const std::filesystem::path &outDir,
                                   EmitDiagnostics &diag,
-                                  EmitResult &result)
+                                  EmitResult &result,
+                                  ActivityScheduleOptions scheduleOptions = {})
     {
         SessionStore session;
-        if (!runActivitySchedule(design, session))
+        if (scheduleOptions.path.empty())
+        {
+            scheduleOptions.path = "top";
+        }
+        scheduleOptions.enableReplication = true;
+        if (!runActivitySchedule(design, session, std::move(scheduleOptions)))
         {
             return false;
         }
@@ -894,6 +901,46 @@ namespace
         EmitGrhSimCpp emitter(&diag);
         result = emitter.emit(design, options);
         return true;
+    }
+
+    Design buildWideConcatFastPathDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId a = makeLogicValue(graph, "a", 8);
+        ValueId b = makeLogicValue(graph, "b", 8);
+        ValueId c = makeLogicValue(graph, "c", 8);
+        ValueId d = makeLogicValue(graph, "d", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+
+        ValueId wideConcatMid = makeLogicValue(graph, "wide_concat_fast_mid", 96);
+        OperationId wideConcat =
+            graph.createOperation(OperationKind::kConcat, graph.internSymbol("wide_concat_fast_op"));
+        for (int i = 0; i < 3; ++i)
+        {
+            graph.addOperand(wideConcat, a);
+            graph.addOperand(wideConcat, b);
+            graph.addOperand(wideConcat, c);
+            graph.addOperand(wideConcat, d);
+        }
+        graph.addResult(wideConcat, wideConcatMid);
+        graph.bindOutputPort("wide_concat_fast_mid", wideConcatMid);
+
+        ValueId wideConcatSlice = makeLogicValue(graph, "wide_concat_fast_slice_y", 32);
+        OperationId sliceOp =
+            graph.createOperation(OperationKind::kSliceStatic, graph.internSymbol("wide_concat_fast_slice_op"));
+        graph.addOperand(sliceOp, wideConcatMid);
+        graph.addResult(sliceOp, wideConcatSlice);
+        graph.setAttr(sliceOp, "sliceStart", static_cast<int64_t>(32));
+        graph.setAttr(sliceOp, "sliceEnd", static_cast<int64_t>(63));
+        graph.bindOutputPort("wide_concat_fast_slice_y", wideConcatSlice);
+
+        return design;
     }
 
     Design buildRegisterWriteInteractionDesign()
@@ -1736,12 +1783,17 @@ int main()
     {
         return fail("Missing looped scalar concat helper usage");
     }
+    const bool hasWideSliceInlineCoverage =
+        sched.find("wide_slice_static_op") != std::string::npos &&
+        sched.find("wide_slice_dyn_op") != std::string::npos &&
+        sched.find("const std::size_t _srcWord = _start / 64u;") != std::string::npos &&
+        sched.find("grhsim_index_words(wide_addr, 130)") != std::string::npos;
     if (sched.find("grhsim_udiv_words") == std::string::npos ||
         sched.find("grhsim_shl_words") == std::string::npos ||
-        sched.find("grhsim_slice_words") == std::string::npos ||
-        sched.find("grhsim_replicate_words") == std::string::npos)
+        sched.find("grhsim_replicate_words") == std::string::npos ||
+        !hasWideSliceInlineCoverage)
     {
-        return fail("Missing emitted pure words wide combinational helper calls");
+        return fail("Missing emitted pure words wide combinational coverage");
     }
     if (sched.find("grhsim_clog2_u64") == std::string::npos ||
         sched.find("slice_array_op") == std::string::npos ||
@@ -1761,7 +1813,11 @@ int main()
     {
         return fail("Missing emitted memory read address handling coverage");
     }
-    if (sched.find("grhsim_index_pow2_words") == std::string::npos)
+    const bool hasPow2WriteRowAddressCoverage =
+        sched.find("grhsim_index_pow2_words") != std::string::npos ||
+        (sched.find("wide_masked_mem_write") != std::string::npos &&
+         sched.find("[(static_cast<std::size_t>(static_cast<std::uint64_t>(wide_addr)) & 3u)]") != std::string::npos);
+    if (!hasPow2WriteRowAddressCoverage)
     {
         return fail("Missing emitted pow2 memory write row addressing coverage");
     }
@@ -1802,14 +1858,27 @@ int main()
     {
         return fail("Direct-commit emit should not keep shadow/write scratch storage");
     }
+    if (header.find("value_logic_storage_") != std::string::npos ||
+        header.find("state_logic_storage_") != std::string::npos)
+    {
+        return fail("Persistent value/state storage should be emitted as direct members");
+    }
+    if (header.find("value_bool_slot_ptrs_") != std::string::npos ||
+        header.find("state_logic_u8_slot_ptrs_") != std::string::npos ||
+        header.find("state_reg_reg_q_") == std::string::npos ||
+        header.find("value_35_0_sum_") == std::string::npos ||
+        header.find("value_107_0_wide_slice_static_y_") == std::string::npos)
+    {
+        return fail("Missing direct persistent member fields or found stale scalar slot pointer tables");
+    }
     if (header.find("commit_state_updates(") != std::string::npos ||
         state.find("commit_state_updates(") != std::string::npos)
     {
         return fail("Direct-commit emit should not expose legacy commit_state_updates helpers");
     }
-    if (header.find("std::array<std::uint8_t, 3> state_mem_idx_mem_{};") == std::string::npos ||
-        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_mem_{};") == std::string::npos ||
-        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_masked_mem_{};") == std::string::npos)
+    if (header.find("std::array<std::uint8_t, 3> state_mem_idx_mem_") == std::string::npos ||
+        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_mem_") == std::string::npos ||
+        header.find("std::array<std::array<std::uint64_t, 3>, 4> state_mem_wide_masked_mem_") == std::string::npos)
     {
         return fail("Missing per-memory static storage fields");
     }
@@ -1857,7 +1926,9 @@ int main()
     if (state.find("std::fill_n(event_edge_slots_, ") == std::string::npos ||
         state.find("state_shadow_touched_slots_ = {};") != std::string::npos ||
         state.find("memory_write_touched_slots_ = {};") != std::string::npos ||
-        state.find("state_mem_wide_mem_ = {};") == std::string::npos)
+        state.find("state_mem_wide_mem_61_ = {};") == std::string::npos ||
+        state.find("state_mem_wide_masked_mem_64_ = {};") == std::string::npos ||
+        state.find("state_mem_idx_mem_67_ = {};") == std::string::npos)
     {
         return fail("Missing static storage reset emission");
     }
@@ -1872,9 +1943,12 @@ int main()
     if (makefile.find("CXX ?= clang++") == std::string::npos ||
         makefile.find("AR ?= ar") == std::string::npos || makefile.find("all: $(LIB)") == std::string::npos ||
         makefile.find("grhsim_top_state_init_0.cpp") == std::string::npos ||
-        makefile.find("grhsim_top_sched_0.cpp") == std::string::npos)
+        makefile.find("grhsim_top_sched_0.cpp") == std::string::npos ||
+        makefile.find("PCH_FILE := $(PCH_HEADER).pch") == std::string::npos ||
+        makefile.find("-x c++-header") == std::string::npos ||
+        makefile.find("-include-pch $(PCH_FILE)") == std::string::npos)
     {
-        return fail("Missing split state/schedule Makefile skeleton");
+        return fail("Missing split state/schedule Makefile skeleton or PCH support");
     }
 
         const std::string buildCmd =
@@ -1886,6 +1960,10 @@ int main()
         if (!std::filesystem::exists(outDir / "libgrhsim_top.a"))
         {
             return fail("Generated grhsim archive missing after make");
+        }
+        if (!std::filesystem::exists(outDir / "grhsim_top.hpp.pch"))
+        {
+            return fail("Generated grhsim PCH missing after make");
         }
 
         const std::filesystem::path harnessPath = outDir / "grhsim_top_harness.cpp";
@@ -2555,6 +2633,148 @@ int main()
             return fail("local-temp harness failed to run");
         }
 
+        const std::filesystem::path wideConcatFastDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_wide_concat_fast";
+        std::filesystem::remove_all(wideConcatFastDir);
+        Design wideConcatFastDesign = buildWideConcatFastPathDesign();
+        EmitDiagnostics wideConcatFastDiag;
+        EmitResult wideConcatFastResult;
+        ActivityScheduleOptions wideConcatFastSchedule;
+        wideConcatFastSchedule.supernodeMaxSize = 1;
+        wideConcatFastSchedule.maxSinkSupernodeOp = 1;
+        if (!emitWithActivitySchedule(wideConcatFastDesign,
+                                      wideConcatFastDir,
+                                      wideConcatFastDiag,
+                                      wideConcatFastResult,
+                                      wideConcatFastSchedule))
+        {
+            return fail("wide-concat-fast activity-schedule pass failed");
+        }
+        if (!wideConcatFastResult.success || wideConcatFastDiag.hasError())
+        {
+            return fail("wide-concat-fast emit failed");
+        }
+        const std::vector<std::filesystem::path> wideConcatFastStateFiles =
+            collectSchedFiles(wideConcatFastDir, "grhsim_top_state");
+        const std::vector<std::filesystem::path> wideConcatFastSchedFiles =
+            collectSchedFiles(wideConcatFastDir, "grhsim_top_sched_");
+        if (wideConcatFastStateFiles.empty() || wideConcatFastSchedFiles.empty())
+        {
+            return fail("wide-concat-fast state/schedule files missing");
+        }
+        const std::string wideConcatFastSched = readFiles(wideConcatFastSchedFiles);
+        if (wideConcatFastSched.find("wide_concat_fast_mid") == std::string::npos ||
+            wideConcatFastSched.find("value_5_0_wide_concat_fast_mid_ = std::array<std::uint64_t, 2>{};") ==
+                std::string::npos ||
+            wideConcatFastSched.find("value_5_0_wide_concat_fast_mid_[") == std::string::npos)
+        {
+            return fail("wide-concat-fast should emit direct concat buffer statements");
+        }
+        if (wideConcatFastSched.find("grhsim_assign_words(") != std::string::npos)
+        {
+            return fail("wide-concat-fast should not emit grhsim_assign_words change detection");
+        }
+
+        const std::filesystem::path wideConcatFastHarnessPath = wideConcatFastDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(wideConcatFastHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create wide-concat-fast harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <array>\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "template <std::size_t N>\n";
+            harness << "static bool same_words(const std::array<std::uint64_t, N>& lhs,\n";
+            harness << "                       const std::array<std::uint64_t, N>& rhs)\n";
+            harness << "{\n";
+            harness << "    for (std::size_t i = 0; i < N; ++i)\n";
+            harness << "        if (lhs[i] != rhs[i]) return false;\n";
+            harness << "    return true;\n";
+            harness << "}\n\n";
+            harness << "template <std::size_t N>\n";
+            harness << "static void put_bit(std::array<std::uint64_t, N>& value, std::size_t bit, bool on)\n";
+            harness << "{\n";
+            harness << "    const std::size_t word = bit / 64u;\n";
+            harness << "    const std::size_t shift = bit & 63u;\n";
+            harness << "    const std::uint64_t mask = UINT64_C(1) << shift;\n";
+            harness << "    if (on) value[word] |= mask;\n";
+            harness << "    else value[word] &= ~mask;\n";
+            harness << "}\n\n";
+            harness << "template <std::size_t N>\n";
+            harness << "static bool get_bit(const std::array<std::uint64_t, N>& value, std::size_t bit)\n";
+            harness << "{\n";
+            harness << "    return ((value[bit / 64u] >> (bit & 63u)) & UINT64_C(1)) != 0;\n";
+            harness << "}\n\n";
+            harness << "template <std::size_t DestN, std::size_t SrcN>\n";
+            harness << "static std::array<std::uint64_t, DestN> slice_words(const std::array<std::uint64_t, SrcN>& src,\n";
+            harness << "                                                     std::size_t start,\n";
+            harness << "                                                     std::size_t width)\n";
+            harness << "{\n";
+            harness << "    std::array<std::uint64_t, DestN> out{};\n";
+            harness << "    for (std::size_t bit = 0; bit < width; ++bit)\n";
+            harness << "        if (get_bit(src, start + bit)) put_bit(out, bit, true);\n";
+            harness << "    return out;\n";
+            harness << "}\n\n";
+            harness << "static std::array<std::uint64_t, 2> repeat_quad_bytes(std::uint8_t a,\n";
+            harness << "                                                      std::uint8_t b,\n";
+            harness << "                                                      std::uint8_t c,\n";
+            harness << "                                                      std::uint8_t d)\n";
+            harness << "{\n";
+            harness << "    std::array<std::uint64_t, 2> out{};\n";
+            harness << "    const std::array<std::uint8_t, 12> bytes{a, b, c, d, a, b, c, d, a, b, c, d};\n";
+            harness << "    for (std::size_t i = 0; i < bytes.size(); ++i)\n";
+            harness << "        for (std::size_t bit = 0; bit < 8u; ++bit)\n";
+            harness << "            if (((bytes[i] >> bit) & UINT8_C(1)) != 0) put_bit(out, (96u - ((i + 1u) * 8u)) + bit, true);\n";
+            harness << "    out[1] &= UINT64_C(0xFFFFFFFF);\n";
+            harness << "    return out;\n";
+            harness << "}\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(0x11);\n";
+            harness << "    sim.b = static_cast<std::uint8_t>(0x22);\n";
+            harness << "    sim.c = static_cast<std::uint8_t>(0x33);\n";
+            harness << "    sim.d = static_cast<std::uint8_t>(0x44);\n";
+            harness << "    sim.eval();\n";
+            harness << "    const auto expected_a = repeat_quad_bytes(static_cast<std::uint8_t>(0x11), static_cast<std::uint8_t>(0x22), static_cast<std::uint8_t>(0x33), static_cast<std::uint8_t>(0x44));\n";
+            harness << "    if (!same_words(sim.wide_concat_fast_mid, expected_a)) return 1;\n";
+            harness << "    if (sim.wide_concat_fast_slice_y != static_cast<std::uint32_t>(slice_words<1>(expected_a, 32u, 32u)[0])) return 2;\n";
+            harness << "    sim.a = static_cast<std::uint8_t>(0xAA);\n";
+            harness << "    sim.b = static_cast<std::uint8_t>(0xBB);\n";
+            harness << "    sim.c = static_cast<std::uint8_t>(0xCC);\n";
+            harness << "    sim.d = static_cast<std::uint8_t>(0xDD);\n";
+            harness << "    sim.eval();\n";
+            harness << "    const auto expected_b = repeat_quad_bytes(static_cast<std::uint8_t>(0xAA), static_cast<std::uint8_t>(0xBB), static_cast<std::uint8_t>(0xCC), static_cast<std::uint8_t>(0xDD));\n";
+            harness << "    if (!same_words(sim.wide_concat_fast_mid, expected_b)) return 3;\n";
+            harness << "    if (sim.wide_concat_fast_slice_y != static_cast<std::uint32_t>(slice_words<1>(expected_b, 32u, 32u)[0])) return 4;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::filesystem::path wideConcatFastHarnessExe = wideConcatFastDir / "grhsim_top_harness";
+        std::string wideConcatFastCompileCmd =
+            "clang++ " + std::string(kHarnessCompileFlags) + " -I" + wideConcatFastDir.string();
+        for (const auto &stateFile : wideConcatFastStateFiles)
+        {
+            wideConcatFastCompileCmd += " " + stateFile.string();
+        }
+        wideConcatFastCompileCmd += " " + (wideConcatFastDir / "grhsim_top_eval.cpp").string();
+        for (const auto &schedPath : wideConcatFastSchedFiles)
+        {
+            wideConcatFastCompileCmd += " " + schedPath.string();
+        }
+        wideConcatFastCompileCmd += " " + wideConcatFastHarnessPath.string() + " -o " + wideConcatFastHarnessExe.string();
+        if (std::system(wideConcatFastCompileCmd.c_str()) != 0)
+        {
+            return fail("wide-concat-fast harness failed to compile");
+        }
+        if (std::system(wideConcatFastHarnessExe.string().c_str()) != 0)
+        {
+            return fail("wide-concat-fast harness failed to run");
+        }
+
         const std::filesystem::path commitBatchDir =
             std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_commit_cond_batch";
         std::filesystem::remove_all(commitBatchDir);
@@ -2573,19 +2793,24 @@ int main()
         const std::string commitBatchRuntime = readFile(commitBatchDir / "grhsim_top_runtime.hpp");
         const std::string commitBatchSched =
             readFiles(collectSchedFiles(commitBatchDir, "grhsim_top_sched_"));
-        if (commitBatchHeader.find("std::uint32_t condIndex = 0;") == std::string::npos ||
-            commitBatchHeader.find("std::uint32_t condBase = 0;") == std::string::npos ||
-            commitBatchRuntime.find("struct grhsim_active_mask_entry") == std::string::npos)
+        if (commitBatchHeader.find("std::uint32_t condIndex = 0;") != std::string::npos ||
+            commitBatchHeader.find("std::uint32_t condBase = 0;") != std::string::npos ||
+            commitBatchRuntime.find("struct grhsim_active_mask_entry") == std::string::npos ||
+            countSubstring(commitBatchSched, "if (event_edge_slots_[0] == grhsim_event_edge_kind::posedge)") != 1)
         {
-            return fail("commit-cond-batch should emit cond-aware commit descriptors");
+            return fail("commit-cond-batch should share one exact-event guard without legacy cond descriptors");
         }
-        if (countSubstring(commitBatchSched, "apply_commit_scalar_state_write_table(") != 1)
+        if (countSubstring(commitBatchSched, "apply_commit_scalar_state_write_table(") != 0)
         {
-            return fail("commit-cond-batch should merge same-event different-cond writes into one commit table");
+            return fail("commit-cond-batch should not fall back to legacy commit tables");
         }
-        if (countSubstring(commitBatchSched, "Commit writes update visible state directly") != 0)
+        if (countSubstring(commitBatchSched, "Commit writes update visible state directly") != 4 ||
+            commitBatchSched.find("batch_reg0_write") == std::string::npos ||
+            commitBatchSched.find("batch_reg1_write") == std::string::npos ||
+            commitBatchSched.find("batch_reg2_write") == std::string::npos ||
+            commitBatchSched.find("batch_reg3_write") == std::string::npos)
         {
-            return fail("commit-cond-batch should avoid expanding per-write commit bodies");
+            return fail("commit-cond-batch should keep direct per-write commit bodies under the shared event guard");
         }
         if (commitBatchSched.find("if ((event_edge_slots_") != std::string::npos ||
             commitBatchSched.find("if (((event_edge_slots_") != std::string::npos)
